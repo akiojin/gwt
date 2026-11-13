@@ -14,6 +14,8 @@ mod gwtd_cli_test;
 mod gwtd_resolution_test;
 #[path = "../memory_cli_test.rs"]
 mod memory_cli_test;
+#[path = "../mobile_coordinator_cli_test.rs"]
+mod mobile_coordinator_cli_test;
 #[path = "../operation_catalog_test.rs"]
 mod operation_catalog_test;
 #[path = "../resident_pm_workspace_cli_test.rs"]

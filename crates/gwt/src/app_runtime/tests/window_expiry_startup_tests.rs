@@ -7,7 +7,13 @@ fn issue_7015_synchronous_restore_refusal_retires_starting_placeholder() {
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
     init_repo_with_initial_commit(&repo);
-    let tab = restore_fixture_tab("tab-1", &repo, &[("agent-1".into(), "source".into())]);
+    let mut tab = restore_fixture_tab("tab-1", &repo, &[("agent-1".into(), "source".into())]);
+    let mut saved = tab.workspace.persisted().clone();
+    let mut shell = sample_window("shell-1", WindowPreset::Shell, WindowProcessStatus::Running);
+    shell.agent_id = None;
+    shell.session_id = Some("source".into());
+    saved.windows.insert(0, shell);
+    tab.workspace = WindowRegistry::from_persisted(saved);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     runtime.rebuild_window_lookup();
     runtime.set_window_status("tab-1", "agent-1", WindowProcessStatus::Starting);
@@ -19,6 +25,11 @@ fn issue_7015_synchronous_restore_refusal_retires_starting_placeholder() {
         session,
         None,
         super::super::startup::RestoreOrigin::Automatic,
+    );
+    assert_eq!(
+        runtime.window_status("tab-1::shell-1"),
+        Some(WindowProcessStatus::Running),
+        "a non-agent row sharing the source session is not the restore target"
     );
     assert_eq!(
         runtime.window_status("tab-1::agent-1"),

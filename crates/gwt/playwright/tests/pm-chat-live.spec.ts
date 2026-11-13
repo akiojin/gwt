@@ -1393,6 +1393,17 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
       const theme = info.project.name.includes('light') ? 'light' : 'dark';
       await page.addInitScript(value => localStorage.setItem('gwt:ui:theme', value), theme);
       await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: new URL(BASE).origin });
+      const choiceRequests: any[] = [], choiceResults: any[] = [];
+      page.on('websocket', socket => {
+        socket.on('framesent', ({ payload }) => {
+          const event = JSON.parse(String(payload));
+          if (event.kind === 'pane_send_input') choiceRequests.push(event);
+        });
+        socket.on('framereceived', ({ payload }) => {
+          const event = JSON.parse(String(payload));
+          if (event.kind === 'pane_send_result') choiceResults.push(event);
+        });
+      });
       await gotoPmReports(page, undefined, BASE);
       const primaryKey = new URL(page.url()).pathname.split('/').at(-1)!;
       const pane = page.locator('.workspace-window').filter({ has: page.locator('.pm-chat') });
@@ -1561,6 +1572,54 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
         await decisionRow.getByRole('button', { name: 'Copy report' }).click();
         await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain('4. Cancel — stop this attempt');
         await saveEvidence('four-choice-decision', await decisionRow.screenshot(), 'image/png');
+
+        // T-ASK-SURFACE: actual Reports -> existing send path -> stopped-pane
+        // refusal. This fixture proves the request and visible failure, never
+        // a provider-accepted answer or a human Q&A capture.
+        const choices = decisionRow.locator('.pm-chat__decision-option');
+        await expect(choices).toHaveText(decision.summary.decision.options.map((option, index) => `${index + 1}. ${option}`));
+        await choices.nth(1).focus();
+        await page.keyboard.press('Enter');
+        await expect.poll(() => choiceRequests.length).toBe(1);
+        expect(choiceRequests[0]).toEqual({ kind: 'pane_send_input', session_id: SESSION,
+          text: 'Answer to "Which recovery?": 2. Wait — keep the current state\r', request_id: expect.any(Number) });
+        await expect.poll(() => choiceResults.find(result => result.request_id === choiceRequests[0].request_id))
+          .toMatchObject({ ok: false, request_id: choiceRequests[0].request_id });
+        await expect(decisionRow.getByRole('alert')).not.toBeEmpty();
+        await expect(choices.nth(1)).toBeEnabled();
+        await expect(choices.nth(1)).toBeFocused();
+        const refusal = await decisionRow.getByRole('alert').innerText();
+        await pane.getByRole('button', { name: 'Chat', exact: true }).click();
+        const chatDecisions = pane.getByRole('region', { name: 'Decision reports', exact: true });
+        const chatDecision = chatDecisions.locator(`[data-decision-id="${mixed.reports[1].id}"]`);
+        await expect(chatDecision.getByRole('alert')).toHaveText(refusal);
+        await expect(chatDecision.locator('.pm-chat__decision-option')).toHaveCount(4);
+        const draft = pane.getByRole('textbox', { name: 'Message to PM' });
+        await draft.fill('Keep this original reply');
+        await chatDecision.getByRole('button', { name: 'Other: reply in chat', exact: true }).click();
+        await expect(draft).toBeFocused();
+        await expect(draft).toHaveValue('Keep this original reply');
+        expect(choiceRequests).toHaveLength(1);
+        await chatDecision.locator('.pm-chat__decision-option').nth(0).click();
+        await expect.poll(() => choiceRequests.length).toBe(2);
+        expect(choiceRequests[1].text).toBe('Answer to "Which recovery?": 1. Retry — repeat the check\r');
+        expect(choiceRequests[1].request_id).not.toBe(choiceRequests[0].request_id);
+        await expect.poll(() => choiceResults.find(result => result.request_id === choiceRequests[1].request_id))
+          .toMatchObject({ ok: false });
+        await expect(chatDecision.getByRole('alert')).not.toBeEmpty();
+        await expect(draft).toHaveValue('Keep this original reply');
+        await page.setViewportSize({ width: 404, height: 1000 });
+        await expect.poll(async () => Math.round((await pane.boundingBox())!.width)).toBe(400);
+        await expect.poll(() => chatDecisions.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+        await chatDecision.scrollIntoViewIfNeeded();
+        await saveEvidence('chat-decision-narrow', await pane.screenshot(), 'image/png');
+        await page.setViewportSize({ width: 1440, height: 1000 });
+        const retryRefusal = choiceResults.find(result => result.request_id === choiceRequests[1].request_id).error;
+        await pane.getByRole('button', { name: 'Decide', exact: true }).click();
+        await expect(pane.locator(`.task-decisions__card[data-decision-id="${mixed.reports[1].id}"]`)
+          .getByRole('alert')).toContainText(retryRefusal);
+        await pane.getByRole('button', { name: 'Reports', exact: true }).click();
+        await saveEvidence('decision-controls-requests', JSON.stringify({ choiceRequests, choiceResults }), 'application/json');
         const qaRow = reports.locator(`article[data-report-id="${qa.report.id}"]`);
         await expect(qaRow.locator('.pm-chat__question')).toHaveText(qaQuestion);
         await expect(qaRow.getByRole('region', { name: 'Answer', exact: true })).toContainText(qaAnswer);
@@ -1665,7 +1724,7 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
     }
   });
 
-  test('T-CHAT-TASK-LINK T-UTASK-OV and T-UTASK-USER-REOPEN/CANCEL/UPDATE/COMPLETE persist browser authority and show confirmed Tasks after reconnect', async ({ page }, info) => {
+  test('T-TASK-DETAIL T-TASK-CHILDREN T-TASK-CRITERIA T-CHAT-TASK-LINK T-UTASK-OV and T-UTASK-USER-REOPEN/CANCEL/UPDATE/COMPLETE persist browser authority and show confirmed Tasks after reconnect', async ({ page }, info) => {
     const theme = info.project.name.includes('light') ? 'light' : 'dark';
     const windowId = 'pm-request-task-fixture';
     const taskId = 'synthetic-fixture-task';
@@ -1901,10 +1960,19 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
       const sourceId = `native:${createHash('sha256').update(JSON.stringify(['codex', nativeConversation, 'task-human'])).digest('hex')}`;
       const overviewSource = { ...seed.sources[pendingTask.source_id], id: sourceId,
         authority: { ...seed.sources[pendingTask.source_id].authority, turn_id: 'synthetic-overview-turn' } };
+      const criteriaPurpose = '目的😀'.repeat(90) + 'PURPOSE_TAIL_NOT_IN_PREVIEW';
+      const criteriaCondition = '条件🧪'.repeat(90) + 'CONDITION_TAIL_NOT_IN_PREVIEW';
+      const criteriaConditions = [criteriaCondition, 'Second criterion <literal> stays text',
+        'Third criterion', 'Fourth criterion', 'Fifth criterion', 'SIXTH_CRITERION_NOT_IN_PREVIEW'];
       const rootTask = { ...pendingTask, source_id: overviewSource.id,
-        draft: { ...draft, id: 'overview-root', title: 'Original request still pending', assignee: 'PM' } };
+        draft: { ...draft, id: 'overview-root', title: 'Original request still pending', assignee: 'PM',
+          purpose: criteriaPurpose, completion_conditions: criteriaConditions } };
       const childTask = { ...pendingTask, source_id: overviewSource.id, parent_id: rootTask.draft.id,
         draft: { ...draft, id: 'overview-child', title: 'Verify remaining outcome', assignee: 'Reviewer' } };
+      const doneChild = { ...childTask, status: 'completed',
+        draft: { ...draft, id: 'overview-done', title: 'Verified child outcome' },
+        completion: { condition_revision: childTask.condition_revision, review_generation: childTask.review_generation,
+          evidence: ['synthetic:verified-child-outcome'] } };
       const appendFixtureReceipt = (actor: { kind: string; id: string }, action: Record<string, unknown>, tasks: unknown[]) => {
         const operation_id = `overview-fixture-${overviewState.revision}`;
         const request = { operation_id, expected_revision: overviewState.revision, reason: 'Synthetic overview fixture only', action };
@@ -1915,14 +1983,18 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
       };
       appendFixtureReceipt({ kind: 'intake', id: 'synthetic-fixture-intake' }, { kind: 'capture', source: overviewSource }, []);
       appendFixtureReceipt(fixturePm, { kind: 'decompose', source_id: overviewSource.id,
-        root: rootTask.draft, children: [childTask.draft] }, [rootTask, childTask]);
+        root: rootTask.draft, children: [childTask.draft, doneChild.draft] },
+      [rootTask, childTask, { ...doneChild, status: 'pending', completion: null }]);
+      appendFixtureReceipt(fixturePm, { kind: 'complete', task_id: doneChild.draft.id,
+        ...doneChild.completion }, [doneChild]);
       const waitingChild = { ...childTask, status: 'waiting', wait_reason: 'CI verdict', next_action: 'Review required checks' };
       appendFixtureReceipt(fixturePm, { kind: 'progress', task_id: childTask.draft.id, status: 'waiting',
         wait_reason: waitingChild.wait_reason, next_action: waitingChild.next_action }, [waitingChild]);
       overviewState.sources[overviewSource.id] = overviewSource;
       overviewState.tasks[rootTask.draft.id] = rootTask;
       overviewState.tasks[childTask.draft.id] = waitingChild;
-      const overviewBytes = JSON.stringify(overviewState);
+      overviewState.tasks[doneChild.draft.id] = doneChild;
+      let overviewBytes = JSON.stringify(overviewState);
       writeFileSync(statePath, overviewBytes);
       // Real native-reader projection plus synthetic TaskStore scaffolding:
       // this proves source navigation, not live provider intake/classification.
@@ -1951,20 +2023,132 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
       const completedFilter = tasksView.getByRole('button', { name: 'Include completed', exact: true });
       await completedFilter.focus();
       await page.keyboard.press('Enter');
-      await expect(tasksView.locator('.pm-chat__task')).toHaveCount(3);
+      await expect(tasksView.locator('.pm-chat__task')).toHaveCount(4);
       await expect(tasksView).toContainText('Cancelled');
       await expect(tasksView).toContainText('PM reassessment required');
       await expect(completedFilter).toBeFocused();
+      await chat.getByRole('button', { name: 'Chat', exact: true }).click();
+      const criteriaDraft = chat.locator('.pm-chat__draft');
+      await criteriaDraft.fill('Keep this draft while reviewing the original request');
+      await chat.getByRole('button', { name: 'Tasks', exact: true }).click();
+      const rootKey = createHash('sha256').update(rootTask.draft.id).digest('hex');
+      const rootRow = tasksView.locator(`[data-task-key="${rootKey}"]`);
+      const detailButton = rootRow.getByRole('button', { name: 'View task details', exact: true });
+      await detailButton.focus();
+      await page.keyboard.press('Enter');
+      const taskDetail = tasksView.getByRole('region', { name: 'Selected task details' });
+      await expect(taskDetail).toBeVisible();
+      await expect(taskDetail).toContainText(original);
+      await expect(taskDetail).toContainText('Showing 6 of 6 completion criteria');
+      await expect(taskDetail).toContainText('SIXTH_CRITERION_NOT_IN_PREVIEW');
+      await expect(taskDetail).toContainText('Showing 1 of 1 recorded changes');
+      await expect(taskDetail).toContainText('Synthetic overview fixture only');
+      await expect(taskDetail.locator('literal')).toHaveCount(0);
+      expect(readFileSync(statePath, 'utf8')).toBe(overviewBytes, 'detail reads never write the store');
+      await taskDetail.getByRole('button', { name: 'Close details', exact: true }).click();
+      await expect(detailButton).toBeFocused();
+      const progress = rootRow.locator('.pm-chat__task-meta').filter({ hasText: 'Direct subtasks:' });
+      await expect(progress).toHaveText('Direct subtasks: 1 completed · 0 cancelled · 1 unfinished (2 total)');
+      await expect(rootRow.locator('.pm-chat__task-meta').first()).toContainText('Pending');
+      await chat.getByRole('button', { name: 'Chat', exact: true }).click();
+      await expect(progress).toBeVisible();
+      await chat.getByRole('button', { name: 'Tasks', exact: true }).click();
+      const criteria = rootRow.locator('details.pm-chat__task-criteria');
+      const criteriaSummary = criteria.locator('summary');
+      await expect(criteriaSummary).toHaveText('Purpose and completion criteria');
+      await expect(criteria).not.toHaveAttribute('open');
+      await expect(criteria).toContainText(`Purpose: ${Array.from(criteriaPurpose).slice(0, 240).join('')}…`);
+      await expect(criteria.locator('ol li')).toHaveText([
+        Array.from(criteriaCondition).slice(0, 240).join('') + '…', ...criteriaConditions.slice(1, 5),
+      ]);
+      await expect(criteria).toContainText('Showing 5 of 6 completion criteria. Text is limited to 240 characters per item.');
+      await expect(criteria).not.toContainText('PURPOSE_TAIL_NOT_IN_PREVIEW');
+      await expect(criteria).not.toContainText('CONDITION_TAIL_NOT_IN_PREVIEW');
+      await expect(criteria).not.toContainText(criteriaConditions[5]);
+      await expect(criteria.locator('literal')).toHaveCount(0);
+      await criteriaSummary.focus();
+      await page.keyboard.press('Enter');
+      await expect(criteria).toHaveAttribute('open');
+      await expect(criteriaSummary).toBeFocused();
+      const criteriaCursor = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence || 0);
+      const scopedWindowId = await page.locator('.workspace-window').filter({ has: chat }).getAttribute('data-id');
+      expect(scopedWindowId).toBeTruthy();
+      await refreshPmReports(page);
+      await page.waitForFunction(({ cursor, id }) => (window as any).__gwtPlaywrightMessages?.some((entry: any) =>
+        entry.sequence > cursor && entry.payload.kind === 'pm_reports' && entry.payload.id === id),
+      { cursor: criteriaCursor, id: scopedWindowId });
+      await expect(criteria).toHaveAttribute('open');
+      await expect(criteriaSummary).toBeFocused();
+      const criteriaUpdate = await exchange('update_pm_request_task', { request: {
+        operation_id: `criteria-overview-update-${theme}`, expected_revision: overviewState.revision,
+        reason: 'Refresh the saved Task summary without replacing its open criteria.',
+        task: { ...rootTask.draft, assignee: 'PM reviewer' },
+      } });
+      expect(criteriaUpdate).toMatchObject({ state: 'ready', task: { draft: { assignee: 'PM reviewer' } } });
+      overviewBytes = readFileSync(statePath, 'utf8');
+      await refreshPmReports(page);
+      await expect(rootRow).toContainText('PM reviewer');
+      await expect(criteria).toHaveAttribute('open');
+      await expect(criteriaSummary).toBeFocused();
+      await detailButton.click();
+      await expect(taskDetail).toContainText('Showing 2 of 2 recorded changes');
+      await expect(taskDetail).toContainText('Refresh the saved Task summary');
+      await taskDetail.getByRole('button', { name: 'Reload details', exact: true }).focus();
       try {
         writeFileSync(statePath, 'broken task store');
         await refreshPmReports(page);
         await expect(tasksView.getByRole('status')).toContainText('last confirmed list');
-        await expect(tasksView.locator('.pm-chat__task')).toHaveCount(3);
+        await expect(tasksView.locator('.pm-chat__task')).toHaveCount(4);
+        await expect(progress).toHaveText('Direct subtasks: 1 completed · 0 cancelled · 1 unfinished (2 total)');
+        await expect(criteria).toHaveAttribute('open');
+        await expect(taskDetail.getByRole('button', { name: 'Reload details', exact: true })).toBeFocused();
+        await expect(criteria.locator('ol li')).toHaveCount(5);
+        await expect(criteriaDraft).toHaveValue('Keep this draft while reviewing the original request');
+        const detailErrorCursor = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence || 0);
+        await taskDetail.getByRole('button', { name: 'Reload details', exact: true }).click();
+        const detailError = await page.waitForFunction(({ cursor, id }) =>
+          (window as any).__gwtPlaywrightMessages?.findLast((entry: any) => entry.sequence > cursor
+            && entry.payload.kind === 'pm_request_task' && entry.payload.id === id)?.payload,
+        { cursor: detailErrorCursor, id: scopedWindowId }).then(handle => handle.jsonValue());
+        expect(detailError.result).toMatchObject({ state: 'error', code: 'unreadable_store' });
+        await expect(taskDetail).toContainText('Request task details could not be read.');
+        await expect(taskDetail).not.toContainText('Loading task details');
+        await expect(taskDetail.getByRole('button', { name: 'Reload details', exact: true })).toBeFocused();
+        await expect(taskDetail).toContainText('last confirmed');
+        await expect(taskDetail).toContainText(original);
+        await expect(taskDetail).not.toContainText('broken task store');
       } finally {
         writeFileSync(statePath, overviewBytes);
       }
       await refreshPmReports(page);
-      await expect(tasksView.getByRole('status')).toContainText('3 of 3 recorded tasks shown');
+      await expect(tasksView.getByRole('status')).toContainText('4 of 4 recorded tasks shown');
+      const detailRecoveryCursor = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence || 0);
+      await taskDetail.getByRole('button', { name: 'Reload details', exact: true }).click();
+      const detailRecovery = await page.waitForFunction(({ cursor, id }) =>
+        (window as any).__gwtPlaywrightMessages?.findLast((entry: any) => entry.sequence > cursor
+          && entry.payload.kind === 'pm_request_task' && entry.payload.id === id)?.payload,
+      { cursor: detailRecoveryCursor, id: scopedWindowId }).then(handle => handle.jsonValue());
+      expect(detailRecovery.result).toMatchObject({ state: 'detail', revision: criteriaUpdate.revision, key: rootKey });
+      await expect(taskDetail).toContainText('Selected snapshot revision');
+      await expect(taskDetail).not.toContainText('last confirmed');
+      await expect(taskDetail).not.toContainText('Loading task details');
+      await expect(taskDetail.getByRole('button', { name: 'Reload details', exact: true })).toBeFocused();
+      await taskDetail.getByRole('button', { name: 'Close details', exact: true }).click();
+      await expect(detailButton).toBeFocused();
+      const detailFocusUpdate = await exchange('update_pm_request_task', { request: {
+        operation_id: `detail-focus-update-${theme}`, expected_revision: criteriaUpdate.revision,
+        reason: 'Keep keyboard focus on the detail action during a Task update.',
+        task: { ...rootTask.draft, assignee: 'PM keyboard reviewer' },
+      } });
+      expect(detailFocusUpdate).toMatchObject({ state: 'ready' });
+      await refreshPmReports(page);
+      await expect(rootRow).toContainText('PM keyboard reviewer');
+      await expect(detailButton).toBeFocused();
+      await expect(detailButton).toBeInViewport({ ratio: 1 });
+      await page.keyboard.press('Enter');
+      await expect(taskDetail).toContainText('Showing 3 of 3 recorded changes');
+      await expect(taskDetail).toContainText('Keep keyboard focus on the detail action during a Task update.');
+      await taskDetail.getByRole('button', { name: 'Close details', exact: true }).click();
       await chat.getByRole('button', { name: 'Chat', exact: true }).click();
       const conversation = chat.getByRole('region', { name: 'PM conversation' });
       await expect(conversation).toBeVisible();
@@ -2009,6 +2193,62 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
       await expect(tasksView).toBeVisible();
       expect(await tasksView.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
       await info.attach(`T-UTASK-OV ${theme} Tasks`, { body: await tasksView.screenshot(), contentType: 'image/png' });
+      await page.setViewportSize({ width: 404, height: 1000 });
+      const criteriaPane = page.locator('.workspace-window').filter({ has: chat });
+      await expect.poll(async () => Math.round((await criteriaPane.boundingBox())!.width)).toBe(400);
+      const doneKey = createHash('sha256').update(doneChild.draft.id).digest('hex');
+      await tasksView.locator(`[data-task-key="${doneKey}"]`).getByRole('button', { name: 'View task details', exact: true }).focus();
+      await page.keyboard.press('Enter');
+      await expect(taskDetail).toContainText('synthetic:verified-child-outcome');
+      await expect(taskDetail).toContainText('Showing 1 of 1 evidence references');
+      await taskDetail.getByRole('button', { name: 'Reload details', exact: true }).focus();
+      await expect(taskDetail.getByRole('button', { name: 'Reload details', exact: true })).toBeInViewport({ ratio: 1 });
+      expect(await taskDetail.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+      const detailScreenshot = info.outputPath(`task-detail-${theme}-400.png`);
+      await chat.screenshot({ path: detailScreenshot });
+      await info.attach(`T-TASK-DETAIL ${theme} 400px`, { path: detailScreenshot, contentType: 'image/png' });
+      const evidenceText = taskDetail.getByText('synthetic:verified-child-outcome', { exact: true });
+      await evidenceText.scrollIntoViewIfNeeded();
+      const historyHeading = taskDetail.getByRole('heading', { name: 'Recent recorded changes', exact: true });
+      await historyHeading.scrollIntoViewIfNeeded();
+      await expect(evidenceText).toBeInViewport({ ratio: 1 });
+      await expect(historyHeading).toBeInViewport({ ratio: 1 });
+      const evidenceScreenshot = info.outputPath(`task-detail-evidence-${theme}-400.png`);
+      await chat.screenshot({ path: evidenceScreenshot });
+      await info.attach(`T-TASK-DETAIL ${theme} evidence 400px`, { path: evidenceScreenshot, contentType: 'image/png' });
+      await taskDetail.getByRole('button', { name: 'Close details', exact: true }).click();
+      await criteriaSummary.scrollIntoViewIfNeeded();
+      await criteriaSummary.focus();
+      await expect(criteriaSummary).toBeFocused();
+      await expect(criteria).toHaveAttribute('open');
+      expect(await criteria.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+      expect(await tasksView.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+      await expect(criteriaDraft).toHaveValue('Keep this draft while reviewing the original request');
+      const childKey = createHash('sha256').update(childTask.draft.id).digest('hex');
+      await expect(tasksView.locator('.pm-chat__task').first()).toHaveAttribute('data-task-key', childKey);
+      const cancelChild = await exchange('cancel_pm_request_task', { request: {
+        operation_id: `criteria-list-reorder-${theme}`,
+        expected_revision: JSON.parse(readFileSync(statePath, 'utf8')).revision,
+        reason: 'Withdraw the child while retaining focus on the root criteria.', task_id: childTask.draft.id,
+      } });
+      expect(cancelChild).toMatchObject({ state: 'ready', task: { status: 'cancelled' } });
+      await refreshPmReports(page);
+      await expect(tasksView.locator('.pm-chat__task').first()).toHaveAttribute('data-task-key', rootKey);
+      await expect(progress).toHaveText('Direct subtasks: 1 completed · 1 cancelled · 0 unfinished (2 total)');
+      await expect(rootRow.locator('.pm-chat__task-meta').first()).toContainText('Pending');
+      expect(JSON.parse(readFileSync(statePath, 'utf8')).tasks[rootTask.draft.id].status).toBe('pending');
+      await expect(criteria).toHaveAttribute('open');
+      await expect(criteriaSummary).toBeFocused();
+      await expect(criteriaSummary).toBeInViewport({ ratio: 1 });
+      await expect(criteriaDraft).toHaveValue('Keep this draft while reviewing the original request');
+      await info.attach(`T-TASK-CRITERIA ${theme} 400px`, { body: await criteriaPane.screenshot(), contentType: 'image/png' });
+      await page.keyboard.press('Enter');
+      await expect(criteria).not.toHaveAttribute('open');
+      await progress.scrollIntoViewIfNeeded();
+      await expect(progress).toBeInViewport({ ratio: 1 });
+      await expect(criteriaSummary).toBeFocused();
+      await expect(criteriaSummary).toBeInViewport({ ratio: 1 });
+      await info.attach(`T-TASK-CHILDREN ${theme} 400px`, { body: await criteriaPane.screenshot(), contentType: 'image/png' });
       expect(errors).toEqual([]);
     } catch (error) {
       primaryErrors.push(error);

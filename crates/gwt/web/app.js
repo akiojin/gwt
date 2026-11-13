@@ -10,6 +10,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         initOperatorShell,
         applyTelemetryCounts,
         subscribeIssueMonitorStatus,
+        subscribeWorkAttentionSummary,
         applyProviderUsage,
         subscribeRuntimeHealth,
         subscribeProjectOwnerHealth,
@@ -152,6 +153,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       import { createWorksSurface } from "/works-surface.js";
       import { createTerminalTextPreview } from "/terminal-text-preview.js";
       import { createPmChat, createPmWindowModel } from "/pm-chat.js";
+      import { logGroupsFromHistoryRows } from "/task-log.js";
+      import { windowCommandErrorPresentation } from "/window-command-error.js";
       import { shouldSkipTerminalFocusActivation } from "/clone-modal-focus-guard.js";
       import { createUiTraceProfiler } from "/ui-trace-profiler.js";
       import { bindControlExplanations, setControlExplanation } from "/control-explanations.js";
@@ -488,6 +491,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       // /launch-wizard-surface.js.
       let activeWorkProjection = null;
       const { model: activeWorkProjectionModel, applyActiveWorkProjectionReceiveEvent } = createActiveWorkProjectionModel();
+      subscribeWorkAttentionSummary(document, activeWorkProjectionModel);
       const agentKanbanPendingPlacement =
         createAgentKanbanPendingPlacementController();
       // SPEC-3064 Phase 3 (E6b): branchCleanupWindowId and the synthetic
@@ -4196,7 +4200,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       }
 
       const pmChatViews = new Map();
-      const { requestPmReports, requestPmConversation, requestPmChatSend, markPmChatSendUnavailable, expirePmChatSend, readPmWindowState, bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, subscribePmWindowState } = createPmWindowModel();
+      const { requestPmReports, requestPmConversation, requestPmTaskDetail, markPmTaskDetailUnavailable, requestPmChatSend, markPmChatSendUnavailable, expirePmChatSend, readPmWindowState, bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, subscribePmWindowState } = createPmWindowModel();
       subscribePmWindowState(state => state.resyncRequest, recovery => {
         if (!recovery) return;
         const request = requestPmReports(recovery.windowId);
@@ -4219,6 +4223,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         const view = pmChatViews.get(windowId);
         if (!view) return;
         view.unsubscribe();
+        view.unsubscribeLog?.();
         view.controller.dispose();
         view.body.classList.remove("pm-conversation-body");
         // Return the terminal nodes to their original body when PM ownership ends.
@@ -4258,6 +4263,12 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         view.controller = createPmChat({
           document, root, windowId: windowData.id, sessionId: windowData.session_id,
           onChatVisible: () => requestVisiblePmReports(false, windowData.id),
+          onTaskDetail: key => {
+            const request = requestPmTaskDetail(windowData.id, key);
+            if (!request) return;
+            if (send(request) === "unavailable") return markPmTaskDetailUnavailable(windowData.id, request.request_id);
+            window.setTimeout(() => markPmTaskDetailUnavailable(windowData.id, request.request_id), 30000);
+          },
           onOpenTerminal: sessionId => {
             if (!sessionId || !worksSurface.openWork({ window_id: windowData.id, session_id: sessionId })) return false;
             openSurface("works");
@@ -4278,8 +4289,17 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
               activateTerminalOnReveal(windowData.id);
             });
           },
+          // SPEC #7007 T-013: a Log group opens the notification drawer at
+          // its original record (keyed rows focus their history row).
+          onViewNotification: entry => notificationCenter.open(entry?.key || undefined),
         });
         pmChatViews.set(windowData.id, view);
+        // SPEC #7007 T-013: the Log view mirrors this page's notification
+        // history (#5016 groups). The subscription fires immediately with
+        // the current rows, then on every history change.
+        view.unsubscribeLog = notificationCenter.subscribe(state => state.rows, rows => {
+          view.controller.receiveLog(logGroupsFromHistoryRows(rows));
+        });
         bindPmWindowState(windowData.id, windowData.session_id);
         view.unsubscribe = subscribePmWindowState(state => state.windows[windowData.id], state => {
           view.controller.update(state);
@@ -4859,10 +4879,12 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       const windowCommandErrorModel = createUiStateStore(null);
       windowCommandErrorModel.subscribe(event => event, event => {
         if (!event) return;
-        const title = { input: "Input failed", resize: "Resize failed", stop: "Stop failed" }[event.operation] || "Window command failed";
-        const key = `window-command:${event.id}:${event.operation}`;
-        notificationCenter.recordError({ key, title, message: event.message });
-        alertsToasts.push({ id: key, level: "error", title, message: event.message, timeoutMs: 8000 });
+        // SPEC #7007 T-014: the backend message is internal wording. The
+        // typed presentation (impact + next action) is the headline; the
+        // original travels as history details.
+        const presentation = windowCommandErrorPresentation(event);
+        notificationCenter.recordError({ key: presentation.key, title: presentation.title, message: presentation.message, details: presentation.details });
+        alertsToasts.push({ id: presentation.key, level: "error", title: presentation.title, message: presentation.message, timeoutMs: 8000 });
       });
 
       const launchProgressModel = createUiStateStore(null);
@@ -5204,6 +5226,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             break;
           case "pm_reports":
           case "pm_conversation":
+          case "pm_request_task":
           case "pane_send_result": {
             applyPmWindowReceiveEvent(event);
             break;
@@ -5668,6 +5691,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       worksSurface = createWorksSurface({
         systemSettingsModel,
         summaryModel: projectAgentSummaryModel,
+        workProjectionModel: activeWorkProjectionModel,
         document,
         windowCatalogModel,
         activityModel: agentActivityModel,

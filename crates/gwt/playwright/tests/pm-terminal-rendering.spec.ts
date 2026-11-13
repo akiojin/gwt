@@ -512,6 +512,11 @@ test("real PTY receives one input and converges with the visible terminal grid",
     try {
       await page.setViewportSize({ width: 1920, height: 1080 });
       await gotoLiveGwt(page, liveBase!, { enableTestBridge: true });
+      await expect.poll(async () => {
+        await sendLiveGwtEvent(page, { kind: "get_project_execution_status" });
+        return page.evaluate(() => (window as any).__gwtPlaywrightMessages
+          .findLast((entry: any) => entry.payload.kind === "project_execution_status")?.payload.status);
+      }, { timeout: 60_000 }).toMatchObject({ view_state: "open", degraded: false });
       const windows = () => page.evaluate(() => {
         const state = (window as any).__gwtPlaywrightMessages.findLast((entry: any) => entry.payload.kind === "workspace_state");
         return state?.payload.workspace.tabs.flatMap((tab: any) => tab.workspace.windows) || [];
@@ -520,10 +525,14 @@ test("real PTY receives one input and converges with the visible terminal grid",
       await sendLiveGwtEvent(page, { kind: "create_window", preset: "shell" });
       await expect.poll(async () => (await windows()).filter((entry: any) => entry.preset === "shell" && !before.has(entry.id))).toHaveLength(1);
       id = (await windows()).find((entry: any) => entry.preset === "shell" && !before.has(entry.id)).id;
+      await expect.poll(() => page.evaluate(id => (window as any).__gwtPlaywrightMessages
+        .findLast((entry: any) => entry.payload.kind === "terminal_status" && entry.payload.id === id)?.payload, id),
+      { timeout: 60_000 }).toMatchObject({ status: "running" });
       const showShell = async () => {
-        const index = (await windows()).findIndex((entry: any) => entry.id === id);
-        await page.locator("#window-list-button").click();
-        await page.locator("#window-list-panel .window-list-row").nth(index).click();
+        await sendLiveGwtEvent(page, { kind: "focus_window", id });
+        await expect.poll(async () => (await windows()).reduce((top: any, entry: any) =>
+          !top || (entry.z_index || 0) > (top.z_index || 0) ? entry : top, null)?.id).toBe(id);
+        await page.reload();
         await expect(page.locator(`.split-pane .workspace-window[data-id="${id}"]`)).toBeVisible();
       };
       await showShell();
@@ -550,7 +559,7 @@ test("real PTY receives one input and converges with the visible terminal grid",
       await page.getByRole("button", { name: "Board", exact: true }).click();
       await page.setViewportSize({ width: 1280, height: 900 });
       await showShell();
-      await grid("hidden-resize-reveal");
+      await grid("hidden-resize-reconnect");
       await page.locator("#split-view-button").click();
       await grid("split");
       await page.locator("#split-view-button").click();
@@ -558,14 +567,15 @@ test("real PTY receives one input and converges with the visible terminal grid",
       await shell.locator(".xterm-helper-textarea").focus();
       await page.keyboard.type("/model");
       await sendLiveGwtEvent(page, { kind: "terminal_input", id, data: "\x04" });
-      await expect.poll(() => outputs.get(id!) || "").toContain("PTY_INPUT_1:2f6d6f64656c\r\n");
+      // Unix PTYs can apply ONLCR to the probe's CRLF; ConPTY preserves it.
+      await expect.poll(() => outputs.get(id!) || "").toMatch(/PTY_INPUT_1:2f6d6f64656c\r+\n/);
       await shell.locator(".xterm-helper-textarea").evaluate(node => {
         const clipboard = new DataTransfer();
         clipboard.setData("text/plain", "/model");
         node.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: clipboard }));
       });
       await sendLiveGwtEvent(page, { kind: "terminal_input", id, data: "\x04" });
-      await expect.poll(() => outputs.get(id!) || "").toContain("PTY_INPUT_2:2f6d6f64656c\r\n");
+      await expect.poll(() => outputs.get(id!) || "").toMatch(/PTY_INPUT_2:2f6d6f64656c\r+\n/);
       await info.attach("real PTY observations", { body: JSON.stringify({ theme, observations, inputHex: "2f6d6f64656c", errors }), contentType: "application/json" });
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
       expect(errors, "zero console/page errors").toEqual([]);

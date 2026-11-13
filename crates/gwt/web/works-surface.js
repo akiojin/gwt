@@ -78,7 +78,7 @@ function drawSpark(document, svg, input, maximum) {
 const summaryCells = [["running", "RUNNING"], ["block", "BLOCK"], ["idle", "IDLE"], ["error", "ERROR"]];
 
 export function createWorksSurface({ document, windowCatalogModel, activityModel, rosterModel, windowDisplayTitle, systemSettingsModel,
-  summaryModel, mountTerminal, mountPreview, onLayout = () => {}, onFocus = () => {}, onSelectMember = () => {}, getTelemetry = () => null }) {
+  summaryModel, workProjectionModel, mountTerminal, mountPreview, onLayout = () => {}, onFocus = () => {}, onSelectMember = () => {}, getTelemetry = () => null }) {
   const element = document.createElement("section");
   element.className = "works-surface"; element.setAttribute("aria-label", "Works");
   element.innerHTML = `<div class="works-overview"><header class="works-heading"><h2>Works</h2><div class="works-counts">
@@ -312,6 +312,9 @@ export function createWorksSurface({ document, windowCatalogModel, activityModel
     rosterModel.subscribeFrame(state => state, value => { if (value !== renderedRoster) render(false); }),
     systemSettingsModel?.subscribeFrame(state => state.worksPreviewLines, () => render(false)),
     summaryModel?.subscribeFrame(state => state, () => { if (!disposed) renderSummary(); }),
+    workProjectionModel?.subscribeFrame(state => state?.projection?.attentionSummary?.summary ?? "", summary => {
+      element.querySelector('[data-count="block"]').parentElement.title = summary;
+    }),
   ];
   return { element, sync: (rehost = true) => render(rehost), openWork, reveal: openWork, showList: () => back(false), setPreviewHost,
     contains: id => !!exactWork(id), isVisible: id => !element.hidden && !!exactWork(id),

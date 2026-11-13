@@ -10,7 +10,13 @@ use super::{
     storage::{CoordinatorStore, StoreError},
     ConfigError, CoordinatorConfig, CredentialError, TlsError,
 };
-use axum::serve::Listener;
+use axum::{
+    extract::{Request, State},
+    http::{header, HeaderValue, StatusCode},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
+    serve::Listener,
+};
 use std::{future::Future, net::SocketAddr, path::Path, sync::Arc};
 use tokio::net::TcpListener;
 
@@ -52,6 +58,37 @@ impl From<StoreError> for StartupError {
 pub struct CoordinatorServer {
     listener: TlsListener,
     store: Arc<CoordinatorStore>,
+    origin: Arc<str>,
+}
+
+/// Origin checks are additional constraints, never registration or device
+/// authorization. Missing Origin is allowed for non-browser clients and direct
+/// navigation; the fixed router still denies every route. Parser-level HTTP
+/// errors are handled before this application middleware.
+async fn http_boundary(State(origin): State<Arc<str>>, request: Request, next: Next) -> Response {
+    let mut origins = request.headers().get_all(header::ORIGIN).iter();
+    let allowed = match origins.next() {
+        None => true,
+        Some(value) => value.as_bytes() == origin.as_bytes() && origins.next().is_none(),
+    };
+    let mut response = if allowed {
+        next.run(request).await
+    } else {
+        (
+            StatusCode::FORBIDDEN,
+            "coordinator origin rejected; retry from the configured HTTPS origin",
+        )
+            .into_response()
+    };
+    for (name, value) in [
+        (header::CONTENT_SECURITY_POLICY, "default-src 'none'; script-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"),
+        (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        (header::REFERRER_POLICY, "no-referrer"),
+        (header::CACHE_CONTROL, "no-store"),
+    ] {
+        response.headers_mut().insert(name, HeaderValue::from_static(value));
+    }
+    response
 }
 
 impl CoordinatorServer {
@@ -73,7 +110,11 @@ impl CoordinatorServer {
             .map_err(|_| StartupError::BindUnavailable)?;
         let listener = TlsListener::new(tcp, tls, HANDSHAKE_TIMEOUT)
             .map_err(|_| StartupError::BindUnavailable)?;
-        Ok(Self { listener, store })
+        Ok(Self {
+            listener,
+            store,
+            origin: Arc::from(config.origin()),
+        })
     }
 
     pub fn local_addr(&self) -> Result<SocketAddr, StartupError> {
@@ -82,7 +123,8 @@ impl CoordinatorServer {
             .map_err(|_| StartupError::BindUnavailable)
     }
 
-    /// Serve only a fixed 404 router. No local/agent router can be supplied.
+    /// Serve only a fixed 404 router behind Origin checks and security headers.
+    /// No local/agent router can be supplied.
     /// Each connection service also retains the registry guard: axum's HTTP
     /// tasks can outlive a cancelled serving future and must still exclude a
     /// second writer until those connections close.
@@ -92,8 +134,14 @@ impl CoordinatorServer {
         self,
         shutdown: impl Future<Output = ()> + Send + 'static,
     ) -> Result<(), StartupError> {
-        let Self { listener, store } = self;
-        let router = axum::Router::new().layer(axum::Extension(Arc::clone(&store)));
+        let Self {
+            listener,
+            store,
+            origin,
+        } = self;
+        let router = axum::Router::new()
+            .layer(axum::Extension(Arc::clone(&store)))
+            .layer(middleware::from_fn_with_state(origin, http_boundary));
         let result = axum::serve(listener, router)
             .with_graceful_shutdown(shutdown)
             .await
@@ -115,7 +163,7 @@ mod tests {
     use std::{fs, net::TcpListener as StdListener, os::unix::fs::PermissionsExt, path::PathBuf};
     use std::{net::SocketAddr, sync::Arc};
     use tokio::{
-        io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+        io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
         net::TcpStream,
         sync::oneshot,
     };
@@ -213,6 +261,65 @@ mod tests {
             .unwrap();
             BufReader::new(tls)
         }
+    }
+
+    #[tokio::test]
+    async fn http_origin_boundary_and_security_headers_apply_to_denied_routes() {
+        let mut fixture = Fixture::new();
+        let server = fixture.start().await;
+        let addr = server.local_addr().unwrap();
+        let (shutdown, signal) = oneshot::channel();
+        let task = tokio::spawn(server.serve_until(async move {
+            let _ = signal.await;
+        }));
+        for (origin, status) in [
+            ("Origin: https://private-secret.example\r\n", 403),
+            ("Origin: null\r\n", 403),
+            ("Origin: http://coordinator.example\r\n", 403),
+            ("Origin: https://coordinator.example/path\r\n", 403),
+            (
+                "Origin: https://coordinator.example\r\nOrigin: https://coordinator.example\r\n",
+                403,
+            ),
+            ("Origin: https://coordinator.example\r\n", 404),
+            ("", 404),
+        ] {
+            let mut client = fixture.connect(addr).await;
+            bounded(client.write_all(
+                format!("GET /ws HTTP/1.1\r\nHost: coordinator.example\r\n{origin}Connection: close\r\n\r\n")
+                    .as_bytes(),
+            ))
+            .await
+            .unwrap();
+            let mut response = String::new();
+            bounded(client.read_to_string(&mut response)).await.unwrap();
+            assert!(
+                response.starts_with(&format!("HTTP/1.1 {status}")),
+                "{response}"
+            );
+            let headers = response
+                .split("\r\n\r\n")
+                .next()
+                .unwrap()
+                .to_ascii_lowercase();
+            for header in [
+                "content-security-policy: default-src 'none'; script-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+                "x-content-type-options: nosniff",
+                "referrer-policy: no-referrer",
+                "cache-control: no-store",
+            ] {
+                assert!(headers.lines().any(|line| line == header), "{response}");
+            }
+            assert!(!headers.contains("access-control-allow-"));
+            assert!(!response.contains("private-secret"));
+            if status == 403 {
+                assert!(response.ends_with(
+                    "coordinator origin rejected; retry from the configured HTTPS origin"
+                ));
+            }
+        }
+        shutdown.send(()).unwrap();
+        bounded(task).await.unwrap().unwrap();
     }
 
     #[tokio::test]

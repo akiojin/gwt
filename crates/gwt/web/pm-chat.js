@@ -2,6 +2,8 @@ import { createUiStateStore } from './ui-state-store.js';
 import { renderUiContent } from './ui-content.js';
 import { createTaskHome } from './task-home.js';
 import { createTaskDecisions } from './task-decisions.js';
+import { createTaskProgress } from './task-progress.js';
+import { createTaskLog } from './task-log.js';
 
 function reportDetailsMarkdown(structured) {
   return [structured.details, (structured.refs || []).map(ref => `- ${ref}`).join('\n')]
@@ -54,7 +56,7 @@ export function createPmWindowModel() {
   function emptyWindow(windowId, sessionId = null) {
     return { windowId, sessionId, revision: 0, terminal: null,
       reportsVersion: null, reports: [], current: null, error: null, loaded: false,
-      requestTasks: null, requestTasksError: null, conversation: null, chatSend: null, paneResult: null };
+      requestTasks: null, requestTasksError: null, taskDetail: null, conversation: null, chatSend: null, paneResult: null };
   }
   function bindPmWindowState(windowId, sessionId) {
     model.update(state => {
@@ -108,6 +110,27 @@ export function createPmWindowModel() {
               : { type: 'markdown', body: report.body || '', body_html: report.body_html || '' },
             detailsContent: report.structured ? { type: 'markdown', body: reportDetailsMarkdown(report.structured),
               body_html: report.details_html || '' } : null })) };
+        if (next.taskDetail?.data && (taskError || (taskOverview?.revision > next.taskDetail.revision))) {
+          next.taskDetail = { ...next.taskDetail, stale: true };
+        }
+      } else if (event.kind === 'pm_request_task') {
+        const selected = previous?.taskDetail;
+        if (!selected || selected.status !== 'loading' || event.request_id !== selected.requestId) return state;
+        const result = event.result;
+        if (result?.state === 'detail') {
+          if (result.key !== selected.key) return state;
+          if (!Number.isSafeInteger(result.revision)
+            || result.revision < Math.max(previous.requestTasks?.revision || 0, selected.revision || 0)) {
+            next = { ...next, taskDetail: { ...selected, status: 'error', stale: true,
+              error: 'The task changed during this read. Reload details to get the current snapshot.' } };
+          } else {
+            next = { ...next, taskDetail: { ...selected, status: 'ready', stale: false,
+              revision: result.revision, data: result.detail, error: null } };
+          }
+        } else if (result?.state === 'error') {
+          next = { ...next, taskDetail: { ...selected, status: 'error', stale: Boolean(selected.data),
+            error: result.message || 'Task details could not be read. Reload details to try again.' } };
+        } else return state;
       } else if (event.kind === 'pm_conversation') {
         // The host already resolved the session's native record and drops reads
         // of a replaced PM; this guard only keeps a late reply off a rebound window.
@@ -190,6 +213,27 @@ export function createPmWindowModel() {
   function requestPmConversation(windowId) {
     return model.read().windows[windowId]?.sessionId ? { kind: 'load_pm_conversation', id: windowId } : null;
   }
+  function requestPmTaskDetail(windowId, key) {
+    const previous = model.read().windows[windowId];
+    if (!previous?.sessionId) return null;
+    const task = previous.requestTasks?.tasks?.find(task => task.key === key);
+    if (key !== null && !task && previous.taskDetail?.key !== key) return null;
+    const requestId = ++requestSequence;
+    const retained = previous.taskDetail?.key === key ? previous.taskDetail : null;
+    model.update(state => ({ ...state, windows: { ...state.windows, [windowId]: { ...previous,
+      taskDetail: key === null ? null : { key, title: task?.title || retained?.title, requestId, status: 'loading', data: retained?.data || null,
+        revision: retained?.revision ?? null, stale: Boolean(retained?.stale), error: null },
+      revision: previous.revision + 1 } }, changedWindowId: windowId }));
+    return key === null ? null : { kind: 'load_pm_request_task', id: windowId, request_id: requestId, task_key: key };
+  }
+  function markPmTaskDetailUnavailable(windowId, requestId = null) {
+    const previous = model.read().windows[windowId], selected = previous?.taskDetail;
+    if (selected?.status !== 'loading' || (requestId !== null && requestId !== selected.requestId)) return;
+    model.update(state => ({ ...state, windows: { ...state.windows, [windowId]: { ...previous,
+      taskDetail: { ...selected, status: 'error', stale: Boolean(selected.data),
+        error: 'The read was not confirmed. Reconnect, then reload details.' },
+      revision: previous.revision + 1 } }, changedWindowId: windowId }));
+  }
   function removePmWindowState(windowId) {
     requests.delete(windowId);
     model.update(state => {
@@ -199,11 +243,12 @@ export function createPmWindowModel() {
   }
   function readPmWindowState() { return model.read(); }
   function subscribePmWindowState(select, render) { return model.subscribe(select, render); }
-  return { requestPmReports, requestPmConversation, requestPmChatSend, markPmChatSendUnavailable, expirePmChatSend, bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, readPmWindowState, subscribePmWindowState };
+  return { requestPmReports, requestPmConversation, requestPmTaskDetail, markPmTaskDetailUnavailable, requestPmChatSend, markPmChatSendUnavailable, expirePmChatSend, bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, readPmWindowState, subscribePmWindowState };
 }
 
 // Read-only report view. The caller owns polling and the unchanged terminal.
-export function createPmChat({ document, root, sessionId, onLogVisibility, onChatVisible = () => {}, onSend = () => {}, onOpenTerminal = () => false,
+export function createPmChat({ document, root, sessionId, onLogVisibility, onChatVisible = () => {}, onTaskDetail = () => {}, onSend = () => {}, onOpenTerminal = () => false,
+  onViewNotification = () => {},
   copyText = text => document.defaultView.navigator.clipboard.writeText(text) }) {
   let session = sessionId;
   let disposed = false;
@@ -213,6 +258,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   let tasksDigest = '';
   let chatDigest;
   let chatSend = null;
+  let draftSend = null;
   const taskRows = new Map();
   let digest = '';
   let currentDigest;
@@ -233,21 +279,23 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   toolbar.setAttribute('aria-label', 'PM view');
   const homeButton = element('button', '', 'Home');
   const decideButton = element('button', '', 'Decide');
+  const progressButton = element('button', '', 'Progress');
   const chatButton = element('button', '', 'Chat');
   const tasksButton = element('button', '', 'Tasks');
+  const taskLogButton = element('button', '', 'Log');
   const reportsButton = element('button', '', 'Reports');
   const logButton = element('button', '', 'Execution log');
-  homeButton.type = decideButton.type = chatButton.type = tasksButton.type
-    = reportsButton.type = logButton.type = 'button';
-  toolbar.append(homeButton, decideButton, chatButton, tasksButton, reportsButton, logButton);
+  homeButton.type = decideButton.type = progressButton.type = chatButton.type = tasksButton.type
+    = taskLogButton.type = reportsButton.type = logButton.type = 'button';
+  toolbar.append(homeButton, decideButton, progressButton, chatButton, tasksButton, taskLogButton, reportsButton, logButton);
   // SPEC #7007: the task-centered Home island is the entry view. Its actions
   // reuse the existing surfaces: creating a task goes through the PM chat
   // composer (the request-task intake path), reviewing decisions opens the
-  // Decide surface, and progress is the Tasks view.
+  // Decide surface, and progress opens the Progress surface.
   const taskHome = createTaskHome({ document,
     onCreateTask: () => { showView('chat'); draft.focus(); },
     onReviewDecisions: () => showView('decide'),
-    onViewProgress: () => showView('tasks'),
+    onViewProgress: () => showView('progress'),
   });
   // SPEC #7007 T-010: the Decide island aggregates only decision reports.
   // Answers travel the existing PM reply path (the chat send); the view
@@ -257,6 +305,21 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   const taskDecisions = createTaskDecisions({ document,
     onAnswerDecision: (item, optionIndex) => answerDecision(item, optionIndex),
     onReplyInChat: () => { showView('chat'); draft.focus(); },
+  });
+  // SPEC #7007 T-012: the Progress island reads the same window snapshot
+  // as Home and Decide. Its detail action reuses the existing task detail
+  // read, which renders in the Tasks view, so the view switches with it.
+  const taskProgress = createTaskProgress({ document,
+    onCreateTask: () => { showView('chat'); draft.focus(); },
+    onReviewDecision: () => showView('decide'),
+    onViewTaskDetails: key => { onTaskDetail(key); showView('tasks'); },
+    onViewAllTasks: () => showView('tasks'),
+  });
+  // SPEC #7007 T-013: the Log island lists the notification history groups
+  // the caller feeds through receiveLog; opening the original record stays
+  // with the caller, which owns the notification center.
+  const taskLog = createTaskLog({ document,
+    onViewNotification: entry => { if (!disposed) onViewNotification(entry); },
   });
   const chatBody = element('section', 'pm-chat__chat');
   chatBody.setAttribute('aria-label', 'PM conversation');
@@ -272,6 +335,11 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   const chatLog = element('div', 'pm-chat__conversation');
   chatLog.setAttribute('role', 'log');
   chatLog.setAttribute('aria-label', 'PM conversation messages');
+  const chatDecisionReports = element('section', 'pm-chat__decision-reports');
+  chatDecisionReports.setAttribute('aria-label', 'Decision reports');
+  const chatDecisionList = element('div', 'pm-chat__decision-list');
+  chatDecisionReports.append(element('h2', '', 'Decision reports'),
+    element('p', '', 'Saved PM reports, separate from the native conversation.'), chatDecisionList);
   const composer = element('form', 'pm-chat__composer');
   composer.setAttribute('aria-label', 'Message PM');
   const draft = element('textarea', 'pm-chat__draft');
@@ -294,7 +362,33 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   const tasksNotice = element('p', 'pm-chat__notice');
   tasksNotice.setAttribute('role', 'status');
   const taskList = element('div', 'pm-chat__task-list');
-  tasksBody.append(tasksHeader, tasksNotice, taskList);
+  const taskDetail = element('section', 'pm-chat__task-detail');
+  taskDetail.setAttribute('aria-label', 'Selected task details');
+  taskDetail.hidden = true;
+  const detailHeading = element('h3', '', 'Selected task details');
+  detailHeading.tabIndex = -1;
+  const detailActions = element('div', 'pm-chat__toolbar');
+  const reloadDetail = element('button', '', 'Reload details');
+  const closeDetail = element('button', '', 'Close details');
+  reloadDetail.type = closeDetail.type = 'button';
+  detailActions.append(reloadDetail, closeDetail);
+  const detailNotice = element('p', 'pm-chat__notice');
+  detailNotice.setAttribute('aria-live', 'polite');
+  const detailContent = element('div', '');
+  taskDetail.append(detailHeading, detailActions, detailNotice, detailContent);
+  reloadDetail.addEventListener('click', () => {
+    if (!disposed && latestState?.taskDetail && latestState.taskDetail.status !== 'loading') onTaskDetail(latestState.taskDetail.key);
+  });
+  closeDetail.addEventListener('click', () => {
+    if (disposed) return;
+    const key = latestState?.taskDetail?.key;
+    onTaskDetail(null);
+    const trigger = taskRows.get(key)?.querySelector('.pm-chat__task-detail-button');
+    (trigger && root.contains(trigger) ? trigger : completedButton).focus();
+  });
+  tasksBody.append(tasksHeader, tasksNotice, taskDetail, taskList);
+  let selectedDetailKey = null;
+  let detailData = null;
   const body = element('div', 'pm-chat__body');
   const currentCard = element('section', 'pm-chat__current');
   currentCard.setAttribute('aria-label', 'PM status');
@@ -324,7 +418,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   body.append(currentCard, historyHeader, notice, transcript);
   const taskWorkspace = element('div', 'pm-chat__workspace');
   taskWorkspace.append(chatBody, tasksBody);
-  root.append(toolbar, terminalStatus, taskHome.element, taskDecisions.element, body, taskWorkspace);
+  root.append(toolbar, terminalStatus, taskHome.element, taskDecisions.element, taskProgress.element, taskLog.element, body, taskWorkspace);
 
   function rememberScroll() {
     // Hidden tabs/windows have no layout; their zero offsets are not user intent.
@@ -351,12 +445,16 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     chatBody.hidden = value !== 'chat';
     taskHome.element.hidden = value !== 'home';
     taskDecisions.element.hidden = value !== 'decide';
+    taskProgress.element.hidden = value !== 'progress';
+    taskLog.element.hidden = value !== 'tasklog';
     root.classList.toggle('pm-chat--logs', logs);
     root.classList.toggle('pm-chat--chat', value === 'chat');
     homeButton.setAttribute('aria-pressed', String(value === 'home'));
     decideButton.setAttribute('aria-pressed', String(value === 'decide'));
+    progressButton.setAttribute('aria-pressed', String(value === 'progress'));
     chatButton.setAttribute('aria-pressed', String(value === 'chat'));
     tasksButton.setAttribute('aria-pressed', String(value === 'tasks'));
+    taskLogButton.setAttribute('aria-pressed', String(value === 'tasklog'));
     reportsButton.setAttribute('aria-pressed', String(value === 'reports'));
     logButton.setAttribute('aria-pressed', String(logs));
     onLogVisibility(logs);
@@ -368,8 +466,10 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   }
   const showHome = () => showView('home');
   const showDecisions = () => showView('decide');
+  const showProgress = () => showView('progress');
   const showChat = () => showView('chat');
   const showTasks = () => showView('tasks');
+  const showTaskLog = () => showView('tasklog');
   const showReports = () => showView('reports');
   const showLog = () => showView('log');
   const openTerminal = () => {
@@ -392,6 +492,26 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     taskHome.receive({ overview, decisionsWaiting: decisions.waiting, completedToday: null,
       stale: Boolean(state?.requestTasksError) && overview !== null });
   }
+  // Progress reads the same snapshot: the request-task overview plus the
+  // live-facts active windows. The windows stay a separate frame because
+  // no frontend join key links a window to a request task.
+  function renderProgress(state) {
+    const facts = state?.current?.facts ?? null;
+    taskProgress.receive({
+      loaded: Boolean(state?.loaded),
+      overview: state?.requestTasks ?? null,
+      error: state?.requestTasksError ?? null,
+      activeWindows: facts ? (facts.active_windows || []).map(item => ({
+        issueNumber: item.issue_number ?? null,
+        title: item.title || null,
+        lastActivityAt: item.last_activity_at ?? null,
+      })) : null,
+    });
+  }
+  function receiveLog(groups) {
+    if (disposed) return;
+    taskLog.receive(groups || []);
+  }
   // Decide aggregates the same decision reports Home counts (AC-6), newest
   // first. Typed packets expose their options; untyped decision reports keep
   // the plain reply path and carry their display text instead.
@@ -399,6 +519,8 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   let pendingDecision = null;
   let decisionSendError = null;
   let observedPaneReceipt = 0;
+  const chatDecisionRows = new Map();
+  const decisionControls = new WeakMap();
   function decisionItems(state) {
     return (state?.reports || []).filter(report => report.kind === 'decision').map(report => {
       const summary = report.structured?.summary ?? null;
@@ -464,6 +586,8 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     const decisions = deriveDecisions(state);
     renderHome(state, decisions);
     renderDecisions(state, decisions);
+    renderReportDecisions(decisions);
+    return decisions;
   }
   function renderDecisions(state, { items, answered }) {
     taskDecisions.receive({
@@ -479,7 +603,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     });
   }
   function answerDecision(item, optionIndex) {
-    if (disposed || chatSend?.status === 'pending' || pendingDecision) return;
+    if (disposed || answeredDecisions.has(item.id) || chatSend?.status === 'pending' || pendingDecision) return;
     const optionText = item.options?.[optionIndex];
     if (optionText == null) return;
     pendingDecision = { id: item.id, optionText, afterSequence: chatSend?.sequence ?? 0,
@@ -497,7 +621,101 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     }
     renderDecisionSurfaces(latestState);
   }
+  function replyInChat() {
+    if (disposed || latestState?.chatSend?.status === 'pending' || pendingDecision) return;
+    showChat();
+    draft.focus();
+  }
+  function renderDecisionControls(controls, item, answered) {
+    const busy = pendingDecision != null || latestState?.chatSend?.status === 'pending';
+    const error = decisionSendError?.id === item.id ? decisionSendError.message : null;
+    const itemDigest = JSON.stringify(item);
+    let view = decisionControls.get(controls);
+    if (!view || view.itemDigest !== itemDigest) {
+      const nodes = [];
+      if (item.recommendation) nodes.push(element('p', '',
+        `Recommended: ${item.recommendation}${item.reason ? ` — ${item.reason}` : ''}`));
+      const status = element('p', '');
+      status.setAttribute('role', 'status');
+      status.setAttribute('tabindex', '-1');
+      const alert = element('p', 'pm-chat__decision-error');
+      alert.setAttribute('role', 'alert');
+      const retry = element('p', '', 'Choose an option to try again.');
+      const options = element('div', 'pm-chat__decision-options');
+      for (const [index, option] of (item.options || []).entries()) {
+        const button = element('button', 'pm-chat__decision-option', `${index + 1}. ${option}`);
+        button.type = 'button';
+        button.addEventListener('click', () => answerDecision(item, index));
+        options.append(button);
+      }
+      const reply = element('button', '', 'Other: reply in chat');
+      reply.type = 'button';
+      reply.addEventListener('click', replyInChat);
+      options.append(reply);
+      controls.replaceChildren(...nodes, status, alert, retry, options);
+      view = { itemDigest, status, alert, retry, options, busy: false, focusedControl: null };
+      decisionControls.set(controls, view);
+    }
+    const active = document.activeElement;
+    const ownsFocus = view.options.contains(active);
+    if (busy && !view.busy) view.focusedControl = ownsFocus ? active : null;
+    // Native disabled buttons may blur. Restore only the interaction that
+    // started here, while leaving a deliberate move to another control alone.
+    const focusStayed = ownsFocus || (view.focusedControl && (!active || active === document.body));
+    const statusText = answered ? `Answer sent: ${answered}`
+      : pendingDecision?.id === item.id ? 'Sending answer…' : '';
+    if (view.status.textContent !== statusText) view.status.textContent = statusText;
+    if (view.alert.textContent !== (error || '')) view.alert.textContent = error || '';
+    view.alert.hidden = view.retry.hidden = !error;
+    if (answered) {
+      if (view.options.parentNode === controls) {
+        view.options.remove();
+        if (focusStayed) view.status.focus({ preventScroll: true });
+      }
+      view.focusedControl = null;
+    } else {
+      if (view.options.parentNode !== controls) controls.append(view.options);
+      for (const button of view.options.children) if (button.disabled !== busy) button.disabled = busy;
+      if (!busy && view.busy) {
+        if (focusStayed) view.focusedControl?.focus({ preventScroll: true });
+        view.focusedControl = null;
+      }
+    }
+    view.busy = busy;
+  }
+  function renderReportDecisions({ items, answered }) {
+    chatDecisionReports.hidden = !items.length;
+    if (items.length && chatDecisionReports.parentNode !== chatLog) chatLog.append(chatDecisionReports);
+    else if (!items.length) chatDecisionReports.remove();
+    const nodes = items.map(item => {
+      let row = chatDecisionRows.get(item.id);
+      if (!row) {
+        row = element('div', 'pm-chat__decision-report');
+        row.dataset.decisionId = item.id;
+        row.append(element('h3', ''), element('p', ''), element('div', 'pm-chat__decision-controls'));
+        chatDecisionRows.set(item.id, row);
+      }
+      if (row.firstChild.textContent !== item.question) row.firstChild.textContent = item.question;
+      const summary = row.children[1];
+      if (summary.textContent !== (item.result || '')) summary.textContent = item.result || '';
+      summary.hidden = !item.result;
+      renderDecisionControls(row.lastChild, item, answered[item.id]);
+      return row;
+    });
+    if (nodes.length !== chatDecisionList.children.length
+      || nodes.some((node, index) => chatDecisionList.children[index] !== node)) chatDecisionList.replaceChildren(...nodes);
+    const ids = new Set(items.map(item => item.id));
+    for (const id of chatDecisionRows.keys()) if (!ids.has(id)) chatDecisionRows.delete(id);
+    // Answer-only updates do not change report content. Refresh its controls
+    // independently so Copy, disclosure and reading position stay intact.
+    for (const row of transcript.children) {
+      const item = items.find(item => item.id === row.dataset.reportId);
+      const controls = row.querySelector('.pm-chat__decision-controls');
+      if (item && controls) renderDecisionControls(controls, item, answered[item.id]);
+    }
+  }
   function renderTasks(state) {
+    renderTaskDetail(state?.taskDetail);
     const overview = state?.requestTasks;
     const error = state?.requestTasksError;
     const rows = overview?.state === 'ready' ? overview.tasks : [];
@@ -507,6 +725,11 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
       : [];
     const nextDigest = JSON.stringify([includeCompleted, rows, sources.map(message => [message.sourceKey, message.id])]);
     if (nextDigest !== tasksDigest) {
+      const focusedTaskControl = document.activeElement?.matches('.pm-chat__task-detail-button')
+        ? '.pm-chat__task-detail-button' : '.pm-chat__task-criteria > summary';
+      const focusedTaskKey = taskList.contains(document.activeElement)
+        && document.activeElement?.matches(focusedTaskControl)
+        ? document.activeElement.closest('.pm-chat__task')?.dataset.taskKey : null;
       tasksDigest = nextDigest;
       const parents = new Map(rows.map(task => [task.key, task.title]));
       const labels = { pending: 'Pending', in_progress: 'In progress', waiting: 'Waiting', completed: 'Completed', cancelled: 'Cancelled' };
@@ -520,15 +743,38 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
         const source = sources.find(message => message.sourceKey === task.source_key);
         const digest = JSON.stringify([task, parents.get(task.parent_key), source?.id]);
         if (row.dataset.digest !== digest) {
+          const previousCriteria = row.querySelector('.pm-chat__task-criteria');
+          const criteriaOpen = previousCriteria?.hasAttribute('open');
           row.dataset.digest = digest;
           row.classList.toggle('pm-chat__task--child', !!task.parent_key);
           const title = element('h3', '', task.title);
           const meta = element('p', 'pm-chat__task-meta', `${labels[task.status] || 'Unknown'} · ${task.assignee || 'Unassigned'}`);
           const fields = [title, meta];
+          const detail = element('button', 'pm-chat__task-detail-button', 'View task details');
+          detail.type = 'button';
+          detail.addEventListener('click', () => { if (!disposed) onTaskDetail(task.key); });
+          fields.push(detail);
+          if (task.child_progress) {
+            const { total, completed, cancelled } = task.child_progress;
+            fields.push(element('p', 'pm-chat__task-meta',
+              `Direct subtasks: ${completed} completed · ${cancelled} cancelled · ${total - completed - cancelled} unfinished (${total} total)`));
+          }
           if (task.parent_key) fields.push(element('p', 'pm-chat__task-meta', `Part of: ${parents.get(task.parent_key) || 'Parent outside this preview'}`));
           if (task.review_required) fields.push(element('p', 'pm-chat__task-review', 'PM reassessment required'));
           if (task.wait_reason) fields.push(element('p', '', `Waiting: ${task.wait_reason}`));
           if (task.next_action) fields.push(element('p', '', `Next: ${task.next_action}`));
+          if (task.criteria_preview) {
+            const preview = task.criteria_preview;
+            const criteria = element('details', 'pm-chat__task-criteria');
+            if (criteriaOpen) criteria.setAttribute('open', '');
+            const conditions = element('ol', '');
+            for (const condition of preview.completion_conditions) conditions.append(element('li', '', condition));
+            criteria.append(element('summary', '', 'Purpose and completion criteria'),
+              element('p', '', `Purpose: ${preview.purpose}`),
+              element('p', 'pm-chat__task-meta', `Preview. Showing ${preview.completion_conditions.length} of ${preview.completion_condition_total} completion criteria. Text is limited to 240 characters per item.`),
+              conditions);
+            fields.push(criteria);
+          }
           const link = element('button', '', 'Show in conversation');
           link.type = 'button';
           link.disabled = !source;
@@ -554,6 +800,8 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
       if (nodes.length !== taskList.children.length || nodes.some((node, index) => taskList.children[index] !== node)) {
         taskList.replaceChildren(...nodes);
       }
+      if (focusedTaskKey) nodes.find(node => node.dataset.taskKey === focusedTaskKey)
+        ?.querySelector(focusedTaskControl)?.focus();
       const keys = new Set(rows.map(task => task.key));
       for (const key of taskRows.keys()) if (!keys.has(key)) taskRows.delete(key);
     }
@@ -565,6 +813,45 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
       ? `Task data could not be refreshed.${overview ? ` Showing the last confirmed list. Last confirmed summary (stale): ${summary}` : ''} ${error} Reopen Tasks after the store is recovered.`
       : summary;
     if (tasksNotice.textContent !== noticeText) tasksNotice.textContent = noticeText;
+  }
+  function renderTaskDetail(selected) {
+    taskDetail.hidden = !selected;
+    if (!selected) { selectedDetailKey = null; detailData = null; detailContent.replaceChildren(); return; }
+    const changedKey = selected.key !== selectedDetailKey;
+    selectedDetailKey = selected.key;
+    detailHeading.textContent = selected.title || 'Selected task details';
+    // Retain keyboard focus while the read is pending.
+    reloadDetail.setAttribute('aria-disabled', String(selected.status === 'loading'));
+    detailNotice.textContent = [selected.status === 'loading' ? 'Loading task details…' : '',
+      selected.stale ? 'Showing the last confirmed detail (stale). Reload details after recovering the task store.' : '',
+      selected.error || '', selected.data ? `Selected snapshot revision ${selected.revision}. Preview only; saved data is unchanged.` : ''].filter(Boolean).join(' ');
+    if (detailData !== selected.data) {
+      detailData = selected.data;
+      const nodes = [];
+      const text = value => value ? value.text + ([...value.text].length < value.total_chars
+        ? `\n[Showing ${[...value.text].length} of ${value.total_chars} characters]` : '') : '';
+      const paragraph = value => element('p', 'pm-chat__task-detail-text', text(value));
+      const data = selected.data;
+      if (data) {
+        nodes.push(element('h4', '', 'Original request'), data.original ? paragraph(data.original)
+          : element('p', '', 'The original request is missing from saved task data.'),
+        element('h4', '', 'Purpose'), paragraph(data.purpose));
+        const list = (title, values, total, label) => {
+          const items = element('ol', '');
+          for (const value of values) { const item = element('li', ''); item.append(paragraph(value)); items.append(item); }
+          nodes.push(element('h4', '', title), element('p', 'pm-chat__task-meta', `Showing ${values.length} of ${total} ${label}.`), items);
+        };
+        list('Completion criteria', data.completion_conditions, data.completion_condition_total, 'completion criteria');
+        list('Completion evidence', data.evidence, data.evidence_total, 'evidence references');
+        nodes.push(element('h4', '', 'Recent recorded changes'),
+          element('p', 'pm-chat__task-meta', `Showing ${data.history.length} of ${data.history_total} recorded changes, newest first. Only changes with a saved task delta are included.`));
+        for (const change of data.history) {
+          nodes.push(element('p', 'pm-chat__task-meta', `Revision ${change.revision} · ${change.action} · ${change.actor_kind} · ${text(change.actor_id)} · ${change.at}`), paragraph(change.reason));
+        }
+      }
+      detailContent.replaceChildren(...nodes);
+    }
+    if (changedKey) { taskDetail.scrollTop = 0; detailHeading.focus(); }
   }
   function renderChat(conversation) {
     const nextDigest = JSON.stringify(conversation);
@@ -605,7 +892,10 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
       nodes.push(bubbleFor(messages[end - 1]));
       start = end;
     }
-    chatLog.replaceChildren(...nodes);
+    // Keep the report-derived section attached while replacing native messages;
+    // native order stays intact and a focused report control keeps its focus.
+    for (const node of [...chatLog.children]) if (node !== chatDecisionReports) node.remove();
+    for (const node of nodes) chatLog.insertBefore(node, chatDecisionReports.parentNode === chatLog ? chatDecisionReports : null);
     chatNotice.textContent = !conversation ? 'Loading PM conversation…'
       : conversation.availability !== 'ready' ? conversation.detail || 'The PM conversation is unavailable.'
         : messages.length ? '' : 'No conversation yet. Send a message to PM below.';
@@ -622,15 +912,21 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     if (composerStatus.textContent !== text) composerStatus.textContent = text;
   }
   function renderComposer(next) {
+    if (next?.status === 'pending' && draftSend?.sequence === null) draftSend.sequence = next.sequence;
     // A confirmed delivery clears only the draft that was sent.
-    if (next?.status === 'sent' && chatSend?.status === 'pending' && chatSend.sequence === next.sequence) draft.value = '';
+    if (next?.status === 'sent' && chatSend?.status === 'pending' && draftSend?.sequence === next.sequence) {
+      draft.value = '';
+    }
+    if (next?.status !== 'pending') draftSend = null;
     chatSend = next || null;
     syncComposer();
   }
   function submitDraft(event) {
     event?.preventDefault();
     if (disposed || chatSend?.status === 'pending' || !draft.value.trim()) return;
+    draftSend = { sequence: null };
     onSend(draft.value);
+    if (draftSend?.sequence === null) draftSend = null;
   }
   function draftKeydown(event) {
     if (event.key !== 'Enter' || event.shiftKey || event.isComposing || event.keyCode === 229) return;
@@ -716,8 +1012,9 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     setSession(state.sessionId);
     latestState = state;
     root.dataset.stateVersion = String(state.revision);
-    renderDecisionSurfaces(state);
+    const decisions = renderDecisionSurfaces(state);
     renderTasks(state);
+    renderProgress(state);
     renderChat(state.conversation);
     renderComposer(state.chatSend);
     if (transcript.childElementCount) rememberScroll();
@@ -774,6 +1071,12 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
             row.append(details);
           }
         }
+        const decision = decisions.items.find(item => item.id === String(report.id));
+        if (decision) {
+          const controls = element('div', 'pm-chat__decision-controls');
+          renderDecisionControls(controls, decision, decisions.answered[decision.id]);
+          row.append(controls);
+        }
         return row;
       });
       transcript.replaceChildren(...nodes);
@@ -795,6 +1098,9 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     pendingDecision = null;
     decisionSendError = null;
     observedPaneReceipt = 0;
+    chatDecisionRows.clear();
+    chatDecisionList.replaceChildren();
+    chatDecisionReports.hidden = true;
     taskRows.clear();
     taskList.replaceChildren();
     tasksDigest = '';
@@ -802,6 +1108,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     expandedChatGroups.clear();
     chatLog.replaceChildren();
     draft.value = '';
+    draftSend = null;
     renderComposer(null);
     includeCompleted = false;
     completedButton.setAttribute('aria-pressed', 'false');
@@ -820,9 +1127,13 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     resizeObserver?.disconnect();
     taskHome.dispose();
     taskDecisions.dispose();
+    taskProgress.dispose();
+    taskLog.dispose();
     homeButton.removeEventListener('click', showHome);
     decideButton.removeEventListener('click', showDecisions);
+    progressButton.removeEventListener('click', showProgress);
     chatButton.removeEventListener('click', showChat);
+    taskLogButton.removeEventListener('click', showTaskLog);
     composer.removeEventListener('submit', submitDraft);
     draft.removeEventListener('keydown', draftKeydown);
     draft.removeEventListener('input', syncComposer);
@@ -837,7 +1148,9 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   }
   homeButton.addEventListener('click', showHome);
   decideButton.addEventListener('click', showDecisions);
+  progressButton.addEventListener('click', showProgress);
   chatButton.addEventListener('click', showChat);
+  taskLogButton.addEventListener('click', showTaskLog);
   composer.addEventListener('submit', submitDraft);
   draft.addEventListener('keydown', draftKeydown);
   draft.addEventListener('input', syncComposer);
@@ -849,6 +1162,6 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   kindSelect.addEventListener('change', filterReports);
   update({ sessionId, revision: 0, reports: [], loaded: false });
   showHome();
-  return { update, setSession, showHome, showDecisions, showChat, showTasks, showReports, dispose,
+  return { update, setSession, showHome, showDecisions, showProgress, showChat, showTasks, showTaskLog, showReports, receiveLog, dispose,
     isChatVisible: () => !disposed && activeView === 'chat' };
 }
