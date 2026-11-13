@@ -13978,10 +13978,10 @@ mod tests {
                     "entries": [
                         {"number": 2, "queued_at": "2026-08-03T00:00:00Z",
                          "queued_by": "operator", "priority": "normal",
-                         "priority_reason": "normal_order"},
+                         "priority_reason": "priority_order"},
                         {"number": 1, "queued_at": "2026-08-03T00:00:00Z",
                          "queued_by": "operator", "priority": "normal",
-                         "priority_reason": "normal_order"},
+                         "priority_reason": "priority_order"},
                     ],
                     "last_seen_at": "2026-08-03T00:00:00Z",
                     "urgent_limit": 2,
