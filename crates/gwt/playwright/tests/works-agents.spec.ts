@@ -383,6 +383,36 @@ test.describe("Works and Agents approved baseline", () => {
     await page.screenshot({ path: info.outputPath("works-measured-zero.png") });
   });
 
+  test("SPEC 5016 AC-16 an equal usage push leaves Works and Agents untouched", async ({ page }, info) => {
+    const metric = works(page).locator('[data-metric="today-input"]');
+    await page.evaluate(() => (window as any).__worksAgentsFixture.usage("measured", 3, true));
+    await expect(metric).toHaveText("9");
+    await openRail(page, "agents");
+    await expect(roster(page)).toBeVisible();
+    // Opening Agents requests its own readbacks; start counting after two quiet frames.
+    await expect.poll(() => page.evaluate(() => new Promise<number>(resolve => {
+      let mutations = 0;
+      const observer = new MutationObserver(records => { mutations += records.length; });
+      observer.observe(document.querySelector('[aria-label="Main pane"]')!, { childList: true, subtree: true, characterData: true, attributes: true });
+      requestAnimationFrame(() => requestAnimationFrame(() => { observer.disconnect(); resolve(mutations); }));
+    }))).toBe(0);
+    await page.evaluate(() => {
+      const state = { mutations: 0, observer: null as MutationObserver | null };
+      state.observer = new MutationObserver(records => { state.mutations += records.length; });
+      state.observer.observe(document.querySelector('[aria-label="Main pane"]')!, { childList: true, subtree: true, characterData: true, attributes: true });
+      (window as any).__equalUsageObservation = state;
+    });
+    // The injected push is received synchronously; two frames cover its batched render.
+    await page.evaluate(() => (window as any).__worksAgentsFixture.usage("measured", 3, true));
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    const equal = await page.evaluate(() => { const state = (window as any).__equalUsageObservation; state.observer.disconnect(); return state.mutations; });
+    expect(equal, "an equal usage push must not re-render the Agents roster").toBe(0);
+    await openRail(page, "works");
+    await page.evaluate(() => (window as any).__worksAgentsFixture.usage("measured", 4, true));
+    await expect(metric).toHaveText("12");
+    await page.screenshot({ path: info.outputPath("works-equal-usage.png") });
+  });
+
   test("telemetry updates retain native host focus and unchanged SVG children", async ({ page }, info) => {
     await page.evaluate(() => (window as any).__worksAgentsFixture.usage());
     const metric = works(page).locator('[data-metric="today-input"]');
@@ -1005,9 +1035,10 @@ async function installWorksAgentsBackend(page: Page) {
       status(id: string, status: string) { const data = windows.find(data => data.id === id); if (data) data.status = status; socket.emit({ kind: "terminal_status", id, status }); socket.emit(aggregate()); },
       retire(id: string, immediate: boolean) { agents = agents.filter(agent => agent.window_id !== id); const event = activity(); if (immediate) window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: event })); else socket.emit(event); },
       error(message: string) { socket.emit({ kind: "agent_roster_error", project_key: projectKey, message }); },
-      usage(quality = "measured", inputTokens = 0) {
+      usage(quality = "measured", inputTokens = 0, immediate = false) {
         const measured = quality === "measured", value = measured ? 0 : null;
-        socket.emit({ kind: "provider_usage", accounts: [], consumption: [], sessions: agents.map(agent => ({
+        const send = (event: unknown) => immediate ? window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: event })) : socket.emit(event);
+        send({ kind: "provider_usage", accounts: [], consumption: [], sessions: agents.map(agent => ({
           session_id: agent.session_id, provider_session_id: `provider-${agent.session_id}`,
           provider: agent.is_pm || agent.session_id === "s-two" ? "claude_code" : "codex", project_path: "/fixture",
           model: "Fixture model", active: true, input_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0,

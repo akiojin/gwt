@@ -220,7 +220,10 @@ export function createAgentRosterModel(projectKey, { onRename = () => {}, schedu
     if (pending) settleName(pending.request_id, "Connection lost. Review your draft and retry.");
   }
   function applyAgentRosterUsage(sessions, projectRoot) {
-    memberUsage = selectWorksTelemetry({ sessions, projectRoot }).by_member;
+    const next = selectWorksTelemetry({ sessions, projectRoot }).by_member;
+    // SPEC 5016 AC-16: an equal usage push must not re-render roster views.
+    if (samePlainData(memberUsage, next)) return;
+    memberUsage = next;
     if (latestSnapshot) applyAgentRosterSnapshot(latestSnapshot);
   }
   // Receipts only commit data. Continue queued transport on the store's
@@ -229,6 +232,18 @@ export function createAgentRosterModel(projectKey, { onRename = () => {}, schedu
     : Object.values(state.name_edits).find(edit => edit.status === "queued"), sendNextName);
   return { model, applyAgentRosterSnapshot, applyAgentRosterError, applyAgentRosterUsage,
     editAgentMemberName, retryAgentMemberName, clearAgentRosterRename };
+}
+
+function samePlainData(left, right) {
+  if (Object.is(left, right)) return true;
+  if (!left || !right || typeof left !== "object" || typeof right !== "object" || Array.isArray(left) !== Array.isArray(right)) return false;
+  const keys = Object.keys(left);
+  return keys.length === Object.keys(right).length && keys.every(key => Object.hasOwn(right, key) && samePlainData(left[key], right[key]));
+}
+
+// SPEC 5016 AC-16: keep the rendered Works telemetry when a push selects equal values.
+export function retainWorksTelemetry(previous, next) {
+  return samePlainData(previous, next) ? previous : next;
 }
 
 // Inputs are session-attributed measurements, never provider account totals.

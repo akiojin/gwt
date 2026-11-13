@@ -1,7 +1,7 @@
 import { createProjectExecutionPolicyModel, createProjectViewReadiness } from "/project-execution-policy-model.js";
 import { createCloseProjectController } from "/close-project-confirm-modal.js";
 import { createUiStateStore } from "/ui-state-store.js";
-import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleModel, createAgentSwitchModel, selectWorksTelemetry } from "/agent-activity-model.js";
+import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleModel, createAgentSwitchModel, retainWorksTelemetry, selectWorksTelemetry } from "/agent-activity-model.js";
       import { Terminal } from "/assets/xterm/xterm.mjs";
       import { FitAddon } from "/assets/xterm/addon-fit.mjs";
       // SPEC-3064 Phase 3 (E7): the migration-modal / project-clone-modal /
@@ -5760,11 +5760,11 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       function updateWorksTelemetry(sessions = latestSessionUsage) {
         latestSessionUsage = sessions;
         const projection = activeWorkProjectionModel.read()?.projection;
-        worksTelemetryModel.update(() => selectWorksTelemetry({ sessions,
+        worksTelemetryModel.update(previous => retainWorksTelemetry(previous, selectWorksTelemetry({ sessions,
           projectRoot: activeProjectTab()?.project_root,
           agents: agentActivityModel.read().agents, works: projection?.active_works || [],
           bySession: rosterModel.read().by_session || {},
-        }));
+        })));
       }
       sessionUsageModel.subscribe(state => state, sessions => {
         applyAgentRosterUsage(sessions, activeProjectTab()?.project_root);

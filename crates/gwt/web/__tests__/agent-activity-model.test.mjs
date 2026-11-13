@@ -398,3 +398,28 @@ test("server Unknown keeps saved-source recovery against old progress and accept
   receipt({ ...unknown, stage: "cancelled", can_resume_saved: false });
   assert.equal(model.read().intents[0].stage, "cancelled", "the explicit saved-source recovery receipt remains observable");
 });
+
+test("AC16 equal usage pushes keep the roster and Works telemetry snapshots", async () => {
+  const { selectWorksTelemetry, retainWorksTelemetry } = await import("../agent-activity-model.js");
+  const { model, applyAgentRosterSnapshot, applyAgentRosterUsage } = createAgentRosterModel("project");
+  applyAgentRosterSnapshot({ project_key: "project", revision: 1, members: [{ agent_member_id: "m1", name: "One" }] });
+  const usage = tokens => [{ project_path: "/repo", state: { kind: "ok" }, active: true, provider: "codex", provider_session_id: "c1",
+    session_id: "s1", agent_member_id: "m1", input_tokens: tokens, cache_read_tokens: 0, cache_creation_tokens: 0, output_tokens: 0,
+    telemetry: { minute_buckets: [{ started_at: "2026-11-14T00:00:00Z", tokens }] } }];
+  applyAgentRosterUsage(usage(5), "/repo");
+  const roster = model.read();
+  assert.equal(roster.members[0].tokens, 5);
+  applyAgentRosterUsage(usage(5), "/repo");
+  applyAgentRosterUsage([...usage(9).map(row => ({ ...row, project_path: "/other" })), ...usage(5)], "/repo");
+  assert.equal(model.read(), roster, "an equal member usage push keeps the roster snapshot");
+  applyAgentRosterUsage(usage(6), "/repo");
+  assert.equal(model.read().members[0].tokens, 6, "a changed member usage still reaches the roster");
+
+  const select = tokens => selectWorksTelemetry({ projectRoot: "/repo", sessions: usage(tokens),
+    agents: [{ window_id: "w1", session_id: "s1" }], bySession: { s1: { branch: "work/one" } } });
+  const telemetry = select(5);
+  assert.equal(retainWorksTelemetry(telemetry, select(5)), telemetry, "equal telemetry keeps the rendered snapshot");
+  const changed = select(6);
+  assert.equal(retainWorksTelemetry(telemetry, changed), changed);
+  assert.equal(retainWorksTelemetry(null, telemetry), telemetry);
+});
