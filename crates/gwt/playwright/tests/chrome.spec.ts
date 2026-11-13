@@ -83,10 +83,6 @@ test.describe("mobile project chrome", () => {
       expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(noticeBounds!.y);
     }
     expect((await page.locator(".surface-area").boundingBox())!.height).toBeGreaterThan(0);
-    const strip = page.locator(".op-status-strip");
-    expect((await strip.boundingBox())!.height).toBeLessThanOrEqual(56);
-    await page.locator("#op-strip-usage").scrollIntoViewIfNeeded();
-    await expect(page.locator("#op-strip-usage")).toBeInViewport({ ratio: 1 });
     const detail = notice.locator("span");
     await expect(detail).toHaveText(`${diagnostic.path}: ${diagnostic.message}`);
     const retry = notice.getByRole("button", { name: "Retry" });

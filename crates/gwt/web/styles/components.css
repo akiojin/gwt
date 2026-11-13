@@ -5089,13 +5089,6 @@ button.workspace-board-ref:focus-visible {
   min-height: 28px;
 }
 
-@media (max-width: 600px) {
-  .op-status-strip:has(> #op-strip-usage:not([hidden])) {
-    max-height: 56px;
-    overflow-y: auto;
-  }
-}
-
 .op-status-strip__cell--usage {
   display: inline-flex;
   flex: 0 1 56ch;
@@ -6028,6 +6021,7 @@ button.workspace-board-ref:focus-visible {
   }
   .workspace-state-notice span {
     max-height: 25vh;
+    max-height: min(25vh, 4lh);
     overflow-y: auto;
   }
 }
