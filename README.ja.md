@@ -146,7 +146,10 @@ Codex の警告が端末に表示されます。[Codex の速度要件](https://
 
   Grok Build は xAI 公式の `grok` command で提供されます。
   `npm install -g @xai-official/grok` でインストールし、初回起動時に認証するか、
-  API-key workflow では `XAI_API_KEY` を設定してください。
+  API-key workflow では `XAI_API_KEY` を設定してください。ホスト起動では、gwt が
+  Grok 公式の `--trust` を付け、対象 Git リポジトリ（main checkout と全 worktree）
+  の hook・MCP/LSP・instructions・skills を許可します。手動起動する CLI の既定設定や
+  他のリポジトリは変更しません。
 - エージェント利用時は必要な API キーを設定すること
   - `ANTHROPIC_API_KEY` または `ANTHROPIC_AUTH_TOKEN`
   - `OPENAI_API_KEY`
