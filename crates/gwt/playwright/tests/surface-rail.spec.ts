@@ -864,6 +864,47 @@ test.describe("Surface rail", () => {
     expect(pageErrors).toEqual([]);
     expect(consoleErrors).toEqual([]);
   });
+
+  // SPEC #6476 T-005b2 (AC-1): on a phone the Board header filters were 19px
+  // tall, Refresh 24px, the destination chip 27px and the composer recipient
+  // 32px and Post 36px. Below 601px the header and composer controls are
+  // 44px tap targets; wider layouts keep their sizes.
+  test("Board header and composer controls are 44px tap targets on a phone", async ({ page }, info) => {
+    const errors = captureBrowserErrors(page);
+    await installSurfaceAssets(page); await installSurfaceRailBackend(page); await page.goto(surfaceAppUrl);
+    await page.locator("#op-rail [data-surface='board']").click();
+    const board = page.locator(".board-root:visible");
+    await expect(board.locator(".board-composer-to-select")).toBeVisible({ timeout: 10_000 });
+    const controls = ".board-root:visible :is(.workspace-toolbar-actions button, .board-composer-bar :is(button, input, select, textarea)):visible";
+    const sizes = () => page.locator(controls).evaluateAll(nodes => nodes.filter(node => node.isConnected).map(node => {
+      const box = node.getBoundingClientRect();
+      return { name: node.getAttribute("aria-label") || node.textContent!.trim().slice(0, 30) || node.className, width: box.width, height: box.height };
+    }));
+    const minHeights = () => page.locator(controls).evaluateAll(nodes => [...new Set(nodes.filter(node => node.isConnected).map(node => getComputedStyle(node).minHeight))].sort());
+    expect((await sizes()).some(control => control.height < 44), "the fixture has desktop-sized controls").toBe(true);
+    const desktop = await minHeights();
+    expect(desktop).not.toContain("44px");
+    await page.setViewportSize({ width: 601, height: 900 });
+    await expect.poll(minHeights, { message: "601px keeps the desktop control sizes" }).toEqual(desktop);
+    for (const width of [320, 390]) {
+      await page.setViewportSize({ width, height: 844 });
+      const measured = await sizes();
+      expect(measured.map(control => control.name)).toEqual(expect.arrayContaining(["All", "For you", "Work", "Refresh board", "Board destination settings", "Post"]));
+      for (const control of measured) {
+        expect(control.height, `${control.name} height at ${width}px`).toBeGreaterThanOrEqual(44);
+        expect(control.width, `${control.name} width at ${width}px`).toBeGreaterThanOrEqual(44);
+      }
+      expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth),
+        "the page itself must not scroll sideways").toBeLessThanOrEqual(0);
+      const heading = (await board.locator(".workspace-toolbar-main").boundingBox())!;
+      const actions = (await board.locator(".workspace-toolbar-actions").boundingBox())!;
+      expect(actions.y, "the controls sit below the Board heading, not over it").toBeGreaterThanOrEqual(heading.y + heading.height - 1);
+      expect(await board.locator(".workspace-toolbar-main .knowledge-heading").evaluate(element => element.scrollWidth <= element.clientWidth + 1),
+        "the Board heading is not clipped").toBe(true);
+      await page.screenshot({ path: info.outputPath(`board-controls-${width}.png`) });
+    }
+    expect(errors, "zero console/page errors").toEqual([]);
+  });
 });
 
 function windowById(page: Page, id: string) {
