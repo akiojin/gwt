@@ -17,9 +17,10 @@ const structuredReport = (id = 'typed') => ({ ...report(id),
 function fixture({ tasksDefault = false, onOpenTerminal } = {}) {
   const { document } = parseHTML('<html><body><div id="host"></div></body></html>');
   const root = document.getElementById('host');
-  const visibility = [], copied = [], sent = [];
+  const visibility = [], copied = [], sent = [], waiting = [];
   let model;
   const view = createPmChat({ document, root, sessionId: 'session', onOpenTerminal,
+    onDecisionsWaiting: decisions => waiting.push(decisions),
     onTaskDetail: key => { const request = model.requestPmTaskDetail('pm', key); if (request) sent.push(request); },
     onLogVisibility: visible => visibility.push(visible), copyText: async text => copied.push(text),
     onSend: text => { const request = model.requestPmChatSend('pm', text); if (request) sent.push(request); } });
@@ -37,7 +38,7 @@ function fixture({ tasksDefault = false, onOpenTerminal } = {}) {
     model.applyPmWindowReceiveEvent(event);
     return event;
   };
-  return { root, model, view, visibility, copied, sent, update };
+  return { root, model, view, visibility, copied, sent, waiting, update };
 }
 
 test('Chat opens its bound PM terminal in Works without losing the draft', () => {
@@ -1415,6 +1416,27 @@ test('Home and Decide read one waiting-decision count after an answer', async ()
   const actionable = [...root.querySelectorAll('.task-decisions__card')]
     .filter(card => card.querySelector('.task-decisions__option'));
   assert.equal(actionable.length, 1, 'Decide leaves the same one decision actionable');
+});
+
+// SPEC #5016 HSK: the shared attention model receives the same waiting
+// decisions that Home counts, never a recount of the raw reports.
+test('PM decisions waiting are published from the one derivation Home reads', async () => {
+  const { root, model, view, waiting, update } = fixture({ tasksDefault: true });
+  update([decisionReport('decision-1'), decisionReport('decision-2')], null, { request_tasks: taskOverview([]) });
+  assert.deepEqual(waiting.at(-1), { waiting: 2, ids: ['decision-2', 'decision-1'] });
+  view.showDecisions();
+  root.querySelector('.task-decisions__option').click();
+  model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', window_id: 'pm', ok: true });
+  const home = () => root.querySelector('.task-home')?.textContent ?? '';
+  for (let attempt = 0; attempt < 80 && !/1 decision needs/.test(home()); attempt++) {
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  assert.equal(waiting.at(-1).waiting, 1);
+  assert.equal(waiting.at(-1).ids.length, 1);
+  assert.match(home(), /1 decision needs your attention/, 'Home shows the published count');
+  const published = waiting.length;
+  view.update(model.readPmWindowState().windows.pm);
+  assert.equal(waiting.length, published, 'an unchanged waiting set is not republished');
 });
 
 test('Decide forgets session answers when the PM session changes', () => {

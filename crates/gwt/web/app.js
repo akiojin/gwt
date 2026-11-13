@@ -3608,6 +3608,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         applyIssueMonitorStatus: applyKnowledgeIssueMonitorStatus,
         applyRepositoryLabels,
         applyIssueMonitorInbox: applyKnowledgeIssueMonitorInbox,
+        applyPmDecisions,
         scheduleIssueMonitorProjectionRefresh,
         handleKnowledgeTransportChange,
         refreshVisibleKnowledgeWindows,
@@ -4225,6 +4226,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         view.unsubscribe();
         view.unsubscribeLog?.();
         view.controller.dispose();
+        applyPmDecisions(windowId, null);
         view.body.classList.remove("pm-conversation-body");
         // Return the terminal nodes to their original body when PM ownership ends.
         view.body.append(...view.logHost.childNodes);
@@ -4292,6 +4294,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           // SPEC #7007 T-013: a Log group opens the notification drawer at
           // its original record (keyed rows focus their history row).
           onViewNotification: entry => notificationCenter.open(entry?.key || undefined),
+          // SPEC #5016 HSK: unanswered decisions join the shared attention count.
+          onDecisionsWaiting: decisions => applyPmDecisions(windowData.id, decisions),
         });
         pmChatViews.set(windowData.id, view);
         // SPEC #7007 T-013: the Log view mirrors this page's notification
