@@ -82,23 +82,17 @@ fn pm_delivery_owner_fixture_for_agent(
     // Issue #6071: the PTY start gate and runner write startup output
     // asynchronously. Wait until the runner's post-`stty` marker has been
     // parsed so no late startup bytes can redraw over a test-painted surface.
+    // A runner that never reports is bounded by the nextest per-test timeout.
     #[cfg(not(windows))]
+    while !target
+        .pane
+        .lock()
+        .unwrap()
+        .screen()
+        .contents()
+        .contains("pm-fixture-ready")
     {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        while !target
-            .pane
-            .lock()
-            .unwrap()
-            .screen()
-            .contents()
-            .contains("pm-fixture-ready")
-        {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "PM delivery fixture runner never reported readiness"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
     }
     if agent_id == gwt_agent::AgentId::GrokBuild {
         target
