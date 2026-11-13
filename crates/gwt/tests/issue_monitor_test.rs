@@ -4515,3 +4515,140 @@ fn test_monitor_with_prefs(
     monitor.set_source_repository(Some(("example", "repo")));
     monitor
 }
+
+/// Issue #7181 AC-3: an opt-in, real-hour observation with the installed broken
+/// Hermes runner. Only isolated scheduler state is exercised; no GitHub claims
+/// or agent processes are launched.
+#[test]
+#[ignore = "requires an unhealthy installed Hermes runner and one real hour"]
+fn issue_7181_unhealthy_installed_hermes_one_hour_soak() {
+    use std::{io::Write, time::Duration};
+
+    let log_path = std::env::var_os("GWT_ISSUE_7181_SOAK_LOG")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/issue-7181-soak.jsonl")
+        });
+    assert!(log_path.is_absolute(), "soak log path must be absolute");
+    fs::create_dir_all(log_path.parent().unwrap()).unwrap();
+    let mut log = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .unwrap();
+    let run_id = uuid::Uuid::new_v4().to_string();
+    let mut record = |event: serde_json::Value| {
+        writeln!(log, "{event}").unwrap();
+        log.flush().unwrap();
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+    let root = temp.path().join("repo");
+    fs::create_dir_all(&root).unwrap();
+    let mut prefs = IssueMonitorPrefs {
+        enabled: true,
+        agent_roster: Some(
+            serde_json::from_value(serde_json::json!({
+                "schema_version": 1, "revision": 1,
+                "members": [
+                    {"agent_member_id":"soak-hermes", "agent_id":"hermes", "name":"Hermes", "enabled":true, "created_at":"2026-11-13T00:00:00Z"},
+                    {"agent_member_id":"soak-codex", "agent_id":"codex", "name":"Codex", "enabled":true, "created_at":"2026-11-13T00:00:00Z"}
+                ]
+            }))
+            .unwrap(),
+        ),
+        ..IssueMonitorPrefs::default()
+    };
+    prefs.set_launch_profile_pool(
+        [("hermes", "soak-hermes"), ("codex", "soak-codex")]
+            .into_iter()
+            .map(|(agent, member)| {
+                serde_json::from_value(serde_json::json!({
+                    "agent_id":agent, "agent_member_id":member,
+                    "version":"installed", "skip_permissions":true
+                }))
+                .unwrap()
+            })
+            .collect(),
+    );
+    let prefs_path = gwt::issue_monitor::issue_monitor_prefs_path_for_repo_path(&root);
+    save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+    let runner = which::which("hermes").expect("installed Hermes must resolve");
+    let started = std::time::Instant::now();
+    record(serde_json::json!({
+        "event":"start", "run_id":run_id, "at":chrono::Utc::now().to_rfc3339(),
+        "runner":runner, "duration_secs":3600,
+        "mode":"isolated_scheduler_real_installed_runner", "actual_agent_launches":0
+    }));
+    let mut samples = 0_u64;
+    loop {
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Hermes)
+            .working_dir(&root)
+            .build();
+        config.command = runner.to_string_lossy().into_owned();
+        let failure = gwt_agent::resolve_host_runner_health_checked(&mut config)
+            .expect_err("Hermes must remain unhealthy for the entire observation");
+        assert!(failure.contains("installed runner failed its health check"));
+
+        let mut monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs.clone());
+        monitor.set_gui_connected(true);
+        monitor.terminal_queue_push(&[41], "soak", &now);
+        monitor.record_candidate(issue(41, &["bug"]));
+        monitor.synchronize_agent_issue_schedule(&root).unwrap();
+        assert_eq!(monitor.scheduled_agent_member_id(41), Some("soak-codex"));
+        assert_eq!(monitor.agent_schedule_launch_exclusion(41), None);
+
+        // An explicit stale Hermes reservation must also fail closed.
+        let mut pinned = monitor.prefs();
+        let reservation = &mut pinned.agent_issue_schedule.reservations[0];
+        reservation.agent_member_id = "soak-hermes".into();
+        reservation.reason = gwt::issue_monitor::AgentScheduleReason::AssignedByYou;
+        let mut pinned = test_monitor_with_prefs(IssueMonitorConfig::default(), pinned);
+        pinned.set_gui_connected(true);
+        pinned.record_candidate(issue(41, &["bug"]));
+        pinned.synchronize_agent_issue_schedule(&root).unwrap();
+        assert!(pinned.agent_schedule_launch_exclusion(41).is_some());
+        assert!(pinned.next_launch_request(&now).is_none());
+
+        // Preserve the operator's healthy target across a different failure.
+        let mut reassigned = monitor.prefs();
+        reassigned.agent_issue_schedule.reservations[0].reason =
+            gwt::issue_monitor::AgentScheduleReason::AssignedByYou;
+        let mut retry = test_monitor_with_prefs(IssueMonitorConfig::default(), reassigned);
+        retry.set_gui_connected(true);
+        retry.record_candidate(issue(41, &["bug"]));
+        assert_eq!(retry.next_launch_request(&now).unwrap().issue_number, 41);
+        retry.record_launch_failed(41, "Issues startup timed out after 180s");
+        assert!(matches!(
+            retry.requeue_failed_issue(41, "retry unrelated startup failure", &now),
+            IssueMonitorRequeueOutcome::Requeued { .. }
+        ));
+        retry.synchronize_agent_issue_schedule(&root).unwrap();
+        assert_eq!(retry.scheduled_agent_member_id(41), Some("soak-codex"));
+        assert_eq!(retry.agent_schedule_launch_exclusion(41), None);
+        assert_eq!(retry.next_launch_request(&now).unwrap().issue_number, 41);
+        assert_eq!(monitor.next_launch_request(&now).unwrap().issue_number, 41);
+        samples += 1;
+        record(serde_json::json!({
+            "event":"sample", "run_id":run_id, "at":chrono::Utc::now().to_rfc3339(),
+            "elapsed_secs":started.elapsed().as_secs(), "sample":samples,
+            "hermes_health":"failed", "new_member":"soak-codex",
+            "retry_member":"soak-codex", "pinned_hermes":"excluded",
+            "hermes_launch_failed":0, "actual_agent_launches":0
+        }));
+        // test-hygiene: allow-wall-clock-deadline AC-3 explicitly requires one real hour with the installed unhealthy runner; this soak is opt-in, outside normal CI.
+        if started.elapsed() >= Duration::from_secs(3600) {
+            break;
+        }
+        std::thread::sleep(
+            Duration::from_secs(60)
+                .min(Duration::from_secs(3600).saturating_sub(started.elapsed())),
+        );
+    }
+    record(serde_json::json!({
+        "event":"end", "run_id":run_id, "at":chrono::Utc::now().to_rfc3339(),
+        "elapsed_secs":started.elapsed().as_secs(), "samples":samples,
+        "hermes_launch_failed":0, "actual_agent_launches":0, "result":"pass"
+    }));
+}
