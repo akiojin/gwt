@@ -1,183 +1,226 @@
-//! Standalone real-consumer probe for Issue #6474. Compile against the checkout's
-//! gwt-agent/gwt-terminal libraries (see run_windows_cmd_runner_probe.py).
+//! Standalone real-consumer probe; run with run_windows_cmd_runner_probe.py.
 use std::{
     collections::HashMap,
     fs,
     io::Read,
-    path::PathBuf,
-    sync::mpsc,
-    time::{Duration, Instant},
+    path::{Path, PathBuf},
+    sync::{mpsc, Arc},
+    thread,
+    time::Duration,
 };
 
 use gwt_agent::{
     prepare::probe_host_runner_with_timeout, resolve_host_runner_health_checked_with_probe,
-    AgentId, AgentLaunchBuilder,
+    AgentId, AgentLaunchBuilder, HostRunnerProbeKind,
 };
-use gwt_terminal::pty::{PtyHandle, SpawnConfig};
+use gwt_core::paths::normalize_windows_child_process_path;
+use gwt_terminal::{pty::SpawnConfig, PtyHandle};
+
+fn assert_fixture_output(output: &str, expected: &Path) {
+    let output = gwt_core::process_console::strip_ansi(output);
+    assert!(output.contains("GWT_ARG:--version"), "{output}");
+    let actual = output
+        .lines()
+        .find_map(|line| line.strip_prefix("GWT_FILE:"))
+        .expect("executed fixture path");
+    assert_eq!(
+        fs::canonicalize(actual.trim()).unwrap(),
+        fs::canonicalize(expected).unwrap()
+    );
+}
+
+fn launch(command: &str, env: HashMap<String, String>, cwd: PathBuf, expected: &Path) -> bool {
+    let pty = Arc::new(
+        PtyHandle::spawn(SpawnConfig {
+            command: command.to_owned(),
+            args: vec!["--version".into()],
+            cols: 100,
+            rows: 24,
+            env,
+            remove_env: vec![],
+            cwd: Some(cwd),
+        })
+        .expect("spawn real ConPTY consumer"),
+    );
+    // ConPTY waits for its startup cursor-position reply before running the client.
+    pty.write_input(b"\x1b[1;1R")
+        .expect("answer ConPTY startup query");
+    let mut reader = pty.reader().expect("ConPTY reader");
+    let (output_tx, output_rx) = mpsc::channel();
+    thread::spawn(move || {
+        let mut output = Vec::new();
+        let result = reader.read_to_end(&mut output);
+        let _ = output_tx.send((result, output));
+    });
+    let child = Arc::clone(&pty);
+    let (exit_tx, exit_rx) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = exit_tx.send(child.wait());
+    });
+    // test-hygiene: allow-wall-clock-deadline Watchdog for a real ConPTY child; no timing assertion.
+    let status = exit_rx.recv_timeout(Duration::from_secs(30));
+    if status.is_err() {
+        let _ = pty.kill();
+        panic!("ConPTY child exceeded its watchdog");
+    }
+    let success = status.unwrap().expect("ConPTY exit status").success();
+    pty.release_descriptors();
+    let (result, output) = output_rx
+        // test-hygiene: allow-wall-clock-deadline Bound a real pipe drain after child exit.
+        .recv_timeout(Duration::from_secs(30))
+        .expect("ConPTY output drain");
+    result.expect("read ConPTY output");
+    if success {
+        assert_fixture_output(&String::from_utf8_lossy(&output), expected);
+    }
+    success
+}
 
 fn main() {
-    let root = PathBuf::from(std::env::args_os().nth(1).expect("fixture root"));
-    fs::create_dir_all(root.join("日本語")).unwrap();
-    let shim = root.join("fake claude.cmd");
+    assert!(cfg!(windows), "this probe must execute on Windows");
+    let mut arguments = std::env::args().skip(1);
+    let root = PathBuf::from(arguments.next().expect("fixture directory"));
+    let expect_red = arguments.next().as_deref() == Some("--expect-red");
+    fs::create_dir_all(&root).expect("create fixture directory");
+    let ordinary = normalize_windows_child_process_path(&fs::canonicalize(root).unwrap());
+    let shim = ordinary.join("fake claude.cmd");
+    let unicode = ordinary.join("実行.cmd");
     fs::write(
         &shim,
-        b"@echo off\r\nif not \"%~1\"==\"--version\" exit /b 2\r\nif not \"%~2\"==\"\" exit /b 3\r\nif not \"%PATHEXT%\"==\".CMD\" exit /b 4\r\necho 1.2.3\r\nexit /b 0\r\n",
+        "@echo off\r\n\"%SystemRoot%\\System32\\chcp.com\" 65001 >nul\r\nif not \"%~1\"==\"--version\" exit /b 9\r\necho Claude Code 2.1.154\r\necho GWT_ARG:%~1\r\necho GWT_FILE:%~f0\r\n",
     )
-    .unwrap();
-    let identity = fs::canonicalize(&shim).unwrap();
-    let unicode = root.join("日本語").join("..").join("fake claude.cmd");
-    assert_eq!(fs::canonicalize(&unicode).unwrap(), identity);
-    let env = HashMap::from([
-        ("PATH".into(), root.to_string_lossy().into_owned()),
-        ("PATHEXT".into(), ".CMD".into()),
-        ("ComSpec".into(), std::env::var("ComSpec").unwrap()),
-    ]);
-    let cases = [
-        ("bare", "fake claude".into(), root.clone(), root.clone()),
-        ("absolute", shim.clone(), root.clone(), root.clone()),
-        ("unicode", unicode, root.clone(), root.clone()),
+    .expect("write fixture");
+    if unicode.exists() {
+        fs::remove_file(&unicode).expect("replace previous fixture alias");
+    }
+    fs::hard_link(&shim, &unicode).expect("same physical file with Unicode name");
+    let verbatim_shim = fs::canonicalize(&shim).unwrap();
+    let verbatim_dir = fs::canonicalize(&ordinary).unwrap();
+    let comspec = std::env::var("ComSpec").expect("Windows ComSpec");
+    let mut failures = Vec::new();
+    for (name, command, path, cwd, expected) in [
+        (
+            "bare",
+            Path::new("fake claude"),
+            &ordinary,
+            &ordinary,
+            &shim,
+        ),
+        ("absolute", shim.as_path(), &ordinary, &ordinary, &shim),
+        ("unicode", unicode.as_path(), &ordinary, &ordinary, &unicode),
         (
             "verbatim-cwd",
-            shim.clone(),
-            identity.parent().unwrap().into(),
-            root.clone(),
+            shim.as_path(),
+            &ordinary,
+            &verbatim_dir,
+            &shim,
         ),
         (
             "verbatim-command",
-            identity.clone(),
-            root.clone(),
-            root.clone(),
+            verbatim_shim.as_path(),
+            &ordinary,
+            &ordinary,
+            &shim,
         ),
         (
             "verbatim-path",
-            "fake claude".into(),
-            root.clone(),
-            identity.parent().unwrap().into(),
+            Path::new("fake claude"),
+            &verbatim_dir,
+            &ordinary,
+            &shim,
         ),
-    ];
-    let mut failed = Vec::new();
-    for (name, command, cwd, path) in cases {
-        eprintln!("case={name} start");
+    ] {
+        let env = HashMap::from([
+            ("PATH".to_owned(), path.display().to_string()),
+            ("PATHEXT".to_owned(), ".CMD".to_owned()),
+            ("ComSpec".to_owned(), comspec.clone()),
+        ]);
         let mut config = AgentLaunchBuilder::new(AgentId::ClaudeCode).build();
-        config.command = command.to_string_lossy().into_owned();
-        config.args = vec!["--version".into()];
+        config.command = command.display().to_string();
         config.env_vars = env.clone();
-        config
-            .env_vars
-            .insert("PATH".into(), path.to_string_lossy().into_owned());
-        config.working_dir = Some(cwd);
-        let mut health_exit = None;
+        config.remove_env.clear();
+        config.working_dir = Some(cwd.clone());
+        let mut measured = None;
         let health = resolve_host_runner_health_checked_with_probe(
             &mut config,
-            |kind, executable, args, env, remove, cwd| {
-                assert_eq!(fs::canonicalize(executable).unwrap(), identity);
+            |kind, resolved, args, actual_env, remove, actual_cwd| {
+                assert_eq!(kind, HostRunnerProbeKind::Direct);
                 assert_eq!(args, ["--version"]);
-                let result = probe_host_runner_with_timeout(
+                assert_eq!(
+                    fs::canonicalize(resolved).unwrap(),
+                    fs::canonicalize(expected).unwrap()
+                );
+                assert_eq!(actual_env, &env);
+                assert!(remove.is_empty());
+                assert_eq!(actual_cwd.as_deref(), Some(cwd.as_path()));
+                // test-hygiene: allow-production-probe-deadline Exercise the real installed-runner consumer.
+                let outcome = probe_host_runner_with_timeout(
                     kind,
-                    executable,
+                    resolved,
                     args,
-                    env,
+                    actual_env,
                     remove,
-                    cwd,
-                    Duration::from_secs(10),
+                    actual_cwd,
+                    Duration::from_secs(30),
                     Duration::from_millis(100),
                 );
-                health_exit = result.exit_code;
-                assert!(!result.timed_out, "{name}: {result:?}");
-                if result.success {
-                    assert_eq!(result.stdout.trim(), "1.2.3");
-                }
-                result
+                measured = Some(outcome.clone());
+                outcome
             },
         );
-        let health_ok = health
-            .as_ref()
-            .is_ok_and(|report| report.version_output.as_deref() == Some("1.2.3"));
-        eprintln!("case={name} health={health_ok} exit={health_exit:?}");
-        // Launch the selected runner through the actual ConPTY consumer, even
-        // in RED mode, so both independent callers are measured on the same input.
-        let pty = PtyHandle::spawn(SpawnConfig {
-            command: config.command.clone(),
-            args: config.args.clone(),
-            cols: 120,
-            rows: 24,
-            env: config.env_vars.clone(),
-            remove_env: config.remove_env.clone(),
-            cwd: config.working_dir.clone(),
-        })
-        .expect("spawn real PTY consumer");
-        // ConPTY waits for the terminal's cursor-position reply before running
-        // a freshly attached console client (the production terminal supplies it).
-        pty.write_input(b"\x1b[1;1R").unwrap();
-        let mut reader = pty.reader().unwrap();
-        let (tx, rx) = mpsc::channel();
-        let reading = std::thread::spawn(move || {
-            let mut output = String::new();
-            let _ = reader.read_to_string(&mut output);
-            let _ = tx.send(output);
-        });
-        // test-hygiene: allow-wall-clock-deadline Bound a real ConPTY subprocess; this is a failure watchdog, not a timing assertion.
-        let deadline = Instant::now() + Duration::from_secs(15);
-        let status = loop {
-            if let Some(status) = pty.try_wait().unwrap() {
-                break status;
-            }
+        let outcome = measured.expect("health invokes its real probe");
+        assert!(!outcome.timed_out, "{name}: {outcome:?}");
+        assert_eq!(health.is_ok(), outcome.success, "{name}");
+        let launched = launch(
+            &command.display().to_string(),
+            env.clone(),
+            cwd.clone(),
+            expected,
+        );
+        assert_eq!(launched, outcome.success, "{name}: consumers disagree");
+        if outcome.success {
+            assert_eq!(outcome.exit_code, Some(0));
+            // Health diagnostics redact inherited path values; identity is
+            // asserted against the resolved command before that boundary.
             assert!(
-                // test-hygiene: allow-wall-clock-deadline Fail a hung real ConPTY process instead of blocking the acceptance probe indefinitely.
-                Instant::now() < deadline,
-                "{name}: ConPTY child did not exit"
+                outcome.stdout.contains("GWT_ARG:--version"),
+                "{name}: {outcome:?}"
             );
-            std::thread::sleep(Duration::from_millis(100));
-        };
-        pty.release_descriptors();
-        // test-hygiene: allow-wall-clock-deadline Bound reader teardown after the real child has exited and its console descriptors are released.
-        let output = rx.recv_timeout(Duration::from_secs(15));
-        if output.is_err() {
-            panic!("{name}: PTY reader did not finish");
+        } else {
+            assert_eq!(outcome.exit_code, Some(1), "{name}: {outcome:?}");
+            failures.push(name);
         }
-        reading.join().unwrap();
-        let output = output.expect("PTY output must finish within deadline");
-        let launch_ok = status.success() && output.contains("1.2.3");
-        println!("case={name} health={health_ok} exit={health_exit:?} launch={launch_ok} canonical={identity:?} argv={:?} env={:?}", config.args, config.env_vars);
-        if !health_ok || !launch_ok {
-            failed.push(name);
-        }
+        println!("case={name} health={} exit={:?} launch={launched} canonical={:?} argv=[\"--version\"] env={env:?}", outcome.success, outcome.exit_code, fs::canonicalize(expected).unwrap());
     }
-    // A truly absent target still fails through the existing actionable path.
-    let mut config = AgentLaunchBuilder::new(AgentId::ClaudeCode).build();
-    config.command = root.join("missing.cmd").to_string_lossy().into_owned();
-    config.env_vars = env;
-    let missing = resolve_host_runner_health_checked_with_probe(
-        &mut config,
-        |kind, executable, args, env, remove, cwd| {
-            let result = probe_host_runner_with_timeout(
+    let mut missing = AgentLaunchBuilder::new(AgentId::ClaudeCode).build();
+    missing.command = ordinary.join("missing.cmd").display().to_string();
+    missing.env_vars = HashMap::from([("ComSpec".into(), comspec)]);
+    let error = resolve_host_runner_health_checked_with_probe(
+        &mut missing,
+        |kind, cmd, args, env, remove, cwd| {
+            // test-hygiene: allow-production-probe-deadline Preserve real missing-runner diagnostics.
+            probe_host_runner_with_timeout(
                 kind,
-                executable,
+                cmd,
                 args,
                 env,
                 remove,
                 cwd,
-                Duration::from_secs(10),
+                Duration::from_secs(30),
                 Duration::from_millis(100),
-            );
-            assert!(!result.success && result.exit_code.is_none());
-            assert!(result
-                .error
-                .as_deref()
-                .is_some_and(|error| error.contains("resolution was rejected")));
-            result
+            )
         },
     )
-    .unwrap_err();
+    .expect_err("missing target must fail");
     assert!(
-        missing.contains("installed runner failed its health check"),
-        "{missing}"
+        error.contains("installed runner failed its health check"),
+        "{error}"
     );
-    println!("missing=diagnostic failed={failed:?}");
-    let expected_red = std::env::args().any(|arg| arg == "--expect-red");
-    if expected_red {
-        assert_eq!(failed, ["verbatim-command", "verbatim-path"]);
+    println!("missing=diagnostic failed={failures:?}");
+    let expected: Vec<&str> = if expect_red {
+        vec!["verbatim-command", "verbatim-path"]
     } else {
-        assert!(failed.is_empty(), "{failed:?}");
-    }
+        vec![]
+    };
+    assert_eq!(failures, expected);
 }
