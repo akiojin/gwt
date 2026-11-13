@@ -1161,6 +1161,7 @@ mod tests {
             source_event: Some("PreToolUse".to_string()),
             gwt_session_id: Some("session-1".to_string()),
             continuation_readiness_nonce: None,
+            native_prompt_id: None,
             agent_session_id: Some("agent-1".to_string()),
             project_root: Some("E:/gwt/test-repo".to_string()),
             branch: Some("feature/runtime".to_string()),

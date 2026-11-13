@@ -1,6 +1,193 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.163.0] - 2026-11-12
+
+### Bug Fixes
+
+- **workspace:** 後続ホストの実行 anchor を保持して復旧する
+- **workspace:** PM が branch-only 履歴の invalid successor を superseded で閉じられるようにする
+- **usage:** Claude モデル枠満了で画面の上限通知を即時に裏付ける
+- **pm:** Correlate chat send results to preserve drafts
+- **ci:** Skip unrelated feedback intake jobs before runner allocation
+- **errors:** Error ledger のロックを明示解放し期限切れ診断の残存ロック失敗を防ぐ
+- **errors:** Windows で未使用になる ledger lock observer を unix テストに限定する
+- **mobile:** Require named coordinator configuration fields
+- **mobile:** Symlink拒否のunsafe診断を保持する
+- **web:** Decideの回答確定を相関なしpane結果でも観測できるようにする
+- **web:** DecideのDOM所有をhostsへ移しReact移行契約に適合させる
+- **ui:** Count only unanswered decisions on PM Home
+- **hook:** Start live transport budget after journaling
+- **ui:** 仕事の詰まり理由を共有状態から描画する
+- **capacity:** 再計測が TTL を超える target の完了計測を進行中は公開し続ける
+- **ui:** 人の判断待ちを共有状態から表示する
+- **ui:** Inbox未受信時のWork理由を保持する
+- **hook:** UserPromptSubmit の PM delivery ACK を dispatcher スレッドで実行する
+- **test:** Claim/settlement 再入場テストの prefs 予算を pin する
+
+### Documentation
+
+- **readme:** Note the status strip and Works heading share tab title counts
+
+### Features
+
+- **mobile:** Validate coordinator deployment configuration
+- **mobile:** Load private coordinator configuration
+- **web:** Add Decide surface for typed PM decisions (#7007)
+- **ui:** Derive RUN/BLOCK/IDLE/ERROR counts from one server aggregate
+- **pm:** Open the PM terminal in Works from Chat
+- **mobile:** Load coordinator configuration from private home
+- **pm:** Chat と Tasks を同じ画面で結び付ける
+- **mobile:** Build coordinator TLS config from private material
+- **mobile:** Accept coordinator connections only after TLS completes
+- **mobile:** Bind coordinator startup to private state
+
+### Miscellaneous Tasks
+
+- **work:** Settle Issue 5542 execution after PM acceptance
+- **work:** PR #7110 の配送メタデータを記録
+- **work:** Record issue 5016 NAGG delivery settlement
+- **work:** Record issue 5016 terminal Work update
+- **work:** Record issue 5016 delivery diagnostics
+- **work:** Record notification verification boundary
+- **work:** Associate notification history delivery with pr 7111
+- **work:** Record Grok test delivery state
+- **work:** Record PR 7114 delivery metadata
+- **work:** #2970 T-6638-8 の検証イベントを記録する
+- **work:** Home から Chat 導線 slice の配信完了を記録する
+- **work:** Record chat send correlation delivery state
+- **work:** Record intake delivery diagnostics
+- **work:** Issue #7098 の検証と Host 互換性診断を記録
+- **work:** PR #7116 の関連付けを記録
+- **work:** Issue #7098 の main 配送引き継ぎを記録
+- **work:** Issue #6604 の作業状態を記録
+- **work:** Issue #6604 の検証記録を更新
+- **work:** T-CHAT-NOISE の検証と Work 更新を記録する
+- **work:** Preserve coordinator configuration PR link
+- **work:** Issue #7123 の作業状態を記録
+- **work:** Preserve notification history delivery handoff
+- **work:** Record notification history final work update
+- **work:** T-CHAT-NOISE の配信完了を記録する
+- **work:** PM チャット配信記録を継承して精算する
+- **work:** 記録配送 PR の紐付けを保存する
+- **work:** Preserve private configuration PR link
+- **work:** 診断修復PRのリンクを記録する
+- **work:** Record notification history pr association
+- **work:** Record HS1 count slice work events
+- **work:** Record HS1 verification work events
+- **work:** PMターミナル導線のPR記録を保存する
+- **work:** Preserve coordinator configuration PR delivery link
+- **work:** Record HS1 count slice delivery
+- **work:** Record HSD work events
+- **work:** Record HSD verification work events
+- **work:** PM Chat と Tasks の PR 記録を保存する
+- **work:** Record coordinator TLS material slice events
+- **work:** Record HSD delivery
+- **work:** 共有派生のPR関連付けを記録する
+- **work:** Record coordinator TLS listener slice events
+- **work:** 質問形式回帰の PR 記録を保存する
+- **work:** 判断待ち共有派生のPR関連付けを記録する
+- **work:** Record coordinator TLS listener settlement events
+- **work:** Record coordinator startup PR linkage
+- **work:** 更新再起動回帰のPR記録を保存する
+
+### Performance
+
+- **index:** Reduce refresh overhead and defer gui snapshots
+- **monitor:** 深い timeline の続きページを 1 回の GraphQL 呼出に集約する
+
+### Refactor
+
+- **ui:** Render notification history from shared state
+
+### Testing
+
+- **ui:** Align live notification expectations with aggregation
+- **grok:** Await applied monitor ack before startup deadline
+- **runtime:** Late ACK fixture の timeout 確定を決定的にする
+- **pm:** PM チャットが実記録の内部要素を表示しないことを固定する
+- **verify:** PM 表示 fixture の hook 監査を正規 preflight に揃える
+- **verify:** PM 表示 fixture の隔離 gwt をテスト間で終了させない
+- **pm:** Pm-chat-live の Reports 系テストを Chat 既定表示に追従させる
+- **runtime:** Hook失敗試験の物理census観測を整合する
+- **web:** Add Decide surface tests for #7007
+- **ui:** Check live title, strip and Works heading share one aggregate
+- **ui:** Read the live HS2 aggregate from the rendered title
+- **pm:** 質問形式の正負対照を固定する
+- **monitor:** 更新再起動後の購読復旧と実pane起動を固定する
+- **monitor:** 本番admission経路を通して昇格回帰を検出する
+
+## [9.162.0] - 2026-11-12
+
+### Bug Fixes
+
+- **workspace:** 親 Work の終端権限を保護し同一世代の復旧を追加
+- **workspace:** 終端時の認可再検証とテストのHOME隔離を修正
+- **ci:** Ubuntu ミラー到達不能時に別ミラー・キャッシュ・指数バックオフで回復する
+- **execution:** Preserve authority during PM fence repair
+- **execution:** Finish interrupted and legacy fence recovery
+- **ui:** 集約した通知行で最新の jump-to を有効にする
+- **launch:** Admit Grok panes to exact PM delivery
+- **grok:** Guard PM input and acknowledge accepted turns
+- **grok:** Preserve composer ownership across prompt redraws
+- **grok:** Keep startup watchdog until accepted work
+- **execution:** Accept workspace home during PM fence recovery
+- **execution:** Resume audited workspace recovery safely
+- **workspace:** Recover missing legacy successor ancestry
+- **workspace:** Preserve legacy batch order and snapshot identity
+- **workspace:** Restore missing host session container anchors
+- **pm:** Keep navigation boundary stable across launch directories
+- **monitor:** Reconnect the Issues materializer while the window is open
+
+### Features
+
+- **usage:** Show Codex credit balance and consumption pace
+- **pm:** PM ウィンドウを Chat 表示で開く
+
+### Miscellaneous Tasks
+
+- **work:** Record Issue 5542 PR delivery
+- **work:** Issue #7081 の Work イベントを記録
+- **work:** Record PR #7089 delivery metadata
+- **work:** Record jump-to fix verification progress
+- **work:** Record Codex credits delivery handoff
+- **work:** Checkpoint Codex credits PR metadata
+- **work:** Record PR #7099 delivery metadata
+- **work:** Record PR #7100 delivery metadata
+- **work:** Record Issue 5542 after-measurement handoff
+- **work:** Record host delivery compatibility diagnosis
+- **work:** Record canonical verification evidence
+- **work:** Record PR 7104 delivery metadata
+- **work:** PM チャット既定表示 slice の Work イベントを記録する
+- **work:** Home から Chat 導線 slice の Work イベントを記録する
+- **work:** Home から Chat 導線 slice の Work 更新を記録する
+- **work:** Home から Chat 導線 slice の検証イベントを記録する
+- **work:** PR #7107 の関連付けを記録
+- **work:** Record issue 6989 delivery blocker
+- **work:** Record PR 7105 delivery metadata
+- **work:** Record issue 6989 delivery recovery
+
+### Performance
+
+- **monitor:** Skip gate reads until review verdict arrives
+
+### Refactor
+
+- **ui:** Toast push の JSDoc を push の直上へ戻す
+
+### Testing
+
+- **workspace:** Reopen の競合検証を決定的にする
+- **runtime:** Preserve fixture operation clocks across threads
+- **workspace:** Use native absolute paths in anchor fixture
+- **pm:** Home からの切替検証と Work 記録を揃える
+- **gui:** Retry 要求に合わせて隔離状態ファイルを復元
+- **pm:** Recover poisoned environment lock in boundary regression
+
+### Ci
+
+- **frontend:** React 描画境界と未移行モジュールの増加を検査
+
 ## [9.161.1] - 2026-11-11
 
 ### Bug Fixes

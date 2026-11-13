@@ -211,7 +211,10 @@ fn daemon_subscription_stays_observer_until_startup_canvas_is_ready() {
     assert!(
         matches!(
             subscriptions_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
-            ClientFrame::Subscribe { channels } if channels == super::daemon_subscriber_channels()
+            ClientFrame::Subscribe {
+                channels,
+                gui_window: true,
+            } if channels == super::daemon_subscriber_channels()
         ),
         "bootstrap must observe events without advertising that it can create agent windows"
     );

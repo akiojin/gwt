@@ -248,7 +248,10 @@ async fn run_session(
         .await
         .map_err(|err| format!("connect failed: {err}"))?;
     let subscribe = match kind {
-        SubscriptionKind::Observer => ClientFrame::Subscribe { channels },
+        SubscriptionKind::Observer => ClientFrame::Subscribe {
+            channels,
+            gui_window: true,
+        },
         SubscriptionKind::Materializer => ClientFrame::SubscribeMaterializer { channels },
     };
     client
@@ -537,6 +540,60 @@ mod tests {
             })
             .await
             .expect("stopped subscriber releases presence lease");
+
+            server_handle.shutdown().await;
+        });
+    }
+
+    #[test]
+    fn gui_window_subscribe_marks_an_open_window_without_a_materializer_lease() {
+        run_isolated_daemon_fixture(async {
+            let temp = gwt_core::test_support::socket_tempdir().expect("tempdir");
+            let scope = sample_scope(&temp);
+            let socket_path = temp.path().join("daemon.sock");
+            let endpoint_path = temp.path().join("endpoint.json");
+            let endpoint = sample_endpoint(scope, &socket_path, "gui-window-secret");
+            let server_endpoint = endpoint.clone();
+            let server_socket = socket_path.clone();
+            let hub = BroadcastHub::new();
+            let observed_hub = hub.clone();
+            let server_handle =
+                server::spawn_server(server_endpoint, server_socket, endpoint_path, hub)
+                    .expect("bind test server");
+
+            let mut client = crate::cli::daemon::client::DaemonClient::connect(&endpoint)
+                .await
+                .expect("observer connects");
+            client
+                .send_frame(&gwt_core::daemon::ClientFrame::Subscribe {
+                    channels: vec![crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL.to_string()],
+                    gui_window: true,
+                })
+                .await
+                .expect("gui window subscribe");
+            assert_eq!(
+                client.read_frame::<DaemonFrame>().await.expect("ack"),
+                DaemonFrame::Ack
+            );
+            assert!(observed_hub.gui_window_open());
+            assert!(!observed_hub.issue_monitor_materializer_connected());
+
+            drop(client);
+            // test-hygiene: allow-wall-clock-deadline The window lease drops on the connection task; this only bounds a stuck fixture.
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while observed_hub.gui_window_count() != 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("window lease released on disconnect");
+            assert!(observed_hub.gui_window_open());
+            let detached = std::time::Instant::now();
+            observed_hub.set_gui_window_detached_at_for_test(detached);
+            assert!(observed_hub.gui_window_open_at(detached));
+            assert!(!observed_hub.gui_window_open_at(
+                detached + crate::cli::daemon::broadcast::GUI_WINDOW_RECONNECT_GRACE
+            ));
 
             server_handle.shutdown().await;
         });

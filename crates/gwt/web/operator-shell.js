@@ -206,27 +206,49 @@ export function applyTelemetryCounts(doc, counts = {}) {
         : "";
   }
   setText("op-strip-idle", counts.idle ?? 0);
-  // FR-039 (anshin): WAITING cell counts agents waiting on the operator.
+  // SPEC #5016 AC-HS1: the cell keeps its FR-039 `waiting` styling contract
+  // and shows the server BLOCK count (agents that need the operator).
   setText("op-strip-waiting", counts.waiting ?? 0);
   setText("op-strip-error", counts.error ?? 0);
   if ("branches" in counts) setText("op-strip-branches", counts.branches ?? "—");
 }
 
-export function subscribeIssueMonitorStatus(doc, model) {
-  return model.subscribeFrame(state => state.status, status => renderIssueMonitorStatus(doc, status));
+export function subscribeWorkAttentionSummary(doc, model) {
+  return model.subscribeFrame(state => state?.projection?.attentionSummary?.summary ?? "", summary => {
+    const cell = doc.querySelector(".op-status-strip__cell--waiting");
+    if (cell) cell.title = summary;
+  });
 }
 
-export function renderIssueMonitorStatus(doc, status = {}) {
+export function subscribeIssueMonitorStatus(doc, model) {
+  let selected;
+  let selectedKey;
+  return model.subscribeFrame(state => {
+    const summary = state.humanAttention?.summary;
+    const reviewSummary = state.reviewAttention?.summary;
+    const steeringSummary = state.steeringAttention?.summary;
+    // Subscribe to the strip's presentation, not unrelated Monitor settings.
+    const key = JSON.stringify([issueMonitorStatusStripView(state.status ?? {},
+      state.counts ?? { queue: 0, active: 0, maxActive: 1 }), summary, reviewSummary, steeringSummary]);
+    if (!selected || selectedKey !== key) {
+      selectedKey = key;
+      selected = { status: state.status, counts: state.counts, summary, reviewSummary, steeringSummary };
+    }
+    return selected;
+  }, state => renderIssueMonitorStatus(doc, state, state.summary, state.reviewSummary, state.steeringSummary));
+}
+
+export function renderIssueMonitorStatus(doc, { status = {}, counts = { queue: 0, active: 0, maxActive: 1 } } = {}, humanSummary = "", reviewSummary = "", steeringSummary = "") {
   const cell = doc.getElementById("op-strip-issue-monitor");
   const value = doc.getElementById("op-strip-issue-monitor-value");
   if (!cell || !value) return;
 
   wireIssueMonitorStatusCell(doc, cell);
-  const view = issueMonitorStatusStripView(status);
+  const view = issueMonitorStatusStripView(status, counts);
   value.textContent = view.value;
   cell.dataset.state = view.state;
-  cell.setAttribute("aria-label", `Open Issues: ${view.value}`);
-  cell.setAttribute("title", `Open Issues | ${view.title}`);
+  cell.setAttribute("aria-label", [`Open Issues: ${view.value}`, humanSummary, reviewSummary, steeringSummary].filter(Boolean).join(". "));
+  cell.setAttribute("title", ["Open Issues", view.title, humanSummary, reviewSummary, steeringSummary].filter(Boolean).join(" | "));
   if (view.alert) {
     cell.classList.add("op-status-strip__cell--alert");
   } else {
@@ -254,7 +276,7 @@ function normalizedIssueMonitorQuotaHold(status) {
   return provider && resetAt ? { provider, reset_at: resetAt } : null;
 }
 
-function issueMonitorStatusStripView(status = {}) {
+function issueMonitorStatusStripView(status, counts) {
   const enabled = Boolean(status.enabled);
   const quotaHold = normalizedIssueMonitorQuotaHold(status);
   const rawState = String(status.state || (enabled ? "idle" : "disabled"));
@@ -271,9 +293,7 @@ function issueMonitorStatusStripView(status = {}) {
   } else if (state === "quota_hold") {
     state = "idle";
   }
-  const queue = Math.max(0, Number(status.queue_len || 0));
-  const active = Math.max(0, Number(status.active_count || 0));
-  const maxActive = Math.max(0, Number(status.max_active_agents ?? 1));
+  const { queue, active, maxActive } = counts;
 
   if (state === "disabled") {
     return {
@@ -342,6 +362,22 @@ function usageSummaryPercent(account) {
   return percentages.length ? Math.max(...percentages) : null;
 }
 
+function codexCreditStatus(account) {
+  if (account.provider !== "codex" || !account.credits ||
+      !["ok", "stale"].includes(account.state?.kind)) return null;
+  const full = (account.windows || []).some(window =>
+    ["five_hour", "weekly"].includes(window.kind) && usageWindowPercent(window) === 100);
+  return {
+    active: full && account.credits.has_credits === true,
+    exhausted: full && account.credits.has_credits === false,
+  };
+}
+
+function usageDisplayLimitReached(account) {
+  const credits = codexCreditStatus(account);
+  return !credits?.active && (account.limit_reached || credits?.exhausted);
+}
+
 // Stable, glanceable per-provider summary value for the status strip (the
 // window nearest its limit when available, else a short degraded token).
 function usageSummaryValue(account) {
@@ -349,13 +385,21 @@ function usageSummaryValue(account) {
   if (kind === "disabled") return "off";
   if (kind === "no_data") return "—";
   if (kind === "unavailable") return "n/a";
+  if (codexCreditStatus(account)?.active) {
+    const credits = account.credits;
+    const balance = credits.unlimited ? "unlimited"
+      : Number.isFinite(credits.balance) && credits.balance >= 0
+        ? `${credits.balance.toLocaleString("en-US", { maximumFractionDigits: 2 })} credits` : "— credits";
+    return `Using credits · ${balance}${kind === "stale" ? " · stale" : ""}`;
+  }
   const percent = usageSummaryPercent(account);
   if (percent != null) return `${Math.round(percent)}%`;
   return "—";
 }
 
 function usageSeverity(account) {
-  if (account.limit_reached) return "danger";
+  if (usageDisplayLimitReached(account)) return "danger";
+  if (codexCreditStatus(account)?.active) return "normal";
   const percent = usageSummaryPercent(account);
   if (percent == null) return "";
   if (percent >= 95) return "danger";
@@ -421,7 +465,7 @@ export function applyProviderUsage(doc, snapshot = {}) {
       USAGE_PROVIDER_NAME[account.provider] || usageProviderLabel(account.provider),
     value: usageSummaryValue(account),
     severity: usageSeverity(account),
-    accessibleSeverity: account.limit_reached
+    accessibleSeverity: usageDisplayLimitReached(account)
       ? "limit reached"
       : usageSeverity(account),
     criticality: usageCriticality(account),
@@ -440,7 +484,8 @@ export function applyProviderUsage(doc, snapshot = {}) {
     const chip = doc.createElement("span");
     chip.className = "op-usage-sum";
     chip.dataset.provider = account.provider;
-    if (account.limit_reached) chip.dataset.limit = "true";
+    if (usageDisplayLimitReached(account)) chip.dataset.limit = "true";
+    if (codexCreditStatus(account)?.active) chip.classList.add("op-usage-sum--credits");
     if (summary.severity) chip.dataset.severity = summary.severity;
     if (summary.models) {
       chip.classList.add("op-usage-sum--models");
@@ -494,7 +539,7 @@ export function applyProviderUsage(doc, snapshot = {}) {
   cell.setAttribute("aria-controls", "provider-usage-popover");
   if (!cell.hasAttribute("aria-expanded")) cell.setAttribute("aria-expanded", "false");
   cell.title = accessibleSummary;
-  if (accounts.some((a) => a.limit_reached)) cell.dataset.limit = "true";
+  if (accounts.some(usageDisplayLimitReached)) cell.dataset.limit = "true";
   else delete cell.dataset.limit;
   cell.hidden = false;
 

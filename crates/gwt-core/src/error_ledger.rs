@@ -241,7 +241,19 @@ pub fn list_since(since: Option<DateTime<Utc>>) -> io::Result<Vec<ErrorRecord>> 
     };
     // Do not diagnose a partially written row while an appender holds the ledger.
     fs2::FileExt::lock_shared(&lock)?;
+    let _lock = HeldLedgerLock(lock);
     read_ledger_files(since)
+}
+
+/// Releases the ledger lock explicitly instead of relying on close: a
+/// duplicate of this description (e.g. inherited by a process forked before
+/// exec) would otherwise keep the ledger locked after the holder returns.
+struct HeldLedgerLock(fs::File);
+
+impl Drop for HeldLedgerLock {
+    fn drop(&mut self) {
+        let _ = fs2::FileExt::unlock(&self.0);
+    }
 }
 
 fn ledger_dir() -> PathBuf {
@@ -250,6 +262,43 @@ fn ledger_dir() -> PathBuf {
 
 fn ledger_path_for_date(date: NaiveDate) -> PathBuf {
     ledger_dir().join(format!("{LEDGER_FILE_PREFIX}.{date}.jsonl"))
+}
+
+#[cfg(test)]
+type LedgerLockObserver = Box<dyn FnMut(&fs::File)>;
+
+#[cfg(test)]
+thread_local! {
+    static TEST_LEDGER_LOCK_OBSERVER: std::cell::RefCell<Option<LedgerLockObserver>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Observe each ledger lock description this thread acquires.
+#[cfg(all(test, unix))]
+struct ScopedLedgerLockObserver;
+
+#[cfg(all(test, unix))]
+impl ScopedLedgerLockObserver {
+    fn set(observer: impl FnMut(&fs::File) + 'static) -> Self {
+        TEST_LEDGER_LOCK_OBSERVER.with(|slot| *slot.borrow_mut() = Some(Box::new(observer)));
+        Self
+    }
+}
+
+#[cfg(all(test, unix))]
+impl Drop for ScopedLedgerLockObserver {
+    fn drop(&mut self) {
+        TEST_LEDGER_LOCK_OBSERVER.with(|slot| slot.borrow_mut().take());
+    }
+}
+
+#[cfg(test)]
+fn observe_ledger_lock(lock: &fs::File) {
+    TEST_LEDGER_LOCK_OBSERVER.with(|slot| {
+        if let Some(observer) = slot.borrow_mut().as_mut() {
+            observer(lock);
+        }
+    });
 }
 
 fn open_ledger_lock() -> io::Result<fs::File> {
@@ -337,8 +386,21 @@ fn append_record(record: &ErrorRecord, once: bool) -> io::Result<()> {
     let lock = open_ledger_lock()?;
     // A timed-out operation still needs to append its failure. Only waiting
     // for another writer should consume/refuse the caller's deadline.
-    fs2::FileExt::try_lock_exclusive(&lock)
-        .or_else(|_| crate::operation_deadline::lock_exclusive(&lock))?;
+    match fs2::FileExt::try_lock_exclusive(&lock) {
+        Ok(()) => {}
+        Err(error) if crate::operation_deadline::is_lock_contended(&error) => {
+            crate::operation_deadline::lock_exclusive(&lock).map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!("error ledger lock contended: {error}"),
+                )
+            })?
+        }
+        Err(error) => return Err(error),
+    }
+    let _lock = HeldLedgerLock(lock);
+    #[cfg(test)]
+    observe_ledger_lock(&_lock.0);
     if once
         && read_ledger_files(None)?
             .iter()
@@ -546,6 +608,55 @@ mod tests {
         record_once(sample(ErrorKind::DaemonFault, "unconfirmed shrink"))
             .expect("an expired readback can still record its diagnostic");
         assert_eq!(list_since(None).unwrap().len(), 2);
+    }
+
+    /// Issue #6604: a duplicate of the writer's lock description (what a
+    /// process forked before exec inherits) must not keep the ledger locked
+    /// after the writer returns. The failing run's real holder was not
+    /// captured; this pins the mechanism, not the original cause.
+    #[cfg(unix)]
+    #[test]
+    fn lingering_duplicate_of_a_released_ledger_lock_does_not_block_expired_writers() {
+        let (_dir, _home) = isolated_home();
+        let duplicates = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let observed = duplicates.clone();
+        let _observer = ScopedLedgerLockObserver::set(move |lock: &fs::File| {
+            observed
+                .borrow_mut()
+                .push(lock.try_clone().expect("duplicate lock description"));
+        });
+        let _deadline =
+            crate::operation_deadline::ScopedOperationDeadline::enter(std::time::Instant::now());
+
+        record(sample(ErrorKind::CacheRefreshFailure, "refresh timed out")).expect("first");
+        assert_eq!(duplicates.borrow().len(), 1, "the writer acquired the lock");
+        let probe = open_ledger_lock().expect("independent lock description");
+        fs2::FileExt::try_lock_exclusive(&probe)
+            .expect("kernel lock is released while the duplicate is still open");
+        fs2::FileExt::unlock(&probe).unwrap();
+
+        record_once(sample(ErrorKind::DaemonFault, "unconfirmed shrink"))
+            .expect("no writer holds the ledger, so the expired deadline is not consumed");
+        assert_eq!(list_since(None).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn expired_operation_reports_real_ledger_contention_without_appending() {
+        let (_dir, _home) = isolated_home();
+        fs::create_dir_all(ledger_dir()).unwrap();
+        let holder = open_ledger_lock().unwrap();
+        fs2::FileExt::try_lock_exclusive(&holder).expect("another writer holds the ledger");
+        let _deadline =
+            crate::operation_deadline::ScopedOperationDeadline::enter(std::time::Instant::now());
+
+        let error = record(sample(ErrorKind::DaemonFault, "blocked")).unwrap_err();
+        assert!(crate::operation_deadline::is_deadline_expired(&error));
+        assert!(
+            error.to_string().contains("error ledger lock contended"),
+            "contention is distinguishable from a bare deadline: {error}"
+        );
+        fs2::FileExt::unlock(&holder).unwrap();
+        assert!(read_ledger_files(None).unwrap().is_empty());
     }
 
     #[test]

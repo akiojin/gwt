@@ -780,6 +780,7 @@ fn a_corroborated_quota_notice_holds_immediately() {
         account_label: None,
         plan: None,
         extra_usage: None,
+        credits: None,
         windows: vec![gwt_core::usage::UsageWindow::new(
             gwt_core::usage::WindowKind::Weekly,
             100.0,
@@ -894,6 +895,7 @@ fn a_different_providers_exhaustion_does_not_corroborate_this_pane() {
         account_label: None,
         plan: None,
         extra_usage: None,
+        credits: None,
         windows: Vec::new(),
         limit_reached: true,
         state: gwt_core::usage::UsageState::Ok,

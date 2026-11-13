@@ -109,6 +109,11 @@ rfd = "0.17"
 reqwest.workspace = true
 sha2.workspace = true
 ring = "0.17"
+# SPEC #6476 T-003l1u: coordinator TLS material, same version/features as the
+# rustls/tokio-rustls already locked through reqwest; ring provider only.
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "=0.26.4", default-features = false, features = ["ring", "tls12"] }
+zeroize = "1"
 subtle = "2.6"
 hex.workspace = true
 zip.workspace = true
@@ -179,6 +184,8 @@ ctor = "1.0.13"
 # Issue #4095: client-side vt100 model for the pane snapshot / stream
 # ordering fixture (patched to vendor/vt100 like gwt-terminal).
 vt100 = "0.16"
+# SPEC #6476 T-003l1u: self-signed coordinator TLS fixtures.
+rcgen = { version = "=0.14.10", default-features = false, features = ["crypto", "pem", "ring"] }
 
 [package.metadata.cargo-machete]
 # Windows build.rs embeds the icon and application manifest with this build dependency.

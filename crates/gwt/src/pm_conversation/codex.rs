@@ -65,5 +65,6 @@ pub(super) fn message(value: &Value) -> Result<Option<PmConversationMessage>, &'
         id: id.to_owned(),
         role,
         text,
+        source_key: None,
     }))
 }

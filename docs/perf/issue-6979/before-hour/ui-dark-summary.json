@@ -1,0 +1,224 @@
+{
+  "theme": "dark",
+  "requested_duration_seconds": 1800,
+  "sample_count": 1674,
+  "errors": [],
+  "completion_max_ms": 566.8436999999976,
+  "completion_budget_ms": 1000,
+  "exceeded": 0,
+  "native_dispatch_diagnostic_ms": 30,
+  "native_watchdog_ms": 100,
+  "trace_chunks": [
+    {
+      "saved": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2-home\\.gwt\\projects\\99a8660247f5bc49\\logs\\ui-trace-20261111T205451.961Z-ui-trace-mwcljqcn-hgr40yhp.jsonl",
+      "copy": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2\\trace-dark-0.jsonl",
+      "entries": 477,
+      "session_id": "ui-trace-mwcljqcn-hgr40yhp",
+      "dropped_entries": 0
+    },
+    {
+      "saved": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2-home\\.gwt\\projects\\99a8660247f5bc49\\logs\\ui-trace-20261111T205552.368Z-ui-trace-mwcll135-2c6tj4bl.jsonl",
+      "copy": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2\\trace-dark-1.jsonl",
+      "entries": 477,
+      "session_id": "ui-trace-mwcll135-2c6tj4bl",
+      "dropped_entries": 0
+    },
+    {
+      "saved": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2-home\\.gwt\\projects\\99a8660247f5bc49\\logs\\ui-trace-20261111T205652.979Z-ui-trace-mwclmbp3-shb3925i.jsonl",
+      "copy": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2\\trace-dark-2.jsonl",
+      "entries": 465,
+      "session_id": "ui-trace-mwclmbp3-shb3925i",
+      "dropped_entries": 0
+    },
+    {
+      "saved": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2-home\\.gwt\\projects\\99a8660247f5bc49\\logs\\ui-trace-20261111T205753.338Z-ui-trace-mwclnmhk-dh3d6grf.jsonl",
+      "copy": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2\\trace-dark-3.jsonl",
+      "entries": 448,
+      "session_id": "ui-trace-mwclnmhk-dh3d6grf",
+      "dropped_entries": 0
+    },
+    {
+      "saved": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2-home\\.gwt\\projects\\99a8660247f5bc49\\logs\\ui-trace-20261111T205855.432Z-ui-trace-mwclox0y-uy2qqfb6.jsonl",
+      "copy": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2\\trace-dark-4.jsonl",
+      "entries": 488,
+      "session_id": "ui-trace-mwclox0y-uy2qqfb6",
+      "dropped_entries": 0
+    },
+    {
+      "saved": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2-home\\.gwt\\projects\\99a8660247f5bc49\\logs\\ui-trace-20261111T205957.726Z-ui-trace-mwclq8y9-hxsirpxm.jsonl",
+      "copy": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2\\trace-dark-5.jsonl",
+      "entries": 497,
+      "session_id": "ui-trace-mwclq8y9-hxsirpxm",
+      "dropped_entries": 0
+    },
+    {
+      "saved": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2-home\\.gwt\\projects\\99a8660247f5bc49\\logs\\ui-trace-20261111T210059.704Z-ui-trace-mwclrl05-38olp7uv.jsonl",
+      "copy": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2\\trace-dark-6.jsonl",
+      "entries": 479,
+      "session_id": "ui-trace-mwclrl05-38olp7uv",
+      "dropped_entries": 0
+    },
+    {
+      "saved": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2-home\\.gwt\\projects\\99a8660247f5bc49\\logs\\ui-trace-20261111T210201.820Z-ui-trace-mwclswu7-jbbqjy92.jsonl",
+      "copy": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2\\trace-dark-7.jsonl",
+      "entries": 507,
+      "session_id": "ui-trace-mwclswu7-jbbqjy92",
+      "dropped_entries": 0
+    },
+    {
+      "saved": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2-home\\.gwt\\projects\\99a8660247f5bc49\\logs\\ui-trace-20261111T210304.184Z-ui-trace-mwclu8rm-q3ngjodp.jsonl",
+      "copy": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2\\trace-dark-8.jsonl",
+      "entries": 470,
+      "session_id": "ui-trace-mwclu8rm-q3ngjodp",
+      "dropped_entries": 0
+    },
+    {
+      "saved": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2-home\\.gwt\\projects\\99a8660247f5bc49\\logs\\ui-trace-20261111T210407.343Z-ui-trace-mwclvkx2-tgseymlx.jsonl",
+      "copy": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2\\trace-dark-9.jsonl",
+      "entries": 511,
+      "session_id": "ui-trace-mwclvkx2-tgseymlx",
+      "dropped_entries": 0
+    },
+    {
+      "saved": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2-home\\.gwt\\projects\\99a8660247f5bc49\\logs\\ui-trace-20261111T210509.937Z-ui-trace-mwclwy0z-19rb5un1.jsonl",
+      "copy": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2\\trace-dark-10.jsonl",
+      "entries": 510,
+      "session_id": "ui-trace-mwclwy0z-19rb5un1",
+      "dropped_entries": 0
+    },
+    {
+      "saved": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2-home\\.gwt\\projects\\99a8660247f5bc49\\logs\\ui-trace-20261111T210612.109Z-ui-trace-mwcly9zx-7lkjh00y.jsonl",
+      "copy": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2\\trace-dark-11.jsonl",
+      "entries": 504,
+      "session_id": "ui-trace-mwcly9zx-7lkjh00y",
+      "dropped_entries": 0
+    },
+    {
+      "saved": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2-home\\.gwt\\projects\\99a8660247f5bc49\\logs\\ui-trace-20261111T210714.157Z-ui-trace-mwclzlvn-wrc91kxx.jsonl",
+      "copy": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2\\trace-dark-12.jsonl",
+      "entries": 498,
+      "session_id": "ui-trace-mwclzlvn-wrc91kxx",
+      "dropped_entries": 0
+    },
+    {
+      "saved": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2-home\\.gwt\\projects\\99a8660247f5bc49\\logs\\ui-trace-20261111T210816.371Z-ui-trace-mwcm0xrp-dugvz1zt.jsonl",
+      "copy": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2\\trace-dark-13.jsonl",
+      "entries": 499,
+      "session_id": "ui-trace-mwcm0xrp-dugvz1zt",
+      "dropped_entries": 0
+    },
+    {
+      "saved": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2-home\\.gwt\\projects\\99a8660247f5bc49\\logs\\ui-trace-20261111T210918.514Z-ui-trace-mwcm29ru-k51176jy.jsonl",
+      "copy": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2\\trace-dark-14.jsonl",
+      "entries": 495,
+      "session_id": "ui-trace-mwcm29ru-k51176jy",
+      "dropped_entries": 0
+    },
+    {
+      "saved": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2-home\\.gwt\\projects\\99a8660247f5bc49\\logs\\ui-trace-20261111T211018.979Z-ui-trace-mwcm3lq1-8flm5d92.jsonl",
+      "copy": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2\\trace-dark-15.jsonl",
+      "entries": 495,
+      "session_id": "ui-trace-mwcm3lq1-8flm5d92",
+      "dropped_entries": 0
+    },
+    {
+      "saved": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2-home\\.gwt\\projects\\99a8660247f5bc49\\logs\\ui-trace-20261111T211121.225Z-ui-trace-mwcm4we4-nr35bskd.jsonl",
+      "copy": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2\\trace-dark-16.jsonl",
+      "entries": 490,
+      "session_id": "ui-trace-mwcm4we4-nr35bskd",
+      "dropped_entries": 0
+    },
+    {
+      "saved": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2-home\\.gwt\\projects\\99a8660247f5bc49\\logs\\ui-trace-20261111T211223.353Z-ui-trace-mwcm68eo-w11pj3ex.jsonl",
+      "copy": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2\\trace-dark-17.jsonl",
+      "entries": 491,
+      "session_id": "ui-trace-mwcm68eo-w11pj3ex",
+      "dropped_entries": 0
+    },
+    {
+      "saved": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2-home\\.gwt\\projects\\99a8660247f5bc49\\logs\\ui-trace-20261111T211324.501Z-ui-trace-mwcm7kby-0c00srka.jsonl",
+      "copy": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2\\trace-dark-18.jsonl",
+      "entries": 488,
+      "session_id": "ui-trace-mwcm7kby-0c00srka",
+      "dropped_entries": 0
+    },
+    {
+      "saved": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2-home\\.gwt\\projects\\99a8660247f5bc49\\logs\\ui-trace-20261111T211426.896Z-ui-trace-mwcm8viz-1rsm1aeu.jsonl",
+      "copy": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2\\trace-dark-19.jsonl",
+      "entries": 483,
+      "session_id": "ui-trace-mwcm8viz-1rsm1aeu",
+      "dropped_entries": 0
+    },
+    {
+      "saved": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2-home\\.gwt\\projects\\99a8660247f5bc49\\logs\\ui-trace-20261111T211527.372Z-ui-trace-mwcma7o7-6g3qwf57.jsonl",
+      "copy": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2\\trace-dark-20.jsonl",
+      "entries": 457,
+      "session_id": "ui-trace-mwcma7o7-6g3qwf57",
+      "dropped_entries": 0
+    },
+    {
+      "saved": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2-home\\.gwt\\projects\\99a8660247f5bc49\\logs\\ui-trace-20261111T211629.747Z-ui-trace-mwcmbic3-lzsd4k4o.jsonl",
+      "copy": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2\\trace-dark-21.jsonl",
+      "entries": 455,
+      "session_id": "ui-trace-mwcmbic3-lzsd4k4o",
+      "dropped_entries": 0
+    },
+    {
+      "saved": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2-home\\.gwt\\projects\\99a8660247f5bc49\\logs\\ui-trace-20261111T211732.060Z-ui-trace-mwcmcugq-47elncg1.jsonl",
+      "copy": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2\\trace-dark-22.jsonl",
+      "entries": 493,
+      "session_id": "ui-trace-mwcmcugq-47elncg1",
+      "dropped_entries": 0
+    },
+    {
+      "saved": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2-home\\.gwt\\projects\\99a8660247f5bc49\\logs\\ui-trace-20261111T211834.446Z-ui-trace-mwcme6jp-xh795x64.jsonl",
+      "copy": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2\\trace-dark-23.jsonl",
+      "entries": 504,
+      "session_id": "ui-trace-mwcme6jp-xh795x64",
+      "dropped_entries": 0
+    },
+    {
+      "saved": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2-home\\.gwt\\projects\\99a8660247f5bc49\\logs\\ui-trace-20261111T211934.988Z-ui-trace-mwcmfio5-nkw9is0q.jsonl",
+      "copy": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2\\trace-dark-24.jsonl",
+      "entries": 458,
+      "session_id": "ui-trace-mwcmfio5-nkw9is0q",
+      "dropped_entries": 0
+    },
+    {
+      "saved": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2-home\\.gwt\\projects\\99a8660247f5bc49\\logs\\ui-trace-20261111T212035.495Z-ui-trace-mwcmgted-4ucd4klw.jsonl",
+      "copy": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2\\trace-dark-25.jsonl",
+      "entries": 457,
+      "session_id": "ui-trace-mwcmgted-4ucd4klw",
+      "dropped_entries": 0
+    },
+    {
+      "saved": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2-home\\.gwt\\projects\\99a8660247f5bc49\\logs\\ui-trace-20261111T212137.689Z-ui-trace-mwcmi42m-egxo1k4y.jsonl",
+      "copy": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2\\trace-dark-26.jsonl",
+      "entries": 485,
+      "session_id": "ui-trace-mwcmi42m-egxo1k4y",
+      "dropped_entries": 0
+    },
+    {
+      "saved": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2-home\\.gwt\\projects\\99a8660247f5bc49\\logs\\ui-trace-20261111T212239.817Z-ui-trace-mwcmjg2o-mbc7fmhi.jsonl",
+      "copy": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2\\trace-dark-27.jsonl",
+      "entries": 485,
+      "session_id": "ui-trace-mwcmjg2o-mbc7fmhi",
+      "dropped_entries": 0
+    },
+    {
+      "saved": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2-home\\.gwt\\projects\\99a8660247f5bc49\\logs\\ui-trace-20261111T212341.870Z-ui-trace-mwcmkrzz-ixoablqq.jsonl",
+      "copy": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2\\trace-dark-28.jsonl",
+      "entries": 485,
+      "session_id": "ui-trace-mwcmkrzz-ixoablqq",
+      "dropped_entries": 0
+    },
+    {
+      "saved": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2-home\\.gwt\\projects\\99a8660247f5bc49\\logs\\ui-trace-20261111T212352.864Z-ui-trace-mwcmm3vr-mxrgl4v6.jsonl",
+      "copy": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2\\trace-dark-29.jsonl",
+      "entries": 63,
+      "session_id": "ui-trace-mwcmm3vr-mxrgl4v6",
+      "dropped_entries": 0
+    }
+  ],
+  "failure": null
+}

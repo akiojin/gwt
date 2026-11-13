@@ -1195,6 +1195,7 @@ mod tests {
             account_label: Some("claude@example.com".into()),
             plan: Some("max".into()),
             extra_usage: None,
+            credits: None,
             windows: vec![gwt_core::usage::UsageWindow::new(
                 WindowKind::FiveHour,
                 19.0,
@@ -1466,6 +1467,7 @@ mod tests {
             account_label: None,
             plan: None,
             extra_usage: None,
+            credits: None,
             windows: vec![gwt_core::usage::UsageWindow::new(kind, 10.0, reset)],
             limit_reached: false,
             state: UsageState::Ok,

@@ -14,6 +14,7 @@ import { dirname, resolve } from "node:path";
 import { parseHTML } from "linkedom";
 
 import { createNotificationCenter, renderNotificationBell } from "../notification-center.js";
+import * as notificationCenter from "../notification-center.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appCss = readFileSync(resolve(here, "..", "styles", "app.css"), "utf8");
@@ -170,6 +171,51 @@ test("same-kind notices never collapse into one row (no id is forwarded)", () =>
 
 // --- Issue #5016 AC-HS3: identical notices aggregate into one row ---
 
+test("notification history owns immutable aggregation, time and retention without a DOM", () => {
+  assert.equal(typeof notificationCenter.createNotificationHistory, "function",
+    "aggregation must be available as data independently of the drawer");
+  let clock = Date.parse("2026-11-12T00:00:00Z");
+  const history = notificationCenter.createNotificationHistory({ maxRetained: 2, now: () => new Date(clock) });
+  const snapshots = [];
+  history.subscribe(state => state, state => snapshots.push(state));
+  const notice = { kind: "issue-monitor", level: "error", title: "Issues", issueNumber: 5016, message: "Decision needed" };
+  const first = history.record(notice);
+  const original = history.read();
+  clock += 1_000;
+  assert.equal(history.record({ ...notice, onActivate() {} }), first);
+  const aggregate = history.read();
+  assert.equal(aggregate.rows.length, 1);
+  assert.equal(aggregate.rows[0].count, 2);
+  assert.equal(aggregate.rows[0].latestAt, new Date(clock).toISOString());
+  assert.equal(aggregate.unreadCount, 1);
+  assert.equal(aggregate.unreadHasError, true);
+  assert.equal(original.rows[0].count, 1, "old snapshots never change");
+  assert.notEqual(original.rows[0].latestAt, aggregate.rows[0].latestAt);
+  assert.ok(Object.isFrozen(aggregate.rows[0]));
+  assert.doesNotThrow(() => JSON.stringify(aggregate), "the history contains data only");
+  history.setOpen(true);
+  assert.equal(history.read().unreadCount, 0);
+  history.setOpen(false);
+  history.recordSurfaceNotice({ key: "capacity", level: "info", title: "Capacity" });
+  history.record({ ...notice, issueNumber: 5017 });
+  assert.equal(history.read().rows.length, 2);
+  assert.equal(history.read().dropped, 1, "normal and keyed notices share one retention cap");
+  assert.equal(history.read().unreadHasError, true);
+  assert.equal(history.dismiss(first), false, "the cap retires the old occurrence identity");
+  const fresh = history.record(notice);
+  assert.notEqual(fresh, first);
+  assert.equal(history.read().rows[0].count, 1);
+  assert.equal(history.read().dropped, 2);
+  history.recordSurfaceNotice({ title: "Unkeyed" });
+  assert.equal(history.removeNotice(""), false, "an empty key cannot identify an unkeyed row");
+  assert.equal(history.resolveError(""), false);
+  history.clearAll();
+  assert.equal(history.read().rows.length, 0);
+  assert.equal(history.read().unreadCount, 0);
+  assert.equal(history.read().unreadHasError, false);
+  assert.equal(snapshots.at(-1), history.read(), "subscribers read the same authoritative snapshot");
+});
+
 test("identical notices aggregate into one row with an occurrence count, latest time and one unread", () => {
   let clock = Date.parse("2026-11-10T09:36:00Z");
   const { document, center } = setup({ now: () => new Date(clock) });
@@ -189,6 +235,36 @@ test("identical notices aggregate into one row with an occurrence count, latest 
     "the row shows the latest occurrence time");
   assert.equal(first.querySelectorAll(".notification-center__time").length, 1);
   assert.match(first.textContent, /steering requested \(1\): resolve the review before closing/, "original text is kept");
+  const snapshot = center.read();
+  assert.equal(snapshot.rows[0].count, 98);
+  assert.equal(snapshot.rows[0].latestAt, first.querySelector(".notification-center__time").dateTime);
+  center.element().remove();
+  center.record(notice);
+  assert.equal(center.count(), 2, "detaching the view does not retire model entries");
+  assert.equal(center.unreadCount(), 2);
+  assert.equal(center.read().rows[0].count, 99);
+  assert.equal(first.querySelector(".notification-center__count").textContent, "×99");
+  assert.equal(snapshot.rows[0].count, 98, "the renderer cannot mutate an earlier snapshot");
+});
+
+test("a recurrence that brings the first jump-to makes the aggregated row operable", () => {
+  const { document, center } = setup();
+  const jumps = [];
+  const row = center.record({ kind: "attention", level: "info", title: "same" });
+  assert.ok(row.getAttribute("role") === null, "a notice without jump-to is not a button");
+  center.record({ kind: "attention", level: "info", title: "same", onActivate: () => jumps.push("latest") });
+  assert.ok(row.querySelector(".notification-center__count")?.textContent === "×2");
+  assert.ok(row.getAttribute("role") === "button", "the row becomes keyboard-operable");
+  assert.ok(row.getAttribute("tabindex") === "0");
+  click(document, row);
+  const enter = new document.defaultView.Event("keydown", { bubbles: true, cancelable: true });
+  enter.key = "Enter";
+  row.dispatchEvent(enter);
+  assert.deepEqual(jumps, ["latest", "latest"]);
+  center.record({ kind: "attention", level: "info", title: "same" });
+  click(document, row);
+  assert.deepEqual(jumps, ["latest", "latest", "latest"], "a later occurrence without jump-to keeps the latest one");
+  assert.ok(center.count() === 1, "activation keeps the history row");
 });
 
 test("aggregation never merges a different Issue, message, level, kind or window id", () => {
@@ -474,6 +550,13 @@ test("surface status updates reuse one row with the latest severity and closed p
   assert.equal(center.resolveError("capacity"), true);
   assert.equal(row.dataset.resolved, "true");
   assert.equal(center.unreadCount(), 0);
+  center.recordSurfaceNotice({ key: "capacity", title: "Manual capacity", level: "info", message: "" });
+  center.open();
+  center.close();
+  center.recordSurfaceNotice({ key: "capacity", title: "Manual capacity", level: "info" });
+  assert.equal(center.unreadCount(), 0, "omitting an already empty message does not change guidance");
+  center.recordSurfaceNotice({ key: "capacity", title: "Manual capacity", level: "info", message: "" });
+  assert.equal(center.unreadCount(), 0, "an empty message also leaves absent guidance unchanged");
 });
 
 test("open(key) reveals and focuses that row even while open, and close restores the original focus", () => {

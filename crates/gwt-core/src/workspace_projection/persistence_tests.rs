@@ -7115,6 +7115,20 @@ fn legacy_external_receipt_retry_restores_backfill_created_assigned_target() {
 
 #[test]
 fn legacy_external_start_adds_missing_target_and_receipt_retry_recreates_it() {
+    legacy_external_fresh_start_recovery(None);
+}
+
+#[test]
+fn legacy_external_fresh_start_rejects_ancestor_event_id_collision() {
+    legacy_external_fresh_start_recovery(Some("event-id"));
+}
+
+#[test]
+fn legacy_external_fresh_start_rejects_ancestor_session_conflict() {
+    legacy_external_fresh_start_recovery(Some("session"));
+}
+
+fn legacy_external_fresh_start_recovery(conflict: Option<&str>) {
     let _guard = lock_test_env();
     let home = tempfile::tempdir().expect("home");
     let _home = ScopedHome::set(home.path());
@@ -7130,12 +7144,24 @@ fn legacy_external_start_adds_missing_target_and_receipt_retry_recreates_it() {
         repo_local_work_events_path_with_migration(&work_event_root).expect("tracked events path");
     let now = Utc.with_ymd_and_hms(2026, 7, 22, 2, 0, 0).unwrap();
     let session_id = "legacy-fresh-session";
-    let target_work_id = "legacy-fresh-target";
     let target_event_id = "legacy-fresh-start-event";
     let branch = "work/legacy-fresh-target";
     let operation_id = "legacy-fresh-start-operation";
+    let predecessor_id = canonical_work_id(&work_event_root, Some(branch), None).unwrap();
+    let occupied_id = successor_work_id(&predecessor_id);
+    let second_occupied_id = successor_work_id(&occupied_id);
+    let target_work_id = successor_work_id(&second_occupied_id);
+    let historical_session = "legacy-historical-session";
+    let container = WorkspaceExecutionContainerRef {
+        branch: Some(branch.to_string()),
+        worktree_path: Some(work_event_root.clone()),
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+    };
 
     let mut current = WorkspaceProjection::default_for_project(&project_state_root);
+    current.id = occupied_id.clone();
     current.agents.push(WorkspaceAgentSummary {
         session_id: session_id.to_string(),
         window_id: None,
@@ -7163,55 +7189,159 @@ fn legacy_external_start_adds_missing_target_and_receipt_retry_recreates_it() {
     unrelated_start.title = Some("Existing canonical Work".to_string());
     let mut unrelated_only = WorkItemsProjection::empty(unrelated_start.updated_at);
     unrelated_only.apply_event(unrelated_start);
-    save_workspace_work_items_projection_to_path(&canonical_path, &unrelated_only)
-        .expect("seed unrelated canonical Work");
-    save_workspace_work_items_projection_to_path(&legacy_path, &WorkItemsProjection::empty(now))
-        .expect("seed empty legacy WorkItems");
-
-    let container = WorkspaceExecutionContainerRef {
-        branch: Some(branch.to_string()),
-        worktree_path: Some(work_event_root.clone()),
-        pr_number: None,
-        pr_url: None,
-        pr_state: None,
-    };
-    let prepared = transact_workspace_state_at_with_commit(
+    let mut source_before = unrelated_only.clone();
+    let mut predecessor = WorkEvent::new(
+        WorkEventKind::Start,
+        &predecessor_id,
+        now - chrono::Duration::seconds(3),
+    );
+    predecessor.id = "legacy-predecessor-start-event".into();
+    predecessor.agent_session_id = Some(historical_session.into());
+    predecessor.agent_id = Some("codex".into());
+    predecessor.owner = Some("Issue #3412".into());
+    predecessor.execution_container = Some(container.clone());
+    source_before.apply_event(predecessor);
+    source_before.apply_event(WorkEvent::new(
+        WorkEventKind::Done,
+        &predecessor_id,
+        now - chrono::Duration::seconds(2),
+    ));
+    let terminal_parent_seed = source_before.clone();
+    let mut before_launch = source_before;
+    let mut occupied = WorkEvent::new(
+        WorkEventKind::Backfill,
+        &occupied_id,
+        now - chrono::Duration::seconds(1),
+    );
+    occupied.owner = Some("Issue #3412".into());
+    occupied.execution_container = Some(container.clone());
+    before_launch.apply_event(occupied);
+    let mut second_occupied = WorkEvent::new(
+        WorkEventKind::Backfill,
+        &second_occupied_id,
+        now - chrono::Duration::seconds(1),
+    );
+    second_occupied.owner = Some("Issue #3412".into());
+    second_occupied.execution_container = Some(container.clone());
+    before_launch.apply_event(second_occupied);
+    save_workspace_work_items_projection_to_path(&canonical_path, &unrelated_only).unwrap();
+    save_workspace_work_items_projection_to_path(&legacy_path, &before_launch).unwrap();
+    let mut audit = WorkEvent::new(WorkEventKind::Discard, &occupied_id, now);
+    audit.id = format!("superseded-{occupied_id}");
+    audit.related_work_item_id = Some(predecessor_id.clone());
+    audit.execution_container = Some(container.clone());
+    audit.bind_successor_supersession_identity().unwrap();
+    let mut second_audit = WorkEvent::new(WorkEventKind::Discard, &second_occupied_id, now);
+    second_audit.id = format!("superseded-{second_occupied_id}");
+    second_audit.related_work_item_id = Some(occupied_id.clone());
+    second_audit.execution_container = Some(container.clone());
+    second_audit.bind_successor_supersession_identity().unwrap();
+    let (_, mut pending) =
+        with_workspace_current_and_work_items_lock(&current_path, &legacy_path, || {
+            build_workspace_state_transaction_locked(
+                &current_path,
+                &legacy_path,
+                &events_path,
+                &project_state_root,
+                true,
+                |projection, _, _| {
+                    assert!(projection.assign_agent(session_id, &target_work_id, None, None, now));
+                    let mut start = WorkEvent::new(WorkEventKind::Start, &target_work_id, now);
+                    start.id = target_event_id.to_string();
+                    start.title = Some("Legacy fresh target".to_string());
+                    start.owner = Some("Issue #3412".to_string());
+                    start.status_category = Some(WorkspaceStatusCategory::Active);
+                    start.agent_session_id = Some(session_id.to_string());
+                    start.agent_id = Some("codex".to_string());
+                    start.execution_container = Some(container.clone());
+                    start.related_work_item_id = Some(second_occupied_id.clone());
+                    Ok(((), vec![audit.clone(), second_audit.clone(), start]))
+                },
+            )
+        })
+        .expect("stage the authenticated producer's same-time supersession batch");
+    pending.external_commit = Some(ExternalWorkspaceCommit {
+        operation_id: operation_id.into(),
+        phase: ExternalWorkspaceCommitPhase::Prepared,
+        reconciliation_work_items_path: None,
+    });
+    write_new_workspace_state_transaction_markers(&pending).unwrap();
+    persist_external_workspace_commit_receipt(
         &current_path,
         &legacy_path,
-        &events_path,
-        &project_state_root,
         operation_id,
-        |projection, _, _| {
-            assert!(projection.assign_agent(session_id, target_work_id, None, None, now));
-            let mut start = WorkEvent::new(WorkEventKind::Start, target_work_id, now);
-            start.id = target_event_id.to_string();
-            start.title = Some("Legacy fresh target".to_string());
-            start.owner = Some("Issue #3412".to_string());
-            start.status_category = Some(WorkspaceStatusCategory::Active);
-            start.agent_session_id = Some(session_id.to_string());
-            start.agent_id = Some("codex".to_string());
-            start.execution_container = Some(container.clone());
-            Ok(((), vec![start]))
-        },
-        || {
-            Err(GwtError::Other(
-                "simulated fresh activation response loss".to_string(),
-            ))
-        },
-    );
-    assert!(
-        prepared.is_err(),
-        "legacy fresh transaction must be Prepared"
-    );
-
+        &pending,
+        ExternalWorkspaceCommitResolution::Committed,
+    )
+    .unwrap();
+    // A crash after durable Commit and promotion retains the exact markers.
+    let external = pending.external_commit.as_mut().unwrap();
+    external.phase = ExternalWorkspaceCommitPhase::Committed;
+    external.reconciliation_work_items_path = Some(canonical_path.clone());
+    write_workspace_state_transaction_markers(&pending, true).unwrap();
+    let recovery = inspect_workspace_state_external_commit_recovery_for_work_event_root(
+        &project_state_root,
+        &work_event_root,
+    )
+    .unwrap()
+    .unwrap();
     assert_eq!(
-        resolve_legacy_workspace_state_external_commit_for_work_event_root(
-            &project_state_root,
-            &work_event_root,
-            operation_id,
-            ExternalWorkspaceCommitDecision::Commit,
-        )
-        .expect("commit legacy fresh transaction"),
+        recovery.resolution,
+        Some(ExternalWorkspaceCommitResolution::Committed)
+    );
+    if let Some(conflict) = conflict {
+        let mut canonical = unrelated_only.clone();
+        match conflict {
+            "event-id" => {
+                canonical.work_items[0].events[0].id = "legacy-predecessor-start-event".into();
+            }
+            "session" => {
+                let mut foreign = WorkEvent::new(
+                    WorkEventKind::Update,
+                    "canonical-unrelated-work",
+                    now - chrono::Duration::seconds(1),
+                );
+                foreign.agent_session_id = Some(historical_session.into());
+                foreign.agent_id = Some("codex".into());
+                foreign.execution_container = Some(WorkspaceExecutionContainerRef {
+                    branch: Some("work/foreign-history".into()),
+                    worktree_path: Some(temp.path().join("foreign-worktree")),
+                    ..container.clone()
+                });
+                canonical.apply_event(foreign);
+            }
+            _ => unreachable!(),
+        }
+        save_workspace_work_items_projection_to_path(&canonical_path, &canonical).unwrap();
+        let canonical_before = fs::read(&canonical_path).unwrap();
+        let legacy_before = fs::read(&legacy_path).unwrap();
+        let current_before = fs::read(&current_path).unwrap();
+        let receipt_path =
+            external_workspace_commit_receipt_path(&current_path, &legacy_path, operation_id);
+        let receipt_before = fs::read(&receipt_path).unwrap();
+        let marker_paths = pending_workspace_state_transaction_paths(&pending);
+        let markers_before = marker_paths
+            .iter()
+            .map(|path| fs::read(path).unwrap())
+            .collect::<Vec<_>>();
+        resolve_workspace_state_external_commit_recovery(&recovery)
+            .expect_err("snapshot insertion must reject conflicting canonical authority");
+        assert_eq!(fs::read(&canonical_path).unwrap(), canonical_before);
+        assert_eq!(fs::read(&legacy_path).unwrap(), legacy_before);
+        assert_eq!(fs::read(&current_path).unwrap(), current_before);
+        assert_eq!(fs::read(&receipt_path).unwrap(), receipt_before);
+        assert_eq!(
+            marker_paths
+                .iter()
+                .map(|path| fs::read(path).unwrap())
+                .collect::<Vec<_>>(),
+            markers_before
+        );
+        return;
+    }
+    assert_eq!(
+        resolve_workspace_state_external_commit_recovery(&recovery)
+            .expect("commit legacy supersession and fresh Start"),
         ExternalWorkspaceCommitResolution::Committed
     );
     let assert_converged = || {
@@ -7231,6 +7361,39 @@ fn legacy_external_start_adds_missing_target_and_receipt_retry_recreates_it() {
             .events
             .iter()
             .any(|event| event.id == target_event_id));
+        let retired = canonical
+            .work_items
+            .iter()
+            .find(|item| item.id == occupied_id)
+            .unwrap();
+        assert!(retired.is_terminal());
+        assert!(retired.events.iter().any(|event| event == &audit));
+        assert!(!retired
+            .agents
+            .iter()
+            .any(|agent| agent.session_id == session_id));
+        let second_retired = canonical
+            .work_items
+            .iter()
+            .find(|item| item.id == second_occupied_id)
+            .unwrap();
+        assert!(second_retired.is_terminal());
+        assert!(second_retired
+            .events
+            .iter()
+            .any(|event| event == &second_audit));
+        assert_eq!(
+            current_work_id_for_launch(
+                &canonical,
+                &work_event_root,
+                Some(branch),
+                Some(&work_event_root),
+                Some("Issue #3412"),
+            )
+            .unwrap(),
+            Some(target_work_id.clone()),
+            "partial migration must preserve usable canonical successor selection"
+        );
     };
     assert_converged();
     assert_eq!(
@@ -7242,16 +7405,33 @@ fn legacy_external_start_adds_missing_target_and_receipt_retry_recreates_it() {
         "legacy Start must publish exactly one tracked event"
     );
 
+    let mut conflicted = load_workspace_work_items_from_path(&canonical_path)
+        .unwrap()
+        .unwrap();
+    conflicted
+        .work_items
+        .iter_mut()
+        .find(|item| item.id == occupied_id)
+        .unwrap()
+        .related_work_item_ids
+        .push("foreign-parent".into());
+    save_workspace_work_items_projection_to_path(&canonical_path, &conflicted).unwrap();
+    let conflict_before = fs::read(&canonical_path).unwrap();
+    assert!(
+        resolve_workspace_state_external_commit_recovery(&recovery).is_err(),
+        "receipt retry must reject contradictory structural lineage"
+    );
+    assert_eq!(fs::read(&canonical_path).unwrap(), conflict_before);
+    save_workspace_work_items_projection_to_path(&canonical_path, &terminal_parent_seed)
+        .expect("simulate a receipt with only the canonical terminal predecessor");
+    resolve_workspace_state_external_commit_recovery(&recovery)
+        .expect("same-time receipt retry must retire ancestors before attaching the new Session");
+    assert_converged();
     save_workspace_work_items_projection_to_path(&canonical_path, &unrelated_only)
         .expect("simulate a pre-upgrade receipt without canonical target");
     assert_eq!(
-        resolve_legacy_workspace_state_external_commit_for_work_event_root(
-            &project_state_root,
-            &work_event_root,
-            operation_id,
-            ExternalWorkspaceCommitDecision::Commit,
-        )
-        .expect("receipt-only retry must recreate canonical target"),
+        resolve_workspace_state_external_commit_recovery(&recovery)
+            .expect("receipt-only retry must recreate canonical target"),
         ExternalWorkspaceCommitResolution::Committed
     );
     assert_converged();
@@ -7262,6 +7442,14 @@ fn legacy_external_start_adds_missing_target_and_receipt_retry_recreates_it() {
             .count(),
         1,
         "receipt-only reconciliation must not duplicate the tracked event"
+    );
+    assert_eq!(
+        t812_read_events(&events_path)
+            .iter()
+            .filter(|event| event.id == audit.id)
+            .count(),
+        1,
+        "receipt-only reconciliation must retain one structural audit"
     );
 }
 

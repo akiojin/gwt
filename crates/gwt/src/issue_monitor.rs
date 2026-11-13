@@ -4529,6 +4529,11 @@ pub enum IssueMonitorStallReason {
     Unknown,
 }
 
+/// Issue #7087 AC-2: the project window is already open, so the gate is a
+/// failed materializer subscription rather than a closed window.
+pub const GUI_MATERIALIZER_RECONNECT_ACTION: &str =
+    "Materializer reconnect failed; the project window is open";
+
 impl IssueMonitorStallReason {
     /// The GUI action that lifts this gate, when no JSON operation can.
     /// `issue.monitor.config.set` refuses `enabled:true` by design.
@@ -4715,11 +4720,22 @@ pub fn rate_limit_reset_for_agent(
 /// Distinct from [`rate_limit_reset_for_agent`], which returns `None` both for
 /// "has quota left" and for "out of quota but printed no reset instant". A
 /// caller corroborating a screen notice needs the first fact on its own.
+///
+/// SPEC #2970 T-6638-8: Claude's account flag covers only the shared windows,
+/// so a full model window (e.g. Fable weekly) also corroborates a refusal the
+/// screen already showed. Codex stays on the account flag.
 pub fn provider_limit_reached_for_agent(
     agent_id: &str,
     accounts: &[gwt_core::usage::ProviderUsage],
 ) -> bool {
-    account_for_agent(agent_id, accounts).is_some_and(|account| account.limit_reached)
+    account_for_agent(agent_id, accounts).is_some_and(|account| {
+        account.limit_reached
+            || (account.provider == gwt_core::usage::UsageProvider::ClaudeCode
+                && account
+                    .windows
+                    .iter()
+                    .any(|window| window.used_percent >= 100.0))
+    })
 }
 
 /// Issue #3923 AC-3: whether the poller independently reports `agent_id`'s
@@ -5301,6 +5317,10 @@ pub struct IssueMonitorState {
     #[serde(skip)]
     process_held_issues: BTreeSet<u64>,
     pub gui_connected: bool,
+    /// Live observation that a project window subscriber is attached, or
+    /// dropped inside the reconnect grace. Never persisted.
+    #[serde(skip)]
+    gui_window_open: bool,
     pub inbox: Vec<IssueMonitorInboxItem>,
     /// Current scan facts include blockers outside the selected queue. They
     /// are rebuilt from source observations, never restored as completion proof.
@@ -8474,6 +8494,7 @@ impl IssueMonitorState {
             max_active_last_change: None,
             agent_capacity: AgentCapacity::default(),
             gui_connected: false,
+            gui_window_open: false,
             inbox: Vec::new(),
             dependency_facts: BTreeMap::new(),
             dependency_completions: BTreeMap::new(),
@@ -11345,6 +11366,10 @@ impl IssueMonitorState {
 
     pub fn set_gui_connected(&mut self, connected: bool) {
         self.gui_connected = connected;
+    }
+
+    pub(crate) fn set_gui_window_open(&mut self, open: bool) {
+        self.gui_window_open = open;
     }
 
     pub fn set_enabled(&mut self, enabled: bool) {
@@ -15959,9 +15984,13 @@ impl IssueMonitorState {
             launch_failures,
             candidate_pool_degradation: self.candidate_pool_degradation.clone(),
             stall_reason,
-            gui_action: stall_reason
-                .and_then(IssueMonitorStallReason::gui_action)
-                .map(str::to_string),
+            gui_action: match stall_reason {
+                Some(IssueMonitorStallReason::GuiDisconnected) if self.gui_window_open => {
+                    Some(GUI_MATERIALIZER_RECONNECT_ACTION.to_string())
+                }
+                Some(reason) => reason.gui_action().map(str::to_string),
+                None => None,
+            },
             // Issue #5047 AC-8: only this gate needs the breakdown, and only
             // this gate can be acted on from it.
             slot_occupancy: matches!(
@@ -30914,6 +30943,7 @@ mod tests {
             account_label: None,
             plan: None,
             extra_usage: None,
+            credits: None,
             windows: vec![UsageWindow::new(
                 WindowKind::Weekly,
                 100.0,
@@ -31667,6 +31697,7 @@ mod tests {
             account_label: None,
             plan: None,
             extra_usage: None,
+            credits: None,
             windows: windows
                 .iter()
                 .map(|(kind, used)| gwt_core::usage::UsageWindow::new(*kind, *used, None))
@@ -32456,6 +32487,55 @@ mod tests {
         assert_eq!(
             IssueMonitorStallReason::MaxActiveSaturated.gui_action(),
             None
+        );
+    }
+
+    /// Issue #7087 AC-2: an open project window with no materializer lease
+    /// stays blocked, and the action names the reconnect failure.
+    #[test]
+    fn open_project_window_without_materializer_reports_reconnect_failure() {
+        let now = "2026-09-28T03:00:00Z";
+        let mut monitor = test_monitor_with_prefs(
+            IssueMonitorConfig {
+                enabled: true,
+                max_active: 1,
+                ..IssueMonitorConfig::default()
+            },
+            IssueMonitorPrefs {
+                enabled: true,
+                max_active_agents: 1,
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
+                launch_profile: Some(test_launch_profile("codex")),
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        scan_queued_candidates(&mut monitor, &[issue(42)], now);
+        monitor.set_gui_connected(false);
+        let closed = monitor.agent_status_at(now);
+        assert_eq!(
+            closed.stall_reason,
+            Some(IssueMonitorStallReason::GuiDisconnected)
+        );
+        assert_eq!(
+            closed.gui_action.as_deref(),
+            Some("Open the gwt window for this project")
+        );
+
+        monitor.set_gui_window_open(true);
+        let open = monitor.agent_status_at(now);
+        assert_eq!(
+            open.stall_reason,
+            Some(IssueMonitorStallReason::GuiDisconnected)
+        );
+        assert_eq!(
+            open.gui_action.as_deref(),
+            Some(GUI_MATERIALIZER_RECONNECT_ACTION)
+        );
+        assert_eq!(
+            monitor
+                .clone()
+                .prepare_claim_effects_with_probe("host/session", now, 1, |_| false),
+            0
         );
     }
 
@@ -52945,6 +53025,7 @@ mod tests {
             account_label: None,
             plan: None,
             extra_usage: None,
+            credits: None,
             windows: vec![
                 UsageWindow::new(WindowKind::FiveHour, 26.0, None),
                 UsageWindow::new(WindowKind::Weekly, 26.0, None),
@@ -52976,6 +53057,57 @@ mod tests {
             ..healthy
         };
         assert!(!provider_reports_healthy_for_agent("codex", &[reached]));
+    }
+
+    /// SPEC #2970 T-6638-8: a full Claude model window still corroborates a
+    /// recognized screen refusal although the account flag stays shared-only,
+    /// while Codex corroboration remains flag-based.
+    #[test]
+    fn a_full_claude_model_window_corroborates_a_recognized_refusal() {
+        use gwt_core::usage::{ProviderUsage, UsageProvider, UsageState, UsageWindow, WindowKind};
+
+        let model_full = ProviderUsage {
+            provider: UsageProvider::ClaudeCode,
+            account_id: None,
+            account_label: None,
+            plan: None,
+            extra_usage: None,
+            credits: None,
+            windows: vec![
+                UsageWindow::new(WindowKind::FiveHour, 40.0, None),
+                UsageWindow::new(WindowKind::Weekly, 96.0, None),
+                UsageWindow::new(WindowKind::FableWeekly, 100.0, None),
+            ],
+            limit_reached: false,
+            state: UsageState::Ok,
+            fetched_at: None,
+        };
+        assert!(provider_limit_reached_for_agent(
+            "claude",
+            std::slice::from_ref(&model_full)
+        ));
+        let below = ProviderUsage {
+            windows: vec![UsageWindow::new(WindowKind::FableWeekly, 99.0, None)],
+            ..model_full.clone()
+        };
+        assert!(!provider_limit_reached_for_agent("claude", &[below]));
+        let codex_full_without_flag = ProviderUsage {
+            provider: UsageProvider::Codex,
+            windows: vec![UsageWindow::new(WindowKind::Weekly, 100.0, None)],
+            ..model_full
+        };
+        assert!(
+            !provider_limit_reached_for_agent(
+                "codex",
+                std::slice::from_ref(&codex_full_without_flag)
+            ),
+            "Codex corroboration stays on the account flag"
+        );
+        let codex_flagged = ProviderUsage {
+            limit_reached: true,
+            ..codex_full_without_flag
+        };
+        assert!(provider_limit_reached_for_agent("codex", &[codex_flagged]));
     }
 
     #[test]

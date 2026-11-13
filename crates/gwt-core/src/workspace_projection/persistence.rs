@@ -1205,6 +1205,13 @@ fn merge_committed_legacy_worktree_events_locked(
             .cmp(&right.updated_at)
             .then_with(|| left.id.cmp(&right.id))
     });
+    if candidates.iter().any(WorkEvent::is_successor_supersession) {
+        let source = transaction
+            .and_then(|pending| pending.work_items.as_ref())
+            .or(legacy.as_ref())
+            .ok_or_else(|| GwtError::Other("legacy supersession source is missing".into()))?;
+        order_legacy_supersession_candidates(&mut candidates, source, work_event_root)?;
+    }
 
     let mut candidate_ids = HashMap::<String, WorkEvent>::new();
     let mut changed = canonical_was_missing;
@@ -1340,6 +1347,45 @@ fn merge_committed_legacy_worktree_events_locked(
                 )));
             }
         }
+        if event.is_successor_supersession() {
+            let source = transaction
+                .and_then(|pending| pending.work_items.as_ref())
+                .or(legacy.as_ref())
+                .ok_or_else(|| GwtError::Other("legacy supersession source is missing".into()))?;
+            validate_legacy_supersession_authority(
+                &canonical,
+                source,
+                target,
+                &event,
+                work_event_root,
+            )?;
+            changed |= materialize_legacy_supersession_ancestors(
+                &mut canonical,
+                source,
+                &event,
+                work_event_root,
+            )?;
+            if let Some(snapshot) = seed_snapshot {
+                validate_legacy_reconciliation_snapshot_insert(
+                    &canonical,
+                    &snapshot,
+                    "legacy supersession target recovery",
+                )?;
+                canonical.work_items.push(snapshot);
+                changed = true;
+            }
+            if !event_already_applied {
+                if canonical.apply_event(event.clone())
+                    == WorkEventApplyOutcome::RejectedSessionConflict
+                {
+                    return Err(GwtError::Other(
+                        "legacy supersession could not be reconciled".into(),
+                    ));
+                }
+                changed = true;
+            }
+            continue;
+        }
         let Some(session_id) = event.agent_session_id.as_deref() else {
             if strict_exact_transaction {
                 return Err(GwtError::Other(format!(
@@ -1415,6 +1461,11 @@ fn merge_committed_legacy_worktree_events_locked(
             false,
         )?;
         if let Some(snapshot) = seed_snapshot {
+            validate_legacy_reconciliation_snapshot_insert(
+                &canonical,
+                &snapshot,
+                "legacy external Workspace target recovery",
+            )?;
             canonical.work_items.push(snapshot);
             changed = true;
         }
@@ -1450,7 +1501,7 @@ fn merge_committed_legacy_worktree_events_locked(
             "legacy external Workspace migration",
             true,
         )?;
-        validate_session_bound_work_authority_uniqueness(
+        validate_legacy_reconciliation_authority_uniqueness(
             &canonical,
             &event.work_item_id,
             session_id,
@@ -1548,6 +1599,349 @@ fn validate_legacy_reconciliation_snapshot_target(
         }
     }
     Ok(())
+}
+
+/// Importing a whole snapshot also imports its historical event identities and
+/// authoritative Session refs, beyond the one event being reconciled.
+fn validate_legacy_reconciliation_snapshot_insert(
+    canonical: &WorkItemsProjection,
+    snapshot: &WorkItem,
+    context: &str,
+) -> Result<()> {
+    for event in &snapshot.events {
+        unique_legacy_reconciliation_event(canonical, event, context)?;
+    }
+    if snapshot.agents.iter().any(|agent| {
+        canonical.work_items.iter().any(|other| {
+            other.id != snapshot.id
+                && other
+                    .agents
+                    .iter()
+                    .any(|existing| existing.session_id == agent.session_id)
+        })
+    }) {
+        return Err(GwtError::Other(format!(
+            "{context} Session is attached to multiple Works"
+        )));
+    }
+    Ok(())
+}
+
+/// Fresh activation emits parent-to-child structural audits and Start at the
+/// same instant. Receipts retain no event order, so recover that order from the
+/// existing canonical lineage selector rather than UUIDs or source row order.
+fn order_legacy_supersession_candidates(
+    candidates: &mut [WorkEvent],
+    source: &WorkItemsProjection,
+    work_event_root: &Path,
+) -> Result<()> {
+    let mut ordered_scopes = HashSet::new();
+    for audit in candidates
+        .iter()
+        .filter(|event| event.is_successor_supersession())
+        .cloned()
+        .collect::<Vec<_>>()
+    {
+        let Some(container) = audit.execution_container.as_ref() else {
+            continue;
+        };
+        let Some(scope) = canonical_work_id(
+            work_event_root,
+            container.branch.as_deref(),
+            container.worktree_path.as_deref(),
+        ) else {
+            continue;
+        };
+        if !ordered_scopes.insert((audit.updated_at, scope.clone())) {
+            continue;
+        }
+        let mut ancestry = Vec::new();
+        current_canonical_work_item(source, work_event_root, &scope, None, Some(&mut ancestry))?;
+        validate_legacy_successor_edges(source, &ancestry, "legacy supersession event order")?;
+        let mut ordered = candidates
+            .iter()
+            .enumerate()
+            .filter(|(_, event)| {
+                event.updated_at == audit.updated_at
+                    && (event.is_successor_supersession() || event.kind == WorkEventKind::Start)
+                    && event.execution_container.as_ref().is_some_and(|container| {
+                        canonical_work_id(
+                            work_event_root,
+                            container.branch.as_deref(),
+                            container.worktree_path.as_deref(),
+                        )
+                        .as_deref()
+                            == Some(scope.as_str())
+                    })
+            })
+            .filter_map(|(index, event)| {
+                ancestry
+                    .iter()
+                    .position(|(child, parent)| {
+                        child == &event.work_item_id
+                            && event.related_work_item_id.as_deref() == Some(parent.as_str())
+                    })
+                    .map(|rank| (index, rank, event.clone()))
+            })
+            .collect::<Vec<_>>();
+        let indices = ordered
+            .iter()
+            .map(|(index, _, _)| *index)
+            .collect::<Vec<_>>();
+        ordered.sort_by_key(|(_, rank, _)| *rank);
+        for (index, (_, _, event)) in indices.into_iter().zip(ordered) {
+            candidates[index] = event;
+        }
+    }
+    Ok(())
+}
+
+/// A committed structural audit retires historical occupancy without assigning
+/// its launch Session to that history. The resolver has already validated the
+/// exact operation/receipt and holds the canonical and legacy state locks.
+fn validate_legacy_supersession_authority(
+    canonical: &WorkItemsProjection,
+    source: &WorkItemsProjection,
+    target: &WorkItem,
+    event: &WorkEvent,
+    work_event_root: &Path,
+) -> Result<()> {
+    let invalid = || {
+        GwtError::Other(format!(
+            "legacy supersession {} has conflicting structural lineage authority",
+            event.id,
+        ))
+    };
+    if !event.is_successor_supersession() {
+        return Err(invalid());
+    }
+    let parent_id = event.related_work_item_id.as_deref().ok_or_else(invalid)?;
+    let source_target =
+        unique_legacy_reconciliation_target(source, &event.work_item_id, "supersession source")?
+            .ok_or_else(invalid)?;
+    let source_parent =
+        unique_legacy_reconciliation_target(source, parent_id, "supersession source")?
+            .ok_or_else(invalid)?;
+    let canonical_parent =
+        unique_legacy_reconciliation_target(canonical, parent_id, "canonical WorkItems")?;
+    validate_legacy_reconciliation_snapshot_target(source, source_target, "supersession source")?;
+    validate_legacy_reconciliation_snapshot_target(source, source_parent, "supersession source")?;
+    let owners_match = |left: &WorkItem, right: &WorkItem| {
+        left.owner == right.owner
+            || can_upgrade_work_owner(left.owner.as_deref(), right.owner.as_deref())
+            || can_upgrade_work_owner(right.owner.as_deref(), left.owner.as_deref())
+    };
+    if !source_parent.is_terminal()
+        || !source_target.is_terminal()
+        || !unique_legacy_reconciliation_event(source, event, "supersession source")?
+        || !owners_match(target, source_target)
+        || canonical_parent
+            .is_some_and(|parent| !parent.is_terminal() || !owners_match(parent, source_parent))
+    {
+        return Err(invalid());
+    }
+    let container = event.execution_container.as_ref().ok_or_else(invalid)?;
+    if !session_bound_paths_match(container.worktree_path.as_deref(), Some(work_event_root))? {
+        return Err(invalid());
+    }
+    let scope = canonical_work_id(
+        work_event_root,
+        container.branch.as_deref(),
+        Some(work_event_root),
+    )
+    .ok_or_else(invalid)?;
+    let container_matches = |container: &WorkspaceExecutionContainerRef| {
+        canonical_work_id(
+            work_event_root,
+            container.branch.as_deref(),
+            container.worktree_path.as_deref(),
+        )
+        .as_deref()
+            == Some(scope.as_str())
+    };
+    if workspace_group_key_for_item(work_event_root, source_parent) != scope
+        && !source_parent
+            .events
+            .iter()
+            .filter_map(|event| event.execution_container.as_ref())
+            .any(container_matches)
+    {
+        return Err(invalid());
+    }
+    for item in [
+        Some(target),
+        Some(source_target),
+        Some(source_parent),
+        canonical_parent,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if item
+            .execution_containers
+            .iter()
+            .chain(
+                item.events
+                    .iter()
+                    .filter_map(|event| event.execution_container.as_ref()),
+            )
+            .chain(
+                item.duplicate_event_containers
+                    .values()
+                    .flatten()
+                    .filter_map(|provenance| provenance.container()),
+            )
+            .any(|container| !container_matches(container))
+        {
+            return Err(invalid());
+        }
+    }
+    for item in [target, source_target] {
+        if item
+            .related_work_item_ids
+            .iter()
+            .map(String::as_str)
+            .chain(
+                item.events
+                    .iter()
+                    .filter_map(|event| event.related_work_item_id.as_deref()),
+            )
+            .chain(
+                item.duplicate_event_containers
+                    .values()
+                    .flatten()
+                    .filter_map(|provenance| provenance.event())
+                    .filter_map(|event| event.related_work_item_id.as_deref()),
+            )
+            .any(|parent| parent != parent_id)
+        {
+            return Err(invalid());
+        }
+    }
+    Ok(())
+}
+
+/// Recover only the independently stored terminal prefix needed by this
+/// audit. Existing canonical history remains authoritative and is not replaced.
+fn materialize_legacy_supersession_ancestors(
+    canonical: &mut WorkItemsProjection,
+    source: &WorkItemsProjection,
+    event: &WorkEvent,
+    work_event_root: &Path,
+) -> Result<bool> {
+    let context = "legacy supersession predecessor recovery";
+    let invalid = || {
+        GwtError::Other(format!(
+            "{context} has conflicting source/canonical lineage"
+        ))
+    };
+    let parent = event.related_work_item_id.as_deref().ok_or_else(invalid)?;
+    let container = event.execution_container.as_ref().ok_or_else(invalid)?;
+    let scope = canonical_work_id(
+        work_event_root,
+        container.branch.as_deref(),
+        Some(work_event_root),
+    )
+    .ok_or_else(invalid)?;
+    // Removing the audit's child bounds this existing selector to the prefix;
+    // it does not remove anything from either durable projection.
+    let mut source_prefix = source.clone();
+    source_prefix
+        .work_items
+        .retain(|item| item.id != event.work_item_id);
+    let mut source_edges = Vec::new();
+    let selected = current_canonical_work_item(
+        &source_prefix,
+        work_event_root,
+        &scope,
+        None,
+        Some(&mut source_edges),
+    )?;
+    if !selected.is_some_and(|item| item.id == parent)
+        && !source_edges.iter().any(|(child, _)| child == parent)
+    {
+        return Err(invalid());
+    }
+    validate_legacy_successor_edges(&source_prefix, &source_edges, context)?;
+    let ids = source_edges
+        .iter()
+        .flat_map(|(child, parent)| [child.as_str(), parent.as_str()])
+        .chain(std::iter::once(parent))
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut merged = canonical.clone();
+    let mut changed = false;
+    for id in ids {
+        let snapshot = unique_legacy_reconciliation_target(&source_prefix, id, context)?
+            .ok_or_else(invalid)?;
+        validate_legacy_reconciliation_snapshot_target(&source_prefix, snapshot, context)?;
+        let existing = unique_legacy_reconciliation_target(canonical, id, context)?;
+        if !snapshot.is_terminal()
+            || existing.is_some_and(|item| {
+                !item.is_terminal()
+                    || !(item.owner == snapshot.owner
+                        || can_upgrade_work_owner(item.owner.as_deref(), snapshot.owner.as_deref())
+                        || can_upgrade_work_owner(snapshot.owner.as_deref(), item.owner.as_deref()))
+            })
+        {
+            return Err(invalid());
+        }
+        for item in [Some(snapshot), existing].into_iter().flatten() {
+            if item
+                .execution_containers
+                .iter()
+                .chain(
+                    item.events
+                        .iter()
+                        .filter_map(|event| event.execution_container.as_ref()),
+                )
+                .chain(
+                    item.duplicate_event_containers
+                        .values()
+                        .flatten()
+                        .filter_map(|provenance| provenance.container()),
+                )
+                .any(|container| {
+                    canonical_work_id(
+                        work_event_root,
+                        container.branch.as_deref(),
+                        container.worktree_path.as_deref(),
+                    )
+                    .as_deref()
+                        != Some(scope.as_str())
+                })
+            {
+                return Err(invalid());
+            }
+        }
+        if existing.is_none() {
+            validate_legacy_reconciliation_snapshot_insert(&merged, snapshot, context)?;
+            merged.work_items.push(snapshot.clone());
+            changed = true;
+        }
+    }
+    let mut merged_edges = Vec::new();
+    let selected = current_canonical_work_item(
+        &merged,
+        work_event_root,
+        &scope,
+        None,
+        Some(&mut merged_edges),
+    )?;
+    if !selected.is_some_and(|item| item.id == parent)
+        && !merged_edges
+            .iter()
+            .any(|(child, ancestor)| child == parent || ancestor == parent)
+    {
+        return Err(invalid());
+    }
+    if source_edges.iter().any(|edge| !merged_edges.contains(edge)) {
+        return Err(invalid());
+    }
+    validate_legacy_successor_edges(&merged, &source_edges, context)?;
+    if changed {
+        *canonical = merged;
+    }
+    Ok(changed)
 }
 
 fn validate_legacy_reconciliation_target_local_authority(
@@ -1669,7 +2063,7 @@ fn validate_legacy_reconciliation_assigned_targets(
             context,
             true,
         )?;
-        validate_session_bound_work_authority_uniqueness(
+        validate_legacy_reconciliation_authority_uniqueness(
             work_items,
             work_id,
             session_id,
@@ -1677,6 +2071,98 @@ fn validate_legacy_reconciliation_assigned_targets(
             work_event_root,
             context,
         )?;
+    }
+    Ok(())
+}
+
+/// Keep the strict competing-authority check, excluding only the terminal
+/// ancestry already proven by the normal canonical successor selector.
+fn validate_legacy_reconciliation_authority_uniqueness(
+    work_items: &WorkItemsProjection,
+    target_work_id: &str,
+    session_id: &str,
+    branch_identity: &str,
+    worktree_identity: &Path,
+    context: &str,
+) -> Result<()> {
+    let mut ancestry = Vec::new();
+    let target = unique_legacy_reconciliation_target(work_items, target_work_id, context)?;
+    let current = canonical_work_id(
+        worktree_identity,
+        Some(branch_identity),
+        Some(worktree_identity),
+    )
+    .and_then(|scope| {
+        current_canonical_work_item(
+            work_items,
+            worktree_identity,
+            &scope,
+            target.and_then(|target| target.owner.as_deref()),
+            Some(&mut ancestry),
+        )
+        .ok()
+        .flatten()
+    });
+    let audited = ancestry.iter().any(|(id, _)| {
+        work_items
+            .work_items
+            .iter()
+            .find(|item| &item.id == id)
+            .is_some_and(|item| item.events.iter().any(WorkEvent::is_successor_supersession))
+    });
+    let competing = if current.is_some_and(|current| current.id == target_work_id) && audited {
+        validate_legacy_successor_edges(work_items, &ancestry, context)?;
+        let mut competing = work_items.clone();
+        competing.work_items.retain(|item| {
+            !ancestry.iter().any(|(_, parent)| parent == &item.id)
+                || item
+                    .agents
+                    .iter()
+                    .any(|agent| agent.session_id == session_id)
+        });
+        Some(competing)
+    } else {
+        None
+    };
+    validate_session_bound_work_authority_uniqueness(
+        competing.as_ref().unwrap_or(work_items),
+        target_work_id,
+        session_id,
+        branch_identity,
+        worktree_identity,
+        context,
+    )
+}
+
+fn validate_legacy_successor_edges(
+    work_items: &WorkItemsProjection,
+    ancestry: &[(String, String)],
+    context: &str,
+) -> Result<()> {
+    for (child, parent) in ancestry {
+        let child = unique_legacy_reconciliation_target(work_items, child, context)?
+            .ok_or_else(|| GwtError::Other(format!("{context} successor is missing")))?;
+        let parent_item = unique_legacy_reconciliation_target(work_items, parent, context)?
+            .ok_or_else(|| GwtError::Other(format!("{context} predecessor is missing")))?;
+        if !parent_item.is_terminal()
+            || child.related_work_item_ids.iter().any(|id| id != parent)
+            || child
+                .events
+                .iter()
+                .filter_map(|event| event.related_work_item_id.as_deref())
+                .any(|id| id != parent)
+            || child
+                .duplicate_event_containers
+                .values()
+                .flatten()
+                .filter_map(|provenance| provenance.event())
+                .filter_map(|event| event.related_work_item_id.as_deref())
+                .any(|id| id != parent)
+        {
+            return Err(GwtError::Other(format!(
+                "{context} successor lineage is contradictory"
+            )));
+        }
     }
     Ok(())
 }
@@ -6959,7 +7445,7 @@ pub fn current_work_id_for_launch(
         return Ok(None);
     };
     Ok(Some(
-        current_canonical_work_item(projection, project_root, &canonical_id, launch_owner)?
+        current_canonical_work_item(projection, project_root, &canonical_id, launch_owner, None)?
             .map(|item| item.id.clone())
             .unwrap_or(canonical_id),
     ))
@@ -6970,6 +7456,7 @@ fn current_canonical_work_item<'a>(
     project_root: &Path,
     canonical_id: &str,
     launch_owner: Option<&str>,
+    mut ancestry: Option<&mut Vec<(String, String)>>,
 ) -> Result<Option<&'a WorkItem>> {
     let Some(mut current) = projection
         .work_items
@@ -7086,6 +7573,9 @@ fn current_canonical_work_item<'a>(
         {
             break;
         }
+        if let Some(ancestry) = ancestry.as_mut() {
+            ancestry.push((successor.id.clone(), current.id.clone()));
+        }
         current = successor;
         if launch_owner.is_some() || successor.owner.is_some() || owner_anchor.is_none() {
             authoritative = successor;
@@ -7111,7 +7601,7 @@ pub fn find_work_item_for_container<'a>(
     let branch = branch.map(str::trim).filter(|value| !value.is_empty());
     let canonical_id = canonical_work_id(project_root, branch, worktree_path);
     if let Some(current) = canonical_id.as_deref().and_then(|id| {
-        current_canonical_work_item(projection, project_root, id, None)
+        current_canonical_work_item(projection, project_root, id, None, None)
             .ok()
             .flatten()
     }) {
@@ -7142,6 +7632,7 @@ pub fn find_work_item_for_container<'a>(
         projection,
         project_root,
         &workspace_group_key_for_item(project_root, matched),
+        None,
         None,
     )
     .ok()

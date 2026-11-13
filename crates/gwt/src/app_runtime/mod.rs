@@ -693,7 +693,7 @@ pub struct WindowRuntime {
     pub(crate) input_observation: Option<gwt::project_runtime::events::OwnerInputObservation>,
     pub(crate) last_human_input_at: Option<Instant>,
     pub(crate) input_in_flight: Option<(u64, uuid::Uuid)>,
-    input_in_flight_reply: Option<ClientId>,
+    input_in_flight_reply: Option<(ClientId, Option<u64>)>,
     pub(crate) pending_input_commands: std::collections::VecDeque<(
         gwt::project_runtime::events::OwnerCommand,
         RemoteRuntimeCommandKind,
@@ -815,7 +815,10 @@ struct PendingRemoteRuntimeCommand {
 
 #[derive(Debug, Clone)]
 pub(crate) enum RemoteRuntimeCommandKind {
-    Input { reply_client: Option<ClientId> },
+    Input {
+        reply_client: Option<ClientId>,
+        request_id: Option<u64>,
+    },
     Resize,
     Stop,
 }
@@ -12324,6 +12327,7 @@ impl AppRuntime {
                 id,
                 request_id,
                 task_id,
+                task_key,
                 receipt_operation_id,
             } => self.pm_request_task_events(
                 context,
@@ -12332,6 +12336,7 @@ impl AppRuntime {
                 request_id,
                 pm_chat::PmRequestTaskOperation::Read {
                     task_id,
+                    task_key,
                     receipt_operation_id,
                 },
             ),
@@ -12380,9 +12385,11 @@ impl AppRuntime {
                 pm_chat::PmRequestTaskOperation::Complete(request),
             ),
             FrontendEvent::PaneName { .. } => Vec::new(),
-            FrontendEvent::PaneSendInput { session_id, text } => {
-                self.pane_send_input_events(client_id, &session_id, &text)
-            }
+            FrontendEvent::PaneSendInput {
+                session_id,
+                text,
+                request_id,
+            } => self.pane_send_input_events(client_id, &session_id, &text, request_id),
             FrontendEvent::PmPaneSendInput {
                 operation_id,
                 window_id,
@@ -13449,13 +13456,19 @@ impl AppRuntime {
             .collect()
     }
 
+    /// SPEC #5016 AC-HS1 derived-state definition, kept in this one place:
+    /// RUN is a working or launching agent; BLOCK is every agent that needs the
+    /// operator, including stopped, interrupted and errored panes; IDLE waits for
+    /// new work; ERROR is the subset of BLOCK whose runtime failed.
     fn aggregate_counts(
         statuses: &HashMap<String, WindowProcessStatus>,
     ) -> gwt::protocol::ProjectAgentAggregate {
         let mut aggregate = gwt::protocol::ProjectAgentAggregate::default();
         for status in statuses.values() {
             match status {
-                WindowProcessStatus::Running => aggregate.running_count += 1,
+                WindowProcessStatus::Running | WindowProcessStatus::Starting => {
+                    aggregate.running_count += 1
+                }
                 WindowProcessStatus::Waiting
                 | WindowProcessStatus::Stopped
                 | WindowProcessStatus::Interrupted => aggregate.block_count += 1,
@@ -13463,7 +13476,7 @@ impl AppRuntime {
                     aggregate.block_count += 1;
                     aggregate.error_count += 1;
                 }
-                WindowProcessStatus::Idle | WindowProcessStatus::Starting => {}
+                WindowProcessStatus::Idle => aggregate.idle_count += 1,
             }
         }
         aggregate
@@ -16305,18 +16318,35 @@ impl AppRuntime {
                     {
                         return Vec::new();
                     }
-                    let pm_root = self
-                        .project_state_mut(&context)
-                        .and_then(|state| state.pending_pm_launches.remove(&window_id));
-                    let pm_cache_changed = match (pm_root, snapshot.pm_registration.as_ref()) {
-                        (Some(root), Some(registration))
-                            if root == context.project_root
+                    let latest_pm_launch = self.project_state_mut(&context).is_some_and(|state| {
+                        state.pending_pm_launches.remove(&window_id);
+                        !state
+                            .pending_pm_launches
+                            .values()
+                            .any(|root| root == &context.project_root)
+                    });
+                    // Cold restore may finish outside ensure's marking interval.
+                    // Trust its registration only while it is still durable;
+                    // a newer PM may have completed since this snapshot was read.
+                    let pm_cache_changed = match snapshot.pm_registration.as_ref() {
+                        Some(registration)
+                            if latest_pm_launch
                                 && snapshot.session_id.as_deref()
-                                    == Some(registration.session_id.as_str()) =>
+                                    == Some(registration.session_id.as_str())
+                                && gwt::pm_registry::load_pm_prefs(
+                                    &gwt::pm_registry::pm_prefs_path_for_repo_path(
+                                        &context.project_root,
+                                    ),
+                                )
+                                .ok()
+                                .and_then(|prefs| prefs.registration)
+                                .is_some_and(|current| {
+                                    current.session_id == registration.session_id
+                                }) =>
                         {
-                            let changed =
-                                self.pm_session_for_root(&root) != Some(&registration.session_id);
-                            self.sync_pm_session_cache(&root, Some(registration));
+                            let changed = self.pm_session_for_root(&context.project_root)
+                                != Some(&registration.session_id);
+                            self.sync_pm_session_cache(&context.project_root, Some(registration));
                             changed
                         }
                         _ => false,

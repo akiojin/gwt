@@ -28,5 +28,6 @@ pub use limit_notice::{
 };
 pub use snapshot_store::{ProviderUsageReading, ProviderUsageWindowReading};
 pub use types::{
-    ProviderUsage, SessionUsage, UsageProvider, UsageSnapshot, UsageState, UsageWindow, WindowKind,
+    CodexCredits, ProviderUsage, SessionUsage, UsageProvider, UsageSnapshot, UsageState,
+    UsageWindow, WindowKind,
 };

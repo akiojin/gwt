@@ -1,5 +1,19 @@
 import { createUiStateStore } from "./ui-state-store.js";
 
+const count = (value) => (Number.isInteger(value) && value >= 0 ? value : 0);
+
+// SPEC 5016 AC-HS1: the single projection of the server aggregate. The tab
+// title, the status strip and the Works heading read only this value; no
+// surface recounts agents from its own input.
+export function projectAgentSummary(aggregate = {}) {
+  return Object.freeze({
+    running: count(aggregate?.running_count),
+    block: count(aggregate?.block_count),
+    idle: count(aggregate?.idle_count),
+    error: count(aggregate?.error_count),
+  });
+}
+
 // Metadata is a projection of the server aggregate, including off-screen windows.
 export function createProjectPageMetadata({
   document: documentRef = globalThis.document,
@@ -9,7 +23,8 @@ export function createProjectPageMetadata({
   scheduleFrame,
 } = {}) {
   let name = "Project";
-  const model = createUiStateStore({ running_count: 0, block_count: 0, error_count: 0, unread: false }, { scheduleFrame });
+  const model = createUiStateStore({ running_count: 0, block_count: 0, idle_count: 0, error_count: 0, unread: false }, { scheduleFrame });
+  const summary = createUiStateStore(projectAgentSummary(model.read()), { scheduleFrame });
   let latestRevision = -1;
   let attentionSyncPending = false;
   function render() {
@@ -18,7 +33,8 @@ export function createProjectPageMetadata({
       try { documentRef.querySelector('link[rel="icon"]')?.setAttribute("href", "data:,"); } catch { /* optional favicon */ }
       return;
     }
-    const { running_count: running = 0, block_count: blocked = 0, error_count: errors = 0, unread = false } = model.read();
+    const { unread = false } = model.read();
+    const { running, block: blocked, error: errors } = summary.read();
     documentRef.title = `${unread ? "● " : ""}${name} — RUN ${running} · BLOCK ${blocked} — gwt`;
     try {
       let icon = documentRef.querySelector('link[rel="icon"]');
@@ -62,6 +78,8 @@ export function createProjectPageMetadata({
     if (!value || value.revision < latestRevision) return;
     latestRevision = value.revision;
     model.update(() => value);
+    const next = projectAgentSummary(value);
+    summary.update(previous => (["running", "block", "idle", "error"].every(key => previous[key] === next[key]) ? previous : next));
   }
   function resetConnection() {
     latestRevision = -1;
@@ -96,5 +114,5 @@ export function createProjectPageMetadata({
     }
     acknowledge();
   });
-  return { setProjectName, update, resetConnection, reportAttention };
+  return { setProjectName, update, resetConnection, reportAttention, summary };
 }

@@ -18,6 +18,63 @@ User Verification Result: n/a (autonomous)
 
 Agent Visual Check: n/a (no UI surface)
 
+## 2026-11-12: independent review verdict 待ちの gate readback（サチ）
+
+fresh launch の HEAD / fetched `origin/develop` はともに
+`c65e99b9be8bc2c896623d45678f3185513d70a2`。PR #7088 の source と merge は
+base に含まれ、未配信 source は0だった。AC-1/3 の配信状態を保持し、
+残る AC-2/4/5 を現 base に対して再評価した。
+
+03:30〜03:40 JST（2026-11-11T18:30:00Z〜18:40:00Z）の完全な600秒区間を、
+既存 `gwt.log.2026-11-11` の JSON から `fields.kind=gh` / `phase=start` /
+`span.name=issue_monitor_scan` で集計した。gwt は210件（protection43、
+rollup38、head36、mergeability34、timeline14、issues17、open pulls3、
+closed pulls3、full PR view22）、unity-cli は112件、vr-cabin-exposure は5件。
+timeline の延べ完了は29 Issue、全回 `pending=true`。対象番号や cursor が
+未記録なので、これを重複読みと断定しない。
+
+これは installed v9.160.0 / GUI PID52136（2026-11-11T11:40:47Z 起動）の
+旧 runtime 観測である。分割 gate と毎回の protection 読みは配信済み
+PR #7058 の集約・cache を反映しておらず、PR #7088 も未ロード。
+この件数や、その一部を差し引いた推計を現 develop の性能証拠にはしない。
+
+現 source に残る根因は別に確認した。`Reviewing` の worker は
+branch protection と gate を取得した後、`autonomous_gate_inputs` が
+reviewed SHA / verdict 未着で `None` を返すと読み取りを破棄していた。
+CI hold は verdict 後にしか作られず、結果待ちの各 scan で再取得する。
+
+最小 Plan は、この既存のローカル readiness 条件を readback 前へ移すこと。
+新 cache / TTL 延長との比較では、新状態を加えず既存契約を保つ案を採用した。
+対象は `issue_monitor_worker.rs` と既存 worker fixture、本記録、Work shards。
+`Some(false)` は完成した拒否 verdict として従来の live gate へ通す。
+空文字 SHA の意味、CI hold、acceptance/head 比較、permission / effect /
+review authority、slot、deadline、UI、稼働 fleet は変更しない。
+
+受け入れは、既存 review-backoff fixture の待機区間を使う決定的な
+RED/GREEN、既存 gate/cache/worker 回帰、hygiene、fresh canonical pre-pr、
+必須 CI / coverage と通常の Ready Refs PR / auto-merge / develop 包含。
+readback budget を既に消費した時計を注入し、未着待機は readback を試みず、
+成功・拒否 verdict 後は従来の BranchProtection stage に戻ることを検証する。
+配備後の AC-2/4/5 は対応する実 fleet 計測まで未証明・unchecked を維持する。
+
+既存 review-backoff 1件と CI-wait 1件は変更前に成功。拡張 fixture は
+`BranchProtection: scan budget reserved for the launch stage` で RED となり、
+未着待ちでも readback に進むことを確認した。production の修正は5行。
+独立実差分レビューは阻害0で、verdict の受信・復旧はこの readback と独立し、
+空文字 SHA や完成した拒否 verdict の意味は変わらないことも確認した。
+
+GREEN は `cargo test -p gwt --lib issue_monitor_worker:: -- --test-threads=1`
+で98成功（既存の実環境用1 ignored）、`issue_monitor_gate::` で40成功。
+追加待機区間、CI hold/cache、review backoff、acceptance/head drift と
+拒否 verdict の routing が成功した。test hygiene は37成功（既存の
+baseline 再生成 helper 1 ignored）、fmt / diff check も成功。
+
+Acceptance Surface: non-user-facing (ordering of remote gate discovery only).
+
+User Verification Result: n/a (autonomous)
+
+Agent Visual Check: n/a (no UI surface)
+
 ## GUI の stale refresh 迂回（2026-11-10、次スライス）
 
 アヤ・ミウラ / Codex。開始時の fetch 後 HEAD と origin/develop はともに
@@ -437,6 +494,53 @@ GREENの`issue_4815_` 5件はPASS。保留2scanのHEAD個別取得は0回、
 3失敗時の停止・新HEADによる解除も維持した。実差分の独立レビューは阻害0。
 
 Acceptance Surface: non-user-facing (remote discovery/cache routing only)。
+
+User Verification Result: n/a (autonomous)
+
+Agent Visual Check: n/a (no UI surface)
+
+## 2026-11-12 タイムライン続きページの集約（FR-6877-7）
+
+### 計測（変更前、installed v9.161.1）
+
+macOS の GUI PID 8114（06:56 JST 起動）の `~/.gwt/logs/gwt.log.2026-11-12`
+を 10 分窓で集計した。gwt project の `issue_monitor_scan` 内 gh start は
+定常 30〜37 本で、20 本を上回る。12:40〜12:50 JST の内訳は
+`gh api graphql issue timelines` 20 本（約 30 秒の scan ごとに 1 本）、
+`gh api issues` 5 本、`gh pr view` 9 本、pulls 一覧 1 本だった。
+
+同日の incremental timeline readback 544 回はすべて `pending=true` で、
+完了 Issue 数 0 が 147 回あった。10 分あたりの完了は約 43 件で、
+Issue ごとの 600 秒 TTL が順に切れるため、backlog は空にならない。
+深い timeline（release PR が全 Issue を参照するため、#5390 は 208 件）
+の続きページは 1 alias の chunk として queue に戻り、1 回の呼出を占有していた。
+
+Issue の `updatedAt` を timeline cache の検証子に使う案は棄却した。
+Issue #5390 の `updatedAt` は 2026-11-11T03:39Z だったが、PR #7088 による
+cross-reference は同日 17:43Z に追加されていた。cross-reference は
+`updatedAt` を更新しない。
+
+### 変更と境界
+
+`LinkedPrBulkRead::read_next` は、部分的なページを後続の同種 chunk で
+alias 上限まで埋める。同種とは、続きページ同士、または初回ページ同士を指す。
+cursor、既読 cursor、途中の要約も一緒に移す。
+ページあたり 5 alias の上限、完全な履歴だけを公開する規則、不正 cursor の
+再始動、transport retry は維持する。#6954 の「失敗する続きページは
+初回ページを待たせない」も維持する。
+TTL、deadline、UI、launch/claim の権限は変更しない。
+
+### 検証
+
+RED: `issue_6877_linked_pr_bulk_read_packs_continuations_into_one_page` は
+変更前に呼出 4 回（期待 3 回）で失敗した。後続 scan の初回ページを挟む形に
+拡張後の期待値は 4 回で、変更前は 5 回になる。GREEN: `linked_pr` 20 件、
+`issue_monitor_worker::` を含む 117 件が PASS した。
+`cargo clippy -p gwt --all-targets --all-features -- -D warnings` も PASS した。
+
+期待効果は timeline 呼出の約 20 本 → 約 11 本 / 600 秒で、配備後の
+実測ではない。AC-2（合計 20 本以下）は本スライスだけでは満たさない見込みで、
+未チェックのまま残す。AC-4/5（CPU）も未計測である。
 
 User Verification Result: n/a (autonomous)
 
