@@ -4226,6 +4226,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         if (!view) return;
         view.unsubscribe();
         view.unsubscribeLog?.();
+        view.unsubscribeHumanAttention?.();
         view.controller.dispose();
         applyPmDecisions(windowId, null);
         applyPmReviewAttention(windowId, null);
@@ -4308,6 +4309,9 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         view.unsubscribeLog = notificationCenter.subscribe(state => state.rows, rows => {
           view.controller.receiveLog(logGroupsFromHistoryRows(rows));
         });
+        // SPEC #5016 HSF: Live facts shows the strip's needs_human value.
+        view.unsubscribeHumanAttention = issueMonitorModel.subscribe(model => model.humanAttention.count,
+          count => view.controller.receiveHumanAttention(count));
         bindPmWindowState(windowData.id, windowData.session_id);
         view.unsubscribe = subscribePmWindowState(state => state.windows[windowData.id], state => {
           view.controller.update(state);

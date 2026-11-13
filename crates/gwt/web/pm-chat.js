@@ -261,6 +261,8 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   let draftSend = null;
   let publishedWaiting;
   let publishedReviews;
+  // SPEC #5016 HSF: the shared needs_human value the status strip reads.
+  let humanAttention = null;
   const taskRows = new Map();
   let digest = '';
   let currentDigest;
@@ -509,6 +511,11 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
         lastActivityAt: item.last_activity_at ?? null,
       })) : null,
     });
+  }
+  function receiveHumanAttention(count) {
+    if (disposed) return;
+    humanAttention = Number.isFinite(count) ? count : null;
+    renderCurrent(latestState?.current);
   }
   function receiveLog(groups) {
     if (disposed) return;
@@ -954,7 +961,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     submitDraft(event);
   }
   function renderCurrent(current) {
-    const nextDigest = JSON.stringify(current ? [current.status, current.facts, current.stale_minutes] : null);
+    const nextDigest = JSON.stringify(current ? [current.status, current.facts, current.stale_minutes, humanAttention] : null);
     if (currentDigest === nextDigest) return;
     currentDigest = nextDigest;
     const authored = element('section', 'pm-chat__current-authored');
@@ -1017,7 +1024,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
       }
       automatic.append(element('p', '', `Active windows: ${(facts.active_windows || []).length}${facts.inventory_incomplete ? ' (incomplete observation)' : ''}`), windows,
         element('p', '', `Queue head: ${facts.queue_head ? issueLabel(facts.queue_head) : facts.source === 'unavailable' ? 'Unknown' : 'None'}`),
-        element('p', '', `needs_human: ${facts.needs_human_count ?? 'Unknown'}`),
+        element('p', '', `needs_human: ${humanAttention ?? 'Unknown'}`),
         element('p', '', `Release: ${facts.release ? `#${facts.release.number} ${facts.release.title}` : facts.release_observed_at ? 'No active PR' : 'Unknown'}`),
         element('p', '', `Pending update: ${facts.pending_update ? `v${facts.pending_update}` : facts.update_known ? 'None' : 'Unknown'}`));
       if (facts.release_observed_at) {
@@ -1184,6 +1191,6 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   kindSelect.addEventListener('change', filterReports);
   update({ sessionId, revision: 0, reports: [], loaded: false });
   showHome();
-  return { update, setSession, showHome, showDecisions, showProgress, showChat, showTasks, showTaskLog, showReports, receiveLog, dispose,
+  return { update, setSession, showHome, showDecisions, showProgress, showChat, showTasks, showTaskLog, showReports, receiveLog, receiveHumanAttention, dispose,
     isChatVisible: () => !disposed && activeView === 'chat' };
 }

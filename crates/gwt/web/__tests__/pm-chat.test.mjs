@@ -438,7 +438,7 @@ test('Reports has a single scroll body and compact token-based history', async (
 });
 
 test('current card stays above history and distinguishes PM explanation from automatic facts', () => {
-  const { root, model, update } = fixture();
+  const { root, model, view, update } = fixture();
   const card = root.querySelector('[aria-label="PM status"]');
   assert.ok(card, 'current card exists before any PM post');
   assert.match(card.textContent, /No current status reported yet/);
@@ -452,6 +452,7 @@ test('current card stays above history and distinguishes PM explanation from aut
       release_observed_at: '2026-10-13T09:18:00Z', pending_update: '9.117.2', error: null },
   };
   const older = update([report()], null, current);
+  view.receiveHumanAttention(2);
   assert.equal(root.querySelector('.pm-chat__body').firstElementChild, card);
   assert.match(card.querySelector('[aria-label="PM notes"]').textContent, /Waiting.*v9.117.2/s);
   assert.equal(card.querySelector('[aria-label="PM notes"] time').getAttribute('datetime'), current.status.items[0].started_at);
@@ -483,6 +484,20 @@ test('current card marks unknown automatic data instead of claiming an empty fle
   assert.match(facts.textContent, /Issues unavailable/);
   assert.match(facts.textContent, /needs_human: Unknown/);
   assert.match(facts.textContent, /Release: Unknown/);
+});
+
+// SPEC #5016 HSF (AC-HS1/HS2): Live facts shows the shared needs_human
+// value the status strip reads, never its own count of the raw facts list.
+test('Live facts needs_human reads the shared attention count, not the facts field', () => {
+  const { root, view, update } = fixture();
+  update([], null, { status: null, facts: { source: 'daemon', active_windows: [], queue_head: null,
+    needs_human_count: 5, release: null, release_observed_at: null, pending_update: null, error: null } });
+  const facts = () => root.querySelector('[aria-label="Live facts"]').textContent;
+  assert.match(facts(), /needs_human: Unknown/, 'the raw facts count is not a second definition');
+  view.receiveHumanAttention(1);
+  assert.match(facts(), /needs_human: 1/);
+  view.receiveHumanAttention(null);
+  assert.match(facts(), /needs_human: Unknown/);
 });
 
 test('Reports renders shared Markdown, metadata and copy, with no input or submit surface', async () => {
