@@ -36,7 +36,11 @@ test("Codex partial-region history survives the real owner snapshot", async ({ p
       await sendLiveGwtEvent(page, { kind: "create_window", preset: "shell" });
       await expect.poll(async () => (await windows()).filter((window: any) => window.preset === "shell" && !before.has(window.id)).length).toBe(1);
       id = (await windows()).find((window: any) => window.preset === "shell" && !before.has(window.id)).id;
-      await expect.poll(text).toMatch(/[>$#%]\s*$/);
+      await sendLiveGwtEvent(page, { kind: "focus_window", id });
+      await expect.poll(async () => (await windows()).sort((a: any, b: any) => b.z_index - a.z_index)[0]?.id).toBe(id);
+      await page.reload();
+      await expect(page.locator(`.workspace-window[data-id="${id}"] .xterm-screen`)).toBeVisible();
+      await expect.poll(text, { timeout: 30_000 }).toMatch(/[>$#%]\s*$/);
       const rows = (await metrics()).rows;
       // Actual Codex 0.167.2 uses DECSTBM above its composer, then CRLF.
       // Feed that sequence through a real PTY and the production owner parser.
