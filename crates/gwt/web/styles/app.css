@@ -6498,7 +6498,18 @@ body.route-body {
   .issue-bridge-root .knowledge-state-filter button,
   .issue-bridge-root .knowledge-monitor-controls :is(button, input),
   .issue-bridge-root .knowledge-search,
-  .issue-bridge-root .workspace-toolbar-actions button { min-height: 44px; }
+  .issue-bridge-root .workspace-toolbar-actions button,
+  .issue-bridge-root .issue-queue-select,
+  .issue-bridge-root .knowledge-row-select,
+  .issue-bridge-root .knowledge-row-actions button,
+  .issue-bridge-root .knowledge-row-menu-item { min-height: 44px; }
+  .issue-bridge-root .knowledge-row-select { align-content: center; }
+  .issue-bridge-root .knowledge-row-menu > summary {
+    display: grid;
+    place-items: center;
+    min-width: 44px;
+    min-height: 44px;
+  }
   .issue-bridge-root .workspace-toolbar-main { flex-basis: 100%; grid-template-columns: minmax(0, 1fr) max-content; }
   .issue-bridge-root .issue-filter-hint { grid-column: 1 / -1; }
 }
