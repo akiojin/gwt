@@ -3846,7 +3846,12 @@ mod tests {
             start + chrono::Duration::seconds(1),
         );
         done.status_category = Some(WorkspaceStatusCategory::Done);
-        let close_bytes = format!("{}\n", serde_json::to_string(&done).unwrap());
+        let pause = WorkEvent::new(WorkEventKind::Pause, "closed-work", start);
+        let close_bytes = format!(
+            "{}\n{}\n",
+            serde_json::to_string(&pause).unwrap(),
+            serde_json::to_string(&done).unwrap()
+        );
         std::fs::write(&closes, &close_bytes).unwrap();
         assert!(ingest_project_work_events_paths(&repo, &works, &state).projection_rebuilt);
         let current = load_workspace_work_items_from_path(&works)
@@ -3855,7 +3860,7 @@ mod tests {
         assert!(current.work_items[0]
             .events
             .iter()
-            .all(|event| event.id != done.id));
+            .all(|event| event.id != pause.id));
         assert!(!ingest_project_work_events_paths(&repo, &works, &state).projection_rebuilt);
 
         let proof = works.with_extension("close-proofs.json");

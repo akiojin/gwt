@@ -630,7 +630,7 @@ struct CloseProofRepairAuthority {
     target: gwt_core::workspace_projection::SessionBoundWorkspaceTerminalTarget,
     work_id: String,
     assignment: gwt_core::workspace_projection::WorkspaceAgentSummary,
-    projected_done: bool,
+    retained_done: bool,
 }
 
 fn close_proof_repair_authority(
@@ -674,7 +674,9 @@ fn close_proof_repair_authority(
         target,
         work_id,
         assignment,
-        projected_done: item.status_category == WorkspaceStatusCategory::Done,
+        retained_done: item
+            .current_terminal_event()
+            .is_some_and(|event| event.kind == gwt_core::workspace_projection::WorkEventKind::Done),
     })
 }
 
@@ -744,7 +746,7 @@ pub(crate) fn close_proof_repair_needed_for_session(
     let session = load_session_for_mutation(session_id).map_err(classify_target_error)?;
     let observation = observe_agent_runtime(&session.worktree_path)?;
     let authority = close_proof_repair_authority(root, session_id, &observation)?;
-    if authority.projected_done {
+    if authority.retained_done {
         match gwt_core::workspace_projection::with_exact_workspace_done_read_only(
             &authority.target,
             &authority.work_id,
@@ -898,7 +900,7 @@ pub fn apply_bound_authenticated_workspace_close_proof_repair(
             mutation_error("close proof repair authority changed before publication")
         })
     };
-    let confirmation = authority.projected_done.then(|| {
+    let confirmation = authority.retained_done.then(|| {
         gwt_core::workspace_projection::with_exact_workspace_done_read_only(
             &authority.target,
             &authority.work_id,
@@ -7632,6 +7634,25 @@ mod tests {
                 shared.push(event);
             }
             save_mutation_work_items(repo, &items);
+            items = load_workspace_work_items_from_path(&works_path)
+                .unwrap()
+                .unwrap();
+            // Reproduce an older compactor: inline Done is gone, but its accepted
+            // sidecar proof still matches the persisted projection bytes.
+            items.work_items[0]
+                .events
+                .retain(|event| event.kind != gwt_core::workspace_projection::WorkEventKind::Done);
+            let legacy = serde_json::to_string_pretty(&items).unwrap();
+            let mut proofs: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&proof_path).unwrap()).unwrap();
+            proofs["snapshots"]
+                .as_array_mut()
+                .unwrap()
+                .last_mut()
+                .unwrap()["projection_hash"] =
+                gwt_core::work_events_intake::content_fingerprint(&legacy).into();
+            std::fs::write(&works_path, legacy).unwrap();
+            std::fs::write(&proof_path, serde_json::to_vec(&proofs).unwrap()).unwrap();
             std::fs::write(
                 gwt_core::paths::gwt_repo_local_work_events_path(repo),
                 shared
@@ -7646,6 +7667,24 @@ mod tests {
                 .work_items[0]
                 .current_terminal_event()
                 .is_none());
+            let target = resolve_authenticated_session_terminal_target(
+                repo,
+                &session.id,
+                &observe_agent_runtime(repo).unwrap(),
+            )
+            .unwrap();
+            gwt_core::workspace_projection::with_exact_workspace_done_read_only(
+                &target,
+                "work-primary-proof-repair",
+                || (),
+            )
+            .expect("the legacy close already has valid exact proof");
+            assert!(close_proof_repair_needed_for_session(
+                repo,
+                &session.id,
+                session.agent_session_id.as_deref(),
+            )
+            .expect("legacy terminal provenance also needs repair with valid proof"));
             std::fs::remove_file(&proof_path).unwrap();
             let close_before = std::fs::read(&closes_path).unwrap();
             let request = AgentWorkspaceCloseProofRepairRequest {
@@ -7757,9 +7796,10 @@ mod tests {
             assert_eq!(std::fs::read(&proof_path).unwrap(), proof_after);
             assert_eq!(std::fs::read(&closes_path).unwrap(), close_before);
 
-            let mut discarded = load_workspace_work_items_from_path(&works_path)
+            let repaired = load_workspace_work_items_from_path(&works_path)
                 .unwrap()
                 .unwrap();
+            let mut discarded = repaired.clone();
             discarded.work_items[0].status_category = WorkspaceStatusCategory::Active;
             discarded.work_items[0].discarded = true;
             discarded.work_items[0].discarded_at = Some(done_at);
@@ -7773,6 +7813,29 @@ mod tests {
                 ExecutionBindingAuthoritySnapshot::capture(repo, repo, &session.id)
             );
             assert_eq!(std::fs::read(&proof_path).unwrap(), discarded_proof);
+            assert_eq!(std::fs::read(&closes_path).unwrap(), close_before);
+            save_mutation_work_items(repo, &repaired);
+            let close: WorkEvent = serde_json::from_slice(&close_before).unwrap();
+            apply_authenticated_workspace_reopen(
+                repo,
+                &session.id,
+                AgentWorkspaceReopenRequest {
+                    schema_version: AGENT_WORKSPACE_REOPEN_SCHEMA_VERSION,
+                    claimed_session_id: session.id.clone(),
+                    observation: observe_agent_runtime(repo).unwrap(),
+                    primary_provider_session_id: session.agent_session_id.clone(),
+                    observed_done_event_id: close.id,
+                    reason: "continue after repairing compacted terminal history".into(),
+                },
+            )
+            .expect("proof repair must make same-session active recovery reachable");
+            apply_bound_authenticated_workspace_update(
+                repo,
+                &session.id,
+                &binding,
+                bound_workspace_update_request(&session),
+            )
+            .expect("the recovered primary can update active Work");
             assert_eq!(std::fs::read(&closes_path).unwrap(), close_before);
         });
     }

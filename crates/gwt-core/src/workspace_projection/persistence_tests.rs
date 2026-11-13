@@ -17065,7 +17065,7 @@ fn exact_close_confirmation_survives_compacted_done_and_prior_pauses() {
         assert!(item
             .events
             .iter()
-            .all(|event| event.kind == WorkEventKind::Update));
+            .any(|event| event.kind == WorkEventKind::Done));
         let works_before = fs::read(&works).unwrap();
         let closes_before = fs::read(&closes).unwrap();
         validate_exact_work_machine_local_close_events_read_only(item, &works, &closes)
@@ -17110,6 +17110,22 @@ impl CloseProofRepairFixture {
             }
         }
         save_workspace_work_items_projection_to_path(&works, &projection).unwrap();
+        if compacted {
+            // Model a projection compacted before current-close retention.
+            let mut legacy = load_workspace_work_items_from_path(&works)
+                .unwrap()
+                .unwrap();
+            legacy.work_items[0]
+                .events
+                .retain(|event| event.id != done.id);
+            let bytes = serde_json::to_vec_pretty(&legacy).unwrap();
+            let proof_path = workspace_close_projection_proofs_path(&works);
+            let mut proofs: CloseProjectionProofs =
+                serde_json::from_slice(&fs::read(&proof_path).unwrap()).unwrap();
+            proofs.snapshots.last_mut().unwrap().projection_hash = close_projection_hash(&bytes);
+            fs::write(&works, bytes).unwrap();
+            fs::write(&proof_path, serde_json::to_vec(&proofs).unwrap()).unwrap();
+        }
         append_workspace_work_events_to_path(&closes, std::slice::from_ref(&done)).unwrap();
         let content = shared
             .iter()
@@ -17446,9 +17462,15 @@ fn exact_close_projection_proof_refuses_missing_stale_and_unprojected_ids() {
     let now = Utc::now();
     let done = WorkEvent::new(WorkEventKind::Done, "proof-work", now);
     let mut full = WorkItemsProjection::empty(now);
+    let pause = WorkEvent::new(
+        WorkEventKind::Pause,
+        "proof-work",
+        now - chrono::Duration::seconds(1),
+    );
+    full.apply_event(pause.clone());
     full.apply_event(done.clone());
     save_workspace_work_items_projection_to_path(&works, &full).unwrap();
-    append_workspace_work_events_to_path(&closes, std::slice::from_ref(&done)).unwrap();
+    append_workspace_work_events_to_path(&closes, &[pause, done.clone()]).unwrap();
     let proof_path = workspace_close_projection_proofs_path(&works);
     fs::remove_file(&proof_path).unwrap();
     let inline_bytes = fs::read(&works).unwrap();

@@ -3322,6 +3322,12 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2026, 11, 8, 7, 0, 0).unwrap();
         let done = WorkEvent::new(WorkEventKind::Done, "proof-recovery", now);
         let mut full = WorkItemsProjection::empty(now);
+        let pause = WorkEvent::new(
+            WorkEventKind::Pause,
+            "proof-recovery",
+            now - chrono::Duration::seconds(1),
+        );
+        full.apply_event(pause.clone());
         full.apply_event(done.clone());
         for index in 1..=99 {
             full.apply_event(WorkEvent::new(
@@ -3331,7 +3337,15 @@ mod tests {
             ));
         }
         save_workspace_work_items_projection_to_path(&works, &full).unwrap();
-        std::fs::write(&closes, serde_json::to_vec(&done).unwrap()).unwrap();
+        std::fs::write(
+            &closes,
+            format!(
+                "{}\n{}",
+                serde_json::to_string(&pause).unwrap(),
+                serde_json::to_string(&done).unwrap()
+            ),
+        )
+        .unwrap();
         let proof = works.with_extension("close-proofs.json");
         std::fs::remove_file(&proof).unwrap();
         let before = std::fs::read(&works).unwrap();
