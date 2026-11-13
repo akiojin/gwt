@@ -5704,12 +5704,10 @@ format_version: Some(1),
         let home = tempfile::tempdir().expect("trusted store home");
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
-        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let url = format!(
-            "http://{}/internal/hook-live",
-            listener.local_addr().unwrap()
-        );
-        drop(listener);
+        // Reserve the port without listening so parallel servers cannot claim it.
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let url = format!("http://{}/internal/hook-live", socket.local_addr().unwrap());
         let (code, output, fixture) = run_start_action(Some(&url), Some("terminal-secret"), true);
         assert_eq!(code, 2, "{output}");
         let refusal: serde_json::Value = serde_json::from_str(output.trim()).unwrap();
