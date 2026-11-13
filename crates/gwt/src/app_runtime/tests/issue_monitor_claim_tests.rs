@@ -5877,6 +5877,76 @@ fn app_runtime_issue_monitor_reorder_persists_and_reorders_cached_inbox() {
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
+    // Issue #5083: both writers must preserve the most recently accepted order,
+    // including when the GUI was initialized before the CLI changed it.
+    let mut env = gwt::cli::TestEnv::new(repo.clone());
+    let assert_saved_order = |env: &mut gwt::cli::TestEnv, expected: &[u64]| {
+        env.stdout.clear();
+        assert_eq!(
+            gwt::cli::run(
+                env,
+                gwt::cli::CliCommand::Issue(gwt::cli::IssueCommand::MonitorStatus {
+                    project_root: Some(repo.clone()),
+                }),
+            )
+            .expect("read CLI monitor status"),
+            0
+        );
+        let status: serde_json::Value = serde_json::from_slice(&env.stdout).unwrap();
+        assert_eq!(status["priority_order"], serde_json::json!(expected));
+        let prefs =
+            gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo))
+                .expect("load Issues prefs");
+        assert_eq!(prefs.priority_order, expected);
+        assert_eq!(
+            prefs.terminal_queues[&gwt::process::current_hostname()]
+                .entries
+                .iter()
+                .map(|entry| entry.number)
+                .collect::<Vec<_>>(),
+            expected
+        );
+    };
+    assert_eq!(
+        gwt::cli::run(
+            &mut env,
+            gwt::cli::CliCommand::Issue(gwt::cli::IssueCommand::MonitorPrioritySet {
+                project_root: Some(repo.clone()),
+                expected_priority_order: None,
+                reason: None,
+                issue_numbers: vec![3167, 3165, 3166],
+            }),
+        )
+        .expect("CLI priority set"),
+        0
+    );
+    assert_saved_order(&mut env, &[3167, 3165, 3166]);
+
+    runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::IssueMonitorQueueMove {
+            issue_number: 3166,
+            position: 0,
+        },
+    );
+    assert_saved_order(&mut env, &[3166, 3167, 3165]);
+
+    assert_eq!(
+        gwt::cli::run(
+            &mut env,
+            gwt::cli::CliCommand::Issue(gwt::cli::IssueCommand::MonitorPriorityMove {
+                project_root: Some(repo.clone()),
+                expected_priority_order: None,
+                reason: None,
+                number: 3165,
+                position: gwt::cli::IssueMonitorPriorityPosition::Head,
+            }),
+        )
+        .expect("CLI priority move"),
+        0
+    );
+    assert_saved_order(&mut env, &[3165, 3166, 3167]);
+
     let events = runtime.handle_frontend_event(
         "client-1".to_string(),
         FrontendEvent::ReorderIssueMonitorIssues {
@@ -5893,10 +5963,7 @@ fn app_runtime_issue_monitor_reorder_persists_and_reorders_cached_inbox() {
         .expect("Issues inbox");
     let visible_numbers: Vec<u64> = inbox.iter().map(|item| item.issue.number).collect();
     assert_eq!(visible_numbers, vec![3167, 3165, 3166]);
-
-    let prefs = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo))
-        .expect("load Issues prefs");
-    assert_eq!(prefs.priority_order, vec![3167, 3165, 3166]);
+    assert_saved_order(&mut env, &[3167, 3165, 3166]);
 }
 
 #[test]
