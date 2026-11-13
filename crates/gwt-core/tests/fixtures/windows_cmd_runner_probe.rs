@@ -42,9 +42,9 @@ fn launch(command: &str, env: HashMap<String, String>, cwd: PathBuf, expected: &
         })
         .expect("spawn real ConPTY consumer"),
     );
-    // ConPTY waits for its startup cursor-position reply before running the client.
+    // The headless harness supplies the startup DSR reply that xterm sends in production.
     pty.write_input(b"\x1b[1;1R")
-        .expect("answer ConPTY startup query");
+        .expect("answer ConPTY cursor position query");
     let mut reader = pty.reader().expect("ConPTY reader");
     let (output_tx, output_rx) = mpsc::channel();
     thread::spawn(move || {
@@ -61,7 +61,7 @@ fn launch(command: &str, env: HashMap<String, String>, cwd: PathBuf, expected: &
     let status = exit_rx.recv_timeout(Duration::from_secs(30));
     if status.is_err() {
         let _ = pty.kill();
-        panic!("ConPTY child exceeded its watchdog");
+        panic!("ConPTY child exceeded its watchdog: {command}");
     }
     let success = status.unwrap().expect("ConPTY exit status").success();
     pty.release_descriptors();
@@ -171,6 +171,10 @@ fn main() {
         let outcome = measured.expect("health invokes its real probe");
         assert!(!outcome.timed_out, "{name}: {outcome:?}");
         assert_eq!(health.is_ok(), outcome.success, "{name}");
+        eprintln!(
+            "case={name} health={} exit={:?}; starting ConPTY",
+            outcome.success, outcome.exit_code
+        );
         let launched = launch(
             &command.display().to_string(),
             env.clone(),
