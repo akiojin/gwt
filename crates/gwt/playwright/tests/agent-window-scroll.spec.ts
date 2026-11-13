@@ -367,6 +367,46 @@ test.describe("Agent window touch scroll on a phone viewport", () => {
     expect(errors, "zero console/page errors").toEqual([]);
   });
 
+  // SPEC #6476 T-005k (AC-2): on Android Chrome the software keyboard only
+  // shrank the visual viewport and covered the terminal input row. The meta
+  // assertion guards interactive-widget=resizes-content, which makes the
+  // keyboard shrink the layout instead; desktop Chromium cannot raise a real
+  // keyboard, so the 520px resize checks the refit path that relies on it.
+  // IME composition is sent once, when committed.
+  test("software keyboard keeps the terminal input row visible and IME sends committed text", async ({ page }, info) => {
+    const errors = await openAgentsFixture(page, info.project.name);
+    expect(await page.locator("meta[name=viewport]").getAttribute("content"))
+      .toContain("interactive-widget=resizes-content");
+    const tile = agentTile(page, "agent-1");
+    await tile.locator(".xterm-screen").tap();
+    const focused = page.locator(".xterm-helper-textarea:focus");
+    await expect(focused).toHaveCount(1);
+    const before = (await terminalInputs(page, "agent-1")).length;
+    const cdp = await page.context().newCDPSession(page);
+    for (const text of ["n", "に", "にほ", "にほん"]) {
+      await cdp.send("Input.imeSetComposition", { text, selectionStart: text.length, selectionEnd: text.length });
+    }
+    await expect(page.locator(".xterm .composition-view.active")).toHaveText("にほん");
+    expect(await terminalInputs(page, "agent-1"), "nothing is sent while composing").toHaveLength(before);
+    await cdp.send("Input.insertText", { text: "日本" });
+    await expect.poll(async () => (await terminalInputs(page, "agent-1")).slice(before)).toEqual(["日本"]);
+
+    const gridRows = () => page.evaluate(() => window.__agentScrollFixture!.instance!.recordedSends
+      .filter(message => message.kind === "update_terminal_grid" && message.id === "agent-1").map(message => message.rows));
+    const rowsBefore = (await gridRows()).at(-1);
+    expect(rowsBefore, "the initial fit sent a grid").toEqual(expect.any(Number));
+    await page.setViewportSize({ width: 390, height: 520 });
+    await expect.poll(async () => (await gridRows()).at(-1), "the shrunken layout refits the PTY grid")
+      .toBeLessThan(rowsBefore);
+    const screen = (await tile.locator(".xterm-screen").boundingBox())!;
+    expect(screen.y + screen.height, "the input row stays above the keyboard").toBeLessThanOrEqual(520);
+    await expect(focused, "the keyboard stays up").toHaveCount(1);
+    await page.keyboard.press("Enter");
+    await expect.poll(async () => (await terminalInputs(page, "agent-1")).slice(before)).toEqual(["日本", "\r"]);
+    await page.screenshot({ path: info.outputPath("soft-keyboard-520.png") });
+    expect(errors, "zero console/page errors").toEqual([]);
+  });
+
   test("swipe sends PageUp/PageDown to a fullscreen agent that does not track the mouse", async ({ page }, info) => {
     const errors = await openAgentsFixture(page, info.project.name);
     await setActiveAgentTab(page, "agent-2");
