@@ -1098,7 +1098,7 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
         await expect(main).toHaveAttribute("data-surface", surface);
         if (surface === "pm") {
           const header = main.locator('.workspace-window[data-pm="true"]');
-          await expect(header.locator(".title-text")).toHaveText(pmName);
+          await expect(header.locator(".title-text")).toHaveText(`Project Manager · ${pmName} — Starting`);
           await expect(header.locator(".window-role-badge")).toHaveText("PM");
         } else if (surface === "agents") {
           await expect(main.locator(".roster-pm-identity .roster-pm-name")).toHaveText(pmName);
