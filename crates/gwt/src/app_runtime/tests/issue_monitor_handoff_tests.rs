@@ -31,6 +31,10 @@ fn issue_3852_stop_close_requeue_launch_now_materializes_an_active_successor() {
             missing_verification: None,
         },
     );
+    // The Monitor's health probe and this runtime must use the same profile.
+    let settings =
+        Settings::load_from_path(fixture.runtime.profile_config_path.as_deref().unwrap()).unwrap();
+    write_profile_config(&gwt_core::paths::gwt_config_path(), &settings);
     let raw_id = fixture.runtime.tabs[0]
         .workspace
         .add_window(WindowPreset::Agent)
@@ -3842,6 +3846,32 @@ fn app_runtime_answered_handoff_exact_resume_retains_autonomous_context() {
     close_test_owner_runtime(&mut fixture.runtime, &window_id);
 }
 
+fn assert_installed_resume_command(session: &gwt_agent::Session, installed_cli: &std::path::Path) {
+    // This fixture has no host-shell override: even on Windows, the Session
+    // retains the direct CLI path before the PTY wraps its .cmd entrypoint.
+    assert_eq!(
+        std::path::Path::new(&session.launch_command),
+        installed_cli,
+        "exact Resume must use the installed fixture CLI"
+    );
+}
+
+#[test]
+#[should_panic(expected = "exact Resume must use the installed fixture CLI")]
+fn installed_resume_command_rejects_cli_path_in_unrelated_arguments() {
+    let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let installed_cli = temp.path().join("codex.cmd");
+    let mut session = gwt_agent::Session::new(temp.path(), "develop", gwt_agent::AgentId::Codex);
+    session.launch_command = "unrelated-command".to_string();
+    session.launch_args = vec![format!(
+        "--description=do not run {}",
+        installed_cli.display()
+    )];
+
+    assert_installed_resume_command(&session, &installed_cli);
+}
+
 /// SPEC-1921 L1a: a saved version cannot select a package runner on exact Resume.
 /// An installed fixture CLI succeeds without a package-runner sandbox pin.
 #[test]
@@ -3893,15 +3923,7 @@ fn monitor_legacy_version_resumes_installed_without_pinned_package_runners() {
         gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
     );
     let session = pane.session.as_ref().unwrap();
-    let installed_cli = installed_cli.to_string_lossy();
-    assert!(
-        session.launch_command == installed_cli
-            || session
-                .launch_args
-                .iter()
-                .any(|arg| arg.contains(installed_cli.as_ref())),
-        "exact Resume must use the installed fixture CLI"
-    );
+    assert_installed_resume_command(session, &installed_cli);
     assert!(
         !session
             .launch_args
@@ -4562,6 +4584,29 @@ fn app_runtime_monitor_fresh_required_delivery_skips_resumable_session() {
     let pane = pane.unwrap();
     assert_owner_monitor_fresh_successor(&pane, &fixture);
     authenticate_monitor_owner_readiness(&owner, &pane);
+    let projection =
+        gwt_core::workspace_projection::load_workspace_projection(&fixture.project_root)
+            .expect("SPEC Monitor Current projection")
+            .expect("Current");
+    assert_eq!(projection.owner.as_deref(), Some("SPEC-3165"));
+    let session_id = &pane.session.as_ref().expect("fresh SPEC Session").id;
+    let works = gwt_core::workspace_projection::load_workspace_work_items(&fixture.project_root)
+        .expect("SPEC Monitor WorkItems")
+        .expect("WorkItems");
+    let work = works
+        .work_items
+        .iter()
+        .find(|item| {
+            item.agents
+                .iter()
+                .any(|agent| &agent.session_id == session_id)
+        })
+        .expect("the authenticated Monitor Session's Work");
+    assert_eq!(
+        work.owner.as_deref(),
+        Some("SPEC-3165"),
+        "SPEC Monitor delivery must persist the canonical Work owner"
+    );
     close_test_owner_runtime(&mut fixture.runtime, &window_id);
 }
 
@@ -6407,7 +6452,6 @@ fn app_runtime_monitor_quota_hold_clear_resumes_the_same_conversation() {
     for exit_code in [0, 1] {
         let temp = tempdir().unwrap();
         let _home = ScopedGwtHome::set(temp.path());
-        let (root, owner, _) = owner_monitor_fixture(temp.path(), 3165, false, &["codex"]);
         let runner = write_fake_codex(temp.path());
         #[cfg(unix)]
         fs::write(&runner, format!("#!/bin/sh\ncase \"$*\" in *--version*) printf '1.2.3\\n'; exit 0;; *'features list'*) exit 0;; esac\nprintf 'quota-fixture-ready\\n'\nread value\nprintf '%s\\n' \"{}\"\nexit {exit_code}\n", CODEX_USAGE_LIMIT_SCREEN)).unwrap();
@@ -6443,6 +6487,8 @@ fn app_runtime_monitor_quota_hold_clear_resumes_the_same_conversation() {
         };
         pin_launch_agents(&mut settings, temp.path());
         write_profile_config(&profile, &settings);
+        // The fixture performs its first schedule scan during initialization.
+        let (root, owner, _) = owner_monitor_fixture(temp.path(), 3165, false, &["codex"]);
         let mut selected = super::pane_control_tests::control_launch_config(&root, 3165);
         run_git(
             selected.working_dir.as_ref().unwrap(),

@@ -753,7 +753,9 @@ fn real_warm_search_finishes_during_background_build_and_build_resumes() {
     let search_key = TargetKey::search(&harness.repo_hash, Some(&harness.worktree_hash));
     let baseline = request_owner(JobPriority::ManualRebuild);
     let heavy = baseline.acquire_heavy(Duration::from_secs(30)).unwrap();
-    invoke("index-files", &build_args);
+    // Keep setup in a one-shot process so the measured background worker starts cold.
+    let baseline_args = [build_args.as_slice(), &["--qos", "interactive"]].concat();
+    invoke("index-files", &baseline_args);
     drop(heavy);
     baseline.complete(JobOutcome::Completed).unwrap();
     let lease = coordinator
@@ -784,13 +786,17 @@ fn real_warm_search_finishes_during_background_build_and_build_resumes() {
         .collect();
     let child = harness.spawn("index-files", &background_args);
     let warming_started = Instant::now();
-    let (background, lease_wait_ms, warm_search_ms, background_warming_ms) =
+    let (background, _background_worker, lease_wait_ms, warm_search_ms, background_warming_ms) =
         std::thread::scope(|scope| {
             let background = scope.spawn(move || {
                 // wait_with_output drains both pipes, then reaps before releasing exclusion.
                 let output = child.wait_with_output().unwrap();
                 drop(heavy);
-                output
+                let result = payload(output);
+                let worker = HarnessWorker::new(
+                    result["worker_pid"].as_u64().expect("background worker") as u32,
+                );
+                (result, worker)
             });
             let mut saw_warming = false;
             loop {
@@ -837,8 +843,10 @@ fn real_warm_search_finishes_during_background_build_and_build_resumes() {
                     .any(|hit| hit["path"] == "src/module_0.rs"),
                 "{result}"
             );
+            let (result, worker) = background.join().unwrap();
             (
-                payload(background.join().unwrap()),
+                result,
+                worker,
                 lease_wait_ms,
                 warm_search_ms,
                 background_warming_ms,

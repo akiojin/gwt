@@ -26,6 +26,9 @@ export function bindControlExplanations({ document, root, id, placement = "botto
   let pointerActive = false;
   let restoringFocus = false;
   let popupHovered = false;
+  // A tap emits compatibility mouseover/focus with no later mouseout, so a
+  // touch pointer never opens an explanation; a mouse or a key re-enables it.
+  let touchPointer = false;
   const target = event => event.target?.closest?.("[data-issue-explanation]");
   const hide = () => {
     if (anchor) {
@@ -79,7 +82,7 @@ export function bindControlExplanations({ document, root, id, placement = "botto
     popup.style.top = `${Math.max(8, Math.min(top, height - size.height - 8))}px`;
   };
   const over = event => {
-    if (dragging || event.buttons) return;
+    if (dragging || event.buttons || touchPointer) return;
     // Hiding a dismissed tooltip exposes the control underneath it;
     // that hit-test change is not a new pointer entry by the user.
     if (popup.hidden && popup.contains(event.relatedTarget)) return;
@@ -97,7 +100,7 @@ export function bindControlExplanations({ document, root, id, placement = "botto
     if (passThrough && insidePopup(event)) { popupHovered = true; return; }
     if (focused) show(focused); else hide();
   };
-  const focus = event => { focused = pointerActive ? null : target(event); if (focused && !restoringFocus) show(focused); };
+  const focus = event => { focused = pointerActive || touchPointer ? null : target(event); if (focused && !restoringFocus) show(focused); };
   const blur = () => { focused = null; if (restoringFocus || popupHovered) return; if (hovered) show(hovered); else hide(); };
   const escape = event => {
     if (event.key !== "Escape" || popup.hidden) return;
@@ -118,6 +121,8 @@ export function bindControlExplanations({ document, root, id, placement = "botto
     if (hovered === previous) hovered = node;
     show(node);
   };
+  const pointerOver = event => { touchPointer = event.pointerType === "touch"; };
+  const keyboard = () => { touchPointer = false; };
   const pointerDown = () => { pointerActive = true; focused = null; hovered = null; hide(); };
   const pointerEnd = () => { pointerActive = false; };
   const pointerMove = event => {
@@ -134,7 +139,7 @@ export function bindControlExplanations({ document, root, id, placement = "botto
   const outsidePress = event => { if (!root.contains(event.target)) pointerDown(); };
   const dragStart = () => { dragging = true; pointerDown(); };
   const dragEnd = () => { dragging = false; pointerEnd(); };
-  const listeners = { mouseover: over, mouseout: out, focusin: focus, focusout: blur,
+  const listeners = { pointerover: pointerOver, mouseover: over, mouseout: out, focusin: focus, focusout: blur,
     pointerdown: pointerDown, dragstart: dragStart, dragend: dragEnd,
     "control-explanations:refresh": refresh };
   for (const [type, listener] of Object.entries(listeners)) root.addEventListener(type, listener);
@@ -142,6 +147,7 @@ export function bindControlExplanations({ document, root, id, placement = "botto
   popup.addEventListener("mouseleave", leavePopup);
   // Dismiss before the app's bubble handler turns Escape into overview.
   document.addEventListener("keydown", escape, true);
+  document.addEventListener("keydown", keyboard, true);
   document.addEventListener("scroll", refresh, true);
   document.addEventListener("pointerup", pointerEnd);
   document.addEventListener("pointercancel", pointerEnd);
@@ -165,6 +171,7 @@ export function bindControlExplanations({ document, root, id, placement = "botto
       for (const [type, listener] of Object.entries(listeners)) root.removeEventListener(type, listener);
       document.removeEventListener("scroll", refresh, true);
       document.removeEventListener("keydown", escape, true);
+      document.removeEventListener("keydown", keyboard, true);
       document.removeEventListener("pointerup", pointerEnd);
       document.removeEventListener("pointercancel", pointerEnd);
       if (passThrough) {

@@ -153,6 +153,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       import { createWorksSurface } from "/works-surface.js";
       import { createTerminalTextPreview } from "/terminal-text-preview.js";
       import { createPmChat, createPmWindowModel } from "/pm-chat.js";
+      import { logGroupsFromHistoryRows } from "/task-log.js";
+      import { windowCommandErrorPresentation } from "/window-command-error.js";
       import { shouldSkipTerminalFocusActivation } from "/clone-modal-focus-guard.js";
       import { createUiTraceProfiler } from "/ui-trace-profiler.js";
       import { bindControlExplanations, setControlExplanation } from "/control-explanations.js";
@@ -3163,6 +3165,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           lineHeight: isBlinkBrowser() ? 1.35 : 1.3,
           scrollback: 5000,
           macOptionClickForcesSelection: true,
+          // The context menu copies the existing range on every platform.
+          rightClickSelectsWord: false,
           // SPEC-3671 FR-008.
           disableStdin: options.readOnly === true,
         });
@@ -3606,6 +3610,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         applyIssueMonitorStatus: applyKnowledgeIssueMonitorStatus,
         applyRepositoryLabels,
         applyIssueMonitorInbox: applyKnowledgeIssueMonitorInbox,
+        applyPmDecisions,
+        applyPmReviewAttention,
         scheduleIssueMonitorProjectionRefresh,
         handleKnowledgeTransportChange,
         refreshVisibleKnowledgeWindows,
@@ -4236,7 +4242,11 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         const view = pmChatViews.get(windowId);
         if (!view) return;
         view.unsubscribe();
+        view.unsubscribeLog?.();
+        view.unsubscribeHumanAttention?.();
         view.controller.dispose();
+        applyPmDecisions(windowId, null);
+        applyPmReviewAttention(windowId, null);
         view.body.classList.remove("pm-conversation-body");
         // Return the terminal nodes to their original body when PM ownership ends.
         view.body.append(...view.logHost.childNodes);
@@ -4302,8 +4312,24 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
               activateTerminalOnReveal(windowData.id);
             });
           },
+          // SPEC #7007 T-013: a Log group opens the notification drawer at
+          // its original record (keyed rows focus their history row).
+          onViewNotification: entry => notificationCenter.open(entry?.key || undefined),
+          // SPEC #5016 HSK: unanswered decisions join the shared attention count.
+          onDecisionsWaiting: decisions => applyPmDecisions(windowData.id, decisions),
+          // SPEC #5016 HSV: unresolved reviews join the same shared count.
+          onReviewAttention: items => applyPmReviewAttention(windowData.id, items),
         });
         pmChatViews.set(windowData.id, view);
+        // SPEC #7007 T-013: the Log view mirrors this page's notification
+        // history (#5016 groups). The subscription fires immediately with
+        // the current rows, then on every history change.
+        view.unsubscribeLog = notificationCenter.subscribe(state => state.rows, rows => {
+          view.controller.receiveLog(logGroupsFromHistoryRows(rows));
+        });
+        // SPEC #5016 HSF: Live facts shows the strip's needs_human value.
+        view.unsubscribeHumanAttention = issueMonitorModel.subscribe(model => model.humanAttention.count,
+          count => view.controller.receiveHumanAttention(count));
         bindPmWindowState(windowData.id, windowData.session_id);
         view.unsubscribe = subscribePmWindowState(state => state.windows[windowData.id], state => {
           view.controller.update(state);
@@ -4883,10 +4909,12 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       const windowCommandErrorModel = createUiStateStore(null);
       windowCommandErrorModel.subscribe(event => event, event => {
         if (!event) return;
-        const title = { input: "Input failed", resize: "Resize failed", stop: "Stop failed" }[event.operation] || "Window command failed";
-        const key = `window-command:${event.id}:${event.operation}`;
-        notificationCenter.recordError({ key, title, message: event.message });
-        alertsToasts.push({ id: key, level: "error", title, message: event.message, timeoutMs: 8000 });
+        // SPEC #7007 T-014: the backend message is internal wording. The
+        // typed presentation (impact + next action) is the headline; the
+        // original travels as history details.
+        const presentation = windowCommandErrorPresentation(event);
+        notificationCenter.recordError({ key: presentation.key, title: presentation.title, message: presentation.message, details: presentation.details });
+        alertsToasts.push({ id: presentation.key, level: "error", title: presentation.title, message: presentation.message, timeoutMs: 8000 });
       });
 
       const launchProgressModel = createUiStateStore(null);

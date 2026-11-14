@@ -39,14 +39,27 @@ fn macos_socket_targets_compile_before_the_execution_budget() {
         .unwrap();
     assert!(preparation["if"].is_null() && preparation["continue-on-error"].is_null());
     let commands = preparation["run"].as_str().unwrap();
+    assert!(commands
+        .lines()
+        .any(|line| line.trim() == "cargo check -p gwt-core -p gwt"));
     for command in [
-        "cargo test -p gwt-core --lib --test test_hygiene_test --test daemon_socket_path_limit --no-run",
-        "cargo test -p gwt --lib --test runtime_tests --no-run",
+        "CARGO_PROFILE_TEST_DEBUG=0 cargo test -p gwt-core --lib --test test_hygiene_test --test daemon_socket_path_limit --no-run",
+        "CARGO_PROFILE_TEST_DEBUG=0 cargo test -p gwt --lib --test runtime_tests --no-run",
     ] {
         assert!(
             commands.lines().any(|line| line.trim() == command),
             "prepare every socket fixture target before the execution budget: {command}"
         );
+    }
+    assert_eq!(steps[execution]["env"]["CARGO_PROFILE_TEST_DEBUG"], "0");
+    // Keep default builds and cache keys on the ordinary profile. Only these
+    // test artifacts omit line tables, including when the script reuses them.
+    assert!(workflow["jobs"]["check-macos"]["env"].is_null());
+    for (index, step) in steps.iter().enumerate() {
+        assert!(step["env"]["CARGO_PROFILE_DEV_DEBUG"].is_null());
+        if index != execution {
+            assert!(step["env"]["CARGO_PROFILE_TEST_DEBUG"].is_null());
+        }
     }
 }
 
@@ -195,7 +208,7 @@ fn consolidated_gwt_suites_register_every_integration_source_once() {
 
     let workflow: serde_yaml::Value =
         serde_yaml::from_str(&read(TEST_WORKFLOW)).expect("test workflow");
-    let steps = workflow["jobs"]["changes"]["steps"]
+    let steps = workflow["jobs"]["source-sync"]["steps"]
         .as_sequence()
         .expect("classification steps");
     let classify = steps
@@ -392,6 +405,23 @@ fn workspace_shards_preserve_the_complete_serial_test_selection() {
             .find(|step| step["name"].as_str() == Some(name))
             .unwrap()
     };
+    // Keep every Cargo invocation on the same test profile without changing
+    // rust-cache's environment-derived key or the other jobs' build profiles.
+    assert!(workflow["env"]["CARGO_PROFILE_TEST_DEBUG"].is_null());
+    assert!(job["env"]["CARGO_PROFILE_TEST_DEBUG"].is_null());
+    let test_steps = [
+        "Build and inventory workspace tests",
+        RUN_TESTS_STEP,
+        "Run doctests",
+        "Run real-binary front-door tests (Xvfb)",
+    ];
+    for step in steps {
+        if test_steps.contains(&step["name"].as_str().unwrap_or_default()) {
+            assert_eq!(step["env"]["CARGO_PROFILE_TEST_DEBUG"], "0");
+        } else {
+            assert!(step["env"]["CARGO_PROFILE_TEST_DEBUG"].is_null());
+        }
+    }
     assert!(step("Build and inventory workspace tests")["run"]
         .as_str()
         .unwrap()
@@ -531,11 +561,27 @@ fn paired_windows_timings_preserve_evidence_outside_the_pr_path() {
     assert!(job.contains("ref: develop"));
     assert!(job.contains("fetch-depth: 0"));
     assert!(job.contains("cargo-nextest@0.9.146"));
+    assert!(job.contains("timeout-minutes: 120"));
+    let (_, build) = named_steps(job)
+        .into_iter()
+        .find(|(name, _)| name == "Build the paired measurement suite")
+        .expect("compile the complete suite outside the measurement budget");
+    assert!(build.contains("cargo test -p gwt --lib --all-features --no-run"));
+    assert!(build.contains("timeout-minutes: 45"));
+    assert!(!build.contains("continue-on-error"));
+    assert!(!build.contains("if:"));
+    assert!(
+        job.find("Build the paired measurement suite").unwrap()
+            < job
+                .find("Measure serial and grouped derived gwt-lib schedules")
+                .unwrap()
+    );
     let (_, measure) = named_steps(job)
         .into_iter()
         .find(|(name, _)| name == "Measure serial and grouped derived gwt-lib schedules")
         .expect("both schedules run in one step on the same host");
     assert!(measure.contains("python scripts/ci_verify_timings.py --output target/verify-timings"));
+    assert!(measure.contains("timeout-minutes: 90"));
     assert!(!measure.contains("continue-on-error"));
     assert!(!measure.contains("if:"));
     let (_, upload) = named_steps(job)
@@ -572,6 +618,15 @@ fn windows_regression_slices_build_each_harness_once_and_gate_all_filters() {
     assert!(warm.contains("ci-windows-tests.mjs run-warm gwt lib gwt cli::hook::event_dispatcher::tests::warm_four_megabyte_history_user_prompt_submit_p95_stays_within_budget -- --exact --test-threads=1"));
 
     let doc: Value = serde_yaml::from_str(&workflow).expect("Test workflow");
+    let warm_job = &doc["jobs"]["test-windows-warm"];
+    assert!(warm_job["env"]["CARGO_PROFILE_DEV_DEBUG"].is_null());
+    for step in warm_job["steps"].as_sequence().unwrap() {
+        if step["run"].as_str() == Some("node scripts/ci-windows-tests.mjs build warm") {
+            assert_eq!(step["env"]["CARGO_PROFILE_DEV_DEBUG"].as_str(), Some("0"));
+        } else {
+            assert!(step["env"]["CARGO_PROFILE_DEV_DEBUG"].is_null());
+        }
+    }
     let invocation =
         regex::Regex::new(r"node scripts/ci-windows-tests\.mjs (run(?:-lib|-runtime)?) ([^\r\n]+)")
             .expect("default regression invocation");

@@ -330,6 +330,32 @@
   .roster-past td::before { content: attr(data-label); color: var(--color-text-muted); }
   .roster-past td:last-child { text-align: start; }
 }
+/* SPEC 6476 T-005h: on a phone the header wrapped meta and usage over several
+   lines. Keep three rows: the controls, then meta and usage on one line each.
+   The full text stays in the DOM. */
+@media (max-width: 600px) {
+  .works-full-header { gap: var(--space-1) var(--space-2); padding: var(--space-1) var(--space-2); }
+  .works-full-header > button { min-width: 44px; min-height: 44px; }
+  .works-full-header > [data-action="previous"],
+  .works-full-header > [data-action="next"] { order: 1; }
+  .works-full-name { flex: 1 1 0; }
+  .works-full-name .work-name,
+  .works-full-meta,
+  .works-full-usage { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .works-full-meta,
+  .works-full-usage { flex: 0 0 100%; order: 2; }
+  .works-full-usage { order: 3; }
+}
+/* SPEC 6476 T-005g: on a phone the Agents controls kept their 28-32px desktop
+   size. Make every control a 44px tap target below 601px. */
+@media (max-width: 600px) {
+  .agents-surface :is(button, input, select, textarea) { min-width: 44px; min-height: 44px; }
+  /* T-005wo: each Works row's Open terminal (28px) and member name link
+     (24px) kept their desktop text-button size. The full header's name is a
+     .work-member too and is meant to get the same target; it already sits in
+     the 44px control row from T-005h, so the header stays three rows. */
+  .works-surface :is(.work-open, .work-member) { min-width: 44px; min-height: 44px; }
+}
 @media (max-width: 480px) {
   .agents-surface { padding: var(--space-3); }
   .works-counts { gap: var(--space-2); }

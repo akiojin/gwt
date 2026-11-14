@@ -36,6 +36,14 @@ fn pm_delivery_owner_fixture_for_agent(
     temp: &Path,
     agent_id: gwt_agent::AgentId,
 ) -> PmDeliveryFixture {
+    pm_delivery_owner_fixture_for_launch_route(temp, agent_id, gwt_agent::LaunchRoute::Manual)
+}
+
+fn pm_delivery_owner_fixture_for_launch_route(
+    temp: &Path,
+    agent_id: gwt_agent::AgentId,
+    launch_route: gwt_agent::LaunchRoute,
+) -> PmDeliveryFixture {
     use super::pane_control_tests::{
         control_launch_config, control_owner_agent, control_owner_launch, control_register_pm,
     };
@@ -52,14 +60,15 @@ fn pm_delivery_owner_fixture_for_agent(
     });
     #[cfg(not(windows))]
     {
-        fs::write(&runner, "#!/bin/sh\ncase \"$*\" in *--version*) printf '1.2.3\\n'; exit 0;; *'features list'*) exit 0;; esac\nstty -echo -icanon -isig; exec cat >/dev/null\n").unwrap();
+        fs::write(&runner, "#!/bin/sh\ncase \"$*\" in *--version*) printf '1.2.3\\n'; exit 0;; *'features list'*) exit 0;; esac\nstty -echo -icanon -isig; printf 'pm-fixture-ready\\n'; exec cat >/dev/null\n").unwrap();
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&runner, fs::Permissions::from_mode(0o755)).unwrap();
     }
     #[cfg(windows)]
-    fs::write(&runner, "@echo off\r\nif \"%~1\"==\"--version\" (echo 1.2.3& exit /b 0)\r\nif \"%~1\"==\"features\" exit /b 0\r\npowershell -NoProfile -Command \"while ($null -ne [Console]::ReadLine()) {}\"\r\n").unwrap();
+    fs::write(&runner, "@echo off\r\nif \"%~1\"==\"--version\" (echo 1.2.3& exit /b 0)\r\nif \"%~1\"==\"features\" exit /b 0\r\npowershell -NoProfile -Command \"[Console]::TreatControlCAsInput = $true; [Console]::WriteLine('pm-fixture-ready'); while ($true) { [void][Console]::ReadKey($true) }\"\r\n").unwrap();
     let location = control_launch_config(&repo, 43);
     let mut config = gwt_agent::AgentLaunchBuilder::new(agent_id.clone())
+        .launch_route(launch_route)
         .working_dir(location.working_dir.unwrap())
         .branch(location.branch.unwrap())
         .base_branch(location.base_branch.unwrap())
@@ -79,6 +88,20 @@ fn pm_delivery_owner_fixture_for_agent(
         target.status
     );
     assert_eq!(target.session.as_ref().unwrap().agent_id, agent_id);
+    // Issue #6071: the PTY start gate and runner write startup output
+    // asynchronously. Wait until the non-echoing runner's ready marker has
+    // been parsed so no late startup bytes can redraw a test-painted surface.
+    // A runner that never reports is bounded by the nextest per-test timeout.
+    while !target
+        .pane
+        .lock()
+        .unwrap()
+        .screen()
+        .contents()
+        .contains("pm-fixture-ready")
+    {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
     if agent_id == gwt_agent::AgentId::GrokBuild {
         target
             .pane
@@ -243,6 +266,59 @@ fn transcript_overlay_reports_failed_pane_and_pm_ack_without_staging_body() {
         text: "recovered notification\r".into(),
     }))
     .expect("ordinary delivery recovers after the overlay closes");
+}
+
+/// Monitor readiness checks must not commit a still-cancellable PM delivery.
+#[test]
+fn authenticated_pm_send_cancel_before_monitor_fence_stays_uncommitted() {
+    use gwt::project_runtime::agent_frontend::{
+        set_owner_agent_dispatch_test_hook, OwnerAgentDispatchTestStage,
+    };
+
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let fixture = pm_delivery_owner_fixture_for_launch_route(
+        temp.path(),
+        gwt_agent::AgentId::Codex,
+        gwt_agent::LaunchRoute::Autonomous,
+    );
+    let writer = fixture.target.writer.as_ref().expect("owner writer");
+    assert!(writer
+        .monitor_runtime
+        .as_ref()
+        .is_some_and(|registration| !registration.review_dispatch));
+    let (responder, result, cancellation) =
+        AgentPmSendResponder::channel_with_acceptance_window(Duration::from_secs(2));
+    let cancellation = Arc::new(cancellation);
+    let cancellation_result = Arc::new(Mutex::new(None));
+    let observed = Arc::clone(&cancellation_result);
+    let cancel = Arc::clone(&cancellation);
+    let _hook = set_owner_agent_dispatch_test_hook(
+        fixture.pm.grant.as_ref().expect("PM grant"),
+        OwnerAgentDispatchTestStage::BeforeMonitorPromptAcceptance,
+        move || {
+            *observed.lock().unwrap() = Some(cancel.cancel());
+        },
+    );
+    fixture.send(
+        "cancel-before-monitor-fence".into(),
+        &uuid::Uuid::new_v4().to_string(),
+        &fixture.target.id,
+        "must remain unsubmitted\r",
+        Some(responder),
+    );
+    let reply = result.blocking_recv().expect("terminal PM result");
+    assert_eq!(
+        *cancellation_result.lock().unwrap(),
+        Some(false),
+        "cancellation before Monitor acceptance must precede the input commit"
+    );
+    assert!(matches!(reply,
+        BackendEvent::PmMessageSendResult { status, .. } if status == "failed"));
+    assert!(writer.pm_delivery_replay.lock().unwrap().is_none());
 }
 
 /// SPEC-3431 FR-111 (T-206): the server-side PM principal gate for pane

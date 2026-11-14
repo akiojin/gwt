@@ -2,6 +2,8 @@ import { createUiStateStore } from './ui-state-store.js';
 import { renderUiContent } from './ui-content.js';
 import { createTaskHome } from './task-home.js';
 import { createTaskDecisions } from './task-decisions.js';
+import { createTaskProgress } from './task-progress.js';
+import { createTaskLog } from './task-log.js';
 
 function reportDetailsMarkdown(structured) {
   return [structured.details, (structured.refs || []).map(ref => `- ${ref}`).join('\n')]
@@ -278,6 +280,7 @@ export function createPmWindowModel() {
 
 // Read-only report view. The caller owns polling and the unchanged terminal.
 export function createPmChat({ document, root, sessionId, onLogVisibility, onChatVisible = () => {}, onTaskDetail = () => {}, onTaskCancel = () => {}, onSend = () => {}, onOpenTerminal = () => false,
+  onViewNotification = () => {}, onDecisionsWaiting = () => {}, onReviewAttention = () => {},
   copyText = text => document.defaultView.navigator.clipboard.writeText(text) }) {
   let session = sessionId;
   let disposed = false;
@@ -288,6 +291,10 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   let chatDigest;
   let chatSend = null;
   let draftSend = null;
+  let publishedWaiting;
+  let publishedReviews;
+  // SPEC #5016 HSF: the shared needs_human value the status strip reads.
+  let humanAttention = null;
   const taskRows = new Map();
   let digest = '';
   let currentDigest;
@@ -308,21 +315,23 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   toolbar.setAttribute('aria-label', 'PM view');
   const homeButton = element('button', '', 'Home');
   const decideButton = element('button', '', 'Decide');
+  const progressButton = element('button', '', 'Progress');
   const chatButton = element('button', '', 'Chat');
   const tasksButton = element('button', '', 'Tasks');
+  const taskLogButton = element('button', '', 'Log');
   const reportsButton = element('button', '', 'Reports');
   const logButton = element('button', '', 'Execution log');
-  homeButton.type = decideButton.type = chatButton.type = tasksButton.type
-    = reportsButton.type = logButton.type = 'button';
-  toolbar.append(homeButton, decideButton, chatButton, tasksButton, reportsButton, logButton);
+  homeButton.type = decideButton.type = progressButton.type = chatButton.type = tasksButton.type
+    = taskLogButton.type = reportsButton.type = logButton.type = 'button';
+  toolbar.append(homeButton, decideButton, progressButton, chatButton, tasksButton, taskLogButton, reportsButton, logButton);
   // SPEC #7007: the task-centered Home island is the entry view. Its actions
   // reuse the existing surfaces: creating a task goes through the PM chat
   // composer (the request-task intake path), reviewing decisions opens the
-  // Decide surface, and progress is the Tasks view.
+  // Decide surface, and progress opens the Progress surface.
   const taskHome = createTaskHome({ document,
     onCreateTask: () => { showView('chat'); draft.focus(); },
     onReviewDecisions: () => showView('decide'),
-    onViewProgress: () => showView('tasks'),
+    onViewProgress: () => showView('progress'),
   });
   // SPEC #7007 T-010: the Decide island aggregates only decision reports.
   // Answers travel the existing PM reply path (the chat send); the view
@@ -332,6 +341,21 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   const taskDecisions = createTaskDecisions({ document,
     onAnswerDecision: (item, optionIndex) => answerDecision(item, optionIndex),
     onReplyInChat: () => { showView('chat'); draft.focus(); },
+  });
+  // SPEC #7007 T-012: the Progress island reads the same window snapshot
+  // as Home and Decide. Its detail action reuses the existing task detail
+  // read, which renders in the Tasks view, so the view switches with it.
+  const taskProgress = createTaskProgress({ document,
+    onCreateTask: () => { showView('chat'); draft.focus(); },
+    onReviewDecision: () => showView('decide'),
+    onViewTaskDetails: key => { onTaskDetail(key); showView('tasks'); },
+    onViewAllTasks: () => showView('tasks'),
+  });
+  // SPEC #7007 T-013: the Log island lists the notification history groups
+  // the caller feeds through receiveLog; opening the original record stays
+  // with the caller, which owns the notification center.
+  const taskLog = createTaskLog({ document,
+    onViewNotification: entry => { if (!disposed) onViewNotification(entry); },
   });
   const chatBody = element('section', 'pm-chat__chat');
   chatBody.setAttribute('aria-label', 'PM conversation');
@@ -446,7 +470,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   body.append(currentCard, historyHeader, notice, transcript);
   const taskWorkspace = element('div', 'pm-chat__workspace');
   taskWorkspace.append(chatBody, tasksBody);
-  root.append(toolbar, terminalStatus, taskHome.element, taskDecisions.element, body, taskWorkspace);
+  root.append(toolbar, terminalStatus, taskHome.element, taskDecisions.element, taskProgress.element, taskLog.element, body, taskWorkspace);
 
   function rememberScroll() {
     // Hidden tabs/windows have no layout; their zero offsets are not user intent.
@@ -473,12 +497,16 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     chatBody.hidden = value !== 'chat';
     taskHome.element.hidden = value !== 'home';
     taskDecisions.element.hidden = value !== 'decide';
+    taskProgress.element.hidden = value !== 'progress';
+    taskLog.element.hidden = value !== 'tasklog';
     root.classList.toggle('pm-chat--logs', logs);
     root.classList.toggle('pm-chat--chat', value === 'chat');
     homeButton.setAttribute('aria-pressed', String(value === 'home'));
     decideButton.setAttribute('aria-pressed', String(value === 'decide'));
+    progressButton.setAttribute('aria-pressed', String(value === 'progress'));
     chatButton.setAttribute('aria-pressed', String(value === 'chat'));
     tasksButton.setAttribute('aria-pressed', String(value === 'tasks'));
+    taskLogButton.setAttribute('aria-pressed', String(value === 'tasklog'));
     reportsButton.setAttribute('aria-pressed', String(value === 'reports'));
     logButton.setAttribute('aria-pressed', String(logs));
     onLogVisibility(logs);
@@ -490,8 +518,10 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   }
   const showHome = () => showView('home');
   const showDecisions = () => showView('decide');
+  const showProgress = () => showView('progress');
   const showChat = () => showView('chat');
   const showTasks = () => showView('tasks');
+  const showTaskLog = () => showView('tasklog');
   const showReports = () => showView('reports');
   const showLog = () => showView('log');
   const openTerminal = () => {
@@ -513,6 +543,31 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     const overview = state?.requestTasks ?? null;
     taskHome.receive({ overview, decisionsWaiting: decisions.waiting, completedToday: null,
       stale: Boolean(state?.requestTasksError) && overview !== null });
+  }
+  // Progress reads the same snapshot: the request-task overview plus the
+  // live-facts active windows. The windows stay a separate frame because
+  // no frontend join key links a window to a request task.
+  function renderProgress(state) {
+    const facts = state?.current?.facts ?? null;
+    taskProgress.receive({
+      loaded: Boolean(state?.loaded),
+      overview: state?.requestTasks ?? null,
+      error: state?.requestTasksError ?? null,
+      activeWindows: facts ? (facts.active_windows || []).map(item => ({
+        issueNumber: item.issue_number ?? null,
+        title: item.title || null,
+        lastActivityAt: item.last_activity_at ?? null,
+      })) : null,
+    });
+  }
+  function receiveHumanAttention(count) {
+    if (disposed) return;
+    humanAttention = Number.isFinite(count) ? count : null;
+    renderCurrent(latestState?.current);
+  }
+  function receiveLog(groups) {
+    if (disposed) return;
+    taskLog.receive(groups || []);
   }
   // Decide aggregates the same decision reports Home counts (AC-6), newest
   // first. Typed packets expose their options; untyped decision reports keep
@@ -589,7 +644,26 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     renderHome(state, decisions);
     renderDecisions(state, decisions);
     renderReportDecisions(decisions);
+    publishWaitingDecisions(decisions);
     return decisions;
+  }
+  // SPEC #5016 HSK: the shared attention model gets the same waiting set
+  // that Home counts; `null` while reports are not loaded.
+  function publishWaitingDecisions({ items, answered, waiting }) {
+    const ids = waiting == null ? null : items.filter(item => !answered[item.id]).map(item => item.id);
+    const key = JSON.stringify(ids);
+    if (key === publishedWaiting) return;
+    publishedWaiting = key;
+    onDecisionsWaiting(ids && { waiting: ids.length, ids });
+  }
+  // SPEC #5016 HSV: unresolved reviews from the PM current facts join the
+  // shared attention model; `null` when this window has not observed them.
+  function publishReviewAttention(facts) {
+    const items = Array.isArray(facts?.review_attention) ? facts.review_attention : null;
+    const key = JSON.stringify(items);
+    if (key === publishedReviews) return;
+    publishedReviews = key;
+    onReviewAttention(items);
   }
   function renderDecisions(state, { items, answered }) {
     taskDecisions.receive({
@@ -951,7 +1025,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     submitDraft(event);
   }
   function renderCurrent(current) {
-    const nextDigest = JSON.stringify(current ? [current.status, current.facts, current.stale_minutes] : null);
+    const nextDigest = JSON.stringify(current ? [current.status, current.facts, current.stale_minutes, humanAttention] : null);
     if (currentDigest === nextDigest) return;
     currentDigest = nextDigest;
     const authored = element('section', 'pm-chat__current-authored');
@@ -1014,7 +1088,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
       }
       automatic.append(element('p', '', `Active windows: ${(facts.active_windows || []).length}${facts.inventory_incomplete ? ' (incomplete observation)' : ''}`), windows,
         element('p', '', `Queue head: ${facts.queue_head ? issueLabel(facts.queue_head) : facts.source === 'unavailable' ? 'Unknown' : 'None'}`),
-        element('p', '', `needs_human: ${facts.needs_human_count ?? 'Unknown'}`),
+        element('p', '', `needs_human: ${humanAttention ?? 'Unknown'}`),
         element('p', '', `Release: ${facts.release ? `#${facts.release.number} ${facts.release.title}` : facts.release_observed_at ? 'No active PR' : 'Unknown'}`),
         element('p', '', `Pending update: ${facts.pending_update ? `v${facts.pending_update}` : facts.update_known ? 'None' : 'Unknown'}`));
       if (facts.release_observed_at) {
@@ -1032,10 +1106,12 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     root.dataset.stateVersion = String(state.revision);
     const decisions = renderDecisionSurfaces(state);
     renderTasks(state);
+    renderProgress(state);
     renderChat(state.conversation);
     renderComposer(state.chatSend);
     if (transcript.childElementCount) rememberScroll();
     renderCurrent(state.current);
+    publishReviewAttention(state.current?.facts);
     const reports = state.reports;
     const visibleReports = kindSelect.value === 'all' ? reports : reports.filter(report => report.kind === kindSelect.value);
     const nextDigest = JSON.stringify([kindSelect.value, visibleReports]);
@@ -1144,9 +1220,13 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     resizeObserver?.disconnect();
     taskHome.dispose();
     taskDecisions.dispose();
+    taskProgress.dispose();
+    taskLog.dispose();
     homeButton.removeEventListener('click', showHome);
     decideButton.removeEventListener('click', showDecisions);
+    progressButton.removeEventListener('click', showProgress);
     chatButton.removeEventListener('click', showChat);
+    taskLogButton.removeEventListener('click', showTaskLog);
     composer.removeEventListener('submit', submitDraft);
     draft.removeEventListener('keydown', draftKeydown);
     draft.removeEventListener('input', syncComposer);
@@ -1161,7 +1241,9 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   }
   homeButton.addEventListener('click', showHome);
   decideButton.addEventListener('click', showDecisions);
+  progressButton.addEventListener('click', showProgress);
   chatButton.addEventListener('click', showChat);
+  taskLogButton.addEventListener('click', showTaskLog);
   composer.addEventListener('submit', submitDraft);
   draft.addEventListener('keydown', draftKeydown);
   draft.addEventListener('input', syncComposer);
@@ -1173,6 +1255,6 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   kindSelect.addEventListener('change', filterReports);
   update({ sessionId, revision: 0, reports: [], loaded: false });
   showHome();
-  return { update, setSession, showHome, showDecisions, showChat, showTasks, showReports, dispose,
+  return { update, setSession, showHome, showDecisions, showProgress, showChat, showTasks, showTaskLog, showReports, receiveLog, receiveHumanAttention, dispose,
     isChatVisible: () => !disposed && activeView === 'chat' };
 }

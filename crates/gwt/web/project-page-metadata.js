@@ -106,7 +106,10 @@ export function createProjectPageMetadata({
       attributes: true, attributeFilter: ["data-theme"],
     });
   }
-  model.subscribeFrame(aggregate => aggregate, render);
+  model.subscribeFrame(aggregate => {
+    const { running, block, error } = projectAgentSummary(aggregate);
+    return JSON.stringify([Boolean(aggregate.unread), running, block, error > 0]);
+  }, render);
   model.subscribe(aggregate => aggregate, () => {
     if (attentionSyncPending) {
       attentionSyncPending = false;

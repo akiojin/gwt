@@ -322,13 +322,29 @@ pub fn persist_durable_launch_recovery_with_identity(
     sync_durable_launch_recovery_directory(parent).map_err(|error| error.to_string())
 }
 
+pub(crate) fn clear_durable_launch_recovery_if_matches(
+    sessions_dir: &Path,
+    expected: &DurableLaunchRecoveryRecord,
+) -> Result<bool, String> {
+    expected.owner()?;
+    clear_durable_launch_recovery_inner(sessions_dir, &expected.session_id, Some(expected))
+}
+
 pub fn clear_durable_launch_recovery(sessions_dir: &Path, session_id: &str) -> Result<(), String> {
+    clear_durable_launch_recovery_inner(sessions_dir, session_id, None).map(|_| ())
+}
+
+fn clear_durable_launch_recovery_inner(
+    sessions_dir: &Path,
+    session_id: &str,
+    expected: Option<&DurableLaunchRecoveryRecord>,
+) -> Result<bool, String> {
     let path = durable_launch_recovery_path(sessions_dir, session_id)?;
     let parent = path
         .parent()
         .ok_or_else(|| "launch recovery path has no parent".to_string())?;
     if !parent.exists() {
-        return Ok(());
+        return Ok(expected.is_none());
     }
     let lock = std::fs::OpenOptions::new()
         .create(true)
@@ -338,6 +354,18 @@ pub fn clear_durable_launch_recovery(sessions_dir: &Path, session_id: &str) -> R
         .open(durable_launch_recovery_lock_path(sessions_dir, session_id)?)
         .map_err(|error| error.to_string())?;
     lock.lock_exclusive().map_err(|error| error.to_string())?;
+    if let Some(expected) = expected {
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error.to_string()),
+        };
+        let current: DurableLaunchRecoveryRecord =
+            serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+        if &current != expected {
+            return Ok(false);
+        }
+    }
     match std::fs::remove_file(&path) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -350,7 +378,8 @@ pub fn clear_durable_launch_recovery(sessions_dir: &Path, session_id: &str) -> R
     };
     durability_barrier.map_or(Ok(()), |directory| {
         sync_durable_launch_recovery_directory(directory).map_err(|error| error.to_string())
-    })
+    })?;
+    Ok(true)
 }
 
 pub fn durable_launch_recovery_session_identity(
@@ -530,5 +559,63 @@ fn path_matches(left: &Path, right: &Path) -> bool {
                 == gwt_core::paths::normalize_windows_child_process_path(&right)
         }
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stale_recovery_cleanup_preserves_strengthened_receipt() {
+        let home = tempfile::tempdir().unwrap();
+        let mut session =
+            gwt_agent::Session::new(home.path(), "work/fixture", gwt_agent::AgentId::Codex);
+        session.project_state_root = Some(home.path().to_path_buf());
+        session.repo_hash = Some("fixture".into());
+        session.linked_issue_number = Some(4735);
+        let base = DurableLaunchRecoveryRecord {
+            schema_version: DURABLE_LAUNCH_RECOVERY_SCHEMA_VERSION,
+            kind: DurableLaunchRecoveryKind::FreshSuccessor {
+                operation_id: "manual-cancel".into(),
+            },
+            session_id: session.id.clone(),
+            project_root: home.path().to_path_buf(),
+            worktree_path: home.path().to_path_buf(),
+            repo_hash: "fixture".into(),
+            owner_kind: "spec".into(),
+            owner_number: 4735,
+            expected_binding: None,
+            expected_agent_id: None,
+            expected_session_identity: None,
+        };
+        let binding = gwt_agent::SessionExecutionBinding {
+            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: session.id.clone(),
+            repo_hash: "fixture".into(),
+            owner_kind: "spec".into(),
+            owner_number: 4735,
+            identity: gwt_agent::ExecutionBindingIdentity {
+                generation_id: "generation".into(),
+                binding_id: "binding".into(),
+                ledger_head_hash: "head".into(),
+            },
+            capability_generation: 1,
+        };
+        let mut strengthened = base.clone();
+        strengthened.expected_session_identity =
+            Some(gwt_agent::SessionExecutionIdentity::for_binding(&session, &binding).unwrap());
+        strengthened.expected_binding = Some(binding);
+        strengthened.expected_agent_id = Some(session.agent_id);
+        strengthened.owner().unwrap();
+        let path = durable_launch_recovery_path(home.path(), &base.session_id).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let bytes = serde_json::to_vec(&strengthened).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+
+        assert!(!clear_durable_launch_recovery_if_matches(home.path(), &base).unwrap());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert!(clear_durable_launch_recovery_if_matches(home.path(), &strengthened).unwrap());
+        assert!(!path.exists());
     }
 }

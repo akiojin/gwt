@@ -1438,6 +1438,216 @@ mod tests {
         );
     }
 
+    // Source-side acceptance callbacks below are not physical PTY delivery proof.
+    #[test]
+    fn monitor_prompt_acceptance_invalidates_completed_stop_until_a_new_hook() {
+        use gwt_agent::session::HookCompletionOutcome::Normal;
+        super::super::health::browser_preflight_tests::with_source(|input, session, path, _| {
+            let sessions = gwt_core::paths::gwt_sessions_dir();
+            let registration = crate::monitor_duplicate_runtime::MonitorRuntimeRegistration {
+                window_id: "input-fence-source".into(),
+                session_id: session.id.clone(),
+                issue_number: session.linked_issue_number.unwrap(),
+                worktree_path: session.worktree_path.clone(),
+                project_root: input.worktree_root.clone(),
+                sessions_dir: sessions.clone(),
+                incarnation: 17,
+                review_dispatch: false,
+            };
+            let normal = begin_hook_event(&input.worktree_root, "Stop", "{}").unwrap();
+            handle_with_input_owned("Stop", "{}", Some(&normal)).unwrap();
+            normal.finish_stop(false).unwrap();
+            normal.record(Normal);
+            assert!(SessionRuntimeState::load(path)
+                .unwrap()
+                .is_current_normal_stop());
+            let session_path = sessions.join(format!("{}.toml", session.id));
+            let session_before = std::fs::read(&session_path).unwrap();
+            let mut expected: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+            expected
+                .as_object_mut()
+                .unwrap()
+                .remove("current_hook_event");
+            let mut accepted = 0;
+            crate::monitor_duplicate_runtime::with_monitor_prompt_acceptance(
+                &registration,
+                std::process::id(),
+                None,
+                || {
+                    assert!(SessionRuntimeState::load(path)?
+                        .current_hook_event
+                        .is_none());
+                    accepted += 1;
+                    Ok(())
+                },
+            )
+            .unwrap();
+            assert_eq!(accepted, 1);
+            assert!(!SessionRuntimeState::load(path)
+                .unwrap()
+                .is_current_normal_stop());
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&std::fs::read(path).unwrap()).unwrap(),
+                expected,
+                "acceptance changes only current observation, preserving history, timestamps and identity",
+            );
+            assert_eq!(std::fs::read(&session_path).unwrap(), session_before);
+            let invalidated = std::fs::read(path).unwrap();
+            crate::monitor_duplicate_runtime::with_monitor_prompt_acceptance(
+                &registration,
+                std::process::id(),
+                None,
+                || Ok(()),
+            )
+            .unwrap();
+            assert_eq!(
+                std::fs::read(path).unwrap(),
+                invalidated,
+                "already-unknown current is a raw no-op"
+            );
+            let successor = begin_hook_event(&input.worktree_root, "Stop", "{}").unwrap();
+            handle_with_input_owned("Stop", "{}", Some(&successor)).unwrap();
+            successor.finish_stop(false).unwrap();
+            successor.record(Normal);
+            assert!(SessionRuntimeState::load(path)
+                .unwrap()
+                .is_current_normal_stop());
+        });
+    }
+
+    #[test]
+    fn monitor_prompt_acceptance_under_session_lease_fences_pending_stop_completion() {
+        use gwt_agent::session::HookCompletionOutcome::Normal;
+        super::super::health::browser_preflight_tests::with_source(|input, session, path, _| {
+            let sessions = gwt_core::paths::gwt_sessions_dir();
+            let registration = crate::monitor_duplicate_runtime::MonitorRuntimeRegistration {
+                window_id: "input-fence-source".into(),
+                session_id: session.id.clone(),
+                issue_number: session.linked_issue_number.unwrap(),
+                worktree_path: session.worktree_path.clone(),
+                project_root: input.worktree_root.clone(),
+                sessions_dir: sessions.clone(),
+                incarnation: 17,
+                review_dispatch: false,
+            };
+            let pending = begin_hook_event(&input.worktree_root, "Stop", "{}").unwrap();
+            handle_with_input_owned("Stop", "{}", Some(&pending)).unwrap();
+            assert!(pending.runtime_was_published());
+            assert!(SessionRuntimeState::load(path)
+                .unwrap()
+                .current_hook_event
+                .is_some());
+            let mut accepted = false;
+            gwt_agent::with_session_lease(&sessions, &session.id, |current| {
+                let identity = gwt_agent::SessionExecutionIdentity::from_session(current)
+                    .map_err(io::Error::other)?
+                    .unwrap();
+                crate::monitor_duplicate_runtime::with_monitor_prompt_acceptance(
+                    &registration,
+                    std::process::id(),
+                    Some(
+                        crate::monitor_duplicate_runtime::HeldMonitorPromptSession::Bound(
+                            &identity,
+                        ),
+                    ),
+                    || {
+                        assert!(SessionRuntimeState::load(path)?
+                            .current_hook_event
+                            .is_none());
+                        accepted = true;
+                        Ok(())
+                    },
+                )
+            })
+            .unwrap();
+            assert!(accepted);
+            let after_acceptance = std::fs::read(path).unwrap();
+            let session_path = sessions.join(format!("{}.toml", session.id));
+            let session_after_acceptance = std::fs::read(&session_path).unwrap();
+            assert!(pending.finish_stop(false).unwrap().is_none());
+            pending.record(Normal);
+            assert_eq!(
+                std::fs::read(path).unwrap(),
+                after_acceptance,
+                "old completion cannot restore current or rewrite history"
+            );
+            assert_eq!(
+                std::fs::read(&session_path).unwrap(),
+                session_after_acceptance
+            );
+            assert!(!SessionRuntimeState::load(path)
+                .unwrap()
+                .is_current_normal_stop());
+            let successor = begin_hook_event(&input.worktree_root, "Stop", "{}").unwrap();
+            handle_with_input_owned("Stop", "{}", Some(&successor)).unwrap();
+            successor.finish_stop(false).unwrap();
+            successor.record(Normal);
+            assert!(SessionRuntimeState::load(path)
+                .unwrap()
+                .is_current_normal_stop());
+        });
+    }
+
+    #[test]
+    fn monitor_prompt_acceptance_preserves_input_capable_unbound_resume() {
+        super::super::health::browser_preflight_tests::with_source(
+            |input, session, _, original| {
+                let sessions = gwt_core::paths::gwt_sessions_dir();
+                let mut unbound =
+                    Session::new(&session.worktree_path, &session.branch, AgentId::Codex);
+                unbound.linked_issue_number = session.linked_issue_number;
+                unbound.agent_session_id = Some("native-unbound-resume".into());
+                unbound.launch_route = gwt_agent::LaunchRoute::Autonomous;
+                unbound.save(&sessions).unwrap();
+                let path = gwt_agent::runtime_state_path(&sessions, &unbound.id);
+                let mut runtime = original.clone();
+                runtime.execution_identity = None;
+                runtime.save(&path).unwrap();
+                let registration = crate::monitor_duplicate_runtime::MonitorRuntimeRegistration {
+                    window_id: "unbound-input-source".into(),
+                    session_id: unbound.id.clone(),
+                    issue_number: unbound.linked_issue_number.unwrap(),
+                    worktree_path: unbound.worktree_path.clone(),
+                    project_root: input.worktree_root.clone(),
+                    sessions_dir: sessions.clone(),
+                    incarnation: 17,
+                    review_dispatch: false,
+                };
+                let before = std::fs::read(&path).unwrap();
+                let session_path = sessions.join(format!("{}.toml", unbound.id));
+                let session_before = std::fs::read(&session_path).unwrap();
+                let mut accepted = false;
+                crate::monitor_duplicate_runtime::with_monitor_prompt_acceptance(
+                    &registration,
+                    std::process::id(),
+                    None,
+                    || {
+                        accepted = true;
+                        Ok(())
+                    },
+                )
+                .expect("unbound Resume remains input-capable and cannot authorize Switch");
+                assert!(accepted);
+                gwt_agent::with_session_lease(&sessions, &unbound.id, |current| {
+                    crate::monitor_duplicate_runtime::with_monitor_prompt_acceptance(
+                        &registration,
+                        std::process::id(),
+                        Some(
+                            crate::monitor_duplicate_runtime::HeldMonitorPromptSession::Unbound(
+                                current,
+                            ),
+                        ),
+                        || Ok(()),
+                    )
+                })
+                .expect("the matching unbound exclusion is reused without nested acquisition");
+                assert_eq!(std::fs::read(&path).unwrap(), before);
+                assert_eq!(std::fs::read(&session_path).unwrap(), session_before);
+            },
+        );
+    }
+
     #[test]
     fn owned_hook_outer_lease_error_after_callback_cannot_certify_output() {
         super::super::health::browser_preflight_tests::with_source(|input, _, path, _| {

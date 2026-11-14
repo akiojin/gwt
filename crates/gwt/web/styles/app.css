@@ -3311,6 +3311,24 @@ body {
   background: color-mix(in oklab, var(--color-state-active) 12%, transparent);
 }
 
+/* SPEC #6476 T-005pf: on a phone the Profile list squeezed the editor to about
+   100px, the five-column environment grid needed 440px, and the controls were
+   24-36px. Stack the list above the editor, lay each variable out as a
+   two-column card, and make the controls 44px tap targets; the surface
+   scrolls vertically while the variable grid keeps its own scroll. */
+@media (max-width: 600px) {
+  .profile-root { overflow-y: auto; }
+  .profile-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto; flex: 0 0 auto; }
+  .profile-list-pane { max-height: 30vh; border-right: 0; border-bottom: 1px solid var(--color-border); }
+  .profile-editor-pane { overflow: visible; }
+  .profile-env-grid { max-height: 60vh; }
+  .profile-env-grid-head { display: none; }
+  .profile-env-grid-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .profile-env-result { grid-column: 1 / -1; }
+  .profile-root :is(button, input, select) { min-height: 44px; }
+  .profile-root .icon-button { min-width: 44px; }
+}
+
 .board-chat-shell {
   flex: 1;
   min-height: 0;
@@ -3457,6 +3475,16 @@ body {
   background: color-mix(in oklab, var(--color-surface) 94%, transparent);
   padding: 12px;
   box-shadow: 0 -18px 40px color-mix(in oklab, var(--color-canvas) 8%, transparent);
+}
+
+/* SPEC 6476 T-005b2: on a phone the Board header filters were 19px tall and
+   the composer controls 32-36px. Make them 44px tap targets below 601px; the
+   timeline links keep their reading size. */
+@media (max-width: 600px) {
+  .board-root .workspace-toolbar { flex-direction: column; align-items: stretch; }
+  .board-root .workspace-toolbar-actions { flex-wrap: wrap; }
+  .board-root .workspace-toolbar-actions button,
+  .board-composer-bar :is(button, input, select, textarea) { min-width: 44px; min-height: 44px; }
 }
 
 .board-status {
@@ -3828,6 +3856,16 @@ body {
 .toast-alerts__dismiss:hover {
   color: var(--color-text-strong);
 }
+/* SPEC #6476 T-005c: a 20px dismiss is too small to tap on a phone. The
+   negative block margins extend the 44px target into the item's top padding
+   and keep the title row at its original 20px, so the message stays close. */
+@media (max-width: 600px) {
+  .toast-alerts__dismiss {
+    min-width: 44px;
+    min-height: 44px;
+    margin-block: calc(-1 * var(--space-2)) calc(var(--space-5) + var(--space-2) - 44px);
+  }
+}
 @keyframes toast-alerts-in {
   from {
     opacity: 0;
@@ -4068,6 +4106,21 @@ body {
 .notification-center__dismiss:hover {
   color: var(--color-text-strong);
 }
+/* SPEC #6476 T-005nc: the drawer controls kept their 20-28px desktop sizes on
+   a phone. The triage row grows to the 44px dismiss; Details stays text-wide. */
+@media (max-width: 600px) {
+  .op-drawer__close,
+  .notification-center__clear,
+  .notification-center__dismiss {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  /* Keep the list-item display so the disclosure marker stays visible. */
+  .notification-center__details > summary {
+    line-height: 44px;
+  }
+}
 
 .attachment-progress {
   position: absolute;
@@ -4304,6 +4357,33 @@ body {
   line-height: 1.5;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+/* SPEC #6476 T-005lg: on a phone the Logs refresh was 24px and the filters
+   32px tall, and the two columns left the detail pane a sliver. Make them 44px
+   tap targets and stack the timeline above the detail below 601px; a short
+   screen scrolls the surface instead of collapsing either pane. */
+@media (max-width: 600px) {
+  .logs-root { overflow-y: auto; }
+  .logs-root .workspace-toolbar-actions button,
+  .logs-filter-field :is(select, input) { min-width: 44px; min-height: 44px; }
+  .logs-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(120px, 1fr) minmax(120px, 1fr); }
+  .logs-timeline { border-right: 0; border-bottom: 1px solid var(--color-border); }
+}
+
+/* SPEC #6476 T-005ix: on a phone the Index search controls were 24-32px,
+   the filters squeezed into one row pushed the worktree select off screen,
+   and the result list and detail needed 580px side by side. Make the controls
+   44px tap targets, wrap the filters, and stack the detail below the list. */
+@media (max-width: 600px) {
+  .index-search-root { overflow-y: auto; }
+  .index-search-panel :is(input, select, button),
+  .index-health-panel button { min-height: 44px; }
+  .index-health-panel .icon-button { min-width: 44px; }
+  .index-filter-bar { flex-wrap: wrap; }
+  .index-scope-list { flex: 1 1 100%; }
+  .index-search-layout { grid-template-columns: minmax(0, 1fr); grid-auto-rows: minmax(120px, 1fr); }
+  .index-result-list { border-right: 0; border-bottom: 1px solid var(--color-border); }
 }
 
 .branch-list-root {
@@ -5075,6 +5155,25 @@ body {
   justify-content: flex-end;
   gap: var(--space-3);
   margin-top: 10px;
+}
+
+/* SPEC #6476 T-005lw/T-005md: every modal kept its 19-38px desktop control
+   sizes on a phone. Checkboxes and toggles sit inside a label, so the label is
+   the target; 24px icon buttons also need the width. */
+@media (max-width: 600px) {
+  .modal-shell :is(button, select, textarea, [role="button"], input:not([type="checkbox"])),
+  .modal-shell label:has(input[type="checkbox"]) {
+    min-height: 44px;
+  }
+
+  /* A summary stays a list-item (keeps its marker), so center it by line. */
+  .modal-shell summary {
+    line-height: 44px;
+  }
+
+  .modal-shell :is(.icon-button, .text-button) {
+    min-width: 44px;
+  }
 }
 
 .text-button {
@@ -6472,6 +6571,27 @@ body.route-body {
 .issue-bridge-root .workspace-toolbar-main { grid-template-columns: minmax(100px, 320px) max-content minmax(0, 1fr); align-items: center; }
 .issue-bridge-root .knowledge-heading { display: none; }
 .issue-bridge-root .knowledge-search { width: 100%; }
+
+/* SPEC #6476: keep phone tabs tappable and toolbar rows clear of each other. */
+@media (max-width: 600px) {
+  .issue-bridge-root .knowledge-state-filter button,
+  .issue-bridge-root .knowledge-monitor-controls :is(button, input),
+  .issue-bridge-root .knowledge-search,
+  .issue-bridge-root .workspace-toolbar-actions button,
+  .issue-bridge-root .issue-queue-select,
+  .issue-bridge-root .knowledge-row-select,
+  .issue-bridge-root .knowledge-row-actions button,
+  .issue-bridge-root .knowledge-row-menu-item { min-height: 44px; }
+  .issue-bridge-root .knowledge-row-select { align-content: center; }
+  .issue-bridge-root .knowledge-row-menu > summary {
+    display: grid;
+    place-items: center;
+    min-width: 44px;
+    min-height: 44px;
+  }
+  .issue-bridge-root .workspace-toolbar-main { flex-basis: 100%; grid-template-columns: minmax(0, 1fr) max-content; }
+  .issue-bridge-root .issue-filter-hint { grid-column: 1 / -1; }
+}
 
 .issue-bridge-root[data-preview-hidden="true"] .issue-list-shell { grid-template-columns: minmax(0, 1fr); }
 .issue-bridge-root[data-preview-hidden="true"] .knowledge-detail-pane { display: none; }

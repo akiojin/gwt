@@ -1044,8 +1044,8 @@ pub(super) fn no_detected_agent_setup_view() -> super::LaunchWizardAgentSetupVie
 }
 
 pub(super) fn agent_id_from_key(agent_id: &str) -> gwt_agent::AgentId {
-    gwt_agent::builtin_agent_descriptor_for_command(agent_id)
-        .map(|descriptor| descriptor.id.clone())
+    gwt_agent::resolve_agent_id(agent_id)
+        .filter(|resolved| !matches!(resolved, gwt_agent::AgentId::Custom(_)))
         .unwrap_or_else(|| gwt_agent::AgentId::Custom(agent_id.to_string()))
 }
 
@@ -1721,6 +1721,13 @@ mod tests {
         assert_eq!(agent_id_from_key("opencode"), gwt_agent::AgentId::OpenCode);
         assert_eq!(agent_id_from_key("openclaw"), gwt_agent::AgentId::OpenClaw);
         assert_eq!(agent_id_from_key("hermes"), gwt_agent::AgentId::Hermes);
+        for builtin_alias in ["codex", "Codex", "CODEX"] {
+            assert_eq!(agent_id_from_key(builtin_alias), gwt_agent::AgentId::Codex);
+        }
+        assert_eq!(
+            agent_id_from_key("ReviewBot"),
+            gwt_agent::AgentId::Custom("ReviewBot".to_string())
+        );
         assert_eq!(
             agent_id_from_key("custom"),
             gwt_agent::AgentId::Custom("custom".to_string())

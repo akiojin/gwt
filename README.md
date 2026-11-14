@@ -153,7 +153,12 @@ unsupported tier is omitted. See [Codex speed requirements](https://learn.chatgp
 
   Grok Build is provided by xAI's official `grok` command. Install it with
   `npm install -g @xai-official/grok`, then authenticate on first launch or set
-  `XAI_API_KEY` for API-key workflows.
+  `XAI_API_KEY` for API-key workflows. For host launches, gwt passes Grok’s
+  official `--trust` for the launched Git repository, including its main checkout
+  and linked worktrees. This enables project hooks, MCP/LSP, instructions, and
+  skills for that repository. Grok saves the grant in `trusted_folders.toml`, so
+  later manual launches using the same trust store and repository key also use
+  it. Global CLI defaults and grants for other repositories are unchanged.
 - AI provider credentials when you use agents:
   - `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`
   - `OPENAI_API_KEY`
@@ -1115,9 +1120,20 @@ guarantee that the disk will not fill.
 The Workspace panel's `Clean Up Ready` count uses the same idea for whole
 worktrees: a merged or change-free Workspace stays cleanup-ready when its only
 uncommitted difference is something gwt itself wrote — its `.gwt/` namespace,
-the materialized `gwt-*` skills and commands, or a `.codex/hooks.json` /
+the agent's `tasks/todo.md` work log, the materialized `gwt-*` skills and commands, or a `.codex/hooks.json` /
 `.claude/settings.local.json` that still carries no hand-written content.
 Anything else you have not committed keeps the Workspace out of the count.
+Other files under `tasks/` still count as local work. The branch is compared
+directly with the canonical base, so a deleted remote work branch does not
+prevent a merged Workspace from becoming ready.
+
+To clear accumulated worktrees, open `Issues`, expand `Other`, and use a
+Workspace's `Clean Up` action or `Clean Up Ready` for the eligible group.
+Existing issue worktrees remain listed there after their Work is closed;
+their Work history stays closed and they have no active owner.
+These actions show a confirmation before removal; whole worktrees are not
+automatically pruned. Live agents/processes and production changes keep a
+Workspace out of the ready group.
 
 ### Free provider resets
 
@@ -1779,6 +1795,20 @@ stores are no longer read and need no manual removal.
 Managed hooks preserve user hooks while adding gwt runtime behavior for agent
 state, workflow guardrails, Board reminders, discussion/plan/build Stop checks,
 and coordination-event summaries.
+
+The shell file-operation guard allows `mkdir`, `rmdir`, `rm`, `touch`, `cp`,
+and `mv` within the worktree or below the OS temporary directory (`TMPDIR` /
+platform temp; also `/tmp` and `/private/tmp` on Unix). This includes harness
+session scratchpads and verification logs. Temporary roots themselves and paths
+escaping through symlinks remain protected. On refusal, the message lists the
+allowed directories and shows how to preserve a temporary log. For other external
+artifacts, configure the tool to output into the worktree or temporary scratchpad,
+or obtain separate authorization for access.
+
+This guard recognizes shell file commands; it is not an OS sandbox. Redirection
+and arbitrary Python/interpreter I/O are outside its inspection. Agents must use
+the same authorized path boundaries regardless of syntax and must not use another
+syntax to bypass a refusal.
 
 **Settings → Project → Hook Center** audits the selected project's hook
 configuration, binary fallbacks, Codex discovery/trust, and opt-in profile path.

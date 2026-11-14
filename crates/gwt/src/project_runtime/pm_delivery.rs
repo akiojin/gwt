@@ -1091,7 +1091,7 @@ pub(crate) fn deliver_pm_wake(
         }
         // Reuse the canonical paste/reservation/submit implementation and its
         // actual-commit current-generation fence; no GUI physical writer exists.
-        super::agent_dispatch::write_current_pane_input(writers, id, entry, &prompt)?;
+        super::agent_dispatch::write_current_pane_input(writers, id, entry, &prompt, None)?;
         if delivery.idle {
             let loop_path = pm_registry::pm_loop_state_path_for_repo_path(root);
             let current =
@@ -1718,27 +1718,36 @@ pub(crate) fn deliver_board_notification(
             |bytes| {
                 reservation
                     .write_input_authorized(bytes, |commit| {
-                        let current = writers.read().map_err(|error| {
-                            gwt_terminal::TerminalError::PtyIoError {
-                                details: error.to_string(),
-                            }
-                        })?;
-                        if !current.get(&window_id).is_some_and(|entry| {
-                            Arc::ptr_eq(entry, &expected) && entry.current.load(Ordering::Acquire)
-                        }) {
-                            lost = true;
-                            return Err(gwt_terminal::TerminalError::PtyIoError {
-                                details: "Board notification target generation changed".into(),
-                            });
-                        }
-                        if Instant::now() >= deadline {
-                            return Err(gwt_terminal::TerminalError::PtyIoError {
-                                details: "Board notification delivery deadline expired".into(),
-                            });
-                        }
-                        reservation.with_unchanged_ordinary_input(ordinary_revision, || {
-                            commit(&mut || attempted = true)
-                        })
+                        super::agent_dispatch::with_current_monitor_prompt_input(
+                            &expected,
+                            None,
+                            || {
+                                let current = writers.read().map_err(|error| {
+                                    gwt_terminal::TerminalError::PtyIoError {
+                                        details: error.to_string(),
+                                    }
+                                })?;
+                                if !current.get(&window_id).is_some_and(|entry| {
+                                    Arc::ptr_eq(entry, &expected)
+                                        && entry.current.load(Ordering::Acquire)
+                                }) {
+                                    lost = true;
+                                    return Err(gwt_terminal::TerminalError::PtyIoError {
+                                        details: "Board notification target generation changed"
+                                            .into(),
+                                    });
+                                }
+                                if Instant::now() >= deadline {
+                                    return Err(gwt_terminal::TerminalError::PtyIoError {
+                                        details: "Board notification delivery deadline expired"
+                                            .into(),
+                                    });
+                                }
+                                reservation.with_unchanged_ordinary_input(ordinary_revision, || {
+                                    commit(&mut || attempted = true)
+                                })
+                            },
+                        )
                     })
                     .map_err(|error| error.to_string())
             },

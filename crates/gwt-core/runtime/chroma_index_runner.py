@@ -3906,6 +3906,7 @@ def _materialize_file_artifact_pair(
     progress_total: Optional[int] = None,
     on_checkpoint: Optional[Callable[[int], None]] = None,
     reuse_entries: Optional[Dict[str, Dict[str, Any]]] = None,
+    invalid_paths: Optional[set[str]] = None,
 ) -> tuple[int, int, bool]:
     """Build one Base or Overlay artifact pair.
 
@@ -3935,7 +3936,11 @@ def _materialize_file_artifact_pair(
                 and not candidate.is_symlink()
             ):
                 shutil.rmtree(candidate, ignore_errors=True)
-        if _artifact_pair_metadata_is_verified(
+        # IDs alone cannot clear payload failures observed by this build.
+        has_invalid_payloads = bool(invalid_paths) and not invalid_paths.isdisjoint(
+            record["path"] for record in records
+        )
+        if not has_invalid_payloads and _artifact_pair_metadata_is_verified(
             artifact_dir, records, descriptor_identity
         ):
             if on_checkpoint is not None:
@@ -3943,11 +3948,6 @@ def _materialize_file_artifact_pair(
             return 0, len(records), False
         if not (len(records) == len(identities) == len(manifest_plans)):
             raise ValueError("file-index-v2 artifact plan length mismatch")
-        if artifact_dir.exists():
-            quarantine = artifact_dir.with_name(
-                f".{artifact_dir.name}.quarantine-{time.time_ns()}-{os.getpid()}"
-            )
-            os.replace(artifact_dir, quarantine)
         staging = artifact_dir.with_name(
             f".{artifact_dir.name}.staging-{time.time_ns()}-{os.getpid()}"
         )
@@ -3957,6 +3957,7 @@ def _materialize_file_artifact_pair(
         computed = 0
         hits = 0
         opened: Dict[str, tuple[Any, Any]] = {}
+        quarantine: Optional[Path] = None
         try:
             for bucket, collection_name in (
                 ("code", V2_FILES_CODE_COLLECTION),
@@ -4126,6 +4127,12 @@ def _materialize_file_artifact_pair(
                 _fsync_file_index_v2_directory(store)
                 for parent in list(store.parents)[:4]:
                     _fsync_directory(parent)
+            # Keep the published metadata in place across yields and staging failures.
+            if artifact_dir.exists():
+                quarantine = artifact_dir.with_name(
+                    f".{artifact_dir.name}.quarantine-{time.time_ns()}-{os.getpid()}"
+                )
+                os.replace(artifact_dir, quarantine)
             _durably_replace_file_index_v2_directory(staging, artifact_dir)
             return computed, hits, False
         finally:
@@ -4134,6 +4141,9 @@ def _materialize_file_artifact_pair(
             # Windows cannot delete SQLite files while Chroma owns their handles.
             # A process kill or delayed native close is retried under the next lock.
             shutil.rmtree(staging, ignore_errors=True)
+            if quarantine is not None and not artifact_dir.exists():
+                os.replace(quarantine, artifact_dir)
+                _fsync_directory(artifact_dir.parent)
 
 
 _BASE_DESCRIPTOR_FIELDS = {
@@ -5589,11 +5599,7 @@ def _action_index_files_protocol_v2_pinned(
     reuse_inputs = _file_index_v2_reuse_inputs(repo_hash, worktree_hash, descriptor, db_root)
     canonical = _canonical_git_tree(root)
     if canonical is not None and canonical.get("root_tree_oid") is not None:
-        base_reuse = reuse_inputs.get("base")
-        if base_reuse is not None and base_reuse["descriptor"]["root_tree_oid"] != canonical["root_tree_oid"]:
-            base_records = _canonical_base_records(root, canonical, reuse_inputs=base_reuse)
-        else:
-            base_records = _canonical_base_records(root, canonical)
+        base_records = _canonical_base_records(root, canonical, reuse_inputs=reuse_inputs.get("base"))
     else:
         base_records = []
     base_by_path = {record["path"]: record for record in base_records}
@@ -5729,7 +5735,8 @@ def _action_index_files_protocol_v2_pinned(
         progress_total=requested,
         on_checkpoint=lambda done: checkpoint(done, "base"),
         **({"reuse_entries": {path: entry for path, entry in reuse_inputs["base"]["entries"].items()
-                            if path not in reuse_inputs["base"]["invalid_paths"]}} if "base" in reuse_inputs else {}),
+                            if path not in reuse_inputs["base"]["invalid_paths"]},
+            "invalid_paths": reuse_inputs["base"]["invalid_paths"]} if "base" in reuse_inputs else {}),
     )
     if base_yielded:
         return _file_index_v2_yielded_result(
@@ -5765,7 +5772,8 @@ def _action_index_files_protocol_v2_pinned(
         progress_total=requested,
         on_checkpoint=lambda done: checkpoint(len(base_records) + done, "overlay"),
         **({"reuse_entries": {path: entry for path, entry in reuse_inputs["overlay"]["entries"].items()
-                            if path not in reuse_inputs["overlay"]["invalid_paths"]}} if "overlay" in reuse_inputs else {}),
+                            if path not in reuse_inputs["overlay"]["invalid_paths"]},
+            "invalid_paths": reuse_inputs["overlay"]["invalid_paths"]} if "overlay" in reuse_inputs else {}),
     )
     computed = base_computed + overlay_computed
     cache_hits = base_hits + overlay_hits
@@ -6380,27 +6388,36 @@ def _load_cached_issue_documents(repo_hash: str) -> List[Dict[str, Any]]:
     return _cached_issue_source(repo_hash, "documents", lambda: _read_cached_issue_documents(repo_hash))
 
 
-def _read_cached_issue_documents(repo_hash: str) -> List[Dict[str, Any]]:
-    root = _issue_cache_root(repo_hash)
-    if not root.is_dir():
-        return []
+def _load_cached_issue_metadata(repo_hash: str) -> List[tuple[Path, int, Dict[str, Any]]]:
+    def load() -> List[tuple[Path, int, Dict[str, Any]]]:
+        root = _issue_cache_root(repo_hash)
+        if not root.is_dir():
+            return []
+        metadata = []
+        for entry in sorted(root.iterdir(), key=lambda item: item.name):
+            if not entry.is_dir():
+                continue
+            try:
+                number = int(entry.name)
+            except ValueError:
+                continue
+            meta_path = entry / "meta.json"
+            if not meta_path.is_file():
+                continue
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError, ValueError, UnicodeDecodeError):
+                continue
+            metadata.append((entry, number, meta))
+        return metadata
 
+    return _cached_issue_source(repo_hash, "metadata", load)
+
+
+def _read_cached_issue_documents(repo_hash: str) -> List[Dict[str, Any]]:
     issues: List[Dict[str, Any]] = []
-    for entry in sorted(root.iterdir(), key=lambda item: item.name):
-        if not entry.is_dir():
-            continue
-        try:
-            number = int(entry.name)
-        except ValueError:
-            continue
-        meta_path = entry / "meta.json"
+    for entry, number, meta in _load_cached_issue_metadata(repo_hash):
         body_path = entry / "body.md"
-        if not meta_path.is_file():
-            continue
-        try:
-            meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError, ValueError, UnicodeDecodeError):
-            continue
         try:
             body = (
                 body_path.read_text(encoding="utf-8") if body_path.is_file() else ""
@@ -6563,31 +6580,14 @@ def _load_cached_spec_documents(
 def _read_cached_spec_documents(
     repo_hash: str,
 ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    root = _issue_cache_root(repo_hash)
-    if not root.is_dir():
-        return [], []
-
     specs: List[Dict[str, Any]] = []
     manifest_entries: List[Dict[str, Any]] = []
-    for entry in sorted(root.iterdir(), key=lambda item: item.name):
-        if not entry.is_dir():
-            continue
-        try:
-            number = int(entry.name)
-        except ValueError:
-            continue
-        meta_path = entry / "meta.json"
-        if not meta_path.is_file():
-            continue
-        try:
-            meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError, ValueError, UnicodeDecodeError):
-            continue
-
+    for entry, number, meta in _load_cached_issue_metadata(repo_hash):
         labels = _normalize_labels(meta.get("labels", []))
         if not _is_spec_issue(labels):
             continue
 
+        meta_path = entry / "meta.json"
         spec_path = entry / "sections" / "spec.md"
         body_path = entry / "body.md"
         source_path = spec_path if spec_path.is_file() else body_path

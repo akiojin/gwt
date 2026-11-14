@@ -20,12 +20,24 @@ class SearchSourceCacheTests(unittest.TestCase):
             meta = {"number": 1, "title": "alpha", "labels": ["gwt-spec"], "state": "open"}
             (issue / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
             (issue / "body.md").write_text("alpha body", encoding="utf-8")
+            ordinary = root / "2"
+            ordinary.mkdir()
+            (ordinary / "meta.json").write_text('{"title":"ordinary","labels":[]}', encoding="utf-8")
             revision = root / "source-revision"
             revision.write_text(str(uuid.uuid4()), encoding="utf-8")
-            first = runner._issue_cache_source_snapshot("repo")
-            issues = runner._load_cached_issue_documents("repo")
-            specs = runner._load_cached_spec_documents("repo")
             read_text = Path.read_text
+            metadata_reads = {}
+
+            def count_metadata_reads(path, *args, **kwargs):
+                if path.name == "meta.json":
+                    metadata_reads[path] = metadata_reads.get(path, 0) + 1
+                return read_text(path, *args, **kwargs)
+
+            with mock.patch.object(Path, "read_text", count_metadata_reads):
+                first = runner._issue_cache_source_snapshot("repo")
+                issues = runner._load_cached_issue_documents("repo")
+                specs = runner._load_cached_spec_documents("repo")
+            self.assertEqual(metadata_reads, {issue / "meta.json": 1, ordinary / "meta.json": 1})
 
             def read_stamp(path, *args, **kwargs):
                 if path.name not in {"source-revision", "refresh-meta.json"}:

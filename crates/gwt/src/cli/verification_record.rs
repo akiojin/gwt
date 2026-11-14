@@ -3360,6 +3360,12 @@ const LIVE_GITHUB_OPT_IN_ENV: &str = "GWT_ALLOW_REAL_GH";
 /// reproduce: a command that passes in the terminal but fails under
 /// `verify.run` reads as a real RED and sends its owner after a bug that is
 /// not there.
+///
+/// Inherit the caller's environment, including PATH; do not discover or append
+/// tool installation directories (#4255). Leading `KEY=value` assignments
+/// override this list. The spawn boundary gives each command private temporary
+/// directories; isolated baselines additionally scrub Git selection and
+/// CARGO_TARGET_DIR without changing PATH.
 fn child_environment_contract() -> Vec<(String, Option<String>)> {
     let mut environment = vec![
         // Live GitHub opt-in must never cross the child boundary (SPEC #4093
@@ -10316,6 +10322,45 @@ fn default_integration_test_builds_a_guarded_binary() {
                 .iter()
                 .any(|(existing, _)| existing == key));
         }
+
+        // #4255: the daemon's explicit environment must preserve PATH too.
+        // The original Windows NotFound came from parallel tests replacing
+        // process-global PATH, fixed by process isolation in #4750.
+        let path = std::env::var("PATH").expect("test host PATH");
+        for isolated_baseline in [false, true] {
+            let environment = resolved_child_environment(isolated_baseline);
+            let inherited_path = environment
+                .iter()
+                .find(|(key, _)| {
+                    if cfg!(windows) {
+                        key.eq_ignore_ascii_case("PATH")
+                    } else {
+                        key == "PATH"
+                    }
+                })
+                .map(|(_, value)| value);
+            assert_eq!(inherited_path, Some(&path));
+        }
+
+        // Resolve Git inside the child, so Windows' parent-side executable
+        // lookup cannot hide a missing child PATH.
+        #[cfg(windows)]
+        let command = "cmd /d /c git --version";
+        #[cfg(not(windows))]
+        let command = "/bin/sh -c 'git --version'";
+        let dir = tempfile::tempdir().unwrap();
+        let (code, signal, output, _) = execute_command_with_isolation(
+            dir.path(),
+            command,
+            false,
+            None,
+            &VerificationHost::Inherit,
+            None,
+        )
+        .unwrap();
+        assert_eq!(code, 0, "{output}");
+        assert_eq!(signal, None, "{output}");
+        assert!(output.contains("git version "), "{output}");
     }
 
     // #4182 AC-7: a test that fetches an unreachable remote makes Windows'

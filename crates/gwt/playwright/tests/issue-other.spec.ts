@@ -261,6 +261,9 @@ test("needs_human snapshot shares counts and reasons across Issue views", async 
   await emit("needs_human", "Choose credentials");
   await expect(pill).toHaveAttribute("title", /Needs human 1/);
   await expect(strip).toHaveAttribute("title", /Needs human 1/);
+  // SPEC #5016 AC-HS1/HS2: both views read the one combined attention value.
+  await expect(pill).toHaveAttribute("title", /Awaiting attention 1 \| Needs human 1/);
+  await expect(strip).toHaveAttribute("title", /Awaiting attention 1 \| Needs human 1/);
   await expect(rowReason).toHaveText("Choose credentials");
   await expect(detailReason).toHaveText("Choose credentials");
   await emit("needs_human");
@@ -268,8 +271,8 @@ test("needs_human snapshot shares counts and reasons across Issue views", async 
   await expect(detailReason).toHaveText("Human decision required");
   await page.screenshot({ path: info.outputPath("needs-human-shared-state.png"), fullPage: true });
   await emit("queued");
-  await expect(pill).toHaveAttribute("title", /Needs human 0/);
-  await expect(strip).toHaveAttribute("title", /Needs human 0/);
+  await expect(pill).toHaveAttribute("title", /Awaiting attention 0 \| Needs human 0/);
+  await expect(strip).toHaveAttribute("title", /Awaiting attention 0 \| Needs human 0/);
   await expect(rowReason).toHaveCount(0);
   await expect(detailReason).toHaveCount(0);
 });
@@ -519,6 +522,39 @@ test("Other keeps branch launch, conversation resume and backend-approved cleanu
   await expect.poll(() => messages(page, "run_branch_cleanup")).toEqual([
     expect.objectContaining({ id: "tab-other::issue-1", branches: ["feature/other"], delete_remote: false }),
   ]);
+});
+
+test("terminal Work keeps its physical Workspace cleanup reachable without reopening Work", async ({ page }) => {
+  await boot(page);
+  await page.evaluate(() => {
+    const fixture = window as any;
+    const projection = fixture.__otherProjection;
+    const item = projection.active_works.find((row: any) => row.id === "other-paused");
+    item.lifecycle_state = "done";
+    item.status_category = "done";
+    item.owner = null;
+    item.agents = [];
+    item.closed_at = "2026-11-13T00:00:00Z";
+    item.works = [{ id: "closed-issue-work", title: "Closed issue work", owner: "Issue #3447",
+      lifecycle_state: "done", status_category: "done", manual_close_allowed: false,
+      closed_at: item.closed_at, agents: [] }];
+    fixture.__otherEmit({ kind: "active_work_projection", projection });
+  });
+  await page.locator(".issue-other-summary").click();
+  await row(page, "other-paused").click();
+  const detail = page.locator(".workspace-overview-detail-pane");
+  await expect(detail).toContainText("Closed issue work");
+  await expect(detail.locator('[data-action="close-work-done"], [data-action="close-work-discard"]')).toHaveCount(0);
+  await detail.locator('[data-action="cleanup-merged-workspace"]').click();
+  const modal = page.locator("#branch-cleanup-modal");
+  await expect(modal).toBeVisible();
+  await expect(modal).toContainText("feature/other");
+  await page.screenshot({ path: test.info().outputPath("terminal-workspace-cleanup.png") });
+  await modal.getByRole("button", { name: "Run cleanup" }).click();
+  await expect.poll(() => messages(page, "run_branch_cleanup")).toEqual([
+    expect.objectContaining({ branches: ["feature/other"], delete_remote: false }),
+  ]);
+  await expect.poll(() => messages(page, "close_work")).toEqual([]);
 });
 
 test("a persisted work preset restores the Issue list with collapsed Other", async ({ page }) => {

@@ -14,23 +14,20 @@ const runtimeCpuUnitsPattern =
 test("Issues strip reads shared attention summaries on model-only updates", async () => {
   const { subscribeIssueMonitorStatus } = await importOperatorShell();
   const { document } = parseHTML(html);
-  const model = createUiStateStore({ status: { enabled: false }, humanAttention: {
-    count: null, summary: "", byIssue: {},
+  const model = createUiStateStore({ status: { enabled: false }, decisionAttention: {
+    count: null, summary: "",
   } }, { scheduleFrame: run => { run(); return () => {}; } });
   const unsubscribe = subscribeIssueMonitorStatus(document, model);
   const cell = document.getElementById("op-strip-issue-monitor");
-  model.update(state => ({ ...state, humanAttention: { count: 2, summary: "Needs human 2", byIssue: {} } }));
-  assert.match(cell.title, /Needs human 2/);
-  model.update(state => ({ ...state, humanAttention: { count: 0, summary: "Needs human 0", byIssue: {} } }));
-  assert.match(cell.title, /Needs human 0/);
-  model.update(state => ({ ...state, reviewAttention: { count: 1, summary: "Review holds 1", byIssue: {} } }));
-  assert.match(cell.title, /Review holds 1/);
-  model.update(state => ({ ...state, reviewAttention: { count: 0, summary: "Review holds 0", byIssue: {} } }));
-  assert.match(cell.title, /Review holds 0/);
-  model.update(state => ({ ...state, steeringAttention: { count: 1, summary: "PM steering 1", byIssue: {} } }));
-  assert.match(cell.title, /PM steering 1/);
-  model.update(state => ({ ...state, steeringAttention: { count: 0, summary: "PM steering 0", byIssue: {} } }));
-  assert.match(cell.title, /PM steering 0/);
+  const attention = "Awaiting attention 2 | Needs human 1 | Review holds 1 | PM steering 1";
+  model.update(state => ({ ...state, decisionAttention: { count: 2, summary: attention } }));
+  assert.ok(cell.title.includes(attention));
+  // SPEC #5016 AC-HS2: the strip must not recombine component summaries itself.
+  model.update(state => ({ ...state, humanAttention: { count: 9, summary: "Needs human 9", byIssue: {} } }));
+  assert.equal(cell.title.includes("Needs human 9"), false);
+  model.update(state => ({ ...state, decisionAttention: { count: 0,
+    summary: "Awaiting attention 0 | Needs human 0 | Review holds 0 | PM steering 0" } }));
+  assert.match(cell.title, /Awaiting attention 0/);
   assert.equal(document.getElementById("op-strip-issue-monitor-value").textContent, "Off");
   model.update(state => ({ ...state, status: { enabled: true, state: "active" },
     counts: { queue: 3, active: 1, maxActive: 2 } }));

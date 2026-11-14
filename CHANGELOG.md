@@ -1,6 +1,261 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.165.0] - 2026-11-14
+
+### Bug Fixes
+
+- **worktree:** 作業メモだけの worktree を整理候補に含める
+- **worktree:** 完了済み Work の残存 Workspace を安全に整理可能にする
+- **gui:** スマートフォン幅で Board の操作を 44px のタッチ目標にする
+- **launch:** Preserve assets when runner health checks fail
+- **workspace:** Restore canonical close proof for active producers
+- **workspace:** Retain binary test entrypoint after intake move
+- **workspace:** Preserve terminal provenance through proof recovery
+- **monitor:** Scan却下時の失敗effect再実行ループを止める
+- **mobile:** Keep settings and status controls usable on phones
+- **mobile:** Preserve usage readability with long diagnostics
+- **ui:** Derive one awaiting-attention count for the Issues strip and pill
+- **gui:** Preserve runtime status order across workspace snapshots
+- **deps:** Update ammonia to 4.2.5
+- **ui:** Count unanswered PM decisions in the shared awaiting-attention value
+- **mobile:** Issuesタブのタッチ領域と操作行を確保する
+- **ui:** Count unresolved reviews in the shared awaiting-attention value
+- **ci:** Restore Windows nightly fixture assumptions
+- **pm:** 連結された自動通知のQ&A誤判定を防ぐ
+- **ui:** Show the shared needs_human value in PM Live facts
+- **terminal:** MacOSのOptionドラッグ選択を復旧する
+- **mobile:** 共通chromeのCheckと通知の閉じるを44pxのタッチ目標にする
+- **issue-monitor:** Unify priority order and report queue reasons
+- **mobile:** Issues上部の操作行・検索・New/Refreshを44pxのタッチ目標にする
+- **test:** Codex trust の書込みを test 時に実ユーザー config から隔離する
+- **launch:** Trust repositories for Grok host launches
+- **mobile:** Issuesカード内の選択・操作・メニューを44pxのタッチ目標にする
+- **terminal:** Retain Codex partial-region scrollback
+- **launch:** Bind Grok trust to the provider cwd
+- **mobile:** Works一覧のOpen terminalとメンバー名を44pxのタッチ目標にする
+- **mobile:** Settings panel内のフォーム操作を44pxのタッチ目標にする
+- **mobile:** PM surfaceのview切替と操作を狭画面で44pxのタッチ目標にする
+- **mobile:** Logsの操作を狭画面で44pxのタッチ目標にしdetailを積み重ねる
+- **mobile:** Indexの操作を狭画面で44pxのタッチ目標にし結果と詳細を積み重ねる
+
+### Features
+
+- **issue-monitor:** 同一ワークツリーの重複 Session を status に出す
+
+### Miscellaneous Tasks
+
+- **work:** T-005g 配送精算の Work イベントを保存する
+- **work:** T-005g2 の配送記録を精算
+- **work:** Issue #3447 の PR 関連付けを記録
+- **work:** T-005b2 着手時の Work イベントを保存する
+- **work:** Issue 7102 の Work 記録を追加する
+- **work:** Record Issue 7102 acceptance audit and delivery
+- **work:** Link Issue #3725 to PR #7190
+- **work:** PR #7197 の関連付けを記録
+- **work:** Record issue 6979 metadata delivery
+- **work:** Boardモバイル操作の独立監査を記録
+- **work:** 監査PRの紐付けを記録
+- **work:** Record mobile UI pull request
+- **work:** PR #7197 の配送確認を記録
+- **work:** PR #7201 の関連付けを記録
+- **work:** Record Issue 6072 pull request
+- **work:** Record Issue 7206 PR association
+- **work:** Record HSJ delivery work events
+- **work:** Record HSK work events
+- **work:** Issue 7209 の CI 復旧確認を記録
+- **work:** Issue 7209 の PR 関連付けを記録
+- **work:** PR #7214の関連付けを記録する
+- **work:** Record HSK delivery work events
+- **work:** Record HSV work events
+- **work:** Issue 5469 の main 配信監査を記録
+- **work:** Record Issue 5941 pull request
+- **work:** Issue 5541 の PR 関連付けを記録
+- **work:** Record HSV delivery work events
+- **work:** Record HSF work events
+- **work:** Issue 5132 の Work イベントを記録
+- **work:** PR 7220 の関連付けを記録
+- **work:** PR #7223 の関連付けを記録する
+- **work:** T-005b2 配送精算の Work イベントを保存する
+- **work:** T-005c の Work イベントを保存する
+- **work:** Record Issue 5083 pull request linkage
+- **work:** T-005c 配送精算の Work イベントを保存する
+- **work:** T-005q の Work イベントを保存する
+- **work:** Record grok trust scope investigation
+- **work:** Correct main delivery evidence
+- **work:** Link Grok trust fix to PR 7229
+- **work:** T-005ic の Work イベントを保存する
+- **work:** Record scrollback PR handoff
+- **work:** Record Grok trust follow-up pull request
+- **work:** T-005wo の Work イベントを保存する
+- **work:** T-005sf の Work イベントを保存する
+- **work:** T-005 狭画面タッチ寸法の配送精算 Work イベントを保存する
+- **work:** T-005pm の Work イベントを保存する
+- **work:** T-005lg の Work イベントを保存する
+- **work:** T-005ix の Work イベントを保存する
+
+### Performance
+
+- **index:** Share raw issue metadata across source readers
+- **ci:** Embedded E2Eを2ワーカーで実行する
+- **ci:** Trim macOS test debug information
+- **ci:** Trim Windows warm test debug information
+
+### Testing
+
+- **workspace:** Include close proof recovery in probe contract
+- **workspace:** Cover missing-session close proof recovery probe
+- **workspace:** Preserve legacy compacted done abort fixture
+- **workspace:** Reserve stopped host port during build probe
+- **ci:** Develop Coverage を落とす2件の flake を根本原因で止める
+- **ci:** PM delivery fixture の待機から壁時計 deadline を除く
+- **ci:** Develop Coverage の残り2件の flake を壁時計 budget から切り離す
+- **ci:** Held PM wake テストで env lock を実際に取得する
+- **e2e:** Replay計測前に初期描画を待つ
+- **issue-monitor:** Align status snapshot with priority provenance
+- **launch:** Explain live startup clock measurement
+- **terminal:** Wait for the real shell view before scrollback checks
+- **launch:** Isolate Grok cleanup fixture homes
+- **mobile:** Works行操作の受入名とdesktop寸法の比較を実態に合わせる
+- **mobile:** Index受入で結果一覧の内部スクロールとsurfaceの横overflowを固定する
+- **mobile:** Index受入の寸法測定をpanel再描画の完了まで再試行する
+
+## [9.164.1] - 2026-11-13
+
+### Bug Fixes
+
+- **gui:** スマートフォン幅で Agents 画面の操作を 44px のタッチ目標にする
+- **runtime:** Preserve owner identity in terminal convergence
+- **launch:** Diagnose grok startup confirmation waits
+- **monitor:** Publish GUI disconnect grace before exposing zero windows
+- **issue-monitor:** Exclude unhealthy runners from member scheduling
+- **issue-monitor:** Retain unhealthy runner diagnostics without a plan
+- **issue-monitor:** Check runner health in the launch environment
+
+### Documentation
+
+- **perf:** Record recovered local admission delivery
+- **perf:** Record delivered source and live probe limits
+
+### Miscellaneous Tasks
+
+- **work:** Issue #7171 配送完了の Work イベントを保存する
+- **work:** Issue #7171 後続スライスの Work イベントを保存する
+- **work:** T-005t 配送精算の Work イベントを保存する
+- **work:** T-005g 着手時の Work イベントを保存する
+- **work:** Record issue 7183 diagnostic PR
+
+## [9.164.0] - 2026-11-13
+
+### Bug Fixes
+
+- **test:** Visual runnerのNode環境パスを正規化する
+- **test:** Windows Claudeの保存先を隔離HOMEに合わせる
+- **test:** PM branchを登録済みworktreeで検証する
+- **ui:** Derive review holds from shared monitor state
+- **test:** Signal-free GUI停止の待機をQuitApp猶予後まで延ばす
+- **ui:** PM steering の件数と理由を共有モデルから描画
+- **gui:** 狭画面の Command Rail を横スクロールでなく折返しで全項目表示する
+- **gui:** 狭画面 rail の PM 規則を ID セレクタにして PM CSS 検査範囲を保つ
+- **ui:** Share workspace attention summaries
+- **runtime:** Preserve PM identity across cold restore
+- **runtime:** Refresh activity when PM identity changes
+- **ui:** Issues stripの不要な再描画を抑止する
+- **pm:** タスク更新時に詳細ボタンのフォーカスを保持する
+- **gui:** 狭画面 Works header の名前で focus ring を切らない
+- **gui:** ソフトキーボード表示時に terminal 入力行を覆わない
+- **ui:** タイトルとfaviconの不要な再描画を抑止する
+- **execution:** Parse verification status in blocker reasons
+- **gui:** タップ後に操作の説明 tooltip を表示したまま残さない
+- **issue-monitor:** Provider quota hold を他ツールのメンバーに割り当てた Issue へ波及させない
+- **restore:** 起動失敗を該当エージェント窓だけに反映する
+- **workspace:** 警告を分離して終端診断のJSONを保持する
+- **process:** Normalize verbatim cmd paths before shell execution
+- **windows:** Cmd の verbatim パス表記を共有境界で正規化
+
+### Features
+
+- **pm:** ChatとReportsから判断へ回答できるようにする
+- **mobile:** Coordinatorの明示serveコマンドを追加する
+- **pm:** Tasksに目的と完了条件のプレビューを追加する
+- **mobile:** Enforce coordinator origin and response headers
+- **gui:** スマートフォン幅で Command Rail を1行に収めて terminal 表示を広げる
+- **pm:** Tasksに直接の子タスクの進捗を表示する
+- **pm:** タスクの原依頼・証拠・変更履歴を表示する
+- **gui:** スマートフォン幅で Works の terminal header を3行に詰める
+- **web:** Add #7007 Progress and Log surfaces, typed window errors (T-012, T-013, T-014)
+
+### Miscellaneous Tasks
+
+- **work:** PR #6949 の参照記録を保存する
+- **work:** Windows cold restart の再開検証を記録する
+- **work:** Windows cold restart 再検証のイベントを記録する
+- **work:** 質問形式回帰の配信監査を保存する
+- **work:** 判断回答のPR記録を保存する
+- **work:** Record coordinator serve PR linkage
+- **work:** Record review hold PR linkage
+- **work:** #4735 新世代のWorkイベントを記録する
+- **work:** #4735 レビュー追随sliceのWorkイベントを記録する
+- **work:** PR #7155 の関連付けを記録
+- **work:** 完了条件プレビューのPR記録を保存する
+- **work:** Record coordinator HTTP PR linkage
+- **work:** T-005r 配信中の Work イベントを保存する
+- **work:** T-005r 精算後の Work イベントを保存する
+- **work:** 後継世代の精算 Work イベントを保存する
+- **work:** T-005h 着手時の Work イベントを保存する
+- **work:** Record workspace attention PR
+- **work:** Record PR #7158 delivery link
+- **work:** 直接子進捗のPR記録を保存する
+- **work:** Record monitor counts PR
+- **work:** タスク詳細のPR関連記録を保存する
+- **work:** MSELのPR関連付けを記録する
+- **work:** タスク詳細の補正PR関連付けを記録する
+- **work:** T-005h 配送確定の Work イベントを保存する
+- **work:** T-005k 着手時の Work イベントを保存する
+- **work:** T-005k 配送確定の Work イベントを保存する
+- **work:** T-005k 精算の Work イベントを保存する
+- **work:** 共有状態モデルのPR関連記録を保存する
+- **work:** T-005t 着手時の Work イベントを保存する
+- **work:** Issue #7125 の完了 Work イベントを記録する
+- **work:** Record issue 7125 acceptance verification
+- **work:** Record issue 7125 pull request linkage
+- **work:** Record issue 7015 source delivery scope
+- **work:** Record issue 7015 pull request link
+- **work:** Record issue 7015 delivery settlement
+- **work:** Record Issue 6382 CI audit and delivery boundary
+- **work:** Record issue 6382 successor delivery
+- **work:** Link issue 6382 delivery PR
+- **work:** Record Issue #3725 diagnostic verification
+- **work:** Link Issue #3725 diagnostic PR
+- **work:** Issue #6474 のPR関連付けを記録
+- **work:** Record issue 6474 verified PR association
+
+### Performance
+
+- **monitor:** Scope pr discovery to local launch candidates
+
+### Refactor
+
+- **ui:** Share monitor queue and slot counts
+
+### Testing
+
+- **windows:** Worksのcold restartを実ブラウザで検証する
+- **windows:** Shell入力をprompt表示後まで待つ
+- **windows:** Cursor行でShell入力準備を確認する
+- **windows:** Fake Claudeのhook shellを実CLIに合わせる
+- **ui:** 実PTY検証を現行の起動と復元に追従させる
+- **works:** 状態配送のACK後に表示を検証する
+- **pm:** Assert backoff through PM preparation state
+- **runtime:** Hook失敗前に実censusの反映を待つ
+- **web:** Specify #7007 Progress/Log surfaces and typed window errors (T-011)
+- **web:** Align window-interrupted-state E2E with typed window errors (#7007 T-014)
+- **windows:** ConPTY 検証で起動時の端末応答を返す
+
+### Ci
+
+- **windows:** Native試験より前にcheckoutをビルドする
+
 ## [9.163.0] - 2026-11-12
 
 ### Bug Fixes

@@ -3540,6 +3540,7 @@ impl OwnerState {
                                 &id,
                                 &entry,
                                 text.as_deref().expect("typed input"),
+                                None,
                             ),
                         };
                         let result = result
@@ -5802,7 +5803,7 @@ impl OwnerState {
             let output_id = id.clone();
             let output_operation_id = operation_id.clone();
             let mut purpose_title = None;
-            let mut manual_successor_prepared = false;
+            let mut manual_successor_prepared = None;
             let result = manual_stop_result
                 .map_err(AgentLaunchError::from)
                 .and_then(|()| {
@@ -5837,10 +5838,12 @@ impl OwnerState {
                             None => false,
                         },
                     );
-                    manual_successor_prepared = matches!(
-                        &config.execution_intent,
-                        gwt_agent::ExecutionLaunchIntent::PreparedManualSuccessor(_)
-                    );
+                    manual_successor_prepared = match &config.execution_intent {
+                        gwt_agent::ExecutionLaunchIntent::PreparedManualSuccessor(binding) => {
+                            Some((config.working_dir.clone(), binding.clone()))
+                        }
+                        _ => None,
+                    };
                     preparation.map_err(AgentLaunchError::from)?;
                     let phase = super::launch::LaunchPhaseTimer::start("owner_admission");
                     let host_project_roots = super::installation::owner_host_project_roots(&root)
@@ -6280,7 +6283,7 @@ impl OwnerState {
                         .is_some_and(|restore| restore.refusal.is_some())
                     && result.is_err()
                     && input.failed_launch.is_none());
-            let unproved_manual_cleanup = manual_successor_prepared
+            let unproved_manual_cleanup = manual_successor_prepared.is_some()
                 && !input.current.load(Ordering::Acquire)
                 && result.is_err()
                 && materialized_snapshot.is_none()
@@ -6289,7 +6292,32 @@ impl OwnerState {
                 && !input.physical_spawn_started
                 && input.pending_fresh_execution.is_none()
                 && input.pending_continue_work.is_none();
-            let cancelled_cleanup = cancelled_cleanup && !unproved_manual_cleanup;
+            let cancelled_cleanup = if unproved_manual_cleanup {
+                let (worktree, binding) = manual_successor_prepared
+                    .as_ref()
+                    .expect("unmaterialized Manual cleanup has a captured preparation");
+                match worktree.as_ref().map_or(Ok(false), |worktree| {
+                    super::continuation::abort_unmaterialized_manual_successor(
+                        &root,
+                        &sessions_dir,
+                        worktree,
+                        binding,
+                        &operation_id,
+                    )
+                }) {
+                    Ok(true) => {
+                        durable_candidate_removed = true;
+                        cancelled_cleanup
+                    }
+                    Ok(false) => false,
+                    Err(error) => {
+                        tracing::warn!(%error, "cancelled Manual preparation requires reconciliation");
+                        false
+                    }
+                }
+            } else {
+                cancelled_cleanup
+            };
             let cleanup_monitor_window_record = || -> Result<(), String> {
                 if let (Ok(registry), Ok(expected)) = (&owner_registry, &expected_registry_row) {
                     super::agent_dispatch::OwnedWindowRecordCleanup {
@@ -7097,6 +7125,16 @@ impl OwnerState {
                 .expect("exact failed agent insertion");
             let (reply, _) = oneshot::channel();
             self.start_close(id.clone(), runtime, CloseCause::ExplicitClose, reply);
+        }
+        if let Some(restore) = restore.as_ref().filter(|_| result.is_ok()) {
+            if let Err(error) = super::installation::retire_same_session_restore_placeholders(
+                &self.root,
+                restore,
+                &session_id,
+                |canonical| self.runtimes.contains_key(canonical),
+            ) {
+                tracing::warn!(%session_id, %error, "same-Session restore placeholder retirement failed");
+            }
         }
         self.refresh_registry_projection();
         if result.is_ok()
@@ -9941,6 +9979,13 @@ impl OwnerState {
                                 return Err(fail("capacity retry cancelled by newer activity"));
                             }
                             let authorized = crate::cli::execution_state::with_current_active_session_execution_identity_lease(&registration.sessions_dir, &identity, || {
+                                let entry = writers.read().map_err(|_| fail("PTY registry unavailable"))?
+                                    .get(&registration.window_id).cloned().ok_or_else(|| fail("the Monitor PTY was replaced"))?;
+                                if !Arc::ptr_eq(&entry.handle, &target.handle) || !entry.monitor_runtime.as_ref().is_some_and(|current| current.session_id == registration.session_id && current.incarnation == registration.incarnation && current.issue_number == registration.issue_number && current.worktree_path == registration.worktree_path && current.project_root == registration.project_root && !current.review_dispatch) {
+                                    return Err(fail("the Monitor PTY was replaced"));
+                                }
+                                let authorize = || {
+                                gwt_core::operation_deadline::ensure_remaining("capacity retry input").map_err(|error| fail(&error.to_string()))?;
                                 let prefs = crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(&registration.project_root)).map_err(|error| fail(&error.to_string()))?;
                                 if !prefs.enabled || !prefs.autonomous_mode || !issuer.active_token_is_current(&token, &binding) {
                                     return Err(fail("autonomous Monitor authority changed"));
@@ -9949,8 +9994,13 @@ impl OwnerState {
                                 if pm.settings.paused || pm.registration.as_ref().is_some_and(|pm| pm.session_id == registration.session_id) {
                                     return Err(fail("PM is paused or owns the target Session"));
                                 }
+                                Ok(())
+                                };
+                                authorize()?;
+                                super::agent_dispatch::with_current_monitor_prompt_input(&entry, Some(crate::monitor_duplicate_runtime::HeldMonitorPromptSession::Bound(&identity)), || {
+                                authorize()?;
                                 let current = writers.read().map_err(|_| fail("PTY registry unavailable"))?;
-                                if !current.get(&registration.window_id).is_some_and(|entry| Arc::ptr_eq(&entry.handle, &target.handle) && entry.monitor_runtime.as_ref().is_some_and(|current| current.session_id == registration.session_id && current.incarnation == registration.incarnation && current.issue_number == registration.issue_number && current.worktree_path == registration.worktree_path && current.project_root == registration.project_root && !current.review_dispatch)) {
+                                if !current.get(&registration.window_id).is_some_and(|current| Arc::ptr_eq(current, &entry)) {
                                     return Err(fail("the Monitor PTY was replaced"));
                                 }
                                 if body_attempted {
@@ -9963,6 +10013,7 @@ impl OwnerState {
                                         commit(&mut || body_attempted = true)
                                     })
                                 }
+                                })
                             }).map_err(|error| fail(&error.to_string()))?;
                             authorized.ok_or_else(|| fail("the producing execution is no longer Active"))?
                         }).map_err(|error| error.to_string()),

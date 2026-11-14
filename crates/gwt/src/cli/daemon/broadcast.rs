@@ -150,12 +150,15 @@ pub(crate) struct GuiWindowLease {
 
 impl Drop for GuiWindowLease {
     fn drop(&mut self) {
+        // Readers that observe zero windows must wait until the reconnect
+        // grace timestamp is published before deciding the window is closed.
+        let mut detached_at = self
+            .detached_at
+            .lock()
+            .expect("GUI window detach mutex poisoned");
         let previous = self.count.fetch_sub(1, Ordering::SeqCst);
         if previous == 1 {
-            *self
-                .detached_at
-                .lock()
-                .expect("GUI window detach mutex poisoned") = Some(Instant::now());
+            *detached_at = Some(Instant::now());
         }
     }
 }
@@ -526,6 +529,7 @@ mod tests {
         assert_eq!(hub.gui_window_count(), 1);
         drop(lease);
         assert_eq!(hub.gui_window_count(), 0);
+        assert!(hub.gui_window_open());
         let detached = Instant::now();
         hub.set_gui_window_detached_at_for_test(detached);
         assert!(hub.gui_window_open_at(detached));

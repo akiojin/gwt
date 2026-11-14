@@ -29,8 +29,11 @@ use std::path::PathBuf;
 const WORKFLOWS: &str = ".github/workflows";
 const TEST_WORKFLOW: &str = "test.yml";
 const RELEASE_WORKFLOW: &str = "release.yml";
-const CHANGES_JOB: &str = "changes";
-const DOCS_ONLY_OUTPUT: &str = "needs.changes.outputs.docs_only";
+/// Issue #5170: the file classification lives in the one Test gate job. A
+/// separate gate job waited for its own runner and enqueued the jobs reading
+/// it behind the rest of the run, which put the long ones at the queue's tail.
+const CHANGES_JOB: &str = "source-sync";
+const DOCS_ONLY_OUTPUT: &str = "needs.source-sync.outputs.docs_only";
 
 /// Mirror of the develop branch protection `required_status_checks.contexts`
 /// (`gh api repos/akiojin/gwt/branches/develop/protection`, 2026-09-07). A job
@@ -510,7 +513,7 @@ fn pull_request_workflows_cancel_the_superseded_run_of_the_same_pr() {
                         && key.contains("github.event.pull_request.number")
                 );
                 assert!(key.ends_with(id), "job groups must be independent: {id}");
-                if matches!(id, "source-sync" | "changes") {
+                if id == "source-sync" {
                     assert!(
                         cancel_in_progress(id, policy),
                         "short classifiers remain replaceable"
@@ -558,6 +561,47 @@ fn required_ci_workflows_run_on_develop_pushes() {
             );
         }
     }
+}
+
+/// Issue #5170: one gate job classifies both the synchronization and the
+/// changed files, so every gated job is enqueued with the rest of the run. The
+/// classify step runs even when the history comparison fails, so the
+/// path filter and the flake target selection stay independent of it.
+#[test]
+fn the_test_workflow_has_one_gate_job_that_classifies_changed_files() {
+    let doc = workflow(TEST_WORKFLOW);
+    assert!(
+        doc["jobs"].get("changes").is_none(),
+        "{TEST_WORKFLOW}: a separate `changes` gate job re-queues the jobs that read it"
+    );
+    let gate = job(&doc, CHANGES_JOB);
+    assert_eq!(
+        gate["permissions"]["pull-requests"].as_str(),
+        Some("read"),
+        "{TEST_WORKFLOW}: the classifier reads the pull request's files"
+    );
+    for output in ["base_only", "docs_only", "flake_targets"] {
+        assert!(
+            gate["outputs"].get(output).is_some(),
+            "{TEST_WORKFLOW}: `{CHANGES_JOB}` must publish `{output}`"
+        );
+    }
+    let steps = gate["steps"].as_sequence().unwrap();
+    let relation = steps
+        .iter()
+        .position(|step| step["id"].as_str() == Some("relation"))
+        .unwrap();
+    let classify = steps
+        .iter()
+        .position(|step| step["id"].as_str() == Some("classify"))
+        .unwrap();
+    assert!(relation < classify);
+    assert_eq!(
+        steps[classify]["if"].as_str(),
+        Some("${{ !cancelled() }}"),
+        "{TEST_WORKFLOW}: classification must not depend on the history comparison"
+    );
+    assert_ne!(steps[classify]["continue-on-error"].as_bool(), Some(true));
 }
 
 /// Issue #5169 AC-1: push runs have no PR files API; classify their own diff.
@@ -726,7 +770,7 @@ fn release_workflow_never_cancels_an_in_flight_release() {
     );
 }
 
-/// AC-2: a `changes` job classifies the PR once and exposes `docs_only`; the
+/// AC-2: the gate job classifies the PR once and exposes `docs_only`; the
 /// heavy non-required jobs depend on it and skip when the PR only touches
 /// documentation. The condition is written with `!cancelled()` so a failed
 /// classification (for example an API error) falls open to running the jobs,
@@ -767,7 +811,7 @@ fn docs_only_changes_skip_the_heavy_windows_and_webview_jobs() {
 
 /// AC-2: the path filter must not change what branch protection gates on.
 /// Every required check still exists under its protected name, and none of
-/// them depends on or conditions on the `changes` job.
+/// them conditions on the path filter.
 #[test]
 fn required_checks_are_never_gated_by_the_path_filter() {
     let mut seen = Vec::new();
@@ -780,12 +824,8 @@ fn required_checks_are_never_gated_by_the_path_filter() {
             }
             seen.push(display.to_string());
             assert!(
-                !needs(body).iter().any(|n| n == CHANGES_JOB),
-                "{file}: required check `{display}` (job `{id}`) must not depend on `{CHANGES_JOB}`"
-            );
-            assert!(
-                !condition(body).contains(CHANGES_JOB),
-                "{file}: required check `{display}` (job `{id}`) must not condition on `{CHANGES_JOB}`"
+                !condition(body).contains("outputs.docs_only"),
+                "{file}: required check `{display}` (job `{id}`) must not condition on the path filter"
             );
         }
     }
