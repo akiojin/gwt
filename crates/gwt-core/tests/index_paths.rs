@@ -198,6 +198,10 @@ fn main() {
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .canonicalize()
         .unwrap();
+    let repo_root = manifest_dir
+        .parent()
+        .and_then(|path| path.parent())
+        .unwrap();
     fs::write(
         fixture.path().join("Cargo.toml"),
         format!(
@@ -206,21 +210,70 @@ name = "file-index-v2-path-contract"
 version = "0.0.0"
 edition = "2021"
 
+[workspace]
+
 [dependencies]
 gwt-core = {{ path = {manifest_dir:?} }}
 "#
         ),
     )
     .unwrap();
+    let fixture_lock_path = fixture.path().join("Cargo.lock");
+    fs::copy(repo_root.join("Cargo.lock"), &fixture_lock_path).unwrap();
+
+    let current_exe = std::env::current_exe().unwrap();
+    let profile_output = current_exe
+        .parent()
+        .and_then(|path| path.parent())
+        .and_then(|path| path.file_name())
+        .and_then(|name| name.to_str())
+        .unwrap();
+    let cargo_profile = if profile_output == "debug" {
+        "dev"
+    } else {
+        profile_output
+    };
+    let target_root = match std::env::var_os("CARGO_TARGET_DIR") {
+        Some(configured) => {
+            let configured = std::path::PathBuf::from(configured);
+            if configured.is_absolute() {
+                configured
+            } else {
+                std::env::current_dir().unwrap().join(configured)
+            }
+        }
+        None => current_exe
+            .ancestors()
+            .find(|path| path.join("CACHEDIR.TAG").is_file())
+            .expect("cargo target root must contain CACHEDIR.TAG")
+            .to_path_buf(),
+    };
+
+    let lock_output = Command::new(env!("CARGO"))
+        .arg("generate-lockfile")
+        .arg("--offline")
+        .arg("--manifest-path")
+        .arg(fixture.path().join("Cargo.toml"))
+        .output()
+        .unwrap();
+    assert!(
+        lock_output.status.success(),
+        "failed to derive the isolated contract lock from the repository lock\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&lock_output.stdout),
+        String::from_utf8_lossy(&lock_output.stderr),
+    );
 
     let output = Command::new(env!("CARGO"))
         .arg("run")
         .arg("--quiet")
+        .arg("--locked")
         .arg("--offline")
+        .arg("--profile")
+        .arg(cargo_profile)
         .arg("--manifest-path")
         .arg(fixture.path().join("Cargo.toml"))
         .arg("--target-dir")
-        .arg(fixture.path().join("target"))
+        .arg(target_root)
         .output()
         .unwrap();
 
