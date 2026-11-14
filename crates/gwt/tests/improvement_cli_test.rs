@@ -255,7 +255,12 @@ fn child_output_timeout_kills_reaps_and_collects_both_streams() {
 #[ignore = "subprocess fixture that keeps inherited output pipes open"]
 fn bounded_child_output_pipe_holder_fixture() {
     if std::env::var_os("GWT_BOUNDED_CHILD_OUTPUT_PIPE_HOLDER").is_some() {
-        thread::sleep(Duration::from_millis(300));
+        let hold = std::env::var("GWT_BOUNDED_CHILD_OUTPUT_PIPE_HOLD_MS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .map(Duration::from_millis)
+            .unwrap_or(Duration::from_millis(300));
+        thread::sleep(hold);
     }
 }
 
@@ -281,6 +286,9 @@ fn bounded_child_output_pipe_parent_fixture() {
         ])
         .env("GWT_BOUNDED_CHILD_OUTPUT_PIPE_HOLDER", "1")
         .stdin(Stdio::null());
+    if let Some(hold_ms) = std::env::var_os("GWT_BOUNDED_CHILD_OUTPUT_PIPE_HOLD_MS") {
+        command.env("GWT_BOUNDED_CHILD_OUTPUT_PIPE_HOLD_MS", hold_ms);
+    }
     command.spawn().expect("spawn pipe holder");
 }
 
@@ -308,6 +316,54 @@ fn inherited_output_pipe_is_bounded_by_cleanup_grace() {
     let message = error.to_string();
     assert!(message.contains("parent-stdout"), "{message}");
     assert!(message.contains("parent-stderr"), "{message}");
+}
+
+fn spawn_pipe_parent_fixture(hold: Duration) -> Child {
+    let executable = std::env::current_exe().expect("current test executable");
+    let mut command = hidden_command(executable);
+    command
+        .args([
+            "--exact",
+            "bounded_child_output_pipe_parent_fixture",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env("GWT_BOUNDED_CHILD_OUTPUT_PIPE_PARENT", "1")
+        .env(
+            "GWT_BOUNDED_CHILD_OUTPUT_PIPE_HOLD_MS",
+            hold.as_millis().to_string(),
+        )
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    command.spawn().expect("spawn pipe parent fixture")
+}
+
+#[test]
+fn delayed_inherited_pipe_close_is_collected_after_holder_exits() {
+    let child = spawn_pipe_parent_fixture(Duration::from_millis(750));
+
+    let output = wait_with_output_timeout(
+        child,
+        Duration::from_secs(2),
+        Duration::from_millis(500),
+    )
+    .expect("delayed pipe close must still be collected");
+
+    let BoundedChildOutput::Completed(output) = output else {
+        panic!("holder that exits after parent must not time out the wait");
+    };
+    assert!(output.status.success(), "pipe parent must exit cleanly");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("parent-stdout"),
+        "stdout={}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("parent-stderr"),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 struct Fixture {
