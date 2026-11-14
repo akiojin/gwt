@@ -1100,6 +1100,9 @@ fn issue5596_durable_facts_prefetch_is_bounded_and_keeps_claims_fifo() {
     run_worker(0);
     let head = take_prefetched();
     // The ordinary worker must recheck authentication even for valid facts.
+    // The real owner needs explicit missing credentials; no file is Unknown.
+    fs::write(temp.path().join(".codex/auth.json"), "{}")
+        .expect("write credential-free auth for the owner recheck");
     fixture.runtime.issue_monitor_provider_auth_probe =
         |_| gwt::issue_monitor::ProviderAuthState::Unauthenticated;
     fixture
