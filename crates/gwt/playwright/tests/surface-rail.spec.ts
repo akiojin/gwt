@@ -893,6 +893,10 @@ test.describe("Surface rail", () => {
   // other tab controls or the desktop sidebar.
   test.describe("Settings touch navigation", () => {
     test.use({ hasTouch: true });
+    const settingsPanelIds = [
+      "system", "supported-agents", "custom-agents", "agent-backends",
+      "usage", "issues", "hooks",
+    ];
     test("Settings navigation tabs are 44px tap targets on a phone", async ({ page }, info) => {
       const errors = captureBrowserErrors(page);
       await installSurfaceAssets(page);
@@ -901,11 +905,13 @@ test.describe("Surface rail", () => {
       await page.locator("#op-rail [data-surface='settings']").click();
       const settings = page.locator(".settings-root:visible");
       const tabs = settings.locator(".settings-tabs [role='tab']");
-      await expect(tabs).toHaveCount(8);
+      await expect(tabs).toHaveCount(settingsPanelIds.length);
+      expect(await tabs.evaluateAll(nodes => nodes.map(node => node.getAttribute("data-settings-tab"))))
+        .toEqual(settingsPanelIds);
       const heights = () => tabs.evaluateAll(nodes => nodes.map(node => node.getBoundingClientRect().height));
-      expect(await heights()).toEqual(Array(8).fill(30));
+      expect(await heights()).toEqual(Array(settingsPanelIds.length).fill(30));
       await page.setViewportSize({ width: 601, height: 900 });
-      expect(await heights(), "601px retains desktop tab heights").toEqual(Array(8).fill(30));
+      expect(await heights(), "601px retains desktop tab heights").toEqual(Array(settingsPanelIds.length).fill(30));
       for (const width of [320, 390]) {
         await page.setViewportSize({ width, height: 844 });
         const sizes = await tabs.evaluateAll(nodes => nodes.map(node => {
@@ -942,7 +948,9 @@ test.describe("Surface rail", () => {
       await page.locator("#op-rail [data-surface='settings']").click();
       const settings = page.locator(".settings-root:visible");
       const tabs = settings.locator(".settings-tabs [role='tab']");
-      await expect(tabs).toHaveCount(8);
+      await expect(tabs).toHaveCount(settingsPanelIds.length);
+      expect(await tabs.evaluateAll(nodes => nodes.map(node => node.getAttribute("data-settings-tab"))))
+        .toEqual(settingsPanelIds);
       // Render a custom agent row so its 24px icon buttons are measured too.
       await page.evaluate(() => (window as any).__surfaceRailSocket().emit({ kind: "custom_agent_list", agents: [{
         id: "fixture-cli", display_name: "Fixture CLI", command: "fixture-command", default_args: [],
@@ -962,21 +970,21 @@ test.describe("Surface rail", () => {
             width: box.width, height: box.height, minHeight: getComputedStyle(target).minHeight };
         }));
       const desktop: string[] = [];
-      for (let index = 0; index < 8; index++) {
+      for (let index = 0; index < settingsPanelIds.length; index++) {
         await tabs.nth(index).click();
         desktop.push(...(await targets()).map(target => `${index}:${target.name}:${target.minHeight}`));
       }
       expect(desktop.join("\n")).not.toContain(":44px");
       await page.setViewportSize({ width: 601, height: 900 });
       const at601: string[] = [];
-      for (let index = 0; index < 8; index++) {
+      for (let index = 0; index < settingsPanelIds.length; index++) {
         await tabs.nth(index).click();
         at601.push(...(await targets()).map(target => `${index}:${target.name}:${target.minHeight}`));
       }
       expect(at601, "601px keeps each panel control's desktop size").toEqual(desktop);
       for (const width of [320, 390]) {
         await page.setViewportSize({ width, height: 844 });
-        for (let index = 0; index < 8; index++) {
+        for (let index = 0; index < settingsPanelIds.length; index++) {
           await tabs.nth(index).tap();
           const panel = (await tabs.nth(index).textContent())!.trim();
           for (const target of await targets()) {

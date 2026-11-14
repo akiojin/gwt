@@ -250,6 +250,7 @@ fn assert_public_ws_agent_route_boundary(
 ) {
     let (fixture, expectation) =
         prepare_public_ws_agent_route(temp_root, provider, npm_fixture, launch_env);
+    let fixture = RestoreApp::new(fixture);
     let socket = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
