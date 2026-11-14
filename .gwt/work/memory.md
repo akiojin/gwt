@@ -7624,3 +7624,10 @@ Type: workflow
 Context: Issue #3253: owner-unlinked workflow-policy blocked gwtd JSON envelope discovery/linking commands because heredoc command segmentation normalized them to a lone gwtd segment and the owner guard did not classify the envelope operation.
 Learning: Classify standalone gwtd JSON envelopes from the original command before segment allowlists, but run shell output redirection detection first so control-plane transport cannot mask worktree writes.
 Future Action: When changing hook workflow policies, add RED tests for both allowed standalone JSON envelope commands and adversarial variants such as chained shell mutation or output redirection.
+
+## 2026-07-07 — SPEC audit should include independent traceability and implementation-surface checks
+
+Type: lesson
+Context: During SPEC-3165 Issue Monitor Agent settings curation on 2026-07-07, marker/readback checks initially passed, but user requested additional subagent inspection. Parallel auditors found missing plan/tasks clarity for FR-029 field-level round-trip, autonomous tuning exclusion tests, Start no-profile guard before enabled-state publish, frontend_action_log.rs classification, and last-settings prefill-only behavior.
+Learning: A SPEC/Issue update is not complete just because required markers and section readback pass. Completeness audits need separate lenses for spec requirements, plan/tasks traceability, owner routing, implementation touch-surface, and Markdown/roundtrip form.
+Future Action: Before claiming Issue/SPEC updates are exhaustive, run or emulate independent traceability and implementation-surface audits, then add explicit tests/tasks for any requirement that could otherwise be hidden inside broad implementation tasks.
