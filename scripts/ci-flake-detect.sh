@@ -167,12 +167,14 @@ if kind == "test":
             selected = [test for test in tests if test.partition("::")[0] in modules]
 elif kind == "lib":
     functions = set()
+    excluded = set()
     compiled_sources = compiled_library_sources()
     for name in changed:
         path = pathlib.Path(name)
         if name.startswith(f"crates/{crate}/src/") and path.suffix == ".rs":
             if compiled_sources is not None and path.is_file() and path.resolve() not in compiled_sources:
                 print(f"{entry}: {name} is not compiled into this library", file=sys.stderr)
+                excluded.add(name)
                 continue
             file_functions = set(re.findall(r"\bfn\s+(?:r#)?([A-Za-z_]\w*)\s*\(",
                                             path.read_text())) if path.is_file() else set()
@@ -184,13 +186,28 @@ elif kind == "lib":
             functions.update(file_functions)
     selected = [test for test in tests if test.rsplit("::", 1)[-1] in functions]
     if not selected:
-        # External test modules / cfg-specific functions can prevent a safe
-        # mapping. Retain coverage rather than silently repeating zero tests.
-        print(f"{entry}: no safe changed-file match; retaining the full target", file=sys.stderr)
-        selected = tests
+        # Empty is proven only when every source was excluded and every
+        # companion is an uncompiled test, workflow, or Work event. Unknown
+        # inputs (including manifests/build scripts) retain the full fallback.
+        proven_empty = bool(excluded) and all(
+            not name or (
+                pathlib.Path(name).is_file()
+                and pathlib.Path(name).resolve() not in compiled_sources
+                and (name in excluded
+                     or (name.startswith(f"crates/{crate}/tests/") and name.endswith(".rs"))
+                     or (name.startswith(".github/workflows/") and name.endswith((".yml", ".yaml")))
+                     or (name.startswith(".gwt/work/events/") and name.endswith(".jsonl")))
+            ) for name in changed
+        )
+        if proven_empty:
+            print(f"{entry}: all changed sources are outside this library; no repetition needed", file=sys.stderr)
+        else:
+            print(f"{entry}: no safe changed-file match; retaining the full target", file=sys.stderr)
+            selected = tests
 else:
     raise SystemExit(f"Unsupported test target: {entry}")
-print("\n".join(selected))
+if selected:
+    print("\n".join(selected))
 # changed-test-selection-end
 PY
 }
@@ -275,7 +292,7 @@ for entry in $targets; do
       exit 1
     fi
     if [ ! -s "$selection" ] || ! grep -q '[^[:space:]]' "$selection"; then
-      echo "$entry: no active tests in the built target"
+      echo "$entry: no tests selected for repetition"
       remaining_targets=$((remaining_targets - 1))
       continue
     fi
