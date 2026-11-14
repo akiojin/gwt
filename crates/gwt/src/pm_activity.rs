@@ -216,6 +216,9 @@ mod tests {
     fn pm_title_activity_dispatch_records_success_only_for_the_registered_pm() {
         use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
 
+        let _env_lock = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempfile::tempdir().unwrap();
         let _home = ScopedGwtHome::set(temp.path());
         let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "resident-pm");
