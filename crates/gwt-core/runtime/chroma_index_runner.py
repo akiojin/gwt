@@ -3948,11 +3948,6 @@ def _materialize_file_artifact_pair(
             return 0, len(records), False
         if not (len(records) == len(identities) == len(manifest_plans)):
             raise ValueError("file-index-v2 artifact plan length mismatch")
-        if artifact_dir.exists():
-            quarantine = artifact_dir.with_name(
-                f".{artifact_dir.name}.quarantine-{time.time_ns()}-{os.getpid()}"
-            )
-            os.replace(artifact_dir, quarantine)
         staging = artifact_dir.with_name(
             f".{artifact_dir.name}.staging-{time.time_ns()}-{os.getpid()}"
         )
@@ -3962,6 +3957,7 @@ def _materialize_file_artifact_pair(
         computed = 0
         hits = 0
         opened: Dict[str, tuple[Any, Any]] = {}
+        quarantine: Optional[Path] = None
         try:
             for bucket, collection_name in (
                 ("code", V2_FILES_CODE_COLLECTION),
@@ -4131,6 +4127,12 @@ def _materialize_file_artifact_pair(
                 _fsync_file_index_v2_directory(store)
                 for parent in list(store.parents)[:4]:
                     _fsync_directory(parent)
+            # Keep the published metadata in place across yields and staging failures.
+            if artifact_dir.exists():
+                quarantine = artifact_dir.with_name(
+                    f".{artifact_dir.name}.quarantine-{time.time_ns()}-{os.getpid()}"
+                )
+                os.replace(artifact_dir, quarantine)
             _durably_replace_file_index_v2_directory(staging, artifact_dir)
             return computed, hits, False
         finally:
@@ -4139,6 +4141,9 @@ def _materialize_file_artifact_pair(
             # Windows cannot delete SQLite files while Chroma owns their handles.
             # A process kill or delayed native close is retried under the next lock.
             shutil.rmtree(staging, ignore_errors=True)
+            if quarantine is not None and not artifact_dir.exists():
+                os.replace(quarantine, artifact_dir)
+                _fsync_directory(artifact_dir.parent)
 
 
 _BASE_DESCRIPTOR_FIELDS = {

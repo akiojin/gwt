@@ -637,6 +637,28 @@ class IncrementalGenerationTests(_IncrementalFixture):
             runner._close_chroma_client(client)
 
         previous_base = result["base_generation_id"]
+        repair_base = runner.resolve_file_index_v2_base_dir(
+            REPO_HASH, previous_base, db_root=self.db_root,
+        )
+        head_path = repair_base.parents[1] / "worktrees" / WORKTREE_HASH / "head.json"
+        retained = {path: path.read_bytes() for path in (
+            repair_base / "descriptor.json", repair_base / "manifest.json", head_path,
+        )}
+        # Force a real encode so background repair yields after this record.
+        runner._cas_entry_path(cas_root, entries[repaired_paths[0]]["cas_key"]).unlink()
+        with mock.patch.object(runner, "_pending_higher_priority", return_value=True):
+            yielded = self._build_protocol_v2(project, WORKTREE_HASH)
+        self.assertTrue(yielded.get("yielded"), yielded)
+        for path, contents in retained.items():
+            self.assertTrue(path.is_file(), f"interrupted repair removed {path}")
+            self.assertEqual(path.read_bytes(), contents)
+        # Recreate the corruption to check the ordinary repair path on resume.
+        client, collection = runner._open_file_index_v2_collection(store, runner.V2_FILES_CODE_COLLECTION)
+        try:
+            collection.update(ids=[repair_ids[0]], documents=["same-tree payload corruption"],
+                              embeddings=[vectors[repair_ids[0]]])
+        finally:
+            runner._close_chroma_client(client)
         with mock.patch.object(runner, "_resolve_record_vector_batch", wraps=runner._resolve_record_vector_batch) as resolve, \
                 mock.patch.object(runner, "_record_from_bytes", wraps=runner._record_from_bytes) as parse:
             result = self._build_protocol_v2(project, WORKTREE_HASH)
@@ -649,8 +671,21 @@ class IncrementalGenerationTests(_IncrementalFixture):
         try:
             self.assertEqual(collection.get(ids=[repair_ids[0]], include=["documents"])["documents"],
                              [expected["documents"][expected["ids"].index(repair_ids[0])]])
+            collection.update(ids=[repair_ids[0]], documents=["repair interrupted at publication"],
+                              embeddings=[vectors[repair_ids[0]]])
         finally:
             runner._close_chroma_client(client)
+        retained = {path: path.read_bytes() for path in retained}
+        with mock.patch.object(runner, "_durably_replace_file_index_v2_directory",
+                               side_effect=RuntimeError("publication interrupted")):
+            with self.assertRaisesRegex(RuntimeError, "publication interrupted"):
+                self._build_protocol_v2(project, WORKTREE_HASH)
+        for path, contents in retained.items():
+            self.assertTrue(path.is_file(), f"failed publication removed {path}")
+            self.assertEqual(path.read_bytes(), contents)
+        resumed = self._build_protocol_v2(project, WORKTREE_HASH)
+        self.assertTrue(resumed.get("ok"), resumed)
+        self.assertEqual(resumed["base_generation_id"], previous_base)
 
     def test_new_base_recreates_a_missing_native_collection(self):
         project = self._make_canonical_repo()
