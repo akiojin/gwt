@@ -5157,6 +5157,25 @@ body {
   margin-top: 10px;
 }
 
+/* SPEC #6476 T-005lw/T-005md: every modal kept its 19-38px desktop control
+   sizes on a phone. Checkboxes and toggles sit inside a label, so the label is
+   the target; 24px icon buttons also need the width. */
+@media (max-width: 600px) {
+  .modal-shell :is(button, select, textarea, [role="button"], input:not([type="checkbox"])),
+  .modal-shell label:has(input[type="checkbox"]) {
+    min-height: 44px;
+  }
+
+  /* A summary stays a list-item (keeps its marker), so center it by line. */
+  .modal-shell summary {
+    line-height: 44px;
+  }
+
+  .modal-shell :is(.icon-button, .text-button) {
+    min-width: 44px;
+  }
+}
+
 .text-button {
   border: none;
   background: transparent;
@@ -6243,20 +6262,6 @@ body {
 
   .wizard-actions .wizard-button {
     flex: 1 1 0;
-  }
-}
-
-/* SPEC #6476 T-005lw: the wizard controls kept their 24-38px desktop sizes on
-   a phone. Checkboxes and toggles sit inside a label, so the label is the
-   target; the 24px set reorder icons also need the width. */
-@media (max-width: 600px) {
-  #wizard-modal :is(button, select, textarea, [role="button"], input:not([type="checkbox"])),
-  #wizard-modal label:has(input[type="checkbox"]) {
-    min-height: 44px;
-  }
-
-  #wizard-modal .icon-button {
-    min-width: 44px;
   }
 }
 

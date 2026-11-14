@@ -262,3 +262,63 @@ test.describe("Notification center touch targets", () => {
       { message: "601px returns to the desktop control sizes" }).not.toContain("44px");
   });
 });
+
+// SPEC #6476 T-005md (AC-1): the shared modal primitive kept its desktop sizes
+// on a phone (Cancel text button 19px, footer buttons 36px).
+test.describe("Shared modal touch targets", () => {
+  test.use({ hasTouch: true });
+  test("close project and migration modals use 44px tap targets on a phone", async ({ page }, testInfo) => {
+    const inject = (detail: Record<string, unknown>) => page.evaluate((payload) => {
+      window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: payload }));
+    }, detail);
+    const openModal = async (name: string) => {
+      if (name === "close") {
+        await page.locator("#close-project-button").click();
+        await inject({
+          kind: "close_project_preview", token: { project_key: "0123456789abcdef" }, title: "Notification project",
+          running_agents: [{ display_name: "Aster", branch: "work/issue-1" }], choice_required: true, project_wide: false, view_count: 1,
+        });
+      } else {
+        await inject({ kind: "migration_detected", tab_id: "notification-project", project_root: "/fixture", branch: "develop" });
+      }
+      await expect(page.locator(".modal-backdrop.open .modal-shell")).toBeVisible();
+    };
+    const controls = ".modal-backdrop.open .modal-shell :is(button, select, textarea, summary, input):visible";
+    const measure = () => page.locator(controls).evaluateAll(nodes => nodes.map(node => {
+      const box = node.getBoundingClientRect();
+      const style = getComputedStyle(node);
+      return { name: node.getAttribute("aria-label") || node.textContent!.trim().slice(0, 24) || node.className,
+        left: box.left, right: box.right, width: box.width, height: box.height,
+        minSize: `${style.minWidth} ${style.minHeight}` };
+    }));
+    for (const name of ["close", "migration"]) {
+      await page.setViewportSize({ width: 601, height: 900 });
+      await openModal(name);
+      const desktop = (await measure()).map(control => control.minSize);
+      expect(desktop.join(" "), `601px keeps the ${name} control sizes`).not.toContain("44px");
+      for (const [width, height] of [[320, 568], [390, 844]]) {
+        await page.setViewportSize({ width, height });
+        await expect(async () => {
+          const measured = await measure();
+          expect(measured.length, `${name} has controls`).toBeGreaterThan(0);
+          for (const control of measured) {
+            expect(control.height, `${name} ${control.name} height at ${width}px`).toBeGreaterThanOrEqual(44);
+            expect(control.width, `${name} ${control.name} width at ${width}px`).toBeGreaterThanOrEqual(44);
+            expect(control.left, `${name} ${control.name} is on screen at ${width}px`).toBeGreaterThanOrEqual(0);
+            expect(control.right, `${name} ${control.name} is on screen at ${width}px`).toBeLessThanOrEqual(width);
+          }
+          expect(await page.locator(".modal-backdrop.open .modal-shell").evaluate(node => node.scrollWidth - node.clientWidth),
+            `the ${name} modal must not scroll sideways at ${width}px`).toBeLessThanOrEqual(0);
+        }).toPass({ timeout: 5_000 });
+        await page.screenshot({ path: testInfo.outputPath(`modal-${name}-${width}.png`) });
+      }
+      if (name === "close") {
+        await page.getByRole("button", { name: "Cancel" }).tap();
+        await expect(page.locator(".modal-backdrop.open .modal-shell")).toHaveCount(0);
+      }
+    }
+    await page.setViewportSize({ width: 601, height: 900 });
+    await expect.poll(async () => (await measure()).map(control => control.minSize).join(" "),
+      { message: "601px returns to the desktop control sizes" }).not.toContain("44px");
+  });
+});
