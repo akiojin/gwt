@@ -573,7 +573,6 @@ crates/gwt/tests/index_search_batch_test.rs|wait_for_process_exit|assert!(starte
 crates/gwt/tests/index_search_batch_test.rs|wait_for_rebuild_invocations|assert!(started.elapsed()<deadline,)|1
 crates/gwt/tests/issue_monitor_stop_ipc_test.rs|hung_daemon_control_publish_is_bounded_and_outcome_unknown|assert!(elapsed<Duration::from_secs(5),)|1
 crates/gwt/tests/managed_assets_test.rs|materializing_one_worktree_does_not_wait_on_a_sibling_worktrees_asset_lock|letdeadline=gwt_core::operation_deadline::ScopedOperationDeadline::enter(Instant::now()+Duration::from_secs(20),)|1
-crates/gwt/tests/migration_e2e_test.rs|t104_e2e_failure_injected_during_bareify_rolls_back_to_original_layout|assert!(elapsed<=Duration::from_secs(30),)|1
 crates/gwt/tests/open_cli_integration.rs|drop|letdeadline=Instant::now()+Duration::from_secs(10)|1
 crates/gwt/tests/open_cli_integration.rs|drop|whileInstant::now()<deadline|1
 crates/gwt/tests/open_cli_integration.rs|lock_payload|Ok(payload)=>breakpayload,Err(error)iferror.is_eof()&&Instant::now()<deadline=>|1
