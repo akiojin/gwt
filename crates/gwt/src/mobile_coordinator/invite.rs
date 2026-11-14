@@ -247,6 +247,23 @@ impl InviteRegistry {
         })
     }
 
+    /// The saved scope of the active (unclaimed, open, unexpired) invite with
+    /// this secret, so a trusted adapter can route a claim without trusting a
+    /// browser-supplied destination. Lookup alone does not consume the invite.
+    pub fn pending_scope(
+        &mut self,
+        secret: &[u8],
+        now: Instant,
+    ) -> Result<Option<InviteScope>, InviteError> {
+        self.observe(now)?;
+        let digest: [u8; 32] = Sha256::digest(secret).into();
+        Ok(self
+            .records
+            .iter()
+            .find(|r| bool::from(r.digest.ct_eq(&digest)) && !r.closed && r.connection_id.is_none())
+            .map(|r| r.scope.clone()))
+    }
+
     pub fn close_connection(
         &mut self,
         connection_id: Uuid,

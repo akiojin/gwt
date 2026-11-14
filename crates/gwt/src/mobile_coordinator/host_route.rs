@@ -3,8 +3,8 @@
 //! A PC Host authenticates with exactly one `Authorization: Bearer` header whose
 //! token is base64url (no padding) JSON naming its credential identity, one
 //! Project, its trusted Host epoch and the 32-byte secret in hex. A request with
-//! any Origin is a browser and is refused; browser signaling is a separate,
-//! later route. The registration exists only while its socket is served: every
+//! any Origin is a browser and is refused; browsers claim invites on the
+//! separate `browser_route`. The registration exists only while its socket is served: every
 //! exit path, including a failed upgrade, logically closes it once.
 //!
 //! The coordinator answers `{"type":"registered","generation","ttl_secs"}` and
@@ -21,8 +21,7 @@
 //! the secret is decoded from the borrowed frame text straight into a wiped
 //! buffer; an escaped secret is refused (after serde has made its own
 //! unescaped copies), and neither the frame buffer nor stack copies left by
-//! moves are erased. Browser claim/signaling and device authority are out of
-//! scope. Closed invites stay as replay fences until their TTL; they count
+//! moves are erased. Browser signaling and device authority are out of scope. Closed invites stay as replay fences until their TTL; they count
 //! toward the global 64-record bound and a per-Host 16-record bound, so one
 //! Host's fences cannot exhaust other Hosts' invites (`host_capacity`).
 //!
@@ -67,11 +66,14 @@ pub(super) type SharedSessions = Arc<Mutex<CoordinatorSessions>>;
 /// Route state. `stopping` ends every Host socket when the server stops; each
 /// socket holds an `alive` sender until its registration is logically closed,
 /// so the server can wait for all of them before releasing the registry.
+/// `retired` is notified after each registration's logical close, so claimed
+/// browser sockets of that registration can end.
 #[derive(Clone)]
 pub(super) struct HostState {
     pub(super) sessions: SharedSessions,
     pub(super) stopping: watch::Receiver<bool>,
     pub(super) alive: mpsc::Sender<()>,
+    pub(super) retired: Arc<watch::Sender<()>>,
 }
 
 #[derive(Deserialize)]
@@ -130,7 +132,7 @@ fn parse_authorization(headers: &HeaderMap) -> Option<HostCredentials> {
 /// Synchronous domain call; the store checkpoint fsyncs at most once per
 /// trusted wall second, so async callers run it on a blocking thread. The
 /// monotonic instant is read under the lock.
-fn call<T>(
+pub(super) fn call<T>(
     sessions: &SharedSessions,
     f: impl FnOnce(&mut CoordinatorSessions, Instant, u64) -> Result<T, RegistrationError>,
 ) -> Result<T, RegistrationError> {
@@ -146,6 +148,7 @@ fn call<T>(
 struct Registration {
     sessions: SharedSessions,
     handle: RegistrationHandle,
+    retired: Arc<watch::Sender<()>>,
 }
 
 impl Registration {
@@ -172,6 +175,7 @@ impl Drop for Registration {
         let _ = call(&self.sessions, |sessions, now, wall| {
             sessions.close(&self.handle, now, wall)
         });
+        self.retired.send_modify(|_| {});
     }
 }
 
@@ -267,6 +271,7 @@ pub(super) async fn register(
     let registration = Registration {
         sessions: state.sessions,
         handle,
+        retired: state.retired,
     };
     let (stopping, alive) = (state.stopping, state.alive);
     upgrade
