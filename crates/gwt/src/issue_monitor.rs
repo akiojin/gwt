@@ -61,9 +61,13 @@ pub fn is_git_https_auth_error(message: &str) -> bool {
 }
 
 pub fn git_https_auth_setup_message(original_error: &str) -> String {
+    let original_error = original_error.trim();
+    if original_error.starts_with(GIT_HTTPS_AUTH_SETUP_PREFIX) {
+        return original_error.to_string();
+    }
     format!(
         "{GIT_HTTPS_AUTH_SETUP_PREFIX} Original error: {}",
-        original_error.trim()
+        original_error
     )
 }
 
@@ -4686,21 +4690,6 @@ impl IssueMonitorState {
         self.autonomous_mode && issue_has_auto_merge_label(issue)
     }
 
-    /// #3165/#3200 error-window lifecycle: decide whether a just-failed agent
-    /// window should be auto-closed. An autonomous (two-stage opt-in) issue
-    /// auto-closes its stale window so the bounded retry relaunches into a clean
-    /// canvas; a default (non-autonomous) issue KEEPS its failed window so the
-    /// human can inspect the error output and relaunch explicitly via Launch Now.
-    /// The issue is looked up in the inbox, where a freshly recorded failure
-    /// still carries the issue and its labels.
-    pub fn should_autoclose_failed_window(&self, issue_number: u64) -> bool {
-        self.inbox
-            .iter()
-            .find(|item| item.issue.number == issue_number)
-            .map(|item| self.is_autonomous_two_stage_candidate(&item.issue))
-            .unwrap_or(false)
-    }
-
     /// #3165 error-window lifecycle: remove and return the stale agent window id
     /// retained for a failed issue, so an explicit Launch Now (default mode) can
     /// close it before relaunching into a fresh window. `None` when no stale
@@ -5894,7 +5883,18 @@ impl IssueMonitorState {
                     {
                         return false;
                     }
-                    self.pending_launch_deliveries.remove(index);
+                    let delivery = self
+                        .pending_launch_deliveries
+                        .remove(index)
+                        .expect("matched launch delivery index");
+                    ensure_claim_release_effect(
+                        &mut self.pending_effects,
+                        self.effect_authority_epoch,
+                        &delivery.delivery_id,
+                        delivery.issue_number,
+                        &delivery.claim_id,
+                        &delivery.claim_owner,
+                    );
                 }
                 PendingLaunchDeliveryMatch::Missing | PendingLaunchDeliveryMatch::Mismatched => {
                     return false
@@ -7181,6 +7181,18 @@ fn issue_monitor_qualified_window_id(window_id: &str) -> Option<(&str, &str)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn git_https_auth_setup_message_is_idempotent_across_failure_replay() {
+        let raw =
+            "fatal: could not read Username for 'https://github.com': terminal prompts disabled";
+        let first = git_https_auth_setup_message(raw);
+        let replayed = git_https_auth_setup_message(&first);
+
+        assert_eq!(replayed, first);
+        assert_eq!(replayed.matches(GIT_HTTPS_AUTH_SETUP_PREFIX).count(), 1);
+        assert_eq!(replayed.matches("Original error:").count(), 1);
+    }
 
     /// Issue #3676 AC-2: the auth verdict must be definitive before it may
     /// block a launch — every ambiguous shape stays fail-open (`Unknown`).
@@ -12116,6 +12128,14 @@ mod tests {
         );
         assert!(monitor.queue.contains(&42));
         assert!(monitor.prefs().pending_launch_deliveries.is_empty());
+        assert!(monitor.pending_effects().iter().any(|effect| matches!(
+            &effect.payload,
+            IssueMonitorEffectPayload::ReleaseClaim {
+                issue_number: 42,
+                claim_id,
+                owner,
+            } if claim_id == "claim-42" && owner == "host/session"
+        )));
     }
 
     #[test]
@@ -13333,56 +13353,6 @@ mod tests {
         assert!(
             !off.is_autonomous_two_stage_candidate(&unlabelled),
             "mode on but no label ⇒ not a candidate"
-        );
-    }
-
-    #[test]
-    fn autoclose_failed_window_only_for_autonomous_candidates() {
-        // #3165/#3200 error-window lifecycle: a failed autonomous issue
-        // (autonomous_mode ON + auto-merge label) auto-closes its stale window so
-        // the retry relaunches clean; default issues keep theirs for inspection.
-        let now = "2026-06-30T00:00:00Z";
-
-        let mut auto = IssueMonitorState::with_prefs(
-            IssueMonitorConfig::default(),
-            IssueMonitorPrefs {
-                autonomous_mode: true,
-                ..IssueMonitorPrefs::default()
-            },
-        );
-        scan_issue_monitor_candidates(&mut auto, &[auto_issue(42, "b")], now);
-        auto.record_agent_issue_failed(42, "boom");
-        assert!(
-            auto.should_autoclose_failed_window(42),
-            "autonomous candidate failure ⇒ auto-close the stale window"
-        );
-        assert!(
-            !auto.should_autoclose_failed_window(999),
-            "unknown issue ⇒ no close"
-        );
-
-        // autonomous_mode OFF ⇒ keep the window (default human-gated path).
-        let mut def = IssueMonitorState::new(IssueMonitorConfig::default());
-        scan_issue_monitor_candidates(&mut def, &[auto_issue(42, "b")], now);
-        def.record_agent_issue_failed(42, "boom");
-        assert!(
-            !def.should_autoclose_failed_window(42),
-            "autonomous_mode off ⇒ keep the failed window"
-        );
-
-        // autonomous_mode ON but no auto-merge label ⇒ keep the window.
-        let mut nolabel = IssueMonitorState::with_prefs(
-            IssueMonitorConfig::default(),
-            IssueMonitorPrefs {
-                autonomous_mode: true,
-                ..IssueMonitorPrefs::default()
-            },
-        );
-        scan_issue_monitor_candidates(&mut nolabel, &[issue(43)], now);
-        nolabel.record_agent_issue_failed(43, "boom");
-        assert!(
-            !nolabel.should_autoclose_failed_window(43),
-            "no auto-merge label ⇒ keep the failed window"
         );
     }
 

@@ -22213,7 +22213,6 @@ fn app_runtime_issue_monitor_launch_error_emits_monitor_failure_events() {
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     let window_id = combined_window_id("tab-1", "agent-1");
-
     let events = runtime.launch_error_events(
         window_id.clone(),
         "binary missing".to_string(),
@@ -22307,6 +22306,43 @@ fn app_runtime_launch_failure_keeps_window_when_durable_close_persistence_fails(
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     let window_id = combined_window_id("tab-1", "agent-1");
+    let launch_effect_id = "effect-durable-close-retry";
+    let delivery_id = format!("launch:{launch_effect_id}");
+    let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig {
+        enabled: true,
+        ..gwt::IssueMonitorConfig::default()
+    });
+    monitor.record_candidate(gwt::IssueMonitorIssue {
+        number: 42,
+        title: "Durable close retry".to_string(),
+        labels: Vec::new(),
+        state: gwt::IssueMonitorIssueState::Open,
+        body: None,
+        url: None,
+        readiness: gwt::IssueMonitorReadiness::NotApplicable,
+        updated_at: None,
+    });
+    assert!(monitor.apply_confirmed_claim(
+        42,
+        "claim-durable-close-retry",
+        "host/session",
+        launch_effect_id,
+        "2026-08-29T00:00:00Z",
+    ));
+    assert!(monitor.claim_launch_delivery(
+        42,
+        &delivery_id,
+        &runtime.issue_monitor_materializer_id,
+        std::process::id(),
+        &window_id,
+        |_| false,
+    ));
+    monitor.set_enabled(false);
+    gwt::save_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(temp.path()),
+        &monitor.prefs(),
+    )
+    .expect("seed claimed launch delivery");
 
     let events = runtime.launch_error_events(
         window_id.clone(),
@@ -22315,7 +22351,7 @@ fn app_runtime_launch_failure_keeps_window_when_durable_close_persistence_fails(
             client_id: "__issue_monitor__".to_string(),
             title: "Issue Monitor".to_string(),
             issue_monitor_issue_number: Some(42),
-            issue_monitor_delivery_id: None,
+            issue_monitor_delivery_id: Some(delivery_id.clone()),
             issue_monitor_project_root: Some(temp.path().to_path_buf()),
             issue_monitor_session_mode: None,
         }),
@@ -22334,6 +22370,12 @@ fn app_runtime_launch_failure_keeps_window_when_durable_close_persistence_fails(
         runtime.window_lookup.contains_key(&window_id),
         "a failed durable absence barrier must keep the diagnostic window in memory"
     );
+    assert!(
+        runtime
+            .issue_monitor_launch_deliveries
+            .contains_key(&delivery_id),
+        "a failed durable absence barrier must retain the exact retry obligation"
+    );
     let prefs =
         gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(temp.path()))
             .expect("reload committed failure");
@@ -22341,6 +22383,384 @@ fn app_runtime_launch_failure_keeps_window_when_durable_close_persistence_fails(
         .failed_issues
         .iter()
         .any(|failed| failed.issue_number == 42 && failed.message == "binary missing"));
+
+    fs::remove_dir(&workspace_path).expect("unblock durable workspace path");
+
+    let retry_events = runtime.issue_monitor_scheduled_tick_events_at("2026-08-29T01:00:00Z");
+
+    assert!(retry_events
+        .iter()
+        .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })));
+    assert!(!runtime.window_lookup.contains_key(&window_id));
+    assert!(!runtime
+        .issue_monitor_launch_deliveries
+        .contains_key(&delivery_id));
+    let prefs =
+        gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(temp.path()))
+            .expect("reload disabled Monitor prefs");
+    assert!(!prefs.enabled, "cleanup must not re-enable Issue Monitor");
+}
+
+#[test]
+fn app_runtime_launch_failure_cleanup_retry_does_not_close_a_reused_window_id() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    init_repo_with_initial_commit(temp.path());
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        temp.path().to_path_buf(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Error,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-1");
+    let failed_window = runtime
+        .issue_monitor_failed_window_identity(&window_id)
+        .expect("failed window identity");
+    let workspace_path = gwt::workspace_state_path(temp.path());
+    gwt::save_workspace_state(&workspace_path, runtime.tabs[0].workspace.persisted())
+        .expect("persist predecessor workspace");
+    let delivery_id = "launch:cleanup-reused-window";
+    runtime.issue_monitor_launch_deliveries.insert(
+        delivery_id.to_string(),
+        super::IssueMonitorLaunchDeliveryState::LaunchFailureCleanupPending {
+            project_root: temp.path().to_path_buf(),
+            issue_number: 42,
+            failed_window,
+        },
+    );
+
+    runtime.window_incarnations.remove(&window_id);
+    runtime.register_window("tab-1", "agent-1");
+    runtime.set_window_status("tab-1", "agent-1", WindowProcessStatus::Running);
+    assert!(runtime
+        .tab_mut("tab-1")
+        .expect("successor tab")
+        .workspace
+        .set_session_id("agent-1", Some("successor-session".to_string())));
+    runtime
+        .window_pty_statuses
+        .insert(window_id.clone(), WindowProcessStatus::Running);
+    runtime
+        .window_hook_states
+        .insert(window_id.clone(), WindowProcessStatus::Running);
+    runtime
+        .window_details
+        .insert(window_id.clone(), "successor diagnostic".to_string());
+
+    let _events = runtime.issue_monitor_scheduled_tick_events_at("2026-08-29T01:00:00Z");
+
+    assert!(runtime.window_lookup.contains_key(&window_id));
+    assert_eq!(
+        runtime.window_status(&window_id),
+        Some(WindowProcessStatus::Running)
+    );
+    assert_eq!(
+        runtime.window_details.get(&window_id).map(String::as_str),
+        Some("successor diagnostic")
+    );
+    let restored = gwt::load_restored_workspace_state(temp.path())
+        .expect("reload successor workspace after cleanup settlement");
+    assert_eq!(restored.windows.len(), 1);
+    assert_eq!(restored.windows[0].id, "agent-1");
+    assert_eq!(
+        restored.windows[0].session_id.as_deref(),
+        Some("successor-session"),
+        "cleanup settlement must durably replace the predecessor snapshot with the successor"
+    );
+    assert!(!runtime
+        .issue_monitor_launch_deliveries
+        .contains_key(delivery_id));
+}
+
+#[test]
+fn app_runtime_launch_failure_cleanup_retry_keeps_obligation_when_successor_persistence_fails() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    init_repo_with_initial_commit(temp.path());
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        temp.path().to_path_buf(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Error,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-1");
+    let failed_window = runtime
+        .issue_monitor_failed_window_identity(&window_id)
+        .expect("failed window identity");
+    let delivery_id = "launch:cleanup-reused-window-persistence-failure";
+    runtime.issue_monitor_launch_deliveries.insert(
+        delivery_id.to_string(),
+        super::IssueMonitorLaunchDeliveryState::LaunchFailureCleanupPending {
+            project_root: temp.path().to_path_buf(),
+            issue_number: 42,
+            failed_window,
+        },
+    );
+
+    runtime.window_incarnations.remove(&window_id);
+    runtime.register_window("tab-1", "agent-1");
+    runtime.set_window_status("tab-1", "agent-1", WindowProcessStatus::Running);
+    runtime
+        .window_pty_statuses
+        .insert(window_id.clone(), WindowProcessStatus::Running);
+    runtime
+        .window_hook_states
+        .insert(window_id.clone(), WindowProcessStatus::Running);
+
+    let workspace_path = gwt::workspace_state_path(temp.path());
+    fs::create_dir_all(&workspace_path).expect("block successor workspace persistence");
+
+    let events = runtime.issue_monitor_scheduled_tick_events_at("2026-08-29T01:00:00Z");
+
+    assert!(runtime.window_lookup.contains_key(&window_id));
+    assert_eq!(
+        runtime.window_status(&window_id),
+        Some(WindowProcessStatus::Running)
+    );
+    assert!(runtime
+        .issue_monitor_launch_deliveries
+        .contains_key(delivery_id));
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::IssueMonitorToast { message, .. }
+            if message.contains("durable successor workspace reconciliation failed")
+    )));
+}
+
+#[test]
+fn app_runtime_launch_failure_cleanup_retry_fails_closed_for_duplicate_project_tabs() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    init_repo_with_initial_commit(temp.path());
+    let first = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        temp.path().to_path_buf(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Error,
+    );
+    let second = sample_project_tab_with_window_at(
+        "tab-2",
+        "agent-2",
+        temp.path().to_path_buf(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![first, second], Some("tab-1"));
+    let failed_window_id = combined_window_id("tab-1", "agent-1");
+    let failed_window = runtime
+        .issue_monitor_failed_window_identity(&failed_window_id)
+        .expect("failed window identity");
+    let delivery_id = "launch:cleanup-duplicate-project-tabs";
+    runtime.issue_monitor_launch_deliveries.insert(
+        delivery_id.to_string(),
+        super::IssueMonitorLaunchDeliveryState::LaunchFailureCleanupPending {
+            project_root: temp.path().to_path_buf(),
+            issue_number: 42,
+            failed_window,
+        },
+    );
+    runtime.window_incarnations.remove(&failed_window_id);
+    runtime.register_window("tab-1", "agent-1");
+    assert!(runtime
+        .tab_mut("tab-2")
+        .expect("second tab")
+        .workspace
+        .set_session_id("agent-2", Some("second-tab-session".to_string())));
+    let workspace_path = gwt::workspace_state_path(temp.path());
+    gwt::save_workspace_state(
+        &workspace_path,
+        runtime
+            .tab("tab-2")
+            .expect("second tab")
+            .workspace
+            .persisted(),
+    )
+    .expect("seed second tab workspace");
+    let before = fs::read(&workspace_path).expect("read seeded workspace");
+
+    let events = runtime.issue_monitor_scheduled_tick_events_at("2026-08-29T01:00:00Z");
+
+    assert!(runtime
+        .issue_monitor_launch_deliveries
+        .contains_key(delivery_id));
+    assert_eq!(
+        fs::read(&workspace_path).expect("reload workspace"),
+        before,
+        "ambiguous duplicate tabs must not overwrite their shared workspace file"
+    );
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::IssueMonitorToast { message, .. }
+            if message.contains("multiple current project tabs")
+    )));
+}
+
+#[test]
+fn app_runtime_initial_launch_failure_cleanup_fails_closed_for_duplicate_project_tabs() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    init_repo_with_initial_commit(temp.path());
+    let first = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        temp.path().to_path_buf(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Error,
+    );
+    let second = sample_project_tab_with_window_at(
+        "tab-2",
+        "agent-2",
+        temp.path().to_path_buf(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![first, second], Some("tab-1"));
+    let failed_window_id = combined_window_id("tab-1", "agent-1");
+    let failed_window = runtime
+        .issue_monitor_failed_window_identity(&failed_window_id)
+        .expect("failed window identity");
+    let delivery_id = "launch:initial-cleanup-duplicate-project-tabs";
+    runtime.issue_monitor_launch_deliveries.insert(
+        delivery_id.to_string(),
+        super::IssueMonitorLaunchDeliveryState::LaunchFailed {
+            message: "initial launch failed".to_string(),
+            session_mode: gwt_agent::SessionMode::Normal,
+            failed_window: Some(failed_window.clone()),
+        },
+    );
+    gwt::save_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(temp.path()),
+        &gwt::IssueMonitorPrefs {
+            failed_issues: vec![gwt::IssueMonitorFailedIssue {
+                issue_number: 42,
+                message: "initial launch failed".to_string(),
+                window_id: None,
+            }],
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed durable launch failure acknowledgement");
+    assert!(runtime
+        .tab_mut("tab-2")
+        .expect("second tab")
+        .workspace
+        .set_session_id("agent-2", Some("second-tab-session".to_string())));
+    let workspace_path = gwt::workspace_state_path(temp.path());
+    gwt::save_workspace_state(
+        &workspace_path,
+        runtime
+            .tab("tab-2")
+            .expect("second tab")
+            .workspace
+            .persisted(),
+    )
+    .expect("seed second tab workspace");
+    let before = fs::read(&workspace_path).expect("read seeded workspace");
+
+    let events = runtime.issue_monitor_launch_failed_result_events_with_delivery(
+        Some(temp.path()),
+        42,
+        "initial launch failed",
+        Some(delivery_id),
+        super::IssueMonitorLaunchFailureFinalizeContext {
+            session_mode: gwt_agent::SessionMode::Normal,
+            failed_window: Some(&failed_window),
+        },
+        Ok(()),
+    );
+
+    assert!(runtime.window_lookup.contains_key(&failed_window_id));
+    assert!(matches!(
+        runtime.issue_monitor_launch_deliveries.get(delivery_id),
+        Some(super::IssueMonitorLaunchDeliveryState::LaunchFailureCleanupPending { .. })
+    ));
+    assert_eq!(
+        fs::read(&workspace_path).expect("reload workspace"),
+        before,
+        "exact-current cleanup must not overwrite another tab's shared workspace file"
+    );
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::IssueMonitorToast { message, .. }
+            if message.contains("multiple current project tabs")
+    )));
+}
+
+#[test]
+fn app_runtime_launch_failure_cleanup_retry_reconciles_a_reopened_project_tab() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    init_repo_with_initial_commit(temp.path());
+    let predecessor = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        temp.path().to_path_buf(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Error,
+    );
+    let predecessor_runtime = sample_runtime(temp.path(), vec![predecessor], Some("tab-1"));
+    let failed_window_id = combined_window_id("tab-1", "agent-1");
+    let failed_window = predecessor_runtime
+        .issue_monitor_failed_window_identity(&failed_window_id)
+        .expect("failed window identity");
+    let predecessor_workspace = predecessor_runtime.tabs[0].workspace.persisted().clone();
+    drop(predecessor_runtime);
+
+    #[cfg(unix)]
+    let (_alias_parent, reopened_root) = {
+        let alias_parent = tempdir().expect("alias parent");
+        let reopened_root = alias_parent.path().join("repo-alias");
+        std::os::unix::fs::symlink(temp.path(), &reopened_root).expect("create project alias");
+        (alias_parent, reopened_root)
+    };
+    #[cfg(not(unix))]
+    let reopened_root = temp.path().to_path_buf();
+    let reopened = sample_project_tab_with_window_at(
+        "tab-2",
+        "agent-1",
+        reopened_root,
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![reopened], Some("tab-2"));
+    assert!(runtime
+        .tab_mut("tab-2")
+        .expect("reopened tab")
+        .workspace
+        .set_session_id("agent-1", Some("reopened-session".to_string())));
+    let delivery_id = "launch:cleanup-reopened-project-tab";
+    runtime.issue_monitor_launch_deliveries.insert(
+        delivery_id.to_string(),
+        super::IssueMonitorLaunchDeliveryState::LaunchFailureCleanupPending {
+            project_root: temp.path().to_path_buf(),
+            issue_number: 42,
+            failed_window,
+        },
+    );
+    gwt::save_workspace_state(
+        &gwt::workspace_state_path(temp.path()),
+        &predecessor_workspace,
+    )
+    .expect("seed predecessor workspace");
+
+    let _events = runtime.issue_monitor_scheduled_tick_events_at("2026-08-29T01:00:00Z");
+
+    assert!(!runtime
+        .issue_monitor_launch_deliveries
+        .contains_key(delivery_id));
+    let restored =
+        gwt::load_restored_workspace_state(temp.path()).expect("reload reopened project workspace");
+    assert_eq!(restored.windows.len(), 1);
+    assert_eq!(restored.windows[0].id, "agent-1");
+    assert_eq!(
+        restored.windows[0].session_id.as_deref(),
+        Some("reopened-session")
+    );
 }
 
 #[test]
@@ -22441,9 +22861,11 @@ fn app_runtime_uncommitted_monitor_launch_error_retains_the_diagnostic_window() 
 fn app_runtime_delayed_launch_failure_ack_does_not_close_a_replacement_window() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
-    let tab = sample_project_tab_with_window(
+    init_repo_with_initial_commit(temp.path());
+    let tab = sample_project_tab_with_window_at(
         "tab-1",
         "agent-1",
+        temp.path().to_path_buf(),
         WindowPreset::Agent,
         WindowProcessStatus::Error,
     );
@@ -22452,9 +22874,34 @@ fn app_runtime_delayed_launch_failure_ack_does_not_close_a_replacement_window() 
     let failed_window = runtime
         .issue_monitor_failed_window_identity(&failed_window_id)
         .expect("failed window identity");
+    let predecessor_workspace = runtime.tabs[0].workspace.persisted().clone();
+    let delivery_id = "launch:delayed-failure-ack";
+    runtime.issue_monitor_launch_deliveries.insert(
+        delivery_id.to_string(),
+        super::IssueMonitorLaunchDeliveryState::LaunchFailed {
+            message: "old launch failed".to_string(),
+            session_mode: gwt_agent::SessionMode::Normal,
+            failed_window: Some(failed_window.clone()),
+        },
+    );
+    gwt::save_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(temp.path()),
+        &gwt::IssueMonitorPrefs {
+            failed_issues: vec![gwt::IssueMonitorFailedIssue {
+                issue_number: 42,
+                message: "old launch failed".to_string(),
+                window_id: None,
+            }],
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed durable launch failure acknowledgement");
 
     let closed = runtime.close_window_after_issue_monitor_finalize_events(&failed_window_id);
     assert!(!closed.is_empty());
+    assert!(runtime
+        .persist_dispatcher
+        .wait_idle(std::time::Duration::from_secs(5)));
     let replacement = runtime.tab_mut("tab-1").expect("tab").workspace.add_window(
         WindowPreset::Agent,
         WindowGeometry {
@@ -22466,13 +22913,23 @@ fn app_runtime_delayed_launch_failure_ack_does_not_close_a_replacement_window() 
     );
     assert_eq!(replacement.id, "agent-1", "fixture must reuse the raw id");
     runtime.register_window("tab-1", &replacement.id);
+    assert!(runtime
+        .tab_mut("tab-1")
+        .expect("successor tab")
+        .workspace
+        .set_session_id("agent-1", Some("successor-session".to_string())));
     assert!(runtime.window_lookup.contains_key(&failed_window_id));
+    gwt::save_workspace_state(
+        &gwt::workspace_state_path(temp.path()),
+        &predecessor_workspace,
+    )
+    .expect("seed stale predecessor workspace snapshot");
 
     let events = runtime.issue_monitor_launch_failed_result_events_with_delivery(
-        None,
+        Some(temp.path()),
         42,
         "old launch failed",
-        None,
+        Some(delivery_id),
         super::IssueMonitorLaunchFailureFinalizeContext {
             session_mode: gwt_agent::SessionMode::Normal,
             failed_window: Some(&failed_window),
@@ -22488,6 +22945,113 @@ fn app_runtime_delayed_launch_failure_ack_does_not_close_a_replacement_window() 
         runtime.window_lookup.contains_key(&failed_window_id),
         "a delayed acknowledgement for the old incarnation must not close its replacement"
     );
+    let restored = gwt::load_restored_workspace_state(temp.path())
+        .expect("reload workspace after delayed acknowledgement settlement");
+    assert_eq!(restored.windows.len(), 1);
+    assert_eq!(restored.windows[0].id, "agent-1");
+    assert_eq!(
+        restored.windows[0].session_id.as_deref(),
+        Some("successor-session"),
+        "the delayed acknowledgement must durably replace the predecessor snapshot"
+    );
+    assert!(!runtime
+        .issue_monitor_launch_deliveries
+        .contains_key(delivery_id));
+}
+
+#[test]
+fn app_runtime_stale_launch_complete_does_not_mutate_a_reused_window_id() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "agent-1",
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-1");
+    runtime.pending_launch_feedback_contexts.insert(
+        window_id.clone(),
+        LaunchFeedbackContext {
+            client_id: "client-old-launch".to_string(),
+            title: "Old launch".to_string(),
+            issue_monitor_issue_number: None,
+            issue_monitor_delivery_id: None,
+            issue_monitor_project_root: None,
+            issue_monitor_session_mode: None,
+        },
+    );
+
+    let closed = runtime.close_window_after_issue_monitor_finalize_events(&window_id);
+    assert!(!closed.is_empty());
+    let replacement = runtime.tab_mut("tab-1").expect("tab").workspace.add_window(
+        WindowPreset::Agent,
+        WindowGeometry {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 500.0,
+        },
+    );
+    assert_eq!(replacement.id, "agent-1", "fixture must reuse the raw id");
+    runtime.register_window("tab-1", &replacement.id);
+    runtime
+        .tab_mut("tab-1")
+        .expect("replacement tab")
+        .workspace
+        .set_status(&replacement.id, WindowProcessStatus::Running);
+    runtime
+        .window_pty_statuses
+        .insert(window_id.clone(), WindowProcessStatus::Running);
+    runtime
+        .window_hook_states
+        .insert(window_id.clone(), WindowProcessStatus::Running);
+    runtime
+        .window_details
+        .insert(window_id.clone(), "successor ready".to_string());
+    runtime.pending_launch_feedback_contexts.insert(
+        window_id.clone(),
+        LaunchFeedbackContext {
+            client_id: "client-successor-launch".to_string(),
+            title: "Successor launch".to_string(),
+            issue_monitor_issue_number: None,
+            issue_monitor_delivery_id: None,
+            issue_monitor_project_root: None,
+            issue_monitor_session_mode: None,
+        },
+    );
+
+    let events =
+        runtime.handle_launch_complete(window_id.clone(), Err("old launch failed".to_string()));
+
+    assert!(runtime.window_lookup.contains_key(&window_id));
+    assert_eq!(
+        runtime.window_status(&window_id),
+        Some(WindowProcessStatus::Running),
+        "an old completion must not mark the same-id successor Error"
+    );
+    assert_eq!(
+        runtime.window_details.get(&window_id).map(String::as_str),
+        Some("successor ready"),
+        "an old completion must not replace successor diagnostics"
+    );
+    assert_eq!(
+        runtime
+            .pending_launch_feedback_contexts
+            .get(&window_id)
+            .map(|context| context.client_id.as_str()),
+        Some("client-successor-launch"),
+        "an old completion must not consume the successor launch context"
+    );
+    assert!(events.iter().all(|event| !matches!(
+        &event.event,
+        BackendEvent::TerminalStatus {
+            id,
+            status: WindowProcessStatus::Error,
+            ..
+        } if id == &window_id
+    )));
 }
 
 #[test]
@@ -38615,7 +39179,7 @@ fn app_runtime_lifecycle_ack_never_replays_local_writer() {
 }
 
 #[test]
-fn app_runtime_agent_failed_ack_runs_ui_finalize_without_a_local_write() {
+fn app_runtime_agent_failed_ack_keeps_autonomous_post_pty_error_evidence() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -38626,71 +39190,194 @@ fn app_runtime_agent_failed_ack_runs_ui_finalize_without_a_local_write() {
     fs::create_dir_all(&repo).expect("create repo");
     init_repo_with_initial_commit(&repo);
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
-    gwt::save_issue_monitor_prefs(
-        &prefs_path,
-        &gwt::IssueMonitorPrefs {
-            enabled: true,
-            autonomous_mode: true,
-            launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
-                issue_number: 42,
-                window_id: "tab-1::agent-1".to_string(),
-            }],
-            autonomous_records: vec![gwt::AutonomousIssueRecord {
-                issue_number: 42,
-                phase: gwt::AutonomousPhase::Implementing,
-                active_launch_id: None,
-                attempts: 1,
-                acceptance_snapshot: None,
-                retry_not_before: None,
-                retry_hold_reason: None,
-                last_heartbeat: None,
-                pr_number: None,
-                reviewed_sha: None,
-                review_passed: None,
-            }],
-            ..gwt::IssueMonitorPrefs::default()
-        },
-    )
-    .expect("seed autonomous lifecycle prefs");
-    let before = fs::read(&prefs_path).expect("read seeded prefs");
-    let tab = sample_project_tab_with_window_at(
-        "tab-1",
-        "agent-1",
-        repo.clone(),
-        WindowPreset::Agent,
-        WindowProcessStatus::Error,
-    );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let window_id = "tab-1::agent-1";
-    runtime.pending_launch_feedback_contexts.insert(
-        window_id.to_string(),
-        LaunchFeedbackContext {
-            client_id: "__issue_monitor__".to_string(),
-            title: "Issue Monitor".to_string(),
-            issue_monitor_issue_number: Some(42),
-            issue_monitor_delivery_id: None,
-            issue_monitor_project_root: Some(repo),
-            issue_monitor_session_mode: None,
-        },
-    );
+    for (raw_id, issue_number, phase) in [
+        ("agent-implementing", 42, gwt::AutonomousPhase::Implementing),
+        ("agent-needs-human", 43, gwt::AutonomousPhase::NeedsHuman),
+    ] {
+        let window_id = format!("tab-1::{raw_id}");
+        gwt::save_issue_monitor_prefs(
+            &prefs_path,
+            &gwt::IssueMonitorPrefs {
+                enabled: true,
+                autonomous_mode: true,
+                launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
+                    issue_number,
+                    window_id: window_id.clone(),
+                }],
+                autonomous_records: vec![gwt::AutonomousIssueRecord {
+                    issue_number,
+                    phase,
+                    active_launch_id: None,
+                    attempts: 1,
+                    acceptance_snapshot: None,
+                    retry_not_before: None,
+                    retry_hold_reason: None,
+                    last_heartbeat: None,
+                    pr_number: None,
+                    reviewed_sha: None,
+                    review_passed: None,
+                }],
+                ..gwt::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("seed autonomous lifecycle prefs");
+        let before = fs::read(&prefs_path).expect("read seeded prefs");
+        let tab = sample_project_tab_with_window_at(
+            "tab-1",
+            raw_id,
+            repo.clone(),
+            WindowPreset::Agent,
+            WindowProcessStatus::Error,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        runtime.pending_launch_feedback_contexts.insert(
+            window_id.clone(),
+            LaunchFeedbackContext {
+                client_id: "__issue_monitor__".to_string(),
+                title: "Issue Monitor".to_string(),
+                issue_monitor_issue_number: Some(issue_number),
+                issue_monitor_delivery_id: None,
+                issue_monitor_project_root: Some(repo.clone()),
+                issue_monitor_session_mode: None,
+            },
+        );
+        runtime.window_details.insert(
+            window_id.clone(),
+            "post-PTY diagnostic evidence".to_string(),
+        );
 
-    let events = runtime.issue_monitor_agent_failed_result_events(
-        window_id,
-        "agent failed",
-        Some(42),
-        Ok(()),
-    );
+        let events = runtime.issue_monitor_agent_failed_result_events(
+            &window_id,
+            "agent failed",
+            Some(issue_number),
+            Ok(()),
+        );
 
-    assert!(!runtime
-        .pending_launch_feedback_contexts
-        .contains_key(window_id));
-    assert!(!runtime.window_lookup.contains_key(window_id));
-    assert!(events.iter().any(|event| matches!(
-        &event.event,
-        BackendEvent::IssueMonitorToast { level, message, issue_number }
-            if level == "error" && message == "agent failed" && *issue_number == Some(42)
-    )));
-    assert_eq!(fs::read(&prefs_path).expect("reload prefs"), before);
+        assert!(!runtime
+            .pending_launch_feedback_contexts
+            .contains_key(&window_id));
+        assert!(
+            runtime.window_lookup.contains_key(&window_id),
+            "an autonomous {phase:?} AgentFailed acknowledgement is not a post-PTY close disposition"
+        );
+        assert_eq!(
+            runtime.window_details.get(&window_id).map(String::as_str),
+            Some("post-PTY diagnostic evidence"),
+            "the retained pane keeps its operator diagnostic evidence"
+        );
+        assert!(events.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::IssueMonitorToast { level, message, issue_number: event_issue_number }
+                if level == "error"
+                    && message == "agent failed"
+                    && *event_issue_number == Some(issue_number)
+        )));
+        assert_eq!(fs::read(&prefs_path).expect("reload prefs"), before);
+    }
+}
+
+#[test]
+fn app_runtime_autonomous_post_pty_exit_retains_diagnostics_across_frontend_reconnect() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+
+    for (raw_id, issue_number, phase) in [
+        ("agent-implementing", 42, gwt::AutonomousPhase::Implementing),
+        ("agent-needs-human", 43, gwt::AutonomousPhase::NeedsHuman),
+    ] {
+        let window_id = format!("tab-1::{raw_id}");
+        gwt::save_issue_monitor_prefs(
+            &prefs_path,
+            &gwt::IssueMonitorPrefs {
+                enabled: true,
+                autonomous_mode: true,
+                launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
+                    issue_number,
+                    window_id: window_id.clone(),
+                }],
+                autonomous_records: vec![gwt::AutonomousIssueRecord {
+                    issue_number,
+                    phase,
+                    active_launch_id: None,
+                    attempts: 1,
+                    acceptance_snapshot: None,
+                    retry_not_before: None,
+                    retry_hold_reason: None,
+                    last_heartbeat: None,
+                    pr_number: None,
+                    reviewed_sha: None,
+                    review_passed: None,
+                }],
+                ..gwt::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("seed autonomous lifecycle prefs");
+        let tab = sample_project_tab_with_window_at(
+            "tab-1",
+            raw_id,
+            repo.clone(),
+            WindowPreset::Agent,
+            WindowProcessStatus::Running,
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        insert_test_pane_runtime(&mut runtime, &window_id);
+        runtime
+            .runtimes
+            .get(&window_id)
+            .expect("agent runtime")
+            .pane
+            .lock()
+            .expect("agent pane")
+            .process_bytes(b"post-PTY diagnostic evidence\r\n");
+
+        let events = runtime.handle_runtime_status_with_exit_confirmation(
+            window_id.clone(),
+            WindowProcessStatus::Error,
+            Some("Process exited with status 1".to_string()),
+            true,
+        );
+
+        assert!(events.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::IssueMonitorToast {
+                level,
+                issue_number: event_issue_number,
+                ..
+            } if level == "error" && *event_issue_number == Some(issue_number)
+        )));
+        assert!(
+            runtime.window_lookup.contains_key(&window_id),
+            "an autonomous {phase:?} post-PTY failure keeps its pane"
+        );
+        assert!(
+            !runtime.runtimes.contains_key(&window_id),
+            "the dead PTY runtime is removed independently of pane retention"
+        );
+        let detail = runtime
+            .window_details
+            .get(&window_id)
+            .expect("durable reconnect diagnostic");
+        assert!(detail.contains("Process exited with status 1"));
+        assert!(detail.contains("post-PTY diagnostic evidence"));
+
+        let reconnect = runtime.frontend_sync_events("client-reconnected");
+        assert!(reconnect.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::TerminalStatus {
+                id,
+                status: WindowProcessStatus::Error,
+                detail: Some(detail),
+            } if id == &window_id && detail.contains("post-PTY diagnostic evidence")
+        )));
+    }
 }
 
 #[test]
@@ -41416,7 +42103,7 @@ fn durable_issue_monitor_delivery_restart_recovers_only_exact_bound_window() {
 }
 
 #[test]
-fn durable_issue_monitor_delivery_restart_records_interruption_before_cleanup() {
+fn durable_issue_monitor_delivery_restart_records_unproven_failure_without_closing_window() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -41497,36 +42184,56 @@ fn durable_issue_monitor_delivery_restart_records_interruption_before_cleanup() 
         gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
     );
 
-    let committed_index = events
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::IssueMonitorLaunchFailed {
+            issue_number,
+            message,
+        } if *issue_number == 3165
+            && message == super::ISSUE_MONITOR_UNPROVEN_MATERIALIZATION_FAILURE_MESSAGE
+    )));
+    assert!(events
         .iter()
-        .position(|event| {
-            matches!(
-                &event.event,
-                BackendEvent::IssueMonitorLaunchFailed { issue_number, message }
-                    if *issue_number == 3165
-                        && message == super::ISSUE_MONITOR_INTERRUPTED_MATERIALIZATION_MESSAGE
-            )
-        })
-        .expect("restart interruption must commit to the Issue Monitor");
-    let close_index = events
-        .iter()
-        .rposition(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. }))
-        .expect("restart interruption must remove the bound window");
-    assert!(committed_index < close_index);
+        .all(|event| !matches!(event.event, BackendEvent::WindowCanvasState { .. })));
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::IssueMonitorToast { message, .. }
+            if message.contains("concrete launch failure reason is unavailable after restart")
+    )));
     assert!(restarted.tabs[0]
         .workspace
         .persisted()
         .windows
         .iter()
-        .all(|window| window.id != "agent-1"));
+        .any(|window| window.id == "agent-1"));
     let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload interruption result");
     assert!(persisted.pending_launch_deliveries.is_empty());
+    assert!(persisted.launching_issues.is_empty());
+    assert!(persisted.pending_effects.iter().any(|effect| matches!(
+        &effect.payload,
+        gwt::IssueMonitorEffectPayload::ReleaseClaim {
+            issue_number: 3165,
+            claim_id,
+            owner,
+        } if claim_id == "claim-3165" && owner == "host/session"
+    )));
     assert!(persisted.failed_issues.iter().any(|failed| {
         failed.issue_number == 3165
-            && failed.message == super::ISSUE_MONITOR_INTERRUPTED_MATERIALIZATION_MESSAGE
+            && failed.message == super::ISSUE_MONITOR_UNPROVEN_MATERIALIZATION_FAILURE_MESSAGE
     }));
-    let restored = gwt::load_restored_workspace_state(&repo).expect("reload cleaned workspace");
-    assert!(restored.windows.iter().all(|window| window.id != "agent-1"));
+    let mut restored_monitor =
+        gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), persisted.clone());
+    assert_eq!(restored_monitor.active_count(), 0);
+    assert!(matches!(
+        restored_monitor.requeue_failed_issue(
+            3165,
+            "operator accepted the retained diagnostic",
+            "2026-08-29T01:00:00Z",
+        ),
+        gwt::IssueMonitorRequeueOutcome::Requeued { .. }
+    ));
+    let restored = gwt::load_restored_workspace_state(&repo).expect("reload retained workspace");
+    assert!(restored.windows.iter().any(|window| window.id == "agent-1"));
 }
 
 #[test]

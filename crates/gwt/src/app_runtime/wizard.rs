@@ -2064,6 +2064,24 @@ impl AppRuntime {
                         failed_window.as_ref(),
                     );
                 }
+                Some(super::IssueMonitorLaunchDeliveryState::LaunchFailureCleanupPending {
+                    project_root: cleanup_project_root,
+                    issue_number: cleanup_issue_number,
+                    failed_window,
+                }) => {
+                    if gwt::workspace_state_path(&cleanup_project_root)
+                        != gwt::workspace_state_path(project_root)
+                        || cleanup_issue_number != issue_number
+                    {
+                        return Vec::new();
+                    }
+                    return self.retry_issue_monitor_launch_failure_cleanup(
+                        delivery_id,
+                        cleanup_issue_number,
+                        &cleanup_project_root,
+                        &failed_window,
+                    );
+                }
                 None => {}
             }
             if let Some((window_id, was_materialized, _)) =
@@ -2088,15 +2106,14 @@ impl AppRuntime {
                     }
                 }
                 if !was_materialized {
-                    let failed_window = self.issue_monitor_failed_window_identity(&window_id);
                     recovery_events.extend(
                         self.issue_monitor_launch_failed_delivery_events_with_mode(
                             Some(project_root),
                             issue_number,
-                            super::ISSUE_MONITOR_INTERRUPTED_MATERIALIZATION_MESSAGE,
+                            super::ISSUE_MONITOR_UNPROVEN_MATERIALIZATION_FAILURE_MESSAGE,
                             Some(delivery_id),
                             gwt_agent::SessionMode::Normal,
-                            failed_window.as_ref(),
+                            None,
                         ),
                     );
                     return recovery_events;

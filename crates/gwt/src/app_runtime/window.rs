@@ -19,11 +19,13 @@
 //! while preserving the broadcast/persist contract through the existing
 //! `workspace_state_broadcast` and `persist` helpers on `AppRuntime`.
 
+use std::path::Path;
+
 use gwt::{AgentKanbanLane, ArrangeMode, CanvasViewport, FocusCycleDirection};
 
 use super::{
-    close_window_from_workspace, AppRuntime, BackendEvent, OutboundEvent, WindowGeometry,
-    WindowPreset, WindowProcessStatus,
+    close_window_from_workspace, AppRuntime, BackendEvent, OutboundEvent, ProjectTabRuntime,
+    WindowGeometry, WindowPreset, WindowProcessStatus,
 };
 
 fn shares_work_surface_singleton(preset: WindowPreset) -> bool {
@@ -485,6 +487,13 @@ impl AppRuntime {
                 address.tab_id
             )
         })?;
+        let unique_tab = self.unique_current_project_tab_for_workspace(&tab.project_root)?;
+        if unique_tab.id != address.tab_id {
+            return Err(format!(
+                "failed window {id} belongs to non-canonical project tab {}",
+                address.tab_id
+            ));
+        }
         let mut workspace = self.persistable_workspace_state(tab);
         let before = workspace.windows.len();
         workspace
@@ -497,6 +506,41 @@ impl AppRuntime {
         }
         self.persist_dispatcher
             .flush_workspace_durable(gwt::workspace_state_path(&tab.project_root), workspace)
+            .map_err(|error| error.to_string())
+    }
+
+    fn unique_current_project_tab_for_workspace(
+        &self,
+        project_root: &Path,
+    ) -> Result<&ProjectTabRuntime, String> {
+        let workspace_path = gwt::workspace_state_path(project_root);
+        let mut matching_tabs = self
+            .tabs
+            .iter()
+            .filter(|tab| gwt::workspace_state_path(&tab.project_root) == workspace_path);
+        let tab = matching_tabs.next().ok_or_else(|| {
+            format!(
+                "current project tab for {} is unavailable",
+                project_root.display()
+            )
+        })?;
+        if matching_tabs.next().is_some() {
+            return Err(format!(
+                "multiple current project tabs share workspace {}",
+                workspace_path.display()
+            ));
+        }
+        Ok(tab)
+    }
+
+    pub(crate) fn persist_current_workspace_durable_for_project(
+        &self,
+        project_root: &Path,
+    ) -> Result<(), String> {
+        let workspace_path = gwt::workspace_state_path(project_root);
+        let tab = self.unique_current_project_tab_for_workspace(project_root)?;
+        self.persist_dispatcher
+            .flush_workspace_durable(workspace_path, self.persistable_workspace_state(tab))
             .map_err(|error| error.to_string())
     }
 

@@ -697,6 +697,11 @@ pub(crate) enum IssueMonitorLaunchDeliveryState {
         session_mode: gwt_agent::SessionMode,
         failed_window: Option<IssueMonitorFailedWindowIdentity>,
     },
+    LaunchFailureCleanupPending {
+        project_root: PathBuf,
+        issue_number: u64,
+        failed_window: IssueMonitorFailedWindowIdentity,
+    },
 }
 
 /// Process-local identity for one exact canvas-window incarnation. Raw window
@@ -739,8 +744,8 @@ fn issue_monitor_writer_conflict_commit(
 }
 
 const ISSUE_MONITOR_MATERIALIZING_TTL: std::time::Duration = std::time::Duration::from_secs(60);
-const ISSUE_MONITOR_INTERRUPTED_MATERIALIZATION_MESSAGE: &str =
-    "Issue Monitor launch was interrupted before terminal materialization";
+const ISSUE_MONITOR_UNPROVEN_MATERIALIZATION_FAILURE_MESSAGE: &str =
+    "concrete launch failure reason is unavailable after restart; retained the exact pane for diagnosis";
 
 #[derive(Debug, Clone)]
 pub struct IssueLaunchWizardPrepared {
@@ -3256,9 +3261,6 @@ impl AppRuntime {
             ),
         };
         if committed {
-            if let Some(delivery_id) = delivery_id {
-                self.issue_monitor_launch_deliveries.remove(delivery_id);
-            }
             events.extend([
                 OutboundEvent::broadcast(BackendEvent::IssueMonitorLaunchFailed {
                     issue_number,
@@ -3280,6 +3282,106 @@ impl AppRuntime {
                     );
                 }
             }
+            // Every exact failed-window delivery becomes one cleanup
+            // obligation before settlement. The pane may already have been
+            // replaced while the durable ACK was in flight; that mismatch
+            // still needs a successor workspace barrier before the old
+            // delivery can be forgotten.
+            if let Some(delivery_id) = delivery_id {
+                if let (Some(failed_window), Some(project_root)) = (failed_window, project_root) {
+                    let remains_current =
+                        self.issue_monitor_failed_window_is_current(failed_window);
+                    self.issue_monitor_launch_deliveries.insert(
+                        delivery_id.to_string(),
+                        IssueMonitorLaunchDeliveryState::LaunchFailureCleanupPending {
+                            project_root: project_root.to_path_buf(),
+                            issue_number,
+                            failed_window: failed_window.clone(),
+                        },
+                    );
+                    if !remains_current {
+                        events.extend(self.retry_issue_monitor_launch_failure_cleanup(
+                            delivery_id,
+                            issue_number,
+                            project_root,
+                            failed_window,
+                        ));
+                    }
+                } else {
+                    self.issue_monitor_launch_deliveries.remove(delivery_id);
+                }
+            }
+        }
+        events
+    }
+
+    fn retry_issue_monitor_launch_failure_cleanups_for_project(
+        &mut self,
+        project_root: &Path,
+    ) -> Vec<OutboundEvent> {
+        let workspace_path = gwt::workspace_state_path(project_root);
+        let pending = self
+            .issue_monitor_launch_deliveries
+            .iter()
+            .filter_map(|(delivery_id, state)| match state {
+                IssueMonitorLaunchDeliveryState::LaunchFailureCleanupPending {
+                    project_root: cleanup_project_root,
+                    issue_number,
+                    failed_window,
+                } if gwt::workspace_state_path(cleanup_project_root) == workspace_path => {
+                    Some((delivery_id.clone(), *issue_number, failed_window.clone()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let mut events = Vec::new();
+        for (delivery_id, issue_number, failed_window) in pending {
+            events.extend(self.retry_issue_monitor_launch_failure_cleanup(
+                &delivery_id,
+                issue_number,
+                project_root,
+                &failed_window,
+            ));
+        }
+        events
+    }
+
+    fn retry_issue_monitor_launch_failure_cleanup(
+        &mut self,
+        delivery_id: &str,
+        issue_number: u64,
+        project_root: &Path,
+        failed_window: &IssueMonitorFailedWindowIdentity,
+    ) -> Vec<OutboundEvent> {
+        let was_current = self.issue_monitor_failed_window_is_current(failed_window);
+        let mut events = if was_current {
+            self.close_window_after_issue_monitor_failure_finalize_events(
+                &failed_window.window_id,
+                issue_number,
+            )
+        } else {
+            Vec::new()
+        };
+        let settled = if was_current {
+            !self.issue_monitor_failed_window_is_current(failed_window)
+        } else {
+            match self.persist_current_workspace_durable_for_project(project_root) {
+                Ok(()) => true,
+                Err(error) => {
+                    events.extend(self.issue_monitor_control_error_events(
+                        None,
+                        gwt::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(
+                            format!("durable successor workspace reconciliation failed: {error}"),
+                        ),
+                        "persist-launch-failure-cleanup-reconciliation",
+                        Some(issue_number),
+                    ));
+                    false
+                }
+            }
+        };
+        if settled {
+            self.issue_monitor_launch_deliveries.remove(delivery_id);
         }
         events
     }
@@ -3810,15 +3912,6 @@ impl AppRuntime {
                 })
             })
         });
-        let autoclose_failed_issue = issue_number.filter(|issue_number| {
-            prefs.as_ref().is_some_and(|prefs| {
-                prefs.autonomous_mode
-                    && prefs
-                        .autonomous_records
-                        .iter()
-                        .any(|record| record.issue_number == *issue_number)
-            })
-        });
         self.pending_launch_feedback_contexts.remove(window_id);
         let mut events = if emit_local_snapshot {
             monitor
@@ -3834,14 +3927,6 @@ impl AppRuntime {
             message: message.to_string(),
             issue_number,
         }));
-        if let Some(issue_number) = autoclose_failed_issue {
-            events.extend(
-                self.close_window_after_issue_monitor_failure_finalize_events(
-                    window_id,
-                    issue_number,
-                ),
-            );
-        }
         events
     }
 
@@ -4770,6 +4855,9 @@ impl AppRuntime {
             .collect();
         let mut events = Vec::new();
         for (project_root, prefs_path, expected_project_tab_id) in projects {
+            events.extend(
+                self.retry_issue_monitor_launch_failure_cleanups_for_project(&project_root),
+            );
             let enabled_or_cleanup = gwt::load_issue_monitor_prefs(&prefs_path)
                 .map(|prefs| prefs.enabled || issue_monitor_prefs_need_local_claim_cleanup(&prefs))
                 .unwrap_or(false);
@@ -7091,6 +7179,7 @@ impl AppRuntime {
         &self,
         window_id: &str,
     ) -> Option<IssueMonitorFailedWindowIdentity> {
+        self.window_lookup.get(window_id)?;
         Some(IssueMonitorFailedWindowIdentity {
             window_id: window_id.to_string(),
             incarnation: self.window_incarnations.get(window_id)?.clone(),
