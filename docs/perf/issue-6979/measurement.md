@@ -353,3 +353,38 @@ records; the canonical record SHA256 is
 This proves input equivalence and the eliminated read, not a latency speedup.
 Owner AC-2/3 still require the original successful pilot, matched after-hour,
 raw recomputation and delivery proof.
+
+## Local client lifetime and HEAD probe diagnostics (2026-11-14)
+
+Two further admitted native diagnostics preserve the original corpus, real
+model and deadlines. Neither passes the five-second refresh gate or replaces
+the matched 13-event after-hour:
+
+| Verification record | Broker p95 | All native rebuild p95 | Timed application bytes |
+| --- | ---: | ---: | ---: |
+| `vrr-586dab2167e1455ca68f8d427672de01` | 9,429ms | 9,377ms | 2,641,725 |
+| `vrr-635dc40371a844458053fb129b3e3855` | 5,706ms | 5,674ms | 2,640,444 |
+
+The second run records Issue/File rebuilds of 5,674/5,649ms. Its six actual
+Monitor scans complete within 9,121ms; 58 dark and 56 light actions have zero
+console/page errors and no one-second overruns. The maximum completed native
+callback is 36ms, with no 100ms overruns or unfinished watchdog warnings. Both
+owned GUIs are stopped. These short observations do not establish AC-2/3.
+Raw artifacts remain under `.gwt/6979-soak/after-clients-20261114-120` and
+`.gwt/6979-soak/after-head-boundary-20261114-120`. Application bytes combine
+instrumented Python writes and normalized Chroma payload; physical OS writes
+remain unmeasured.
+
+The collector now audits every native rebuild in addition to terminal broker
+claims, because Issue rebuilds can finish outside a terminal broker claim.
+Both boundaries retain the unchanged 5,000ms threshold; no timing is removed.
+
+Deterministic regressions prove three local reductions: empty or entirely
+inherited staging no longer opens unused vector readers; Files/Docs GC readers
+share one helper-local native lifetime; a HEAD-only canonical capture uses two
+Git processes rather than three. Remote canonical selection still uses three
+and takes precedence over HEAD. Both fresh source captures, metadata/vector
+verification and publication barriers remain. The combined HEAD probe accepts
+only strict output and retains the original fallback on ambiguity. No process
+cache, model, storage format, ranking, scheduler or priority changes are made.
+Host-variable pilot timings are not a controlled causal speedup comparison.

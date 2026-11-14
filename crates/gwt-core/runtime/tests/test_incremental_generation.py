@@ -73,16 +73,33 @@ class FileVectorVerificationTests(unittest.TestCase):
                                        "metadatas": [metadata], "embeddings": [vector]}
         cas_root = Path("file-index-v2/cas")
         with mock.patch.object(runner, "_artifact_pair_metadata_is_verified", return_value=True), \
-                mock.patch.object(runner, "_open_file_index_v2_collection", return_value=(mock.Mock(), collection)), \
+                mock.patch.object(runner, "_open_file_index_v2_collection", return_value=(mock.Mock(), collection)) as opened, \
                 mock.patch.object(runner, "_read_cas_vector", return_value=vector) as read_cas, \
                 mock.patch.object(runner, "_vector_checksum", side_effect=AssertionError("fresh CAS read already hashed")):
             self.assertTrue(runner._staged_artifact_vectors_are_verified(
                 Path("file-index-v2/bases/staging"), [record], [identity], [entry], descriptor, cas_root
             ))
+        opened.assert_called_once_with(
+            runner._file_artifact_store(Path("file-index-v2/bases/staging"), descriptor),
+            runner.V2_FILES_CODE_COLLECTION,
+        )
         read_cas.assert_called_once_with(
             cas_root, identity, runner._embedding_contract(compatibility), 2,
             expected_manifest_checksum=checksum,
         )
+        with mock.patch.object(runner, "_artifact_pair_metadata_is_verified", return_value=True) as metadata_check, \
+                mock.patch.object(runner, "_open_file_index_v2_collection") as opened, \
+                mock.patch.object(runner, "_read_cas_vector") as read_cas:
+            self.assertTrue(runner._staged_artifact_vectors_are_verified(
+                Path("file-index-v2/bases/staging"), [record], [identity], [entry], descriptor, cas_root,
+                inherited_members={runner._file_record_id(entry)},
+            ))
+            self.assertTrue(runner._staged_artifact_vectors_are_verified(
+                Path("file-index-v2/bases/staging"), [], [], [], descriptor, cas_root,
+            ))
+        self.assertEqual(metadata_check.call_count, 2)
+        opened.assert_not_called()
+        read_cas.assert_not_called()
 
 
 class CompatibilityDescriptorTests(unittest.TestCase):
@@ -465,7 +482,27 @@ class IncrementalGenerationTests(_IncrementalFixture):
         future_artifact.rmdir()
         with runner._file_index_v2_pin(REPO_HASH, WORKTREE_HASH, "reader", self.db_root):
             self.assertEqual(runner._prune_file_record_pool(v2_root), 0)
-        self.assertEqual(runner._prune_file_record_pool(v2_root), 1)
+        original_open = runner._open_file_index_v2_collection
+        original_close = runner._close_chroma_client
+        live_clients = {}
+        pair_overlaps = []
+
+        def open_pool(path, collection_name):
+            client, collection = original_open(path, collection_name)
+            if collection_name == runner.V2_FILES_DOCS_COLLECTION:
+                pair_overlaps.append((path, runner.V2_FILES_CODE_COLLECTION) in live_clients.values())
+            live_clients[id(client)] = (path, collection_name)
+            return client, collection
+
+        def close_pool(client):
+            live_clients.pop(id(client), None)
+            original_close(client)
+
+        with mock.patch.object(runner, "_open_file_index_v2_collection", side_effect=open_pool), \
+                mock.patch.object(runner, "_close_chroma_client", side_effect=close_pool):
+            self.assertEqual(runner._prune_file_record_pool(v2_root), 1)
+        self.assertEqual(pair_overlaps, [True])
+        self.assertEqual(live_clients, {}, "GC clients must close even after early deletion return")
         client, collection = runner._open_file_index_v2_collection(store, runner.V2_FILES_CODE_COLLECTION)
         try:
             self.assertEqual(collection.count(), 8)
@@ -945,11 +982,17 @@ class IncrementalGenerationTests(_IncrementalFixture):
 
     def test_canonical_capture_consolidates_git_probes_without_changing_the_pinned_tree(self):
         repo = self._make_canonical_repo()
-        self._run_git("-C", str(repo), "update-ref", "refs/remotes/origin/develop", "HEAD")
         expected_tree = subprocess.check_output(
-            ["git", "-C", str(repo), "rev-parse", "refs/remotes/origin/develop^{tree}"],
+            ["git", "-C", str(repo), "rev-parse", "HEAD^{tree}"],
             env=git_fixture_env(),
         ).decode("ascii").strip()
+        with mock.patch.object(runner, "_git_command", wraps=runner._git_command) as probe:
+            head_snapshot = runner._canonical_git_tree(repo / "src")
+        self.assertEqual(head_snapshot, {"reference": "HEAD", "root_tree_oid": expected_tree,
+                                        "tree_prefix": "src/"})
+        self.assertEqual(probe.call_count, 2, [call.args[1] for call in probe.call_args_list])
+
+        self._run_git("-C", str(repo), "update-ref", "refs/remotes/origin/develop", "HEAD")
         (repo / "src/branch.rs").write_text("//! Only on the work branch.\n", encoding="utf-8")
         self._run_git("-C", str(repo), "add", "src/branch.rs")
         self._run_git("-C", str(repo), "-c", "user.name=gwt tests", "-c",
@@ -959,14 +1002,15 @@ class IncrementalGenerationTests(_IncrementalFixture):
             snapshot = runner._canonical_git_tree(repo / "src")
         self.assertEqual(snapshot, {"reference": "origin/develop", "root_tree_oid": expected_tree,
                                     "tree_prefix": "src/"})
-        self.assertLessEqual(probe.call_count, 3, [call.args[1] for call in probe.call_args_list])
+        self.assertEqual(probe.call_count, 3, [call.args[1] for call in probe.call_args_list])
 
         original_git = runner._git_command
         injected = []
 
         def ambiguous_boundary(root, args, input_bytes=None):
             completed = original_git(root, args, input_bytes)
-            if list(args) == ["rev-parse", "--is-inside-work-tree", "--show-toplevel", "--show-prefix"]:
+            if list(args) == ["rev-parse", "--is-inside-work-tree", "--show-toplevel", "--show-prefix",
+                              "--verify", "--quiet", "HEAD^{tree}"]:
                 injected.append(True)
                 return subprocess.CompletedProcess(completed.args, completed.returncode,
                                                    completed.stdout + b"\n", completed.stderr)
@@ -975,6 +1019,16 @@ class IncrementalGenerationTests(_IncrementalFixture):
         with mock.patch.object(runner, "_git_command", side_effect=ambiguous_boundary):
             self.assertEqual(runner._canonical_git_tree(repo / "src"), snapshot)
         self.assertEqual(injected, [True], "ambiguous combined output must use the original probes")
+
+        # An unavailable HEAD must not hide an independently valid canonical ref.
+        self._run_git("-C", str(repo), "update-ref", "-d", "refs/heads/develop")
+        with mock.patch.object(runner, "_git_command", wraps=original_git) as probe:
+            self.assertEqual(runner._canonical_git_tree(repo / "src"), snapshot)
+        self.assertEqual(probe.call_count, 3, [call.args[1] for call in probe.call_args_list])
+        (repo / ".git/HEAD").write_text("f" * 40 + "\n", encoding="ascii")
+        with mock.patch.object(runner, "_git_command", wraps=original_git) as probe:
+            self.assertEqual(runner._canonical_git_tree(repo / "src"), snapshot)
+        self.assertEqual(probe.call_count, 3, [call.args[1] for call in probe.call_args_list])
 
     def test_canonical_ref_peel_failure_does_not_fallback_to_lower_ref(self):
         repo = self._make_canonical_repo()
