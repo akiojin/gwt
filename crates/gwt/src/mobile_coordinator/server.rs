@@ -11,7 +11,7 @@ use super::{
     ConfigError, CoordinatorConfig, CredentialError, TlsError,
 };
 use axum::{
-    extract::{Request, State},
+    extract::{DefaultBodyLimit, Request, State},
     http::{header, HeaderValue, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -19,6 +19,9 @@ use axum::{
 };
 use std::{future::Future, net::SocketAddr, path::Path, sync::Arc};
 use tokio::net::TcpListener;
+
+/// Largest accepted request body: the mobile policy's maximum SDP size.
+const MAX_REQUEST_BODY: usize = 64 * 1024;
 
 /// Fixed diagnostics only. Raw storage and socket errors are discarded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -71,14 +74,25 @@ async fn http_boundary(State(origin): State<Arc<str>>, request: Request, next: N
         None => true,
         Some(value) => value.as_bytes() == origin.as_bytes() && origins.next().is_none(),
     };
-    let mut response = if allowed {
-        next.run(request).await
-    } else {
+    let oversized = request
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok()?.parse::<u64>().ok())
+        .is_some_and(|length| length > MAX_REQUEST_BODY as u64);
+    let mut response = if !allowed {
         (
             StatusCode::FORBIDDEN,
             "coordinator origin rejected; retry from the configured HTTPS origin",
         )
             .into_response()
+    } else if oversized {
+        (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "coordinator request body too large; retry with a smaller request",
+        )
+            .into_response()
+    } else {
+        next.run(request).await
     };
     for (name, value) in [
         (header::CONTENT_SECURITY_POLICY, "default-src 'none'; script-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"),
@@ -89,6 +103,17 @@ async fn http_boundary(State(origin): State<Arc<str>>, request: Request, next: N
         response.headers_mut().insert(name, HeaderValue::from_static(value));
     }
     response
+}
+
+/// Wrap the coordinator routes in the HTTP boundary shared by every route.
+/// A body declared larger than `MAX_REQUEST_BODY` is refused before routing;
+/// route extractors read at most `MAX_REQUEST_BODY` of an undeclared body.
+/// `Router::layer` wraps only routes that already exist, so every route must be
+/// added before the router is passed here.
+fn with_http_boundary(router: axum::Router, origin: Arc<str>) -> axum::Router {
+    router
+        .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY))
+        .layer(middleware::from_fn_with_state(origin, http_boundary))
 }
 
 impl CoordinatorServer {
@@ -141,9 +166,10 @@ impl CoordinatorServer {
             store,
             origin,
         } = self;
-        let router = axum::Router::new()
-            .layer(axum::Extension(Arc::clone(&store)))
-            .layer(middleware::from_fn_with_state(origin, http_boundary));
+        let router = with_http_boundary(
+            axum::Router::new().layer(axum::Extension(Arc::clone(&store))),
+            origin,
+        );
         let result = axum::serve(listener, router)
             .with_graceful_shutdown(shutdown)
             .await
@@ -322,6 +348,95 @@ mod tests {
         }
         shutdown.send(()).unwrap();
         bounded(task).await.unwrap().unwrap();
+    }
+
+    fn assert_security_headers(response: &str) {
+        let headers = response
+            .split("\r\n\r\n")
+            .next()
+            .unwrap()
+            .to_ascii_lowercase();
+        for header in [
+            "content-security-policy: default-src 'none'; script-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+            "x-content-type-options: nosniff",
+            "referrer-policy: no-referrer",
+            "cache-control: no-store",
+        ] {
+            assert!(headers.lines().any(|line| line == header), "{response}");
+        }
+    }
+
+    #[tokio::test]
+    async fn declared_oversized_request_bodies_are_rejected_before_routing() {
+        let mut fixture = Fixture::new();
+        let server = fixture.start().await;
+        let addr = server.local_addr().unwrap();
+        let (shutdown, signal) = oneshot::channel();
+        let task = tokio::spawn(server.serve_until(async move {
+            let _ = signal.await;
+        }));
+        for (length, status) in [(MAX_REQUEST_BODY + 1, 413), (MAX_REQUEST_BODY, 404)] {
+            let mut client = fixture.connect(addr).await;
+            // The body is withheld: the boundary must answer from the header.
+            bounded(client.write_all(
+                format!(
+                    "POST /ws HTTP/1.1\r\nHost: coordinator.example\r\nOrigin: https://coordinator.example\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n"
+                )
+                .as_bytes(),
+            ))
+            .await
+            .unwrap();
+            let mut response = String::new();
+            bounded(client.read_to_string(&mut response)).await.unwrap();
+            assert!(
+                response.starts_with(&format!("HTTP/1.1 {status}")),
+                "{response}"
+            );
+            assert_security_headers(&response);
+            if status == 413 {
+                assert!(response
+                    .ends_with("coordinator request body too large; retry with a smaller request"));
+            }
+        }
+        shutdown.send(()).unwrap();
+        bounded(task).await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn undeclared_request_bodies_are_limited_for_route_extractors() {
+        let router = with_http_boundary(
+            axum::Router::new().route(
+                "/echo",
+                axum::routing::post(
+                    |body: axum::body::Bytes| async move { body.len().to_string() },
+                ),
+            ),
+            Arc::from("https://coordinator.example"),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move { axum::serve(listener, router).await });
+        for (length, status) in [(MAX_REQUEST_BODY, 200), (MAX_REQUEST_BODY + 1, 413)] {
+            let mut client = TcpStream::connect(addr).await.unwrap();
+            let mut request = format!(
+                "POST /echo HTTP/1.1\r\nHost: coordinator.example\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{length:x}\r\n"
+            )
+            .into_bytes();
+            request.resize(request.len() + length, b'a');
+            request.extend_from_slice(b"\r\n0\r\n\r\n");
+            bounded(client.write_all(&request)).await.unwrap();
+            let mut response = String::new();
+            bounded(client.read_to_string(&mut response)).await.unwrap();
+            assert!(
+                response.starts_with(&format!("HTTP/1.1 {status}")),
+                "{response}"
+            );
+            assert_security_headers(&response);
+            if status == 200 {
+                assert!(response.ends_with(&length.to_string()), "{response}");
+            }
+        }
+        task.abort();
     }
 
     #[tokio::test]
