@@ -466,63 +466,105 @@ fn pm_request_task_browser_cancel_preserves_audit_and_reconciles_receipts() {
 }
 
 #[test]
-fn pm_request_task_browser_cancel_by_key_rejects_ambiguous_selectors_and_preserves_receipt() {
+fn pm_request_task_browser_keyed_mutations_reject_ambiguous_selectors_and_preserve_receipts() {
     use sha2::Digest;
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let temp = tempdir().unwrap();
-    let _home = ScopedGwtHome::set(temp.path().join(".gwt"));
-    let repo = temp.path().join("repo");
-    fs::create_dir_all(&repo).unwrap();
-    init_repo(&repo);
-    let store = completed_pm_request_task_fixture(&repo);
-    let state_path =
-        gwt_core::pm_peer::project_dir(&repo).join("project-state/request-tasks/state.json");
-    let initial_bytes = fs::read(&state_path).unwrap();
-    let tab = sample_project_tab_with_window_at(
-        "tab-1",
-        "agent-1",
-        repo,
-        WindowPreset::Agent,
-        WindowProcessStatus::Stopped,
-    );
-    let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
-    let context = runtime.test_context();
-    let (spawner, tasks) = BlockingTaskSpawner::queued();
-    runtime.blocking_tasks = spawner;
-    let invoke = |runtime: &mut AppRuntime, wire| {
-        pm_request_task_browser_reply(runtime, &context, &tasks, &recorded, "browser-a", wire)
-    };
-    let key = format!("{:x}", sha2::Sha256::digest(b"synthetic-task"));
-    let cancel = serde_json::json!({"kind":"cancel_pm_request_task", "id":"tab-1::agent-1", "request_id":1,
+    for (kind, status) in [
+        ("cancel_pm_request_task", "cancelled"),
+        ("reopen_pm_request_task", "pending"),
+    ] {
+        let temp = tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path().join(".gwt"));
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        init_repo(&repo);
+        let store = completed_pm_request_task_fixture(&repo);
+        let state_path =
+            gwt_core::pm_peer::project_dir(&repo).join("project-state/request-tasks/state.json");
+        let initial_bytes = fs::read(&state_path).unwrap();
+        let tab = sample_project_tab_with_window_at(
+            "tab-1",
+            "agent-1",
+            repo,
+            WindowPreset::Agent,
+            WindowProcessStatus::Stopped,
+        );
+        let (mut runtime, recorded) =
+            sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+        let context = runtime.test_context();
+        let (spawner, tasks) = BlockingTaskSpawner::queued();
+        runtime.blocking_tasks = spawner;
+        let invoke = |runtime: &mut AppRuntime, wire| {
+            pm_request_task_browser_reply(runtime, &context, &tasks, &recorded, "browser-a", wire)
+        };
+        let key = format!("{:x}", sha2::Sha256::digest(b"synthetic-task"));
+        let cancel = serde_json::json!({"kind":kind, "id":"tab-1::agent-1", "request_id":1,
         "task_key":key, "request":{"operation_id":"key-cancel", "expected_revision":3,
         "reason":"Withdraw the saved request", "task_id":""}});
-    for (key, task_id, code) in [
-        ("", "", "invalid_request"),
-        (key.as_str(), "synthetic-task", "invalid_request"),
-        ("unknown", "", "missing_task"),
-    ] {
-        let mut invalid = cancel.clone();
-        invalid["task_key"] = serde_json::json!(key);
-        invalid["request"]["task_id"] = serde_json::json!(task_id);
-        assert_eq!(invoke(&mut runtime, invalid)["code"], code);
-        assert_eq!(store.read().unwrap().unwrap().revision, 3);
+        for (key, task_id, code) in [
+            ("", "", "invalid_request"),
+            (key.as_str(), "synthetic-task", "invalid_request"),
+            ("unknown", "", "missing_task"),
+        ] {
+            let mut invalid = cancel.clone();
+            invalid["task_key"] = serde_json::json!(key);
+            invalid["request"]["task_id"] = serde_json::json!(task_id);
+            assert_eq!(invoke(&mut runtime, invalid)["code"], code);
+            assert_eq!(store.read().unwrap().unwrap().revision, 3);
+        }
+        let mut foreign: serde_json::Value = serde_json::from_slice(&initial_bytes).unwrap();
+        foreign["project_key"] = serde_json::json!("foreign-project");
+        fs::write(&state_path, serde_json::to_vec(&foreign).unwrap()).unwrap();
+        assert_eq!(
+            invoke(&mut runtime, cancel.clone())["code"],
+            "foreign_project"
+        );
+        fs::write(
+            &state_path,
+            br#"{"schema_version":"PRIVATE-KEYED-SENTINEL"}"#,
+        )
+        .unwrap();
+        let unreadable = invoke(&mut runtime, cancel.clone());
+        assert_eq!(unreadable["code"], "unreadable_store");
+        assert!(!unreadable.to_string().contains("PRIVATE-KEYED-SENTINEL"));
+        fs::write(&state_path, initial_bytes).unwrap();
+        let applied = invoke(&mut runtime, cancel.clone());
+        assert_eq!(applied["state"], "ready");
+        assert_eq!(applied["task"]["status"], status);
+        assert_eq!(applied["receipt"]["actor"]["id"], "browser:browser-a");
+        assert_eq!(invoke(&mut runtime, cancel.clone()), applied);
+        assert_eq!(store.read().unwrap().unwrap().revision, 4);
+        store
+            .apply(
+                &gwt_core::pm_request_tasks::Actor {
+                    kind: gwt_core::pm_request_tasks::ActorKind::User,
+                    id: "browser:browser-a".into(),
+                },
+                &gwt_core::pm_request_tasks::Request {
+                    operation_id: "later-cancel".into(),
+                    expected_revision: 4,
+                    reason: "Later tracking change".into(),
+                    action: gwt_core::pm_request_tasks::Action::Cancel {
+                        task_id: "synthetic-task".into(),
+                    },
+                },
+            )
+            .unwrap();
+        let before_retry = fs::read(&state_path).unwrap();
+        let retry = invoke(&mut runtime, cancel);
+        assert_eq!(retry["revision"], 5);
+        assert_eq!(
+            retry["task"],
+            serde_json::to_value(&store.read().unwrap().unwrap().tasks["synthetic-task"]).unwrap()
+        );
+        assert_eq!(
+            retry["receipt"], applied["receipt"],
+            "the original receipt is immutable even when current state advances"
+        );
+        assert_eq!(fs::read(&state_path).unwrap(), before_retry);
     }
-    let mut foreign: serde_json::Value = serde_json::from_slice(&initial_bytes).unwrap();
-    foreign["project_key"] = serde_json::json!("foreign-project");
-    fs::write(&state_path, serde_json::to_vec(&foreign).unwrap()).unwrap();
-    assert_eq!(
-        invoke(&mut runtime, cancel.clone())["code"],
-        "foreign_project"
-    );
-    fs::write(&state_path, initial_bytes).unwrap();
-    let applied = invoke(&mut runtime, cancel.clone());
-    assert_eq!(applied["state"], "ready");
-    assert_eq!(applied["task"]["status"], "cancelled");
-    assert_eq!(applied["receipt"]["actor"]["id"], "browser:browser-a");
-    assert_eq!(invoke(&mut runtime, cancel.clone()), applied);
-    assert_eq!(store.read().unwrap().unwrap().revision, 4);
 }
 
 #[test]

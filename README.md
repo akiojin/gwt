@@ -1317,8 +1317,14 @@ children refuse completion. Repeating the same completion under a new operation
 is valid and may record an empty task delta.
 Replaying Update or Complete preserves
 the original receipt while the current task may reflect later changes, including
-a subsequent reopen. Reopen and Cancel
+a subsequent reopen. Raw-ID Reopen and Cancel
 continue to return their receipt's applied task state.
+Reopen and Cancel also accept a top-level `task_key` from the selected Task
+projection with an empty `request.task_id`. Empty, unknown or mixed selectors
+are rejected. These keyed operations return the current saved task and revision
+alongside the original receipt, so a retry cannot present an older receipt's
+task state as current. Reopen keeps the same user audit, CAS and pending
+reassessment rules; a Reopen control in the Tasks detail is separate work.
 After a connection loss, read the current task and original receipt: a new
 connection has a new actor, so replaying the old operation there is a conflict.
 The current task and the receipt's historical task state retain their own

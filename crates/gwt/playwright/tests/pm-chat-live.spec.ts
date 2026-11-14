@@ -1726,7 +1726,7 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
     }
   });
 
-  test('T-TASK-CANCEL T-TASK-DETAIL T-TASK-CHILDREN T-TASK-CRITERIA T-CHAT-TASK-LINK T-UTASK-OV and T-UTASK-USER-REOPEN/CANCEL/UPDATE/COMPLETE persist browser authority and show confirmed Tasks after reconnect', async ({ page }, info) => {
+  test('T-TASK-KEY-REOPEN T-TASK-CANCEL T-TASK-DETAIL T-TASK-CHILDREN T-TASK-CRITERIA T-CHAT-TASK-LINK T-UTASK-OV and T-UTASK-USER-REOPEN/CANCEL/UPDATE/COMPLETE persist browser authority and show confirmed Tasks after reconnect', async ({ page }, info) => {
     const theme = info.project.name.includes('light') ? 'light' : 'dark';
     const windowId = 'pm-request-task-fixture';
     const taskId = 'synthetic-fixture-task';
@@ -1833,8 +1833,19 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
       expect(completeState.sources).toEqual(seed.sources);
       expect(completeState.tasks[taskId]).toEqual(completed.task);
       const request = { operation_id: `browser-reopen-${theme}`, expected_revision: 5,
-        reason: 'The original outcome needs another review.\nPlease reopen this task.', task_id: taskId };
-      const reopened = await exchange('reopen_pm_request_task', { request });
+        reason: 'The original outcome needs another review.\nPlease reopen this task.', task_id: '' };
+      const taskKey = createHash('sha256').update(taskId).digest('hex');
+      const beforeReopen = readFileSync(statePath, 'utf8');
+      for (const [task_key, selectedRequest, code] of [
+        ['', request, 'invalid_request'],
+        [taskKey, { ...request, task_id: taskId }, 'invalid_request'],
+        ['unknown', request, 'missing_task'],
+      ] as const) {
+        expect(await exchange('reopen_pm_request_task', { task_key, request: selectedRequest }))
+          .toMatchObject({ state: 'error', code, recovery_operation: 'load_pm_request_task' });
+        expect(readFileSync(statePath, 'utf8')).toBe(beforeReopen);
+      }
+      const reopened = await exchange('reopen_pm_request_task', { task_key: taskKey, request });
       expect(reopened).toMatchObject({ state: 'ready', revision: 6, task: {
         ...pendingTask, review_generation: 2, review_required: true,
       }, receipt: { operation_id: request.operation_id, action: 'reopen', revision: 6,
@@ -1848,9 +1859,9 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
       expect(saved.tasks[taskId]).toEqual(reopened.task);
       expect(saved.sources).toEqual(seed.sources);
       expect(saved.sources[pendingTask.source_id].original).toBe(original);
-      expect(await exchange('reopen_pm_request_task', { request })).toEqual(reopened);
+      expect(await exchange('reopen_pm_request_task', { task_key: taskKey, request })).toEqual(reopened);
       expect(readFileSync(statePath, 'utf8')).toBe(savedBytes);
-      expect(await exchange('reopen_pm_request_task', { request: { ...request,
+      expect(await exchange('reopen_pm_request_task', { task_key: taskKey, request: { ...request,
         operation_id: `${request.operation_id}-stale` } })).toMatchObject({ state: 'error', code: 'conflict',
         current_revision: 6, recovery_operation: 'load_pm_request_task' });
       expect(readFileSync(statePath, 'utf8')).toBe(savedBytes);
@@ -1869,7 +1880,7 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
       await page.reload();
       await page.waitForFunction(() => (window as any).__gwtPlaywrightTestBridgeInstalled === true);
       await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
-      expect(await exchange('reopen_pm_request_task', { request })).toMatchObject({ state: 'error',
+      expect(await exchange('reopen_pm_request_task', { task_key: taskKey, request })).toMatchObject({ state: 'error',
         code: 'operation_conflict', recovery_operation: 'load_pm_request_task' });
       expect(await exchange('load_pm_request_task', { task_id: taskId,
         receipt_operation_id: request.operation_id })).toEqual(reopened);
