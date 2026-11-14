@@ -88,6 +88,73 @@ impl From<AssetIoError> for std::io::Error {
     }
 }
 
+/// Shared by ordinary writers and PM transaction preflight (#4487 / #4484).
+/// Windows junctions and other reparse points are indirection too.
+pub fn reject_indirection(path: &Path, metadata: &std::fs::Metadata) -> std::io::Result<()> {
+    #[cfg(windows)]
+    let indirect = {
+        use std::os::windows::fs::MetadataExt;
+        metadata.file_attributes() & 0x0400 != 0
+    };
+    #[cfg(not(windows))]
+    let indirect = metadata.file_type().is_symlink();
+    if indirect {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            format!(
+                "symlink/reparse point is not allowed in managed asset mutation: {}",
+                path.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Check only the selected mutation path and its ancestors, never unrelated
+/// project entries or credential links. Remove the reported link (or restore
+/// a real managed directory/file) and retry to recover from a refusal.
+/// This is a preflight check, not protection against concurrent link swaps.
+pub fn ensure_safe_mutation(path: &Path, route: AssetRoute) -> Result<(), AssetIoError> {
+    if path
+        .components()
+        .any(|part| part == std::path::Component::ParentDir)
+    {
+        return Err(AssetIoError::new(
+            route,
+            path,
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "parent components are not allowed in managed asset mutation paths",
+            ),
+        ));
+    }
+    let absolute =
+        std::path::absolute(path).map_err(|source| AssetIoError::new(route, path, source))?;
+    for node in absolute.ancestors().collect::<Vec<_>>().into_iter().rev() {
+        // macOS provides these root-owned system aliases. Do not canonicalize
+        // arbitrary parents: doing so would hide a project's symlink.
+        #[cfg(target_os = "macos")]
+        if [("/var", "/private/var"), ("/tmp", "/private/tmp")]
+            .iter()
+            .any(|(alias, target)| {
+                node == Path::new(alias)
+                    && std::fs::read_link(node).is_ok_and(|link| {
+                        node.parent().unwrap_or(Path::new("/")).join(link) == Path::new(target)
+                    })
+            })
+        {
+            continue;
+        }
+        match std::fs::symlink_metadata(node) {
+            Ok(metadata) => reject_indirection(node, &metadata)
+                .map_err(|source| AssetIoError::new(route, path, source))?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(source) => return Err(AssetIoError::new(route, path, source)),
+        }
+    }
+    Ok(())
+}
+
 /// Read a file, tagging failure as [`AssetRoute::Read`].
 pub fn read_to_string(path: impl AsRef<Path>) -> Result<String, AssetIoError> {
     let path = path.as_ref();
@@ -105,6 +172,7 @@ pub fn read(path: impl AsRef<Path>) -> Result<Vec<u8>, AssetIoError> {
 /// Create a directory tree, tagging failure as [`AssetRoute::Write`].
 pub fn create_dir_all(path: impl AsRef<Path>) -> Result<(), AssetIoError> {
     let path = path.as_ref();
+    ensure_safe_mutation(path, AssetRoute::Write)?;
     std::fs::create_dir_all(path)
         .map_err(|source| AssetIoError::new(AssetRoute::Write, path, source))
 }
@@ -113,6 +181,7 @@ pub fn create_dir_all(path: impl AsRef<Path>) -> Result<(), AssetIoError> {
 /// the destination, which is the one a reader needs in order to act.
 pub fn write(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> Result<(), AssetIoError> {
     let path = path.as_ref();
+    ensure_safe_mutation(path, AssetRoute::Write)?;
     std::fs::write(path, contents)
         .map_err(|source| AssetIoError::new(AssetRoute::Write, path, source))
 }
@@ -121,6 +190,7 @@ pub fn write(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> Result<(), A
 /// reported is the destination, because that is where a backup fails.
 pub fn backup(from: impl AsRef<Path>, to: impl AsRef<Path>) -> Result<u64, AssetIoError> {
     let to = to.as_ref();
+    ensure_safe_mutation(to, AssetRoute::Backup)?;
     std::fs::copy(from.as_ref(), to)
         .map_err(|source| AssetIoError::new(AssetRoute::Backup, to, source))
 }
@@ -129,6 +199,8 @@ pub fn backup(from: impl AsRef<Path>, to: impl AsRef<Path>) -> Result<u64, Asset
 pub fn rename(from: impl AsRef<Path>, to: impl AsRef<Path>) -> Result<(), AssetIoError> {
     let from = from.as_ref();
     let to = to.as_ref();
+    ensure_safe_mutation(from, AssetRoute::Write)?;
+    ensure_safe_mutation(to, AssetRoute::Write)?;
     #[cfg(windows)]
     let result = retry_on_sharing_violation(|| rename_with_posix_semantics(from, to));
     #[cfg(not(windows))]
@@ -219,18 +291,21 @@ pub fn symlink_metadata(path: impl AsRef<Path>) -> Result<std::fs::Metadata, Ass
 /// Remove an empty directory, tagging failure as [`AssetRoute::Delete`].
 pub fn remove_dir(path: impl AsRef<Path>) -> Result<(), AssetIoError> {
     let path = path.as_ref();
+    ensure_safe_mutation(path, AssetRoute::Delete)?;
     std::fs::remove_dir(path).map_err(|source| AssetIoError::new(AssetRoute::Delete, path, source))
 }
 
 /// Remove a file, tagging failure as [`AssetRoute::Delete`].
 pub fn remove_file(path: impl AsRef<Path>) -> Result<(), AssetIoError> {
     let path = path.as_ref();
+    ensure_safe_mutation(path, AssetRoute::Delete)?;
     std::fs::remove_file(path).map_err(|source| AssetIoError::new(AssetRoute::Delete, path, source))
 }
 
 /// Remove a directory tree, tagging failure as [`AssetRoute::Delete`].
 pub fn remove_dir_all(path: impl AsRef<Path>) -> Result<(), AssetIoError> {
     let path = path.as_ref();
+    ensure_safe_mutation(path, AssetRoute::Delete)?;
     std::fs::remove_dir_all(path)
         .map_err(|source| AssetIoError::new(AssetRoute::Delete, path, source))
 }
@@ -238,6 +313,17 @@ pub fn remove_dir_all(path: impl AsRef<Path>) -> Result<(), AssetIoError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mutation_rejects_parent_traversal_before_creating_a_missing_ancestor() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("missing/../target/new");
+        let error = create_dir_all(&path).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(error.route, AssetRoute::Write);
+        assert_eq!(error.path, path);
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
 
     #[cfg(windows)]
     #[test]

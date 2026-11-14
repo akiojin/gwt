@@ -95,26 +95,6 @@ fn lock_path_for(path: &Path) -> PathBuf {
     path.with_extension("json.lock")
 }
 
-/// Resolve a hooks path to its actual file target when the path is a symlink.
-fn resolved_hooks_path(path: &Path) -> PathBuf {
-    let Ok(meta) = std::fs::symlink_metadata(path) else {
-        return path.to_path_buf();
-    };
-    if !meta.file_type().is_symlink() {
-        return path.to_path_buf();
-    }
-
-    let Ok(link) = std::fs::read_link(path) else {
-        return path.to_path_buf();
-    };
-
-    if link.is_absolute() {
-        link
-    } else {
-        path.parent().unwrap_or(Path::new(".")).join(link)
-    }
-}
-
 /// Find the newest timestamped backup path for a hooks file.
 fn newest_timestamped_backup(path: &Path) -> Option<PathBuf> {
     let dir = path.parent().unwrap_or(Path::new("."));
@@ -165,6 +145,7 @@ fn load_backup_config(path: &Path) -> Result<Option<HooksConfig>, HooksError> {
 /// Acquire an exclusive lock for the resolved hooks target.
 fn acquire_lock(path: &Path) -> Result<std::fs::File, HooksError> {
     let lock_path = lock_path_for(path);
+    crate::asset_io::ensure_safe_mutation(&lock_path, crate::asset_io::AssetRoute::Write)?;
     let file = OpenOptions::new()
         .create(true)
         .read(true)
@@ -188,7 +169,8 @@ fn acquire_lock(path: &Path) -> Result<std::fs::File, HooksError> {
 ///
 /// Returns the path to the timestamped backup file.
 pub fn backup_hooks(path: &Path) -> Result<PathBuf, HooksError> {
-    let target = resolved_hooks_path(path);
+    crate::asset_io::ensure_safe_mutation(path, crate::asset_io::AssetRoute::Backup)?;
+    let target = path.to_path_buf();
     let timestamped = timestamped_backup_path_for(&target);
     let stable = backup_path_for(&target);
 
@@ -200,7 +182,8 @@ pub fn backup_hooks(path: &Path) -> Result<PathBuf, HooksError> {
 
 /// Restore hooks file from its backup (.bak).
 pub fn restore_from_backup(path: &Path) -> Result<(), HooksError> {
-    let target = resolved_hooks_path(path);
+    crate::asset_io::ensure_safe_mutation(path, crate::asset_io::AssetRoute::Write)?;
+    let target = path.to_path_buf();
     for candidate in backup_candidates_for(&target) {
         if candidate.exists() {
             // Restoring writes the target; the path a reader must act on is
@@ -234,7 +217,8 @@ fn try_parse_config(content: &str) -> Option<HooksConfig> {
 /// 2. Merge managed hooks (replace gwt-managed, keep user hooks)
 /// 3. Write result atomically via temp file + rename
 pub fn merge_hooks_safe(path: &Path, managed: &[Hook]) -> Result<(), HooksError> {
-    let target = resolved_hooks_path(path);
+    crate::asset_io::ensure_safe_mutation(path, crate::asset_io::AssetRoute::Write)?;
+    let target = path.to_path_buf();
     let _lock = acquire_lock(&target)?;
 
     let existing = if path.exists() || target.exists() {
@@ -269,6 +253,7 @@ pub fn merge_hooks_safe(path: &Path, managed: &[Hook]) -> Result<(), HooksError>
     ));
     let json = serde_json::to_string_pretty(&new_config)?;
     {
+        crate::asset_io::ensure_safe_mutation(&tmp_path, crate::asset_io::AssetRoute::Write)?;
         let write = |source| {
             crate::asset_io::AssetIoError::new(
                 crate::asset_io::AssetRoute::Write,

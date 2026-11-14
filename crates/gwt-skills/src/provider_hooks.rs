@@ -429,7 +429,7 @@ fn home_dir() -> Option<PathBuf> {
 /// to the real home; on platforms/filesystems where symlinks fail we fall
 /// back to a copy. Existing entries are replaced so refresh stays idempotent.
 fn bridge_hermes_credentials(source_home: &Path, dest_home: &Path) -> io::Result<()> {
-    fs::create_dir_all(dest_home)?;
+    crate::asset_io::create_dir_all(dest_home)?;
     for name in HERMES_CREDENTIAL_FILES {
         let src = source_home.join(name);
         let dst = dest_home.join(name);
@@ -443,6 +443,7 @@ fn bridge_hermes_credentials(source_home: &Path, dest_home: &Path) -> io::Result
             fs::remove_file(&dst)?;
         }
         if symlink_file(&src, &dst).is_err() {
+            crate::asset_io::ensure_safe_mutation(&dst, crate::AssetRoute::Write)?;
             fs::copy(&src, &dst)?;
         }
     }
@@ -914,6 +915,47 @@ mod hermes_tests {
                 .file_type()
                 .is_symlink());
         }
+        generate_hermes_hooks_with_source(wt.path(), Some(src.path())).unwrap();
+        assert_eq!(
+            fs::read_to_string(&env_link).unwrap(),
+            "HERMES_API_KEY=secret\n"
+        );
+        assert_eq!(
+            fs::read_to_string(src.path().join("auth.json")).unwrap(),
+            "{\"nous\":\"tok\"}\n"
+        );
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn hermes_credential_bridge_rejects_symlink_mutation() {
+        let root = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        write_file(&source.path().join(".env"), "source credential");
+        let sentinel = external.path().join(".env");
+        fs::write(&sentinel, "sentinel").unwrap();
+        let target = root.path().join("hermes");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(external.path(), &target).unwrap();
+        #[cfg(windows)]
+        {
+            let output = gwt_core::process::hidden_command("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(target.components().collect::<PathBuf>())
+                .arg(external.path().components().collect::<PathBuf>())
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+        }
+
+        let error = bridge_hermes_credentials(source.path(), &target).unwrap_err();
+        assert!(error.to_string().contains("write"), "{error}");
+        assert!(
+            error.to_string().contains(&target.display().to_string()),
+            "{error}"
+        );
+        assert_eq!(fs::read_to_string(sentinel).unwrap(), "sentinel");
     }
 
     #[test]

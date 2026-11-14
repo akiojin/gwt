@@ -136,10 +136,10 @@ pub fn render_config_toml(config: &CodexHomeConfig) -> String {
 /// Materialize a worktree-local `CODEX_HOME` at the given path. Creates
 /// the directory and writes `config.toml` with [`render_config_toml`].
 pub fn materialize(codex_home: &Path, config: &CodexHomeConfig) -> std::io::Result<PathBuf> {
-    std::fs::create_dir_all(codex_home)?;
+    crate::asset_io::create_dir_all(codex_home)?;
     let config_path = codex_home.join("config.toml");
     let rendered = render_config_toml(config);
-    std::fs::write(&config_path, rendered)?;
+    crate::asset_io::write(&config_path, rendered)?;
     Ok(config_path)
 }
 
@@ -267,6 +267,36 @@ mod tests {
         materialize(&codex_home, &sample("llmlb")).expect("materialize twice");
         let body2 = std::fs::read_to_string(codex_home.join("config.toml")).expect("read");
         assert_eq!(body, body2, "second materialize must be byte-identical");
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn materialize_rejects_symlink_mutation() {
+        let home = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        let sentinel = external.path().join("config.toml");
+        std::fs::write(&sentinel, "sentinel").unwrap();
+        let target = home.path().join("codex");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(external.path(), &target).unwrap();
+        #[cfg(windows)]
+        {
+            let output = gwt_core::process::hidden_command("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(target.components().collect::<PathBuf>())
+                .arg(external.path().components().collect::<PathBuf>())
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+        }
+
+        let error = materialize(&target, &sample("llmlb")).unwrap_err();
+        assert!(error.to_string().contains("write"), "{error}");
+        assert!(
+            error.to_string().contains(&target.display().to_string()),
+            "{error}"
+        );
+        assert_eq!(std::fs::read_to_string(sentinel).unwrap(), "sentinel");
     }
 
     #[test]

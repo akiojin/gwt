@@ -1520,37 +1520,8 @@ fn copy_pm_managed_asset_symlink(
     ))
 }
 
-#[cfg(windows)]
 fn reject_pm_managed_asset_indirection(path: &Path, metadata: &fs::Metadata) -> io::Result<()> {
-    use std::os::windows::fs::MetadataExt;
-
-    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
-    if metadata.file_type().is_symlink()
-        || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            format!(
-                "indirect node is not allowed in PM managed asset transaction: {}",
-                path.display()
-            ),
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(not(windows))]
-fn reject_pm_managed_asset_indirection(path: &Path, metadata: &fs::Metadata) -> io::Result<()> {
-    if metadata.file_type().is_symlink() {
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            format!(
-                "symlink is not allowed in PM managed asset transaction: {}",
-                path.display()
-            ),
-        ));
-    }
-    Ok(())
+    gwt_skills::asset_io::reject_indirection(path, metadata)
 }
 
 /// What one managed-asset materialization committed to disk that a caller

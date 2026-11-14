@@ -395,6 +395,7 @@ fn normalize_targets(targets: &[ManagedAssetTarget]) -> Vec<ManagedAssetTarget> 
 }
 
 fn prune_retired_hook_scripts(dest: &Path, plan: &mut DistributePlan) -> io::Result<()> {
+    crate::asset_io::ensure_safe_mutation(dest, crate::asset_io::AssetRoute::Delete)?;
     if dest.exists() {
         for entry in crate::asset_io::read_dir(dest)? {
             let entry = entry?;
@@ -502,6 +503,7 @@ fn prune_dir_against_source(
     tracked_paths: &HashSet<PathBuf>,
     plan: &mut DistributePlan,
 ) -> io::Result<()> {
+    crate::asset_io::ensure_safe_mutation(dest, crate::asset_io::AssetRoute::Delete)?;
     if !dest.exists() {
         return Ok(());
     }

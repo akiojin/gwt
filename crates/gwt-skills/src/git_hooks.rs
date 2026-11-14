@@ -120,12 +120,12 @@ pub fn materialize_managed_git_hooks(worktree: &Path) -> io::Result<Vec<PathBuf>
         return Ok(Vec::new());
     };
 
-    fs::create_dir_all(&plan.hooks_dir)?;
+    crate::asset_io::create_dir_all(&plan.hooks_dir)?;
     // The generated directory ignores itself, including this file, so a
     // materialized worktree stays free of tracked diffs.
     let self_ignore = plan.hooks_dir.join(".gitignore");
     if !self_ignore.exists() {
-        fs::write(&self_ignore, "*\n")?;
+        crate::asset_io::write(&self_ignore, "*\n")?;
     }
 
     let mut written = Vec::new();
@@ -142,7 +142,7 @@ pub fn materialize_managed_git_hooks(worktree: &Path) -> io::Result<Vec<PathBuf>
         {
             continue;
         }
-        fs::write(&hook.target, shim)?;
+        crate::asset_io::write(&hook.target, shim)?;
         make_executable(&hook.target)?;
         written.push(hook.target);
     }
@@ -185,6 +185,7 @@ fn is_executable(_path: &Path) -> bool {
 fn make_executable(path: &Path) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
+    crate::asset_io::ensure_safe_mutation(path, crate::AssetRoute::Write)?;
     let mut permissions = fs::metadata(path)?.permissions();
     permissions.set_mode(0o755);
     fs::set_permissions(path, permissions)
@@ -318,6 +319,47 @@ mod tests {
             ],
             "an empty core.hooksPath directory must be reported, not silently skipped"
         );
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn materialize_git_hooks_rejects_symlink_mutation() {
+        let repo = repo_with_generated_hooks_path();
+        let external = tempfile::tempdir().unwrap();
+        let sentinel = external.path().join("pre-commit");
+        let contents = format!("# {MANAGED_HOOK_MARKER}\nsentinel\n");
+        fs::write(&sentinel, &contents).unwrap();
+        let target = repo.path().join(".husky/_/pre-commit");
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&sentinel, &target).unwrap();
+        #[cfg(windows)]
+        {
+            let output = hidden_command("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(target.components().collect::<PathBuf>())
+                .arg(external.path().components().collect::<PathBuf>())
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+        }
+
+        let result = materialize_managed_git_hooks(repo.path());
+        #[cfg(unix)]
+        {
+            let error = result.unwrap_err();
+            assert!(error.to_string().contains("write"), "{error}");
+            assert!(
+                error.to_string().contains(&target.display().to_string()),
+                "{error}"
+            );
+        }
+        #[cfg(windows)]
+        if let Ok(written) = result {
+            // A directory junction is a foreign hook, so preserving it is safe.
+            assert!(!written.contains(&target));
+        }
+        assert_eq!(fs::read_to_string(sentinel).unwrap(), contents);
     }
 
     #[test]

@@ -1254,9 +1254,10 @@ pub(crate) fn with_codex_config_lock<T>(
     // Paths come from CODEX_HOME / OS home, not gwt_home, so tests need their own guard.
     gwt_config::home::assert_test_path(config_path);
     if let Some(parent) = config_path.parent() {
-        fs::create_dir_all(parent)?;
+        crate::asset_io::create_dir_all(parent)?;
     }
     let lock_path = codex_config_lock_path(config_path);
+    crate::asset_io::ensure_safe_mutation(&lock_path, crate::AssetRoute::Write)?;
     let lock = fs::OpenOptions::new()
         .create(true)
         .read(true)
@@ -1550,6 +1551,37 @@ mod tests {
         generate_codex_hooks, generate_codex_hooks_for_mode,
         settings_local::codex_event_hook_commands_with_bin, CodexHookDiscoveryMode,
     };
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn codex_config_lock_rejects_symlink_mutation() {
+        let home = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        let target = home.path().join("codex");
+        let config = target.join("config.toml");
+        let sentinel = external.path().join("config.toml.gwt-lock");
+        fs::write(&sentinel, "sentinel").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(external.path(), &target).unwrap();
+        #[cfg(windows)]
+        {
+            let output = gwt_core::process::hidden_command("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(target.components().collect::<PathBuf>())
+                .arg(external.path().components().collect::<PathBuf>())
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+        }
+
+        let error = with_codex_config_lock(&config, || Ok(())).unwrap_err();
+        assert!(error.to_string().contains("write"), "{error}");
+        assert!(
+            error.to_string().contains(&target.display().to_string()),
+            "{error}"
+        );
+        assert_eq!(fs::read_to_string(sentinel).unwrap(), "sentinel");
+    }
 
     #[test]
     fn command_hook_hash_matches_codex_for_known_post_tool_use_fixture() {
