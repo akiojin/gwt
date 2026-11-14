@@ -1420,6 +1420,16 @@ export function createLaunchWizardSurface({
               "launch-note",
               "Hermes is not set up yet (no credentials in ~/.hermes). Run `hermes setup` (or `hermes model`) in a terminal to choose a provider and sign in; gwt will then bridge it into every worktree. You can still launch — Hermes will prompt for setup.",
             );
+            const setupButton = createNode(
+              "button",
+              "launch-choice-button",
+              "Run Hermes setup",
+            );
+            setupButton.type = "button";
+            setupButton.addEventListener("click", () =>
+              sendWizardAction({ kind: "run_hermes_setup" }),
+            );
+            note.appendChild(setupButton);
             section.appendChild(note);
           }
           const grid = createNode("div", "launch-form-grid");

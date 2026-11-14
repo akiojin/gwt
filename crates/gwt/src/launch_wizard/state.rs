@@ -472,6 +472,9 @@ impl LaunchWizardState {
             LaunchWizardAction::RunOpenCodeSetup => {
                 self.run_opencode_setup();
             }
+            LaunchWizardAction::RunHermesSetup => {
+                self.run_hermes_setup();
+            }
             LaunchWizardAction::Back => {
                 if self.show_confirm() {
                     // SPEC-2014 FR-124: Confirm から Runtime ステップへ戻す。
@@ -1538,6 +1541,46 @@ impl LaunchWizardState {
             docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::default(),
             windows_shell: self.windows_shell_for_launch(),
             env_vars: HashMap::new(),
+            remove_env: Vec::new(),
+            command_override: Some(runner.executable),
+            command_args_override: Some(args),
+        };
+        self.completion = Some(LaunchWizardCompletion::Launch(Box::new(
+            LaunchWizardLaunchRequest::Shell(Box::new(config)),
+        )));
+    }
+
+    /// SPEC-3152 FR-006: run Hermes setup against the user's real HERMES_HOME
+    /// so the resulting credentials are shared back through the bridge.
+    fn run_hermes_setup(&mut self) {
+        let source_home = gwt_skills::hermes_source_home(
+            self.context
+                .worktree_path
+                .as_deref()
+                .unwrap_or(self.context.quick_start_root.as_path()),
+        );
+        let Some(source_home) = source_home else {
+            self.error = Some("Unable to resolve Hermes home for setup".to_string());
+            return;
+        };
+        let runner = gwt_agent::launch::resolve_runner(&gwt_agent::AgentId::Hermes, "installed");
+        let mut args = runner.base_args.clone();
+        args.push("setup".to_string());
+        args.push("--portal".to_string());
+
+        let mut env_vars = HashMap::new();
+        env_vars.insert("HERMES_HOME".to_string(), source_home.display().to_string());
+        self.launch_target = LaunchTargetKind::Shell;
+        let config = ShellLaunchConfig {
+            working_dir: self.context.worktree_path.clone(),
+            branch: (!self.branch_name.is_empty()).then(|| self.branch_name.clone()),
+            base_branch: None,
+            display_name: "Hermes Setup".to_string(),
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            docker_service: None,
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::default(),
+            windows_shell: self.windows_shell_for_launch(),
+            env_vars,
             remove_env: Vec::new(),
             command_override: Some(runner.executable),
             command_args_override: Some(args),

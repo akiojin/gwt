@@ -688,6 +688,11 @@ pub enum LaunchWizardAction {
     /// `opencode` convention, so the wire tag is `run_opencode_setup`.
     #[serde(rename = "run_opencode_setup")]
     RunOpenCodeSetup,
+    /// SPEC-3152 FR-006: launch `hermes setup --portal` in a host pane with
+    /// HERMES_HOME pointed at the user's source Hermes home, not the
+    /// worktree-local `.gwt/hermes` bridge.
+    #[serde(rename = "run_hermes_setup")]
+    RunHermesSetup,
     Submit,
     /// SPEC-2014 FR-128: progress rail クリックで指定フェーズへ直接移動する。
     GotoStep {

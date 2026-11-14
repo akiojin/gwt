@@ -2457,6 +2457,14 @@ test("Launch wizard runtime confirmation shows summary without setup forms", () 
   );
 });
 
+test("Hermes setup note offers the in-pane setup launcher", () => {
+  assert.match(
+    launchWizardSource,
+    /if\s*\(\s*launchWizard\.hermes_needs_setup\s*\)\s*\{[\s\S]*?"Run Hermes setup"[\s\S]*?sendWizardAction\(\{\s*kind:\s*"run_hermes_setup"\s*\}\)/,
+    "expected Hermes needs-setup note to dispatch run_hermes_setup",
+  );
+});
+
 test("Launch wizard submit button uses Continue before runtime context is resolved", () => {
   assert.match(
     launchWizardSource,

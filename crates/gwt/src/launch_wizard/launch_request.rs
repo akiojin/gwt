@@ -798,6 +798,53 @@ mod tests {
     }
 
     #[test]
+    fn run_hermes_setup_yields_shell_completion_with_source_home() {
+        let _env_lock = crate::env_test_lock().lock().expect("env lock");
+        let source_home = tempdir().expect("source home");
+        let _hermes_home =
+            gwt_core::test_support::ScopedEnvVar::set("HERMES_HOME", source_home.path());
+        let mut options = sample_agent_options();
+        options.push(AgentOption {
+            id: "hermes".to_string(),
+            name: "Hermes Agent".to_string(),
+            available: true,
+            installed_version: Some("0.17.0".to_string()),
+            versions: Vec::new(),
+            custom_agent: None,
+        });
+        let mut ctx = context(branch("feature/gui"), "feature/gui");
+        ctx.worktree_path = Some(PathBuf::from("/tmp/repo-feature"));
+        let mut state = LaunchWizardState::open_with(ctx, options, Vec::new());
+        state.set_agent_id("hermes");
+
+        state.apply(LaunchWizardAction::RunHermesSetup);
+
+        match state.completion.as_ref() {
+            Some(LaunchWizardCompletion::Launch(request)) => match request.as_ref() {
+                LaunchWizardLaunchRequest::Shell(config) => {
+                    assert_eq!(config.display_name, "Hermes Setup");
+                    assert_eq!(config.runtime_target, gwt_agent::LaunchRuntimeTarget::Host);
+                    assert_eq!(
+                        config.working_dir.as_deref(),
+                        Some(Path::new("/tmp/repo-feature"))
+                    );
+                    assert_eq!(config.command_override.as_deref(), Some("hermes"));
+                    assert_eq!(
+                        config.command_args_override.as_deref(),
+                        Some(&["setup".to_string(), "--portal".to_string()][..])
+                    );
+                    assert_eq!(
+                        config.env_vars.get("HERMES_HOME").map(String::as_str),
+                        Some(source_home.path().to_str().expect("utf8 path"))
+                    );
+                }
+                other => panic!("expected shell launch request, got {other:?}"),
+            },
+            other => panic!("expected launch completion, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn run_opencode_setup_action_deserializes_from_frontend_wire_tag() {
         // SPEC-3151 FR-010: the frontend dispatches `{"kind":"run_opencode_setup"}`.
         // Default snake_case would produce `run_open_code_setup`, so the variant
@@ -805,6 +852,13 @@ mod tests {
         let action: LaunchWizardAction =
             serde_json::from_str(r#"{"kind":"run_opencode_setup"}"#).expect("deserialize action");
         assert_eq!(action, LaunchWizardAction::RunOpenCodeSetup);
+    }
+
+    #[test]
+    fn run_hermes_setup_action_deserializes_from_frontend_wire_tag() {
+        let action: LaunchWizardAction =
+            serde_json::from_str(r#"{"kind":"run_hermes_setup"}"#).expect("deserialize action");
+        assert_eq!(action, LaunchWizardAction::RunHermesSetup);
     }
 
     #[test]

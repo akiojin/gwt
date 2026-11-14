@@ -107,6 +107,7 @@ impl AppRuntime {
             gwt::LaunchWizardAction::SetHermesOption { .. } => "set_hermes_option",
             gwt::LaunchWizardAction::SetHermesSafeMode { .. } => "set_hermes_safe_mode",
             gwt::LaunchWizardAction::RunOpenCodeSetup => "run_opencode_setup",
+            gwt::LaunchWizardAction::RunHermesSetup => "run_hermes_setup",
             gwt::LaunchWizardAction::Submit => "submit",
             gwt::LaunchWizardAction::GotoStep { .. } => "goto_step",
         }
