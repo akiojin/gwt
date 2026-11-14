@@ -17,6 +17,7 @@ use super::{
 use gwt_core::repo_hash::ProjectKey;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 const MAX_REGISTRATIONS: usize = 64;
 /// One Host cannot hold the whole gate. Matches the per-Host pending invite
@@ -62,9 +63,10 @@ impl RegistrationHandle {
     }
 }
 
+/// The retained bearer is wiped whenever a registration is retired or dropped.
 struct Registration {
     identity: CredentialIdentity,
-    secret: [u8; 32],
+    secret: Zeroizing<[u8; 32]>,
     scope: InviteScope,
     credential_expires_at: u64,
     deadline: Instant,
@@ -131,9 +133,11 @@ impl CoordinatorSessions {
         let deadline = self.deadline(expiry, now, wall)?;
         self.registrations.push(Registration {
             identity: *identity,
-            secret: secret
-                .try_into()
-                .map_err(|_| RegistrationError::Credential(CredentialError::Unauthorized))?,
+            secret: Zeroizing::new(
+                secret
+                    .try_into()
+                    .map_err(|_| RegistrationError::Credential(CredentialError::Unauthorized))?,
+            ),
             scope,
             credential_expires_at: expiry,
             deadline,
@@ -259,7 +263,7 @@ impl CoordinatorSessions {
                 .verify(
                     &registration.identity,
                     registration.scope.project(),
-                    &registration.secret,
+                    &*registration.secret,
                     wall,
                 )
                 .map_err(StoreError::from)
@@ -851,5 +855,14 @@ mod tests {
         sessions
             .register_invite(&recovered, &[12; 32], 300, later, 130)
             .unwrap();
+    }
+
+    #[test]
+    fn retained_bearers_are_zeroized_when_a_registration_is_dropped() {
+        fn zeroizes_on_drop<T: zeroize::ZeroizeOnDrop>(_: &T) {}
+        let (_directory, mut sessions, credential) = fixture(200);
+        let now = sessions.last_instant;
+        register(&mut sessions, &credential, now, 100);
+        zeroizes_on_drop(&sessions.registrations[0].secret);
     }
 }
