@@ -1120,6 +1120,52 @@ struct FinalizedAgentCapabilityLaunch<'a> {
     permission_decision: Option<&'a gwt_agent::PermissionModeDecision>,
 }
 
+/// Exercise the production linked-owner installer from restart regression tests.
+#[cfg(test)]
+pub(super) fn install_linked_owner_launch_for_restart_test(
+    issuer: &AgentCapabilityIssuer,
+    sessions_dir: &Path,
+    session: &mut gwt_agent::Session,
+    worktree: &Path,
+    owner: gwt::cli::execution_state::ExecutionOwnerKey,
+) -> (HashMap<String, String>, Option<PendingFreshExecutionLaunch>) {
+    let mut env = HashMap::new();
+    FinalizedAgentCapabilityLaunch {
+        issuer: Some(issuer),
+        sessions_dir,
+        session,
+        project_root: worktree,
+        worktree,
+        producing_owner: Some(owner),
+        prepared_continuation: None,
+        rebound_continuation: None,
+        execution_entrypoint: "$gwt-execute",
+        runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+        container_runtime: None,
+        permission_decision: None,
+    }
+    .install(&mut env)
+    .expect("install production linked-owner launch authority");
+    let pending = env
+        .get(gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV)
+        .map(|nonce| {
+            pending_fresh_execution_launch_from_session(
+                sessions_dir,
+                &session.id,
+                worktree,
+                &worktree.display().to_string(),
+                Some(owner.number),
+                None,
+                None,
+                None,
+                nonce,
+                &session.agent_id,
+            )
+            .expect("reconstruct production pending fresh launch")
+        });
+    (env, pending)
+}
+
 impl FinalizedAgentCapabilityLaunch<'_> {
     #[cfg(test)]
     fn install(

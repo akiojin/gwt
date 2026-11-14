@@ -142,7 +142,12 @@ pub(crate) struct FreshExecutionFinalization {
 enum FreshExecutionFinalizationOutcome {
     Committed,
     RolledBack(String),
-    Retained,
+    Retained(String),
+}
+
+enum FreshExecutionPreparation {
+    Committed,
+    Retained(String),
 }
 
 pub(crate) type FreshExecutionReadinessResult =
@@ -223,7 +228,7 @@ fn prepare_fresh_execution_launch_session_start(
     sessions_dir: &Path,
     live_session_ids: &HashSet<String>,
     window_is_current: impl Fn() -> bool,
-) -> Result<bool, String> {
+) -> Result<FreshExecutionPreparation, String> {
     if !window_is_current() {
         return Err("fresh launch window changed before activation".to_string());
     }
@@ -246,7 +251,9 @@ fn prepare_fresh_execution_launch_session_start(
     let Some(issuer) = issuer else {
         return Err("the Host capability issuer is unavailable".to_string());
     };
-    if !issuer.prepared_token_is_current(token, &pending.binding) {
+    if !issuer.prepared_token_is_current(token, &pending.binding)
+        && !issuer.active_token_is_current(token, &pending.binding)
+    {
         return Err("the Prepared Host capability is no longer current".to_string());
     }
     let probe = gwt::probe_authenticated_prepared_execution_binding(
@@ -260,19 +267,12 @@ fn prepare_fresh_execution_launch_session_start(
             nonce: uuid::Uuid::new_v4().to_string(),
         },
     );
-    if probe.as_ref().is_err()
-        || probe
-            .as_ref()
-            .is_ok_and(|receipt| receipt.execution_binding != pending.binding.identity)
-    {
+    let probe = probe.map_err(|error| {
+        format!("the Host could not prove the exact Prepared execution binding: {error}")
+    })?;
+    if probe.execution_binding != pending.binding.identity {
         return Err("the Host could not prove the exact Prepared execution binding".to_string());
     }
-    if issuer.promote_prepared(token, &pending.binding).is_err()
-        || !issuer.active_token_is_current(token, &pending.binding)
-    {
-        return Err("the Prepared Host capability could not be promoted".to_string());
-    }
-
     invoke_fresh_execution_pre_work_commit_hook();
     let already_activated = pending_fresh_execution_activation_status(pending) == Some(true);
     let transaction_committed = if already_activated {
@@ -327,7 +327,8 @@ fn prepare_fresh_execution_launch_session_start(
                         },
                         || {
                             if !window_is_current()
-                                || !issuer.active_token_is_current(token, &pending.binding)
+                                || !(issuer.prepared_token_is_current(token, &pending.binding)
+                                    || issuer.active_token_is_current(token, &pending.binding))
                             {
                                 return Err(gwt_core::error::GwtError::Io(std::io::Error::other(
                                     "fresh launch window or capability changed before activation",
@@ -355,17 +356,34 @@ fn prepare_fresh_execution_launch_session_start(
             .map(|result| result.is_some())
     };
     if !matches!(transaction_committed, Ok(true)) {
+        let detail = match transaction_committed {
+            Err(error) => {
+                let retryable = error.kind() == std::io::ErrorKind::WouldBlock;
+                let detail = format!("fresh generation activation did not commit: {error}");
+                if retryable {
+                    return Ok(FreshExecutionPreparation::Retained(detail));
+                }
+                detail
+            }
+            _ => "fresh generation activation no longer matches the exact Session".to_string(),
+        };
         if pending_fresh_execution_activation_status(pending) != Some(true) {
-            return Err("the fresh generation activation transaction was rejected".to_string());
+            return Err(detail);
         }
         // A response-loss retry owns any partial generation+Work repair.
         // It must reacquire the exact active Session lease and must never
         // publish Work from this unclassified error path.
-        return Ok(false);
+        return Ok(FreshExecutionPreparation::Retained(detail));
     }
 
-    if !issuer.active_token_is_current(token, &pending.binding) {
-        return Ok(false);
+    // Publishing Active authority before the durable transaction leaves a
+    // Prepared generation with a capability that can no longer retry readiness.
+    if issuer.promote_prepared(token, &pending.binding).is_err()
+        || !issuer.active_token_is_current(token, &pending.binding)
+    {
+        return Ok(FreshExecutionPreparation::Retained(
+            "the committed fresh generation capability could not be promoted".to_string(),
+        ));
     }
     let active_probe = gwt::probe_authenticated_execution_binding(
         &pending.project_root,
@@ -390,10 +408,12 @@ fn prepare_fresh_execution_launch_session_start(
         .flatten()
             == Some(pending.predecessor_binding.clone())
     {
-        return Ok(false);
+        return Ok(FreshExecutionPreparation::Retained(
+            "the committed fresh generation did not pass the exact authority probe".to_string(),
+        ));
     }
 
-    Ok(true)
+    Ok(FreshExecutionPreparation::Committed)
 }
 
 fn cleanup_fresh_execution_launch_candidate(
@@ -7627,7 +7647,7 @@ impl AppRuntime {
                     .get(&window).copied() == window_generation,
             );
             let outcome = match result {
-                Ok(true)
+                Ok(FreshExecutionPreparation::Committed)
                     if prepare_fresh_execution_launch_publication(
                         &pending,
                         active_session.as_ref().expect("committed exact Session"),
@@ -7666,10 +7686,15 @@ impl AppRuntime {
                         }
                         FreshExecutionFinalizationOutcome::RolledBack(detail)
                     } else {
-                        FreshExecutionFinalizationOutcome::Retained
+                        FreshExecutionFinalizationOutcome::Retained(detail)
                     }
                 }
-                _ => FreshExecutionFinalizationOutcome::Retained,
+                Ok(FreshExecutionPreparation::Retained(detail)) =>
+                    FreshExecutionFinalizationOutcome::Retained(detail),
+                Ok(FreshExecutionPreparation::Committed) =>
+                    FreshExecutionFinalizationOutcome::Retained(
+                        "fresh generation committed but launch publication remains pending".to_string(),
+                    ),
             };
             proxy.send(crate::UserEvent::FreshExecutionFinalized(Box::new(
                 FreshExecutionFinalization {
@@ -7708,12 +7733,23 @@ impl AppRuntime {
             .remove(window_id)
             .unwrap();
         let pending = completion.pending.clone();
+        let failure_detail = match &completion.outcome {
+            FreshExecutionFinalizationOutcome::Retained(detail)
+            | FreshExecutionFinalizationOutcome::RolledBack(detail) => Some(detail.clone()),
+            FreshExecutionFinalizationOutcome::Committed => None,
+        };
         let (committed, events) = self.apply_fresh_execution_finalized(completion);
         for (operation_id, reply) in inflight.readiness_replies {
             let result = if committed {
                 fresh_execution_readiness_receipt(&pending, operation_id).map(Some)
             } else {
-                Err(fresh_execution_readiness_conflict())
+                let mut error = fresh_execution_readiness_conflict();
+                if let Some(detail) = failure_detail.as_deref() {
+                    error.message.push_str(": ");
+                    error.message.push_str(detail);
+                    error.diagnostic_reason = Some("fresh_launch_activation_deferred".to_string());
+                }
+                Err(error)
             };
             let _ = reply.send(result);
         }
@@ -7796,7 +7832,16 @@ impl AppRuntime {
                 self.pending_fresh_execution_launches.remove(window_id);
                 (false, events)
             }
-            FreshExecutionFinalizationOutcome::Retained => (false, Vec::new()),
+            FreshExecutionFinalizationOutcome::Retained(detail) => {
+                tracing::warn!(
+                    session_id = %pending.binding.session_id,
+                    operation_id = %pending.operation_id,
+                    %detail,
+                    "fresh SessionStart retained exact candidate for readiness retry"
+                );
+                self.record_readiness_handoff(window_id, &detail);
+                (false, Vec::new())
+            }
         }
     }
 

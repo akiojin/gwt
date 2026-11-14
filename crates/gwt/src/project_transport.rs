@@ -1789,6 +1789,15 @@ fn workspace_update_error_response(
     status: StatusCode,
     error: AgentWorkspaceUpdateError,
 ) -> Response {
+    if status.is_server_error() {
+        tracing::warn!(
+            status = status.as_u16(),
+            code = ?error.code,
+            diagnostic_reason = ?error.diagnostic_reason,
+            message = %gwt_core::error_ledger::sanitize_error_message(&error.message),
+            "Host agent bridge failed before producing a successful receipt"
+        );
+    }
     let reason = match error.code {
         AgentWorkspaceUpdateErrorCode::InvalidRequest => "invalid_request",
         AgentWorkspaceUpdateErrorCode::RelaunchRequired => "relaunch_required",

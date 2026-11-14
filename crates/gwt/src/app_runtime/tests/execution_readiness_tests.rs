@@ -1,6 +1,58 @@
 use super::*;
 
 #[test]
+fn fresh_execution_lease_contention_keeps_readiness_retryable() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let mut fixture = pending_fresh_execution_fixture(temp.path(), "fresh-lease-retry");
+    let nonce = fixture.runtime.pending_fresh_execution_launches[&fixture.window_id]
+        .readiness_nonce
+        .clone();
+    let (reply, response) = std::sync::mpsc::channel();
+    fixture.runtime.resend_fresh_execution_ready(
+        &fixture.issuer.grant_for_test(&fixture.token).unwrap(),
+        &gwt::AgentExecutionContinuationRequest {
+            schema_version: 1,
+            operation_id: "contended-readiness".to_string(),
+            readiness_nonce: Some(nonce.clone()),
+        },
+        reply,
+    );
+    gwt::cli::trusted_store::with_write_lease(&fixture.repo, || {
+        commit_pending_fresh_execution(&mut fixture.runtime);
+        Ok(())
+    })
+    .unwrap();
+    let error = response.try_recv().unwrap().unwrap_err();
+    assert_eq!(error.diagnostic_reason.as_deref(), Some("fresh_launch_activation_deferred"));
+    assert!(error.message.contains("owner write lease is held"), "{error}");
+    assert!(gwt_core::error_ledger::list_since(None).unwrap().iter().any(|record| {
+        record.target.session_id.as_deref() == Some(&fixture.candidate_session_id)
+            && record.message.contains("owner write lease is held")
+    }));
+    assert!(
+        fixture
+            .issuer
+            .prepared_token_is_current(&fixture.token, &fixture.binding),
+        "a competing writer must not promote a candidate that could not activate"
+    );
+    fixture
+        .runtime
+        .finalize_fresh_execution_launch_session_start(&fixture.window_id, Some(&nonce));
+    assert!(!commit_pending_fresh_execution(&mut fixture.runtime).is_empty());
+    assert!(fixture
+        .issuer
+        .active_token_is_current(&fixture.token, &fixture.binding));
+    assert_eq!(
+        gwt::cli::execution_state::current_execution_binding(&fixture.repo, fixture.owner).unwrap(),
+        Some(fixture.binding.identity)
+    );
+}
+
+#[test]
 fn fresh_execution_session_start_queues_io_and_deduplicates_readiness() {
     let _env_guard = env_test_lock()
         .lock()

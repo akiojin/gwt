@@ -9047,6 +9047,8 @@ mod execution_genesis_tests;
 #[cfg(test)]
 mod execution_readiness_tests;
 #[cfg(test)]
+mod execution_restart_tests;
+#[cfg(test)]
 mod execution_recovery_tests;
 #[cfg(test)]
 mod frontend_launch_tests;
