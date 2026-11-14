@@ -943,6 +943,104 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn host_registration_registers_invites_and_reports_recoverable_rejections() {
+        use futures_util::{SinkExt as _, StreamExt as _};
+        use tokio_tungstenite::tungstenite::Message;
+        let mut fixture = Fixture::new();
+        let wall = real_wall();
+        let valid = fixture.issue_token(wall);
+        let server = fixture.start_at(wall).await;
+        let addr = server.local_addr().unwrap();
+        let sessions = Arc::clone(&server.sessions);
+        let (shutdown, signal) = oneshot::channel();
+        let task = tokio::spawn(server.serve_until(async move {
+            let _ = signal.await;
+        }));
+        let auth = [("authorization", format!("Bearer {valid}"))];
+        let invite = |generation: Uuid, nonce: Uuid, byte: u8, ttl: u64| {
+            json!({"type":"register_invite","generation":generation,"nonce":nonce,
+                "secret":format!("{byte:02x}").repeat(32),"ttl_secs":ttl})
+            .to_string()
+        };
+
+        let mut socket = open_host(&fixture, addr, &auth).await.unwrap();
+        let registered = next_json(&mut socket).await;
+        let generation: Uuid = serde_json::from_value(registered["generation"].clone()).unwrap();
+        let mut exchange = async |text: String| {
+            bounded(socket.send(Message::text(text))).await.unwrap();
+            next_json(&mut socket).await
+        };
+        let nonce = Uuid::new_v4();
+        assert_eq!(
+            exchange(invite(generation, nonce, 1, 300)).await,
+            json!({"type":"invite_registered","generation":generation,"nonce":nonce})
+        );
+        // Recoverable rejections answer the same nonce and keep the registration.
+        for (byte, ttl, reason) in [
+            (1, 300, "already_registered"),
+            (2, 0, "invalid_ttl"),
+            (2, 301, "invalid_ttl"),
+        ] {
+            let nonce = Uuid::new_v4();
+            assert_eq!(
+                exchange(invite(generation, nonce, byte, ttl)).await,
+                json!({"type":"invite_rejected","generation":generation,"nonce":nonce,
+                    "reason":reason})
+            );
+        }
+        for byte in 2..=8 {
+            assert_eq!(
+                exchange(invite(generation, Uuid::new_v4(), byte, 60)).await["type"],
+                "invite_registered"
+            );
+        }
+        assert_eq!(
+            exchange(invite(generation, Uuid::new_v4(), 9, 60)).await["reason"],
+            "host_capacity"
+        );
+        let nonce = Uuid::new_v4();
+        let renewed =
+            exchange(json!({"type":"renew","generation":generation,"nonce":nonce}).to_string())
+                .await;
+        assert_eq!(
+            (&renewed["type"], &renewed["nonce"]),
+            (&json!("renewed"), &json!(nonce))
+        );
+        assert_eq!(live(&sessions), 1);
+        bounded(socket.close(None)).await.unwrap();
+        wait_until_closed(&sessions).await;
+
+        // A foreign generation or an unborrowable (escaped) secret closes it.
+        let foreign = |_: Uuid| invite(Uuid::new_v4(), Uuid::new_v4(), 0x10, 60);
+        let escaped = |generation: Uuid| {
+            invite(generation, Uuid::new_v4(), 0xab, 60).replacen(
+                "\"secret\":\"ab",
+                "\"secret\":\"\\u0061b",
+                1,
+            )
+        };
+        let cases: [&dyn Fn(Uuid) -> String; 2] = [&foreign, &escaped];
+        for case in cases {
+            let mut socket = open_host(&fixture, addr, &auth).await.unwrap();
+            let registered = next_json(&mut socket).await;
+            let generation: Uuid =
+                serde_json::from_value(registered["generation"].clone()).unwrap();
+            assert_eq!(live(&sessions), 1);
+            bounded(socket.send(Message::text(case(generation))))
+                .await
+                .unwrap();
+            assert!(matches!(
+                bounded(socket.next()).await,
+                None | Some(Err(_)) | Some(Ok(Message::Close(_)))
+            ));
+            wait_until_closed(&sessions).await;
+        }
+
+        shutdown.send(()).unwrap();
+        bounded(task).await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
     async fn shutdown_closes_open_host_registrations_and_releases_the_registry() {
         use futures_util::StreamExt as _;
         let mut fixture = Fixture::new();
