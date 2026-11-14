@@ -993,6 +993,149 @@ test.describe("Issue queue real backend launch", () => {
     expect(errors, "zero console/page errors including owned fixture cleanup").toEqual([]);
   });
 
+  test("T94417 ordinary exit preserves a busy fixed assignment until its member is free", async ({ page }, info) => {
+    const fixture = await startIssueQueueLaunchFixture(info, {
+      additionalIssueNumbers: [44, 45], autonomousMode: true, terminalConvergence: true,
+      monitorPreferences: { enabled: false, max_active_agents: 1 },
+    });
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    const preferences = async () => JSON.parse((await fixture.monitorPreferencesBytes()).toString());
+    const record = (id: string) => readFile(join(fixture.home, ".gwt", "sessions", `${id}.toml`), "utf8");
+    const field = (text: string, key: string) => text.match(new RegExp(`^${key}\\s*=\\s*"([^"]*)"`, "m"))?.[1];
+    const activity = () => page.evaluate(() =>
+      ((window as any).__gwtPlaywrightMessages ?? [])
+        .map(({ payload }: any) => payload.kind === "local_agent_activity" ? payload.activity : payload.projection?.local_agent_activity)
+        .filter((snapshot: any) => snapshot?.project_key === location.pathname.split("/")[2])
+        .at(-1));
+    const request = async (event: unknown, kind: string) => {
+      const after = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence || 0);
+      await sendLiveGwtEvent(page, event);
+      return (await page.waitForFunction(({ after, kind }) =>
+        (window as any).__gwtPlaywrightMessages?.findLast((entry: any) =>
+          entry.sequence > after && [kind, `${kind}_error`].includes(entry.payload.kind))?.payload,
+      { after, kind }, { timeout: 30_000 })).jsonValue();
+    };
+    const exited = (pid: number) => { try { process.kill(pid, 0); return false; } catch { return true; } };
+    const reservation = async () => (await preferences()).agent_issue_schedule.reservations
+      .find((entry: any) => entry.issue_number === 45);
+    try {
+      await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+      await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      const initial = (await request({ kind: "agent_roster", action: { kind: "read" } }, "agent_roster")).roster;
+      const roster = (await request({ kind: "agent_roster", action: { kind: "add" },
+        expected_revision: initial.revision }, "agent_roster")).roster;
+      expect(roster.error).toBeFalsy();
+      expect(roster.members.filter((member: any) => member.enabled)).toHaveLength(2);
+      await sendLiveGwtEvent(page, { kind: "set_issue_monitor_max_active_agents", max_active_agents: 2 });
+      await expect.poll(async () => JSON.parse(await readFile(
+        join(fixture.home, ".gwt/machine-state/agent-settings.json"), "utf8")))
+        .toMatchObject({ mode: "manual", manual_limit: 2 });
+      const baseProfile = (await preferences()).launch_profiles[0];
+      const profiles = roster.members.filter((member: any) => member.enabled).map((member: any) => {
+        expect(member.agent_id).toBe("codex");
+        return { ...baseProfile, agent_member_id: member.agent_member_id, agent_id: member.agent_id };
+      });
+      const profileReply = await request({ kind: "issue_monitor_profiles_set", request_id: 94417, profiles },
+        "issue_monitor_profiles");
+      expect(profileReply.profiles).toEqual(profiles);
+      await expect.poll(async () => (await preferences()).launch_profiles).toEqual(profiles);
+      await page.locator('[data-surface="issues"]').click();
+      const issues = page.locator('.workspace-window[data-preset="issue"] .issue-bridge-root');
+      await sendLiveGwtEvent(page, { kind: "issue_monitor_queue_push", issue_numbers: [43, 44] });
+      await page.getByRole("group", { name: "Issues controls", exact: true })
+        .getByRole("button", { name: "Start", exact: true }).click();
+      await expect.poll(async () => (await fixture.launchIssues()).sort(), { timeout: 90_000 }).toEqual([43, 44]);
+      const launches = await fixture.launches();
+      for (const launch of launches) {
+        expect(launch.gwt_session_id).toBeTruthy();
+        await expect.poll(async () => field(await record(launch.gwt_session_id!), "agent_session_id"),
+          { timeout: 45_000 }).toBe(launch.provider_session_id);
+        expect(() => process.kill(launch.pid, 0)).not.toThrow();
+      }
+      await expect.poll(async () => (await activity())?.agents?.length).toBe(2);
+      await expect.poll(async () => (await preferences()).agent_roster.members
+        .filter((member: any) => launches.some(launch => launch.gwt_session_id === member.assignment?.session_id)).length).toBe(2);
+      await sendLiveGwtEvent(page, { kind: "issue_monitor_queue_push", issue_numbers: [45] });
+      await expect(issues.locator('[data-queue-column="queued"] [data-issue-number="45"]')).toBeVisible();
+      const reply = fixture.scheduleOperation("issue.monitor.schedule.read");
+      expect(reply.ok, JSON.stringify(reply)).toBe(true);
+      const schedule = JSON.parse(reply.output);
+      const automatic = schedule.members.find((member: any) => member.issues.some((issue: any) => issue.issue_number === 45));
+      expect(automatic).toBeTruthy();
+      const selected = (await preferences()).agent_roster.members.find((member: any) =>
+        member.enabled && member.assignment && member.agent_member_id !== automatic.agent_member_id);
+      expect(selected).toBeTruthy();
+      const selectedLaunch = launches.find(launch => launch.gwt_session_id === selected.assignment.session_id)!;
+      const otherLaunch = launches.find(launch => launch.gwt_session_id !== selected.assignment.session_id)!;
+      await page.locator('.op-rail__surface[data-surface="agents"]').click();
+      const agents = page.getByRole("region", { name: "Main pane", exact: true })
+        .locator(".agents-surface:not(.agents-surface--preview)");
+      await agents.locator(`.roster-row[data-member-id="${automatic.agent_member_id}"]`).click();
+      const plan = agents.locator('.roster-plan[data-issue-number="45"]');
+      await plan.getByRole("combobox", { name: "Assign issue #45 to member", exact: true }).selectOption(selected.agent_member_id);
+      await plan.getByRole("button", { name: "Reassign issue #45", exact: true }).click();
+      await expect.poll(reservation).toMatchObject({ agent_member_id: selected.agent_member_id, reason: "assigned_by_you" });
+      const fixed = await reservation();
+      await agents.locator(`.roster-row[data-member-id="${selected.agent_member_id}"]`).click();
+      await expect(agents.locator('.roster-plan[data-issue-number="45"] .roster-plan-reason')).toHaveText("Assigned by you");
+      await page.locator('[data-surface="issues"]').click();
+
+      const otherWindow = (await activity()).agents.find((agent: any) => agent.session_id === otherLaunch.gwt_session_id).window_id;
+      await sendLiveGwtEvent(page, { kind: "terminal_input", id: otherWindow, data: "GWT_FIXTURE_EXIT\r" });
+      // After exit, observe only real output, census and durable state; never drive a scan by reading it.
+      await expect.poll(() => exited(otherLaunch.pid), { timeout: 60_000 }).toBe(true);
+      await expect.poll(async () => (await activity())?.agents?.map((agent: any) => agent.session_id))
+        .toEqual([selectedLaunch.gwt_session_id]);
+      await expect.poll(async () => (await preferences()).agent_roster.members
+        .find((member: any) => member.agent_member_id === automatic.agent_member_id)?.assignment).toBeNull();
+      const previousScan = (await preferences()).last_scan_at;
+      await expect.poll(async () => {
+        const prefs = await preferences();
+        return !!prefs.last_scan_at && prefs.last_scan_at !== previousScan && !prefs.last_scan_error;
+      }, { timeout: 90_000, message: "a successful scan observes the genuinely free other slot" }).toBe(true);
+      expect((await preferences()).enabled).toBe(true);
+      expect((await preferences()).autonomous_mode).toBe(true);
+      expect(await reservation()).toEqual(fixed);
+      expect((await preferences()).agent_roster.members.find((member: any) =>
+        member.agent_member_id === selected.agent_member_id).assignment).toEqual(selected.assignment);
+      expect(() => process.kill(selectedLaunch.pid, 0)).not.toThrow();
+      const queued = issues.locator('[data-queue-column="queued"] [data-issue-number="45"]');
+      await expect(queued).toBeVisible();
+      expect(await fixture.launchIssues()).toHaveLength(2);
+      const fixedClaims = fixture.requests.filter(request => request.method === "POST"
+        && request.url === "/repos/fixture/queue/issues/45/comments");
+      expect(fixedClaims, "the free other member cannot claim the user-assigned Issue").toEqual([]);
+      await info.attach(`fixed-assignment-wait-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
+
+      const selectedWindow = (await activity()).agents.find((agent: any) => agent.session_id === selectedLaunch.gwt_session_id).window_id;
+      await sendLiveGwtEvent(page, { kind: "terminal_input", id: selectedWindow, data: "GWT_FIXTURE_EXIT\r" });
+      await expect.poll(() => exited(selectedLaunch.pid), { timeout: 60_000 }).toBe(true);
+      await expect.poll(async () => (await fixture.launchIssues()).sort(), { timeout: 90_000 }).toEqual([43, 44, 45]);
+      const successor = (await fixture.launches())[2];
+      expect(launches.map(launch => launch.pid)).not.toContain(successor.pid);
+      expect(launches.map(launch => launch.gwt_session_id)).not.toContain(successor.gwt_session_id);
+      await expect.poll(async () => field(await record(successor.gwt_session_id!), "agent_session_id"),
+        { timeout: 45_000 }).toBe(successor.provider_session_id);
+      expect(field(await record(successor.gwt_session_id!), "agent_member_id")).toBe(selected.agent_member_id);
+      expect(() => process.kill(successor.pid, 0)).not.toThrow();
+      await expect.poll(async () => (await activity())?.agents?.map((agent: any) => agent.session_id))
+        .toEqual([successor.gwt_session_id]);
+      await expect(issues.locator('[data-queue-column="active"] [data-issue-number="45"]')).toBeVisible();
+      await expect(issues.locator('[data-metric="active"]')).toHaveText("Active 1 · 1 issue · PM 0");
+      await info.attach("fixed-assignment-exit-admission", { body: JSON.stringify({
+        fixed, selected, otherLaunch, selectedLaunch, successor, fixedClaims,
+      }, null, 2), contentType: "application/json" });
+      await info.attach(`fixed-assignment-admitted-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
+    } finally {
+      try { await page.close(); } finally { await fixture.stop(); }
+    }
+    expect(errors, "zero console/page errors including owned fixture cleanup").toEqual([]);
+  });
+
   test("Backlog drag launches once and Blocked generation stays stopped after app restart", async ({ page }, info) => {
     const fixture = await startIssueQueueLaunchFixture(info);
     const errors: string[] = [];
