@@ -22304,6 +22304,8 @@ exit 0
             },
         )
         .expect("seed prefs");
+        crate::agent_registry::ensure_active_for_owner(&scope.project_root)
+            .expect("initialize registry before exercising normal daemon shutdown");
         let shutdown = Arc::new(DaemonShutdown::new());
         let socket_path = temp.path().join("shutdown-daemon.sock");
         let endpoint_path = temp.path().join("shutdown-endpoint.json");
