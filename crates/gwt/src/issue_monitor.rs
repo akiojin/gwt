@@ -6774,14 +6774,18 @@ impl IssueMonitorState {
             return IssueMonitorRequeueOutcome::LaunchLive;
         }
 
+        let attempts_before = self.attempt_count(issue_number);
         self.failure_release_version += 1;
         let release = IssueMonitorReleasedFailure {
             issue_number,
             release_version: self.failure_release_version,
             released_at: now.to_string(),
             reason: reason.to_string(),
+            attempts_before,
+            attempts_after: 0,
         };
-        self.released_failures.insert(issue_number, release);
+        self.released_failures.insert(issue_number, release.clone());
+        self.merge_requeue_audit(std::iter::once(release));
         self.apply_failure_release(issue_number);
         self.push_autonomous_notice(
             "info",
@@ -6790,6 +6794,8 @@ impl IssueMonitorState {
         );
         IssueMonitorRequeueOutcome::Requeued {
             stale_window_id: None,
+            attempts_before,
+            attempts_after: self.attempt_count(issue_number),
         }
     }
 
