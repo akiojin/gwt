@@ -377,6 +377,12 @@ function coalesceByKind(
   if (!queue || queue.length <= 1) {
     return queue ? queue.slice() : [];
   }
+  // A snapshot belongs to the workspace identity that preceded it. Keep this
+  // batch ordered, including output on either side of the snapshot, so a new
+  // session's screen cannot be applied to a runtime that is about to retire.
+  if (queue.some((entry) => kindFor(entry) === "terminal_snapshot")) {
+    return queue.slice();
+  }
   const streamedChunkLimit = normalizeStreamedChunkLimit(maxStreamedBeforeState);
   const lastIndexByKind = new Map();
   for (let i = 0; i < queue.length; i += 1) {

@@ -169,6 +169,19 @@ test("non-coalesce kinds preserve order and multiplicity", () => {
   assert.deepEqual(coalesced, queue);
 });
 
+test("terminal snapshots preserve workspace identity and following output order", () => {
+  const queue = [
+    { kind: "workspace_state", session: "old" },
+    { kind: "terminal_output", id: "agent", data: "old output" },
+    { kind: "workspace_state", session: "new" },
+    { kind: "active_work_projection", session: "new" },
+    { kind: "terminal_snapshot", id: "agent", data: "new snapshot" },
+    { kind: "terminal_output", id: "agent", data: "new output" },
+  ];
+
+  assert.deepEqual(coalesceEvents(queue), queue);
+});
+
 // These fence tests exercise caller-supplied scoped outcomes independently
 // of the production census snapshot's default ordered-state policy.
 const SAMPLE_ORDERED_STATE_KINDS = new Set([
