@@ -1633,26 +1633,26 @@ fn assert_fresh_monitor_startup_failures_stop(failures: &[&str]) {
         }
         let identity = fixture.owner.client().identity().unwrap().clone();
         let census_key = format!("{}:{}", identity.pid, identity.host_started_at);
-        fixture.executor.block_on(async {
+        let before = fixture.executor.block_on(async {
             // test-hygiene: allow-wall-clock-deadline Bounds the actual independent empty-host census publication before a raw prefs no-op assertion, not a guessed delay.
             tokio::time::timeout(Duration::from_secs(30), async {
                 loop {
                     fixture.owner.wait_monitor_idle().await.unwrap();
-                    let prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+                    let bytes = fs::read(&prefs_path).unwrap();
+                    let prefs: gwt::IssueMonitorPrefs = serde_json::from_slice(&bytes).unwrap();
                     if prefs
                         .monitor_runtime_counts
                         .get(&census_key)
                         .is_some_and(|census| census.counts.is_empty() && census.windows.is_empty())
                     {
-                        break;
+                        break bytes;
                     }
                     tokio::task::yield_now().await;
                 }
             })
             .await
-            .expect("the exact empty host census must be durable before the stale ACK baseline");
+            .expect("the exact empty host census must be durable before the stale ACK baseline")
         });
-        let before = fs::read(&prefs_path).unwrap();
         assert!(
             fixture
                 .executor
