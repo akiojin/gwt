@@ -1,0 +1,5 @@
+# Auto-generated docker-compose override for gwt bundle mounting
+services:
+  gwt:
+    volumes:
+      - "/var/folders/p8/3j934ld94g5drz6_x1zy39m80000gn/T/gwt-fresh-home.XXXXXX.Gm8XBSgtw1/.gwt/bin/gwtd-linux:/usr/local/bin/gwtd:ro"
