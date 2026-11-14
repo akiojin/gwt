@@ -17,10 +17,10 @@ dedicated execution path.
 ## Usage
 
 ```text
-/gwt:gwt-verify [--mode quick|full|pre-pr] [--headed]
+/gwt:gwt-verify [--mode full|pre-pr] [--headed]
 ```
 
-If `--mode` is omitted, defaults to `quick`.
+If `--mode` is omitted, defaults to `full`.
 
 ## Steps
 
