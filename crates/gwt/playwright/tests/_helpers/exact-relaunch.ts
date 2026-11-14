@@ -118,6 +118,7 @@ export type ExactRelaunchSetup = {
   switching?: { sourceIssueNumber: number; positive: boolean };
   prepare?: (context: { home: string; bin: string; project: string; env: NodeJS.ProcessEnv }) => Promise<void>;
   monitorPreferences?: Record<string, unknown>;
+  restoreDiagnostics?: boolean;
   beforeStart?: (context: { home: string; project: string; env: NodeJS.ProcessEnv; preferences: string }) => Promise<void>;
 };
 
@@ -257,6 +258,12 @@ const actorReady = (async () => {
 })().catch(error=>{actorEvent('actor_failed',{message:error.message});throw error;});
 // Prevent an unhandled-rejection exit while stdin is waiting for the real Host instruction.
 actorReady.catch(()=>{});
+const rawMonitorProbe = async () => {
+  await actorReady;
+  actorEvent('raw_accepted',observedRuntime());
+  nativeHook('Stop');
+  actorEvent('raw_successor',observedRuntime());
+};
 const checkpointed = new Set();
 const checkpoint = async line => {
   await actorReady;
@@ -451,6 +458,7 @@ ${switchActor}
 ${terminalActor}
 console.log('GWT_FAKE_PROVIDER_READY ' + native);
 readline.createInterface({input:process.stdin}).on('line', line => {
+  ${setup.switching ? "if (line.trim() === 'GWT_RAW_MONITOR_PROBE') { rawMonitorProbe().catch(error=>actorEvent('actor_failed',{message:error.message})); return; }" : ""}
   ${setup.switching ? "if (line.includes('GWT checkpoint request ')) { checkpoint(line).catch(error=>actorEvent('actor_failed',{message:error.message})); return; }" : ""}
   if (line.trim() === 'GWT_FIXTURE_EXIT') {
     ${setup.exitNotice ? `process.stdout.write(${JSON.stringify(setup.exitNotice)}, () => process.exit(0));` : "process.exit(0);"}
@@ -577,6 +585,7 @@ readline.createInterface({input:process.stdin}).on('line', line => {
   let incarnation = 0;
   let url = "";
   type ShutdownOptions = { signalFree?: boolean; disconnectBrowser?: () => Promise<unknown> };
+  let logFinished: Promise<Error | undefined> = Promise.resolve(undefined);
   async function shutdownEvents() {
     const directory = join(state, "logs");
     const names = await readdir(directory).catch((error: NodeJS.ErrnoException) => {
@@ -622,6 +631,73 @@ readline.createInterface({input:process.stdin}).on('line', line => {
   }
   async function launches(): Promise<ExactRelaunchInvocation[]> {
     return (await readFile(argvLog, "utf8")).split("\n").filter(Boolean).map(line => JSON.parse(line));
+  }
+  async function attachRestoreState(phase: string, coldOwnerDrain: boolean) {
+    // Only identities launched by this fixture; never persist a full Session,
+    // environment, hook payload, or provider transcript in these diagnostics.
+    const sessions = [];
+    for (const id of new Set((await launches()).map(launch => launch.gwt_session_id).filter(Boolean))) {
+      const path = join(state, "sessions", `${id}.toml`);
+      try {
+        const record = await readFile(path, "utf8");
+        // Nested session_history entries can repeat agent_session_id; they
+        // must never replace the current top-level native handle.
+        const topLevel = record.split(/^\[/m)[0];
+        const fields = Object.fromEntries([...topLevel.matchAll(
+          /^(id|status|worktree_path|project_state_root|repo_hash|agent_id|agent_session_id|restore_window_on_startup|last_activity_at|updated_at|launch_origin|restore_source_session_id|linked_issue_number|consecutive_interruptions|last_hook_event|last_hook_event_at|last_completed_stop_at)\s*=\s*(.+)$/gm,
+        )].map(([, key, value]) => [key, value]));
+        sessions.push({ id, path, state: "present", fields,
+          agent_type: record.match(/^\[agent_id\]\r?\n\s*type\s*=\s*"([^"]+)"/m)?.[1] ?? null });
+      } catch (error) {
+        sessions.push({ id, path, state: (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "unreadable",
+          error_code: (error as NodeJS.ErrnoException).code ?? "unknown" });
+      }
+    }
+    let pm;
+    const path = join(preferences, "pm.json");
+    try {
+      const prefs = JSON.parse(await readFile(path, "utf8"));
+      const registration = prefs.registration;
+      pm = { path, state: "present", auto_start: prefs.settings?.auto_start,
+        registration: registration ? {
+          session_id: registration.session_id, agent_id: registration.agent_id,
+          worktree_path: registration.worktree_path, consecutive_crashes: registration.consecutive_crashes,
+          next_not_before: registration.next_not_before,
+        } : null, start_block: prefs.start_block ?? null };
+    } catch (error) {
+      pm = { path, state: (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "unreadable",
+        error_code: (error as NodeJS.ErrnoException).code ?? "invalid_json" };
+    }
+    await testInfo.attach("fixture-restore-state", { body: JSON.stringify({
+      incarnation, phase, cold_owner_drain: coldOwnerDrain, sessions, pm,
+    }), contentType: "application/json" });
+  }
+  async function attachRestoreLogs() {
+    const failures: unknown[] = [];
+    async function attach(name: string, path: string, contentType: string) {
+      try { await testInfo.attach(name, { body: await readFile(path), contentType }); }
+      catch (error) { failures.push(error); }
+    }
+    // Process exit precedes WriteStream.finish. Retain the final bytes too.
+    if (child && (child.exitCode !== null || child.signalCode !== null)) {
+      const error = await logFinished;
+      if (error) failures.push(error);
+    }
+    await attach(`fixture-gui-${incarnation}-log`, join(home, `gwt-${incarnation}.log`), "text/plain");
+    for (const [directory, prefix, pattern, contentType] of [
+      [join(state, "logs"), "owner", /^gwt\.log\./, "application/x-ndjson"],
+      [join(state, "projects", hash, "runtime", "daemon"), "daemon", /\.daemon-stderr\.log$/, "text/plain"],
+    ] as const) {
+      try {
+        for (const name of (await readdir(directory)).filter(name => pattern.test(name)).sort()) {
+          await attach(`fixture-${prefix}-${incarnation}-${name}`, join(directory, name), contentType);
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") failures.push(error);
+      }
+    }
+    if (failures.length === 1) throw failures[0];
+    if (failures.length) throw new AggregateError(failures, failures.map(String).join("; "));
   }
   function processCommand(pid: number) {
     const result = windows
@@ -720,6 +796,10 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     const guiErrors: unknown[] = [];
     const ownedGui = child;
     const ownedPid = ownedGui?.pid;
+    const captureRestore = setup.restoreDiagnostics && ownedPid;
+    if (captureRestore) {
+      try { await attachRestoreState("before-stop", !!options.signalFree); } catch (error) { guiErrors.push(error); }
+    }
     let shutdownOffset: number | undefined;
     let windowsOwner: Awaited<ReturnType<typeof captureGuiOwner>> | undefined;
     const ownerObservationSupported = process.platform === "darwin" || process.platform === "linux";
@@ -906,6 +986,10 @@ readline.createInterface({input:process.stdin}).on('line', line => {
           await healthPending;
         }
       }
+      if (captureRestore) {
+        try { await attachRestoreState("after-drain", !!options.signalFree); } catch (error) { guiErrors.push(error); }
+        try { await attachRestoreLogs(); } catch (error) { guiErrors.push(error); }
+      }
       // PTYs can create their own process groups; clean only recorded fixture
       // providers still carrying our unique argv-recorder path in their command.
       const providerPids: number[] = [];
@@ -974,6 +1058,11 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     const errors: unknown[] = [], witnesses: ColdWitness[] = [];
     const ownedGui = child;
     const ownedPid = child?.pid;
+    const captureRestore = setup.restoreDiagnostics && ownedPid;
+    const diagnosticErrors: unknown[] = [];
+    if (captureRestore) {
+      try { await attachRestoreState("before-stop", true); } catch (error) { diagnosticErrors.push(error); }
+    }
     let shutdownOffset: number | undefined;
     const providerPaths = [join(bin, "codex"), join(bin, "claude")];
     const privateChild = async (witness: ColdWitness) => {
@@ -1064,6 +1153,11 @@ readline.createInterface({input:process.stdin}).on('line', line => {
         if (!natural) throw new Error("Cold owner natural reap not observed before deadline");
       } catch (error) { errors.push(error); }
     }
+    if (captureRestore) {
+      try { await attachRestoreState("after-drain", true); } catch (error) { diagnosticErrors.push(error); }
+      try { await attachRestoreLogs(); } catch (error) { diagnosticErrors.push(error); }
+    }
+    errors.push(...diagnosticErrors);
     const providerPreFallback: unknown[] = [];
     for (const witness of witnesses) {
       try {
@@ -1129,6 +1223,10 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     const urlFile = join(home, `url-${++incarnation}.txt`);
     const logFile = join(home, `gwt-${incarnation}.log`);
     const stream = createWriteStream(logFile);
+    logFinished = new Promise(resolve => {
+      stream.once("finish", () => resolve(undefined));
+      stream.once("error", resolve);
+    });
     try {
       await startCapacityFixture();
       child = spawn(gwt, ["--no-tray", "--no-open"], {
