@@ -4149,11 +4149,12 @@ fn runtime_hook_agent_failure_enqueue_error_does_not_commit_local_fallback() {
         let host_pid = std::process::id();
         let host_started_at = gwt::process::host_process_start_time(host_pid).unwrap();
         let host_key = format!("{host_pid}:{host_started_at}");
-        owner_fixture_block_on(async {
-            // test-hygiene: allow-wall-clock-deadline Observe the exact live census before taking the fault baseline; scan idle does not join the independent reconciler.
+        let before = owner_fixture_block_on(async {
+            // test-hygiene: allow-wall-clock-deadline Observe the exact durable census before taking the fault baseline; the registry can precede its JSON mirror.
             tokio::time::timeout(Duration::from_secs(30), async {
                 loop {
-                    let prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+                    let bytes = fs::read(&prefs_path).unwrap();
+                    let prefs: gwt::IssueMonitorPrefs = serde_json::from_slice(&bytes).unwrap();
                     if prefs
                         .monitor_runtime_counts
                         .get(&host_key)
@@ -4166,15 +4167,14 @@ fn runtime_hook_agent_failure_enqueue_error_does_not_commit_local_fallback() {
                                 && census.windows.get(&pane.id) == Some(&42)
                         })
                     {
-                        break;
+                        break bytes;
                     }
                     tokio::task::yield_now().await;
                 }
             })
             .await
-            .expect("the actual live pane census must settle before the fault baseline");
+            .expect("the actual live pane census must settle before the fault baseline")
         });
-        let before = fs::read(&prefs_path).unwrap();
         let endpoint_path = gwt_core::daemon::RuntimeScope::from_project_root(
             &root,
             gwt_core::daemon::RuntimeTarget::Host,
