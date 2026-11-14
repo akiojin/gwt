@@ -1240,6 +1240,106 @@ test.describe("Issue queue real backend launch", () => {
     expect(errors, "zero console/page errors including owned fixture cleanup").toEqual([]);
   });
 
+  test("T94420 ordinary exit preserves an unfinished dependency and admits the next Issue", async ({ page }, info) => {
+    const fixture = await startIssueQueueLaunchFixture(info, {
+      additionalIssueNumbers: [44, 45], autonomousMode: true, terminalConvergence: true,
+      monitorPreferences: { max_active_agents: 1 },
+      initialBodies: { 44: "## Acceptance Criteria\n- [ ] AC-1: Record the provider handoff.\n\n## Dependencies\nBlocked-by: #43" },
+    });
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    const preferences = async () => JSON.parse((await fixture.monitorPreferencesBytes()).toString());
+    const nativeSession = async (id: string) => (await readFile(
+      join(fixture.home, ".gwt", "sessions", `${id}.toml`), "utf8"))
+      .match(/^agent_session_id\s*=\s*"([^"]*)"/m)?.[1];
+    const activity = () => page.evaluate(() =>
+      ((window as any).__gwtPlaywrightMessages ?? [])
+        .map(({ payload }: any) => payload.kind === "local_agent_activity" ? payload.activity : payload.projection?.local_agent_activity)
+        .filter((snapshot: any) => snapshot?.project_key === location.pathname.split("/")[2])
+        .at(-1));
+    const inbox = () => page.evaluate(() =>
+      ((window as any).__gwtPlaywrightMessages ?? []).findLast(({ payload }: any) =>
+        payload.kind === "issue_monitor_inbox")?.payload.items);
+    const dependent = async () => (await inbox())?.find((row: any) => row.issue.number === 44);
+    try {
+      await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+      await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
+      await page.locator('[data-surface="issues"]').click();
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      const issues = page.locator('.workspace-window[data-preset="issue"] .issue-bridge-root');
+      await sendLiveGwtEvent(page, { kind: "set_issue_monitor_max_active_agents", max_active_agents: 1 });
+      await expect.poll(async () => JSON.parse(await readFile(
+        join(fixture.home, ".gwt/machine-state/agent-settings.json"), "utf8")))
+        .toMatchObject({ mode: "manual", manual_limit: 1 });
+      await sendLiveGwtEvent(page, { kind: "issue_monitor_queue_push", issue_numbers: [43] });
+      await expect.poll(() => fixture.launchIssues(), { timeout: 90_000 }).toEqual([43]);
+      const source = (await fixture.launches())[0];
+      expect(source.gwt_session_id).toBeTruthy();
+      await expect.poll(() => nativeSession(source.gwt_session_id!), { timeout: 45_000 }).toBe(source.provider_session_id);
+      await expect.poll(async () => (await activity())?.agents?.map((agent: any) => agent.session_id))
+        .toEqual([source.gwt_session_id]);
+      expect(() => process.kill(source.pid, 0)).not.toThrow();
+      const sourceWindow = (await activity()).agents[0].window_id;
+      await sendLiveGwtEvent(page, { kind: "issue_monitor_queue_push", issue_numbers: [44, 45] });
+      await expect(issues.locator('[data-queue-column="queued"] [data-issue-number="45"]')).toBeVisible();
+      await expect.poll(dependent, { timeout: 90_000 }).toMatchObject({
+        state: "blocked_by_dependency", dependency: { blocked_by: [{ number: 43 }] },
+      });
+      expect(await fixture.launchIssues()).toEqual([43]);
+      const previousScan = (await preferences()).last_scan_at;
+      await sendLiveGwtEvent(page, { kind: "terminal_input", id: sourceWindow, data: "GWT_FIXTURE_EXIT\r" });
+      await expect.poll(() => {
+        try { process.kill(source.pid, 0); return false; } catch { return true; }
+      }, { timeout: 60_000 }).toBe(true);
+      // Observe the natural claim/launch path without a status call that could drive it.
+      await expect.poll(dependent, { timeout: 90_000 }).toMatchObject({
+        state: "blocked_by_dependency", dependency: { blocked_by: [{ number: 43 }] },
+      });
+      await expect.poll(() => fixture.launchIssues(), { timeout: 90_000 }).toEqual([43, 45]);
+      const target = (await fixture.launches())[1];
+      expect(target.pid).not.toBe(source.pid);
+      expect(target.gwt_session_id).toBeTruthy();
+      expect(target.gwt_session_id).not.toBe(source.gwt_session_id);
+      expect(target.provider_session_id).not.toBe(source.provider_session_id);
+      await expect.poll(() => nativeSession(target.gwt_session_id!), { timeout: 45_000 }).toBe(target.provider_session_id);
+      expect(() => process.kill(target.pid, 0)).not.toThrow();
+      await expect.poll(async () => (await activity())?.agents?.map((agent: any) => agent.session_id))
+        .toEqual([target.gwt_session_id]);
+      await expect.poll(async () => {
+        const prefs = await preferences();
+        return !!prefs.last_scan_at && prefs.last_scan_at !== previousScan && !prefs.last_scan_error;
+      }, { timeout: 90_000 }).toBe(true);
+      expect(await preferences()).toMatchObject({ enabled: true, autonomous_mode: true });
+      await expect.poll(async () => (await inbox())?.find((row: any) => row.issue.number === 43)?.issue.state)
+        .toBe("open");
+      const dependentRow = issues.locator('[data-queue-column="queued"] [data-issue-number="44"]');
+      await expect(dependentRow).toContainText("Blocked by dependency");
+      await expect(dependentRow).toContainText("Blocked by #43");
+      await expect(dependentRow.locator('[data-action="focus-surface-window"]')).toHaveCount(0);
+      await expect(issues.locator('[data-queue-column="active"] .knowledge-row')).toHaveCount(1);
+      await expect(issues.locator('[data-queue-column="active"] [data-issue-number="45"]')).toBeVisible();
+      await expect(issues.locator('[data-metric="active"]')).toHaveText("Active 1 · 1 issue · PM 0");
+      await expect(issues.locator('[data-issue-number="43"]')).toBeVisible();
+      expect(fixture.requests.some(request => request.method === "POST"
+        && request.url === "/repos/fixture/queue/issues/44/comments")).toBe(false);
+      expect(fixture.commentsForIssue(44), "the dependent Issue never acquires a claim").toEqual([]);
+      expect(fixture.requests.some(request => request.method === "PATCH"
+        && request.url === "/repos/fixture/queue/issues/43")).toBe(false);
+      await expect.poll(dependent).toMatchObject({
+        state: "blocked_by_dependency", dependency: { blocked_by: [{ number: 43 }] },
+      });
+      expect(await fixture.launchIssues()).toEqual([43, 45]);
+      await info.attach("unfinished-dependency-next-admission", { body: JSON.stringify({
+        source, target, dependent: await dependent(), inbox: await inbox(), requests: fixture.requests }, null, 2), contentType: "application/json" });
+      await info.attach(`unfinished-dependency-next-admission-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
+    } finally {
+      try { await page.close(); } finally { await fixture.stop(); }
+    }
+    expect(errors, "zero console/page errors including owned fixture cleanup").toEqual([]);
+  });
+
   test("T94418 operator hold survives ordinary exit until explicit requeue", async ({ page }, info) => {
     const fixture = await startIssueQueueLaunchFixture(info, {
       additionalIssueNumbers: [44], autonomousMode: true, terminalConvergence: true,
