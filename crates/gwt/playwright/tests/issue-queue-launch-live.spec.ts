@@ -375,11 +375,13 @@ test.describe("Issue queue real backend launch", () => {
     expect(errors).toEqual([]);
   });
 
-  for (const afterAck of ["unchanged", "input", "source edit"] as const) test(afterAck === "input"
+  for (const afterAck of ["unchanged", "input", "source edit", "cancel"] as const) test(afterAck === "input"
     ? "T94421 input after checkpoint ACK preserves the source without switching"
     : afterAck === "source edit"
       ? "T94422 source edit after checkpoint ACK preserves unsaved work without switching"
-      : "T20b saved checkpoint switches through the real Host and Issues", async ({ page }, info) => {
+      : afterAck === "cancel"
+        ? "T94423 cancellation after checkpoint ACK survives the delayed Normal Stop"
+        : "T20b saved checkpoint switches through the real Host and Issues", async ({ page }, info) => {
     test.skip(process.platform !== "linux" || process.env.GWT_PLAYWRIGHT_SWITCH_POSITIVE !== "1",
       "positive proof requires the isolated Linux root process namespace");
     const fixture = await startIssueQueueLaunchFixture(info, {
@@ -587,6 +589,51 @@ test.describe("Issue queue real backend launch", () => {
         await info.attach("post-ack-source-edit-preserved", { body: JSON.stringify({ acknowledged, failed, saved }),
           contentType: "application/json" });
         await info.attach(`post-ack-source-edit-preserved-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
+      } else if (afterAck === "cancel") {
+        const acknowledged = (await preferences()).agent_switch_intents[waiting.operation];
+        expect(acknowledged.stage).toBe("checkpoint_verified");
+        const checkpoint = fixture.savedSource(source.cwd);
+        expect(checkpoint.porcelain).toBe("");
+        await plans.getByRole("button", { name: "Cancel switch", exact: true }).click();
+        await expect.poll(async () => (await preferences()).agent_switch_intents[waiting.operation]?.stage)
+          .toBe("cancelled");
+        await expect(plans.locator(".roster-switch-status")).toContainText("Switch cancelled");
+        await writeFile(join(fixture.home, `normal-n2-${waiting.operation}.json`), JSON.stringify({ operation: waiting.operation }));
+        await expect.poll(async () => (await fixture.actorEvents()).some((entry: any) =>
+          entry.stage === "normal_n2_hook_returned" && entry.operation === waiting.operation
+            && entry.pid === source.pid && entry.gwt_session_id === source.gwt_session_id),
+        { timeout: Math.max(1, handoffDeadline - Date.now()) }).toBe(true);
+        const prefs = await preferences();
+        const cancelled = prefs.agent_switch_intents[waiting.operation];
+        expect(cancelled).toMatchObject({ stage: "cancelled", source: acknowledged.source,
+          checkpoint: acknowledged.checkpoint, reason: "Cancelled before stopping the current Session" });
+        expect(cancelled.runtime_exit_confirmed).not.toBe(true);
+        expect(prefs.monitor_runtime_stop_requests || []).toEqual([]);
+        expect(prefs.agent_roster.members.find((value: any) => value.agent_member_id === member.agent_member_id)
+          .assignment).toEqual(acknowledged.source.assignment);
+        expect(prefs.launched_claims[43]).toBe(acknowledged.source.claim_id);
+        expect(fixture.processAlive(source.pid)).toBe(true);
+        expect(fixture.processAlive(idle.tree_child_pid)).toBe(true);
+        expect(await fixture.launchIssues()).toEqual([43]);
+        expect(fixture.requests.filter(request => request.method === "POST"
+          && request.url === "/repos/fixture/queue/issues/44/comments")).toEqual([]);
+        expect(fixture.executionStatus(source.cwd).ecr_status).toBe("active");
+        const saved = fixture.savedSource(source.cwd);
+        expect(saved).toMatchObject({ branch: checkpoint.branch, head: checkpoint.head, remoteHead: checkpoint.remoteHead });
+        for (const line of saved.porcelain.split("\n").filter(Boolean))
+          expect(line).toMatch(/^\?\? \.gwt\/work\/events\/[0-9a-f]{2}\/[0-9a-f]{64}\.jsonl$/);
+        const work = (await fixture.workItems()).work_items.find((value: any) => value.id === acknowledged.checkpoint.work_id);
+        expect(work).toMatchObject({ owner: "Issue #43" });
+        expect(["idle", "active"]).toContain(work.status_category);
+        expect(work.events).toEqual(expect.arrayContaining([expect.objectContaining({
+          summary: `Saved source checkpoint ${waiting.operation}`, status_category: "idle",
+        })]));
+        expect(work.board_refs).toContain(acknowledged.checkpoint.board_entry_id);
+        await expect(plans.locator(".roster-switch-status")).toContainText("Switch cancelled");
+        expect((await fixture.actorEvents()).filter((entry: any) => entry.stage === "actor_failed")).toEqual([]);
+        await info.attach("post-ack-cancellation-preserved-source", { body: JSON.stringify({ acknowledged, cancelled, saved }),
+          contentType: "application/json" });
+        await info.attach(`post-ack-cancellation-preserved-source-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
       } else {
         await writeFile(join(fixture.home, `normal-n2-${waiting.operation}.json`), JSON.stringify({ operation: waiting.operation }));
         await expect.poll(async () => (await fixture.launches()).length === 2
