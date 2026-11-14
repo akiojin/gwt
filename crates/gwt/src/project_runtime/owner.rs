@@ -7126,6 +7126,16 @@ impl OwnerState {
             let (reply, _) = oneshot::channel();
             self.start_close(id.clone(), runtime, CloseCause::ExplicitClose, reply);
         }
+        if let Some(restore) = restore.as_ref().filter(|_| result.is_ok()) {
+            if let Err(error) = super::installation::retire_same_session_restore_placeholders(
+                &self.root,
+                restore,
+                &session_id,
+                |canonical| self.runtimes.contains_key(canonical),
+            ) {
+                tracing::warn!(%session_id, %error, "same-Session restore placeholder retirement failed");
+            }
+        }
         self.refresh_registry_projection();
         if result.is_ok()
             && named_assignment.agent_name.is_some()

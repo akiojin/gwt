@@ -1531,6 +1531,114 @@ fn recover_restored_window_protects_replacement_and_normal_launches() {
     control_close(&foreign_owner, &foreign);
 }
 
+/// Issue #4735 RSR: a restore rebound to its predecessor's current Active
+/// binding keeps the source internal Session ID under a fresh owner pane. The
+/// captured Stopped placeholder must not survive beside it, or the restored
+/// Agent's own authenticated Name is refused as ambiguous.
+#[cfg(unix)]
+#[test]
+fn same_session_restore_retires_placeholder_so_authenticated_name_succeeds() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let _custom_agents = ScopedEnvVar::unset(gwt_agent::DISABLE_GLOBAL_CUSTOM_AGENTS_ENV);
+    let project = temp.path().join("project");
+    control_init_repo(&project);
+    seed_owner_fixture_roster(&project, 8);
+    gwt_agent::save_stored_custom_agents_to_path(
+        &gwt_core::paths::gwt_config_path(),
+        &[gwt_agent::StoredCustomAgent::new(control_custom_agent())],
+    )
+    .unwrap();
+    let sessions = gwt_core::paths::gwt_sessions_dir();
+
+    // Previous owner: the production launch alone creates the linked
+    // Session, its Active execution binding and the canonical registry row.
+    let previous = owner_fixture_block_on(
+        gwt::project_runtime::test_support::ProjectOwnerHarness::start(&project),
+    )
+    .unwrap();
+    let source = control_owner_launch(
+        &previous,
+        "agent-source",
+        control_launch_config(&project, 4735),
+    );
+    let source_id = source.session.as_ref().unwrap().id.clone();
+    owner_fixture_block_on(previous.shutdown());
+    assert!(source.pty.try_wait().unwrap().is_some());
+    let mut saved = gwt_agent::Session::load(&sessions.join(format!("{source_id}.toml"))).unwrap();
+    assert_eq!(saved.status, gwt_agent::AgentStatus::Stopped);
+    assert!(saved.restore_window_on_startup);
+    assert!(saved.execution_binding.is_some());
+    // The benign Custom provider's native conversation is fixture metadata.
+    saved.agent_session_id = Some("fixture-native-conversation".into());
+    saved.save(&sessions).unwrap();
+    let rows_for = |session_id: &str| {
+        gwt::persistence::load_workspace_state(&gwt::persistence::workspace_state_path(&project))
+            .unwrap()
+            .windows
+            .into_iter()
+            .filter(|row| row.session_id.as_deref() == Some(session_id))
+            .map(|row| row.id)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(rows_for(&source_id), vec!["agent-source".to_string()]);
+
+    // Restarted owner: the GUI routes a restore to a fresh owner pane id.
+    let owner = owner_fixture_block_on(
+        gwt::project_runtime::test_support::ProjectOwnerHarness::start(&project),
+    )
+    .unwrap();
+    configure_owner_fixture_start_gate(&owner);
+    let restored_id = owner.pane_id("project-pane-restore");
+    let receipt = owner_fixture_block_on(owner.command(
+        gwt::project_runtime::events::OwnerCommand::RestoreSavedSession {
+            id: restored_id.clone(),
+            operation_id: "same-session-restore".into(),
+            source_session_id: source_id.clone(),
+            expected_source: Box::new(saved.clone()),
+            origin: gwt_agent::SessionLaunchOrigin::UserRestart,
+            cols: 80,
+            rows: 24,
+        },
+    ))
+    .unwrap();
+    assert!(
+        receipt.get("restore_refusal").is_none(),
+        "actual restore must be admitted: {receipt:?}"
+    );
+    let restored =
+        owner_fixture_block_on(owner.probe(&restored_id, receipt["incarnation"].as_u64().unwrap()))
+            .unwrap_or_else(|error| panic!("{error}: {receipt}"));
+    assert_eq!(
+        restored.session.as_ref().unwrap().id,
+        source_id,
+        "premise: the rebound restore keeps the source internal Session ID"
+    );
+    assert_eq!(
+        rows_for(&source_id),
+        vec!["project-pane-restore".to_string()],
+        "only the restored pane may carry the restored Session ID"
+    );
+    let named = control_request(
+        &owner,
+        &restored,
+        AgentFrontendRequest::Name {
+            candidate: "Orven".into(),
+            request_id: "restored-name".into(),
+        },
+    );
+    let result = named
+        .events
+        .iter()
+        .find(|event| event["kind"] == "pane_name_result")
+        .unwrap();
+    assert_eq!(result["ok"], true, "{result}");
+    control_close(&owner, &restored);
+}
+
 /// Issue #5248 AC-2/AC-3: stop has already removed the Monitor binding, so
 /// successful pane close must still publish the complete surviving canvas.
 #[cfg(unix)]
