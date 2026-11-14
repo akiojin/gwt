@@ -147,7 +147,7 @@ pub fn extract_claim_comments(comments: &[CommentSnapshot]) -> Vec<ClaimComment>
         .collect()
 }
 
-pub fn acquire_claim<C: IssueClient>(
+pub fn acquire_claim<C: IssueClient + ?Sized>(
     client: &C,
     issue_number: IssueNumber,
     claim: ClaimComment,
@@ -189,7 +189,7 @@ pub fn acquire_claim<C: IssueClient>(
 /// Acquire a stable logical claim while preserving whether a mutation was
 /// definitely not submitted or may have reached GitHub. An unknown outcome is
 /// intentionally left to the durable executor for authoritative replay.
-pub fn acquire_claim_mutation<C: IssueClient>(
+pub fn acquire_claim_mutation<C: IssueClient + ?Sized>(
     client: &C,
     issue_number: IssueNumber,
     claim: ClaimComment,
@@ -229,7 +229,7 @@ pub fn acquire_claim_mutation<C: IssueClient>(
     resolve_claim_after_mutation(client, issue_number, own_claim, now)
 }
 
-fn resolve_claim_after_mutation<C: IssueClient>(
+fn resolve_claim_after_mutation<C: IssueClient + ?Sized>(
     client: &C,
     issue_number: IssueNumber,
     own_claim: ClaimComment,
@@ -242,7 +242,7 @@ fn resolve_claim_after_mutation<C: IssueClient>(
     resolve_claim_snapshot_mutation(client, issue_number, &claims, &own_claim, now, true)
 }
 
-fn resolve_claim_after_submission<C: IssueClient>(
+fn resolve_claim_after_submission<C: IssueClient + ?Sized>(
     client: &C,
     issue_number: IssueNumber,
     own_claim: ClaimComment,
@@ -327,7 +327,7 @@ fn active_own_claims_except(
         .collect()
 }
 
-fn terminalize_claims<C: IssueClient>(
+fn terminalize_claims<C: IssueClient + ?Sized>(
     client: &C,
     claims: Vec<ClaimComment>,
     status: ClaimStatus,
@@ -359,7 +359,7 @@ fn promote_mutation_error_after_submission(
     }
 }
 
-fn terminalize_claims_mutation<C: IssueClient>(
+fn terminalize_claims_mutation<C: IssueClient + ?Sized>(
     client: &C,
     claims: Vec<ClaimComment>,
     status: ClaimStatus,
@@ -384,7 +384,7 @@ fn terminalize_claims_mutation<C: IssueClient>(
     Ok(terminalized)
 }
 
-fn resolve_claim_snapshot<C: IssueClient>(
+fn resolve_claim_snapshot<C: IssueClient + ?Sized>(
     client: &C,
     issue_number: IssueNumber,
     claims: &[ClaimComment],
@@ -421,7 +421,7 @@ fn resolve_claim_snapshot<C: IssueClient>(
     }
 }
 
-fn resolve_claim_snapshot_mutation<C: IssueClient>(
+fn resolve_claim_snapshot_mutation<C: IssueClient + ?Sized>(
     client: &C,
     issue_number: IssueNumber,
     claims: &[ClaimComment],
@@ -475,7 +475,7 @@ fn resolve_claim_snapshot_mutation<C: IssueClient>(
 /// Replaying a release after a daemon restart is idempotent: an absent claim,
 /// or a claim already in a terminal state, is treated as the target state and
 /// does not issue another patch.
-pub fn release_claim<C: IssueClient>(
+pub fn release_claim<C: IssueClient + ?Sized>(
     client: &C,
     issue_number: IssueNumber,
     claim_id: &str,
@@ -510,7 +510,7 @@ pub fn release_claim<C: IssueClient>(
 }
 
 /// Mutation-aware release used by the durable side-effect executor.
-pub fn release_claim_mutation<C: IssueClient>(
+pub fn release_claim_mutation<C: IssueClient + ?Sized>(
     client: &C,
     issue_number: IssueNumber,
     claim_id: &str,
@@ -557,7 +557,7 @@ fn claim_identity_matches(
         && requested.issue_number == issue_number.0
 }
 
-fn fetch_claims<C: IssueClient>(
+fn fetch_claims<C: IssueClient + ?Sized>(
     client: &C,
     issue_number: IssueNumber,
 ) -> Result<Vec<ClaimComment>, ApiError> {

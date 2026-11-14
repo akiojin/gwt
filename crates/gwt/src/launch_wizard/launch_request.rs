@@ -330,18 +330,71 @@ mod tests {
         assert_eq!(config.reasoning_level.as_deref(), Some("high"));
         assert_eq!(config.tool_version.as_deref(), Some("0.110.0"));
         assert_eq!(config.docker_service.as_deref(), Some("gwt"));
+        // Issue #3462: Resume inherits the Skip Permissions preference.
         assert!(
-            !config.skip_permissions,
-            "a Resume launch must never inherit a permission bypass"
+            config.skip_permissions,
+            "a Resume launch must inherit the Skip Permissions preference"
         );
         assert!(
-            !config
-                .args
-                .iter()
-                .any(|arg| arg == "--dangerously-bypass-approvals-and-sandbox"),
-            "a Resume launch must not carry Codex's dangerous bypass flag"
+            config.args.contains(&"--yolo".to_string()),
+            "a Resume launch must carry Codex's skip-permissions flag"
         );
         assert!(config.codex_fast_mode);
+    }
+
+    // Issue #3462: Resume / Continue launches must inherit the Skip
+    // Permissions preference from the same source as Normal launches.
+    // Dropping the flag on resume left restored agents stuck at permission
+    // prompts and persisted `skip_permissions = false`, poisoning every
+    // later restore of the same session lineage.
+    #[test]
+    fn build_launch_config_resume_inherits_skip_permissions_for_claude() {
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            sample_agent_options(),
+            Vec::new(),
+        );
+        state.agent_id = "claude".to_string();
+        state.mode = "resume".to_string();
+        state.resume_session_id = Some("session-123".to_string());
+        state.skip_permissions = true;
+
+        let config = state.build_launch_config().expect("launch config");
+        assert_eq!(config.session_mode, gwt_agent::SessionMode::Resume);
+        assert!(
+            config.skip_permissions,
+            "a Resume launch must inherit the Skip Permissions preference"
+        );
+        assert!(config.args.contains(&"--resume".to_string()));
+        assert!(
+            config
+                .args
+                .contains(&"--dangerously-skip-permissions".to_string()),
+            "a Resume launch must carry Claude's skip-permissions flag"
+        );
+    }
+
+    #[test]
+    fn build_launch_config_continue_inherits_skip_permissions_for_codex() {
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            sample_agent_options(),
+            Vec::new(),
+        );
+        state.agent_id = "codex".to_string();
+        state.mode = "continue".to_string();
+        state.skip_permissions = true;
+
+        let config = state.build_launch_config().expect("launch config");
+        assert_eq!(config.session_mode, gwt_agent::SessionMode::Continue);
+        assert!(
+            config.skip_permissions,
+            "a Continue launch must inherit the Skip Permissions preference"
+        );
+        assert!(
+            config.args.contains(&"--yolo".to_string()),
+            "a Continue launch must carry Codex's skip-permissions flag"
+        );
     }
 
     // SPEC-2014 2026-05-18 amendment FR-A / SC-A / SC-B:
@@ -960,10 +1013,11 @@ mod tests {
         assert_eq!(config.display_name, "Claude Proxy");
         assert!(config.args.contains(&"--serve".to_string()));
         assert!(config.args.contains(&"--resume".to_string()));
-        assert!(!config.skip_permissions);
+        // Issue #3462: Resume inherits the Skip Permissions preference.
+        assert!(config.skip_permissions);
         assert!(
-            !config.args.contains(&"--unsafe".to_string()),
-            "a Resume launch must not carry the custom agent permission bypass"
+            config.args.contains(&"--unsafe".to_string()),
+            "a Resume launch must carry the custom agent skip-permissions args"
         );
         assert_eq!(
             config.env_vars.get("API_KEY").map(String::as_str),

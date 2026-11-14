@@ -95,6 +95,7 @@ jobs:
         run: cargo test -p gwt-core --test windows_process_resolver --test process_adapter_parity
         timeout-minutes: 15
       - name: Run real Claude probe caller regressions
+        shell: bash
         run: |
           cargo test -p gwt-core --lib real_bun_global_placeholder_fixture
           cargo test -p gwt-agent --lib real_bun_global_placeholder_fixture -- --test-threads=1
@@ -104,6 +105,15 @@ jobs:
         timeout-minutes: 15
       - name: Run Windows PTY resolver adapter tests
         run: cargo test -p gwt-terminal --lib pty::windows_spawn::tests -- --test-threads=1
+        timeout-minutes: 15
+      - name: Run Issue Monitor scheduled driver contracts
+        shell: bash
+        run: |
+          cargo test -p gwt --bin gwt scheduled_tick_is_single_flight_per_canonical_project_scope -- --test-threads=1
+          cargo test -p gwt --bin gwt scheduled_tick_drives_disabled_claim_cleanup_without_scanning -- --test-threads=1
+          cargo test -p gwt --bin gwt scheduled_tick_advances_autonomous_launch_without_an_external_daemon -- --test-threads=1
+          cargo test -p gwt --bin gwt app_runtime_local_driver_ -- --test-threads=1
+          cargo test -p gwt --lib local_fallback_lease -- --test-threads=1
         timeout-minutes: 15
       - name: Run agent process resolver caller contracts
         run: cargo test -p gwt --test agent_process_resolution_contract_test

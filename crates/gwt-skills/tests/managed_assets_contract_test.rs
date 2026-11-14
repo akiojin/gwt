@@ -50,6 +50,27 @@ fn first_inline_code(line: &str) -> &str {
         .unwrap_or_else(|| panic!("missing inline code in {line:?}"))
 }
 
+#[cfg(unix)]
+fn browser_check_shell_block(name: &str) -> String {
+    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let skill_path = workspace_root.join(".claude/skills/browser-check/SKILL.md");
+    let skill = fs::read_to_string(&skill_path)
+        .unwrap_or_else(|err| panic!("read {}: {err}", skill_path.display()));
+    let begin = format!("# browser-check-{name}-begin");
+    let end = format!("# browser-check-{name}-end");
+    let body = skill
+        .split_once(&begin)
+        .unwrap_or_else(|| panic!("missing executable browser-check marker {begin}"))
+        .1
+        .split_once(&end)
+        .unwrap_or_else(|| panic!("missing executable browser-check marker {end}"))
+        .0;
+    body.lines()
+        .map(|line| line.strip_prefix("     ").unwrap_or(line))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[test]
 fn distribute_to_worktree_materializes_claude_and_codex_skill_bundles() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -103,6 +124,157 @@ fn repo_keeps_managed_claude_and_codex_skill_assets_in_parity() {
             "managed gwt-* skill asset must be byte-identical between .claude and .codex: {relative:?}"
         );
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn browser_check_authority_script_rejects_local_build_paths_at_any_depth() {
+    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let claude_path = workspace_root.join(".claude/skills/browser-check/SKILL.md");
+    let codex_path = workspace_root.join(".codex/skills/browser-check/SKILL.md");
+    let claude = fs::read_to_string(&claude_path)
+        .unwrap_or_else(|err| panic!("read {}: {err}", claude_path.display()));
+    let codex = fs::read_to_string(&codex_path)
+        .unwrap_or_else(|err| panic!("read {}: {err}", codex_path.display()));
+
+    assert_eq!(
+        claude, codex,
+        "browser-check must stay byte-identical across Claude and Codex"
+    );
+    assert!(
+        claude.contains("cargo build -p gwt --bin gwt --bin gwtd"),
+        "browser-check must build the exact GUI and audit binaries together"
+    );
+
+    let script = format!(
+        "{}\nfor candidate in \"$@\"; do if is_checkout_local_hook_bin \"$candidate\"; then printf 'reject\\n'; else printf 'allow\\n'; fi; done",
+        browser_check_shell_block("hook-authority")
+    );
+    let output = hidden_command("bash")
+        .args([
+            "-c",
+            &script,
+            "browser-check-test",
+            "/repo/target/debug/gwtd",
+            "/repo/target/aarch64-apple-darwin/debug/gwtd",
+            r"C:\repo\TARGET\x86_64-pc-windows-msvc\RELEASE\GWTD.EXE",
+            "/Applications/GWT.app/Contents/MacOS/gwtd",
+        ])
+        .env("GWT_HOOK_BIN", "gwtd")
+        .output()
+        .expect("run executable authority resolver");
+    assert!(output.status.success(), "{:?}", output);
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "reject\nreject\nreject\nallow\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn browser_check_authority_prefers_portable_logical_name_for_stable_path_entry() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tools = tempfile::tempdir().expect("tools tempdir");
+    let fake_gwtd = tools.path().join("gwtd");
+    fs::write(&fake_gwtd, "#!/bin/sh\nexit 0\n").expect("write fake gwtd");
+    fs::set_permissions(&fake_gwtd, fs::Permissions::from_mode(0o755))
+        .expect("make fake gwtd executable");
+    let current_path = std::env::var_os("PATH").unwrap_or_default();
+    let path = std::env::join_paths(
+        std::iter::once(tools.path().to_path_buf()).chain(std::env::split_paths(&current_path)),
+    )
+    .expect("compose PATH");
+
+    let script = format!(
+        "{}\nprintf '%s\\n' \"$CHECK_HOOK_BIN\"",
+        browser_check_shell_block("hook-authority")
+    );
+    let output = hidden_command("bash")
+        .args(["-c", &script])
+        .env_remove("GWT_HOOK_BIN")
+        .env("PATH", path)
+        .output()
+        .expect("run authority resolver with stable PATH entry");
+
+    assert!(output.status.success(), "{:?}", output);
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "gwtd\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn browser_check_repairs_exact_hook_fallback_before_launch() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let fake_gwtd = dir.path().join("gwtd");
+    let capture = dir.path().join("capture.txt");
+    fs::write(
+        &fake_gwtd,
+        "#!/bin/sh\nprintf 'GWT_BIN_PATH=%s\\nGWT_HOOK_BIN=%s\\n' \"${GWT_BIN_PATH-unset}\" \"${GWT_HOOK_BIN-unset}\" > \"$CAPTURE\"\ncat >> \"$CAPTURE\"\nprintf '%s\\n' '{\"ok\":true,\"output\":\"{\\\"repair\\\":{},\\\"health\\\":{\\\"status\\\":\\\"healthy\\\",\\\"issues\\\":[]}}\"}'\n",
+    )
+    .expect("write fake gwtd");
+    fs::set_permissions(&fake_gwtd, fs::Permissions::from_mode(0o755))
+        .expect("make fake gwtd executable");
+
+    let output = hidden_command("bash")
+        .args(["-c", &browser_check_shell_block("hook-repair")])
+        .current_dir(dir.path())
+        .env("REPO_ROOT", dir.path())
+        .env("CHECK_HOME", dir.path())
+        .env("CHECKOUT_GWTD", &fake_gwtd)
+        .env("CHECK_HOOK_BIN", "gwtd")
+        .env("CAPTURE", &capture)
+        .env("GWT_BIN_PATH", "/stale/target/debug/gwtd")
+        .output()
+        .expect("run hook repair block");
+
+    assert!(
+        output.status.success(),
+        "hook repair failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let captured = fs::read_to_string(capture).expect("read captured doctor request");
+    assert!(captured.contains("GWT_BIN_PATH=unset"), "{captured}");
+    assert!(captured.contains("GWT_HOOK_BIN=gwtd"), "{captured}");
+    let request = captured.lines().skip(2).collect::<Vec<_>>().join("\n");
+    let request: serde_json::Value = serde_json::from_str(&request).expect("doctor request JSON");
+    assert_eq!(request["operation"], "hook.doctor");
+    assert_eq!(request["params"]["repair"], true);
+    assert_eq!(request["params"]["expected_hook_bin"], "gwtd");
+}
+
+#[cfg(unix)]
+#[test]
+fn browser_check_launch_script_unsets_ambient_runtime_override() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let fake_gwt = dir.path().join("target/debug/gwt");
+    fs::create_dir_all(fake_gwt.parent().expect("fake gwt parent")).unwrap();
+    fs::write(
+        &fake_gwt,
+        "#!/bin/sh\nprintf '%s\\n' \"${GWT_BIN_PATH-unset}\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&fake_gwt, fs::Permissions::from_mode(0o755)).unwrap();
+    let log = dir.path().join("launch.log");
+    let script = format!(
+        "ENV_ARGS=(GWT_HOOK_BIN=gwtd)\n{}",
+        browser_check_shell_block("launch")
+    );
+    let output = hidden_command("bash")
+        .args(["-c", &script])
+        .env("CHECKOUT_GWT", &fake_gwt)
+        .env("LOG_FILE", &log)
+        .env("GWT_BIN_PATH", "/ambient/stale/gwtd")
+        .output()
+        .expect("run executable fresh GUI launch block");
+
+    assert!(output.status.success(), "{:?}", output);
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "unset\n");
+    assert_eq!(fs::read_to_string(log).unwrap(), "unset\n");
 }
 
 #[test]
