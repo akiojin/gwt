@@ -6058,8 +6058,8 @@ button.workspace-board-ref:focus-visible {
 .pm-chat__decision-option { max-width: 100%; white-space: normal; overflow-wrap: anywhere; text-align: start; }
 .pm-chat__decision-error { color: var(--color-state-blocked); }
 .pm-chat__composer { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 0 var(--space-2); padding: var(--space-2) var(--space-3); border-top: 1px solid var(--color-border); background: var(--color-surface); }
-.pm-chat__draft { flex: 1; min-width: 0; min-height: 2.5rem; max-height: 12rem; resize: vertical; padding: var(--space-2); border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface-elevated); color: var(--color-text); font: inherit; }
-.pm-chat__draft:focus-visible { outline: 2px solid var(--color-focus-ring); outline-offset: 1px; }
+.pm-chat__draft, .pm-chat__task-cancel-reason { flex: 1; min-width: 0; min-height: 2.5rem; max-height: 12rem; resize: vertical; padding: var(--space-2); border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface-elevated); color: var(--color-text); font: inherit; }
+.pm-chat__draft:focus-visible, .pm-chat__task-cancel-reason:focus-visible { outline: 2px solid var(--color-focus-ring); outline-offset: 1px; }
 .pm-chat__composer-status { flex-basis: 100%; margin: var(--space-1) 0 0; color: var(--color-text-muted); }
 /* Kept rendered when empty so the live region announces the next status. */
 .pm-chat__composer-status:empty { margin: 0; }
@@ -6089,6 +6089,8 @@ button.workspace-board-ref:focus-visible {
 .pm-chat__task-detail { margin: var(--space-2) var(--space-3); padding: var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface-elevated); max-height: 28rem; overflow: auto; }
 .pm-chat__task-detail h3, .pm-chat__task-detail h4 { margin: var(--space-2) 0; font-size: var(--type-sm); }
 .pm-chat__task-detail-text { white-space: pre-wrap; overflow-wrap: anywhere; margin: var(--space-2) 0; }
+.pm-chat__task-cancel { display: grid; gap: var(--space-2); margin-block: var(--space-3); }
+.pm-chat__task-cancel label { display: grid; gap: var(--space-1); min-width: 0; }
 .pm-chat__task-detail ol { padding-inline-start: var(--space-5); }
 .pm-chat__task-detail :focus-visible { outline: 2px solid var(--color-focus-ring); outline-offset: 2px; }
 @container (max-width: 760px) {

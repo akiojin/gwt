@@ -1724,7 +1724,7 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
     }
   });
 
-  test('T-TASK-DETAIL T-TASK-CHILDREN T-TASK-CRITERIA T-CHAT-TASK-LINK T-UTASK-OV and T-UTASK-USER-REOPEN/CANCEL/UPDATE/COMPLETE persist browser authority and show confirmed Tasks after reconnect', async ({ page }, info) => {
+  test('T-TASK-CANCEL T-TASK-DETAIL T-TASK-CHILDREN T-TASK-CRITERIA T-CHAT-TASK-LINK T-UTASK-OV and T-UTASK-USER-REOPEN/CANCEL/UPDATE/COMPLETE persist browser authority and show confirmed Tasks after reconnect', async ({ page }, info) => {
     const theme = info.project.name.includes('light') ? 'light' : 'dark';
     const windowId = 'pm-request-task-fixture';
     const taskId = 'synthetic-fixture-task';
@@ -2249,12 +2249,108 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
       await expect(criteriaSummary).toBeFocused();
       await expect(criteriaSummary).toBeInViewport({ ratio: 1 });
       await info.attach(`T-TASK-CHILDREN ${theme} 400px`, { body: await criteriaPane.screenshot(), contentType: 'image/png' });
+      await detailButton.click();
+      const cancelReason = taskDetail.getByRole('textbox', { name: 'Reason for cancelling this task', exact: true });
+      const cancelButton = taskDetail.getByRole('button', { name: 'Cancel task', exact: true });
+      await expect(cancelReason).toBeVisible();
+      await expect(cancelButton).toHaveAttribute('aria-disabled', 'true');
+      const beforeCancel = readFileSync(statePath, 'utf8');
+      await cancelButton.focus();
+      await page.keyboard.press('Enter');
+      expect(readFileSync(statePath, 'utf8')).toBe(beforeCancel, 'blank reason never writes');
+      const cancelReasonText = 'Withdraw this request from tracking.\nKeep the original <literal> request and audit.';
+      await cancelReason.fill(cancelReasonText);
+      await expect(cancelButton).toHaveAttribute('aria-disabled', 'false');
+      await cancelButton.focus();
+      await expect(cancelButton).toBeInViewport({ ratio: 1 });
+      const cancelImage = info.outputPath(`task-cancel-${theme}-400.png`);
+      await chat.screenshot({ path: cancelImage });
+      await info.attach(`T-TASK-CANCEL ${theme} controls 400px`, { path: cancelImage, contentType: 'image/png' });
+      // Hold only the real outgoing cancellation. Apply a competing update on
+      // the same authenticated host, then release the original bytes unchanged.
+      await page.evaluate(() => {
+        const host = window as any;
+        for (const socket of new Set<WebSocket>(host.__gwtPlaywrightSockets || [])) {
+          if (socket.readyState !== WebSocket.OPEN || !new URL(socket.url).searchParams.has('repo_hash')) continue;
+          const originalSend = socket.send;
+          socket.send = function(data: string) {
+            const event = JSON.parse(String(data));
+            if (event.kind === 'cancel_pm_request_task') {
+              socket.send = originalSend;
+              host.__heldTaskCancellation = event;
+              host.__releaseTaskCancellation = () => originalSend.call(socket, data);
+              return;
+            }
+            return originalSend.call(socket, data);
+          };
+        }
+      });
+      await page.keyboard.press('Enter');
+      const held = await page.waitForFunction(() => (window as any).__heldTaskCancellation).then(handle => handle.jsonValue());
+      expect(held).toMatchObject({ kind: 'cancel_pm_request_task', task_key: rootKey,
+        request: { task_id: '', reason: cancelReasonText } });
+      await expect(cancelButton).toHaveAttribute('aria-disabled', 'true');
+      await expect(cancelReason).toHaveAttribute('readonly', '');
+      await page.keyboard.press('Enter');
+      expect(readFileSync(statePath, 'utf8')).toBe(beforeCancel, 'pending cancellation is neither optimistic nor duplicated');
+      const competingUpdate = await exchange('update_pm_request_task', { request: {
+        operation_id: `cancel-competing-update-${theme}`, expected_revision: held.request.expected_revision,
+        reason: 'A competing browser corrects the assignee before cancellation arrives.',
+        task: { ...JSON.parse(beforeCancel).tasks[rootTask.draft.id].draft, assignee: 'Another reviewer' },
+      } });
+      expect(competingUpdate).toMatchObject({ state: 'ready', revision: held.request.expected_revision + 1 });
+      const competingBytes = readFileSync(statePath, 'utf8');
+      const releaseCursor = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence || 0);
+      await page.evaluate(() => (window as any).__releaseTaskCancellation());
+      const conflict = await page.waitForFunction(({ id, cursor }) => (window as any).__gwtPlaywrightMessages?.findLast((entry: any) =>
+        entry.sequence > cursor && entry.payload.kind === 'pm_request_task' && entry.payload.request_id === id)?.payload,
+      { id: held.request_id, cursor: releaseCursor }, { timeout: 15_000 }).then(handle => handle.jsonValue());
+      exchanges.push({ request: held, response: conflict });
+      expect(conflict.result).toMatchObject({ state: 'error', code: 'conflict', current_revision: competingUpdate.revision });
+      await expect(taskDetail.locator('.pm-chat__task-cancel-status')).toContainText(conflict.result.message);
+      await expect(taskDetail).toContainText('last confirmed detail (stale)');
+      await expect(taskDetail).toContainText(original);
+      await expect(cancelReason).toHaveValue(cancelReasonText);
+      await expect(cancelButton).toBeFocused();
+      await expect(cancelButton).toHaveAttribute('aria-disabled', 'true');
+      expect(readFileSync(statePath, 'utf8')).toBe(competingBytes);
+      await taskDetail.getByRole('button', { name: 'Reload details', exact: true }).click();
+      await expect(cancelButton).toHaveAttribute('aria-disabled', 'false');
+      await expect(taskDetail).not.toContainText('last confirmed detail (stale)');
+      await expect(taskDetail).toContainText(`Selected snapshot revision ${competingUpdate.revision}.`);
+      await expect(cancelReason).toHaveValue(cancelReasonText);
+      await cancelButton.focus();
+      await page.keyboard.press('Enter');
+      await expect(taskDetail.locator('.pm-chat__task-cancel-status')).toContainText('This task is cancelled.');
+      await expect(cancelReason).not.toBeVisible();
+      const afterCancel = JSON.parse(readFileSync(statePath, 'utf8'));
+      const beforeConfirmedCancel = JSON.parse(competingBytes);
+      expect(afterCancel.revision).toBe(competingUpdate.revision + 1);
+      expect(afterCancel.tasks[rootTask.draft.id]).toMatchObject({ status: 'cancelled', completion: null });
+      expect(afterCancel.sources).toEqual(beforeConfirmedCancel.sources);
+      expect(afterCancel.tasks[childTask.draft.id]).toEqual(beforeConfirmedCancel.tasks[childTask.draft.id]);
+      expect(afterCancel.receipts.slice(0, -1)).toEqual(beforeConfirmedCancel.receipts);
+      expect(afterCancel.receipts.at(-1)).toMatchObject({ action: 'cancel', reason: cancelReasonText, actor: { kind: 'user' } });
+      expect(afterCancel.receipts.at(-1).actor.id).toMatch(/^browser:[0-9a-f-]{36}$/i);
+      await expect(taskDetail).toContainText(cancelReasonText);
+      await expect(criteriaDraft).toHaveValue('Keep this draft while reviewing the original request');
+      const reloadAfterCancel = taskDetail.getByRole('button', { name: 'Reload details', exact: true });
+      await expect(reloadAfterCancel).toBeFocused();
+      await expect(reloadAfterCancel).toBeInViewport({ ratio: 1 });
+      expect(await taskDetail.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+      const cancelledImage = info.outputPath(`task-cancel-confirmed-${theme}-400.png`);
+      await chat.screenshot({ path: cancelledImage });
+      await info.attach(`T-TASK-CANCEL ${theme} confirmed 400px`, { path: cancelledImage, contentType: 'image/png' });
       expect(errors).toEqual([]);
     } catch (error) {
       primaryErrors.push(error);
       throw error;
     } finally {
       try {
+        const incoming = await page.evaluate(() => (window as any).__gwtPlaywrightMessages);
+        const incomingPath = info.outputPath(`task-cancel-incoming-${theme}.json`);
+        writeFileSync(incomingPath, JSON.stringify(incoming));
+        await info.attach(`T-TASK-CANCEL ${theme} incoming`, { path: incomingPath, contentType: 'application/json' });
         await info.attach(`T-UTASK-USER-REOPEN/CANCEL/UPDATE/COMPLETE ${theme} transport and persistence`, {
           body: JSON.stringify({ synthetic_fixture_seed: true, native_intake_proof: false,
             production_task_ui: true, read_only_overview: true, theme, seed, exchanges, console_page_errors: errors,

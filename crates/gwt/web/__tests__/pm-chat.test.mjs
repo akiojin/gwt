@@ -20,6 +20,7 @@ function fixture({ tasksDefault = false, onOpenTerminal } = {}) {
   const visibility = [], copied = [], sent = [];
   let model;
   const view = createPmChat({ document, root, sessionId: 'session', onOpenTerminal,
+    onTaskCancel: reason => { const request = model.requestPmTaskCancel('pm', reason); if (request) sent.push(request); },
     onTaskDetail: key => { const request = model.requestPmTaskDetail('pm', key); if (request) sent.push(request); },
     onLogVisibility: visible => visibility.push(visible), copyText: async text => copied.push(text),
     onSend: text => { const request = model.requestPmChatSend('pm', text); if (request) sent.push(request); } });
@@ -75,13 +76,91 @@ const trackedTask = (key, extra = {}) => ({ key, parent_key: null, title: `Task 
   review_required: false, ...extra });
 
 const bounded = text => ({ text, total_chars: [...text].length });
-const selectedDetail = () => ({ original: bounded('Exact <original>\nrequest'), purpose: bounded('Original purpose'),
+const selectedDetail = () => ({ status: 'pending', original: bounded('Exact <original>\nrequest'), purpose: bounded('Original purpose'),
   completion_conditions: [bounded('Verify <criterion>')], completion_condition_total: 2,
   evidence: [bounded('proof:<literal>')], evidence_total: 2, history_total: 2,
   history: [{ revision: 4, action: 'complete', actor_kind: 'pm', actor_id: bounded('PM reviewer'),
     at: '2026-11-13T00:00:00Z', reason: bounded('Verified <outcome>') }] });
 const detailReply = (request, extra = {}) => ({ kind: 'pm_request_task', id: 'pm', request_id: request.request_id,
   result: { state: 'detail', key: request.task_key, revision: 4, detail: selectedDetail(), ...extra } });
+
+test('Task cancellation requires a fresh selected read and correlates only its own receipt', () => {
+  const { model, update } = fixture();
+  assert.equal(typeof model.requestPmTaskCancel, 'function');
+  update([], null, { request_tasks: taskOverview([trackedTask('one')]) });
+  const read = model.requestPmTaskDetail('pm', 'one');
+  assert.equal(model.requestPmTaskCancel('pm', 'Withdraw'), null);
+  model.applyPmWindowReceiveEvent(detailReply(read));
+  assert.equal(model.requestPmTaskCancel('pm', '  '), null);
+  const request = model.requestPmTaskCancel('pm', 'Withdraw <literally>');
+  assert.equal(request.kind, 'cancel_pm_request_task');
+  assert.equal(request.task_key, 'one');
+  assert.equal(request.request.task_id, '');
+  assert.equal(request.request.expected_revision, 4);
+  assert.equal(request.request.reason, 'Withdraw <literally>');
+  assert.match(request.request.operation_id, /^task-cancel-/);
+  assert.equal(model.requestPmTaskCancel('pm', 'Duplicate'), null);
+  const reply = { kind: 'pm_request_task', id: 'pm', request_id: request.request_id,
+    result: { state: 'ready', revision: 5, task: { status: 'cancelled' },
+      receipt: { action: 'cancel', operation_id: request.request.operation_id, revision: 5 } } };
+  model.applyPmWindowReceiveEvent({ ...reply, request_id: request.request_id + 1 });
+  assert.equal(model.readPmWindowState().windows.pm.taskCancel.status, 'pending');
+  model.applyPmWindowReceiveEvent({ ...reply, result: { ...reply.result, receipt: { ...reply.result.receipt, operation_id: 'other' } } });
+  assert.equal(model.readPmWindowState().windows.pm.taskCancel.status, 'pending');
+  model.markPmTaskCancelUnavailable('pm', request.request_id);
+  model.applyPmWindowReceiveEvent(reply);
+  assert.equal(model.readPmWindowState().windows.pm.taskCancel.status, 'error');
+  assert.equal(model.readPmWindowState().windows.pm.taskDetail.stale, true);
+  assert.equal(model.readPmWindowState().windows.pm.taskDetail.data.status, 'pending', 'never optimistic');
+  assert.equal(model.requestPmTaskCancel('pm', 'Retry'), null);
+  update([], null, { request_tasks: { state: 'error', message: 'The list read failed' } });
+  const reload = model.requestPmTaskDetail('pm', 'one');
+  model.applyPmWindowReceiveEvent(detailReply(reload, { revision: 5 }));
+  const retry = model.requestPmTaskCancel('pm', 'Withdraw after rereading');
+  assert.ok(retry, 'a fresh selected read recovers cancellation without pretending the list recovered');
+  assert.equal(model.readPmWindowState().windows.pm.requestTasksError, 'The list read failed');
+  model.applyPmWindowReceiveEvent({ ...reply, request_id: retry.request_id,
+    result: { ...reply.result, revision: 6, receipt: { ...reply.result.receipt, operation_id: retry.request.operation_id, revision: 6 } } });
+  assert.equal(model.readPmWindowState().windows.pm.taskCancel.status, 'recorded');
+  assert.equal(model.readPmWindowState().windows.pm.taskDetail.stale, true);
+  model.bindPmWindowState('pm', 'replacement');
+  model.applyPmWindowReceiveEvent(reply);
+  assert.equal(model.readPmWindowState().windows.pm.taskCancel, null);
+});
+
+test('Task detail cancellation keeps its reason and chat draft while stale and exposes labelled controls', async () => {
+  const { model, update, root, sent } = fixture();
+  update([], null, { request_tasks: taskOverview([trackedTask('one')]) });
+  const read = model.requestPmTaskDetail('pm', 'one');
+  model.applyPmWindowReceiveEvent(detailReply(read));
+  const reason = root.querySelector('[aria-label="Reason for cancelling this task"]');
+  assert.ok(reason, 'the selected detail exposes a labelled reason field');
+  const cancel = [...root.querySelectorAll('button')].find(node => node.textContent === 'Cancel task');
+  cancel.click();
+  assert.equal(sent.length, 0, 'empty reason cannot submit');
+  reason.value = 'Withdraw this request';
+  reason.dispatchEvent(new root.ownerDocument.defaultView.Event('input'));
+  root.querySelector('.pm-chat__draft').value = 'Keep my chat draft';
+  cancel.click();
+  cancel.click();
+  assert.equal(sent.length, 1);
+  assert.equal(cancel.getAttribute('aria-disabled'), 'true');
+  model.applyPmWindowReceiveEvent({ kind: 'pm_request_task', id: 'pm', request_id: sent[0].request_id,
+    result: { state: 'error', code: 'conflict', message: 'The task changed. Reload details.' } });
+  assert.equal(reason.value, 'Withdraw this request');
+  assert.match(root.querySelector('.pm-chat__task-cancel-status').textContent, /task changed/);
+  assert.equal(root.querySelector('.pm-chat__draft').value, 'Keep my chat draft');
+  update([], null, { request_tasks: { state: 'error', message: 'The list read failed' } });
+  const reload = model.requestPmTaskDetail('pm', 'one');
+  model.applyPmWindowReceiveEvent(detailReply(reload, { revision: 5 }));
+  assert.equal(cancel.getAttribute('aria-disabled'), 'false', 'fresh details are actionable while the list warning remains');
+  update([], null, { request_tasks: { state: 'error', message: 'A new read failed' } });
+  assert.equal(cancel.getAttribute('aria-disabled'), 'true', 'a new error still fences stale details');
+  model.bindPmWindowState('pm', 'replacement');
+  assert.equal(reason.value, '');
+  const css = await readFile(new URL('../styles/components.css', import.meta.url), 'utf8');
+  assert.match(css, /\.pm-chat__task-cancel\s*\{[^}]*var\(--space-/);
+});
 
 test('selected Task reads correlate key, request and Session and retain confirmed stale data', () => {
   const { model, update } = fixture();
@@ -493,9 +572,10 @@ test('Reports renders shared Markdown, metadata and copy, with no input or submi
   assert.equal(root.querySelector('pre code').textContent, 'cargo test');
   assert.equal(root.querySelector('article time').getAttribute('datetime'), report().created_at);
   assert.match(root.textContent, /progress/);
-  // Only the Chat composer (FR-CHAT-3) accepts input; Reports and Tasks stay read-only.
+  // Reports remain read-only; Chat and the selected Task cancellation accept input.
   const editable = 'input, textarea, form, [contenteditable], button[type="submit"]';
-  assert.deepEqual([...root.querySelectorAll(editable)].filter(node => !node.closest('.pm-chat__composer')), []);
+  assert.equal(root.querySelectorAll('.pm-chat__body ' + editable.split(', ').join(', .pm-chat__body ')).length, 0);
+  assert.equal([...root.querySelectorAll(editable)].filter(node => !node.closest('.pm-chat__composer, .pm-chat__task-cancel')).length, 0);
   assert.equal(root.querySelectorAll('.pm-chat__composer').length, 1);
   root.querySelector('[aria-label="Copy report"]').click();
   await Promise.resolve();
