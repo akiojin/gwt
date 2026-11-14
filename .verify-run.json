@@ -1,0 +1,1 @@
+{"schema_version":1,"operation":"verify.run","params":{"commands":["cargo fmt --all -- --check","cargo clippy --all-targets --all-features -- -D warnings","cargo test -p gwt-core -p gwt --all-features","env RUSTDOCFLAGS=-Dwarnings cargo doc --no-deps -p gwt"],"max_wait_secs":1500,"user_verification_result":"pending"}}
