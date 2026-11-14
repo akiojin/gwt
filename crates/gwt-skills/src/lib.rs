@@ -2224,6 +2224,77 @@ mod tests {
         );
     }
 
+    // Issue #3724: agent-facing stack docs drifted to the retired Tauri +
+    // Svelte + gwt-gui layout. CLAUDE.md / GEMINI.md must remain aliases of
+    // AGENTS.md, and AGENTS.md must describe the live 12-crate workspace,
+    // crates/gwt --bin gwt/--bin gwtd split, and crates/gwt/web ES modules.
+    #[test]
+    fn agent_guidance_matches_current_workspace_stack() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+
+        for relative in ["CLAUDE.md", "GEMINI.md"] {
+            let content = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            assert_eq!(
+                content.trim(),
+                "@AGENTS.md",
+                "{relative} must stay an include of AGENTS.md so stack docs cannot drift"
+            );
+        }
+
+        let agents = std::fs::read_to_string(workspace_root.join("AGENTS.md"))
+            .unwrap_or_else(|err| panic!("failed to read AGENTS.md: {err}"));
+
+        for retired in [
+            "gwt-gui/",
+            "cargo tauri",
+            "svelte-check",
+            "Svelte 5",
+            "vitest",
+            "pnpm install",
+            "pnpm test",
+            "pnpm test:e2e",
+            "127.0.0.1:4173",
+            "crates/gwt-tauri",
+            "wry + tao",
+            "wry/tao",
+        ] {
+            assert!(
+                !agents.contains(retired),
+                "AGENTS.md must not document retired stack phrase: {retired}"
+            );
+        }
+
+        for required in [
+            "crates/gwt-agent",
+            "crates/gwt-ai",
+            "crates/gwt-clipboard",
+            "crates/gwt-config",
+            "crates/gwt-core",
+            "crates/gwt-docker",
+            "crates/gwt-git",
+            "crates/gwt-github",
+            "crates/gwt-skills",
+            "crates/gwt-terminal",
+            "crates/gwt-voice",
+            "crates/gwt/web/",
+            "--bin gwt",
+            "--bin gwtd",
+            "scripts/run-frontend-unit-tests.sh",
+            "scripts/run-visual-tests.sh",
+            "crates/gwt/web/__tests__",
+            "cargo test -p gwt --bin gwt",
+            "app_runtime/",
+            "runtime_health_poller.rs",
+            "ES Modules",
+        ] {
+            assert!(
+                agents.contains(required),
+                "AGENTS.md must document current stack phrase: {required}"
+            );
+        }
+    }
+
     // SPEC-1935 Amendment (FR-129..FR-133): gwt-verify is a project-agnostic
     // verification contract. The skill must document Test Inventory emission,
     // a User Verification Handoff phase with a 4-step 導線 structure

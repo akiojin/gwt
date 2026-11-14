@@ -42,9 +42,9 @@
 
 ### 🧩 GUI/TUI ガイドライン
 
-- デスクトップ GUI は WebView (wry + tao) + axum WebSocket サーバー
-- フロントエンド: HTML/JS/CSS (xterm.js でターミナル描画)
-- バックエンド: Rust (`gwt` + `gwt-core` / `gwt-agent` / `gwt-skills` / `gwt-github` などのドメインクレート)
+- デスクトップ GUI は tray 常駐の `--bin gwt`（tao event loop + tray-icon）と axum HTTP/WebSocket サーバー
+- フロントエンド: `crates/gwt/web/` の素の ES Modules（HTML/JS/CSS、xterm.js でターミナル描画）。UI は標準出力の `gwt browser URL` をブラウザで開く
+- バックエンド: Rust workspace 12 crate（`gwt` + `gwt-core` / `gwt-agent` / `gwt-skills` / `gwt-github` などのドメインクレート）
 - ターミナルエミュレーション: vt100 crate
 - UI アイコンは Unicode シンボルを使用する
 - GUI/CSS 変更では Operator Design System (`crates/gwt/web/styles/tokens.css` と typography tokens) を必ず使用し、新規 UI CSS に raw hex / rgb / rgba 色や独自 palette を直書きしない。必要な token が無い場合は、理由を明示して token 追加を検討する
@@ -135,6 +135,7 @@
 - `gwt-execute` を使って TDD ベースで実装する（design-gated / direct / standalone mode）。旧 `gwt-build-spec` / `gwt-fix-issue` は transition alias として扱う
 - 仕様の受け入れシナリオに基づき、**実装コードより先にテストコードを書く**
 - Rust: `crates/*/tests/` または `#[cfg(test)]` モジュール内にテストを追加
+- Frontend: `crates/gwt/web/__tests__/*.test.mjs` にテストを追加する。**新規テストファイルは `scripts/run-frontend-unit-tests.sh` の実行リストに追記しないと CI で実行されない**
 - テストが RED（失敗）状態であることを確認してから実装に進む
 
 #### 適用除外
@@ -200,17 +201,28 @@
 - `chore:` や `docs:` などリリース対象外のタイプでも必ずプレフィックスを付け、曖昧な自然文だけのコミットメッセージを禁止する。
 - コミット前に commitlint ルール（subject 空欄禁止・100文字以内など）を自己確認し、CI での差し戻しを防止する。
 
-### ローカル検証/実行ルール（Rust）
+### ローカル検証/実行ルール
 
-- このリポジトリのローカル検証・実行は Cargo を使用する
+- このリポジトリのローカル検証・実行は Cargo と repo root の `scripts/` を使用する
 - 現在の checkout で `gwtd` の JSON operation を実行する場合は、タスクまたはセッションの初回実行前に checkout root で `cargo build -p gwt --bin gwtd` を実行し、以後は `<checkout-root>/target/debug/gwtd` を明示的に使用する。`GWT_BIN_PATH` や `PATH` 上のバイナリは、version が一致する場合や checkout より新しい場合も checkout source と同じ実装であることを保証しないため使用しない
 - ビルド: `cargo build -p gwt --bin gwt --bin gwtd`
 - 開発: `cargo run -p gwt --bin gwt`
-- テスト: `cargo test -p gwt-core -p gwt --all-features`
+- Rust テスト: `cargo test -p gwt-core -p gwt --all-features`
+  - `crates/gwt` の `app_runtime/` と `runtime_health_poller.rs` のテストは `--bin gwt`（`src/main.rs`）側に属する。`cargo test -p gwt --lib` だけではこれらのテストが 0 件通過して偽 GREEN になる。完了判定に `--lib` だけを使わず、`cargo test -p gwt --bin gwt --all-features` も実行する
 - Lint: `cargo clippy --all-targets --all-features -- -D warnings`
 - フォーマット: `cargo fmt`
 - GUI のユーザー確認が必要な実装では、ビルド済みなら `target/debug/gwt`、未ビルドなら `cargo run -p gwt --bin gwt` で起動し、標準出力の `gwt browser URL: http://127.0.0.1:<port>/` をユーザーに共有する。共有前に `curl -fsS -I <URL>` などで HTTP 200 を確認し、ユーザーが同じ URL で手動確認できる状態にする。
 - 「デバッグ用サーバーを起動して」等の依頼は **`browser-check` skill**（`.claude/skills/browser-check/SKILL.md`）の手順に従う。production の `GWT.app` や既存 gwt インスタンスの URL を共有せず、この checkout の `target/debug/gwt` を隔離 HOME（fresh home + `~/.gwt/runtime` symlink + credential/`.docker` symlink + `session.json` seed）で `--no-tray --no-open` 起動し、`GWT_BROWSER_URL_FILE` から得た URL を HTTP 200 確認後に共有する。検査完了の連絡を受けたらプロセスを停止する。
+
+#### フロントエンド実行前セットアップ
+
+- リポジトリ root にフロントエンド用の package manifest は置かない。単体テストの依存はスクリプトが一時ディレクトリへ入れる
+- repo root から `bash scripts/run-frontend-unit-tests.sh` を実行する（内部で `node --test`。対象は `crates/gwt/web/__tests__/*.test.mjs`）
+
+#### フロントエンド E2E（Playwright）手順
+
+- Playwright 仕様は `crates/gwt/playwright/` 配下
+- 実行導線は repo root から `bash scripts/run-visual-tests.sh`
 
 ## コミュニケーションガイドライン
 
@@ -274,21 +286,35 @@ AGENTS.md には複製しない（複製ドリフトが SPEC-1935 で問題化�
 
 ## 使用中の技術
 
-- Rust 2021 Edition (stable) + vt100, portable-pty, serde, tokio, axum, wry/tao, xterm.js (GUI terminal)
+- Rust 2021 Edition (stable) の Cargo workspace（12 crate: `crates/gwt`, `crates/gwt-agent`, `crates/gwt-ai`, `crates/gwt-clipboard`, `crates/gwt-config`, `crates/gwt-core`, `crates/gwt-docker`, `crates/gwt-git`, `crates/gwt-github`, `crates/gwt-skills`, `crates/gwt-terminal`, `crates/gwt-voice`）
+- `crates/gwt` は `--bin gwt`（tray 常駐 GUI + axum HTTP/WebSocket サーバー）と `--bin gwtd`（JSON envelope CLI）の二値
+- フロントエンドは `crates/gwt/web/` 配下の素の ES Modules（HTML/JS/CSS、xterm.js）。Svelte / Vite / Tauri は使わない
+- ターミナルは vt100 + portable-pty。設定/IPC は serde, tokio, axum。ホスト event loop は tao + tray-icon
 - GitHub Issue cache、ローカルファイル、Git メタデータ、ChromaDB / multilingual-e5 semantic index
 
 ## プロジェクト構成
 
 ```text
-├── Cargo.toml          # ワークスペース設定
+├── Cargo.toml                 # ワークスペース設定（members は上記 12 crate）
 ├── crates/
-│   ├── gwt/            # GUI フロントエンド + gwtd JSON envelope CLI (WebView GUI)
-│   ├── gwt-core/       # コアライブラリ（coordination / workspace / index など）
-│   ├── gwt-agent/      # エージェント検出・起動・セッション管理
-│   ├── gwt-skills/     # 組込スキル / 管理対象アセット配布
-│   ├── gwt-github/     # GitHub Issue SOT for SPEC 管理 (SPEC-12)
-│   └── ...             # AI / Git / Docker / terminal / config などのドメインクレート
-└── scripts/            # 開発 / 検証 / リリース補助スクリプト
+│   ├── gwt/                   # --bin gwt + --bin gwtd
+│   │   ├── web/               # 素の ES Modules フロントエンド（HTML/JS/CSS）
+│   │   ├── web/__tests__/     # フロントエンド単体テスト（*.test.mjs）
+│   │   └── playwright/        # Playwright E2E / visual specs
+│   ├── gwt-agent/             # エージェント検出・起動・セッション管理
+│   ├── gwt-ai/                # プロバイダ / モデル / usage
+│   ├── gwt-clipboard/         # クリップボード連携
+│   ├── gwt-config/            # 設定
+│   ├── gwt-core/              # コアライブラリ（coordination / workspace / index など）
+│   ├── gwt-docker/            # Docker 起動
+│   ├── gwt-git/               # Git 操作
+│   ├── gwt-github/            # GitHub Issue SOT for SPEC 管理 (SPEC-12)
+│   ├── gwt-skills/            # 組込スキル / 管理対象アセット配布
+│   ├── gwt-terminal/          # PTY / ターミナル
+│   └── gwt-voice/             # 音声入力
+└── scripts/                   # 開発 / 検証 / リリース補助スクリプト
+    ├── run-frontend-unit-tests.sh
+    └── run-visual-tests.sh
 ```
 
 **SPEC 管理**: SPEC は `gwt-spec` ラベル付き GitHub Issue として格納される (#1930 SPEC-12 参照)。
