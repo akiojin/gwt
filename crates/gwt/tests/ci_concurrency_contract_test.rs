@@ -575,6 +575,11 @@ fn the_test_workflow_has_one_gate_job_that_classifies_changed_files() {
         "{TEST_WORKFLOW}: a separate `changes` gate job re-queues the jobs that read it"
     );
     let gate = job(&doc, CHANGES_JOB);
+    assert_eq!(gate["runs-on"].as_str(), Some("ubuntu-slim"));
+    assert_eq!(gate["timeout-minutes"].as_u64(), Some(5));
+    for permission in ["contents", "actions"] {
+        assert_eq!(gate["permissions"][permission].as_str(), Some("read"));
+    }
     assert_eq!(
         gate["permissions"]["pull-requests"].as_str(),
         Some("read"),

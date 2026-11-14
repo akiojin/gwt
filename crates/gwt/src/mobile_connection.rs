@@ -59,6 +59,11 @@ impl HostBinding {
         &self.host_id
     }
 
+    /// Normalized `https://host[:port]` origin of the coordinator.
+    pub(crate) fn coordinator_origin(&self) -> &str {
+        &self.coordinator_origin
+    }
+
     pub fn new(host_id: &str, coordinator_origin: &str) -> io::Result<Self> {
         let host_id = Uuid::parse_str(host_id)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid mobile Host ID"))?;
@@ -805,17 +810,21 @@ impl MobileAuthorization {
         self.challenges.clear();
     }
 
-    /// Explicit PC enable intent for one imported Host/Project. Parsing the
-    /// credential is not registration authentication: the trusted transport
-    /// must authenticate the coordinator before accepting its matching reply.
-    /// Once selected, registered mode cannot fall back to legacy `enable()`.
-    pub fn enable_registered(
+    /// Whether the Host currently accepts mobile access. Registered mode turns
+    /// this on only after an accepted renewal; final effects still check the
+    /// lease, so this is a status read, not an authorization.
+    pub fn is_enabled(&self) -> bool {
+        self.runtime.lock().is_ok_and(|runtime| runtime.enabled)
+    }
+
+    /// Explicit PC enable intent for one imported Host/Project. Disables the
+    /// Host, selects registered mode (no legacy `enable()` fallback) and
+    /// returns the fresh Host epoch the coordinator registration must carry.
+    /// Parsing the credential is not registration authentication.
+    pub fn prepare_registration(
         &mut self,
         credential: &LoadedHostCredential,
-        generation: Uuid,
-        now: Instant,
-        wall: u64,
-    ) -> Result<RegistrationRenewal, AuthorizationError> {
+    ) -> Result<Uuid, AuthorizationError> {
         self.disable();
         let runtime = self
             .runtime
@@ -827,6 +836,35 @@ impl MobileAuthorization {
         };
         if self.host_binding.as_ref() != Some(credential.binding()) {
             return Err(AuthorizationError::WrongPeer);
+        }
+        Ok(runtime.host_epoch)
+    }
+
+    /// Start the lease for the coordinator's registration generation. The
+    /// trusted transport must have authenticated the coordinator. Only the
+    /// still-prepared registration of `host_epoch` qualifies: any disable or
+    /// earlier lease since `prepare_registration` disables and refuses, because
+    /// the coordinator recorded that epoch.
+    pub fn enable_registered(
+        &mut self,
+        credential: &LoadedHostCredential,
+        host_epoch: Uuid,
+        generation: Uuid,
+        now: Instant,
+        wall: u64,
+    ) -> Result<RegistrationRenewal, AuthorizationError> {
+        let binding_matches = self.host_binding.as_ref() == Some(credential.binding());
+        let runtime = self
+            .runtime
+            .get_mut()
+            .map_err(|_| AuthorizationError::Unavailable)?;
+        let prepared = matches!(
+            &runtime.registration,
+            RegistrationMode::Required { project, lease: None } if project == credential.project()
+        );
+        if !(prepared && binding_matches && !runtime.enabled && runtime.host_epoch == host_epoch) {
+            self.disable();
+            return Err(AuthorizationError::StaleSession);
         }
         let mut lease = RegistrationLease::new(generation, credential.expires_at(), now, wall)
             .map_err(AuthorizationError::Registration)?;
@@ -2931,6 +2969,73 @@ mod tests {
         (dir, auth, peer, credential)
     }
 
+    /// Prepare and accept a coordinator generation in one step, as a Host
+    /// actor does when nothing disables it between registration and reply.
+    #[cfg(unix)]
+    trait RegisterNow {
+        fn register_now(
+            &mut self,
+            credential: &crate::mobile_host::credential::LoadedHostCredential,
+            now: Instant,
+            wall: u64,
+        ) -> Result<RegistrationRenewal, AuthorizationError>;
+    }
+
+    #[cfg(unix)]
+    impl RegisterNow for MobileAuthorization {
+        fn register_now(
+            &mut self,
+            credential: &crate::mobile_host::credential::LoadedHostCredential,
+            now: Instant,
+            wall: u64,
+        ) -> Result<RegistrationRenewal, AuthorizationError> {
+            let epoch = self.prepare_registration(credential)?;
+            self.enable_registered(credential, epoch, Uuid::new_v4(), now, wall)
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn registration_lease_starts_only_on_the_prepared_host_epoch() {
+        let (_dir, mut auth, _peer, credential) = registered_fixture();
+        let epoch = auth.prepare_registration(&credential).unwrap();
+        assert_eq!(auth.runtime.lock().unwrap().host_epoch, epoch);
+        assert!(!auth.is_enabled());
+        // A disable between registering and the coordinator reply changes the
+        // epoch the coordinator recorded; that reply must not start a lease.
+        auth.disable();
+        assert_eq!(
+            auth.enable_registered(&credential, epoch, Uuid::new_v4(), Instant::now(), NOW),
+            Err(AuthorizationError::StaleSession)
+        );
+        assert_eq!(
+            auth.poll_registration(Instant::now(), NOW),
+            Err(AuthorizationError::Registration(LeaseError::NotRegistered))
+        );
+
+        let epoch = auth.prepare_registration(&credential).unwrap();
+        let request = auth
+            .enable_registered(&credential, epoch, Uuid::new_v4(), Instant::now(), NOW)
+            .unwrap();
+        auth.accept_registration(
+            request.generation(),
+            request.nonce(),
+            30,
+            Instant::now(),
+            NOW,
+        )
+        .unwrap();
+        assert!(auth.is_enabled());
+        assert_eq!(auth.runtime.lock().unwrap().host_epoch, epoch);
+        // An active lease is not a prepared registration: refuse and disable.
+        assert_eq!(
+            auth.enable_registered(&credential, epoch, Uuid::new_v4(), Instant::now(), NOW),
+            Err(AuthorizationError::StaleSession)
+        );
+        assert!(!auth.is_enabled());
+        assert_ne!(auth.runtime.lock().unwrap().host_epoch, epoch);
+    }
+
     #[test]
     #[cfg(unix)]
     fn registration_poll_checks_pending_and_revokes_idle_native_input() {
@@ -2939,9 +3044,7 @@ mod tests {
         let key = key();
         let device = paired(&mut auth, &key);
         let started = Instant::now();
-        let request = auth
-            .enable_registered(&credential, Uuid::new_v4(), started, NOW)
-            .unwrap();
+        let request = auth.register_now(&credential, started, NOW).unwrap();
         assert_eq!(auth.poll_registration(started, NOW), Ok(None));
         assert_eq!(
             auth.challenge_peer_bound(&device.id, &project(), &peer, NOW)
@@ -2994,7 +3097,7 @@ mod tests {
         let next = auth
             .write()
             .unwrap()
-            .enable_registered(&credential, Uuid::new_v4(), Instant::now(), NOW)
+            .register_now(&credential, Instant::now(), NOW)
             .unwrap();
         auth.write()
             .unwrap()
@@ -3017,9 +3120,7 @@ mod tests {
         let (_dir, mut auth, peer, credential) = registered_fixture();
         let key = key();
         let device = paired(&mut auth, &key);
-        let request = auth
-            .enable_registered(&credential, Uuid::new_v4(), Instant::now(), NOW)
-            .unwrap();
+        let request = auth.register_now(&credential, Instant::now(), NOW).unwrap();
         auth.enable();
         assert_eq!(
             auth.challenge_peer_bound(&device.id, &project(), &peer, NOW)
@@ -3128,7 +3229,7 @@ mod tests {
         let next = auth
             .write()
             .unwrap()
-            .enable_registered(&credential, Uuid::new_v4(), Instant::now(), NOW)
+            .register_now(&credential, Instant::now(), NOW)
             .unwrap();
         auth.write()
             .unwrap()
@@ -3151,9 +3252,7 @@ mod tests {
         let (_dir, mut auth, peer, credential) = registered_fixture();
         let key = key();
         let device = paired(&mut auth, &key);
-        let request = auth
-            .enable_registered(&credential, Uuid::new_v4(), Instant::now(), NOW)
-            .unwrap();
+        let request = auth.register_now(&credential, Instant::now(), NOW).unwrap();
         auth.accept_registration(
             request.generation(),
             request.nonce(),
@@ -3191,7 +3290,7 @@ mod tests {
         let request = auth
             .write()
             .unwrap()
-            .enable_registered(&credential, Uuid::new_v4(), Instant::now(), NOW)
+            .register_now(&credential, Instant::now(), NOW)
             .unwrap();
         auth.write()
             .unwrap()
@@ -3224,7 +3323,7 @@ mod tests {
         let request = auth
             .write()
             .unwrap()
-            .enable_registered(&credential, Uuid::new_v4(), Instant::now(), NOW)
+            .register_now(&credential, Instant::now(), NOW)
             .unwrap();
         auth.write()
             .unwrap()
@@ -3288,16 +3387,11 @@ mod tests {
         assert!(auth
             .write()
             .unwrap()
-            .enable_registered(
-                &credential,
-                Uuid::new_v4(),
-                Instant::now(),
-                credential.expires_at()
-            )
+            .register_now(&credential, Instant::now(), credential.expires_at())
             .is_err());
         let (mut foreign, _) = bound_authority();
         assert_eq!(
-            foreign.enable_registered(&credential, Uuid::new_v4(), Instant::now(), NOW),
+            foreign.register_now(&credential, Instant::now(), NOW),
             Err(AuthorizationError::WrongPeer)
         );
         foreign.enable();

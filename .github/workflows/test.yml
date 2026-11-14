@@ -29,7 +29,9 @@ concurrency:
 jobs:
   source-sync:
     name: Classify CI synchronization
-    runs-on: ubuntu-latest
+    # The lightweight gate needs only Git, Python and gh, all in ubuntu-slim.
+    # Keep compilation jobs on their existing runners; concurrency is shared.
+    runs-on: ubuntu-slim
     timeout-minutes: 5
     permissions:
       contents: read
@@ -511,8 +513,12 @@ jobs:
       - name: Install runtime deps
         run: |
           python -m pip install --upgrade pip
+          # This runner has no GPU; avoid PyPI torch's unused CUDA dependencies.
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install -r crates/gwt-core/runtime/project_index_requirements.txt
           pip install pytest
+          pip check
+          python -c "import torch; print('torch:', torch.__version__, 'CUDA:', torch.version.cuda); assert torch.version.cuda is None"
       - name: Run Phase 8 runner tests
         env:
           GWT_INDEX_FAKE_EMBEDDING: "1"

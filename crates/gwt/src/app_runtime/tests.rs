@@ -3672,6 +3672,24 @@ fn issue_monitor_final_spawn_preserves_live_wait_and_exempts_review() {
         }
         let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
         gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("save wait");
+        let host_pid = std::process::id();
+        let host_started_at = gwt::process::host_process_start_time(host_pid).unwrap();
+        let host_key = format!("{host_pid}:{host_started_at}");
+        owner_fixture_block_on(async {
+            // test-hygiene: allow-wall-clock-deadline Observe the initial census before comparing all preference fields; the owner publishes it independently of launch admission.
+            tokio::time::timeout(Duration::from_secs(30), async {
+                loop {
+                    let prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+                    if let Some(census) = prefs.monitor_runtime_counts.get(&host_key) {
+                        assert!(census.counts.is_empty() && census.windows.is_empty());
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("initial host census must precede the preference baseline");
+        });
         let prefs_before = fs::read(&prefs_path).expect("prefs before admission");
         let mut prefs_before_typed = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
         let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::ClaudeCode)

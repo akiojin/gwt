@@ -218,6 +218,13 @@ mod tests {
         ConfigError, CredentialError, TlsError,
     };
     use super::*;
+    use crate::{
+        mobile_connection::{HostBinding, MobileAuthorization},
+        mobile_host::{
+            credential::{load_host_credential, LoadedHostCredential},
+            registration_client::{run_registration, RegistrationClientError},
+        },
+    };
     use gwt_core::repo_hash::ProjectKey;
     use rustls::pki_types::ServerName;
     use serde_json::json;
@@ -333,20 +340,48 @@ mod tests {
                 .unwrap()
         }
 
+        fn client_config(&self) -> Arc<rustls::ClientConfig> {
+            Arc::new(
+                rustls::ClientConfig::builder_with_provider(Arc::new(
+                    rustls::crypto::ring::default_provider(),
+                ))
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_root_certificates(self.roots.clone())
+                .with_no_client_auth(),
+            )
+        }
+
+        /// Issue a Host credential at trusted `wall` and load it as the PC does.
+        fn issue_credential(&self, wall: u64) -> (LoadedHostCredential, HostBinding) {
+            let mut store = CoordinatorStore::open(&self.directory, wall).unwrap();
+            let project = ProjectKey::parse(PROJECT).unwrap();
+            let issued = store
+                .issue(
+                    "https://coordinator.example",
+                    Uuid::new_v4(),
+                    std::slice::from_ref(&project),
+                    wall + 3_600,
+                    wall,
+                )
+                .unwrap();
+            drop(store);
+            let binding = HostBinding::new(
+                &issued.identity.host_id.to_string(),
+                "https://coordinator.example",
+            )
+            .unwrap();
+            let credential = load_host_credential(&issued.path, &binding, &project, wall).unwrap();
+            (credential, binding)
+        }
+
         async fn connect(
             &self,
             addr: SocketAddr,
         ) -> BufReader<tokio_rustls::client::TlsStream<TcpStream>> {
-            let client = rustls::ClientConfig::builder_with_provider(Arc::new(
-                rustls::crypto::ring::default_provider(),
-            ))
-            .with_safe_default_protocol_versions()
-            .unwrap()
-            .with_root_certificates(self.roots.clone())
-            .with_no_client_auth();
             let tcp = TcpStream::connect(addr).await.unwrap();
             let tls = bounded(
-                tokio_rustls::TlsConnector::from(Arc::new(client))
+                tokio_rustls::TlsConnector::from(self.client_config())
                     .connect(ServerName::try_from("coordinator.example").unwrap(), tcp),
             )
             .await
@@ -908,6 +943,104 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn host_registration_registers_invites_and_reports_recoverable_rejections() {
+        use futures_util::{SinkExt as _, StreamExt as _};
+        use tokio_tungstenite::tungstenite::Message;
+        let mut fixture = Fixture::new();
+        let wall = real_wall();
+        let valid = fixture.issue_token(wall);
+        let server = fixture.start_at(wall).await;
+        let addr = server.local_addr().unwrap();
+        let sessions = Arc::clone(&server.sessions);
+        let (shutdown, signal) = oneshot::channel();
+        let task = tokio::spawn(server.serve_until(async move {
+            let _ = signal.await;
+        }));
+        let auth = [("authorization", format!("Bearer {valid}"))];
+        let invite = |generation: Uuid, nonce: Uuid, byte: u8, ttl: u64| {
+            json!({"type":"register_invite","generation":generation,"nonce":nonce,
+                "secret":format!("{byte:02x}").repeat(32),"ttl_secs":ttl})
+            .to_string()
+        };
+
+        let mut socket = open_host(&fixture, addr, &auth).await.unwrap();
+        let registered = next_json(&mut socket).await;
+        let generation: Uuid = serde_json::from_value(registered["generation"].clone()).unwrap();
+        let mut exchange = async |text: String| {
+            bounded(socket.send(Message::text(text))).await.unwrap();
+            next_json(&mut socket).await
+        };
+        let nonce = Uuid::new_v4();
+        assert_eq!(
+            exchange(invite(generation, nonce, 1, 300)).await,
+            json!({"type":"invite_registered","generation":generation,"nonce":nonce})
+        );
+        // Recoverable rejections answer the same nonce and keep the registration.
+        for (byte, ttl, reason) in [
+            (1, 300, "already_registered"),
+            (2, 0, "invalid_ttl"),
+            (2, 301, "invalid_ttl"),
+        ] {
+            let nonce = Uuid::new_v4();
+            assert_eq!(
+                exchange(invite(generation, nonce, byte, ttl)).await,
+                json!({"type":"invite_rejected","generation":generation,"nonce":nonce,
+                    "reason":reason})
+            );
+        }
+        for byte in 2..=8 {
+            assert_eq!(
+                exchange(invite(generation, Uuid::new_v4(), byte, 60)).await["type"],
+                "invite_registered"
+            );
+        }
+        assert_eq!(
+            exchange(invite(generation, Uuid::new_v4(), 9, 60)).await["reason"],
+            "host_capacity"
+        );
+        let nonce = Uuid::new_v4();
+        let renewed =
+            exchange(json!({"type":"renew","generation":generation,"nonce":nonce}).to_string())
+                .await;
+        assert_eq!(
+            (&renewed["type"], &renewed["nonce"]),
+            (&json!("renewed"), &json!(nonce))
+        );
+        assert_eq!(live(&sessions), 1);
+        bounded(socket.close(None)).await.unwrap();
+        wait_until_closed(&sessions).await;
+
+        // A foreign generation or an unborrowable (escaped) secret closes it.
+        let foreign = |_: Uuid| invite(Uuid::new_v4(), Uuid::new_v4(), 0x10, 60);
+        let escaped = |generation: Uuid| {
+            invite(generation, Uuid::new_v4(), 0xab, 60).replacen(
+                "\"secret\":\"ab",
+                "\"secret\":\"\\u0061b",
+                1,
+            )
+        };
+        let cases: [&dyn Fn(Uuid) -> String; 2] = [&foreign, &escaped];
+        for case in cases {
+            let mut socket = open_host(&fixture, addr, &auth).await.unwrap();
+            let registered = next_json(&mut socket).await;
+            let generation: Uuid =
+                serde_json::from_value(registered["generation"].clone()).unwrap();
+            assert_eq!(live(&sessions), 1);
+            bounded(socket.send(Message::text(case(generation))))
+                .await
+                .unwrap();
+            assert!(matches!(
+                bounded(socket.next()).await,
+                None | Some(Err(_)) | Some(Ok(Message::Close(_)))
+            ));
+            wait_until_closed(&sessions).await;
+        }
+
+        shutdown.send(()).unwrap();
+        bounded(task).await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
     async fn shutdown_closes_open_host_registrations_and_releases_the_registry() {
         use futures_util::StreamExt as _;
         let mut fixture = Fixture::new();
@@ -937,5 +1070,114 @@ mod tests {
         ));
         drop(sessions);
         drop(CoordinatorStore::open(&fixture.directory, real_wall()).unwrap());
+    }
+
+    #[tokio::test]
+    async fn host_client_registers_through_its_authority_and_disables_on_every_exit() {
+        use std::sync::RwLock;
+        use tokio::sync::watch;
+        let mut fixture = Fixture::new();
+        let wall = real_wall();
+        let (credential, binding) = fixture.issue_credential(wall);
+        let (unknown, unknown_binding) = Fixture::new().issue_credential(wall);
+        let server = fixture.start_at(wall).await;
+        let addr = server.local_addr().unwrap();
+        let sessions = Arc::clone(&server.sessions);
+        let (shutdown, signal) = oneshot::channel();
+        let task = tokio::spawn(server.serve_until(async move {
+            let _ = signal.await;
+        }));
+        let devices = fixture.home.join("devices.json");
+        let authority = |binding: &HostBinding| {
+            Arc::new(RwLock::new(
+                MobileAuthorization::load_bound(&devices, binding).unwrap(),
+            ))
+        };
+        let credential = Arc::new(credential);
+        let spawn = |authority: Arc<RwLock<MobileAuthorization>>,
+                     credential: Arc<LoadedHostCredential>,
+                     stopping: watch::Receiver<bool>| {
+            let tls = fixture.client_config();
+            tokio::spawn(async move {
+                let tcp = TcpStream::connect(addr).await.unwrap();
+                run_registration(authority, &credential, tls, tcp, stopping).await
+            })
+        };
+        let enabled = |authority: &Arc<RwLock<MobileAuthorization>>| {
+            let authority = Arc::clone(authority);
+            bounded(async move {
+                while !authority.read().unwrap().is_enabled() {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            })
+        };
+
+        // A credential this coordinator never issued gets no lease.
+        let (_stop, stopping) = watch::channel(false);
+        let foreign = authority(&unknown_binding);
+        let result = bounded(spawn(Arc::clone(&foreign), Arc::new(unknown), stopping))
+            .await
+            .unwrap();
+        assert!(
+            matches!(result, Err(RegistrationClientError::Rejected(401))),
+            "{result:?}"
+        );
+        assert!(!foreign.read().unwrap().is_enabled());
+        assert_eq!(live(&sessions), 0);
+
+        // A coordinator outside the caller's trust roots never sees the bearer.
+        let (_stop, stopping) = watch::channel(false);
+        let untrusted = authority(&binding);
+        let result = bounded({
+            let authority = Arc::clone(&untrusted);
+            let credential = Arc::clone(&credential);
+            let tls = Arc::new(
+                rustls::ClientConfig::builder_with_provider(Arc::new(
+                    rustls::crypto::ring::default_provider(),
+                ))
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_root_certificates(rustls::RootCertStore::empty())
+                .with_no_client_auth(),
+            );
+            tokio::spawn(async move {
+                let tcp = TcpStream::connect(addr).await.unwrap();
+                run_registration(authority, &credential, tls, tcp, stopping).await
+            })
+        })
+        .await
+        .unwrap();
+        assert!(
+            matches!(result, Err(RegistrationClientError::Connect)),
+            "{result:?}"
+        );
+        assert!(!untrusted.read().unwrap().is_enabled());
+        assert_eq!(live(&sessions), 0);
+
+        // Registration plus the first renewal round trip enables the Host;
+        // an explicit PC stop disables it and logically closes the registration.
+        let (stop, stopping) = watch::channel(false);
+        let host = authority(&binding);
+        let client = spawn(Arc::clone(&host), Arc::clone(&credential), stopping);
+        enabled(&host).await;
+        assert_eq!(live(&sessions), 1);
+        stop.send(true).unwrap();
+        assert!(matches!(bounded(client).await.unwrap(), Ok(())));
+        assert!(!host.read().unwrap().is_enabled());
+        wait_until_closed(&sessions).await;
+
+        // Losing the coordinator also disables the Host with an error.
+        let (_stop, stopping) = watch::channel(false);
+        let host = authority(&binding);
+        let client = spawn(Arc::clone(&host), credential, stopping);
+        enabled(&host).await;
+        shutdown.send(()).unwrap();
+        bounded(task).await.unwrap().unwrap();
+        let result = bounded(client).await.unwrap();
+        assert!(
+            matches!(result, Err(RegistrationClientError::Closed)),
+            "{result:?}"
+        );
+        assert!(!host.read().unwrap().is_enabled());
     }
 }
