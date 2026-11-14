@@ -19,6 +19,11 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 const MAX_REGISTRATIONS: usize = 64;
+/// One Host cannot hold the whole gate. Matches the per-Host pending invite
+/// cap, and leaves room for a restarted Host while its old leases expire.
+/// Counted by host_id, so registrations of a rotated-away credential keep
+/// counting until their next check or lease expiry (at most 30 seconds).
+const MAX_REGISTRATIONS_PER_HOST: usize = 8;
 const LEASE_SECS: u64 = 30;
 
 #[derive(Debug, thiserror::Error)]
@@ -29,7 +34,7 @@ pub enum RegistrationError {
         "registration is foreign, closed or expired; authenticate a fresh registration and invite"
     )]
     DeadRegistration,
-    #[error("64 live registrations are retained; close one or wait for its lease before authenticating again")]
+    #[error("live registrations are full (64 in total or 8 per Host); close one or wait for its lease before authenticating again")]
     Capacity,
     #[error("trusted registration clock moved backwards or is unavailable; repair the clock and explicitly reopen the store and gate")]
     ClockRollback,
@@ -111,7 +116,13 @@ impl CoordinatorSessions {
                 .map_err(StoreError::from)
         });
         let expiry = result.map_err(|error| self.auth_error(error, now))?;
-        if self.registrations.len() >= MAX_REGISTRATIONS {
+        let same_host = self
+            .registrations
+            .iter()
+            .filter(|r| r.identity.host_id == identity.host_id)
+            .count();
+        if self.registrations.len() >= MAX_REGISTRATIONS || same_host >= MAX_REGISTRATIONS_PER_HOST
+        {
             return Err(RegistrationError::Capacity);
         }
         let generation = Uuid::new_v4();
@@ -754,22 +765,75 @@ mod tests {
             .unwrap();
     }
 
+    /// Issue another Host's credential into the same store, for multi-Host tests.
+    fn other_host(sessions: &mut CoordinatorSessions, expiry: u64) -> LoadedHostCredential {
+        let project = ProjectKey::parse("0123456789abcdef").unwrap();
+        let issued = sessions
+            .store
+            .issue(
+                "https://mobile.example",
+                Uuid::new_v4(),
+                std::slice::from_ref(&project),
+                expiry,
+                100,
+            )
+            .unwrap();
+        let binding = HostBinding::new(
+            &issued.identity.host_id.to_string(),
+            "https://mobile.example",
+        )
+        .unwrap();
+        load_host_credential(&issued.path, &binding, &project, 100).unwrap()
+    }
+
+    fn try_register(
+        sessions: &mut CoordinatorSessions,
+        credential: &LoadedHostCredential,
+        now: Instant,
+    ) -> Result<RegistrationHandle, RegistrationError> {
+        sessions.register(
+            credential.identity(),
+            credential.project(),
+            credential.secret_bytes(),
+            Uuid::new_v4(),
+            now,
+            100,
+        )
+    }
+
     #[test]
-    fn registration_capacity_recovers_by_close_and_expiry() {
+    fn one_host_cannot_hold_more_than_its_registration_share() {
         let (_directory, mut sessions, credential) = fixture(200);
+        let other = other_host(&mut sessions, 200);
         let now = sessions.last_instant;
-        let handles: Vec<_> = (0..64)
+        let handles: Vec<_> = (0..8)
             .map(|_| register(&mut sessions, &credential, now, 100))
             .collect();
         assert!(matches!(
-            sessions.register(
-                credential.identity(),
-                credential.project(),
-                credential.secret_bytes(),
-                Uuid::new_v4(),
-                now,
-                100
-            ),
+            try_register(&mut sessions, &credential, now),
+            Err(RegistrationError::Capacity)
+        ));
+        register(&mut sessions, &other, now, 100);
+        sessions.close(&handles[0], now, 100).unwrap();
+        register(&mut sessions, &credential, now, 100);
+        assert_eq!(sessions.live_registrations(), 9);
+    }
+
+    #[test]
+    fn registration_capacity_recovers_by_close_and_expiry() {
+        let (_directory, mut sessions, credential) = fixture(200);
+        let hosts: Vec<_> = (0..7).map(|_| other_host(&mut sessions, 200)).collect();
+        let now = sessions.last_instant;
+        let mut handles = Vec::new();
+        for host in std::iter::once(&credential).chain(&hosts) {
+            for _ in 0..8 {
+                handles.push(register(&mut sessions, host, now, 100));
+            }
+        }
+        assert_eq!(handles.len(), 64);
+        let spare = other_host(&mut sessions, 200);
+        assert!(matches!(
+            try_register(&mut sessions, &spare, now),
             Err(RegistrationError::Capacity)
         ));
         sessions.close(&handles[0], now, 100).unwrap();
