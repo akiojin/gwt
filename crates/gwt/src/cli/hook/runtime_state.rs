@@ -158,6 +158,13 @@ fn sync_agent_session_id(
     )
 }
 
+fn agent_session_id_needs_sync(
+    session: Option<&Session>,
+    agent_session_id: &HookSessionId,
+) -> bool {
+    session.and_then(Session::exact_resume_session_id) != Some(agent_session_id.as_str())
+}
+
 fn validated_hook_agent_session_id(
     event: &str,
     gwt_session_id: &GwtSessionId,
@@ -226,8 +233,17 @@ pub fn handle(event: &str) -> Result<(), HookError> {
 }
 
 pub fn handle_with_input(event: &str, input: &str) -> Result<(), HookError> {
+    handle_with_input_prepared(event, input).map(|_| ())
+}
+
+/// Handle one runtime-state event and return the Session already loaded and
+/// advanced by this hook so aggregate prompt handlers can reuse it.
+pub(crate) fn handle_with_input_prepared(
+    event: &str,
+    input: &str,
+) -> Result<Option<Session>, HookError> {
     let Some(runtime_path) = std::env::var_os(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV) else {
-        return Ok(());
+        return Ok(None);
     };
     let runtime_path = PathBuf::from(runtime_path);
     let hook_event = if input.trim().is_empty() {
@@ -237,24 +253,31 @@ pub fn handle_with_input(event: &str, input: &str) -> Result<(), HookError> {
     };
     let sessions_dir = sessions_dir_for_runtime_path(&runtime_path);
     let gwt_session_id = GwtSessionId::required_from_env(event)?;
-    let session = current_session_for_id(&sessions_dir, &gwt_session_id);
+    let mut session = current_session_for_id(&sessions_dir, &gwt_session_id);
     let agent_session_id = validated_hook_agent_session_id(
         event,
         &gwt_session_id,
         session.as_ref(),
         hook_event.as_ref(),
     )?;
-    if let Some(agent_session_id) = agent_session_id.as_ref() {
+    if let Some(agent_session_id) = agent_session_id
+        .as_ref()
+        .filter(|agent_session_id| agent_session_id_needs_sync(session.as_ref(), agent_session_id))
+    {
         if let Err(error) = sync_agent_session_id(&sessions_dir, &gwt_session_id, agent_session_id)
         {
             log_session_metadata_error("sync agent_session_id for", &gwt_session_id, &error);
         }
     }
     if session.is_some() {
-        if let Err(error) =
-            gwt_agent::persist_session_hook_event(&sessions_dir, gwt_session_id.as_str(), event)
-        {
-            log_session_metadata_error("record hook event for", &gwt_session_id, &error);
+        match gwt_agent::update_session(&sessions_dir, gwt_session_id.as_str(), |session| {
+            session.record_hook_event(event);
+            Ok(())
+        }) {
+            Ok(updated) => session = Some(updated),
+            Err(error) => {
+                log_session_metadata_error("record hook event for", &gwt_session_id, &error);
+            }
         }
     }
 
@@ -263,7 +286,8 @@ pub fn handle_with_input(event: &str, input: &str) -> Result<(), HookError> {
             .ok()
             .flatten()
     });
-    write_for_event_with_pending_discussion(&runtime_path, event, pending_discussion)
+    write_for_event_with_pending_discussion(&runtime_path, event, pending_discussion)?;
+    Ok(session)
 }
 
 pub(crate) fn session_start_agent_session_diagnostic(input: &str) -> Option<String> {
@@ -706,6 +730,36 @@ mod tests {
 
         let loaded = Session::load(&sessions_dir.join(format!("{session_id}.toml"))).unwrap();
         assert_eq!(loaded.agent_session_id.as_deref(), Some("agent-123"));
+    }
+
+    #[test]
+    fn prepared_runtime_state_returns_the_updated_session_for_prompt_reuse() {
+        let _lock = env_lock();
+        let mut env = EnvGuard::new();
+        env.unset("CODEX_THREAD_ID");
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_dir = dir.path().join(".gwt").join("sessions");
+        let session = Session::new(dir.path(), "feature/prepared", AgentId::Codex);
+        let session_id = session.id.clone();
+        session.save(&sessions_dir).unwrap();
+        let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &session_id);
+        env.set(GWT_SESSION_ID_ENV, session_id.clone());
+        env.set(
+            gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV,
+            runtime_path.as_os_str(),
+        );
+
+        let prepared =
+            handle_with_input_prepared("UserPromptSubmit", r#"{"session_id":"agent-prepared"}"#)
+                .expect("runtime state")
+                .expect("prepared Session");
+
+        assert_eq!(prepared.id, session_id);
+        assert_eq!(prepared.exact_resume_session_id(), Some("agent-prepared"));
+        assert_eq!(
+            prepared.last_hook_event.as_deref(),
+            Some("UserPromptSubmit")
+        );
     }
 
     #[test]

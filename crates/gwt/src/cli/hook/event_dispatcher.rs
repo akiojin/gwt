@@ -16,20 +16,49 @@ use super::{
 };
 use crate::discussion_resume::{load_pending_goal, PendingDiscussionGoal};
 
+pub(super) const USER_PROMPT_SUBMIT_HOOK_DEADLINE: std::time::Duration =
+    std::time::Duration::from_millis(200);
+
 pub fn handle_with_input(
     event: &str,
     input: &str,
     worktree_root: &Path,
     current_session: Option<&str>,
 ) -> Result<HookOutput, HookError> {
-    match event {
+    let started = Instant::now();
+    diagnostics::begin_event();
+    let _deadline = enter_event_deadline(event, started);
+    let result = match event {
         "SessionStart" => handle_session_start(event, input, worktree_root),
         "UserPromptSubmit" => handle_user_prompt_submit(event, input, worktree_root),
         "PreToolUse" => handle_pre_tool_use(event, input),
         "PostToolUse" => handle_post_tool_use(event, input),
         "Stop" => handle_stop(event, input, worktree_root, current_session),
         other => Err(HookError::InvalidEvent(other.to_string())),
-    }
+    };
+    let additional_context_bytes = result
+        .as_ref()
+        .ok()
+        .map(additional_context_bytes)
+        .unwrap_or_default();
+    diagnostics::record_event_total(
+        event,
+        started.elapsed(),
+        if result.is_ok() { "ok" } else { "error" },
+        diagnostics::event_metrics(additional_context_bytes),
+    );
+    result
+}
+
+fn enter_event_deadline(
+    event: &str,
+    started: Instant,
+) -> Option<gwt_core::operation_deadline::ScopedOperationDeadline> {
+    (event == "UserPromptSubmit").then(|| {
+        gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            started + USER_PROMPT_SUBMIT_HOOK_DEADLINE,
+        )
+    })
 }
 
 fn handle_session_start(
@@ -75,7 +104,7 @@ fn handle_session_start(
         autonomous_decision_policy_context(),
     );
     let pending_goal = run_value(event, "discussion-goal-start", || {
-        load_pending_goal_for_hook_worktree(worktree_root)
+        load_pending_goal_for_hook_worktree(worktree_root, None)
     });
     Ok(append_pending_discussion_goal_context(
         output,
@@ -99,35 +128,54 @@ fn handle_user_prompt_submit(
     input: &str,
     worktree_root: &Path,
 ) -> Result<HookOutput, HookError> {
-    run_step(event, "runtime-state", || {
-        crate::daemon_runtime::handle_runtime_state(event, input)
-    })?;
-    run_step(event, "forward", || {
-        crate::daemon_runtime::handle_forward(input)
+    let prepared_session = run_step(event, "runtime-state", || {
+        crate::daemon_runtime::handle_runtime_state_prepared(event, input)
     })?;
     run_value(event, "pm-delivery-ack", || {
-        pm_loop_stop_check::handle_delivery_acknowledgement(worktree_root, input);
+        pm_loop_stop_check::handle_delivery_acknowledgement(
+            prepared_session
+                .as_ref()
+                .map(|session| session.worktree_path.as_path())
+                .unwrap_or(worktree_root),
+            input,
+        );
     });
     // SPEC-2359 Phase W-11 (US-58): the workspace-identity step no longer
     // derives a title from the prompt; it only performs the Phase W-10
     // canonical Project State split repair. Fail-open so a repair error does
     // not abort prompt handling.
     run_value(event, "workspace-identity", || {
-        if let Err(error) = workspace_identity::handle_user_prompt_submit(input) {
+        let result = prepared_session
+            .as_ref()
+            .map(workspace_identity::handle_user_prompt_submit_for_session)
+            .unwrap_or_else(|| workspace_identity::handle_user_prompt_submit(input));
+        if let Err(error) = result {
             tracing::warn!(?error, "workspace-identity hook step failed");
         }
     });
     // SPEC-3248 P11 (T-240 core): producing prompts in execution lanes arm
     // typed action obligations. Fail-open state writer.
     run_value(event, "action-obligation-record", || {
-        action_obligation_stop_check::handle_user_prompt_submit(worktree_root, input);
+        if let Some(session) = prepared_session.as_ref() {
+            action_obligation_stop_check::handle_user_prompt_submit_for_session(session, input);
+        } else {
+            action_obligation_stop_check::handle_user_prompt_submit(worktree_root, input);
+        }
     });
     // SPEC-3431 FR-012: user contact re-arms the PM's resident-loop budget.
     run_value(event, "pm-loop-reset", || {
-        pm_loop_stop_check::handle_user_prompt_submit(worktree_root);
+        pm_loop_stop_check::handle_user_prompt_submit(
+            prepared_session
+                .as_ref()
+                .map(|session| session.worktree_path.as_path())
+                .unwrap_or(worktree_root),
+        );
     });
     let output = run_step(event, "board-reminder", || {
-        board_reminder::handle_with_input(event, input)
+        prepared_session
+            .as_ref()
+            .map(|session| board_reminder::handle_with_input_for_session(event, input, session))
+            .unwrap_or_else(|| board_reminder::handle_with_input(event, input))
     })?;
     let output = append_additional_context(
         output,
@@ -135,7 +183,7 @@ fn handle_user_prompt_submit(
         autonomous_decision_policy_context(),
     );
     let pending_goal = run_value(event, "discussion-goal-start", || {
-        load_pending_goal_for_hook_worktree(worktree_root)
+        load_pending_goal_for_hook_worktree(worktree_root, prepared_session.as_ref())
     });
     Ok(append_pending_discussion_goal_context(
         output,
@@ -316,7 +364,23 @@ fn run_value<T>(event: &str, handler: &str, operation: impl FnOnce() -> T) -> T 
     value
 }
 
-fn load_pending_goal_for_hook_worktree(worktree_root: &Path) -> Option<PendingDiscussionGoal> {
+fn additional_context_bytes(output: &HookOutput) -> usize {
+    match output {
+        HookOutput::HookSpecificAdditionalContext { text, .. } => text.len(),
+        HookOutput::PreToolUsePermission { .. }
+        | HookOutput::SystemMessage(_)
+        | HookOutput::Silent
+        | HookOutput::StopBlock { .. } => 0,
+    }
+}
+
+fn load_pending_goal_for_hook_worktree(
+    worktree_root: &Path,
+    prepared_session: Option<&gwt_agent::Session>,
+) -> Option<PendingDiscussionGoal> {
+    if let Some(session) = prepared_session {
+        return load_pending_goal(&session.worktree_path).ok().flatten();
+    }
     let resolved_worktree_root = gwt_core::paths::resolve_current_worktree_root(worktree_root);
     load_pending_goal(&resolved_worktree_root).ok().flatten()
 }
@@ -377,6 +441,60 @@ mod tests {
     use crate::discussion_resume::PendingDiscussionGoal;
     use gwt_agent::{AgentId, Session, GWT_SESSION_ID_ENV, GWT_SESSION_RUNTIME_PATH_ENV};
     use gwt_core::test_support::ScopedEnvVar;
+    use std::time::Duration;
+
+    #[test]
+    fn user_prompt_submit_installs_an_aggregate_deadline_below_250_ms() {
+        let started = Instant::now();
+        let _deadline = enter_event_deadline("UserPromptSubmit", started)
+            .expect("UserPromptSubmit must install an aggregate deadline");
+        let expires_at = gwt_core::operation_deadline::current()
+            .expect("aggregate deadline must be visible to nested operations");
+
+        assert!(expires_at > started);
+        assert!(
+            expires_at <= started + Duration::from_millis(250),
+            "UserPromptSubmit aggregate deadline exceeded 250ms: {:?}",
+            expires_at.duration_since(started)
+        );
+    }
+
+    #[test]
+    fn consumerless_user_prompt_submit_has_no_forward_step() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let profile = home.path().join("profile.jsonl");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _profile = ScopedEnvVar::set("GWT_HOOK_PROFILE_PATH", &profile);
+        let _session_id = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+        let _runtime_path = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+        let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+        let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+
+        handle_with_input("UserPromptSubmit", "{}", home.path(), None).expect("prompt hook");
+
+        let records = std::fs::read_to_string(profile).expect("profile records");
+        let handlers: Vec<_> = records
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .filter_map(|record| record["handler"].as_str().map(str::to_string))
+            .collect();
+        assert_eq!(
+            handlers
+                .iter()
+                .filter(|handler| handler.as_str() == "runtime-state")
+                .count(),
+            1,
+            "RuntimeState owner must remain exactly once: {handlers:?}"
+        );
+        assert!(
+            !handlers.iter().any(|handler| handler == "forward"),
+            "UserPromptSubmit has no Forward consumer; duplicate step must be absent: {handlers:?}"
+        );
+    }
 
     fn write_pending_goal(worktree: &Path) {
         let discussion_path = worktree.join(".gwt/discussion.md");

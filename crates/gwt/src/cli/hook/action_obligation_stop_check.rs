@@ -21,14 +21,6 @@ use crate::cli::action_obligation;
 /// missing or unparsable prompt arms nothing — unclassifiable input must not
 /// over-block (conservative bias).
 pub fn handle_user_prompt_submit(worktree: &Path, input: &str) {
-    // SPEC-3431 FR-064: the resident PM cannot settle a producing obligation.
-    // Every settlement path (all-passing `verify.run`, `pr.*`) requires
-    // production artifacts the PM's contract forbids it from creating, so
-    // arming one leaves it blocked at Stop with no exit but a false
-    // `execution.blocked`. Never arm rather than block-then-excuse.
-    if super::is_resident_pm_worktree(worktree) {
-        return;
-    }
     let resolved = gwt_core::paths::resolve_current_worktree_root(worktree);
     let Some(session_id) = std::env::var(gwt_agent::GWT_SESSION_ID_ENV)
         .ok()
@@ -37,6 +29,24 @@ pub fn handle_user_prompt_submit(worktree: &Path, input: &str) {
     else {
         return;
     };
+    handle_user_prompt_submit_for_resolved_session(&resolved, &session_id, input);
+}
+
+/// Prepared-Session entry: the dispatcher already owns the canonical
+/// worktree and Session identity, so the prompt path must not rediscover Git.
+pub(crate) fn handle_user_prompt_submit_for_session(session: &gwt_agent::Session, input: &str) {
+    handle_user_prompt_submit_for_resolved_session(&session.worktree_path, &session.id, input);
+}
+
+fn handle_user_prompt_submit_for_resolved_session(worktree: &Path, session_id: &str, input: &str) {
+    // SPEC-3431 FR-064: the resident PM cannot settle a producing obligation.
+    // Every settlement path (all-passing `verify.run`, `pr.*`) requires
+    // production artifacts the PM's contract forbids it from creating, so
+    // arming one leaves it blocked at Stop with no exit but a false
+    // `execution.blocked`. Never arm rather than block-then-excuse.
+    if super::is_resident_pm_worktree(worktree) {
+        return;
+    }
     let Some(prompt) = serde_json::from_str::<serde_json::Value>(input)
         .ok()
         .and_then(|value| {
@@ -48,7 +58,7 @@ pub fn handle_user_prompt_submit(worktree: &Path, input: &str) {
     else {
         return;
     };
-    if let Err(error) = action_obligation::mark_from_prompt(&resolved, &session_id, &prompt) {
+    if let Err(error) = action_obligation::mark_from_prompt(worktree, session_id, &prompt) {
         tracing::warn!(?error, "action obligation arming failed");
     }
 }

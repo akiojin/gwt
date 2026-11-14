@@ -701,19 +701,26 @@ fn send_terminalization_via_agent_bridge(
 }
 
 pub fn handle_runtime_state(event: &str, input: &str) -> Result<(), HookError> {
+    handle_runtime_state_prepared(event, input).map(|_| ())
+}
+
+pub(crate) fn handle_runtime_state_prepared(
+    event: &str,
+    input: &str,
+) -> Result<Option<Session>, HookError> {
     if std::env::var_os(GWT_SESSION_RUNTIME_PATH_ENV).is_none() {
-        return Ok(());
+        return Ok(None);
     }
-    runtime_state::handle_with_input(event, input)?;
+    let session = runtime_state::handle_with_input_prepared(event, input)?;
     emit_live_event_fail_open(RuntimeHookEvent::from_hook(
         RuntimeHookEventKind::RuntimeState,
         Some(event),
         runtime_state::status_for_event(event).map(str::to_string),
         None,
-        current_session_from_env(),
+        session.clone(),
         parse_hook_event_best_effort(input),
     ));
-    Ok(())
+    Ok(session)
 }
 
 pub fn handle_blocked_stop_runtime_state(input: &str) -> Result<(), HookError> {
@@ -867,7 +874,10 @@ fn emit_live_event_with_policy(
         policy.per_attempt_timeout
     };
     let started = Instant::now();
-    let deadline = started.checked_add(overall_timeout).unwrap_or(started);
+    let local_deadline = started.checked_add(overall_timeout).unwrap_or(started);
+    let deadline = gwt_core::operation_deadline::current()
+        .map(|ambient| ambient.min(local_deadline))
+        .unwrap_or(local_deadline);
     let mut attempts = 0usize;
 
     loop {
@@ -1180,6 +1190,35 @@ mod tests {
         )
         .expect_err("ordinary hook remains a single fail-open transport attempt");
 
+        assert_eq!(server.attempts(), 1);
+    }
+
+    #[test]
+    fn ordinary_hook_transport_is_clamped_by_the_aggregate_deadline() {
+        let server =
+            HookLiveTestServer::start(vec![(Duration::from_millis(100), StatusCode::NO_CONTENT)]);
+        let event = hook_live_test_event("UserPromptSubmit", None);
+        let started = Instant::now();
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            started + Duration::from_millis(20),
+        );
+
+        emit_live_event_with_policy(
+            &event,
+            &server.target("private-forward-token"),
+            HookLiveRetryPolicy {
+                per_attempt_timeout: Duration::from_millis(150),
+                overall_deadline: Duration::from_millis(150),
+                retry_delay: Duration::ZERO,
+            },
+        )
+        .expect_err("delayed live transport must stop at the aggregate deadline");
+
+        assert!(
+            started.elapsed() < Duration::from_millis(75),
+            "live transport exceeded ambient deadline: {:?}",
+            started.elapsed()
+        );
         assert_eq!(server.attempts(), 1);
     }
 
@@ -1754,5 +1793,32 @@ mod tests {
         let _forward_token = ScopedEnvVar::unset(GWT_HOOK_FORWARD_TOKEN_ENV);
 
         handle_forward("{}").expect("forward hook remains fail-open");
+    }
+
+    #[test]
+    fn runtime_state_owner_returns_one_prepared_session_for_prompt_handlers() {
+        let _env_lock = env_test_lock();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sessions_dir = dir.path().join("sessions");
+        let session = Session::new(dir.path(), "feature/prepared", gwt_agent::AgentId::Codex);
+        let session_id = session.id.clone();
+        session.save(&sessions_dir).expect("save session");
+        let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &session_id);
+        let _session_id = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session_id);
+        let _runtime_path = ScopedEnvVar::set(GWT_SESSION_RUNTIME_PATH_ENV, &runtime_path);
+        let _forward_url = ScopedEnvVar::unset(GWT_HOOK_FORWARD_URL_ENV);
+        let _forward_token = ScopedEnvVar::unset(GWT_HOOK_FORWARD_TOKEN_ENV);
+        let _codex_thread = ScopedEnvVar::unset("CODEX_THREAD_ID");
+
+        let prepared =
+            handle_runtime_state_prepared("UserPromptSubmit", r#"{"session_id":"agent-prepared"}"#)
+                .expect("runtime owner")
+                .expect("prepared Session");
+
+        assert_eq!(prepared.id, session_id);
+        assert_eq!(
+            prepared.last_hook_event.as_deref(),
+            Some("UserPromptSubmit")
+        );
     }
 }

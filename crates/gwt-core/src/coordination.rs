@@ -48,11 +48,23 @@ thread_local! {
     static FAIL_NEXT_EVENT_MANIFEST_WRITE: std::cell::Cell<bool> = const {
         std::cell::Cell::new(false)
     };
+    static PROMPT_BOARD_READ_TEST_COUNTS: std::cell::Cell<(usize, usize)> =
+        const { std::cell::Cell::new((0, 0)) };
 }
 
 #[cfg(test)]
 fn fail_next_event_manifest_write() {
     FAIL_NEXT_EVENT_MANIFEST_WRITE.with(|fail| fail.set(true));
+}
+
+#[cfg(test)]
+fn reset_prompt_board_read_test_counts() {
+    PROMPT_BOARD_READ_TEST_COUNTS.with(|counts| counts.set((0, 0)));
+}
+
+#[cfg(test)]
+fn prompt_board_read_test_counts() -> (usize, usize) {
+    PROMPT_BOARD_READ_TEST_COUNTS.with(std::cell::Cell::get)
 }
 
 /// Who authored a Board entry: the human operator, an agent session, or
@@ -812,6 +824,64 @@ pub struct BoardHistoryPage {
     pub has_more_before: bool,
 }
 
+/// One prompt-time Board observation: an audience-scoped delta and the
+/// unscoped recent-own-status decision derived from the same history read.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PromptBoardRead {
+    pub recent_entries: Vec<BoardEntry>,
+    pub has_recent_own_status: bool,
+    pub latest_own_status_at: Option<DateTime<Utc>>,
+}
+
+pub struct PromptBoardReadRequest<'a> {
+    pub diff_since: DateTime<Utc>,
+    pub scope: &'a BoardAudienceScope,
+    pub status_author: &'a str,
+    pub status_kind: &'a BoardEntryKind,
+    pub status_since: DateTime<Utc>,
+}
+
+impl PromptBoardRead {
+    pub fn from_scoped_history(
+        history: Vec<BoardEntry>,
+        request: PromptBoardReadRequest<'_>,
+    ) -> Self {
+        Self::from_history(history, request, true)
+    }
+
+    pub fn from_channel_history(
+        history: Vec<BoardEntry>,
+        request: PromptBoardReadRequest<'_>,
+    ) -> Self {
+        Self::from_history(history, request, false)
+    }
+
+    fn from_history(
+        history: Vec<BoardEntry>,
+        request: PromptBoardReadRequest<'_>,
+        filter_scope: bool,
+    ) -> Self {
+        let latest_own_status_at = history
+            .iter()
+            .filter(|entry| {
+                entry.author == request.status_author && entry.kind == *request.status_kind
+            })
+            .map(|entry| entry.updated_at)
+            .max();
+        let recent_entries = history
+            .into_iter()
+            .filter(|entry| entry.updated_at > request.diff_since)
+            .filter(|entry| !filter_scope || board_entry_visible_for_scope(entry, request.scope))
+            .collect();
+        Self {
+            recent_entries,
+            has_recent_own_status: latest_own_status_at
+                .is_some_and(|updated_at| updated_at > request.status_since),
+            latest_own_status_at,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 struct EventSegmentManifest {
     version: u32,
@@ -819,6 +889,11 @@ struct EventSegmentManifest {
     #[serde(default)]
     segments: Vec<EventSegmentMeta>,
     updated_at: DateTime<Utc>,
+}
+
+struct PreparedCoordinationRoot {
+    path: PathBuf,
+    manifest: EventSegmentManifest,
 }
 
 impl EventSegmentManifest {
@@ -1540,6 +1615,23 @@ fn discover_legacy_coordination_dirs(worktree_root: &Path) -> Vec<PathBuf> {
     dirs
 }
 
+fn prepare_coordination_read_root(worktree_root: &Path) -> Result<PreparedCoordinationRoot> {
+    let path = if let Some(repo_root) = coordination_repo_root(worktree_root) {
+        let project_dir = gwt_project_dir_for_repo_path(&repo_root).join("coordination");
+        if !coordination_migration_marker_path(&project_dir).exists() {
+            let legacy_dirs = discover_legacy_coordination_dirs(worktree_root);
+            migrate_legacy_coordination_dirs(&project_dir, &legacy_dirs)?;
+        }
+        project_dir
+    } else {
+        legacy_coordination_dir(worktree_root)
+    };
+    std::fs::create_dir_all(&path)?;
+    ensure_segment_storage(&path)?;
+    let manifest = load_event_manifest_from_dir(&path)?;
+    Ok(PreparedCoordinationRoot { path, manifest })
+}
+
 fn migrate_legacy_coordination_dirs(project_dir: &Path, legacy_dirs: &[PathBuf]) -> Result<()> {
     if coordination_migration_marker_path(project_dir).exists() {
         return Ok(());
@@ -1929,6 +2021,11 @@ fn load_events_from_path(path: &Path) -> Result<Vec<CoordinationEvent>> {
             continue;
         }
         let mut event: CoordinationEvent = serde_json::from_str(trimmed).map_err(json_error)?;
+        #[cfg(test)]
+        PROMPT_BOARD_READ_TEST_COUNTS.with(|counts| {
+            let (materializations, decodes) = counts.get();
+            counts.set((materializations, decodes.saturating_add(1)));
+        });
         normalize_coordination_event(&mut event);
         events.push(event);
     }
@@ -2091,6 +2188,12 @@ fn json_error(err: serde_json::Error) -> GwtError {
 pub struct RemindersState {
     #[serde(default)]
     pub last_injected_at: Option<DateTime<Utc>>,
+    /// Last prompt turn on which the recent-own-status observation completed.
+    #[serde(default)]
+    pub last_own_status_checked_at: Option<DateTime<Utc>>,
+    /// Latest own status observed by a successful prompt Board read.
+    #[serde(default)]
+    pub last_own_status_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub last_reminded_kind: HashMap<String, DateTime<Utc>>,
     /// SPEC-2359 Phase U-9 (FR-178): the `title_summary` value observed
@@ -2143,6 +2246,36 @@ fn reminders_path(worktree_root: &Path, agent_session_id: &str) -> PathBuf {
     reminders_dir(worktree_root).join(format!("{agent_session_id}.json"))
 }
 
+fn migrated_coordination_root_for_repo_hash(repo_hash: Option<&str>) -> Option<PathBuf> {
+    repo_hash
+        .map(str::trim)
+        .filter(|value| {
+            value.len() == 16
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        })
+        .map(|value| {
+            crate::paths::gwt_projects_dir()
+                .join(value)
+                .join("coordination")
+        })
+        .filter(|root| coordination_migration_marker_path(root).is_file())
+}
+
+fn reminders_path_for_repo_hash(
+    worktree_root: &Path,
+    repo_hash: Option<&str>,
+    agent_session_id: &str,
+) -> PathBuf {
+    migrated_coordination_root_for_repo_hash(repo_hash)
+        .map(|root| {
+            root.join("reminders")
+                .join(format!("{agent_session_id}.json"))
+        })
+        .unwrap_or_else(|| reminders_path(worktree_root, agent_session_id))
+}
+
 /// Load reminder state for the given agent session. Returns a default state
 /// when no sidecar file exists yet.
 pub fn load_reminders_state(
@@ -2150,6 +2283,18 @@ pub fn load_reminders_state(
     agent_session_id: &str,
 ) -> Result<RemindersState> {
     load_json_or_default(&reminders_path(worktree_root, agent_session_id))
+}
+
+pub fn load_reminders_state_for_repo_hash(
+    worktree_root: &Path,
+    repo_hash: Option<&str>,
+    agent_session_id: &str,
+) -> Result<RemindersState> {
+    load_json_or_default(&reminders_path_for_repo_hash(
+        worktree_root,
+        repo_hash,
+        agent_session_id,
+    ))
 }
 
 /// Atomically persist reminder state for the given agent session.
@@ -2165,22 +2310,53 @@ pub fn write_reminders_state(
     write_atomic_json(&path, state)
 }
 
+pub fn write_reminders_state_for_repo_hash(
+    worktree_root: &Path,
+    repo_hash: Option<&str>,
+    agent_session_id: &str,
+    state: &RemindersState,
+) -> Result<()> {
+    let path = reminders_path_for_repo_hash(worktree_root, repo_hash, agent_session_id);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    write_atomic_json(&path, state)
+}
+
 /// Return Board entries whose `updated_at` is strictly later than `since`,
 /// sorted chronologically (same ordering as the projection).
 pub fn load_entries_since(worktree_root: &Path, since: DateTime<Utc>) -> Result<Vec<BoardEntry>> {
     ensure_repo_local_files(worktree_root)?;
     let coordination_root = coordination_dir(worktree_root);
     let manifest = load_event_manifest_from_dir(&coordination_root)?;
-    let segments_dir = coordination_events_segments_dir_from_root(&coordination_root);
+    load_entries_since_from_prepared(
+        &PreparedCoordinationRoot {
+            path: coordination_root,
+            manifest,
+        },
+        since,
+    )
+}
+
+fn load_entries_since_from_prepared(
+    prepared: &PreparedCoordinationRoot,
+    since: DateTime<Utc>,
+) -> Result<Vec<BoardEntry>> {
+    #[cfg(test)]
+    PROMPT_BOARD_READ_TEST_COUNTS.with(|counts| {
+        let (materializations, decodes) = counts.get();
+        counts.set((materializations.saturating_add(1), decodes));
+    });
+    let segments_dir = coordination_events_segments_dir_from_root(&prepared.path);
     let mut entries = Vec::new();
-    for segment in manifest.segments {
+    for segment in &prepared.manifest.segments {
         if segment
             .max_updated_at
             .is_some_and(|max_updated_at| max_updated_at <= since)
         {
             continue;
         }
-        let path = segments_dir.join(segment.file);
+        let path = segments_dir.join(&segment.file);
         for event in load_events_from_path(&path)? {
             let CoordinationEvent::MessageAppended { entry } = event;
             if entry.updated_at > since {
@@ -2214,6 +2390,67 @@ pub fn has_recent_post_by(
     Ok(load_entries_since(worktree_root, threshold)?
         .iter()
         .any(|entry| entry.author == author && entry.kind == *kind && entry.updated_at > threshold))
+}
+
+/// Read the prompt delta and recent-own-status decision from one prepared
+/// coordination root and one history materialization.
+pub fn load_prompt_reminder(
+    worktree_root: &Path,
+    diff_since: DateTime<Utc>,
+    scope: &BoardAudienceScope,
+    status_author: &str,
+    status_kind: &BoardEntryKind,
+    status_since: DateTime<Utc>,
+) -> Result<PromptBoardRead> {
+    let prepared = prepare_coordination_read_root(worktree_root)?;
+    let history = load_entries_since_from_prepared(&prepared, diff_since.min(status_since))?;
+    Ok(PromptBoardRead::from_scoped_history(
+        history,
+        PromptBoardReadRequest {
+            diff_since,
+            scope,
+            status_author,
+            status_kind,
+            status_since,
+        },
+    ))
+}
+
+pub fn load_prompt_reminder_for_repo_hash(
+    worktree_root: &Path,
+    repo_hash: Option<&str>,
+    diff_since: DateTime<Utc>,
+    scope: &BoardAudienceScope,
+    status_author: &str,
+    status_kind: &BoardEntryKind,
+    status_since: DateTime<Utc>,
+) -> Result<PromptBoardRead> {
+    let Some(path) = migrated_coordination_root_for_repo_hash(repo_hash) else {
+        return load_prompt_reminder(
+            worktree_root,
+            diff_since,
+            scope,
+            status_author,
+            status_kind,
+            status_since,
+        );
+    };
+    ensure_segment_storage(&path)?;
+    let prepared = PreparedCoordinationRoot {
+        manifest: load_event_manifest_from_dir(&path)?,
+        path,
+    };
+    let history = load_entries_since_from_prepared(&prepared, diff_since.min(status_since))?;
+    Ok(PromptBoardRead::from_scoped_history(
+        history,
+        PromptBoardReadRequest {
+            diff_since,
+            scope,
+            status_author,
+            status_kind,
+            status_since,
+        },
+    ))
 }
 
 pub fn board_entry_exists(worktree_root: &Path, entry_id: &str) -> Result<bool> {
@@ -2340,6 +2577,25 @@ pub trait BoardProvider {
         kind: &BoardEntryKind,
         within: chrono::Duration,
     ) -> Result<bool>;
+    /// Prompt-optimized composite read. Implementations should derive both
+    /// results from one provider/history materialization.
+    fn load_prompt_reminder(
+        &self,
+        worktree_root: &Path,
+        request: PromptBoardReadRequest<'_>,
+    ) -> Result<PromptBoardRead> {
+        let history =
+            self.load_entries_since(worktree_root, request.diff_since.min(request.status_since))?;
+        Ok(PromptBoardRead::from_scoped_history(history, request))
+    }
+    fn load_prompt_reminder_for_repo_hash(
+        &self,
+        worktree_root: &Path,
+        _repo_hash: Option<&str>,
+        request: PromptBoardReadRequest<'_>,
+    ) -> Result<PromptBoardRead> {
+        self.load_prompt_reminder(worktree_root, request)
+    }
     /// Whether an entry with `entry_id` exists.
     fn board_entry_exists(&self, worktree_root: &Path, entry_id: &str) -> Result<bool>;
     /// Load a page of older entries before `before_entry_id`.
@@ -2418,6 +2674,38 @@ impl BoardProvider for LocalProvider {
         has_recent_post_by(worktree_root, author, kind, within)
     }
 
+    fn load_prompt_reminder(
+        &self,
+        worktree_root: &Path,
+        request: PromptBoardReadRequest<'_>,
+    ) -> Result<PromptBoardRead> {
+        load_prompt_reminder(
+            worktree_root,
+            request.diff_since,
+            request.scope,
+            request.status_author,
+            request.status_kind,
+            request.status_since,
+        )
+    }
+
+    fn load_prompt_reminder_for_repo_hash(
+        &self,
+        worktree_root: &Path,
+        repo_hash: Option<&str>,
+        request: PromptBoardReadRequest<'_>,
+    ) -> Result<PromptBoardRead> {
+        load_prompt_reminder_for_repo_hash(
+            worktree_root,
+            repo_hash,
+            request.diff_since,
+            request.scope,
+            request.status_author,
+            request.status_kind,
+            request.status_since,
+        )
+    }
+
     fn board_entry_exists(&self, worktree_root: &Path, entry_id: &str) -> Result<bool> {
         board_entry_exists(worktree_root, entry_id)
     }
@@ -2444,7 +2732,7 @@ impl BoardProvider for LocalProvider {
 
 #[cfg(test)]
 mod tests {
-    use std::{path::Path, str::FromStr, sync::Arc, thread};
+    use std::{path::Path, str::FromStr, sync::Arc, thread, time::Instant};
 
     use chrono::TimeZone;
 
@@ -4497,6 +4785,170 @@ mod tests {
             chrono::Duration::minutes(10)
         )
         .unwrap());
+    }
+
+    fn write_large_prompt_board_fixture(
+        coordination_root: &Path,
+        events: &[CoordinationEvent],
+    ) -> u64 {
+        let segment_file = initial_segment_file_name();
+        let segments_dir = coordination_events_segments_dir_from_root(coordination_root);
+        std::fs::create_dir_all(&segments_dir).unwrap();
+        let segment_path = segments_dir.join(&segment_file);
+        let mut file = std::fs::File::create(&segment_path).unwrap();
+        let mut segment = EventSegmentMeta {
+            file: segment_file.clone(),
+            entries: 0,
+            bytes: 0,
+            first_created_at: None,
+            last_created_at: None,
+            max_updated_at: None,
+            first_entry_id: None,
+            last_entry_id: None,
+        };
+        for event in events {
+            let bytes = serialized_event_line(event).unwrap();
+            file.write_all(&bytes).unwrap();
+            update_segment_meta(&mut segment, event, bytes.len() as u64);
+        }
+        file.flush().unwrap();
+        let stored_bytes = segment.bytes;
+        write_event_manifest(
+            coordination_root,
+            &EventSegmentManifest {
+                version: EVENT_MANIFEST_VERSION,
+                active_segment: segment_file,
+                segments: vec![segment],
+                updated_at: Utc::now(),
+            },
+        )
+        .unwrap();
+        stored_bytes
+    }
+
+    #[test]
+    fn prompt_board_read_materializes_large_history_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let coordination_root = legacy_coordination_dir(dir.path());
+        let base = Utc.with_ymd_and_hms(2026, 8, 20, 0, 0, 0).unwrap();
+        let diff_since = base + chrono::Duration::seconds(400);
+        let payload = "x".repeat(9 * 1024);
+        let mut events = Vec::with_capacity(HOT_PROJECTION_ENTRY_LIMIT + 1);
+
+        for index in 0..=HOT_PROJECTION_ENTRY_LIMIT {
+            let mut entry = BoardEntry::new(
+                AuthorKind::Agent,
+                if index == 0 { "Codex" } else { "Claude" },
+                BoardEntryKind::Status,
+                format!("entry-{index:04} {payload}"),
+                None,
+                None,
+                vec![],
+                vec![],
+            );
+            entry.id = format!("entry-{index:04}");
+            entry.created_at = base + chrono::Duration::seconds(index as i64 + 1);
+            entry.updated_at = entry.created_at;
+            entry.audience = if index % 2 == 0 {
+                vec!["workspace-current".to_string()]
+            } else {
+                vec!["workspace-other".to_string()]
+            };
+            events.push(CoordinationEvent::MessageAppended { entry });
+        }
+
+        let stored_bytes = write_large_prompt_board_fixture(&coordination_root, &events);
+        assert!(stored_bytes > 4 * 1024 * 1024);
+        assert!(events.len() > HOT_PROJECTION_ENTRY_LIMIT);
+        reset_prompt_board_read_test_counts();
+
+        let read = load_prompt_reminder(
+            dir.path(),
+            diff_since,
+            &BoardAudienceScope::Workspace("workspace-current".to_string()),
+            "Codex",
+            &BoardEntryKind::Status,
+            base,
+        )
+        .unwrap();
+
+        assert!(read.has_recent_own_status);
+        assert!(read
+            .recent_entries
+            .iter()
+            .all(|entry| entry.updated_at > diff_since
+                && entry.audience == vec!["workspace-current".to_string()]));
+        assert_eq!(
+            prompt_board_read_test_counts(),
+            (1, events.len()),
+            "combined prompt read must materialize and decode history exactly once"
+        );
+
+        let mut samples = Vec::with_capacity(30);
+        for _ in 0..30 {
+            reset_prompt_board_read_test_counts();
+            let started = Instant::now();
+            load_prompt_reminder(
+                dir.path(),
+                diff_since,
+                &BoardAudienceScope::Workspace("workspace-current".to_string()),
+                "Codex",
+                &BoardEntryKind::Status,
+                base,
+            )
+            .unwrap();
+            samples.push(started.elapsed());
+            assert_eq!(prompt_board_read_test_counts(), (1, events.len()));
+        }
+        samples.sort_unstable();
+        let p95 = samples[28];
+        assert!(
+            p95 < std::time::Duration::from_millis(250),
+            "warm 4MB/501-entry prompt Board read p95 exceeded 250ms: {p95:?}; samples={samples:?}"
+        );
+    }
+
+    #[test]
+    fn prompt_board_read_and_cursor_use_session_repo_hash_without_worktree_discovery() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::ScopedGwtHome::set(home.path());
+        let repo_hash = "0123456789abcdef";
+        let coordination_root = crate::paths::gwt_projects_dir()
+            .join(repo_hash)
+            .join("coordination");
+        std::fs::create_dir_all(&coordination_root).unwrap();
+        std::fs::write(
+            coordination_migration_marker_path(&coordination_root),
+            b"complete",
+        )
+        .unwrap();
+        write_large_prompt_board_fixture(&coordination_root, &[]);
+        let absent_worktree = home.path().join("does-not-need-git-discovery");
+        let epoch = DateTime::<Utc>::from_timestamp(0, 0).unwrap();
+
+        let read = load_prompt_reminder_for_repo_hash(
+            &absent_worktree,
+            Some(repo_hash),
+            epoch,
+            &BoardAudienceScope::All,
+            "Codex",
+            &BoardEntryKind::Status,
+            epoch,
+        )
+        .unwrap();
+        assert_eq!(read, PromptBoardRead::default());
+
+        let state = RemindersState {
+            last_injected_at: Some(epoch),
+            ..RemindersState::default()
+        };
+        write_reminders_state_for_repo_hash(&absent_worktree, Some(repo_hash), "session-1", &state)
+            .unwrap();
+        assert_eq!(
+            load_reminders_state_for_repo_hash(&absent_worktree, Some(repo_hash), "session-1")
+                .unwrap(),
+            state
+        );
     }
 
     #[test]

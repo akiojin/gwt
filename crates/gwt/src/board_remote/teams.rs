@@ -15,7 +15,7 @@ use serde::Deserialize;
 
 use gwt_core::coordination::{
     AuthorKind, BoardAudienceScope, BoardEntry, BoardEntryKind, BoardHistoryPage, BoardPostOutcome,
-    BoardProjection, BoardProvider, CoordinationSnapshot,
+    BoardProjection, BoardProvider, CoordinationSnapshot, PromptBoardRead, PromptBoardReadRequest,
 };
 use gwt_core::{GwtError, Result};
 
@@ -550,6 +550,20 @@ impl BoardProvider for TeamsProvider {
         _scope: &BoardAudienceScope,
     ) -> Result<Vec<BoardEntry>> {
         self.load_entries_since(worktree_root, since)
+    }
+
+    fn load_prompt_reminder(
+        &self,
+        worktree_root: &Path,
+        request: PromptBoardReadRequest<'_>,
+    ) -> Result<PromptBoardRead> {
+        let history_since = request.diff_since.min(request.status_since);
+        let history = self
+            .cached_history(worktree_root)?
+            .into_iter()
+            .filter(|entry| entry.updated_at > history_since)
+            .collect();
+        Ok(PromptBoardRead::from_channel_history(history, request))
     }
 
     fn has_recent_post_by(
@@ -1567,6 +1581,20 @@ mod tests {
                 .len(),
             3
         );
+        let prompt = prov
+            .load_prompt_reminder(
+                &root,
+                gwt_core::coordination::PromptBoardReadRequest {
+                    diff_since: epoch,
+                    scope: &BoardAudienceScope::Workspace("not-this-channel".to_string()),
+                    status_author: "U",
+                    status_kind: &BoardEntryKind::Status,
+                    status_since: epoch,
+                },
+            )
+            .unwrap();
+        assert_eq!(prompt.recent_entries.len(), 3);
+        assert!(prompt.has_recent_own_status);
 
         let wide = chrono::Duration::days(1_000_000);
         assert!(prov

@@ -21,7 +21,7 @@ use chrono::{DateTime, Utc};
 use gwt_config::{BoardProviderKind, ProjectBoardConfig, Settings, SlackConfig, TeamsConfig};
 use gwt_core::coordination::{
     BoardAudienceScope, BoardEntry, BoardEntryKind, BoardHistoryPage, BoardPostOutcome,
-    BoardProvider, CoordinationSnapshot, LocalProvider,
+    BoardProvider, CoordinationSnapshot, LocalProvider, PromptBoardRead, PromptBoardReadRequest,
 };
 use gwt_core::paths::gwt_repo_local_work_dir;
 use gwt_core::{GwtError, Result};
@@ -64,11 +64,24 @@ pub(crate) mod test_provider_override {
 
     thread_local! {
         static KIND: Cell<BoardProviderKind> = const { Cell::new(BoardProviderKind::Local) };
+        static PROVIDER_FOR_CALLS: Cell<usize> = const { Cell::new(0) };
     }
 
     /// Current override for this thread (defaults to `Local`).
     pub(crate) fn current() -> BoardProviderKind {
         KIND.with(Cell::get)
+    }
+
+    pub(crate) fn record_provider_for_call() {
+        PROVIDER_FOR_CALLS.with(|calls| calls.set(calls.get().saturating_add(1)));
+    }
+
+    pub(crate) fn reset_provider_for_calls() {
+        PROVIDER_FOR_CALLS.with(|calls| calls.set(0));
+    }
+
+    pub(crate) fn provider_for_calls() -> usize {
+        PROVIDER_FOR_CALLS.with(Cell::get)
     }
 
     /// Force `kind` for the duration of the returned guard, then restore.
@@ -305,6 +318,8 @@ fn build_remote_for(
 /// Each repo gets its own provider scoped to its own channel, so Board posts and
 /// reads never mix across projects. `local` stays on the zero-cost fast path.
 pub fn provider_for(worktree_root: &Path) -> Box<dyn BoardProvider> {
+    #[cfg(test)]
+    test_provider_override::record_provider_for_call();
     let project = ProjectBoardConfig::load_from_work_dir(&gwt_repo_local_work_dir(worktree_root));
     let global_kind = current_kind();
     // Fast path: no project override and global is local → zero-cost local,
@@ -485,6 +500,52 @@ pub fn has_recent_post_by(
     provider_for(worktree_root).has_recent_post_by(worktree_root, author, kind, within)
 }
 
+/// Resolve one provider and derive both prompt Board observations through its
+/// composite read API.
+pub fn load_prompt_reminder(
+    worktree_root: &Path,
+    diff_since: DateTime<Utc>,
+    scope: &BoardAudienceScope,
+    status_author: &str,
+    status_kind: &BoardEntryKind,
+    status_since: DateTime<Utc>,
+) -> Result<PromptBoardRead> {
+    crate::cli::hook::diagnostics::record_prompt_board_read();
+    provider_for(worktree_root).load_prompt_reminder(
+        worktree_root,
+        PromptBoardReadRequest {
+            diff_since,
+            scope,
+            status_author,
+            status_kind,
+            status_since,
+        },
+    )
+}
+
+pub fn load_prompt_reminder_for_repo_hash(
+    worktree_root: &Path,
+    repo_hash: Option<&str>,
+    diff_since: DateTime<Utc>,
+    scope: &BoardAudienceScope,
+    status_author: &str,
+    status_kind: &BoardEntryKind,
+    status_since: DateTime<Utc>,
+) -> Result<PromptBoardRead> {
+    crate::cli::hook::diagnostics::record_prompt_board_read();
+    provider_for(worktree_root).load_prompt_reminder_for_repo_hash(
+        worktree_root,
+        repo_hash,
+        PromptBoardReadRequest {
+            diff_since,
+            scope,
+            status_author,
+            status_kind,
+            status_since,
+        },
+    )
+}
+
 /// Whether an entry with `entry_id` exists.
 pub fn board_entry_exists(worktree_root: &Path, entry_id: &str) -> Result<bool> {
     provider_for(worktree_root).board_entry_exists(worktree_root, entry_id)
@@ -517,6 +578,25 @@ pub fn load_entries_before_for_scope(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prompt_board_read_constructs_provider_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let epoch = DateTime::<Utc>::from_timestamp(0, 0).unwrap();
+        test_provider_override::reset_provider_for_calls();
+
+        let _ = load_prompt_reminder(
+            dir.path(),
+            epoch,
+            &BoardAudienceScope::All,
+            "Codex",
+            &BoardEntryKind::Status,
+            epoch,
+        )
+        .unwrap();
+
+        assert_eq!(test_provider_override::provider_for_calls(), 1);
+    }
 
     #[test]
     fn build_remote_local_reads_empty_board() {

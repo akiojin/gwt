@@ -12,6 +12,7 @@ use axum::{
     Json, Router,
 };
 use chrono::TimeZone;
+use gwt::cli::{dispatch, TestEnv};
 use gwt::daemon_runtime::{handle_coordination_event, handle_forward, handle_runtime_state};
 use gwt_agent::{runtime_state_path, AgentId, Session};
 use gwt_core::paths::gwt_cache_dir;
@@ -108,6 +109,13 @@ impl CaptureServer {
             .recv_timeout(Duration::from_secs(1))
             .expect("expected hook live event")
     }
+
+    fn assert_no_more_events(&self) {
+        assert!(
+            self.rx.recv_timeout(Duration::from_millis(100)).is_err(),
+            "unexpected duplicate hook live event"
+        );
+    }
 }
 
 impl Drop for CaptureServer {
@@ -150,6 +158,60 @@ fn sample_issue_snapshot(number: u64, title: &str, labels: Vec<&str>) -> IssueSn
         ),
         comments: Vec::<CommentSnapshot>::new(),
     }
+}
+
+fn argv(strs: &[&str]) -> Vec<String> {
+    strs.iter().map(std::string::ToString::to_string).collect()
+}
+
+#[test]
+fn user_prompt_submit_dispatches_one_runtime_state_event_and_no_forward_event() {
+    let _lock = env_lock();
+    let mut env = EnvGuard::new();
+    let home = tempfile::tempdir().unwrap();
+    env.set("HOME", home.path().as_os_str().to_os_string());
+    env.set("USERPROFILE", home.path().as_os_str().to_os_string());
+    env.unset("CODEX_THREAD_ID");
+
+    let sessions_dir = home.path().join(".gwt").join("sessions");
+    let worktree = home.path().join("repo");
+    fs::create_dir_all(&worktree).unwrap();
+    let session = Session::new(&worktree, "feature/prompt-live", AgentId::Codex);
+    let session_id = session.id.clone();
+    session.save(&sessions_dir).unwrap();
+    let runtime_path = runtime_state_path(&sessions_dir, &session_id);
+    let server = CaptureServer::start();
+    env.set("GWT_SESSION_ID", session_id.clone());
+    env.set(
+        "GWT_SESSION_RUNTIME_PATH",
+        runtime_path.as_os_str().to_os_string(),
+    );
+    env.set("GWT_HOOK_FORWARD_URL", server.url.clone());
+    env.set("GWT_HOOK_FORWARD_TOKEN", "secret-token");
+
+    let mut cli = TestEnv::new(worktree.clone());
+    cli.stdin = serde_json::json!({
+        "session_id": "agent-session-prompt",
+        "cwd": worktree,
+        "prompt": "continue the bounded prompt work"
+    })
+    .to_string();
+
+    let code = dispatch(
+        &mut cli,
+        &argv(&["gwt", "hook", "event", "UserPromptSubmit"]),
+    );
+
+    assert_eq!(
+        code,
+        0,
+        "prompt hook stderr: {}",
+        String::from_utf8_lossy(&cli.stderr)
+    );
+    let (_auth, payload) = server.recv();
+    assert_eq!(payload["kind"], "runtime_state");
+    assert_eq!(payload["source_event"], "UserPromptSubmit");
+    server.assert_no_more_events();
 }
 
 #[test]

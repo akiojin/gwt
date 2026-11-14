@@ -396,14 +396,14 @@ pub fn mark_from_prompt(worktree: &Path, session_id: &str, prompt: &str) -> io::
     let Some(base_kind) = classify_prompt(prompt) else {
         return Ok(false);
     };
-    match crate::cli::trusted_store::with_write_lease_wait(
-        worktree,
-        std::time::Duration::from_millis(300),
-        || {
-            let kind = classify_prompt_for_worktree(worktree, prompt, base_kind);
-            mark_locked(worktree, session_id, prompt, kind)
-        },
-    ) {
+    let lease_wait = gwt_core::operation_deadline::current()
+        .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()))
+        .unwrap_or_else(|| std::time::Duration::from_millis(300))
+        .min(std::time::Duration::from_millis(300));
+    match crate::cli::trusted_store::with_write_lease_wait(worktree, lease_wait, || {
+        let kind = classify_prompt_for_worktree(worktree, prompt, base_kind);
+        mark_locked(worktree, session_id, prompt, kind)
+    }) {
         Err(err) if err.kind() == ErrorKind::WouldBlock => {
             // This fail-open path cannot share the lease with execution state,
             // but it must still avoid reusing a classification sampled before
