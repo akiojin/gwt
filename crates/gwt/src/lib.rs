@@ -85,9 +85,12 @@ pub use index_worker::{
     WorktreeProbeOutcome,
 };
 pub use issue_monitor::{
-    is_auto_improve_candidate, scan_issue_monitor_candidates, IssueMonitorConfig,
-    IssueMonitorInboxItem, IssueMonitorIssue, IssueMonitorIssueState, IssueMonitorLaunchRequest,
-    IssueMonitorScanSummary, IssueMonitorState, IssueMonitorStatusView, MonitorInboxState,
+    is_auto_improve_candidate, is_issue_monitor_candidate, load_issue_monitor_settings_from_path,
+    prepare_issue_monitor_launches, save_issue_monitor_settings_to_path,
+    scan_issue_monitor_candidates, IssueMonitorConfig, IssueMonitorInboxItem, IssueMonitorIssue,
+    IssueMonitorIssueState, IssueMonitorLaunchBatch, IssueMonitorLaunchRequest,
+    IssueMonitorProjectSettings, IssueMonitorScanSummary, IssueMonitorState,
+    IssueMonitorStatusView, MonitorInboxState,
 };
 pub use knowledge_bridge::{
     load_knowledge_bridge, refresh_knowledge_bridge_cache, search_knowledge_bridge,

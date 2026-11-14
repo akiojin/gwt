@@ -1317,6 +1317,7 @@ impl AppRuntime {
         &mut self,
         client_id: &str,
         issue_number: u64,
+        linked_issue_kind: gwt::LinkedIssueKind,
     ) -> Vec<OutboundEvent> {
         let Some(tab_id) = self.active_tab_id.clone() else {
             return vec![OutboundEvent::reply(
@@ -1379,7 +1380,7 @@ impl AppRuntime {
             &project_root,
             &base_branch_name,
             issue_number,
-            gwt::LinkedIssueKind::Issue,
+            linked_issue_kind,
         ) {
             Ok(()) => vec![
                 OutboundEvent::reply(

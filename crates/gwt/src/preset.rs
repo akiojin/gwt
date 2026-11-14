@@ -133,7 +133,7 @@ impl WindowPreset {
             Self::Profile => "Manage env profiles, overrides, and merged preview",
             Self::Logs => "Placeholder logs surface",
             Self::Issue => "Placeholder issue surface",
-            Self::IssueMonitor => "Watch labeled Issues and launch improvement agents",
+            Self::IssueMonitor => "Watch open Issues and launch improvement agents",
             Self::Spec => "Placeholder SPEC surface",
             Self::Work => "Workspace overview",
             Self::Index => "Search indexed project knowledge",

@@ -1528,25 +1528,74 @@ impl AppRuntime {
                             state: if enabled { "idle" } else { "disabled" }.to_string(),
                             queue_len: 0,
                             active_issue_number: None,
+                            active_issue_numbers: Vec::new(),
+                            max_active_agents: 1,
                             last_scan_at: None,
                             last_error: None,
                         },
                     },
                 )]
             }
-            FrontendEvent::ListIssueMonitor => vec![
-                OutboundEvent::reply(
-                    client_id.clone(),
-                    BackendEvent::IssueMonitorStatus {
-                        status: gwt::IssueMonitorState::new(gwt::IssueMonitorConfig::default())
-                            .status_view(),
-                    },
-                ),
-                OutboundEvent::reply(client_id, BackendEvent::IssueMonitorInbox { items: vec![] }),
-            ],
-            FrontendEvent::IssueMonitorLaunchNow { issue_number } => {
-                self.open_issue_monitor_launch_wizard_events(&client_id, issue_number)
+            FrontendEvent::ReorderIssueMonitorIssues { issue_numbers } => {
+                if let Some(project_root) = self.active_project_root().map(Path::to_path_buf) {
+                    thread::Builder::new()
+                        .name("gwt-issue-monitor-reorder-publish".to_string())
+                        .spawn(move || {
+                            let payload = gwt::runtime_daemon_events::issue_monitor_payload(
+                                "control",
+                                serde_json::json!({ "priority_order": issue_numbers }),
+                                std::process::id(),
+                            );
+                            if let Err(error) = gwt::daemon_publisher::publish_event(
+                                &project_root,
+                                gwt::runtime_daemon_events::ISSUE_MONITOR_CONTROL_CHANNEL,
+                                payload,
+                            ) {
+                                tracing::debug!(
+                                    error = %error,
+                                    "issue monitor reorder daemon publish failed (non-fatal)"
+                                );
+                            }
+                        })
+                        .ok();
+                }
+                Vec::new()
             }
+            FrontendEvent::SetIssueMonitorMaxActiveAgents { max_active_agents } => {
+                let max_active_agents = max_active_agents.max(1);
+                if let Some(project_root) = self.active_project_root().map(Path::to_path_buf) {
+                    thread::Builder::new()
+                        .name("gwt-issue-monitor-max-active-publish".to_string())
+                        .spawn(move || {
+                            let payload = gwt::runtime_daemon_events::issue_monitor_payload(
+                                "control",
+                                serde_json::json!({ "max_active_agents": max_active_agents }),
+                                std::process::id(),
+                            );
+                            if let Err(error) = gwt::daemon_publisher::publish_event(
+                                &project_root,
+                                gwt::runtime_daemon_events::ISSUE_MONITOR_CONTROL_CHANNEL,
+                                payload,
+                            ) {
+                                tracing::debug!(
+                                    error = %error,
+                                    "issue monitor max-active daemon publish failed (non-fatal)"
+                                );
+                            }
+                        })
+                        .ok();
+                }
+                Vec::new()
+            }
+            FrontendEvent::ListIssueMonitor => Vec::new(),
+            FrontendEvent::IssueMonitorLaunchNow {
+                issue_number,
+                linked_issue_kind,
+            } => self.open_issue_monitor_launch_wizard_events(
+                &client_id,
+                issue_number,
+                linked_issue_kind.unwrap_or(gwt::LinkedIssueKind::Issue),
+            ),
             FrontendEvent::ApplyUpdate => self.apply_pending_update_events(&client_id),
             FrontendEvent::ApplyUpdateStart => self.apply_update_start_events(&client_id),
             FrontendEvent::ApplyUpdateToVersion { version } => {

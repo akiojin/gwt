@@ -13,7 +13,7 @@ use crate::{
     file_tree::FileTreeEntry,
     issue_monitor::{IssueMonitorInboxItem, IssueMonitorStatusView},
     knowledge_bridge::{KnowledgeDetailView, KnowledgeKind, KnowledgeListItem},
-    launch_wizard::{LaunchWizardAction, LaunchWizardView},
+    launch_wizard::{LaunchWizardAction, LaunchWizardView, LinkedIssueKind},
     persistence::{
         AgentKanbanLane, CanvasViewport, PersistedWindowState, ProjectKind, WindowGeometry,
         WindowProcessStatus,
@@ -615,9 +615,17 @@ pub enum FrontendEvent {
     SetIssueMonitorEnabled {
         enabled: bool,
     },
+    ReorderIssueMonitorIssues {
+        issue_numbers: Vec<u64>,
+    },
+    SetIssueMonitorMaxActiveAgents {
+        max_active_agents: usize,
+    },
     ListIssueMonitor,
     IssueMonitorLaunchNow {
         issue_number: u64,
+        #[serde(default)]
+        linked_issue_kind: Option<LinkedIssueKind>,
     },
     /// Legacy Phase 14 entry point. Frontend now sends
     /// [`FrontendEvent::ApplyUpdateStart`] / [`FrontendEvent::ApplyUpdateRestartNow`]

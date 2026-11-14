@@ -887,7 +887,15 @@ fn issue_monitor_daemon_user_event(event: serde_json::Value) -> Option<UserEvent
         }
         "launch_request" => {
             let issue_number = payload.get("issue_number")?.as_u64()?;
-            Some(UserEvent::IssueMonitorLaunchRequest { issue_number })
+            let linked_issue_kind = payload
+                .get("linked_issue_kind")
+                .cloned()
+                .and_then(|value| serde_json::from_value::<gwt::LinkedIssueKind>(value).ok())
+                .unwrap_or(gwt::LinkedIssueKind::Issue);
+            Some(UserEvent::IssueMonitorLaunchRequest {
+                issue_number,
+                linked_issue_kind,
+            })
         }
         _ => None,
     }
@@ -1015,6 +1023,7 @@ enum UserEvent {
     DaemonRuntimeHook(gwt::RuntimeHookEvent),
     IssueMonitorLaunchRequest {
         issue_number: u64,
+        linked_issue_kind: gwt::LinkedIssueKind,
     },
     LaunchProgress {
         window_id: String,
@@ -1297,6 +1306,8 @@ mod tests {
             state: "idle".to_string(),
             queue_len: 1,
             active_issue_number: None,
+            active_issue_numbers: Vec::new(),
+            max_active_agents: 1,
             last_scan_at: Some("2026-06-23T10:00:00Z".to_string()),
             last_error: None,
         };
@@ -1324,7 +1335,7 @@ mod tests {
 
         let launch_payload = gwt::runtime_daemon_events::issue_monitor_payload(
             "launch_request",
-            serde_json::json!({"issue_number": 42}),
+            serde_json::json!({"issue_number": 42, "linked_issue_kind": "spec"}),
             42,
         );
         match super::daemon_broadcast_user_event(
@@ -1333,8 +1344,12 @@ mod tests {
             project_root,
             99,
         ) {
-            Some(UserEvent::IssueMonitorLaunchRequest { issue_number }) => {
+            Some(UserEvent::IssueMonitorLaunchRequest {
+                issue_number,
+                linked_issue_kind,
+            }) => {
                 assert_eq!(issue_number, 42);
+                assert_eq!(linked_issue_kind, gwt::LinkedIssueKind::Spec);
             }
             other => panic!("unexpected issue monitor launch event: {other:?}"),
         }
@@ -7041,9 +7056,16 @@ fn main() -> std::io::Result<()> {
                 let events = app.handle_daemon_runtime_hook_event(event);
                 clients.dispatch(events);
             }
-            Event::UserEvent(UserEvent::IssueMonitorLaunchRequest { issue_number }) => {
+            Event::UserEvent(UserEvent::IssueMonitorLaunchRequest {
+                issue_number,
+                linked_issue_kind,
+            }) => {
                 let events = app
-                    .open_issue_monitor_launch_wizard_events("__issue_monitor__", issue_number)
+                    .open_issue_monitor_launch_wizard_events(
+                        "__issue_monitor__",
+                        issue_number,
+                        linked_issue_kind,
+                    )
                     .into_iter()
                     .map(|mut event| {
                         if matches!(event.target, DispatchTarget::Client(_))

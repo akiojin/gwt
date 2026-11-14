@@ -221,8 +221,8 @@ fn spawn_issue_monitor_worker(scope: RuntimeScope, hub: BroadcastHub, shutdown: 
     tokio::spawn(async move {
         let mut control_rx =
             hub.subscribe(crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_CHANNEL);
-        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
-        publish_issue_monitor_payloads(&hub, &mut monitor);
+        let mut monitor = crate::IssueMonitorState::new(issue_monitor_config_for_scope(&scope));
+        publish_issue_monitor_payloads(&hub, &mut monitor, &scope);
         let mut interval =
             tokio::time::interval(Duration::from_secs(monitor.config.poll_interval_secs));
 
@@ -233,12 +233,17 @@ fn spawn_issue_monitor_worker(scope: RuntimeScope, hub: BroadcastHub, shutdown: 
                 control = control_rx.recv() => {
                     match control {
                         Ok(DaemonFrame::Event { payload, .. }) => {
-                            if let Some(enabled) = decode_issue_monitor_control_enabled(payload) {
-                                monitor.set_enabled(enabled);
-                                publish_issue_monitor_payloads(&hub, &mut monitor);
-                                if enabled {
+                            if let Some(control) = decode_issue_monitor_control(payload) {
+                                match control {
+                                    IssueMonitorControl::Enabled(enabled) => monitor.set_enabled(enabled),
+                                    IssueMonitorControl::MaxActiveAgents(max) => monitor.set_max_active_agents(max),
+                                    IssueMonitorControl::PriorityOrder(order) => monitor.set_priority_order(order),
+                                }
+                                save_issue_monitor_settings_for_scope(&scope, &monitor);
+                                publish_issue_monitor_payloads(&hub, &mut monitor, &scope);
+                                if monitor.config.enabled {
                                     monitor = scan_issue_monitor_once(scope.clone(), monitor).await;
-                                    publish_issue_monitor_payloads(&hub, &mut monitor);
+                                    publish_issue_monitor_payloads(&hub, &mut monitor, &scope);
                                 }
                             }
                         }
@@ -250,7 +255,7 @@ fn spawn_issue_monitor_worker(scope: RuntimeScope, hub: BroadcastHub, shutdown: 
                 _ = interval.tick() => {
                     if monitor.config.enabled {
                         monitor = scan_issue_monitor_once(scope.clone(), monitor).await;
-                        publish_issue_monitor_payloads(&hub, &mut monitor);
+                        publish_issue_monitor_payloads(&hub, &mut monitor, &scope);
                     }
                 }
             }
@@ -258,7 +263,13 @@ fn spawn_issue_monitor_worker(scope: RuntimeScope, hub: BroadcastHub, shutdown: 
     });
 }
 
-fn decode_issue_monitor_control_enabled(payload: serde_json::Value) -> Option<bool> {
+enum IssueMonitorControl {
+    Enabled(bool),
+    MaxActiveAgents(usize),
+    PriorityOrder(Vec<u64>),
+}
+
+fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonitorControl> {
     match crate::runtime_daemon_events::decode_runtime_daemon_event(
         crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL,
         payload,
@@ -268,9 +279,54 @@ fn decode_issue_monitor_control_enabled(payload: serde_json::Value) -> Option<bo
             if event.get("event")?.as_str()? != "control" {
                 return None;
             }
-            event.get("payload")?.get("enabled")?.as_bool()
+            let payload = event.get("payload")?;
+            if let Some(enabled) = payload.get("enabled").and_then(serde_json::Value::as_bool) {
+                return Some(IssueMonitorControl::Enabled(enabled));
+            }
+            if let Some(max) = payload
+                .get("max_active_agents")
+                .and_then(serde_json::Value::as_u64)
+            {
+                return Some(IssueMonitorControl::MaxActiveAgents(max as usize));
+            }
+            if let Some(order) = payload
+                .get("priority_order")
+                .and_then(serde_json::Value::as_array)
+            {
+                let order = order
+                    .iter()
+                    .filter_map(serde_json::Value::as_u64)
+                    .collect::<Vec<_>>();
+                return Some(IssueMonitorControl::PriorityOrder(order));
+            }
+            None
         }
         _ => None,
+    }
+}
+
+fn issue_monitor_settings_path(scope: &RuntimeScope) -> PathBuf {
+    gwt_core::paths::gwt_project_dir_for_repo_path(&scope.project_root).join("issue-monitor.json")
+}
+
+fn issue_monitor_config_for_scope(scope: &RuntimeScope) -> crate::IssueMonitorConfig {
+    let mut config = crate::IssueMonitorConfig::default();
+    if let Ok(settings) =
+        crate::load_issue_monitor_settings_from_path(&issue_monitor_settings_path(scope))
+    {
+        config.enabled = settings.enabled;
+        config.priority_order = settings.priority_order;
+        config.max_active_agents = settings.max_active_agents.max(1);
+    }
+    config
+}
+
+fn save_issue_monitor_settings_for_scope(scope: &RuntimeScope, monitor: &crate::IssueMonitorState) {
+    if let Err(error) = crate::save_issue_monitor_settings_to_path(
+        &issue_monitor_settings_path(scope),
+        &monitor.project_settings(),
+    ) {
+        tracing::debug!(error = %error, "issue monitor settings save failed");
     }
 }
 
@@ -309,23 +365,27 @@ fn scan_issue_monitor_once_blocking(
                 return monitor;
             }
         };
-    let client = match HttpIssueClient::from_gh_auth(&owner, &repo) {
-        Ok(client) => client,
-        Err(error) => {
-            monitor.record_scan_error(now, format!("GitHub auth failed: {error}"));
-            return monitor;
-        }
-    };
-    let monitor_owner = format!("{}:{}", whoami::username(), std::process::id());
-    crate::scan_issue_monitor_candidates(&mut monitor, &client, &issues, &monitor_owner, &now);
+    crate::scan_issue_monitor_candidates(&mut monitor, &issues, &now);
     monitor
 }
 
-fn publish_issue_monitor_payloads(hub: &BroadcastHub, monitor: &mut crate::IssueMonitorState) {
+fn publish_issue_monitor_payloads(
+    hub: &BroadcastHub,
+    monitor: &mut crate::IssueMonitorState,
+    scope: &RuntimeScope,
+) {
     let gui_connected = hub.receiver_count(crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL) > 0;
-    for payload in
-        crate::issue_monitor_worker::issue_monitor_daemon_payloads(monitor, gui_connected)
-    {
+    monitor.set_gui_connected(gui_connected);
+    let launch_requests = if gui_connected {
+        prepare_issue_monitor_launches_for_scope(scope, monitor)
+    } else {
+        Vec::new()
+    };
+    for payload in crate::issue_monitor_worker::issue_monitor_daemon_payloads(
+        monitor,
+        gui_connected,
+        launch_requests,
+    ) {
         let payload = crate::runtime_daemon_events::issue_monitor_payload(
             &payload.event,
             payload.payload,
@@ -339,6 +399,32 @@ fn publish_issue_monitor_payloads(hub: &BroadcastHub, monitor: &mut crate::Issue
             },
         );
     }
+}
+
+fn prepare_issue_monitor_launches_for_scope(
+    scope: &RuntimeScope,
+    monitor: &mut crate::IssueMonitorState,
+) -> Vec<crate::IssueMonitorLaunchRequest> {
+    if !monitor.config.enabled || monitor.queue_len() == 0 {
+        return Vec::new();
+    }
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let Some((owner, repo)) =
+        crate::issue_monitor_worker::github_remote_owner_and_repo(&scope.project_root)
+    else {
+        monitor.record_scan_error(now, "GitHub origin remote is unavailable");
+        return Vec::new();
+    };
+    let client = match HttpIssueClient::from_gh_auth(&owner, &repo) {
+        Ok(client) => client,
+        Err(error) => {
+            monitor.record_scan_error(now, format!("GitHub auth failed: {error}"));
+            return Vec::new();
+        }
+    };
+    let monitor_owner = format!("{}:{}", whoami::username(), std::process::id());
+    let batch = crate::prepare_issue_monitor_launches(monitor, &client, &monitor_owner, &now);
+    batch.requests
 }
 
 async fn handle_connection(

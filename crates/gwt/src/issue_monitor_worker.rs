@@ -3,7 +3,10 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{IssueMonitorInboxItem, IssueMonitorIssue, IssueMonitorIssueState, IssueMonitorState};
+use crate::{
+    IssueMonitorInboxItem, IssueMonitorIssue, IssueMonitorIssueState, IssueMonitorLaunchRequest,
+    IssueMonitorState,
+};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IssueMonitorDaemonPayload {
@@ -14,8 +17,10 @@ pub struct IssueMonitorDaemonPayload {
 pub fn issue_monitor_daemon_payloads(
     monitor: &mut IssueMonitorState,
     gui_connected: bool,
+    launch_requests: Vec<IssueMonitorLaunchRequest>,
 ) -> Vec<IssueMonitorDaemonPayload> {
     monitor.set_gui_connected(gui_connected);
+    let had_launch_requests = !launch_requests.is_empty();
     let mut payloads = vec![
         IssueMonitorDaemonPayload {
             event: "status".to_string(),
@@ -30,7 +35,7 @@ pub fn issue_monitor_daemon_payloads(
     ];
 
     if gui_connected {
-        if let Some(request) = monitor.next_launch_request() {
+        for request in launch_requests {
             payloads.push(IssueMonitorDaemonPayload {
                 event: "toast".to_string(),
                 payload: serde_json::json!({
@@ -44,8 +49,11 @@ pub fn issue_monitor_daemon_payloads(
                 payload: serde_json::json!({
                     "issue_number": request.issue_number,
                     "branch_name": request.branch_name,
+                    "linked_issue_kind": request.linked_issue_kind,
                 }),
             });
+        }
+        if had_launch_requests {
             payloads.push(IssueMonitorDaemonPayload {
                 event: "status".to_string(),
                 payload: serde_json::to_value(monitor.status_view())
@@ -138,7 +146,7 @@ mod tests {
         });
         monitor.record_claimed(issue(42), "claim-a");
 
-        let payloads = issue_monitor_daemon_payloads(&mut monitor, false);
+        let payloads = issue_monitor_daemon_payloads(&mut monitor, false, Vec::new());
 
         assert!(payloads.iter().any(|payload| payload.event == "status"));
         assert!(payloads.iter().any(|payload| payload.event == "inbox"));
@@ -157,10 +165,14 @@ mod tests {
         });
         monitor.record_claimed(issue(42), "claim-a");
 
-        let payloads = issue_monitor_daemon_payloads(&mut monitor, true);
+        monitor.set_gui_connected(true);
+        let request = monitor.next_launch_request().expect("launch request");
+        let payloads = issue_monitor_daemon_payloads(&mut monitor, true, vec![request]);
 
         assert!(payloads.iter().any(|payload| {
-            payload.event == "launch_request" && payload.payload["issue_number"] == 42
+            payload.event == "launch_request"
+                && payload.payload["issue_number"] == 42
+                && payload.payload["linked_issue_kind"] == "issue"
         }));
         assert_eq!(monitor.active_issue_number(), Some(42));
         assert_eq!(

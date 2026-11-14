@@ -219,6 +219,18 @@ fn embedded_web_issue_monitor_surface_is_registered_and_wired() {
         "Issue Monitor must not render as a fixed overlay card"
     );
     assert!(
+        surface_js.contains("set_issue_monitor_max_active_agents"),
+        "Issue Monitor must expose a max-active control"
+    );
+    assert!(
+        surface_js.contains("reorder_issue_monitor_issues"),
+        "Issue Monitor must expose priority reorder controls"
+    );
+    assert!(
+        surface_js.contains("linked_issue_kind"),
+        "Issue Monitor launch actions must preserve Issue vs SPEC routing"
+    );
+    assert!(
         html.contains("case \"issue_monitor_status\""),
         "app.js must handle issue monitor status events"
     );

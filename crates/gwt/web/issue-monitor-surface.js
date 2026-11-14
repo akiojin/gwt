@@ -6,6 +6,8 @@ export function createIssueMonitorSurface({ document, send }) {
     state: "disabled",
     queue_len: 0,
     active_issue_number: null,
+    active_issue_numbers: [],
+    max_active_agents: 1,
     last_scan_at: null,
     last_error: null,
   };
@@ -94,6 +96,27 @@ export function createIssueMonitorSurface({ document, send }) {
         padding: 0 12px;
         color: #cbd5e1;
       }
+      .issue-monitor-card__controls {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 0 12px 2px;
+      }
+      .issue-monitor-card__stepper {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        color: #cbd5e1;
+      }
+      .issue-monitor-card__number {
+        width: 52px;
+        border: 1px solid rgba(203, 213, 225, 0.28);
+        border-radius: 6px;
+        background: rgba(15, 23, 42, 0.88);
+        color: #f8fafc;
+        font: inherit;
+        padding: 4px 6px;
+      }
       .issue-monitor-card__detail {
         color: #94a3b8;
       }
@@ -151,6 +174,7 @@ export function createIssueMonitorSurface({ document, send }) {
         gap: 6px;
       }
       .issue-monitor-card__button {
+        min-width: 28px;
         padding: 4px 7px;
         white-space: nowrap;
       }
@@ -197,12 +221,33 @@ export function createIssueMonitorSurface({ document, send }) {
     statusBlock.appendChild(stateText);
     statusBlock.appendChild(detailText);
 
+    const controls = element("div", "issue-monitor-card__controls");
+    const maxLabel = element("label", "issue-monitor-card__stepper");
+    maxLabel.appendChild(element("span", null, "Max active"));
+    const maxInput = element("input", "issue-monitor-card__number");
+    maxInput.type = "number";
+    maxInput.min = "1";
+    maxInput.step = "1";
+    maxInput.value = "1";
+    maxInput.addEventListener("change", () => {
+      const parsed = Number.parseInt(maxInput.value, 10);
+      const maxActive = Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
+      maxInput.value = String(maxActive);
+      sendMonitorEvent({
+        kind: "set_issue_monitor_max_active_agents",
+        max_active_agents: maxActive,
+      });
+    });
+    maxLabel.appendChild(maxInput);
+    controls.appendChild(maxLabel);
+
     const errorText = element("div", "issue-monitor-card__error");
     const inboxRoot = element("div", "issue-monitor-card__inbox");
     const toastRoot = element("div", "issue-monitor-card__toast");
 
     root.appendChild(header);
     root.appendChild(statusBlock);
+    root.appendChild(controls);
     root.appendChild(errorText);
     root.appendChild(inboxRoot);
     root.appendChild(toastRoot);
@@ -212,6 +257,7 @@ export function createIssueMonitorSurface({ document, send }) {
       stateText,
       detailText,
       toggleButton,
+      maxInput,
       errorText,
       inboxRoot,
       toastRoot,
@@ -237,6 +283,32 @@ export function createIssueMonitorSurface({ document, send }) {
     }
   }
 
+  function linkedIssueKind(item) {
+    const labels = Array.isArray(item?.issue?.labels) ? item.issue.labels : [];
+    return labels.includes("gwt-spec") ? "spec" : "issue";
+  }
+
+  function issueOrder() {
+    return inboxItems
+      .map((item) => issueNumber(item))
+      .filter((number) => Number.isInteger(number) && number > 0);
+  }
+
+  function moveIssue(number, offset) {
+    const order = issueOrder();
+    const index = order.indexOf(number);
+    const nextIndex = index + offset;
+    if (index < 0 || nextIndex < 0 || nextIndex >= order.length) {
+      return;
+    }
+    const [moved] = order.splice(index, 1);
+    order.splice(nextIndex, 0, moved);
+    sendMonitorEvent({
+      kind: "reorder_issue_monitor_issues",
+      issue_numbers: order,
+    });
+  }
+
   function renderInbox() {
     if (!mounted) {
       return;
@@ -244,11 +316,11 @@ export function createIssueMonitorSurface({ document, send }) {
     const { inboxRoot } = mounted;
     inboxRoot.replaceChildren();
     if (!inboxItems.length) {
-      inboxRoot.appendChild(element("div", "issue-monitor-card__empty", "No watched issues"));
+      inboxRoot.appendChild(element("div", "issue-monitor-card__empty", "No open issues"));
       return;
     }
 
-    for (const item of inboxItems) {
+    inboxItems.forEach((item, index) => {
       const number = issueNumber(item);
       const row = element("div", "issue-monitor-card__item");
       const issue = element("div", "issue-monitor-card__issue");
@@ -271,36 +343,61 @@ export function createIssueMonitorSurface({ document, send }) {
 
       const actions = element("div", "issue-monitor-card__actions");
       if (number && item.state === "queued") {
+        const upButton = element("button", "issue-monitor-card__button", "↑");
+        upButton.type = "button";
+        upButton.title = "Move earlier";
+        upButton.disabled = index === 0;
+        upButton.addEventListener("click", () => moveIssue(number, -1));
+        actions.appendChild(upButton);
+
+        const downButton = element("button", "issue-monitor-card__button", "↓");
+        downButton.type = "button";
+        downButton.title = "Move later";
+        downButton.disabled = index === inboxItems.length - 1;
+        downButton.addEventListener("click", () => moveIssue(number, 1));
+        actions.appendChild(downButton);
+      }
+      if (number && item.state === "queued") {
         const launchButton = element("button", "issue-monitor-card__button", "Launch");
         launchButton.type = "button";
         launchButton.addEventListener("click", () => {
-          sendMonitorEvent({ kind: "issue_monitor_launch_now", issue_number: number });
+          sendMonitorEvent({
+            kind: "issue_monitor_launch_now",
+            issue_number: number,
+            linked_issue_kind: linkedIssueKind(item),
+          });
         });
         actions.appendChild(launchButton);
       }
       row.appendChild(actions);
       inboxRoot.appendChild(row);
-    }
+    });
   }
 
   function renderStatus() {
     if (!mounted) {
       return;
     }
-    const { toggleButton, stateText, detailText, errorText } = mounted;
+    const { toggleButton, stateText, detailText, maxInput, errorText } = mounted;
     const enabled = Boolean(status.enabled);
     toggleButton.dataset.enabled = enabled ? "true" : "false";
     toggleButton.textContent = enabled ? "On" : "Off";
     const stateLabel = String(status.state || (enabled ? "idle" : "disabled"));
     stateText.textContent = stateLabel.charAt(0).toUpperCase() + stateLabel.slice(1);
     const details = [`Queue ${status.queue_len || 0}`];
-    if (status.active_issue_number) {
-      details.push(`Active #${status.active_issue_number}`);
+    const activeNumbers = Array.isArray(status.active_issue_numbers)
+      ? status.active_issue_numbers
+      : status.active_issue_number
+        ? [status.active_issue_number]
+        : [];
+    if (activeNumbers.length) {
+      details.push(`Active ${activeNumbers.map((number) => `#${number}`).join(", ")}`);
     }
     if (status.last_scan_at) {
       details.push(`Scan ${status.last_scan_at}`);
     }
     detailText.textContent = details.join(" | ");
+    maxInput.value = String(Math.max(1, Number(status.max_active_agents) || 1));
     const lastError = status.last_error || "";
     errorText.textContent = lastError;
     errorText.dataset.visible = lastError ? "true" : "false";
