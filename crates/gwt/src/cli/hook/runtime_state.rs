@@ -1438,6 +1438,182 @@ mod tests {
         );
     }
 
+    fn raw_monitor_input_fences_hook(pending: bool, test_name: &str) {
+        use gwt_agent::session::HookCompletionOutcome::Normal;
+        use std::sync::{atomic::AtomicBool, Arc, Mutex, RwLock};
+
+        let wait_for = |path: &Path| {
+            // test-hygiene: allow-wall-clock-deadline Markers establish ordering; this only bounds a missing child.
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            while !path.exists() {
+                assert!(
+                    // test-hygiene: allow-wall-clock-deadline Markers establish ordering; bound a missing child.
+                    std::time::Instant::now() < deadline,
+                    "missing actor marker: {path:?}"
+                );
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        };
+        if let Some(directory) = std::env::var_os("GWT_TEST_RAW_MONITOR_HOOK_ACTOR") {
+            let directory = PathBuf::from(directory);
+            wait_for(&directory.join("go"));
+            let sessions = gwt_core::paths::gwt_sessions_dir();
+            let id = GwtSessionId::from_env().unwrap();
+            let session = Session::load(&sessions.join(format!("{}.toml", id.as_str()))).unwrap();
+            let completion = begin_hook_event(&session.worktree_path, "Stop", "{}").unwrap();
+            assert!(handle_with_input_owned("Stop", "{}", Some(&completion))
+                .unwrap()
+                .is_some());
+            let pending_completion = if pending {
+                Some(completion)
+            } else {
+                completion.finish_stop(false).unwrap();
+                completion.record(Normal);
+                None
+            };
+            std::fs::write(directory.join("ready"), b"").unwrap();
+            wait_for(&directory.join("complete"));
+            if let Some(completion) = pending_completion {
+                assert!(completion.finish_stop(false).unwrap().is_none());
+                completion.record(Normal);
+            } else {
+                let successor = begin_hook_event(&session.worktree_path, "Stop", "{}").unwrap();
+                handle_with_input_owned("Stop", "{}", Some(&successor)).unwrap();
+                successor.finish_stop(false).unwrap();
+                successor.record(Normal);
+            }
+            std::fs::write(directory.join("done"), b"").unwrap();
+            return;
+        }
+
+        super::super::health::browser_preflight_tests::with_source(
+            |input, session, path, original| {
+                let directory = path.parent().unwrap().join("raw-monitor-hook-actor");
+                std::fs::create_dir(&directory).unwrap();
+                let home = gwt_core::test_support::gwt_home_override().unwrap();
+                let handle = Arc::new(
+                    gwt_terminal::PtyHandle::spawn(gwt_terminal::pty::SpawnConfig {
+                        command: std::env::current_exe()
+                            .unwrap()
+                            .to_string_lossy()
+                            .into_owned(),
+                        args: vec!["--exact".into(), test_name.into(), "--nocapture".into()],
+                        cols: 80,
+                        rows: 24,
+                        env: [
+                            ("HOME".into(), home.to_string_lossy().into_owned()),
+                            ("USERPROFILE".into(), home.to_string_lossy().into_owned()),
+                            (
+                                "GWT_TEST_RAW_MONITOR_HOOK_ACTOR".into(),
+                                directory.to_string_lossy().into_owned(),
+                            ),
+                        ]
+                        .into_iter()
+                        .collect(),
+                        remove_env: Vec::new(),
+                        cwd: Some(input.worktree_root.clone()),
+                    })
+                    .unwrap(),
+                );
+                let mut runtime = original.clone();
+                runtime.child_pid = handle.process_id();
+                runtime.child_started_at = runtime
+                    .child_pid
+                    .and_then(crate::process::host_process_start_time);
+                assert!(runtime.child_started_at.is_some());
+                runtime.save(path).unwrap();
+                let entry = Arc::new(crate::project_runtime::agent_dispatch::PtyWriterEntry {
+                    project_key: gwt_core::paths::project_scope_hash(&input.worktree_root),
+                    handle: handle.clone(),
+                    current: Arc::new(AtomicBool::new(true)),
+                    monitor_runtime: Some(
+                        crate::monitor_duplicate_runtime::MonitorRuntimeRegistration {
+                            window_id: "raw-monitor-source".into(),
+                            session_id: session.id.clone(),
+                            issue_number: session.linked_issue_number.unwrap(),
+                            worktree_path: session.worktree_path.clone(),
+                            project_root: input.worktree_root.clone(),
+                            sessions_dir: gwt_core::paths::gwt_sessions_dir(),
+                            incarnation: 17,
+                            review_dispatch: false,
+                        },
+                    ),
+                    pm_delivery_replay: Mutex::new(None),
+                });
+                let writers = Arc::new(RwLock::new(std::collections::HashMap::from([(
+                    "raw-monitor-source".into(),
+                    entry.clone(),
+                )])));
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    std::fs::write(directory.join("go"), b"").unwrap();
+                    wait_for(&directory.join("ready"));
+                    let before = std::fs::read(path).unwrap();
+                    let observed: SessionRuntimeState = serde_json::from_slice(&before).unwrap();
+                    assert_eq!(observed.is_current_normal_stop(), !pending);
+                    assert!(observed.current_hook_event.is_some());
+                    let session_path =
+                        gwt_core::paths::gwt_sessions_dir().join(format!("{}.toml", session.id));
+                    let session_before = std::fs::read(&session_path).unwrap();
+                    let revision = handle.ordinary_input_revision().unwrap();
+                    crate::project_runtime::agent_dispatch::write_current_raw_input(
+                        &writers,
+                        "raw-monitor-source",
+                        &entry,
+                        b"raw input\r\n",
+                    )
+                    .unwrap();
+                    assert_eq!(handle.ordinary_input_revision(), Some(revision + 1));
+                    assert!(!handle.has_unsent_user_input());
+                    let invalidated = std::fs::read(path).unwrap();
+                    let mut expected: serde_json::Value = serde_json::from_slice(&before).unwrap();
+                    expected
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("current_hook_event");
+                    assert_eq!(
+                        serde_json::from_slice::<serde_json::Value>(&invalidated).unwrap(),
+                        expected,
+                        "accepted raw input removes only current observation"
+                    );
+                    assert_eq!(std::fs::read(&session_path).unwrap(), session_before);
+                    std::fs::write(directory.join("complete"), b"").unwrap();
+                    wait_for(&directory.join("done"));
+                    if pending {
+                        assert_eq!(
+                            std::fs::read(path).unwrap(),
+                            invalidated,
+                            "late Stop completion cannot restore current or change history"
+                        );
+                        assert_eq!(std::fs::read(&session_path).unwrap(), session_before);
+                    } else {
+                        let successor = SessionRuntimeState::load(path).unwrap();
+                        assert!(successor.is_current_normal_stop());
+                        assert_ne!(successor.current_hook_event, observed.current_hook_event);
+                    }
+                }));
+                assert!(
+                    crate::session_finalizer::kill_and_reap(&handle, "raw-monitor-source").unwrap()
+                );
+                handle.release_descriptors();
+                if let Err(panic) = result {
+                    std::panic::resume_unwind(panic);
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn raw_monitor_input_invalidates_completed_stop_until_genuine_successor() {
+        raw_monitor_input_fences_hook(false,
+            "cli::hook::runtime_state::tests::raw_monitor_input_invalidates_completed_stop_until_genuine_successor");
+    }
+
+    #[test]
+    fn raw_monitor_input_prevents_pending_stop_completion_from_restoring_current() {
+        raw_monitor_input_fences_hook(true,
+            "cli::hook::runtime_state::tests::raw_monitor_input_prevents_pending_stop_completion_from_restoring_current");
+    }
+
     // Source-side acceptance callbacks below are not physical PTY delivery proof.
     #[test]
     fn monitor_prompt_acceptance_invalidates_completed_stop_until_a_new_hook() {

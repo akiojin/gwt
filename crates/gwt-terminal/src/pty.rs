@@ -388,6 +388,41 @@ struct PtyInputState {
     /// cleared. Used so PM wake injection can wait instead of splicing a
     /// `[gwt]` prompt into a live TUI composer.
     unsent_user_input: bool,
+    raw_framing: RawInputFraming,
+}
+
+/// Only bracketed-paste framing is retained; this is not a composer model.
+#[derive(Clone, Copy, Default)]
+struct RawInputFraming {
+    paste: bool,
+    prefix: usize,
+}
+
+impl RawInputFraming {
+    fn observe(&mut self, data: &[u8]) -> bool {
+        let mut confirms = false;
+        for &byte in data {
+            let marker = if self.paste {
+                b"\x1b[201~"
+            } else {
+                b"\x1b[200~"
+            };
+            if byte == marker[self.prefix] {
+                self.prefix += 1;
+                if self.prefix == marker.len() {
+                    confirms |= self.paste;
+                    self.paste = !self.paste;
+                    self.prefix = 0;
+                }
+                continue;
+            }
+            self.prefix = usize::from(byte == 0x1b);
+            if !self.paste && matches!(byte, b'\r' | b'\n') {
+                confirms = true;
+            }
+        }
+        confirms
+    }
 }
 
 enum ChildState {
@@ -1020,6 +1055,22 @@ impl PtyHandle {
         self.write_ordinary_input(data, true)
     }
 
+    /// Authorize a raw chunk before recording input facts or queueing bytes.
+    /// The flag observes CR/LF outside paste, or a complete paste terminator;
+    /// it does not prove provider consumption. Call `commit` at most once.
+    /// The callback runs without the input-state or physical-writer lock and
+    /// must release its guards before returning, including after `commit`.
+    pub fn write_input_with_acceptance(
+        &self,
+        data: &[u8],
+        accept: impl FnOnce(
+            bool,
+            &mut dyn FnMut() -> Result<(), TerminalError>,
+        ) -> Result<(), TerminalError>,
+    ) -> Result<(), TerminalError> {
+        self.write_ordinary_input_accepting(data, true, true, accept, || Ok(()))
+    }
+
     /// Preserve ordinary input ordering/composer protection without treating
     /// an automated write as human activity.
     pub fn write_machine_input(&self, data: &[u8]) -> Result<(), TerminalError> {
@@ -1085,6 +1136,20 @@ impl PtyHandle {
         human: bool,
         before_writer: impl FnOnce() -> Result<(), TerminalError>,
     ) -> Result<(), TerminalError> {
+        self.write_ordinary_input_accepting(data, human, false, |_, commit| commit(), before_writer)
+    }
+
+    fn write_ordinary_input_accepting(
+        &self,
+        data: &[u8],
+        human: bool,
+        authorize: bool,
+        accept: impl FnOnce(
+            bool,
+            &mut dyn FnMut() -> Result<(), TerminalError>,
+        ) -> Result<(), TerminalError>,
+        before_writer: impl FnOnce() -> Result<(), TerminalError>,
+    ) -> Result<(), TerminalError> {
         let mut state = self
             .input_state
             .lock()
@@ -1117,37 +1182,61 @@ impl PtyHandle {
                 details: "PTY input generation is no longer active".to_string(),
             });
         }
-        if !data.is_empty() {
-            state.ordinary_input_revision = state.ordinary_input_revision.saturating_add(1);
-        }
-        // Escape-only terminal responses must not postpone supervision. The
-        // existing content classifier also covers paste payloads and edits.
-        if human
-            && (chunk_has_prompt_content(data)
-                || data
-                    .iter()
-                    .any(|byte| matches!(byte, b'\r' | b'\n' | 0x03 | 0x15)))
-        {
-            state.last_human_input_at = Some(gwt_core::operation_deadline::now());
-        }
-        state.note_user_input(data);
-        // Register before waiting for I/O so a reservation can flush this
-        // earlier chunk before input accepted by its authorization callback.
+        let revision = state.ordinary_input_revision;
+        let mut framing = state.raw_framing;
+        let confirms = framing.observe(data);
         let pending: Arc<[u8]> = Arc::from(data);
-        state.queued.push_back(Arc::clone(&pending));
-        if state.protected {
-            return Ok(());
-        }
-        // A stalled writer must not pin input_state: snapshots hold Pane while
-        // observing it, and the output reader needs Pane to keep draining the
-        // child's output. Holding both would close an I/O wait cycle.
-        drop(state);
-
         let discard_pending = || {
             if let Ok(mut state) = self.input_state.lock() {
                 state.queued.retain(|entry| !Arc::ptr_eq(entry, &pending));
             }
         };
+        let mut accepted = false;
+        let mut protected = if authorize {
+            false
+        } else {
+            accepted = true;
+            state.accept_ordinary(data, human, framing, &pending)
+        };
+        drop(state);
+        let result = if authorize {
+            accept(confirms, &mut || {
+                let mut state =
+                    self.input_state
+                        .lock()
+                        .map_err(|error| TerminalError::PtyIoError {
+                            details: format!("input state lock poisoned: {error}"),
+                        })?;
+                if accepted
+                    || !self.generation_active.load(Ordering::Acquire)
+                    || state.ordinary_input_revision != revision
+                    || (_order.is_none() && !state.protected)
+                {
+                    return Err(TerminalError::PtyIoError {
+                        details: "ordinary input changed before queue acceptance".into(),
+                    });
+                }
+                protected = state.accept_ordinary(data, human, framing, &pending);
+                accepted = true;
+                Ok(())
+            })
+        } else {
+            Ok(())
+        };
+        if let Err(error) = result {
+            discard_pending();
+            return Err(error);
+        }
+        if !accepted {
+            return Err(TerminalError::PtyIoError {
+                details: "ordinary input was not accepted".into(),
+            });
+        }
+        if protected {
+            return Ok(());
+        }
+        // The acceptance callback has released Session/runtime guards before
+        // waiting for the physical writer. Never hold input_state over I/O.
         if let Err(error) = before_writer() {
             discard_pending();
             return Err(error);
@@ -1816,6 +1905,30 @@ pub fn run_start_gate_from_env() -> Result<i32, TerminalError> {
 }
 
 impl PtyInputState {
+    fn accept_ordinary(
+        &mut self,
+        data: &[u8],
+        human: bool,
+        framing: RawInputFraming,
+        pending: &Arc<[u8]>,
+    ) -> bool {
+        if !data.is_empty() {
+            self.ordinary_input_revision = self.ordinary_input_revision.saturating_add(1);
+        }
+        if human
+            && (chunk_has_prompt_content(data)
+                || data
+                    .iter()
+                    .any(|byte| matches!(byte, b'\r' | b'\n' | 0x03 | 0x15)))
+        {
+            self.last_human_input_at = Some(gwt_core::operation_deadline::now());
+        }
+        self.note_user_input(data);
+        self.raw_framing = framing;
+        self.queued.push_back(Arc::clone(pending));
+        self.protected
+    }
+
     fn human_input_is_quiet(&self, quiet_for: Duration) -> bool {
         self.last_human_input_at.is_none_or(|at| {
             gwt_core::operation_deadline::now()
@@ -3450,6 +3563,77 @@ mod tests {
         assert_eq!(
             handle.input_state.lock().unwrap().last_human_input_at,
             human_time
+        );
+    }
+
+    #[test]
+    fn raw_acceptance_observes_confirmation_and_split_paste_boundaries() {
+        let _pty_guard = lock_pty_test();
+        let handle = Arc::new(PtyHandle::spawn(sleep_config("60")).unwrap());
+        let reservation = handle.reserve_input_transaction().unwrap();
+        for (bytes, expected) in [
+            (b"\x1b[A\x0c".as_slice(), false),
+            (b"\r".as_slice(), true),
+            (b"\n".as_slice(), true),
+            (b"\x1b[20".as_slice(), false),
+            (b"0~first\r\nsecond".as_slice(), false),
+            (b"\x1b[201".as_slice(), false),
+            (b"~".as_slice(), true),
+            (b"\x1b[200~plain\x1b[201~".as_slice(), true),
+            (b"\x1b[B\x03\x15".as_slice(), false),
+        ] {
+            let before = handle.ordinary_input_revision();
+            handle
+                .write_input_with_acceptance(bytes, |confirms, commit| {
+                    assert_eq!(confirms, expected, "chunk: {bytes:?}");
+                    assert_eq!(handle.ordinary_input_revision(), before);
+                    commit()
+                })
+                .unwrap();
+        }
+        drop(reservation);
+    }
+
+    #[test]
+    fn raw_acceptance_rejection_and_revision_race_do_not_queue_the_chunk() {
+        let _pty_guard = lock_pty_test();
+        let handle = Arc::new(PtyHandle::spawn(sleep_config("60")).unwrap());
+        let reservation = handle.reserve_input_transaction().unwrap();
+        let before = handle.ordinary_input_observation().unwrap();
+        assert!(handle
+            .write_input_with_acceptance(b"\x1b[200~", |_, _| {
+                Err(TerminalError::PtyIoError {
+                    details: "refused by owner".into(),
+                })
+            })
+            .is_err());
+        assert_eq!(handle.ordinary_input_observation().unwrap(), before);
+        assert!(handle.input_state.lock().unwrap().queued.is_empty());
+        handle
+            .write_input_with_acceptance(b"\r", |confirms, commit| {
+                assert!(confirms, "rejected framing must not affect later input");
+                commit()
+            })
+            .unwrap();
+        assert!(handle
+            .write_input_with_acceptance(b"lost\r", |_, commit| {
+                handle.write_input(b"newer")?;
+                commit()
+            })
+            .is_err());
+        let state = handle.input_state.lock().unwrap();
+        assert_eq!(state.ordinary_input_revision, 2);
+        assert_eq!(state.queued.len(), 2);
+        assert_eq!(&*state.queued[1], b"newer");
+        drop(state);
+        assert!(
+            handle
+                .write_input_with_acceptance(b"unreserved\r", |_, commit| {
+                    drop(reservation);
+                    commit()
+                })
+                .is_err(),
+            "a released reservation must not bypass ordinary ordering"
         );
     }
 
