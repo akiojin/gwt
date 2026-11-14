@@ -34,11 +34,24 @@ jobs:
     permissions:
       contents: read
       actions: read
+      # The changed-file classifier reads the pull request's files.
+      pull-requests: read
     concurrency:
       group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-source-sync
       cancel-in-progress: true
+    # Issue #5170: this is the only gate job. A separate classification job
+    # waited for its own runner and enqueued the jobs reading it behind the
+    # rest of the run, which put the long ones at the queue's tail.
     outputs:
       base_only: ${{ steps.relation.outputs.base_only }}
+      docs_only: ${{ steps.classify.outputs.docs_only }}
+      # SPEC #4551 T-055: the cargo test targets the PR touched, as
+      # `<crate>|test|<name>` / `<crate>|lib|` tokens, so the flake job repeats
+      # only those. Crate granularity does not fit: measured on this runner
+      # class, one `cargo test --workspace --all-features` takes 11m23s, so 20
+      # runs of a changed `gwt` alone would blow any step budget. The SPEC's own
+      # cost model is per target ("#4550 は 54 テスト 0.53 秒で、20 回でも 11 秒").
+      flake_targets: ${{ steps.classify.outputs.flake_targets }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -57,40 +70,19 @@ jobs:
       - name: Distinguish base synchronization from PR changes
         id: relation
         run: python3 scripts/ci_sync_relation.py --event-file "$GITHUB_EVENT_PATH" --runs-file "$RUNNER_TEMP/ci-runs.json" > "$RUNNER_TEMP/ci-source-relation.json"
-
-  # Issue #4119 AC-2: classify the PR's files once so jobs a documentation edit
-  # cannot affect skip instead of queueing a Windows runner. Only jobs that are
-  # NOT a develop required status check may depend on this job: GitHub reports
-  # a skipped job as Success to branch protection, so gating a required check
-  # here would let a PR merge without running it. The gated jobs condition on
-  # `!cancelled() && needs.changes.outputs.docs_only != 'true'`, so a failed
-  # classification (API error) falls open to running them. Both properties are
-  # pinned by crates/gwt/tests/ci_concurrency_contract_test.rs.
-  changes:
-    name: Classify changed files
-    concurrency:
-      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-changes
-      cancel-in-progress: true
-    runs-on: ubuntu-latest
-    outputs:
-      docs_only: ${{ steps.classify.outputs.docs_only }}
-      # SPEC #4551 T-055: the cargo test targets the PR touched, as
-      # `<crate>|test|<name>` / `<crate>|lib|` tokens, so the flake job repeats
-      # only those. Crate granularity does not fit: measured on this runner
-      # class, one `cargo test --workspace --all-features` takes 11m23s, so 20
-      # runs of a changed `gwt` alone would blow any step budget. The SPEC's own
-      # cost model is per target ("#4550 は 54 テスト 0.53 秒で、20 回でも 11 秒").
-      flake_targets: ${{ steps.classify.outputs.flake_targets }}
-    steps:
-      # Source mapping reads Cargo registrations and harnesses for each event.
-      # A merge group also needs history for its changed-file diff. `blob:none`
-      # keeps that full-history fetch to commits and trees.
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-          filter: blob:none
+      # Issue #4119 AC-2: classify the PR's files once so jobs a documentation edit
+      # cannot affect skip instead of queueing a Windows runner. Only jobs that are
+      # NOT a develop required status check may condition on `docs_only`: GitHub
+      # reports a skipped job as Success to branch protection, so gating a
+      # required check here would let a PR merge without running it. The gated jobs condition on
+      # `!cancelled() && needs.source-sync.outputs.docs_only != 'true'`, so a failed
+      # classification (API error) falls open to running them. Both properties are
+      # pinned by crates/gwt/tests/ci_concurrency_contract_test.rs.
       - name: Classify changed files
         id: classify
+        # Independent of the history comparison above: a failed comparison
+        # must not drop the path filter or the flake target selection.
+        if: ${{ !cancelled() }}
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -415,8 +407,8 @@ jobs:
     concurrency:
       group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-flake-detection
       cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
-    needs: [changes, source-sync]
-    if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.flake_targets != '' }}
+    needs: source-sync
+    if: ${{ !cancelled() && needs.source-sync.outputs.docs_only != 'true' && needs.source-sync.outputs.flake_targets != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -462,7 +454,7 @@ jobs:
           # these after cache restore: dependencies already use debug=false.
           CARGO_PROFILE_DEV_DEBUG: "0"
           CARGO_PROFILE_TEST_DEBUG: "0"
-          GWT_FLAKE_TARGETS: ${{ needs.changes.outputs.flake_targets }}
+          GWT_FLAKE_TARGETS: ${{ needs.source-sync.outputs.flake_targets }}
           GWT_FLAKE_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
           GWT_FLAKE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
           GWT_FLAKE_BUDGET_SECS: "220"
@@ -1089,8 +1081,8 @@ jobs:
     concurrency:
       group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-test-windows-agent-launch-e2e
       cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
-    needs: [changes, source-sync]
-    if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' }}
+    needs: source-sync
+    if: ${{ !cancelled() && needs.source-sync.outputs.docs_only != 'true' }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -1192,8 +1184,8 @@ jobs:
     concurrency:
       group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-test-frontend
       cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
-    needs: [changes, source-sync]
-    if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' }}
+    needs: source-sync
+    if: ${{ !cancelled() && needs.source-sync.outputs.docs_only != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -1241,7 +1233,7 @@ jobs:
         timeout-minutes: 25
 
   report-post-merge-failure:
-    needs: [source-sync, changes, test, test-linux-infrastructure, test-rust-required, flake-detection, test-python-runner, test-index-e2e, test-windows-core-build, test-windows-core-stability, test-windows-index-stability, test-windows-rust, test-windows-rust-lib, test-windows-warm, test-windows-required, test-windows-agent-launch-e2e, test-frontend]
+    needs: [source-sync, test, test-linux-infrastructure, test-rust-required, flake-detection, test-python-runner, test-index-e2e, test-windows-core-build, test-windows-core-stability, test-windows-index-stability, test-windows-rust, test-windows-rust-lib, test-windows-warm, test-windows-required, test-windows-agent-launch-e2e, test-frontend]
     if: ${{ github.event_name == 'push' && failure() }}
     concurrency:
       group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-report-post-merge-failure
