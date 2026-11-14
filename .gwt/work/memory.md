@@ -7624,3 +7624,157 @@ Type: workflow
 Context: Issue #3253: owner-unlinked workflow-policy blocked gwtd JSON envelope discovery/linking commands because heredoc command segmentation normalized them to a lone gwtd segment and the owner guard did not classify the envelope operation.
 Learning: Classify standalone gwtd JSON envelopes from the original command before segment allowlists, but run shell output redirection detection first so control-plane transport cannot mask worktree writes.
 Future Action: When changing hook workflow policies, add RED tests for both allowed standalone JSON envelope commands and adversarial variants such as chained shell mutation or output redirection.
+
+## 2026-07-07 — Intake は Board handoff だけで完了扱いにしない
+
+Type: agent workflow correction
+Context: Intake セッションで GUI 全体の重さの gwt-discussion を実施した際、既存 owner (#3170 / #2012) を特定したにもかかわらず、最初は Board handoff のみで止め、Issue/SPEC section 更新を『必要なら』と表現した。ユーザーから『IntakeセッションではIssueまたはSPECの登録は行うものでは』と指摘された。
+Learning: Intake/Curate lane の成果物は Board だけでは不十分。検索で既存 owner が見つかった場合は、その Issue/SPEC の spec/plan/tasks などの canonical section を更新する。既存 owner が無い場合は Issue または SPEC を登録する。実装しないことと、Issue/SPEC を更新しないことは別物。
+Future Action: Intake セッションでは gwt-search / gwt-discussion の routing 決定後、必ず (1) 既存 Issue/SPEC section 更新、または (2) 新規 Issue/SPEC 登録、または (3) durable artifact 不要の明確な理由、のいずれかを完了条件にする。Board handoff だけで完了扱いにしない。
+
+## 2026-07-07 — Intake artifact gate は soft reminder ではなく Stop-block と self-improvement capture で強制する
+
+Type: agent-workflow-correction
+Context: 2026-07-07 intake discussion initially ended as Board-only handoff for GUI responsiveness. User clarified the problem was not a single judgment error but missing enforcement, and self-improvement did not run when the workflow failed.
+Learning: Curate/Intake completion must require a durable Issue/SPEC outcome or explicit No Action with reason. Board posts are coordination history, not artifact proof. A soft reminder is insufficient; Stop gate and Improvement Candidate capture are required for contract violations.
+Future Action: Before finishing intake work, verify Issue/SPEC create/update or no_action proof exists. If the workflow contract itself failed, run improvement.capture with target_artifact issue-spec-workflow and update the owning SPEC tasks, not only memory.add.
+
+## 2026-07-07 — Required artifact action を回答だけで終えない
+
+Type: agent-workflow-correction
+Context: 2026-07-07 user correction after the agent said cross-Issue bundling and self-improvement capture were required but initially only answered instead of updating artifacts.
+Learning: When an intake agent identifies a required condition, the next action must update the owning Issue/SPEC or record No Action proof. A natural-language explanation is not a valid artifact action. Self-improvement must capture the workflow failure, not merely describe that capture is missing.
+Future Action: If you say 'this must be done' or 'otherwise it is not guaranteed', immediately perform the intake artifact update in the same turn when mutation is allowed. Also run improvement.capture for the workflow failure using target_artifact issue-spec-workflow, then verify with readback.
+
+## 2026-07-07 — 複数 Issue 修正は Primary Execution Owner に束ねる
+
+Type: agent-workflow-correction
+Context: 2026-07-07 user asked how fixes spanning multiple Issues are handled when Execution sessions launch from a single Issue/SPEC.
+Learning: Because Execution has one linked_issue_number, related Issue tasks alone are not a guarantee. Intake must pick exactly one Primary Execution Owner and classify related owners as bundled-required, dependent-follow-up, or reference-only. Bundled-required work must be copied into the Primary owner's tasks and completion criteria.
+Future Action: When a fix spans multiple Issues/SPECs, update the Primary owner so a single-Issue Execution session can see the full required scope. Do not rely on 'also see #N' for work that must ship in the same PR.
+
+## 2026-07-07 — Bundled-required multi-Issue work は one primary Execution agent/session が検証まで所有する
+
+Type: agent-workflow-correction
+Context: 2026-07-07 user asked whether multi-Issue bundled work is handled by one agent and whether Execution handles tests through E2E.
+Learning: Primary owner/PR scope is not enough. Bundled-required related scope must be owned by one primary Execution agent/session, and that same primary owner must carry implementation through focused tests, full relevant verification, and E2E/managed-hook lifecycle tests when the behavior crosses hooks/session/user workflow. If required E2E cannot run, the correct state is blocked, not done.
+Future Action: When intake classifies related owners as bundled-required, update the Primary owner to state single primary Execution agent/session ownership plus verification evidence requirements. Execution handoff must require test additions, command results, and E2E evidence or a blocked report with the missing verification.
+
+## 2026-07-07 — Execution 完了は prose ではなく build.complete evidence gate で強制する
+
+Type: agent-workflow-correction
+Context: 2026-07-07 user asked to reconsider whether single Execution agent/session and E2E requirements were really enough.
+Learning: They are not enough if build.complete can close gwt-build-spec without structured evidence. Completion enforcement must live at the lifecycle operation: validate current session ownership, Primary/bundled-required coverage, tests, E2E/managed-hook result, and User Verification Result before deactivating build state. If required E2E cannot run, record blocked, not complete.
+Future Action: When designing Execution gates, require machine-readable completion evidence and make build.complete/PR gates reject missing or stale evidence. Do not rely on final-answer prose, task text, or Board handoff as proof that tests/E2E were actually run.
+
+## 2026-07-07 — Execution gate は SPEC build だけでなく plain Issue / PR op / trusted evidence store まで覆う
+
+Type: agent-workflow-correction
+Context: 2026-07-07 user asked to think deeper and broader after build.complete evidence gate was added.
+Learning: A build.complete-only evidence gate is too narrow. Execution enforcement must start at linked-owner launch, cover both gwt-build-spec and gwt-fix-issue, block Stop via an execution control record even if the skill lifecycle was not started, require tool-generated verification run records, gate canonical pr.create/pr.edit/pr.ready operations, support explicit ownership transfer for resume, and reject direct evidence file tampering.
+Future Action: When hardening agent workflow gates, audit all bypass paths: alternate entrypoints, missing lifecycle start, direct canonical operations, manual evidence fabrication, stale evidence, session resume, direct file edits, and autonomous-control exceptions. Add negative tests and E2E for every bypass path before claiming enforcement.
+
+## 2026-07-07 — Execution 中の Intake / GitHub Issue 更新は owner artifact revision gate で stale にする
+
+Type: agent-workflow-correction
+Context: 2026-07-07 user asked what happens if an Intake session updates the Issue while Execution is running.
+Learning: Execution evidence must bind not only to code HEAD/diff but also to the owner Issue/SPEC artifact revision. Intake or external GitHub updates to the Primary owner or bundled-required owner during Execution make the acceptance snapshot and Verification Plan stale. Completion/PR gates must refresh latest revisions, reject stale evidence, require impact classification and verification regeneration, and notify the active Execution owner.
+Future Action: When designing execution completion gates, include owner artifact snapshot/revision tracking and stale detection for concurrent Intake or external Issue/SPEC updates. Default ambiguous artifact updates to blocking until the Execution session refreshes context and re-verifies affected scope.
+
+## 2026-07-07 — Active Execution 中の Issue/SPEC 更新は書き込み側も CAS/freshness gate が必要
+
+Type: agent-workflow-correction
+Context: Execution 完了時の owner revision stale gate だけでは、Intake の issue.spec.edit が stale cache、複数 Intake session、partial spec/plan/tasks update、CAS 不在の GitHub mutation を通して正本 artifact を危険に更新できる。
+Learning: Active owner を Intake/GitHub 更新する設計では、Execution の complete/PR gate だけでなく、artifact mutation 自体に fresh remote expected revision、owner write lease、CAS-equivalent write、multi-section transaction、post-write readback、notification-failure-independent stale state が必要。
+Future Action: Issue/SPEC workflow gate を設計・実装する前に、read path と completion gate だけでなく write path の atomicity、cache freshness、CAS availability、partial failure、notification failure を必ず確認し、必要なら Primary owner SPEC に FR/tasks を追加する。
+
+## 2026-07-07 — Stale owner control は完了時だけでなく runtime boundary で割り込む
+
+Type: agent-workflow-correction
+Context: Execution 中に Intake/GitHub が owner Issue/SPEC を更新したとき、completion/PR gate で stale evidence を拒否しても、agent がその前に古い要件で production edit、test、verification evidence、child session、autonomous action を続けられると無駄な diff と誤証跡が増える。既存/resumed session に Execution Control Record が無い場合も absence が bypass になる。
+Learning: Active Execution の owner state が stale/conflict/backfill-required/schema-incompatible になったら、UserPromptSubmit/SessionStart で context 注入し、PreToolUse で stale-safe operation 以外の mutating work を deny する必要がある。legacy running session は fresh snapshot で backfill するか backfill_required として止める。
+Future Action: Execution control-plane や Issue/SPEC update gate を設計するときは、final completion/PR gate、write-side CAS gate に加えて、runtime interruption、legacy backfill、workflow_bypass hardening、autonomous monitor pause、subordinate session inheritance を必ず検討し、SPEC tasks に E2E を入れる。
+
+## 2026-07-07 — Execution control/evidence は worktree-local ではなく repo-scoped に保存する
+
+Type: agent-workflow-correction
+Context: Execution中にIntakeがIssue/SPECを更新するケースを確認した。既存のskill-stateは<worktree>/.gwt/skill-stateで、Intakeのephemeral worktreeとExecution worktreeが分かれるとstale/conflict/backfill-required stateが共有されない。
+Learning: Execution Control Record、Verification Run Record、Artifact Write Transaction、write lease、completion evidenceの正本はrepo-scoped trusted storeに置く必要がある。worktree-local skill-stateはStop/UX用の非正本cacheに限定し、store欠損・破損・schema mismatch・detached identityはfail-closedにする。
+Future Action: Execution/Issue/SPEC gateを設計するときは、保存先が同一repoの全worktree/sessionから見えるかを必ず確認する。Intake ephemeral update -> cross-worktree stale read -> PreToolUse block -> refresh/reverify -> final gate のE2EをPrimary owner tasksに入れる。
+
+## 2026-07-07 — Execution owner freshness は Issue cache TTL ではなく remote fail-closed token で見る
+
+Type: agent-workflow-correction
+Context: Execution中に別マシンやGitHub UIでPrimary/bundled ownerが更新されるケースを確認した。repo-scoped trusted storeは同一マシン内では効くが、remoteだけが変わる更新はlocal transaction/fanoutを残さない。SPEC #1939のIssue cacheは検索/表示UXのため15分TTLとstartup fail-openを持つ。
+Learning: Execution用owner freshnessはIssue cache TTL/search index healthと分離する必要がある。Primary/bundled ownerごとにRemote Owner Freshness Tokenを持ち、token期限切れ・network/auth unavailable・rate limit・parse failureはremote_freshness_unknown等のtyped blocked stateとしてfail-closedにする。completion/PR gateはTTL tokenに頼らず必ず即時remote validationする。
+Future Action: Execution gateを設計するときは、same-machine storeだけでなくcross-machine/GitHub UI/external automation更新を想定する。runtime boundaryでremote stale pullまたは期限切れtoken blockを入れ、offlineやrate limitでpass evidenceを作れないE2EをPrimary owner tasksに含める。
+
+## 2026-07-07 — PR Ready/merge は作成時 evidence ではなく current lifecycle state で判定する
+
+Type: lesson
+Context: #3248 hardening discussionで、completion/PR handoff時点の evidence は強化されていたが、PR作成後からReady/mergeまでにHEAD、base branch、CI、review、owner Issue/SPEC、PR body metadataが変わるTOCTOUが残ることを確認した。
+Learning: PR creation successやPR handoff evidenceをmerge readinessと同一視してはいけない。PR lifecycleにはcurrent PR head/base/owner/CI/review/evidence metadataへ束縛されたReady Evidence LeaseとMerge-Readiness Gateが必要で、stale後はhidden local stateだけでなくVisible Merge Blockerを残す。
+Future Action: PR/merge関連のworkflowを設計・レビューするときは、作成時の証跡だけでなく、Ready/merge直前のcurrent PR state再検証、head/base/CI/review/owner drift、PR body tamper、visible blocker、self-improvement captureを必ず確認する。
+
+## 2026-07-07 — Raw GitHub/SCM mutation は Authorized Transport Intent で縛る
+
+Type: lesson
+Context: #3248 hardening discussionで、canonical JSON operationsやPR lifecycle gateを強化しても、Bashからの`gh pr merge`、`git push`、`gh api`、`curl`、script-wrapped helperが直接remote mutationするとgateを迂回できることを確認した。現行policyはtransport都合で`gh pr merge`と`git push`を許可している。
+Learning: workflow gateの強制は正規operationだけでは不十分。remote mutation sinkにはAuthorized Transport Intent、trusted wrapper、post-readback、server-side backstopが必要。raw command成功やPR/body/proseはtrusted evidenceではない。
+Future Action: PR/Issue/SPEC/branch/release/check mutationを設計・レビューするときは、canonical JSON operationだけでなく、Bash経由のgh/git/curl/API/script bypass、intentのsingle-use/expiry/ref/SHA binding、server-side branch protection/token scope、final readback detectionを必ず確認する。
+
+## 2026-07-07 — Fail-closed gate は recovery と performance budget まで設計する
+
+Type: lesson
+Context: #3248 の managed-hooks v2 設計で、Intake outcome、Execution ownership、owner freshness、verification evidence、PR lifecycle、out-of-band transport を fail-closed にしたが、block reason / recovery action / Gate Doctor / performance budget がないと agent が同じ拒否を繰り返し UX regression になる。
+Learning: Workflow gate は deny だけでは不十分。Gate Decision Record、typed Recovery Action Plan、Gate Doctor、denial coalescing、break-glass limits、observe/warn の最終 gate 非緩和、hook hot-path budget を同時に設計しないと、本当に強制された運用にならない。
+Future Action: Issue/SPEC workflow gate を追加・強化する時は、acceptance scenario と tasks に structured diagnostics、具体的 recovery command、self-improvement loop、E2E block-to-repair fixture、hook performance budget を必ず含める。
+
+## 2026-07-07 — Answer-only 防止は Action Obligation と evidence settlement で設計する
+
+Type: lesson
+Context: #3248 の Answer-To-Artifact Enforcement は latest prompt 以降の outcome を要求していたが、粗い dirty marker だけでは質問/status prompt を過剰に止め、逆に agent の約束や完了主張がどの tool/JSON/readback evidence で満たされたかを証明しにくい。
+Learning: 回答だけで行動しない失敗を止めるには、UserPromptSubmit、Action Bundle、assistant commitment、Gate Recovery Action Plan から Action Obligation Record を作り、Issue/SPEC readback、Execution Control Record、Verification Run Record、Build Completion Evidence、PR Lifecycle Evidence などの trusted Action Evidence でしか producing obligation を消し込めないようにする必要がある。
+Future Action: Workflow gate や intake/execution 設計を更新するときは、prompt 分類、non-producing answer、promissory answer scan、obligation settlement、failed/partial evidence non-settlement、cross-lane propagation、E2E prompt-to-action fixture を tasks に含める。
+
+## 2026-07-07 — 大きい workflow SPEC は phase contract と directive supersession を先に設計する
+
+Type: lesson
+Context: #3248 のサブエージェント検査で、T-070..T-253 が単一 Execution scope として大きすぎること、古い P7 completion 条件が残ること、ユーザー撤回/方針変更で古い obligation や recovery plan が継続する危険が見つかった。
+Learning: Workflow gate SPEC は、action を強制するだけでなく、ユーザーの最新 directive で古い action を cancel/supersede できる必要がある。さらに大きい owner は phase slice、Ready/Draft 境界、依存 graph、FR/acceptance/task/E2E traceability を持たないと、単一 PR scope の過大化か、古い完了条件による抜け漏れを起こす。
+Future Action: Issue/SPEC workflow を深掘りする時は、subagent review を使って stale completion criteria、phase scope、directive cancellation/supersession、related owner boundary、traceability map を点検し、必要なら spec/plan/tasks に phase contract と directive epoch gate を追加する。
+
+## 2026-07-07 — Phase contract は具体 matrix と launch/completion gate まで落とす
+
+Type: lesson
+Context: #3248 で phase delivery contract を追加した後も、P7A/P7B/P8/P9/P10/P11 の具体 task/FR/Ready 条件 matrix が無ければ、Execution agent が broad owner scope を推測したり、部分 phase を #3248 完了と誤認する余地が残った。
+Learning: 大きな workflow SPEC を phase 分割する時は、抽象的に phase contract を要求するだけでは不十分。phase_slice、task range、FR/acceptance coverage、prerequisites、related-owner stance、Ready/Draft policy、E2E artifact、completion claim scope を Issue 上の具体 matrix として持ち、Launch/Completion/PR/Board がその matrix を読む必要がある。
+Future Action: 今後、大きな SPEC の scope を分割する時は、spec/plan/tasks に concrete phase matrix、phase_slice launch gate、scoped completion claim gate、traceability artifact generation task を必ず追加する。
+
+## 2026-07-07 — Intake は成果物確定前に独立検査を通す
+
+Type: agent-workflow-correction
+Context: #3248 の Issue 内容をサブエージェント検査したところ、phase_slice 必須契約、P7A/P8/P10 境界、P7B traceability、巨大 SPEC artifact operability の漏れが見つかった。ユーザーから、今回だけでなく今後の Intake でも同じ検査フローが必要だと指摘された。
+Learning: Intake lane の成果物は Issue/SPEC/plan/tasks/Action Bundle であり、main agent の自己判断だけでは漏れが残る。draft snapshot、独立検査、finding disposition、critical finding block、waiver 規則、Execution launch への検査状態伝搬を workflow 契約にしないと再発する。
+Future Action: 今後 Intake で Issue/SPEC 更新または Execution-driving Action Bundle を出す前に、Intake Inspection Snapshot を固定し、可能ならサブエージェントで読み取り専用検査を行い、全 finding の disposition と readback evidence を確認してから handoff する。critical finding が残る場合は完了しない。
+
+## 2026-07-07 — 巨大 SPEC は artifact operability と phase launch packet を設計する
+
+Type: agent-workflow-correction
+Context: #3248 の spec/plan/tasks section は約 142KB/73KB/64KB まで巨大化した。単に Issue owner を渡して全文 section を読む/書く運用では、context overflow、hook hot path 遅延、partial write、stale readback、review 不能な handoff が起きる。
+Learning: 大型 SPEC owner には Artifact Operability Record、compact Phase Launch Packet、section hash/readback、Oversize Write Guard、split integrity、stale hash rejection、inspectable handoff が必要。Phase-local E2E と full lifecycle completion も分離して扱う。
+Future Action: 巨大な Issue/SPEC を扱う Intake/Planning では、Execution launch 前に section size/hash/routing を記録し、全文ではなく phase-scoped packet を渡す設計を追加する。write/readback の stale hash や split integrity failure は完了 evidence にしない。
+
+## 2026-07-07 — Issue Monitor の設定は画面内 Settings と Intake-backed Add Issue に寄せる
+
+Type: agent-workflow-correction
+Context: #3165 の Issue Monitor 設定計画で、Quick Issue は便利でないというユーザー指摘を受けた。既存コードには Quick Issue 文字列はなく、Issue Monitor は Start/Stop、Max active、Autonomous toggle、row Configure のみで、Autonomous tuning は prefs に存在するが画面内で切り替えられない。
+Learning: Issue Monitor が実装入口になるなら、設定は Issue Monitor 画面内の Launch/Monitor/Autonomous パネルで扱い、Agent settings は launch profile 専用、Autonomous tuning は Monitor Settings 専用に分離する。Issue 追加は standalone Quick Issue ではなく existing Intake/Register Issue flow に接続し、canonical readback 成功後に inbox refresh する。
+Future Action: Issue Monitor UX 変更を計画するときは #3165 を primary owner とし、既存 IssueMonitorPrefs と open_intake_session/set_initial_prompt を再利用する。Quick Issue 的な軽量保存路は増やさず、成功/readback/cancel/failure の queue 影響を必ず明記する。
+
+## 2026-07-08 — Execution session は常に effective skip_permissions=true で起動する
+
+Type: agent-workflow-correction
+Context: ユーザーが Execution セッションで Skip Permission が出ないと停止すると指摘し、続けて『常にSkip Permissionで実行』と明確化した。従来の #3200 には autonomous のみ skip を強制し、非 autonomous StartWithLastSettings は permission prompt で止まり得るという古い前提が残っていた。
+Learning: provider tool permission prompt は human gate として残さない。linked Issue/SPEC を持つ producing-work Execution は Start Work / Issue Monitor / gwt-build-spec / gwt-fix-issue / resume/adopt の全入口で effective skip_permissions=true を強制する。PR/user verification/merge gate は別物として維持する。
+Future Action: Execution launch や Issue Monitor launch を設計・レビューするときは、保存 profile の skip=false/missing を launch 時に effective true へ正規化し、provider-specific argv/env/config に skip transport が存在することをテストする。unsupported custom agent は claim/spawn 前に block し、skip-less interactive Execution を導入しない。
