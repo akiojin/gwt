@@ -1624,6 +1624,19 @@ Managed hooks は user hook を保持しながら、Agent state、workflow guard
 Board reminders、discussion/plan/build Stop checks、coordination-event summaries
 を追加します。
 
+シェルのファイル操作ガードは、worktree 内または OS の一時ディレクトリ
+（`TMPDIR` / 各 OS の temp、Unix では `/tmp`・`/private/tmp` も対象）配下の
+`mkdir`・`rmdir`・`rm`・`touch`・`cp`・`mv` を許可します。harness の session
+scratchpad や検証ログも含みます。一時ディレクトリそのものへの操作と symlink を
+経由した領域外への操作は拒否します。拒否メッセージには許可ディレクトリと一時ログを
+保全する例を表示します。それ以外の外部成果物は、ツールの出力先を worktree または
+一時 scratchpad に指定するか、アクセスの許可を別途取得してください。
+
+このガードはシェルのファイル操作コマンドを判定するもので、OS の sandbox では
+ありません。リダイレクトと任意の Python / interpreter の I/O は検査対象外です。
+エージェントは書き方によらず同じ許可パスの境界を守り、別の構文で拒否を回避しては
+いけません。
+
 **Settings → Project → Hook Center** では、選択したプロジェクトの hook 設定、
 バイナリの fallback、Codex の探索・信頼状態、任意の profile 出力先を監査できます。
 **Regenerate managed hooks** は既存の managed hook だけを修復し、user hook を保持します。
