@@ -12,12 +12,24 @@
 //! remaining lease seconds. The Host's request-start/nonce lease remains its own
 //! contract; this route never extends a lease beyond the domain deadline and
 //! closes the socket when that deadline passes, or when the server stops.
-//! Invites, browser signaling and device authority are out of scope.
+//!
+//! `{"type":"register_invite","generation","nonce","secret","ttl_secs"}` adds a
+//! Host-generated invite (64 hex, never escaped) to the registration's scope
+//! and answers `invite_registered`, or `invite_rejected` with a `reason` for a
+//! rejection the Host can recover from by generating another invite. Any other
+//! failure loses the registration and closes the socket. On the accepted path
+//! the secret is decoded from the borrowed frame text straight into a wiped
+//! buffer; an escaped secret is refused (after serde has made its own
+//! unescaped copies), and neither the frame buffer nor stack copies left by
+//! moves are erased. Browser claim/signaling and device authority are out of
+//! scope. Closed invites stay as replay fences in the global 64-record bound
+//! until their TTL; per-Host accounting of those fences is a known follow-up.
 //!
 //! Each call reads the real wall clock; a backwards step makes the domain gate
 //! terminal (fail closed) until the operator restarts the coordinator.
 
 use super::{
+    invite::InviteError,
     registration::{CoordinatorSessions, RegistrationError, RegistrationHandle},
     CredentialError, CredentialIdentity,
 };
@@ -144,6 +156,12 @@ impl Registration {
                 .ok_or(RegistrationError::DeadRegistration)
         })
     }
+
+    fn register_invite(&self, secret: &[u8; 32], ttl_secs: u64) -> Result<(), RegistrationError> {
+        call(&self.sessions, |sessions, now, wall| {
+            sessions.register_invite(&self.handle, secret, ttl_secs, now, wall)
+        })
+    }
 }
 
 /// Fallback for paths that cannot await (a failed upgrade); normal socket exits
@@ -159,7 +177,29 @@ impl Drop for Registration {
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum HostMessage {
-    Renew { generation: Uuid, nonce: Uuid },
+    Renew {
+        generation: Uuid,
+        nonce: Uuid,
+    },
+    RegisterInvite {
+        generation: Uuid,
+        nonce: Uuid,
+        #[serde(deserialize_with = "super::borrowed_hex_secret")]
+        secret: Zeroizing<[u8; 32]>,
+        ttl_secs: u64,
+    },
+}
+
+/// Invite rejections that leave the registration intact; the Host recovers by
+/// generating a fresh invite or waiting for a pending one to expire.
+fn recoverable_invite_rejection(error: &RegistrationError) -> Option<&'static str> {
+    match error {
+        RegistrationError::Invite(InviteError::InvalidTtl) => Some("invalid_ttl"),
+        RegistrationError::Invite(InviteError::AlreadyRegistered) => Some("already_registered"),
+        RegistrationError::Invite(InviteError::HostCapacity) => Some("host_capacity"),
+        RegistrationError::Invite(InviteError::Capacity) => Some("capacity"),
+        _ => None,
+    }
 }
 
 /// Remaining lease seconds, rounded up so a fresh lease reports 30.
@@ -251,6 +291,19 @@ async fn send_json(socket: &mut WebSocket, value: serde_json::Value) -> bool {
         .is_ok()
 }
 
+/// Runs a synchronous domain call on a blocking thread; `None` if it panicked.
+async fn blocking<T: Send + 'static>(
+    registration: Registration,
+    f: impl FnOnce(&Registration) -> T + Send + 'static,
+) -> Option<(Registration, T)> {
+    tokio::task::spawn_blocking(move || {
+        let result = f(&registration);
+        (registration, result)
+    })
+    .await
+    .ok()
+}
+
 async fn serve_host(
     mut socket: WebSocket,
     mut registration: Registration,
@@ -274,36 +327,57 @@ async fn serve_host(
                 Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
                 _ => break,
             };
-            let Ok(HostMessage::Renew {
-                generation: renewed,
-                nonce,
-            }) = serde_json::from_str(text.as_str())
-            else {
+            let Ok(message) = serde_json::from_str::<HostMessage>(text.as_str()) else {
                 break;
             };
-            if renewed != generation {
-                break;
-            }
-            let renewal = tokio::task::spawn_blocking(move || {
-                let result = registration.renew();
-                (registration, result)
-            })
-            .await;
-            // A panicked renewal already dropped (closed) the registration.
-            let Ok((returned, result)) = renewal else {
-                let _ = socket.send(Message::Close(None)).await;
-                return;
+            let reply = match message {
+                HostMessage::Renew {
+                    generation: renewed,
+                    nonce,
+                } if renewed == generation => {
+                    // A panicked call already dropped the registration, which
+                    // closes it unless the panic poisoned the sessions lock.
+                    let Some((returned, result)) = blocking(registration, |r| r.renew()).await
+                    else {
+                        let _ = socket.send(Message::Close(None)).await;
+                        return;
+                    };
+                    registration = returned;
+                    let Ok(next) = result else {
+                        break;
+                    };
+                    deadline = next;
+                    serde_json::json!({
+                        "type": "renewed", "generation": generation, "nonce": nonce,
+                        "ttl_secs": ttl_secs(deadline),
+                    })
+                }
+                HostMessage::RegisterInvite {
+                    generation: scoped,
+                    nonce,
+                    secret,
+                    ttl_secs: invite_ttl,
+                } if scoped == generation => {
+                    let invite = move |r: &Registration| r.register_invite(&secret, invite_ttl);
+                    let Some((returned, result)) = blocking(registration, invite).await else {
+                        let _ = socket.send(Message::Close(None)).await;
+                        return;
+                    };
+                    registration = returned;
+                    match result.as_ref().map_err(recoverable_invite_rejection) {
+                        Ok(()) => serde_json::json!({
+                            "type": "invite_registered", "generation": generation, "nonce": nonce,
+                        }),
+                        Err(Some(reason)) => serde_json::json!({
+                            "type": "invite_rejected", "generation": generation, "nonce": nonce,
+                            "reason": reason,
+                        }),
+                        Err(None) => break,
+                    }
+                }
+                _ => break,
             };
-            registration = returned;
-            let Ok(next) = result else {
-                break;
-            };
-            deadline = next;
-            let renewed = serde_json::json!({
-                "type": "renewed", "generation": generation, "nonce": nonce,
-                "ttl_secs": ttl_secs(deadline),
-            });
-            if !send_json(&mut socket, renewed).await {
+            if !send_json(&mut socket, reply).await {
                 break;
             }
         }
