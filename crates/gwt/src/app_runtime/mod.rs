@@ -11094,6 +11094,7 @@ impl AppRuntime {
             | FrontendEvent::RestartWindow { id, .. }
             | FrontendEvent::TerminalInput { id, .. }
             | FrontendEvent::LoadPmConversation { id }
+            | FrontendEvent::RequestTerminalSnapshot { id }
             | FrontendEvent::LoadPmReports { id, .. }
             | FrontendEvent::PasteImage { id, .. }
             | FrontendEvent::PasteImageUploaded { id, .. }
@@ -11468,6 +11469,7 @@ impl AppRuntime {
             | FrontendEvent::RestartWindow { id, .. }
             | FrontendEvent::TerminalInput { id, .. }
             | FrontendEvent::LoadPmConversation { id }
+            | FrontendEvent::RequestTerminalSnapshot { id }
             | FrontendEvent::LoadPmReports { id, .. }
             | FrontendEvent::PasteImage { id, .. }
             | FrontendEvent::PasteImageUploaded { id, .. }
@@ -11788,6 +11790,9 @@ impl AppRuntime {
             FrontendEvent::StopAllWindows {} => self.stop_all_windows_events(context),
             FrontendEvent::RestartWindow { id } => self.restart_window_events(&id),
             FrontendEvent::TerminalInput { id, data } => self.terminal_input_events(&id, &data),
+            FrontendEvent::RequestTerminalSnapshot { id } => {
+                self.client_pane_snapshot_repair_events(&client_id, std::slice::from_ref(&id))
+            }
             FrontendEvent::LoadPmConversation { id } => {
                 self.load_pm_conversation_events(context, client_id, &id)
             }

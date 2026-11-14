@@ -2072,6 +2072,9 @@ terminal packet を含む各更新を同期で消費します。描画用の `su
 まとめ、最新 snapshot を描画します。animation frame が停止しても 100 ms timer で
 進み、購読解除や dispose 時は予約を取り消します。Usage のステータス表示・popover・
 設定・Workspace 表示がこの経路を使用します。
+非表示の窓の raw terminal 出力は窓ごとに base64 で 4 MiB まで保持します。上限を
+超えるとキューを解放して `request_terminal_snapshot` を送り、その client 宛ての
+snapshot（画面と scrollback）で欠落分を置き換えます。到着までの後続出力は破棄します。
 共通の `ui-content.js` は content の型から plaintext または backend で sanitize 済みの
 Markdown 描画を選びます。モデルへの取り込み時に `{ type: 'markdown', body, body_html }`
 をレコードの `content` に設定します。各面は確定した content を `renderUiContent` に渡し、

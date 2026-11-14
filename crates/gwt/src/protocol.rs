@@ -640,6 +640,11 @@ pub enum FrontendEvent {
     LoadPmConversation {
         id: String,
     },
+    /// Ask for a client-scoped snapshot of one terminal after the frontend
+    /// released that hidden window's bounded raw-output queue (SPEC-5016 AC-15).
+    RequestTerminalSnapshot {
+        id: String,
+    },
     /// Read explicitly posted reports for the registered PM window.
     LoadPmReports {
         id: String,
@@ -4030,6 +4035,23 @@ mod tests {
         let mut invalid = legacy;
         invalid["surface_owner"] = serde_json::json!("unknown");
         assert!(serde_json::from_value::<FrontendEvent>(invalid).is_err());
+    }
+
+    // SPEC-5016 AC-15: a hidden terminal whose bounded queue overflowed asks
+    // for a fresh snapshot instead of retaining unbounded raw output.
+    #[test]
+    fn request_terminal_snapshot_wire_carries_only_the_window_id() {
+        let request: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "request_terminal_snapshot", "id": "tab-1::shell-1"
+        }))
+        .unwrap();
+        assert!(
+            matches!(request, FrontendEvent::RequestTerminalSnapshot { ref id } if id == "tab-1::shell-1")
+        );
+        assert!(serde_json::from_value::<FrontendEvent>(serde_json::json!({
+            "kind": "request_terminal_snapshot"
+        }))
+        .is_err());
     }
 
     #[test]

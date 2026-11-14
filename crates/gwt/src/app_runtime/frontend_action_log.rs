@@ -795,6 +795,7 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         | FrontendEvent::AgentIssueMonitorScanNow { .. }
         | FrontendEvent::TerminalInput { .. }
         | FrontendEvent::LoadPmConversation { .. }
+        | FrontendEvent::RequestTerminalSnapshot { .. }
         | FrontendEvent::LoadPmReports { .. }
         | FrontendEvent::GetIssueMonitorProfiles
         | FrontendEvent::PasteImage { .. }

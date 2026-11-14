@@ -816,3 +816,117 @@ test("defaults expose bounded per-frame budgets", () => {
   assert.equal(DEFAULT_MAX_WINDOWS_PER_FLUSH, 8);
   assert.equal(DEFAULT_MAX_TOTAL_CHARS_PER_FLUSH, DEFAULT_MAX_CHARS_PER_FLUSH);
 });
+
+// SPEC-5016 AC-15: a hidden (quiesced) window must not retain unbounded raw
+// output. Past the per-window cap the queue is released and the existing
+// backend snapshot repair restores the screen instead.
+test("quiesced terminal output is bounded per window and requests a snapshot on overflow", () => {
+  const scheduler = manualScheduler();
+  const writes = [];
+  const overflows = [];
+  const eligibility = new Map([["agent-hidden", false], ["agent-visible", true]]);
+  const batcher = createTerminalOutputBatcher({
+    schedule: scheduler.schedule,
+    maxPendingCharsPerWindow: 10,
+    canWrite: (windowId) => eligibility.get(windowId) !== false,
+    onOverflow: (windowId) => overflows.push(windowId),
+    write: (windowId, text, done) => {
+      writes.push({ windowId, text });
+      done();
+    },
+  });
+
+  batcher.enqueue("agent-hidden", "aaaa");
+  scheduler.runOnce();
+  assert.equal(batcher.pendingCount("agent-hidden"), 1, "first flush quiesces the hidden window");
+  batcher.enqueue("agent-hidden", "bbbb");
+  assert.deepEqual(overflows, [], "output within the cap stays queued");
+  assert.equal(batcher.pendingCount("agent-hidden"), 2);
+
+  batcher.enqueue("agent-hidden", "cccc");
+  assert.deepEqual(overflows, ["agent-hidden"], "crossing the cap requests one snapshot");
+  assert.equal(batcher.pendingCount("agent-hidden"), 0, "the over-cap queue is released");
+  assert.equal(batcher.pendingWindowCount(), 0);
+  assert.equal(batcher.isOverflowed("agent-hidden"), true);
+
+  // Until the snapshot replaces the screen, later raw chunks are already
+  // contained in that snapshot, so they are discarded rather than retained.
+  assert.equal(batcher.enqueue("agent-hidden", "dddd"), false);
+  assert.equal(batcher.pendingCount("agent-hidden"), 0);
+  assert.deepEqual(overflows, ["agent-hidden"], "no duplicate request below another cap");
+  batcher.enqueue("agent-hidden", "eeeeeeee");
+  assert.deepEqual(overflows, ["agent-hidden", "agent-hidden"],
+    "a lost request is retried after another cap of discarded output");
+
+  // Revealing the window re-requests the pending snapshot without writing
+  // stale bytes, once per batch of newly discarded output.
+  eligibility.set("agent-hidden", true);
+  assert.equal(batcher.schedulePending("agent-hidden"), false);
+  assert.deepEqual(overflows, ["agent-hidden", "agent-hidden"],
+    "nothing arrived since the last request");
+  batcher.enqueue("agent-hidden", "ff");
+  assert.equal(batcher.schedulePending("agent-hidden"), false);
+  assert.equal(batcher.schedulePending("agent-hidden"), false);
+  assert.deepEqual(overflows, ["agent-hidden", "agent-hidden", "agent-hidden"],
+    "repeated layout passes request once");
+  scheduler.runAll();
+  assert.deepEqual(writes, []);
+
+  // The snapshot path clears the window; live output resumes normally.
+  batcher.clear("agent-hidden");
+  assert.equal(batcher.isOverflowed("agent-hidden"), false);
+  batcher.enqueue("agent-hidden", "live");
+  batcher.enqueue("agent-visible", "other");
+  scheduler.runAll();
+  assert.deepEqual(writes, [
+    { windowId: "agent-hidden", text: "live" },
+    { windowId: "agent-visible", text: "other" },
+  ]);
+});
+
+test("writable terminal output is never dropped by the hidden retention cap", () => {
+  const scheduler = manualScheduler();
+  const writes = [];
+  const overflows = [];
+  const batcher = createTerminalOutputBatcher({
+    schedule: scheduler.schedule,
+    maxPendingCharsPerWindow: 4,
+    onOverflow: (windowId) => overflows.push(windowId),
+    write: (windowId, text, done) => {
+      writes.push({ windowId, text });
+      done();
+    },
+  });
+
+  batcher.enqueue("agent-1", "abc");
+  batcher.enqueue("agent-1", "def");
+  batcher.enqueue("agent-1", "ghi");
+  scheduler.runAll();
+
+  assert.deepEqual(overflows, []);
+  assert.deepEqual(writes, [{ windowId: "agent-1", text: "abcdefghi" }]);
+});
+
+test("a throwing overflow callback does not break the output queue", () => {
+  const scheduler = manualScheduler();
+  const batcher = createTerminalOutputBatcher({
+    schedule: scheduler.schedule,
+    maxPendingCharsPerWindow: 2,
+    canWrite: () => false,
+    onOverflow: () => { throw new Error("socket closed"); },
+    write: () => {},
+  });
+  batcher.enqueue("agent-1", "a");
+  scheduler.runOnce();
+  assert.doesNotThrow(() => batcher.enqueue("agent-1", "bc"));
+  assert.equal(batcher.pendingCount("agent-1"), 0);
+  assert.equal(batcher.isOverflowed("agent-1"), true);
+});
+
+test("default hidden retention cap is bounded and wired to the snapshot request", () => {
+  assert.equal(terminalOutput.DEFAULT_MAX_PENDING_CHARS_PER_WINDOW, 4 * 1024 * 1024);
+  const app = readFileSync(new URL("../app.js", import.meta.url), "utf8");
+  assert.match(app,
+    /onOverflow: \(windowId\) => send\(\{ kind: "request_terminal_snapshot", id: windowId \}\)/,
+    "app.js must turn a dropped hidden queue into a snapshot request");
+});

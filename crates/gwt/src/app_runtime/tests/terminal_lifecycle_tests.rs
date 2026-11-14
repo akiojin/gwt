@@ -2910,6 +2910,66 @@ fn client_pane_snapshot_repair_replies_with_snapshots_for_known_panes_only() {
     close_test_owner_runtime(&mut runtime, &shell_id);
 }
 
+// SPEC-5016 AC-15: the frontend drops a hidden window's over-cap raw queue and
+// asks for the same client-scoped snapshot repair; other windows' and other
+// projects' ids never produce a snapshot.
+#[test]
+fn request_terminal_snapshot_replies_to_the_requesting_client_only() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        temp.path().to_path_buf(),
+        ProjectKind::Git,
+        &[WindowPreset::Shell],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let shell_id = combined_window_id("tab-1", "shell-1");
+    insert_test_pane_runtime(&mut runtime, &shell_id);
+    process_test_owner_output(&mut runtime, &shell_id, b"hidden-overflow");
+
+    let events = runtime.handle_frontend_event(
+        "client-7".to_string(),
+        FrontendEvent::RequestTerminalSnapshot {
+            id: shell_id.clone(),
+        },
+    );
+    let snapshots = events
+        .iter()
+        .filter(|event| matches!(event.event, BackendEvent::TerminalSnapshot { .. }))
+        .collect::<Vec<_>>();
+    assert_eq!(snapshots.len(), 1, "one repair snapshot: {events:?}");
+    assert!(
+        matches!(&snapshots[0].target, DispatchTarget::Client(id) if id == "client-7"),
+        "the snapshot is scoped to the requesting client"
+    );
+    match &snapshots[0].event {
+        BackendEvent::TerminalSnapshot { id, data_base64 } => {
+            assert_eq!(id, &shell_id);
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(data_base64)
+                .expect("snapshot base64");
+            assert!(String::from_utf8_lossy(&bytes).contains("hidden-overflow"));
+        }
+        other => panic!("expected TerminalSnapshot, got {other:?}"),
+    }
+
+    let unknown = runtime.handle_frontend_event(
+        "client-7".to_string(),
+        FrontendEvent::RequestTerminalSnapshot {
+            id: "tab-1::missing-pane".to_string(),
+        },
+    );
+    assert!(
+        unknown
+            .iter()
+            .all(|event| !matches!(event.event, BackendEvent::TerminalSnapshot { .. })),
+        "unknown panes produce no snapshot: {unknown:?}"
+    );
+    close_test_owner_runtime(&mut runtime, &shell_id);
+}
+
 // Issue #4095 AC-1 / AC-2: a snapshot serialized while the PTY reader is ahead
 // of the event loop already contains chunks whose `terminal_output` has not
 // been dispatched yet. Replaying those chunks after the snapshot re-applies

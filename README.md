@@ -2251,6 +2251,10 @@ the initial selection immediately, then batches changed selectors into one
 callback per store using the latest snapshot. A 100 ms timer keeps rendering
 when animation frames stop; unsubscribe or dispose cancels pending work. Usage
 uses this path for its status summary, popover, settings, and Workspace view.
+Raw terminal output for a hidden window is retained up to 4 MiB of base64 per
+window. Past that cap the queue is released and the frontend sends
+`request_terminal_snapshot`; the client-scoped snapshot (screen and scrollback)
+replaces the dropped output, and later output is discarded until it arrives.
 The shared
 `ui-content.js` renderer selects plaintext or backend-sanitized Markdown from
 the content type. Assign `{ type: 'markdown', body, body_html }` to a record's

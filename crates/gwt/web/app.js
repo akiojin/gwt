@@ -270,6 +270,9 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         // old-width wraps and relative erases to an already resized terminal.
         // Hidden Agents likewise feed the buffer used by Issue previews.
         canWrite: (windowId) => pmChatViews.has(windowId) || (worksHost && worksSurface?.contains(windowId)) || canRefreshTerminalViewport(windowId),
+        // SPEC-5016 AC-15: a hidden window's queue is bounded; past the cap the
+        // backend snapshot (current screen + scrollback) replaces the dropped bytes.
+        onOverflow: (windowId) => send({ kind: "request_terminal_snapshot", id: windowId }),
         onFlush: (windowId) => {
           const runtime = terminalMap.get(windowId);
           if (runtime?.snapshotWriteCoordinator?.shouldDeferOutput() === true) {

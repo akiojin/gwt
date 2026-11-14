@@ -8,6 +8,10 @@
 export const DEFAULT_MAX_CHARS_PER_FLUSH = 65536;
 export const DEFAULT_MAX_WINDOWS_PER_FLUSH = 8;
 export const DEFAULT_MAX_TOTAL_CHARS_PER_FLUSH = DEFAULT_MAX_CHARS_PER_FLUSH;
+// SPEC-5016 AC-15: retention cap for a window whose output cannot be written
+// (hidden). Past it the queue is released and the backend snapshot repair
+// restores the screen, so a long-hidden agent cannot grow memory without bound.
+export const DEFAULT_MAX_PENDING_CHARS_PER_WINDOW = 4 * 1024 * 1024;
 
 // A document can become hidden after work is queued. Promote pending work to
 // a yielding MessageChannel task before frames suspend and timers are clamped.
@@ -77,6 +81,13 @@ function normalizeMaxTotalCharsPerFlush(value) {
   return Math.floor(value);
 }
 
+function normalizeMaxPendingCharsPerWindow(value) {
+  if (!Number.isFinite(value) || value <= 0) {
+    return DEFAULT_MAX_PENDING_CHARS_PER_WINDOW;
+  }
+  return Math.floor(value);
+}
+
 function defaultMergeChunks(chunks) {
   return chunks.join("");
 }
@@ -107,8 +118,10 @@ export function createTerminalOutputBatcher({
   maxCharsPerFlush = DEFAULT_MAX_CHARS_PER_FLUSH,
   maxWindowsPerFlush = DEFAULT_MAX_WINDOWS_PER_FLUSH,
   maxTotalCharsPerFlush = DEFAULT_MAX_TOTAL_CHARS_PER_FLUSH,
+  maxPendingCharsPerWindow = DEFAULT_MAX_PENDING_CHARS_PER_WINDOW,
   mergeChunks = defaultMergeChunks,
   canWrite,
+  onOverflow,
 } = {}) {
   if (typeof write !== "function") {
     throw new TypeError("createTerminalOutputBatcher requires a write callback");
@@ -121,14 +134,18 @@ export function createTerminalOutputBatcher({
   const mergeChunksImpl =
     typeof mergeChunks === "function" ? mergeChunks : defaultMergeChunks;
   const canWriteImpl = typeof canWrite === "function" ? canWrite : () => true;
+  const pendingCharsCap = normalizeMaxPendingCharsPerWindow(maxPendingCharsPerWindow);
+  const onOverflowImpl = typeof onOverflow === "function" ? onOverflow : null;
   const pendingByWindow = new Map();
   const quiescedWindows = new Set();
+  // windowId -> chars discarded since the last snapshot request.
+  const overflowedWindows = new Map();
   let scheduled = false;
 
   function entryFor(windowId) {
     let entry = pendingByWindow.get(windowId);
     if (!entry) {
-      entry = { chunks: [], head: 0 };
+      entry = { chunks: [], head: 0, chars: 0 };
       pendingByWindow.set(windowId, entry);
     }
     return entry;
@@ -150,8 +167,27 @@ export function createTerminalOutputBatcher({
     if (!normalized) {
       return false;
     }
+    if (overflowedWindows.has(windowId)) {
+      // The requested snapshot already contains this output.
+      const discarded = overflowedWindows.get(windowId) + normalized.length;
+      if (discarded >= pendingCharsCap) {
+        overflowedWindows.set(windowId, 0);
+        requestSnapshot(windowId);
+      } else {
+        overflowedWindows.set(windowId, discarded);
+      }
+      return false;
+    }
     const entry = entryFor(windowId);
     entry.chunks.push(normalized);
+    entry.chars += normalized.length;
+    if (quiescedWindows.has(windowId) && entry.chars > pendingCharsCap) {
+      pendingByWindow.delete(windowId);
+      quiescedWindows.delete(windowId);
+      overflowedWindows.set(windowId, 0);
+      requestSnapshot(windowId);
+      return false;
+    }
     if (!quiescedWindows.has(windowId) || hasSchedulablePendingWindow()) {
       scheduleFlush();
     }
@@ -173,12 +209,25 @@ export function createTerminalOutputBatcher({
       chunks.push(next);
       entry.head += 1;
       chars += next.length;
+      entry.chars -= next.length;
       if (chars >= charLimit) {
         break;
       }
     }
     compactConsumedChunks(entry);
     return chunks;
+  }
+
+  function requestSnapshot(windowId) {
+    if (!onOverflowImpl) {
+      return;
+    }
+    try {
+      onOverflowImpl(windowId);
+    } catch (error) {
+      // A closed socket retries on the next cap or reveal; the queue stays bounded.
+      console.warn("[terminal-output-buffer] snapshot request failed for %s", windowId, error);
+    }
   }
 
   function notifyFlushed(windowId) {
@@ -290,10 +339,20 @@ export function createTerminalOutputBatcher({
 
   function clear(windowId) {
     quiescedWindows.delete(windowId);
+    overflowedWindows.delete(windowId);
     return pendingByWindow.delete(windowId);
   }
 
   function schedulePending(windowId) {
+    if (overflowedWindows.has(windowId)) {
+      // Reveal retries only when output arrived after the last request; layout
+      // passes repeat this call and must not flood the backend.
+      if (overflowedWindows.get(windowId) > 0) {
+        overflowedWindows.set(windowId, 0);
+        requestSnapshot(windowId);
+      }
+      return false;
+    }
     if (!pendingByWindow.has(windowId)) {
       return false;
     }
@@ -318,6 +377,10 @@ export function createTerminalOutputBatcher({
     return pendingByWindow.size;
   }
 
+  function isOverflowed(windowId) {
+    return overflowedWindows.has(windowId);
+  }
+
   return {
     enqueue,
     flushNow,
@@ -325,5 +388,6 @@ export function createTerminalOutputBatcher({
     schedulePending,
     pendingCount,
     pendingWindowCount,
+    isOverflowed,
   };
 }
