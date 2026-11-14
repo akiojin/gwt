@@ -294,3 +294,48 @@ Open Questions:
 
 Next:
 Action Bundle: Update Spec + Update Plan + Resume Build。SPEC #1939 のspec/plan/tasksにIndex window UI polish follow-upを追加し、gwt-build-specでTDD実装へ渡す。
+
+## 2026-07-09 — SPEC-2008 Window Size Fit & Equalize 追補
+
+Status: promoted
+Topics: window size fit, equalize, smart guides
+Related SPECs: #2008
+Related Works: 
+Promoted To: SPEC #2008 2026-07-09 Amendment（US-28/US-29/FR-108〜FR-116/SC-068〜SC-073）+ plan/tasks Phase 40（T-347〜T-363）
+
+Summary:
+PowerPoint 風サイズ調整の要望を調査。端合わせ・リサイズ中サイズ一致吸着は既存 Smart Guides Amendment（US-27/FR-099-107、Phase 39 未実装）がカバー済み。追加で US-28 Equalize（focused 基準一括同サイズ化）と US-29 Fit（terminal cell grid / panel intrinsic、titlebar ボタン・handle double-click・hotkey の 3 経路）を SPEC-2008 に追補することをユーザーと確定。配信順序は Phase 39 先行、Fit/Equalize は Phase 40 として別 PR。
+
+Decisions:
+- 既存 SPEC-2008 が owner（新規 SPEC 不要）
+- Equalize は Tile/Stack/Align と並ぶ Floating action、focused 基準・位置維持
+- Fit は terminal=セルグリッド整数倍丸め、panel=intrinsic size、maximized は no-op
+- 発動 3 経路すべて採用（titlebar ボタン / handle double-click / hotkey）
+- Phase 39 実装先行、Phase 40 は別 PR
+
+Open Questions:
+
+
+Next:
+Execute レーンが gwt-build-spec で Phase 39（T-328〜T-346 Smart Guides）→ Phase 40（T-347〜T-363 Fit/Equalize）の順に実装する。spec/plan/tasks への amendment 反映は 2026-07-09 に完了・roundtrip 検証済み。
+
+## Discussion TODO - Window Size Fit & Equalize
+
+### Proposal A - SPEC-2008 に Fit & Equalize を追補し Phase 39→40 で実装 [chosen]
+- Summary: 端合わせ・吸着・リサイズ中サイズ一致は既存 Smart Guides Amendment（US-27 / FR-099〜FR-107、Phase 39 未実装）が正本。追加要望の Equalize（focused 基準一括同サイズ化、Floating action）と Fit（terminal cell grid 丸め / panel intrinsic size、titlebar ボタン・handle double-click・hotkey の 3 経路、maximized は no-op）を 2026-07-09 Amendment（US-28 / US-29 / FR-108〜FR-116 / SC-068〜SC-073）として spec/plan/tasks に追補する。実装は Phase 39 先行、Phase 40 は別 PR。
+- Open Questions: None.
+- Dependency Checks: SPEC-2008 が canvas window manager の owner。double-click Fit は Phase 39 の directional resize handles（T-336）に依存。Equalize は既存 arrange 経路の mode 追加で backend protocol を増やさない。
+- Deferred Decisions: Fit hotkey の具体キーは実装時に既存 hotkey registry と衝突チェックの上で確定（contract test で固定）。最小ウィンドウサイズは SPEC #3263 rescope（2026-07-09 Board decision）で判明した frontend 420×260 と backend window_canvas.rs 360×260 の衝突を Phase 39 実装時に単一値へ確定するため、Phase 40 の FR-108/FR-111/FR-112 に書かれた 420×260 はその確定値に読み替える（#3263 T-009 の単一ソース化と整合させる）。
+- Coverage Checks: scope boundary / ownership / failure・edge（min 420×260 clamp、cell metrics 未確定 no-op、maximized no-op、viewport clamp）/ migration（persisted 形式変更なし）/ verification（unit・contract・Playwright・browser-check）をカバー。
+- Exit Blockers: none
+- Next Question: none
+- Depth Mode: normal
+- Question Ledger: Q1 Fit の意味 → 3 解釈すべて採用（吸着 + ワンアクション同サイズ + コンテンツ Fit）。Q2 Equalize UX → 一括・focused 基準の Floating action。Q3 Fit 対象 → terminal cell grid と panel intrinsic の両方。Q4 発動経路 → titlebar ボタン / handle double-click / hotkey の 3 経路すべて。Q5 配信順序 → Phase 39 先行、Fit/Equalize は Phase 40 で別 PR。
+- Depth Gate: complete
+- Implementation Proof: crates/gwt/web/ に window-smart-guides.js 不存在、app.js の resizeState は単一ハンドル、SPEC-2008 tasks Phase 39（T-328〜T-346）全 unchecked を確認。
+- SPEC/Issue Proof: issue.spec.section number:2008 で spec（US-27 / FR-099〜FR-107 / SC-064〜SC-067）、plan（Phase 39）、tasks（Phase 39、最終 T-346）を読了。FR-108 / SC-068 / T-347 が未使用であることを grep で確認。
+- Gap Check Proof: scope = 2 機能追加（Equalize / Fit）+ 既存 Phase 39、ownership = SPEC-2008 単独、failure/edge = min clamp・metrics 不明 no-op・maximized no-op・viewport clamp、migration = persisted 形式変更なし、verification = SC-068〜SC-073 と browser-check。
+- Official Docs Proof: not-applicable: 純ローカルの frontend/backend 挙動（PowerPoint は着想であり外部 API 依存なし）。
+- External Research Proof: not-applicable: repo 内証跡と SPEC-2008 で確定できる。
+- Evidence Gate: complete
+- Promotable Changes: SPEC-2008 spec/plan/tasks へ 2026-07-09 Amendment と Phase 40（T-347〜T-363）を追記（.gwt/tmp-spec2008-amend-*.md 準備済み、適用は .gwt/tmp-spec2008-apply.md）。

@@ -7624,3 +7624,10 @@ Type: workflow
 Context: Issue #3253: owner-unlinked workflow-policy blocked gwtd JSON envelope discovery/linking commands because heredoc command segmentation normalized them to a lone gwtd segment and the owner guard did not classify the envelope operation.
 Learning: Classify standalone gwtd JSON envelopes from the original command before segment allowlists, but run shell output redirection detection first so control-plane transport cannot mask worktree writes.
 Future Action: When changing hook workflow policies, add RED tests for both allowed standalone JSON envelope commands and adversarial variants such as chained shell mutation or output redirection.
+
+## 2026-07-09 — intake session からの既存 SPEC 大容量 section 追記は user-run apply script 方式にする
+
+Type: agent-workflow
+Context: branchless intake session から既存 SPEC の大容量 section（spec 76KB 等）へ amendment を追記しようとした。workflow-policy hook は owner 未リンク session の Bash を ownerless-safe 分類（standalone gwtd JSON envelope / read-only pipeline のみ許可）で制限し、pipe・redirect・jq --rawfile 経由の issue.spec.edit を全てブロックした。
+Learning: 1) issue.spec.edit は section 全文置換で append 不可。大容量 section は inline envelope に安全に載らない。2) intake session の owner link は launch 時のみ設定され、実行時にリンクする operation は存在しない。3) 回避はユーザー実行（! prefix）の適用スクリプト: 現行 section dump → amendment 結合 → jq --rawfile で envelope 生成 → gwtd。4) GitHub API は read-after-write が遅延するため、書き込み直後の roundtrip 検証は false negative を出す。数分後の再読で反映確認できた。
+Future Action: intake から既存 SPEC section を追記する場合は最初から user-run 適用スクリプト方式（.gwt/ に amendment + apply script を Write）を選ぶ。roundtrip 検証はリトライ間隔を長く（30 秒以上または手動再確認）し、ok:true + サイズ増分 + marker grep で確認する。恒久対応としては issue.spec.edit への append mode か intake 向け owner link operation の SPEC 化を検討する。
