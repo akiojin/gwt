@@ -925,9 +925,12 @@ test.describe("Project Index status surface", () => {
         results: [
           { scope: "issues", title: "Phone layout issue", subtitle: "Issue #6476", preview: "Stack the panes.", distance: 0.1 },
           { scope: "specs", title: "Touch target spec", subtitle: "SPEC #6476", preview: "44px controls.", distance: 0.2 },
+          // Enough rows to overflow the stacked list pane.
+          ...Array.from({ length: 13 }, (_, index) =>
+            ({ scope: "issues", title: `Filler result ${index + 1}`, preview: "Filler.", distance: 0.3 + index / 100 })),
         ],
       });
-      await expect(root.locator(".index-result-row")).toHaveCount(2);
+      await expect(root.locator(".index-result-row")).toHaveCount(15);
       const measure = (selector: string) => page.locator(selector).evaluateAll(nodes => nodes.map(node => {
         const box = node.getBoundingClientRect();
         return { name: node.getAttribute("aria-label") || node.textContent!.trim().slice(0, 24) || node.className,
@@ -955,6 +958,8 @@ test.describe("Project Index status surface", () => {
         }
         expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth),
           "the page itself must not scroll sideways").toBeLessThanOrEqual(0);
+        expect(await root.evaluate(node => node.scrollWidth - node.clientWidth),
+          "the Index surface must not scroll sideways").toBeLessThanOrEqual(0);
       };
       for (const [width, height] of [[320, 568], [390, 844]]) {
         await page.setViewportSize({ width, height });
@@ -967,6 +972,8 @@ test.describe("Project Index status surface", () => {
         expect(detail.width, `the detail uses the window width at ${width}px`).toBeGreaterThanOrEqual(width / 2);
         expect(detail.y, `the detail sits below the results at ${width}px`).toBeGreaterThanOrEqual(list.y + list.height - 1);
         for (const pane of [list, detail]) expect(pane.height, `neither pane collapses at ${width}x${height}`).toBeGreaterThanOrEqual(120);
+        expect(await root.locator(".index-result-list").evaluate(node => node.scrollHeight > node.clientHeight),
+          `the result list scrolls inside its pane at ${width}px`).toBe(true);
         await root.locator(".index-result-row", { hasText: "Touch target spec" }).tap();
         await expect(root.locator(".index-detail-title")).toHaveText("Touch target spec");
         await page.screenshot({ path: info.outputPath(`index-search-${width}.png`) });
