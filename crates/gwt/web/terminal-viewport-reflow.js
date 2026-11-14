@@ -1001,7 +1001,12 @@ export function runTerminalActivationSequence({
       reason: "fit-dimensions-unavailable",
     });
   }
+  const buffer = terminal.buffer?.active;
+  const wasAtBottom = buffer && buffer.viewportY >= buffer.baseY;
   fitAddon.fit();
+  // Reflow can leave a tail reader one line above the new bottom. Restore
+  // that intent before the native resize redraw, without moving history readers.
+  if (wasAtBottom) terminal.scrollToBottom();
   const fittedGrid = currentTerminalGrid(terminal);
   const gridChanged =
     fittedGrid.cols !== currentGrid.cols || fittedGrid.rows !== currentGrid.rows;

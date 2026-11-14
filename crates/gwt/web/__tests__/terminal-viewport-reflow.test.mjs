@@ -1539,6 +1539,29 @@ test("runTerminalActivationSequence renders before fit and emits geometry (T-199
   assert.equal(result.rows, 24);
 });
 
+test("activation fit retains tail intent without moving a history reader", () => {
+  for (const atBottom of [true, false]) {
+    const buffer = { viewportY: atBottom ? 124 : 20, baseY: 124 };
+    const terminal = {
+      cols: 45, rows: 21, buffer: { active: buffer },
+      refresh() {},
+      scrollToBottom() { buffer.viewportY = buffer.baseY; },
+    };
+    const runtime = { terminal, fitAddon: { fit() {
+      terminal.cols = 43;
+      terminal.rows = 20;
+      buffer.baseY = 132;
+      buffer.viewportY = atBottom ? 131 : 20;
+    } } };
+    const result = runTerminalActivationSequence({ runtime, shouldFocus: false,
+      sendGeometry() {
+        assert.equal(buffer.viewportY, atBottom ? 132 : 20,
+          "restore the prior tail before the native redraw can begin");
+      } });
+    assert.equal(result.gridChanged, true);
+  }
+});
+
 test("runTerminalActivationSequence honours shouldFocus / shouldPersistGeometry flags (T-199)", () => {
   const callOrder = [];
   const parent = {
