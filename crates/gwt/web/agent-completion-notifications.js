@@ -91,7 +91,7 @@ export function monitorDiagnostic({ message, kind, stage, issue_number } = {}) {
   const phase = (!stalled && stage) || raw.match(/scan failed at ([\w-]+) stage:/)?.[1] || "monitor";
   const source = stalled ? "scan_stall" : kind || (phase === "monitor" ? "monitor" : "scan_failure");
   return { key: `issue-monitor:${JSON.stringify([source, phase, identity, issue_number || null])}`,
-    message: stalled ? identity : display, stalled };
+    message: stalled ? identity : raw, stalled };
 }
 
 // The server owns runtime timing, attention suppression, and recipient election.

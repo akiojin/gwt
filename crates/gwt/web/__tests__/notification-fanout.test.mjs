@@ -176,6 +176,15 @@ test("launch requested repeats share one Issue row until dismissed or cleared", 
   assert.equal(center.count(), 1, "clear all also releases the keyed row");
 });
 
+test("Monitor grouping preserves readable diagnostic durations and timestamps", () => {
+  const message = "Issue Monitor startup timed out after 180s at 2026-11-09T00:00:00Z: initial prompt was not submitted";
+  const diagnostic = monitorDiagnostic({ message });
+  assert.equal(diagnostic.message, message);
+  assert.equal(diagnostic.key, monitorDiagnostic({
+    message: message.replace("180s", "200s").replace("00:00:00Z", "00:01:00Z"),
+  }).key, "volatile details must not create another notification row");
+});
+
 test("Issue #6932 groups repeated Monitor failures and suppresses continued/stable stalled attention", () => {
   const initialization = appSource.match(/const issueMonitorNotificationModel = createUiStateStore\(null\);[\s\S]*?\n {6}\}\);/)?.[0];
   const { document } = parseHTML("<!doctype html><html><body></body></html>");
