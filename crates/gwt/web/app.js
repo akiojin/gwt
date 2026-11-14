@@ -937,7 +937,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         }
         // These explicit writes belong to this live connection.
         // Never replay an unacknowledged write after reconnect.
-        if (["confirm_close_project", "cancel_close_project", "preview_close_project", "project_view_ready", "restart_wedged_owner"].includes(message.kind) ||
+        if (["confirm_close_project", "cancel_close_project", "preview_close_project", "project_view_ready", "restart_wedged_owner", "cancel_pm_request_task"].includes(message.kind) ||
             (message.kind === "agent_switch" && message.action.kind !== "read") ||
             (message.kind === "agent_roster" && message.action.kind === "rename") ||
             (message.kind === "get_hook_doctor" && message.repair === true)) {
@@ -4204,13 +4204,14 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       }
 
       const pmChatViews = new Map();
-      const { requestPmReports, requestPmConversation, requestPmTaskDetail, markPmTaskDetailUnavailable, requestPmChatSend, markPmChatSendUnavailable, expirePmChatSend, readPmWindowState, bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, subscribePmWindowState } = createPmWindowModel();
+      const { requestPmReports, requestPmConversation, requestPmTaskDetail, markPmTaskDetailUnavailable, requestPmTaskCancel, markPmTaskCancelUnavailable, requestPmChatSend, markPmChatSendUnavailable, expirePmChatSend, readPmWindowState, bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, subscribePmWindowState } = createPmWindowModel();
       subscribePmWindowState(state => state.resyncRequest, recovery => {
         if (!recovery) return;
         const request = requestPmReports(recovery.windowId);
         if (request) send(request);
       });
       const renderedTerminalPackets = new Map();
+      const refreshedTaskCancellations = new Map();
       subscribePmWindowState(state => state.windows[state.changedWindowId], state => {
         if (!state) return;
         const packet = state.terminal;
@@ -4221,9 +4222,23 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         }
         const view = pmChatViews.get(state.windowId);
         if (view) view.logHost.dataset.stateVersion = String(state.revision);
+        const cancellation = state.taskCancel;
+        if (cancellation?.status === "recorded" && refreshedTaskCancellations.get(state.windowId) !== cancellation.requestId) {
+          refreshedTaskCancellations.set(state.windowId, cancellation.requestId);
+          if (state.taskDetail?.key === cancellation.key) loadPmTaskDetail(state.windowId, cancellation.key);
+          requestVisiblePmReports(true, state.windowId);
+        }
       });
 
+      function loadPmTaskDetail(windowId, key) {
+        const request = requestPmTaskDetail(windowId, key);
+        if (!request) return;
+        if (send(request) === "unavailable") return markPmTaskDetailUnavailable(windowId, request.request_id);
+        window.setTimeout(() => markPmTaskDetailUnavailable(windowId, request.request_id), 30000);
+      }
+
       function disposePmChat(windowId) {
+        refreshedTaskCancellations.delete(windowId);
         const view = pmChatViews.get(windowId);
         if (!view) return;
         view.unsubscribe();
@@ -4270,11 +4285,12 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         view.controller = createPmChat({
           document, root, windowId: windowData.id, sessionId: windowData.session_id,
           onChatVisible: () => requestVisiblePmReports(false, windowData.id),
-          onTaskDetail: key => {
-            const request = requestPmTaskDetail(windowData.id, key);
+          onTaskDetail: key => loadPmTaskDetail(windowData.id, key),
+          onTaskCancel: reason => {
+            const request = requestPmTaskCancel(windowData.id, reason);
             if (!request) return;
-            if (send(request) === "unavailable") return markPmTaskDetailUnavailable(windowData.id, request.request_id);
-            window.setTimeout(() => markPmTaskDetailUnavailable(windowData.id, request.request_id), 30000);
+            if (send(request) === "unavailable") return markPmTaskCancelUnavailable(windowData.id, request.request_id);
+            window.setTimeout(() => markPmTaskCancelUnavailable(windowData.id, request.request_id), 30000);
           },
           onOpenTerminal: sessionId => {
             if (!sessionId || !worksSurface.openWork({ window_id: windowData.id, session_id: sessionId })) return false;

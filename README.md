@@ -2210,7 +2210,7 @@ gwt shows an actionable hint.
 
 ## PM project configuration
 
-The PM window's **Tasks** view is a read-only preview of saved request tasks. It
+The PM window's **Tasks** view shows saved request tasks. It
 shows unfinished work first, including parent relationships, assignees, waiting
 reasons, next actions, and pending PM reassessment. **Include completed** also
 shows completed and cancelled tasks. Parents show counts of their direct subtasks
@@ -2230,7 +2230,12 @@ characters of the original, 20 criteria, 10 evidence references, and 20 changes
 to 240. Counts and shortened text are explicit. Changes include only receipts
 with a saved change to that task, so this is not a complete operation history.
 **Reload details** refreshes it; changes or read failures retain confirmed detail
-with a stale warning. **Close details** returns focus to its task. Task editing, automatic intake, and history import
+with a stale warning. **Close details** returns focus to its task.
+To cancel tracking, enter a reason in the selected detail and choose **Cancel task**.
+This records the browser user's reason and preserves the original request and past changes;
+it does not stop agents or change Issues or pull requests. The state changes only after
+the host confirms it. A conflict or unconfirmed response keeps the last confirmed detail;
+reconnect and use **Reload details** before another attempt. Task editing, completion controls, automatic intake, and history import
 are not available in this preview. **Reports** and **Execution log** remain
 available from the same toolbar.
 

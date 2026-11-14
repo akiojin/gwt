@@ -772,6 +772,8 @@ pub enum FrontendEvent {
     CancelPmRequestTask {
         id: String,
         request_id: u64,
+        #[serde(default)]
+        task_key: Option<String>,
         request: PmRequestTaskUserRequest,
     },
     UpdatePmRequestTask {

@@ -3,6 +3,7 @@
 use gwt::pm_conversation::{PmConversationAvailability, PmConversationSnapshot};
 use gwt::protocol::PmRequestTaskResult;
 use gwt_core::pm_request_tasks::{Action, Actor, ActorKind, Request, TaskError, TaskStore};
+use sha2::{Digest, Sha256};
 
 use super::{AppRuntime, BackendEvent, ClientId, OutboundEvent, ProjectContext, UserEvent};
 
@@ -13,7 +14,10 @@ pub(super) enum PmRequestTaskOperation {
         receipt_operation_id: Option<String>,
     },
     Reopen(gwt::protocol::PmRequestTaskUserRequest),
-    Cancel(gwt::protocol::PmRequestTaskUserRequest),
+    Cancel {
+        request: gwt::protocol::PmRequestTaskUserRequest,
+        task_key: Option<String>,
+    },
     Update(gwt::protocol::PmRequestTaskUpdateRequest),
     Complete(gwt::protocol::PmRequestTaskCompleteRequest),
 }
@@ -86,6 +90,7 @@ fn request_task_result(
     client_id: &str,
     operation: PmRequestTaskOperation,
 ) -> Result<PmRequestTaskResult, TaskError> {
+    let mut keyed_cancel = false;
     let (request, action) = match operation {
         PmRequestTaskOperation::Read {
             task_id,
@@ -145,7 +150,30 @@ fn request_task_result(
             };
             (request, action)
         }
-        PmRequestTaskOperation::Cancel(request) => {
+        PmRequestTaskOperation::Cancel {
+            mut request,
+            task_key,
+        } => {
+            if let Some(selected_key) = task_key {
+                if selected_key.trim().is_empty() || !request.task_id.is_empty() {
+                    return Err(TaskError::Invalid(
+                        "task_key requires a nonempty key without task_id".into(),
+                    ));
+                }
+                let state = store.read().map_err(|error| match error {
+                    TaskError::Unreadable(_) => TaskError::Unreadable(
+                        "Request tasks could not be read. Restore this project's saved task store and reload details.".into(),
+                    ),
+                    error => error,
+                })?.ok_or(TaskError::MissingTask)?;
+                request.task_id = state
+                    .tasks
+                    .keys()
+                    .find(|id| format!("{:x}", Sha256::digest(id.as_bytes())) == selected_key)
+                    .cloned()
+                    .ok_or(TaskError::MissingTask)?;
+                keyed_cancel = true;
+            }
             let action = Action::Cancel {
                 task_id: request.task_id.clone(),
             };
@@ -200,6 +228,9 @@ fn request_task_result(
             action,
         },
     )?;
+    if keyed_cancel {
+        return current_request_task_result(store, &request.task_id, receipt);
+    }
     // An exact retry returns its original applied snapshot, not a claim
     // about current state. Read/receipt reconciliation observes that separately.
     let task = receipt

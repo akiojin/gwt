@@ -56,7 +56,7 @@ export function createPmWindowModel() {
   function emptyWindow(windowId, sessionId = null) {
     return { windowId, sessionId, revision: 0, terminal: null,
       reportsVersion: null, reports: [], current: null, error: null, loaded: false,
-      requestTasks: null, requestTasksError: null, taskDetail: null, conversation: null, chatSend: null, paneResult: null };
+      requestTasks: null, requestTasksError: null, taskDetail: null, taskCancel: null, conversation: null, chatSend: null, paneResult: null };
   }
   function bindPmWindowState(windowId, sessionId) {
     model.update(state => {
@@ -114,7 +114,19 @@ export function createPmWindowModel() {
           next.taskDetail = { ...next.taskDetail, stale: true };
         }
       } else if (event.kind === 'pm_request_task') {
+        const cancellation = previous?.taskCancel;
         const selected = previous?.taskDetail;
+        if (cancellation?.status === 'pending' && event.request_id === cancellation.requestId) {
+          const result = event.result;
+          const recorded = result?.state === 'ready' && result.receipt?.action === 'cancel'
+            && result.receipt.operation_id === cancellation.operationId
+            && Number.isSafeInteger(result.receipt.revision) && result.receipt.revision > cancellation.revision;
+          if (!recorded && result?.state !== 'error') return state;
+          next = { ...next, taskCancel: { ...cancellation, status: recorded ? 'recorded' : 'error',
+            error: recorded ? null : result.message || 'Cancellation was not confirmed. Reload details before trying again.' },
+            taskDetail: selected?.key === cancellation.key ? { ...selected, stale: true } : selected };
+          return { ...state, windows: { ...state.windows, [event.id]: { ...next, revision: next.revision + 1 } }, changedWindowId: event.id };
+        }
         if (!selected || selected.status !== 'loading' || event.request_id !== selected.requestId) return state;
         const result = event.result;
         if (result?.state === 'detail') {
@@ -234,6 +246,26 @@ export function createPmWindowModel() {
         error: 'The read was not confirmed. Reconnect, then reload details.' },
       revision: previous.revision + 1 } }, changedWindowId: windowId }));
   }
+  function requestPmTaskCancel(windowId, reason) {
+    const previous = model.read().windows[windowId], selected = previous?.taskDetail;
+    if (!previous?.sessionId || previous.taskCancel?.status === 'pending' || selected?.status !== 'ready'
+      || selected.stale || !['pending', 'in_progress', 'waiting', 'completed'].includes(selected.data?.status)
+      || selected.revision < (previous.requestTasks?.revision || 0) || !String(reason ?? '').trim()) return null;
+    const requestId = ++requestSequence, operationId = `task-cancel-${globalThis.crypto.randomUUID()}`;
+    model.update(state => ({ ...state, windows: { ...state.windows, [windowId]: { ...previous,
+      taskCancel: { key: selected.key, requestId, operationId, revision: selected.revision, status: 'pending', error: null },
+      revision: previous.revision + 1 } }, changedWindowId: windowId }));
+    return { kind: 'cancel_pm_request_task', id: windowId, request_id: requestId, task_key: selected.key,
+      request: { operation_id: operationId, expected_revision: selected.revision, reason, task_id: '' } };
+  }
+  function markPmTaskCancelUnavailable(windowId, requestId) {
+    const previous = model.read().windows[windowId], cancellation = previous?.taskCancel;
+    if (cancellation?.status !== 'pending' || cancellation.requestId !== requestId) return;
+    model.update(state => ({ ...state, windows: { ...state.windows, [windowId]: { ...previous,
+      taskCancel: { ...cancellation, status: 'error', error: 'Cancellation was not confirmed. Reconnect, then reload details before trying again.' },
+      taskDetail: previous.taskDetail?.key === cancellation.key ? { ...previous.taskDetail, stale: true } : previous.taskDetail,
+      revision: previous.revision + 1 } }, changedWindowId: windowId }));
+  }
   function removePmWindowState(windowId) {
     requests.delete(windowId);
     model.update(state => {
@@ -243,11 +275,11 @@ export function createPmWindowModel() {
   }
   function readPmWindowState() { return model.read(); }
   function subscribePmWindowState(select, render) { return model.subscribe(select, render); }
-  return { requestPmReports, requestPmConversation, requestPmTaskDetail, markPmTaskDetailUnavailable, requestPmChatSend, markPmChatSendUnavailable, expirePmChatSend, bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, readPmWindowState, subscribePmWindowState };
+  return { requestPmReports, requestPmConversation, requestPmTaskDetail, markPmTaskDetailUnavailable, requestPmTaskCancel, markPmTaskCancelUnavailable, requestPmChatSend, markPmChatSendUnavailable, expirePmChatSend, bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, readPmWindowState, subscribePmWindowState };
 }
 
 // Read-only report view. The caller owns polling and the unchanged terminal.
-export function createPmChat({ document, root, sessionId, onLogVisibility, onChatVisible = () => {}, onTaskDetail = () => {}, onSend = () => {}, onOpenTerminal = () => false,
+export function createPmChat({ document, root, sessionId, onLogVisibility, onChatVisible = () => {}, onTaskDetail = () => {}, onTaskCancel = () => {}, onSend = () => {}, onOpenTerminal = () => false,
   onViewNotification = () => {}, onDecisionsWaiting = () => {}, onReviewAttention = () => {},
   copyText = text => document.defaultView.navigator.clipboard.writeText(text) }) {
   let session = sessionId;
@@ -379,7 +411,23 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   const detailNotice = element('p', 'pm-chat__notice');
   detailNotice.setAttribute('aria-live', 'polite');
   const detailContent = element('div', '');
-  taskDetail.append(detailHeading, detailActions, detailNotice, detailContent);
+  const cancelControls = element('div', 'pm-chat__task-cancel');
+  const cancelLabel = element('label', '', 'Reason for cancelling this task');
+  const cancelReason = element('textarea', 'pm-chat__task-cancel-reason');
+  cancelReason.setAttribute('aria-label', 'Reason for cancelling this task');
+  cancelReason.maxLength = 1000;
+  cancelReason.rows = 2;
+  cancelLabel.append(cancelReason);
+  const cancelTask = element('button', '', 'Cancel task');
+  cancelTask.type = 'button';
+  const cancelStatus = element('p', 'pm-chat__task-cancel-status');
+  cancelStatus.setAttribute('aria-live', 'polite');
+  cancelControls.append(element('p', 'pm-chat__task-meta', 'Cancel tracking only. This does not stop agents or change Issues or pull requests.'), cancelLabel, cancelTask);
+  taskDetail.append(detailHeading, detailActions, detailNotice, cancelStatus, cancelControls, detailContent);
+  cancelReason.addEventListener('input', () => renderTaskCancellation(latestState));
+  cancelTask.addEventListener('click', () => {
+    if (!disposed && cancelTask.getAttribute('aria-disabled') === 'false') onTaskCancel(cancelReason.value);
+  });
   reloadDetail.addEventListener('click', () => {
     if (!disposed && latestState?.taskDetail && latestState.taskDetail.status !== 'loading') onTaskDetail(latestState.taskDetail.key);
   });
@@ -744,6 +792,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   }
   function renderTasks(state) {
     renderTaskDetail(state?.taskDetail);
+    renderTaskCancellation(state);
     const overview = state?.requestTasks;
     const error = state?.requestTasksError;
     const rows = overview?.state === 'ready' ? overview.tasks : [];
@@ -844,15 +893,16 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   }
   function renderTaskDetail(selected) {
     taskDetail.hidden = !selected;
-    if (!selected) { selectedDetailKey = null; detailData = null; detailContent.replaceChildren(); return; }
+    if (!selected) { selectedDetailKey = null; detailData = null; cancelReason.value = ''; detailContent.replaceChildren(); return; }
     const changedKey = selected.key !== selectedDetailKey;
+    if (changedKey) cancelReason.value = '';
     selectedDetailKey = selected.key;
     detailHeading.textContent = selected.title || 'Selected task details';
     // Retain keyboard focus while the read is pending.
     reloadDetail.setAttribute('aria-disabled', String(selected.status === 'loading'));
     detailNotice.textContent = [selected.status === 'loading' ? 'Loading task details…' : '',
       selected.stale ? 'Showing the last confirmed detail (stale). Reload details after recovering the task store.' : '',
-      selected.error || '', selected.data ? `Selected snapshot revision ${selected.revision}. Preview only; saved data is unchanged.` : ''].filter(Boolean).join(' ');
+      selected.error || '', selected.data ? `Selected snapshot revision ${selected.revision}. Text below is a bounded preview.` : ''].filter(Boolean).join(' ');
     if (detailData !== selected.data) {
       detailData = selected.data;
       const nodes = [];
@@ -880,6 +930,20 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
       detailContent.replaceChildren(...nodes);
     }
     if (changedKey) { taskDetail.scrollTop = 0; detailHeading.focus(); }
+  }
+  function renderTaskCancellation(state) {
+    const selected = state?.taskDetail, cancellation = state?.taskCancel;
+    const current = cancellation?.key === selected?.key ? cancellation : null;
+    const actionable = ['pending', 'in_progress', 'waiting', 'completed'].includes(selected?.data?.status);
+    if (!actionable && cancelControls.contains(document.activeElement)) reloadDetail.focus();
+    cancelControls.hidden = !actionable;
+    cancelTask.setAttribute('aria-disabled', String(!actionable || selected?.status !== 'ready' || selected.stale
+      || cancellation?.status === 'pending' || !cancelReason.value.trim()));
+    cancelReason.readOnly = cancellation?.status === 'pending';
+    cancelStatus.textContent = cancellation?.status === 'pending'
+      ? (current ? 'Saving cancellation…' : 'Another task cancellation is awaiting confirmation. Reconnect and reload its details if confirmation does not arrive.')
+      : current?.status === 'recorded' ? `Cancellation recorded.${selected?.data?.status === 'cancelled' && !selected.stale ? ' This task is cancelled.' : ' Reload details to see the current state.'}`
+      : current?.error || (selected?.data?.status === 'cancelled' ? 'This task is cancelled.' : '');
   }
   function renderChat(conversation) {
     const nextDigest = JSON.stringify(conversation);
