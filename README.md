@@ -1796,6 +1796,20 @@ Managed hooks preserve user hooks while adding gwt runtime behavior for agent
 state, workflow guardrails, Board reminders, discussion/plan/build Stop checks,
 and coordination-event summaries.
 
+The shell file-operation guard allows `mkdir`, `rmdir`, `rm`, `touch`, `cp`,
+and `mv` within the worktree or below the OS temporary directory (`TMPDIR` /
+platform temp; also `/tmp` and `/private/tmp` on Unix). This includes harness
+session scratchpads and verification logs. Temporary roots themselves and paths
+escaping through symlinks remain protected. On refusal, the message lists the
+allowed directories and shows how to preserve a temporary log. For other external
+artifacts, configure the tool to output into the worktree or temporary scratchpad,
+or obtain separate authorization for access.
+
+This guard recognizes shell file commands; it is not an OS sandbox. Redirection
+and arbitrary Python/interpreter I/O are outside its inspection. Agents must use
+the same authorized path boundaries regardless of syntax and must not use another
+syntax to bypass a refusal.
+
 **Settings → Project → Hook Center** audits the selected project's hook
 configuration, binary fallbacks, Codex discovery/trust, and opt-in profile path.
 **Regenerate managed hooks** uses the existing managed-only repair and preserves
