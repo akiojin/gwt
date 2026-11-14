@@ -1093,6 +1093,7 @@ PR merge is not required for this metric.
 
 `issue.monitor.status` also exposes `event_history`: the newest 100 Monitor
 notifications, ordered oldest first, with an `id`, RFC3339 `recorded_at`,
+an emission `sequence` that preserves order when timestamps coincide,
 `issue_number`, notification kind `level` (`info`/`warn`/`error`/`done`), and
 `message`. Failed attempts, retry notices, needs-human transitions, merges and
 slot releases remain readable after GUI notifications are consumed and across

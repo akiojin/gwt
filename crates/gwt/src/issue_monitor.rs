@@ -6567,6 +6567,9 @@ pub struct AutonomousNotice {
 pub struct IssueMonitorEvent {
     pub id: String,
     pub recorded_at: String,
+    /// Emission order when several controls share a recording timestamp.
+    #[serde(default)]
+    pub sequence: u64,
     #[serde(flatten)]
     pub notice: AutonomousNotice,
 }
@@ -20620,9 +20623,23 @@ impl IssueMonitorState {
                 chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
             ),
         };
+        let sequence = self
+            .event_history
+            .iter()
+            .find(|event| event.id == id)
+            .map(|event| event.sequence)
+            .unwrap_or_else(|| {
+                self.event_history
+                    .iter()
+                    .map(|event| event.sequence)
+                    .max()
+                    .unwrap_or(0)
+                    .saturating_add(1)
+            });
         self.merge_event_history(std::iter::once(IssueMonitorEvent {
             id,
             recorded_at,
+            sequence,
             notice: notice.clone(),
         }));
         while self.pending_autonomous_notices.len() >= AUTONOMOUS_NOTICE_CAP {
@@ -20638,10 +20655,21 @@ impl IssueMonitorState {
             .map(|event| (event.id.clone(), event))
             .collect::<BTreeMap<_, _>>();
         for event in incoming {
-            by_id.entry(event.id.clone()).or_insert(event);
+            by_id
+                .entry(event.id.clone())
+                // A stale failure replay precedes disk rebase. Adopt durable
+                // ordering, retaining the independently computed notice for ACK equality.
+                .and_modify(|known| known.sequence = event.sequence)
+                .or_insert(event);
         }
         let mut history = by_id.into_values().collect::<Vec<_>>();
-        history.sort_by(|a, b| (&a.recorded_at, &a.id).cmp(&(&b.recorded_at, &b.id)));
+        history.sort_by_cached_key(|event| {
+            (
+                parse_rfc3339_utc(&event.recorded_at),
+                event.sequence,
+                event.id.clone(),
+            )
+        });
         let drop_count = history
             .len()
             .saturating_sub(ISSUE_MONITOR_EVENT_HISTORY_CAP);
@@ -50467,7 +50495,27 @@ mod tests {
             monitor.push_unconditional_notice("warn", 7, "another admission".to_string());
         });
         assert_eq!(replay.prefs().event_history.len(), 4);
+        assert_eq!(
+            replay.prefs().event_history.last().unwrap().notice.message,
+            "another admission"
+        );
         assert_eq!(replay.event_control_context, None);
+
+        let mut stale = replay.clone();
+        replay.with_control_event_context("intervening-control", now, |monitor| {
+            monitor.push_unconditional_notice("warn", 8, "intervening admission".to_string());
+        });
+        let latest = |monitor: &mut IssueMonitorState| {
+            monitor.push_unconditional_notice("warn", 7, "latest admission".to_string());
+        };
+        replay.with_control_event_context("latest-control", now, latest);
+        stale.with_control_event_context("latest-control", now, latest);
+        assert_eq!(stale.prefs().event_history.last().unwrap().sequence, 5);
+        stale.rebase_gui_observer_prefs(&replay.prefs());
+        assert_eq!(stale.prefs().event_history, replay.prefs().event_history);
+        assert_eq!(stale.prefs().event_history.last().unwrap().sequence, 6);
+        stale.with_control_event_context("latest-control", now, latest);
+        assert_eq!(stale.prefs().event_history, replay.prefs().event_history);
     }
 
     #[test]
@@ -50477,7 +50525,8 @@ mod tests {
                 .map(|n| {
                     serde_json::json!({
                         "id": format!("event-{n}"),
-                        "recorded_at": format!("2026-07-02T00:{:02}:{:02}Z", n / 60, n % 60),
+                        "recorded_at": "2026-07-02T00:00:00Z",
+                        "sequence": n,
                         "level": "warn",
                         "issue_number": n,
                         "message": "repeated failure"
@@ -50493,7 +50542,7 @@ mod tests {
         let disk = prefs_with_events(51, 150);
         observer.rebase_gui_observer_prefs(&disk);
         observer.rebase_gui_observer_prefs(&disk);
-        let restored =
+        let mut restored =
             test_monitor_with_prefs(IssueMonitorConfig::default(), prefs_with_events(1, 150));
         for monitor in [&observer, &restored] {
             let prefs = serde_json::to_value(monitor.prefs()).unwrap();
@@ -50512,6 +50561,21 @@ mod tests {
                 100
             );
         }
+        let fractional: IssueMonitorEvent = serde_json::from_value(serde_json::json!({
+            "id": "fractional",
+            "recorded_at": "2026-07-02T00:00:00.100000000Z",
+            "sequence": 151,
+            "level": "warn",
+            "issue_number": 151,
+            "message": "later instant"
+        }))
+        .unwrap();
+        restored.merge_event_history([fractional]);
+        restored.rebase_gui_observer_prefs(&prefs_with_events(1, 100));
+        let history = restored.prefs().event_history;
+        assert_eq!(history.len(), 100);
+        assert_eq!(history.first().unwrap().notice.issue_number, 52);
+        assert_eq!(history.last().unwrap().notice.issue_number, 151);
     }
 
     #[test]
