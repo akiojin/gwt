@@ -38,6 +38,7 @@ use std::{
 };
 use tokio::sync::{mpsc, watch};
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 pub(super) const HOST_REGISTER_PATH: &str = "/host/v1/register";
 /// The same bound as HTTP request bodies (the mobile policy's maximum SDP).
@@ -69,14 +70,37 @@ struct HostToken {
     generation: Uuid,
     project: String,
     host_epoch: Uuid,
-    secret: String,
+    #[serde(deserialize_with = "borrowed_secret")]
+    secret: Zeroizing<[u8; 32]>,
+}
+
+/// Decodes the hex secret straight from the borrowed token bytes, so no owned
+/// copy is left unwiped. An escaped string cannot be borrowed and is refused.
+fn borrowed_secret<'de, D>(deserializer: D) -> Result<Zeroizing<[u8; 32]>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let hex_secret = <&'de str>::deserialize(deserializer)?;
+    let mut secret = Zeroizing::new([0u8; 32]);
+    hex::decode_to_slice(hex_secret, &mut *secret).map_err(serde::de::Error::custom)?;
+    Ok(secret)
 }
 
 struct HostCredentials {
     identity: CredentialIdentity,
     project: ProjectKey,
     host_epoch: Uuid,
-    secret: [u8; 32],
+    secret: Zeroizing<[u8; 32]>,
+}
+
+fn decode_token(token: &str) -> Option<Zeroizing<Vec<u8>>> {
+    if token.len() > MAX_TOKEN_CHARS {
+        return None;
+    }
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(token)
+        .ok()
+        .map(Zeroizing::new)
 }
 
 fn parse_authorization(headers: &HeaderMap) -> Option<HostCredentials> {
@@ -85,19 +109,11 @@ fn parse_authorization(headers: &HeaderMap) -> Option<HostCredentials> {
     if values.next().is_some() {
         return None;
     }
-    let token = value.to_str().ok()?.strip_prefix("Bearer ")?;
-    if token.len() > MAX_TOKEN_CHARS {
-        return None;
-    }
-    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(token)
-        .ok()?;
+    let bytes = decode_token(value.to_str().ok()?.strip_prefix("Bearer ")?)?;
     let token: HostToken = serde_json::from_slice(&bytes).ok()?;
     if token.schema_version != 1 {
         return None;
     }
-    let mut secret = [0u8; 32];
-    hex::decode_to_slice(&token.secret, &mut secret).ok()?;
     Some(HostCredentials {
         identity: CredentialIdentity {
             host_id: token.host_id,
@@ -106,7 +122,7 @@ fn parse_authorization(headers: &HeaderMap) -> Option<HostCredentials> {
         },
         project: ProjectKey::parse(&token.project).ok()?,
         host_epoch: token.host_epoch,
-        secret,
+        secret: token.secret,
     })
 }
 
@@ -179,13 +195,15 @@ pub(super) async fn register(
     let Some(credentials) = parse_authorization(&headers) else {
         return (StatusCode::UNAUTHORIZED, UNAUTHORIZED).into_response();
     };
+    // The header bytes cannot be wiped; at least do not keep them alive.
+    drop(headers);
     let sessions = Arc::clone(&state.sessions);
     let registered = tokio::task::spawn_blocking(move || {
         call(&sessions, |sessions, now, wall| {
             let handle = sessions.register(
                 &credentials.identity,
                 &credentials.project,
-                &credentials.secret,
+                &*credentials.secret,
                 credentials.host_epoch,
                 now,
                 wall,
@@ -339,7 +357,7 @@ mod tests {
     #[test]
     fn bearer_tokens_are_parsed_strictly() {
         let parsed = parse_authorization(&headers(&[&token(valid())])).unwrap();
-        assert_eq!(parsed.secret, [0xab; 32]);
+        assert_eq!(*parsed.secret, [0xab; 32]);
         assert_eq!(parsed.project.as_str(), "0123456789abcdef");
         for (field, value) in [
             ("schema_version", serde_json::json!(2)),
@@ -358,5 +376,27 @@ mod tests {
         let padded = format!("{}=", token(valid()));
         assert!(parse_authorization(&headers(&[&padded])).is_none());
         assert!(parse_authorization(&headers(&[])).is_none());
+    }
+
+    fn zeroizes_on_drop<T: zeroize::ZeroizeOnDrop>(_: &T) {}
+
+    #[test]
+    fn owned_secret_holders_are_zeroize_on_drop_and_escaped_secrets_are_refused() {
+        let token = token(valid());
+        let bearer = token.strip_prefix("Bearer ").unwrap();
+        zeroizes_on_drop(&decode_token(bearer).unwrap());
+        let parsed = parse_authorization(&headers(&[&token])).unwrap();
+        zeroizes_on_drop(&parsed.secret);
+        // An escaped secret cannot be borrowed and would need an owned copy.
+        let escaped = serde_json::to_string(&valid()).unwrap().replacen(
+            "\"secret\":\"abab",
+            "\"secret\":\"\\u0061bab",
+            1,
+        );
+        let escaped = format!(
+            "Bearer {}",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(escaped)
+        );
+        assert!(parse_authorization(&headers(&[&escaped])).is_none());
     }
 }

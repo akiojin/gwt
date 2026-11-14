@@ -530,9 +530,6 @@ test.describe("Issue queue real backend launch", () => {
         runtime_status: "Running", current_hook_event: { event: "UserPromptSubmit", outcome: "normal" } });
       expect(activity.current_hook_event.correlation_id).not.toBe(n1.current_hook_event.correlation_id);
       expect(waiting.current_hook_event).toEqual(activity.current_hook_event);
-      const read = await request({ kind: "agent_switch", action: { kind: "read",
-        request_id: `normal-stop-${waiting.operation}` } }, "agent_switch");
-      expect(read.kind).toBe("agent_switch");
       await expect.poll(async () => (await preferences()).agent_switch_intents[waiting.operation]?.reason,
         { timeout: 30_000 }).toMatch(/Waiting for the current turn to finish/);
       expect((await preferences()).monitor_runtime_stop_requests || []).toEqual([]);
@@ -545,12 +542,6 @@ test.describe("Issue queue real backend launch", () => {
           && entry.operation === waiting.operation && entry.pid === source.pid
           && entry.gwt_session_id === source.gwt_session_id),
       { timeout: Math.max(1, handoffDeadline - Date.now()), message: "genuine N2 hook returned or ordinary target already launched" }).toBe(true);
-      if ((await fixture.launches()).length === 1) {
-        const afterStop = await request({ kind: "agent_switch", action: { kind: "read",
-          request_id: `after-normal-stop-${waiting.operation}` } }, "agent_switch",
-        Math.min(30_000, Math.max(1, handoffDeadline - Date.now())));
-        expect(afterStop.kind).toBe("agent_switch");
-      }
       await expect.poll(async () => (await fixture.launches()).length,
         { timeout: Math.max(1, handoffDeadline - Date.now()), message: "actual source checkpoint ACK, physical exit and ordinary target Issues launch" }).toBe(2);
       const launches = await fixture.launches();
@@ -577,10 +568,6 @@ test.describe("Issue queue real backend launch", () => {
       await info.attach("agent-switch-target-confirmation", {
         body: JSON.stringify(await targetConfirmation()), contentType: "application/json",
       });
-      const afterTarget = await request({ kind: "agent_switch", action: { kind: "read",
-        request_id: `after-target-confirmed-${waiting.operation}` } }, "agent_switch",
-      Math.min(30_000, Math.max(1, completionDeadline - Date.now())));
-      expect(afterTarget.kind).toBe("agent_switch");
       await expect.poll(async () => Object.values((await preferences()).agent_switch_intents || {})
         .map((intent: any) => intent.stage), { timeout: Math.max(1, completionDeadline - Date.now()) }).toEqual(["completed"]);
       const saved = Object.values((await preferences()).agent_switch_intents)[0] as any;

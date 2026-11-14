@@ -461,6 +461,7 @@ pub(crate) enum OwnerMessage {
     },
     AgentSwitchFinished {
         drove: bool,
+        recheck_after: Option<std::time::Duration>,
         result: OwnerReply,
         reply: oneshot::Sender<OwnerReply>,
     },
@@ -1177,6 +1178,7 @@ pub(crate) struct OwnerState {
     retiring: usize,
     input_jobs: usize,
     switch_job_inflight: bool,
+    next_switch_drive: Option<std::time::Instant>,
     pm_wake_permits: super::pm_delivery::PmWakePermits,
     agent_operations: HashMap<String, AgentOperation>,
     retirements: HashMap<(String, u64), Option<Retirement>>,
@@ -1263,6 +1265,7 @@ impl OwnerState {
             retiring: 0,
             input_jobs: 0,
             switch_job_inflight: false,
+            next_switch_drive: None,
             pm_wake_permits: Default::default(),
             agent_operations: HashMap::new(),
             retirements: HashMap::new(),
@@ -1373,11 +1376,13 @@ impl OwnerState {
             self.check_readiness_deadlines(std::time::Instant::now());
             self.tick_runtime_policies(std::time::Instant::now());
             self.check_monitor_deadlines(std::time::Instant::now());
+            self.tick_agent_switch(std::time::Instant::now());
             let deadline = self
                 .next_readiness_deadline()
                 .into_iter()
                 .chain(self.next_policy_deadline())
                 .chain(self.next_monitor_deadline())
+                .chain(self.next_switch_drive)
                 .chain(self.reconciliation.retry_at)
                 .chain(
                     (!self.stopping)
@@ -1444,12 +1449,24 @@ impl OwnerState {
                 }
                 OwnerMessage::AgentSwitchFinished {
                     drove,
+                    recheck_after,
                     result,
                     reply,
                 } => {
                     self.input_jobs -= 1;
                     if drove {
                         self.switch_job_inflight = false;
+                    }
+                    self.rearm_agent_switch(recheck_after, std::time::Instant::now());
+                    if drove && reply.is_closed() {
+                        if let Some(snapshot) = result
+                            .as_ref()
+                            .ok()
+                            .and_then(|value| value.get("snapshot"))
+                            .and_then(|value| serde_json::from_value(value.clone()).ok())
+                        {
+                            let _ = self.events.send(OwnerEvent::AgentSwitch { snapshot });
+                        }
                     }
                     let _ = reply.send(result);
                 }
@@ -2277,6 +2294,7 @@ impl OwnerState {
             reason = if reply.is_some() { "shutdown_requested" } else if self.gui_presence.quit_requested() { "gui_quit" } else { "gui_presence_expired" },
             "project owner shutdown started");
         self.stopping = true;
+        self.next_switch_drive = None;
         self.pm_wake_permits.cancel_mobile_for_pane(None);
         self.residency.send_replace(ResidencySnapshot {
             startup_intent: self.gui_presence.intent(),
@@ -2536,6 +2554,7 @@ impl OwnerState {
                 let (reply, _) = oneshot::channel();
                 let _ = sender.send(OwnerMessage::AgentSwitchFinished {
                     drove: false,
+                    recheck_after: None,
                     result,
                     reply,
                 });
@@ -2616,6 +2635,45 @@ impl OwnerState {
         );
     }
 
+    fn rearm_agent_switch(
+        &mut self,
+        recheck_after: Option<std::time::Duration>,
+        now: std::time::Instant,
+    ) {
+        if self.stopping {
+            return;
+        }
+        if let Some(delay) = recheck_after {
+            let due = now + delay;
+            if delay > std::time::Duration::from_secs(1) {
+                // A busy tick's earlier wake must not bypass target backoff.
+                self.next_switch_drive = Some(self.next_switch_drive.map_or(due, |at| at.max(due)));
+            } else {
+                // An older terminal reply must not erase a newer request's wake.
+                self.next_switch_drive.get_or_insert(due);
+            }
+        }
+    }
+
+    fn tick_agent_switch(&mut self, now: std::time::Instant) {
+        if self.stopping {
+            self.next_switch_drive = None;
+            return;
+        }
+        if !self.next_switch_drive.is_some_and(|due| due <= now) {
+            return;
+        }
+        self.next_switch_drive = None;
+        if self.switch_job_inflight {
+            self.rearm_agent_switch(Some(std::time::Duration::from_secs(1)), now);
+            return;
+        }
+        // Hook exit and launch acknowledgements can finish without a mailbox
+        // notification. Reobserve through the same guarded driver, off-thread.
+        let (reply, _) = oneshot::channel();
+        self.begin_agent_switch(None, reply);
+    }
+
     fn begin_agent_switch(
         &mut self,
         action: Option<crate::issue_monitor::AgentSwitchAction>,
@@ -2656,6 +2714,7 @@ impl OwnerState {
             let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
                 gwt_core::operation_deadline::now() + std::time::Duration::from_secs(60),
             );
+            let mut target_waited = false;
             let result = match action {
                 Some(action) => super::agent_switch::apply_action(&root, &sessions, action),
                 None => super::agent_switch::drive_pending(
@@ -2663,6 +2722,7 @@ impl OwnerState {
                     &sessions,
                     &entries,
                     &writers,
+                    &mut target_waited,
                     |exited| {
                         let _ =
                             sender.send(OwnerMessage::AgentSwitchSourceExited(Box::new(exited)));
@@ -2670,8 +2730,20 @@ impl OwnerState {
                 ),
             }
             .map(|snapshot| json!({"snapshot":snapshot}));
+            let pending_local = result.is_ok()
+                && super::agent_switch::has_pending_local_switch(&root).unwrap_or(false);
+            let recheck_after = pending_local.then(|| {
+                std::time::Duration::from_secs(if target_waited {
+                    crate::IssueMonitorConfig::default()
+                        .poll_interval_secs
+                        .max(60)
+                } else {
+                    1
+                })
+            });
             let _ = sender.send(OwnerMessage::AgentSwitchFinished {
                 drove,
+                recheck_after,
                 result,
                 reply,
             });
@@ -12703,6 +12775,7 @@ fn owner_fixture(
         retiring: 0,
         input_jobs: 0,
         switch_job_inflight: false,
+        next_switch_drive: None,
         pm_wake_permits: Default::default(),
         agent_operations: HashMap::new(),
         retirements: HashMap::new(),
@@ -12719,6 +12792,49 @@ fn owner_fixture(
 #[cfg(test)]
 mod worker_tests {
     use super::*;
+
+    #[test]
+    fn switch_reconciliation_keeps_a_newer_request_after_an_older_terminal_reply() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let (mut owner, _, _) = owner_fixture(temp.path());
+        let now = std::time::Instant::now();
+        let due = now + std::time::Duration::from_secs(1);
+        owner.rearm_agent_switch(Some(std::time::Duration::from_secs(1)), now);
+        assert_eq!(owner.next_switch_drive, Some(due));
+        owner.rearm_agent_switch(None, due);
+        assert_eq!(owner.next_switch_drive, Some(due));
+        let backoff = std::time::Duration::from_secs(60);
+        owner.rearm_agent_switch(Some(backoff), now);
+        owner.rearm_agent_switch(Some(std::time::Duration::from_secs(1)), now);
+        assert_eq!(owner.next_switch_drive, Some(now + backoff));
+        owner.next_switch_drive = None;
+        owner.rearm_agent_switch(None, due);
+        assert_eq!(owner.next_switch_drive, None);
+    }
+
+    #[test]
+    fn switch_reconciliation_defers_an_inflight_driver_and_stops_with_its_owner() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let (mut owner, _, _) = owner_fixture(temp.path());
+        let now = std::time::Instant::now();
+        let interval = std::time::Duration::from_secs(1);
+        owner.rearm_agent_switch(Some(interval), now);
+        owner.switch_job_inflight = true;
+        owner.tick_agent_switch(now);
+        assert_eq!(owner.next_switch_drive, Some(now + interval));
+        owner.tick_agent_switch(now + interval);
+        assert_eq!(owner.next_switch_drive, Some(now + interval * 2));
+        assert_eq!(
+            owner.input_jobs, 0,
+            "a busy driver must not spawn another job"
+        );
+        owner.stopping = true;
+        owner.tick_agent_switch(now + interval * 2);
+        owner.rearm_agent_switch(Some(interval), now + interval * 2);
+        assert_eq!(owner.next_switch_drive, None);
+    }
 
     #[test]
     fn quota_release_does_not_count_unmaterialized_operations_twice() {
@@ -14786,6 +14902,7 @@ mod tests {
             retiring: 0,
             input_jobs: 0,
             switch_job_inflight: false,
+            next_switch_drive: None,
             pm_wake_permits: Default::default(),
             agent_operations: HashMap::new(),
             retirements: HashMap::new(),

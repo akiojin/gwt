@@ -347,6 +347,9 @@ pub struct OwnerFinalScreen {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum OwnerEvent {
+    AgentSwitch {
+        snapshot: crate::issue_monitor::AgentSwitchSnapshot,
+    },
     ProjectExecutionStatus {
         status: crate::protocol::ProjectExecutionStatusView,
     },
