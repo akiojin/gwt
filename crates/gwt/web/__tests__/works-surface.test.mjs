@@ -241,6 +241,10 @@ test("Works retains live rows across partial catalogs without granting terminal 
   assert.equal(rows().length, 1, "catalog-first replacement must not disappear");
   const newer = { ...next, session_id: "newer-session", runtime_incarnation: 6 };
   f.activityModel.update(() => ({ agents: [newer], count: 1 })); f.flush();
+  const successorRoot = f.surface.element.querySelector('.works-terminal[data-window-id="one"]');
+  f.surface.sync();
+  assert.ok(f.surface.element.querySelector('.works-terminal[data-window-id="one"]') === successorRoot,
+    "a coherent successor must not inherit the old Session's catalog conflict and remount on the next render");
   assert.equal(f.surface.openWork(next), false);
   assert.equal(f.surface.openWork(newer), true);
   f.activityModel.update(() => ({ agents: [newer], count: 1, snapshot: { project_key: "this-project" } }));

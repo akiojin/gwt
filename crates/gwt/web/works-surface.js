@@ -280,7 +280,9 @@ export function createWorksSurface({ projectKey, document, windowCatalogModel, a
       const conflict = windows.some(data => data.id === previous.data.id
         && (data.session_id !== previous.assignment.session_id || data.preset === "shell"));
       if (foreign || conflict) {
-        if (current) result[result.indexOf(current)] = { ...current, catalogConflict: foreign ? "foreign-project" : JSON.stringify(windows.filter(data => data.id === previous.data.id).map(data => [data.session_id, data.preset])) };
+        if (current && (foreign || !current.ready || current.assignment.session_id === previous.assignment.session_id)) {
+          result[result.indexOf(current)] = { ...current, catalogConflict: foreign ? "foreign-project" : JSON.stringify(windows.filter(data => data.id === previous.data.id).map(data => [data.session_id, data.preset])) };
+        }
         continue;
       }
       if (snapshot?.host_id && snapshot.host_id !== previous.hostId) continue;
