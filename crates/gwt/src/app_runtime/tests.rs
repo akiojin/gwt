@@ -65,9 +65,9 @@ use super::{
     IssueMonitorProfileSaveContext, KnowledgeLoadRequest, KnowledgeRefreshTask,
     KnowledgeSearchRequest, LaunchFeedbackContext, LaunchWizardMemoryCache, LaunchWizardSession,
     LocalIssueMonitorEffectOutcome, OutboundEvent, PendingContinueWork,
-    PendingContinueWorkExecution, PendingFreshExecutionLaunch, ProcessLaunch, ProjectTabRuntime,
-    ReadinessDeadlineDecision, ScheduledIssueMonitorScanOutcome, UserEvent, WindowRuntime,
-    WorkspaceLaunchProjectionKind, WorkspaceResumeContext,
+    PendingContinueWorkExecution, PendingFreshExecutionLaunch, PendingStartupAutoResumeSession,
+    ProcessLaunch, ProjectTabRuntime, ReadinessDeadlineDecision, ScheduledIssueMonitorScanOutcome,
+    UserEvent, WindowRuntime, WorkspaceLaunchProjectionKind, WorkspaceResumeContext,
 };
 use crate::embedded_server::AgentPmSendResponder;
 use crate::{
@@ -46377,6 +46377,36 @@ fn planned_orphan_intake_path_is_not_queued_for_auto_resume_while_prune_is_block
         pending_session_ids,
         vec!["session-retained-intake"],
         "only the exact detached path in the prune plan must be excluded"
+    );
+}
+
+#[test]
+fn startup_reaper_inputs_protect_selected_auto_resume_and_exclude_orphan_plan() {
+    let root = tempfile::tempdir().expect("startup reaper fixture root");
+    let survivor = root.path().join("survivor");
+    let orphan = root.path().join("orphan");
+    std::fs::create_dir_all(&survivor).expect("create survivor worktree path");
+    std::fs::create_dir_all(&orphan).expect("create orphan worktree path");
+    let mut session =
+        gwt_agent::Session::new(&survivor, "work/survivor", gwt_agent::AgentId::Codex);
+    session.id = "startup-protected-session".to_string();
+    let pending = PendingStartupAutoResumeSession {
+        tab_id: "tab-startup-reaper".to_string(),
+        session,
+        workspace_resume_context: None,
+    };
+
+    let (worktrees, protected) = super::startup::startup_generation_reaper_inputs(
+        &[survivor.clone(), orphan.clone(), survivor.clone()],
+        &HashSet::from([orphan]),
+        &[pending],
+    );
+
+    assert_eq!(worktrees, vec![survivor.clone(), survivor]);
+    assert_eq!(
+        protected,
+        HashSet::from(["startup-protected-session".to_string()]),
+        "only sessions that passed startup restore admission protect their Active generation",
     );
 }
 

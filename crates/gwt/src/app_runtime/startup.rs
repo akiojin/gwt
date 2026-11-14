@@ -39,6 +39,61 @@ const STARTUP_AUTO_RESUME_STALE_AFTER_SECS: i64 = 24 * 60 * 60;
 const STARTUP_AUTO_RESUME_STACK_OFFSET_X: f64 = 28.0;
 const STARTUP_AUTO_RESUME_STACK_OFFSET_Y: f64 = 24.0;
 
+pub(super) fn startup_generation_reaper_inputs(
+    startup_worktrees: &[PathBuf],
+    planned_orphan_intake_paths: &HashSet<PathBuf>,
+    pending_auto_resume: &[PendingStartupAutoResumeSession],
+) -> (Vec<PathBuf>, HashSet<String>) {
+    let worktrees = startup_worktrees
+        .iter()
+        .filter(|worktree| {
+            !planned_orphan_intake_paths
+                .iter()
+                .any(|planned| same_worktree_path(planned, worktree))
+        })
+        .cloned()
+        .collect();
+    let protected_session_ids = pending_auto_resume
+        .iter()
+        .map(|pending| pending.session.id.clone())
+        .collect();
+    (worktrees, protected_session_ids)
+}
+
+pub(super) fn run_startup_defunct_generation_reaper(
+    worktrees: &[PathBuf],
+    sessions_dir: &Path,
+    protected_session_ids: &HashSet<String>,
+) -> gwt::cli::execution_state::StartupGenerationReapReport {
+    let started = std::time::Instant::now();
+    let report = gwt::cli::execution_state::reap_startup_defunct_active_generations(
+        worktrees,
+        sessions_dir,
+        protected_session_ids,
+    );
+    for failure in &report.failures {
+        tracing::warn!(
+            repository = ?failure.repository,
+            worktree = ?failure.worktree,
+            owner = ?failure.owner,
+            reason = %failure.reason,
+            "startup execution reaper retained an owner after an inspection or transaction failure"
+        );
+    }
+    tracing::info!(
+        repositories = report.repositories_scanned,
+        owner_entries = report.owner_entries_seen,
+        candidates = report.candidates,
+        reaped = report.reaped,
+        repaired = report.repaired,
+        retained = report.retained,
+        failures = report.failures.len(),
+        elapsed_ms = started.elapsed().as_millis(),
+        "startup execution reaper completed"
+    );
+    report
+}
+
 pub(super) fn spawn_startup_orphan_intake_prune_with<T, F>(
     jobs: Vec<T>,
     mut prune: F,
@@ -287,6 +342,22 @@ impl AppRuntime {
             .flat_map(|(_, plan)| plan.detached_worktree_paths().iter().cloned())
             .collect::<HashSet<_>>();
         self.queue_startup_auto_resume_sessions(&planned_orphan_intake_paths);
+        // Issue #3473 / SPEC-2359 W-37: auto-resume admission owns the exact
+        // current-generation survivors. Protect that fixed queue before the
+        // repository-wide sweep, then finish every provably defunct
+        // Active->Blocked transaction before PM/Monitor dispatch can launch a
+        // competing owner. Per-owner failures are captured in the report and
+        // never abort the remaining startup batch.
+        let (reaper_worktrees, protected_session_ids) = startup_generation_reaper_inputs(
+            &startup_worktrees,
+            &planned_orphan_intake_paths,
+            &self.pending_startup_auto_resume_sessions,
+        );
+        let _ = run_startup_defunct_generation_reaper(
+            &reaper_worktrees,
+            &self.sessions_dir,
+            &protected_session_ids,
+        );
         spawn_startup_orphan_intake_prune(orphan_intake_prune_plans);
 
         let windows = self

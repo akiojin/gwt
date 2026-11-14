@@ -413,7 +413,7 @@ fn fail_repair_quarantine_if_requested(quarantined_count: usize) -> io::Result<(
 
 /// Linked owner kind. A `gwt-spec`-labeled Issue is a SPEC owner; everything
 /// else is a plain Issue owner.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionOwnerKind {
     Spec,
@@ -527,7 +527,7 @@ pub struct ExecutionControlRecord {
 /// Repository identity is represented by the parent trusted-store directory.
 /// The Primary owner number selects storage; `kind` is validated metadata so
 /// label/cache drift cannot fork `issue-N` and `spec-N` ledgers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ExecutionOwnerKey {
     pub kind: ExecutionOwnerKind,
     pub number: u64,
@@ -731,13 +731,24 @@ pub fn classify_exact_session_runtime(
         else {
             continue;
         };
+        let namespace_type = namespace.file_type()?;
+        if namespace_type.is_symlink() || !namespace_type.is_dir() {
+            saw_unknown = true;
+            continue;
+        }
         let sidecar = namespace
             .path()
             .join(format!("{}.json", expected.session_id));
-        match sidecar.try_exists() {
-            Ok(false) => continue,
-            Ok(true) => saw_sidecar = true,
+        match fs::symlink_metadata(&sidecar) {
+            Err(error) if error.kind() == ErrorKind::NotFound => continue,
             Err(error) => return Err(error),
+            Ok(metadata) => {
+                saw_sidecar = true;
+                if metadata.file_type().is_symlink() || !metadata.is_file() {
+                    saw_unknown = true;
+                    continue;
+                }
+            }
         }
         let runtime = match gwt_agent::SessionRuntimeState::load(&sidecar) {
             Ok(runtime) => runtime,
@@ -912,6 +923,1097 @@ pub fn unreachable_current_generation_holder(
             ExactSessionRuntimeDisposition::Live | ExactSessionRuntimeDisposition::Unknown => None,
         },
     )
+}
+
+const STARTUP_REAPER_OPERATION_PREFIX: &str = "startup-reaper-";
+const STARTUP_REAPER_WORKTREE_MARKER: &str = "worktree-path.txt";
+const STARTUP_REAPER_BATCH_BUDGET: Duration = Duration::from_secs(5);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartupGenerationReapCandidateKind {
+    Active,
+    Repair,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartupGenerationReapCandidate {
+    /// A surviving worktree in the repository, used only to resolve and
+    /// continuously validate the repository-scoped owner authority.
+    pub worktree: PathBuf,
+    /// The exact startup worktree for the generation, when it still exists.
+    /// A missing binding still leaves the repo-scoped owner ledger eligible
+    /// for a ledger-only terminal transition.
+    pub bound_worktree: Option<PathBuf>,
+    pub worktree_binding_hash: String,
+    pub owner: ExecutionOwnerKey,
+    pub generation_id: String,
+    pub generation_head_hash: String,
+    pub ledger_content_hash: String,
+    pub holder_session_id: String,
+    pub kind: StartupGenerationReapCandidateKind,
+}
+
+/// Exact side-effect-free startup admission proof for one current Active
+/// holder. A bare Session id is insufficient because a stale queued Session
+/// may share the id while naming another owner/generation/head/binding.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct StartupGenerationProtection {
+    pub owner: ExecutionOwnerKey,
+    pub generation_id: String,
+    pub generation_head_hash: String,
+    pub worktree_binding_hash: String,
+    pub holder_session_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartupGenerationReapFailure {
+    pub repository: Option<PathBuf>,
+    pub worktree: Option<PathBuf>,
+    pub owner: Option<ExecutionOwnerKey>,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StartupGenerationReapScan {
+    pub repositories_scanned: usize,
+    pub owner_entries_seen: usize,
+    pub candidates: Vec<StartupGenerationReapCandidate>,
+    pub failures: Vec<StartupGenerationReapFailure>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartupGenerationReapRetainReason {
+    Protected,
+    ActiveLaunchHandshake,
+    Live,
+    Unknown,
+    Prepared,
+    Changed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StartupGenerationReapOutcome {
+    Reaped {
+        owner: ExecutionOwnerKey,
+        generation_id: String,
+        holder_session_id: String,
+        operation_id: String,
+        reason: String,
+    },
+    Repaired {
+        owner: ExecutionOwnerKey,
+        generation_id: String,
+        holder_session_id: String,
+        operation_id: String,
+    },
+    Retained(StartupGenerationReapRetainReason),
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StartupGenerationReapReport {
+    pub repositories_scanned: usize,
+    pub owner_entries_seen: usize,
+    pub candidates: usize,
+    pub reaped: usize,
+    pub repaired: usize,
+    pub retained: usize,
+    pub outcomes: Vec<(ExecutionOwnerKey, StartupGenerationReapOutcome)>,
+    pub failures: Vec<StartupGenerationReapFailure>,
+}
+
+fn startup_reaper_failure(
+    repository: Option<&Path>,
+    worktree: Option<&Path>,
+    owner: Option<ExecutionOwnerKey>,
+    reason: impl Into<String>,
+) -> StartupGenerationReapFailure {
+    StartupGenerationReapFailure {
+        repository: repository.map(Path::to_path_buf),
+        worktree: worktree.map(Path::to_path_buf),
+        owner,
+        reason: reason.into(),
+    }
+}
+
+fn startup_reaper_require_real_directory(path: &Path, label: &str) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(invalid_generation_data(format!(
+            "startup reaper {label} is not a real directory"
+        )));
+    }
+    Ok(())
+}
+
+fn startup_reaper_require_real_file(path: &Path, label: &str) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(invalid_generation_data(format!(
+            "startup reaper {label} is not a real file"
+        )));
+    }
+    Ok(())
+}
+
+fn startup_reaper_validate_binding_hash(worktree_binding_hash: &str) -> io::Result<()> {
+    if worktree_binding_hash.len() != 64
+        || !worktree_binding_hash
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(invalid_generation_data(
+            "startup reaper generation has an invalid worktree binding hash",
+        ));
+    }
+    Ok(())
+}
+
+enum StartupGenerationWorktreeResolution {
+    Bound(PathBuf),
+    ConfirmedDeleted,
+}
+
+/// Recover an omitted binding from its no-follow trusted marker. Ledger-only
+/// mutation is allowed only when that marker names the same full binding and
+/// the recorded path is genuinely NotFound. Marker-less/permission/I/O cases
+/// remain inventory-unknown and fail closed.
+fn resolve_startup_generation_worktree(
+    repository: &Path,
+    worktree_binding_hash: &str,
+) -> io::Result<StartupGenerationWorktreeResolution> {
+    startup_reaper_validate_binding_hash(worktree_binding_hash)?;
+    let trusted_dir = repository.join(&worktree_binding_hash[..16]);
+    startup_reaper_require_real_directory(&trusted_dir, "generation trusted directory")?;
+    let marker = trusted_dir.join(STARTUP_REAPER_WORKTREE_MARKER);
+    startup_reaper_require_real_file(&marker, "worktree marker")?;
+    let recorded = fs::read_to_string(&marker)?;
+    let recorded = recorded.trim();
+    if recorded.is_empty() {
+        return Err(invalid_generation_data(
+            "startup reaper worktree marker is empty",
+        ));
+    }
+    let recorded_path = PathBuf::from(recorded);
+    match fs::symlink_metadata(&recorded_path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(invalid_generation_data(
+                    "startup reaper marked worktree is not a real directory",
+                ));
+            }
+            let canonical = dunce::canonicalize(&recorded_path).map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!("startup reaper marked worktree cannot be canonicalized: {error}"),
+                )
+            })?;
+            if normalized_worktree_binding_hash(&canonical) != worktree_binding_hash {
+                return Err(invalid_generation_data(
+                    "startup reaper worktree marker does not match the generation binding",
+                ));
+            }
+            let trusted = crate::cli::trusted_store::trusted_dir_for_worktree(&canonical)
+                .ok_or_else(|| {
+                    invalid_generation_data(
+                        "startup reaper marked worktree has no canonical repository identity",
+                    )
+                })?;
+            if trusted.parent() != Some(repository) {
+                return Err(invalid_generation_data(
+                    "startup reaper worktree marker crossed repository authority",
+                ));
+            }
+            Ok(StartupGenerationWorktreeResolution::Bound(canonical))
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            if normalized_worktree_binding_hash(&recorded_path) != worktree_binding_hash {
+                return Err(invalid_generation_data(
+                    "startup reaper deleted worktree marker does not match the generation binding",
+                ));
+            }
+            Ok(StartupGenerationWorktreeResolution::ConfirmedDeleted)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Discover every current Active owner ledger once per canonical repository.
+///
+/// The repository owner ledger is authoritative; worktree inventory is used
+/// only to bind a candidate back to the strict projection/pointer transaction
+/// it is allowed to update. Every malformed or unreadable entry is surfaced as
+/// a typed failure while the rest of the repository remains inspectable.
+#[must_use]
+pub fn scan_startup_generation_reap_candidates(worktrees: &[PathBuf]) -> StartupGenerationReapScan {
+    let mut scan = StartupGenerationReapScan::default();
+    let mut repositories =
+        std::collections::BTreeMap::<PathBuf, std::collections::BTreeMap<String, PathBuf>>::new();
+    for worktree in worktrees {
+        let canonical = match dunce::canonicalize(worktree) {
+            Ok(canonical) => canonical,
+            Err(error) => {
+                scan.failures.push(startup_reaper_failure(
+                    None,
+                    Some(worktree),
+                    None,
+                    format!("startup reaper worktree cannot be canonicalized: {error}"),
+                ));
+                continue;
+            }
+        };
+        let Some(trusted_dir) = crate::cli::trusted_store::trusted_dir_for_worktree(&canonical)
+        else {
+            scan.failures.push(startup_reaper_failure(
+                None,
+                Some(&canonical),
+                None,
+                "startup reaper worktree has no canonical repository identity",
+            ));
+            continue;
+        };
+        let Some(repository) = trusted_dir.parent() else {
+            scan.failures.push(startup_reaper_failure(
+                None,
+                Some(&canonical),
+                None,
+                "startup reaper trusted worktree directory has no repository parent",
+            ));
+            continue;
+        };
+        repositories
+            .entry(repository.to_path_buf())
+            .or_default()
+            .entry(worktree_binding_hash(&canonical))
+            .or_insert(canonical);
+    }
+    scan.repositories_scanned = repositories.len();
+
+    for (repository, worktrees_by_binding) in repositories {
+        let owners_root = repository.join("execution-owners");
+        match startup_reaper_require_real_directory(&owners_root, "owner root") {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => continue,
+            Err(error) => {
+                scan.failures.push(startup_reaper_failure(
+                    Some(&repository),
+                    None,
+                    None,
+                    error.to_string(),
+                ));
+                continue;
+            }
+        }
+        let entries = match fs::read_dir(&owners_root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == ErrorKind::NotFound => continue,
+            Err(error) => {
+                scan.failures.push(startup_reaper_failure(
+                    Some(&repository),
+                    None,
+                    None,
+                    format!("startup reaper owner root is unreadable: {error}"),
+                ));
+                continue;
+            }
+        };
+        let mut entries = entries.collect::<Vec<_>>();
+        entries.sort_by(|left, right| match (left, right) {
+            (Ok(left), Ok(right)) => left.file_name().cmp(&right.file_name()),
+            (Err(_), Ok(_)) => std::cmp::Ordering::Greater,
+            (Ok(_), Err(_)) => std::cmp::Ordering::Less,
+            (Err(_), Err(_)) => std::cmp::Ordering::Equal,
+        });
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) if error.kind() == ErrorKind::NotFound => continue,
+                Err(error) => {
+                    scan.failures.push(startup_reaper_failure(
+                        Some(&repository),
+                        None,
+                        None,
+                        format!("startup reaper owner entry is unreadable: {error}"),
+                    ));
+                    continue;
+                }
+            };
+            let file_name = entry.file_name();
+            let Some(file_name) = file_name.to_str() else {
+                scan.failures.push(startup_reaper_failure(
+                    Some(&repository),
+                    None,
+                    None,
+                    "startup reaper owner entry name is not UTF-8",
+                ));
+                continue;
+            };
+            let Some(owner_number) = file_name
+                .strip_prefix("owner-")
+                .and_then(|value| value.parse::<u64>().ok())
+            else {
+                continue;
+            };
+            scan.owner_entries_seen += 1;
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(error) if error.kind() == ErrorKind::NotFound => continue,
+                Err(error) => {
+                    scan.failures.push(startup_reaper_failure(
+                        Some(&repository),
+                        None,
+                        None,
+                        format!("startup reaper owner entry type is unreadable: {error}"),
+                    ));
+                    continue;
+                }
+            };
+            if !file_type.is_dir() || file_type.is_symlink() {
+                scan.failures.push(startup_reaper_failure(
+                    Some(&repository),
+                    None,
+                    None,
+                    format!("startup reaper owner entry {file_name} is not a directory"),
+                ));
+                continue;
+            }
+            let ledger_path = entry.path().join(GENERATION_LEDGER_FILE);
+            match startup_reaper_require_real_file(&ledger_path, "owner ledger") {
+                Ok(()) => {}
+                Err(error) if error.kind() == ErrorKind::NotFound => continue,
+                Err(error) => {
+                    scan.failures.push(startup_reaper_failure(
+                        Some(&repository),
+                        None,
+                        None,
+                        error.to_string(),
+                    ));
+                    continue;
+                }
+            }
+            let contents = match fs::read_to_string(&ledger_path) {
+                Ok(contents) => contents,
+                Err(error) if error.kind() == ErrorKind::NotFound => continue,
+                Err(error) => {
+                    scan.failures.push(startup_reaper_failure(
+                        Some(&repository),
+                        None,
+                        None,
+                        format!("startup reaper owner ledger is unreadable: {error}"),
+                    ));
+                    continue;
+                }
+            };
+            let ledger = match serde_json::from_str::<ExecutionGenerationLedger>(&contents) {
+                Ok(ledger) => ledger,
+                Err(error) => {
+                    scan.failures.push(startup_reaper_failure(
+                        Some(&repository),
+                        None,
+                        None,
+                        format!("startup reaper owner ledger is malformed: {error}"),
+                    ));
+                    continue;
+                }
+            };
+            let owner = ledger.owner;
+            if owner.number != owner_number {
+                scan.failures.push(startup_reaper_failure(
+                    Some(&repository),
+                    None,
+                    Some(owner),
+                    "startup reaper owner ledger does not match its owner-scoped path",
+                ));
+                continue;
+            }
+            if let Err(error) = validate_generation_ledger(&ledger, owner) {
+                scan.failures.push(startup_reaper_failure(
+                    Some(&repository),
+                    None,
+                    Some(owner),
+                    format!("startup reaper owner ledger failed integrity validation: {error}"),
+                ));
+                continue;
+            }
+            let Some(current) = ledger.current_generation() else {
+                scan.failures.push(startup_reaper_failure(
+                    Some(&repository),
+                    None,
+                    Some(owner),
+                    "startup reaper owner ledger has no current generation",
+                ));
+                continue;
+            };
+            let bound_worktree = match worktrees_by_binding
+                .get(&current.identity.worktree_binding_hash)
+                .cloned()
+            {
+                Some(worktree) => Some(worktree),
+                None => match resolve_startup_generation_worktree(
+                    &repository,
+                    &current.identity.worktree_binding_hash,
+                ) {
+                    Ok(StartupGenerationWorktreeResolution::Bound(worktree)) => Some(worktree),
+                    Ok(StartupGenerationWorktreeResolution::ConfirmedDeleted) => None,
+                    Err(error) => {
+                        scan.failures.push(startup_reaper_failure(
+                            Some(&repository),
+                            None,
+                            Some(owner),
+                            format!(
+                                "startup reaper generation worktree inventory is unproven: {error}"
+                            ),
+                        ));
+                        continue;
+                    }
+                },
+            };
+            let worktree = bound_worktree
+                .clone()
+                .or_else(|| worktrees_by_binding.values().next().cloned())
+                .expect("a scanned repository always has a representative worktree");
+            let effective_status = ledger.effective_status_for(current);
+            let projection = match serde_json::from_str::<ExecutionControlRecord>(
+                ledger.effective_projection_for(current),
+            )
+            .map(hydrate_recovery_envelopes)
+            {
+                Ok(projection) => projection,
+                Err(error) => {
+                    scan.failures.push(startup_reaper_failure(
+                        Some(&repository),
+                        Some(&worktree),
+                        Some(owner),
+                        format!("startup reaper generation projection is malformed: {error}"),
+                    ));
+                    continue;
+                }
+            };
+            if !integrity_ok(&projection)
+                || projection.owner_kind != owner.kind
+                || projection.owner_number != owner.number
+                || projection.status != effective_status
+            {
+                scan.failures.push(startup_reaper_failure(
+                    Some(&repository),
+                    Some(&worktree),
+                    Some(owner),
+                    "startup reaper generation projection failed owner/status/integrity validation",
+                ));
+                continue;
+            }
+            let kind = match effective_status {
+                ExecutionControlStatus::Active => StartupGenerationReapCandidateKind::Active,
+                ExecutionControlStatus::Blocked => {
+                    let Some(bound_worktree) = bound_worktree.as_ref() else {
+                        // A ledger-only transition for a deleted worktree is
+                        // already authoritative. There is no live projection
+                        // or pointer location to repair.
+                        continue;
+                    };
+                    let repair_event = ledger
+                        .lifecycle_events_for(&current.identity.generation_id)
+                        .max_by_key(|event| event.sequence)
+                        .filter(|event| {
+                            event.from_status == ExecutionControlStatus::Active
+                                && event.to_status == ExecutionControlStatus::Blocked
+                                && event.session_id == projection.primary_session_id
+                                && event.operation_id.as_deref().is_some_and(|operation_id| {
+                                    operation_id.starts_with(STARTUP_REAPER_OPERATION_PREFIX)
+                                })
+                        });
+                    if repair_event.is_none() {
+                        continue;
+                    }
+                    match load_generation_ledger(bound_worktree, owner) {
+                        Ok(Some(strict)) if strict.content_hash == ledger.content_hash => continue,
+                        Ok(_) => StartupGenerationReapCandidateKind::Repair,
+                        Err(error)
+                            if matches!(
+                                error.kind(),
+                                ErrorKind::InvalidData | ErrorKind::NotFound
+                            ) =>
+                        {
+                            StartupGenerationReapCandidateKind::Repair
+                        }
+                        Err(error) => {
+                            scan.failures.push(startup_reaper_failure(
+                                Some(&repository),
+                                Some(&worktree),
+                                Some(owner),
+                                format!("startup reaper repair state is unreadable: {error}"),
+                            ));
+                            continue;
+                        }
+                    }
+                }
+                ExecutionControlStatus::Completed => continue,
+            };
+            scan.candidates.push(StartupGenerationReapCandidate {
+                worktree,
+                bound_worktree,
+                worktree_binding_hash: current.identity.worktree_binding_hash.clone(),
+                owner,
+                generation_id: current.identity.generation_id.clone(),
+                generation_head_hash: effective_generation_head_hash(&ledger, current),
+                ledger_content_hash: ledger.content_hash.clone(),
+                holder_session_id: projection.primary_session_id,
+                kind,
+            });
+        }
+    }
+    scan.candidates.sort_by(|left, right| {
+        left.owner
+            .number
+            .cmp(&right.owner.number)
+            .then_with(|| left.owner.kind.as_str().cmp(right.owner.kind.as_str()))
+            .then_with(|| left.worktree.cmp(&right.worktree))
+    });
+    scan
+}
+
+/// Produce a protection token only for a side-effect-free exact-current
+/// startup admission. Non-current, unbound, malformed, or settled queued
+/// Sessions do not protect an owner from the one startup sweep.
+pub fn startup_generation_protection_for_session(
+    session: &gwt_agent::Session,
+) -> io::Result<Option<StartupGenerationProtection>> {
+    let Some(identity) = gwt_agent::SessionExecutionIdentity::from_session(session)
+        .map_err(|error| invalid_generation_data(error.to_string()))?
+    else {
+        return Ok(None);
+    };
+    let binding = &identity.execution_binding;
+    let owner = match binding.owner_kind.as_str() {
+        "spec" => ExecutionOwnerKey {
+            kind: ExecutionOwnerKind::Spec,
+            number: binding.owner_number,
+        },
+        "issue" => ExecutionOwnerKey {
+            kind: ExecutionOwnerKind::Issue,
+            number: binding.owner_number,
+        },
+        _ => return Ok(None),
+    };
+    let context = match GenerationTransactionContext::resolve(&session.worktree_path, owner) {
+        Ok(context) => context,
+        Err(error) if error.kind() == ErrorKind::InvalidInput => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let Some(ledger) = load_generation_ledger_from_context(&context)? else {
+        return Ok(None);
+    };
+    let Some(current) = ledger.current_generation() else {
+        return Ok(None);
+    };
+    let record = serde_json::from_str::<ExecutionControlRecord>(
+        ledger.effective_projection_for(current),
+    )
+    .map(hydrate_recovery_envelopes)
+    .map_err(|error| {
+        invalid_generation_data(format!(
+            "startup protection projection is malformed: {error}"
+        ))
+    })?;
+    if ledger.effective_status_for(current) != ExecutionControlStatus::Active
+        || record.primary_session_id != session.id
+        || identity.execution_binding.identity
+            != execution_binding_for_generation(&ledger, current)
+        || !durable_session_binding_authorizes_current_generation(
+            &context,
+            &ledger,
+            &session.id,
+            session,
+        )?
+    {
+        return Ok(None);
+    }
+    Ok(Some(StartupGenerationProtection {
+        owner,
+        generation_id: current.identity.generation_id.clone(),
+        generation_head_hash: effective_generation_head_hash(&ledger, current),
+        worktree_binding_hash: current.identity.worktree_binding_hash.clone(),
+        holder_session_id: session.id.clone(),
+    }))
+}
+
+fn startup_generation_is_protected(
+    candidate: &StartupGenerationReapCandidate,
+    protections: &std::collections::HashSet<StartupGenerationProtection>,
+) -> bool {
+    protections.contains(&StartupGenerationProtection {
+        owner: candidate.owner,
+        generation_id: candidate.generation_id.clone(),
+        generation_head_hash: candidate.generation_head_hash.clone(),
+        worktree_binding_hash: candidate.worktree_binding_hash.clone(),
+        holder_session_id: candidate.holder_session_id.clone(),
+    })
+}
+
+fn startup_reaper_binding_trusted_dir(
+    context: &GenerationTransactionContext,
+    worktree_binding_hash: &str,
+) -> io::Result<PathBuf> {
+    startup_reaper_validate_binding_hash(worktree_binding_hash)?;
+    let trusted_root = context.worktree_trusted_dir.parent().ok_or_else(|| {
+        invalid_generation_data(
+            "startup reaper representative worktree has no repository-scoped trusted parent",
+        )
+    })?;
+    Ok(trusted_root.join(&worktree_binding_hash[..16]))
+}
+
+fn startup_reaper_validate_candidate_authority(
+    context: &GenerationTransactionContext,
+    generation_trusted_dir: &Path,
+) -> io::Result<()> {
+    startup_reaper_require_real_directory(generation_trusted_dir, "generation trusted directory")?;
+    let owners_root = context.owner_dir.parent().ok_or_else(|| {
+        invalid_generation_data("startup reaper owner directory has no owner root")
+    })?;
+    startup_reaper_require_real_directory(owners_root, "owner root")?;
+    startup_reaper_require_real_directory(&context.owner_dir, "owner directory")?;
+    startup_reaper_require_real_file(
+        &context.owner_dir.join(GENERATION_LEDGER_FILE),
+        "owner ledger",
+    )
+}
+
+fn with_startup_generation_candidate_leases<T>(
+    candidate: &StartupGenerationReapCandidate,
+    operation: impl FnOnce(&GenerationTransactionContext) -> io::Result<T>,
+) -> io::Result<T> {
+    let context = GenerationTransactionContext::resolve(
+        candidate
+            .bound_worktree
+            .as_deref()
+            .unwrap_or(&candidate.worktree),
+        candidate.owner,
+    )?;
+    let generation_trusted_dir =
+        startup_reaper_binding_trusted_dir(&context, &candidate.worktree_binding_hash)?;
+    startup_reaper_validate_candidate_authority(&context, &generation_trusted_dir)?;
+    crate::cli::trusted_store::with_write_lease_for_resolved_dir_wait(
+        &generation_trusted_dir,
+        Duration::ZERO,
+        || {
+            context.validate_unchanged()?;
+            startup_reaper_validate_candidate_authority(&context, &generation_trusted_dir)?;
+            crate::cli::trusted_store::with_write_lease_for_resolved_dir_wait(
+                &context.owner_dir,
+                Duration::ZERO,
+                || {
+                    context.validate_unchanged()?;
+                    startup_reaper_validate_candidate_authority(
+                        &context,
+                        &generation_trusted_dir,
+                    )?;
+                    operation(&context)
+                },
+            )
+        },
+    )
+}
+
+fn startup_reaper_operation_id(candidate: &StartupGenerationReapCandidate, reason: &str) -> String {
+    let digest = sha256_hex(
+        serde_json::to_vec(&(
+            "startup-reaper-v1",
+            candidate.owner,
+            candidate.generation_id.as_str(),
+            candidate.generation_head_hash.as_str(),
+            candidate.holder_session_id.as_str(),
+            reason,
+        ))
+        .unwrap_or_default(),
+    );
+    format!("{STARTUP_REAPER_OPERATION_PREFIX}{}", &digest[..32])
+}
+
+fn startup_generation_has_prepared_fence(
+    ledger: &ExecutionGenerationLedger,
+    generation_id: &str,
+) -> bool {
+    let mut continuation_operations = std::collections::HashSet::new();
+    let continuation_prepared = ledger.continuation_attempts.iter().rev().any(|attempt| {
+        continuation_operations.insert(attempt.request.operation_id.as_str())
+            && attempt.predecessor.generation_id == generation_id
+            && attempt.status == ContinuationAttemptStatus::Prepared
+    });
+    let mut takeover_operations = std::collections::HashSet::new();
+    continuation_prepared
+        || ledger.takeover_attempts.iter().rev().any(|attempt| {
+            takeover_operations.insert(attempt.request.operation_id.as_str())
+                && attempt.generation_id == generation_id
+                && attempt.status == GenerationTakeoverAttemptStatus::Prepared
+        })
+}
+
+/// A truly missing Session may be reaped only when no runtime namespace even
+/// contains its sidecar. `symlink_metadata` deliberately treats a dangling
+/// symlink as present/ambiguous instead of following it into a false NotFound.
+fn missing_startup_holder_has_no_runtime_sidecar(
+    sessions_dir: &Path,
+    session_id: &str,
+) -> io::Result<bool> {
+    let runtime_root = sessions_dir.join("runtime");
+    let entries = match fs::read_dir(runtime_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(true),
+        Err(error) => return Err(error),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let sidecar = entry.path().join(format!("{session_id}.json"));
+        match fs::symlink_metadata(sidecar) {
+            Ok(_) => return Ok(false),
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(true)
+}
+
+fn missing_startup_holder_has_no_session_fence(
+    sessions_dir: &Path,
+    session_id: &str,
+) -> io::Result<bool> {
+    for path in [
+        gwt_agent::active_launch_handshake_path(sessions_dir, session_id),
+        gwt_agent::manual_handoff_path(sessions_dir, session_id),
+    ] {
+        match fs::symlink_metadata(path) {
+            Ok(_) => return Ok(false),
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(true)
+}
+
+fn repair_startup_generation_candidate(
+    context: &GenerationTransactionContext,
+    candidate: &StartupGenerationReapCandidate,
+) -> io::Result<StartupGenerationReapOutcome> {
+    let ledger = load_owner_generation_ledger_from_context(context)?.ok_or_else(|| {
+        io::Error::new(
+            ErrorKind::NotFound,
+            "startup reaper repair owner ledger disappeared",
+        )
+    })?;
+    let Some(current) = ledger.current_generation() else {
+        return Ok(StartupGenerationReapOutcome::Retained(
+            StartupGenerationReapRetainReason::Changed,
+        ));
+    };
+    if ledger.content_hash != candidate.ledger_content_hash
+        || current.identity.generation_id != candidate.generation_id
+        || effective_generation_head_hash(&ledger, current) != candidate.generation_head_hash
+        || ledger.effective_status_for(current) != ExecutionControlStatus::Blocked
+        || current.identity.worktree_binding_hash != candidate.worktree_binding_hash
+        || generation_pointer_owner_hint(&context.worktree)? != Some(candidate.owner)
+    {
+        return Ok(StartupGenerationReapOutcome::Retained(
+            StartupGenerationReapRetainReason::Changed,
+        ));
+    }
+    let event = ledger
+        .lifecycle_events_for(&candidate.generation_id)
+        .max_by_key(|event| event.sequence)
+        .filter(|event| {
+            event.from_status == ExecutionControlStatus::Active
+                && event.to_status == ExecutionControlStatus::Blocked
+                && event.session_id == candidate.holder_session_id
+                && event.operation_id.as_deref().is_some_and(|operation_id| {
+                    operation_id.starts_with(STARTUP_REAPER_OPERATION_PREFIX)
+                })
+        })
+        .ok_or_else(|| {
+            generation_conflict("startup reaper repair no longer owns the terminal transition")
+        })?;
+    let operation_id = event.operation_id.clone().unwrap_or_default();
+    let projection = ledger.effective_projection_for(current).to_string();
+    write_activated_generation(context, &ledger, &projection)?;
+    let readback = load_generation_ledger_from_context(context)?.ok_or_else(|| {
+        invalid_generation_data("startup reaper repair lost generation authority")
+    })?;
+    if readback.content_hash != ledger.content_hash {
+        return Err(invalid_generation_data(
+            "startup reaper repair readback changed the owner ledger",
+        ));
+    }
+    Ok(StartupGenerationReapOutcome::Repaired {
+        owner: candidate.owner,
+        generation_id: candidate.generation_id.clone(),
+        holder_session_id: candidate.holder_session_id.clone(),
+        operation_id,
+    })
+}
+
+/// Revalidate and settle one startup candidate under the canonical
+/// worktree-global -> owner -> Session lease order.
+pub fn reap_startup_generation_candidate(
+    candidate: &StartupGenerationReapCandidate,
+    sessions_dir: &Path,
+    protections: &std::collections::HashSet<StartupGenerationProtection>,
+) -> io::Result<StartupGenerationReapOutcome> {
+    with_startup_generation_candidate_leases(candidate, |context| {
+        if candidate.kind == StartupGenerationReapCandidateKind::Repair {
+            return repair_startup_generation_candidate(context, candidate);
+        }
+        gwt_agent::with_session_path_lease_wait(
+            sessions_dir,
+            &candidate.holder_session_id,
+            Duration::ZERO,
+            |session_state| {
+                let mut ledger =
+                    load_owner_generation_ledger_from_context(context)?.ok_or_else(|| {
+                        io::Error::new(
+                            ErrorKind::NotFound,
+                            "startup reaper owner ledger disappeared",
+                        )
+                    })?;
+                let Some(current) = ledger.current_generation().cloned() else {
+                    return Ok(StartupGenerationReapOutcome::Retained(
+                        StartupGenerationReapRetainReason::Changed,
+                    ));
+                };
+                if ledger.content_hash != candidate.ledger_content_hash
+                    || current.identity.generation_id != candidate.generation_id
+                    || effective_generation_head_hash(&ledger, &current)
+                        != candidate.generation_head_hash
+                    || ledger.effective_status_for(&current) != ExecutionControlStatus::Active
+                    || current.identity.worktree_binding_hash != candidate.worktree_binding_hash
+                {
+                    return Ok(StartupGenerationReapOutcome::Retained(
+                        StartupGenerationReapRetainReason::Changed,
+                    ));
+                }
+                if candidate.bound_worktree.is_some() {
+                    let strict =
+                        load_generation_ledger_from_context(context)?.ok_or_else(|| {
+                            invalid_generation_data(
+                                "startup reaper strict projection disappeared before mutation",
+                            )
+                        })?;
+                    if strict.content_hash != ledger.content_hash {
+                        return Ok(StartupGenerationReapOutcome::Retained(
+                            StartupGenerationReapRetainReason::Changed,
+                        ));
+                    }
+                }
+                if startup_generation_has_prepared_fence(&ledger, &candidate.generation_id) {
+                    return Ok(StartupGenerationReapOutcome::Retained(
+                        StartupGenerationReapRetainReason::Prepared,
+                    ));
+                }
+                if startup_generation_is_protected(candidate, protections) {
+                    return Ok(StartupGenerationReapOutcome::Retained(
+                        StartupGenerationReapRetainReason::Protected,
+                    ));
+                }
+                let mut record = serde_json::from_str::<ExecutionControlRecord>(
+                    ledger.effective_projection_for(&current),
+                )
+                .map(hydrate_recovery_envelopes)
+                .map_err(|error| {
+                    invalid_generation_data(format!(
+                        "startup reaper Active projection is malformed: {error}"
+                    ))
+                })?;
+                if !integrity_ok(&record)
+                    || record.owner_kind != candidate.owner.kind
+                    || record.owner_number != candidate.owner.number
+                    || record.primary_session_id != candidate.holder_session_id
+                    || record.status != ExecutionControlStatus::Active
+                    || record.settled_at.is_some()
+                {
+                    return Ok(StartupGenerationReapOutcome::Retained(
+                        StartupGenerationReapRetainReason::Changed,
+                    ));
+                }
+                let reason = match session_state {
+                    gwt_agent::SessionPathState::Missing => {
+                        if !missing_startup_holder_has_no_session_fence(
+                            sessions_dir,
+                            &candidate.holder_session_id,
+                        )? || !missing_startup_holder_has_no_runtime_sidecar(
+                            sessions_dir,
+                            &candidate.holder_session_id,
+                        )? {
+                            return Ok(StartupGenerationReapOutcome::Retained(
+                                StartupGenerationReapRetainReason::Unknown,
+                            ));
+                        }
+                        "startup reaper: holder Session is missing and has no runtime sidecar"
+                    }
+                    gwt_agent::SessionPathState::Error(error) => return Err(error),
+                    gwt_agent::SessionPathState::Present(session) => {
+                        let Some(identity) =
+                            gwt_agent::SessionExecutionIdentity::from_session(&session)
+                                .map_err(|error| invalid_generation_data(error.to_string()))?
+                        else {
+                            return Ok(StartupGenerationReapOutcome::Retained(
+                                StartupGenerationReapRetainReason::Unknown,
+                            ));
+                        };
+                        if identity.session_id != candidate.holder_session_id
+                            || identity.execution_binding.identity
+                                != execution_binding_for_generation(&ledger, &current)
+                            || startup_reaper_worktree_binding_hash(&identity.worktree_path)?
+                                != candidate.worktree_binding_hash
+                        {
+                            return Ok(StartupGenerationReapOutcome::Retained(
+                                StartupGenerationReapRetainReason::Unknown,
+                            ));
+                        }
+                        // Durable fresh-launch recovery owns handshake
+                        // reconciliation before this batch. The reaper only
+                        // observes the fence and must leave even an abandoned
+                        // marker byte-identical instead of silently widening
+                        // its mutation authority.
+                        if gwt_agent::read_session_active_launch_handshake_under_lease(
+                            sessions_dir,
+                            &identity,
+                        )?
+                        .is_some()
+                        {
+                            return Ok(StartupGenerationReapOutcome::Retained(
+                                StartupGenerationReapRetainReason::ActiveLaunchHandshake,
+                            ));
+                        }
+                        match classify_exact_session_runtime(sessions_dir, &identity)? {
+                            ExactSessionRuntimeDisposition::Absent => {
+                                "startup reaper: exact holder has no runtime sidecar"
+                            }
+                            ExactSessionRuntimeDisposition::Terminal(_)
+                                if matches!(
+                                    session.status,
+                                    gwt_agent::AgentStatus::Stopped
+                                        | gwt_agent::AgentStatus::Interrupted
+                                ) =>
+                            {
+                                "startup reaper: exact holder Session and runtime are terminal"
+                            }
+                            ExactSessionRuntimeDisposition::Defunct(_) => {
+                                "startup reaper: exact holder runtime is defunct"
+                            }
+                            ExactSessionRuntimeDisposition::Live => {
+                                return Ok(StartupGenerationReapOutcome::Retained(
+                                    StartupGenerationReapRetainReason::Live,
+                                ));
+                            }
+                            ExactSessionRuntimeDisposition::Terminal(_)
+                            | ExactSessionRuntimeDisposition::Unknown => {
+                                return Ok(StartupGenerationReapOutcome::Retained(
+                                    StartupGenerationReapRetainReason::Unknown,
+                                ));
+                            }
+                        }
+                    }
+                };
+                let operation_id = startup_reaper_operation_id(candidate, reason);
+                let recorded_at = Utc::now();
+                record.status = ExecutionControlStatus::Blocked;
+                record.blocked_reason = Some(reason.to_string());
+                record.missing_verification = Some("defunct execution holder".to_string());
+                record.settled_at = Some(recorded_at);
+                let projection = serialized_execution_projection(&record)?;
+                append_lifecycle_event(
+                    &mut ledger,
+                    GenerationLifecycleEvent {
+                        sequence: 0,
+                        generation_id: current.identity.generation_id,
+                        from_status: ExecutionControlStatus::Active,
+                        to_status: ExecutionControlStatus::Blocked,
+                        session_id: candidate.holder_session_id.clone(),
+                        reason: reason.to_string(),
+                        operation_id: Some(operation_id.clone()),
+                        recorded_at,
+                        execution_control_json: projection.clone(),
+                        previous_event_hash: String::new(),
+                        content_hash: String::new(),
+                    },
+                );
+                stamp_generation_ledger(&mut ledger);
+                if candidate.bound_worktree.is_some() {
+                    write_activated_generation(context, &ledger, &projection)?;
+                } else {
+                    write_owner_ledger(context, &ledger)?;
+                }
+                let readback = if candidate.bound_worktree.is_some() {
+                    load_generation_ledger_from_context(context)?
+                } else {
+                    load_owner_generation_ledger_from_context(context)?
+                }
+                .ok_or_else(|| {
+                    invalid_generation_data("startup reaper lost generation authority")
+                })?;
+                if readback.current_effective_status() != Some(ExecutionControlStatus::Blocked)
+                    || readback.content_hash != ledger.content_hash
+                {
+                    return Err(invalid_generation_data(
+                        "startup reaper readback does not match the committed Blocked generation",
+                    ));
+                }
+                Ok(StartupGenerationReapOutcome::Reaped {
+                    owner: candidate.owner,
+                    generation_id: candidate.generation_id.clone(),
+                    holder_session_id: candidate.holder_session_id.clone(),
+                    operation_id,
+                    reason: reason.to_string(),
+                })
+            },
+        )
+    })
+}
+
+#[must_use]
+pub fn reap_startup_defunct_active_generations(
+    worktrees: &[PathBuf],
+    sessions_dir: &Path,
+    protections: &std::collections::HashSet<StartupGenerationProtection>,
+) -> StartupGenerationReapReport {
+    let scan = scan_startup_generation_reap_candidates(worktrees);
+    let mut report = StartupGenerationReapReport {
+        repositories_scanned: scan.repositories_scanned,
+        owner_entries_seen: scan.owner_entries_seen,
+        candidates: scan.candidates.len(),
+        failures: scan.failures,
+        ..StartupGenerationReapReport::default()
+    };
+    let deadline = std::time::Instant::now() + STARTUP_REAPER_BATCH_BUDGET;
+    for candidate in scan.candidates {
+        if std::time::Instant::now() >= deadline {
+            report.failures.push(startup_reaper_failure(
+                crate::cli::trusted_store::trusted_dir_for_worktree(&candidate.worktree)
+                    .and_then(|dir| dir.parent().map(Path::to_path_buf))
+                    .as_deref(),
+                Some(&candidate.worktree),
+                Some(candidate.owner),
+                "startup reaper batch budget exhausted before candidate transaction",
+            ));
+            break;
+        }
+        match reap_startup_generation_candidate(&candidate, sessions_dir, protections) {
+            Ok(outcome) => {
+                match &outcome {
+                    StartupGenerationReapOutcome::Reaped { .. } => report.reaped += 1,
+                    StartupGenerationReapOutcome::Repaired { .. } => report.repaired += 1,
+                    StartupGenerationReapOutcome::Retained(_) => report.retained += 1,
+                }
+                report.outcomes.push((candidate.owner, outcome));
+            }
+            Err(error) => report.failures.push(startup_reaper_failure(
+                crate::cli::trusted_store::trusted_dir_for_worktree(&candidate.worktree)
+                    .and_then(|dir| dir.parent().map(Path::to_path_buf))
+                    .as_deref(),
+                Some(&candidate.worktree),
+                Some(candidate.owner),
+                format!("startup reaper candidate failed: {error}"),
+            )),
+        }
+    }
+    report
 }
 
 pub fn is_owner_launch_successor_attempt(attempt: &ContinuationAttempt) -> bool {
@@ -1518,9 +2620,8 @@ fn read_legacy_projection_from_context(
     }
 }
 
-fn worktree_binding_hash(worktree: &Path) -> String {
-    let canonical = dunce::canonicalize(worktree).unwrap_or_else(|_| worktree.to_path_buf());
-    let normalized = canonical
+fn normalized_worktree_binding_hash(worktree: &Path) -> String {
+    let normalized = worktree
         .to_string_lossy()
         .replace('\\', "/")
         .trim_end_matches('/')
@@ -1528,6 +2629,29 @@ fn worktree_binding_hash(worktree: &Path) -> String {
     #[cfg(windows)]
     let normalized = normalized.to_lowercase();
     sha256_hex(normalized)
+}
+
+fn worktree_binding_hash(worktree: &Path) -> String {
+    let canonical = dunce::canonicalize(worktree).unwrap_or_else(|_| worktree.to_path_buf());
+    normalized_worktree_binding_hash(&canonical)
+}
+
+fn startup_reaper_worktree_binding_hash(worktree: &Path) -> io::Result<String> {
+    match dunce::canonicalize(worktree) {
+        Ok(canonical) => Ok(normalized_worktree_binding_hash(&canonical)),
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            match fs::symlink_metadata(worktree) {
+                Err(metadata_error) if metadata_error.kind() == ErrorKind::NotFound => {
+                    Ok(normalized_worktree_binding_hash(worktree))
+                }
+                Ok(_) => Err(invalid_generation_data(
+                    "startup reaper worktree is present but cannot be canonicalized",
+                )),
+                Err(metadata_error) => Err(metadata_error),
+            }
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn validate_generation_ledger(
@@ -12257,6 +13381,951 @@ mod tests {
                 runtime_incarnation: 1,
             }),
             "the qualifying holder must carry its exact runtime proof for revalidation",
+        );
+    }
+
+    #[test]
+    fn startup_reaper_scans_one_repository_once_and_blocks_every_missing_holder() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(first.path());
+        crate::cli::trusted_store::init_git_repo_with_origin(second.path());
+        let first_owner = generation_owner();
+        let second_owner = ExecutionOwnerKey {
+            kind: ExecutionOwnerKind::Issue,
+            number: first_owner.number + 1,
+        };
+        for (worktree, owner, holder) in [
+            (first.path(), first_owner, "startup-missing-first"),
+            (second.path(), second_owner, "startup-missing-second"),
+        ] {
+            let mut active = active_record(holder);
+            active.owner_kind = owner.kind;
+            active.owner_number = owner.number;
+            save(worktree, &active).unwrap();
+            ensure_generation_ledger(worktree, owner, LegacyActiveDisposition::Live).unwrap();
+        }
+        let worktrees = vec![
+            first.path().to_path_buf(),
+            second.path().to_path_buf(),
+            first.path().to_path_buf(),
+        ];
+
+        let scan = scan_startup_generation_reap_candidates(&worktrees);
+
+        assert_eq!(scan.repositories_scanned, 1);
+        assert_eq!(scan.owner_entries_seen, 2);
+        assert!(scan.failures.is_empty(), "{:?}", scan.failures);
+        assert_eq!(scan.candidates.len(), 2);
+
+        let report = reap_startup_defunct_active_generations(
+            &worktrees,
+            &gwt_core::paths::gwt_sessions_dir(),
+            &std::collections::HashSet::new(),
+        );
+
+        assert_eq!(report.reaped, 2, "{report:?}");
+        assert_eq!(report.repaired, 0, "{report:?}");
+        assert!(report.failures.is_empty(), "{report:?}");
+        for (worktree, owner, holder) in [
+            (first.path(), first_owner, "startup-missing-first"),
+            (second.path(), second_owner, "startup-missing-second"),
+        ] {
+            let ledger = load_generation_ledger(worktree, owner).unwrap().unwrap();
+            assert_eq!(
+                ledger.current_effective_status(),
+                Some(ExecutionControlStatus::Blocked)
+            );
+            let event = ledger.lifecycle_events.last().unwrap();
+            assert_eq!(event.session_id, holder);
+            assert_eq!(event.from_status, ExecutionControlStatus::Active);
+            assert_eq!(event.to_status, ExecutionControlStatus::Blocked);
+            assert!(event
+                .operation_id
+                .as_deref()
+                .is_some_and(|operation_id| operation_id.starts_with("startup-reaper-")));
+        }
+
+        let replay = reap_startup_defunct_active_generations(
+            &worktrees,
+            &gwt_core::paths::gwt_sessions_dir(),
+            &std::collections::HashSet::new(),
+        );
+        assert_eq!(replay.reaped, 0, "{replay:?}");
+        assert_eq!(replay.repaired, 0, "{replay:?}");
+    }
+
+    #[test]
+    fn startup_reaper_preserves_protected_and_unknown_holders_byte_for_byte() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let protected_worktree = tempfile::tempdir().unwrap();
+        let unknown_worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(protected_worktree.path());
+        crate::cli::trusted_store::init_git_repo_with_origin(unknown_worktree.path());
+        let protected_owner = generation_owner();
+        let unknown_owner = ExecutionOwnerKey {
+            kind: ExecutionOwnerKind::Issue,
+            number: protected_owner.number + 1,
+        };
+        let protected_holder = "startup-protected-holder";
+        let unknown_holder = "startup-unknown-holder";
+        for (worktree, owner, holder) in [
+            (protected_worktree.path(), protected_owner, protected_holder),
+            (unknown_worktree.path(), unknown_owner, unknown_holder),
+        ] {
+            let mut active = active_record(holder);
+            active.owner_kind = owner.kind;
+            active.owner_number = owner.number;
+            save(worktree, &active).unwrap();
+            ensure_generation_ledger(worktree, owner, LegacyActiveDisposition::Live).unwrap();
+        }
+        let unknown_binding = current_execution_binding(unknown_worktree.path(), unknown_owner)
+            .unwrap()
+            .unwrap();
+        persist_generation_session_binding(
+            unknown_worktree.path(),
+            unknown_owner,
+            unknown_holder,
+            unknown_binding,
+        );
+        let unknown_session = gwt_agent::Session::load(
+            &gwt_core::paths::gwt_sessions_dir().join(format!("{unknown_holder}.toml")),
+        )
+        .unwrap();
+        let unknown_identity = gwt_agent::SessionExecutionIdentity::from_session(&unknown_session)
+            .unwrap()
+            .unwrap();
+        gwt_agent::SessionRuntimeState::for_execution(
+            gwt_agent::AgentStatus::Running,
+            &unknown_identity,
+            1,
+        )
+        .save(&gwt_agent::runtime_state_path(
+            &gwt_core::paths::gwt_sessions_dir(),
+            unknown_holder,
+        ))
+        .unwrap();
+        assert_eq!(
+            classify_exact_session_runtime(
+                &gwt_core::paths::gwt_sessions_dir(),
+                &unknown_identity,
+            )
+            .unwrap(),
+            ExactSessionRuntimeDisposition::Unknown,
+        );
+        let protected_before =
+            generation_authority_bytes(protected_worktree.path(), protected_owner);
+        let unknown_before = generation_authority_bytes(unknown_worktree.path(), unknown_owner);
+        let protected = std::collections::HashSet::from([protected_holder.to_string()]);
+
+        let report = reap_startup_defunct_active_generations(
+            &[
+                protected_worktree.path().to_path_buf(),
+                unknown_worktree.path().to_path_buf(),
+            ],
+            &gwt_core::paths::gwt_sessions_dir(),
+            &protected,
+        );
+
+        assert_eq!(report.reaped, 0, "{report:?}");
+        assert_eq!(report.retained, 2, "{report:?}");
+        assert!(report.failures.is_empty(), "{report:?}");
+        assert_eq!(
+            generation_authority_bytes(protected_worktree.path(), protected_owner),
+            protected_before,
+        );
+        assert_eq!(
+            generation_authority_bytes(unknown_worktree.path(), unknown_owner),
+            unknown_before,
+        );
+    }
+
+    #[test]
+    fn startup_reaper_preserves_active_launch_handshake_byte_for_byte() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let owner = generation_owner();
+        let holder = "startup-active-launch-handshake";
+        let mut active = active_record(holder);
+        active.owner_number = owner.number;
+        save(worktree.path(), &active).unwrap();
+        ensure_generation_ledger(worktree.path(), owner, LegacyActiveDisposition::Live).unwrap();
+        let binding = current_execution_binding(worktree.path(), owner)
+            .unwrap()
+            .unwrap();
+        persist_generation_session_binding(worktree.path(), owner, holder, binding);
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let session =
+            gwt_agent::Session::load(&sessions_dir.join(format!("{holder}.toml"))).unwrap();
+        let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
+            .unwrap()
+            .unwrap();
+        let mut handshake = gwt_agent::with_session_lease(&sessions_dir, holder, |_| {
+            gwt_agent::begin_session_active_launch_handshake_under_lease(
+                &sessions_dir,
+                &identity,
+                "startup-reaper-handshake-fence",
+                crate::process::host_process_start_time(std::process::id()).unwrap(),
+            )
+        })
+        .unwrap()
+        .unwrap();
+        // Model an abandoned but still authoritative fence. Durable fresh
+        // launch recovery owns cleanup; the startup reaper must not consume it.
+        handshake.host_pid = i32::MAX as u32;
+        handshake.host_started_at = 1;
+        let handshake_path = gwt_agent::active_launch_handshake_path(&sessions_dir, holder);
+        let mut handshake_bytes = serde_json::to_vec_pretty(&handshake).unwrap();
+        handshake_bytes.push(b'\n');
+        std::fs::write(&handshake_path, &handshake_bytes).unwrap();
+        let authority_before = generation_authority_bytes(worktree.path(), owner);
+
+        let report = reap_startup_defunct_active_generations(
+            &[worktree.path().to_path_buf()],
+            &sessions_dir,
+            &std::collections::HashSet::new(),
+        );
+
+        assert_eq!(report.reaped, 0, "{report:?}");
+        assert_eq!(report.retained, 1, "{report:?}");
+        assert!(report.failures.is_empty(), "{report:?}");
+        assert_eq!(
+            generation_authority_bytes(worktree.path(), owner),
+            authority_before
+        );
+        assert_eq!(std::fs::read(handshake_path).unwrap(), handshake_bytes);
+    }
+
+    #[test]
+    fn startup_reaper_preserves_missing_session_with_launch_fence_byte_for_byte() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let owner = generation_owner();
+        let holder = "startup-missing-session-launch-fence";
+        let mut active = active_record(holder);
+        active.owner_number = owner.number;
+        save(worktree.path(), &active).unwrap();
+        ensure_generation_ledger(worktree.path(), owner, LegacyActiveDisposition::Live).unwrap();
+        let binding = current_execution_binding(worktree.path(), owner)
+            .unwrap()
+            .unwrap();
+        persist_generation_session_binding(worktree.path(), owner, holder, binding);
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let session_path = sessions_dir.join(format!("{holder}.toml"));
+        let session = gwt_agent::Session::load(&session_path).unwrap();
+        let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
+            .unwrap()
+            .unwrap();
+        gwt_agent::with_session_lease(&sessions_dir, holder, |_| {
+            gwt_agent::begin_session_active_launch_handshake_under_lease(
+                &sessions_dir,
+                &identity,
+                "startup-missing-session-fence",
+                crate::process::host_process_start_time(std::process::id()).unwrap(),
+            )
+        })
+        .unwrap()
+        .unwrap();
+        std::fs::remove_file(&session_path).unwrap();
+        let handshake_path = gwt_agent::active_launch_handshake_path(&sessions_dir, holder);
+        let handshake_before = std::fs::read(&handshake_path).unwrap();
+        let authority_before = generation_authority_bytes(worktree.path(), owner);
+
+        let report = reap_startup_defunct_active_generations(
+            &[worktree.path().to_path_buf()],
+            &sessions_dir,
+            &std::collections::HashSet::new(),
+        );
+
+        assert_eq!(report.reaped, 0, "{report:?}");
+        assert_eq!(report.retained, 1, "{report:?}");
+        assert_eq!(
+            generation_authority_bytes(worktree.path(), owner),
+            authority_before
+        );
+        assert_eq!(std::fs::read(handshake_path).unwrap(), handshake_before);
+    }
+
+    #[test]
+    fn startup_reaper_loses_a_prepared_race_without_mutation() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let owner = generation_owner();
+        let holder = "startup-prepared-race";
+        let mut active = active_record(holder);
+        active.owner_number = owner.number;
+        save(worktree.path(), &active).unwrap();
+        ensure_generation_ledger(worktree.path(), owner, LegacyActiveDisposition::Live).unwrap();
+        let scan = scan_startup_generation_reap_candidates(&[worktree.path().to_path_buf()]);
+        let candidate = scan.candidates.into_iter().next().unwrap();
+        prepare_active_continuation_successor(
+            worktree.path(),
+            owner,
+            &successor_request("startup-race", "host", "execution-continue"),
+        )
+        .unwrap();
+        let before = generation_authority_bytes(worktree.path(), owner);
+
+        let outcome = reap_startup_generation_candidate(
+            &candidate,
+            &gwt_core::paths::gwt_sessions_dir(),
+            &std::collections::HashSet::new(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            outcome,
+            StartupGenerationReapOutcome::Retained(StartupGenerationReapRetainReason::Changed),
+        );
+        assert_eq!(generation_authority_bytes(worktree.path(), owner), before);
+    }
+
+    #[test]
+    fn startup_reaper_preserves_prepared_takeover_byte_for_byte() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let owner = generation_owner();
+        let mut active = active_record("session-original");
+        active.owner_number = owner.number;
+        save(worktree.path(), &active).unwrap();
+        ensure_generation_ledger(worktree.path(), owner, LegacyActiveDisposition::Live).unwrap();
+        prepare_generation_takeover(
+            worktree.path(),
+            owner,
+            &takeover_request("startup-prepared-takeover"),
+        )
+        .unwrap();
+        let candidate = scan_startup_generation_reap_candidates(&[worktree.path().to_path_buf()])
+            .candidates
+            .into_iter()
+            .next()
+            .unwrap();
+        let before = generation_authority_bytes(worktree.path(), owner);
+
+        let outcome = reap_startup_generation_candidate(
+            &candidate,
+            &gwt_core::paths::gwt_sessions_dir(),
+            &std::collections::HashSet::new(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            outcome,
+            StartupGenerationReapOutcome::Retained(StartupGenerationReapRetainReason::Prepared),
+        );
+        assert_eq!(generation_authority_bytes(worktree.path(), owner), before);
+    }
+
+    #[test]
+    fn startup_reaper_ignores_historical_aborted_takeover_fence() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let owner = generation_owner();
+        let mut active = active_record("session-original");
+        active.owner_number = owner.number;
+        save(worktree.path(), &active).unwrap();
+        ensure_generation_ledger(worktree.path(), owner, LegacyActiveDisposition::Live).unwrap();
+        let request = takeover_request("startup-aborted-takeover");
+        prepare_generation_takeover(worktree.path(), owner, &request).unwrap();
+        abort_generation_takeover(worktree.path(), owner, &request, "startup fixture abort")
+            .unwrap();
+
+        let report = reap_startup_defunct_active_generations(
+            &[worktree.path().to_path_buf()],
+            &gwt_core::paths::gwt_sessions_dir(),
+            &std::collections::HashSet::new(),
+        );
+
+        assert_eq!(report.reaped, 1, "{report:?}");
+        assert_eq!(report.retained, 0, "{report:?}");
+    }
+
+    #[test]
+    fn startup_reaper_repairs_ledger_first_commit_without_duplicate_audit() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let owner = generation_owner();
+        let holder = "startup-partial-write";
+        let mut active = active_record(holder);
+        active.owner_number = owner.number;
+        save(worktree.path(), &active).unwrap();
+        ensure_generation_ledger(worktree.path(), owner, LegacyActiveDisposition::Live).unwrap();
+        let candidate = scan_startup_generation_reap_candidates(&[worktree.path().to_path_buf()])
+            .candidates
+            .into_iter()
+            .next()
+            .unwrap();
+        set_generation_write_failure(GenerationWriteFailurePoint::AfterLedger);
+
+        assert_eq!(
+            reap_startup_generation_candidate(
+                &candidate,
+                &gwt_core::paths::gwt_sessions_dir(),
+                &std::collections::HashSet::new(),
+            )
+            .unwrap_err()
+            .kind(),
+            ErrorKind::Other,
+        );
+
+        let repair = scan_startup_generation_reap_candidates(&[worktree.path().to_path_buf()]);
+        assert_eq!(repair.candidates.len(), 1, "{repair:?}");
+        assert_eq!(
+            repair.candidates[0].kind,
+            StartupGenerationReapCandidateKind::Repair,
+        );
+        assert!(matches!(
+            reap_startup_generation_candidate(
+                &repair.candidates[0],
+                &gwt_core::paths::gwt_sessions_dir(),
+                &std::collections::HashSet::new(),
+            )
+            .unwrap(),
+            StartupGenerationReapOutcome::Repaired { .. }
+        ));
+        let ledger = load_generation_ledger(worktree.path(), owner)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            ledger.current_effective_status(),
+            Some(ExecutionControlStatus::Blocked),
+        );
+        assert_eq!(ledger.lifecycle_events.len(), 1);
+    }
+
+    #[test]
+    fn startup_reaper_scan_is_bounded_to_one_pass_for_125_owner_ledgers() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+
+        for number in 4_000..4_125 {
+            let owner = ExecutionOwnerKey {
+                kind: ExecutionOwnerKind::Issue,
+                number,
+            };
+            let holder = format!("startup-scale-holder-{number}");
+            let mut record = active_record(&holder);
+            record.owner_kind = owner.kind;
+            record.owner_number = owner.number;
+            let projection = String::from_utf8(serialize_execution_control(&record).unwrap())
+                .expect("UTF-8 execution projection");
+            let context = GenerationTransactionContext::resolve(worktree.path(), owner).unwrap();
+            let generation_id = format!("gen-startup-scale-{number}");
+            let mut generation = ExecutionGeneration {
+                identity: ExecutionGenerationIdentity {
+                    owner,
+                    generation_id: generation_id.clone(),
+                    predecessor_generation_id: None,
+                    predecessor_content_hash: None,
+                    session_binding_id: format!("binding-startup-scale-{number}"),
+                    initial_session_id: holder,
+                    worktree_binding_hash: context.worktree_binding_hash.clone(),
+                    entrypoint: "$gwt-execute".to_string(),
+                    activated_at: Utc::now(),
+                },
+                status: ExecutionControlStatus::Active,
+                execution_control_json: projection,
+                content_hash: String::new(),
+            };
+            generation.content_hash = compute_generation_hash(&generation);
+            let mut ledger = ExecutionGenerationLedger {
+                schema_version: GENERATION_LEDGER_SCHEMA_VERSION,
+                owner,
+                generations: vec![generation],
+                continuation_attempts: Vec::new(),
+                takeover_attempts: Vec::new(),
+                takeovers: Vec::new(),
+                lifecycle_events: Vec::new(),
+                continuation_validations: Vec::new(),
+                current_generation_id: generation_id,
+                content_hash: String::new(),
+            };
+            stamp_generation_ledger(&mut ledger);
+            std::fs::create_dir_all(&context.owner_dir).unwrap();
+            std::fs::write(
+                context.owner_dir.join(GENERATION_LEDGER_FILE),
+                serde_json::to_vec_pretty(&ledger).unwrap(),
+            )
+            .unwrap();
+        }
+
+        let scan = scan_startup_generation_reap_candidates(&[
+            worktree.path().to_path_buf(),
+            worktree.path().to_path_buf(),
+        ]);
+
+        assert_eq!(scan.repositories_scanned, 1);
+        assert_eq!(scan.owner_entries_seen, 125);
+        assert_eq!(scan.candidates.len(), 125);
+        assert!(scan.failures.is_empty(), "{:?}", scan.failures);
+
+        let report = reap_startup_defunct_active_generations(
+            &[worktree.path().to_path_buf()],
+            &gwt_core::paths::gwt_sessions_dir(),
+            &std::collections::HashSet::new(),
+        );
+        assert_eq!(report.owner_entries_seen, 125, "{report:?}");
+        assert_eq!(report.reaped, 125, "{report:?}");
+        assert!(report.failures.is_empty(), "{report:?}");
+    }
+
+    #[test]
+    fn startup_reaper_isolates_malformed_owner_ledger_and_continues_the_batch() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let good_worktree = tempfile::tempdir().unwrap();
+        let malformed_worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(good_worktree.path());
+        crate::cli::trusted_store::init_git_repo_with_origin(malformed_worktree.path());
+        let good_owner = generation_owner();
+        let malformed_owner = ExecutionOwnerKey {
+            kind: ExecutionOwnerKind::Issue,
+            number: good_owner.number + 1,
+        };
+        for (worktree, owner, holder) in [
+            (good_worktree.path(), good_owner, "startup-good-ledger"),
+            (
+                malformed_worktree.path(),
+                malformed_owner,
+                "startup-malformed-ledger",
+            ),
+        ] {
+            let mut active = active_record(holder);
+            active.owner_kind = owner.kind;
+            active.owner_number = owner.number;
+            save(worktree, &active).unwrap();
+            ensure_generation_ledger(worktree, owner, LegacyActiveDisposition::Live).unwrap();
+        }
+        let malformed_ledger = generation_owner_dir(malformed_worktree.path(), malformed_owner)
+            .unwrap()
+            .join(GENERATION_LEDGER_FILE);
+        std::fs::write(&malformed_ledger, b"{not-json").unwrap();
+        let malformed_before = std::fs::read(&malformed_ledger).unwrap();
+        let worktrees = vec![
+            good_worktree.path().to_path_buf(),
+            malformed_worktree.path().to_path_buf(),
+        ];
+
+        let report = reap_startup_defunct_active_generations(
+            &worktrees,
+            &gwt_core::paths::gwt_sessions_dir(),
+            &std::collections::HashSet::new(),
+        );
+
+        assert_eq!(report.owner_entries_seen, 2, "{report:?}");
+        assert_eq!(report.reaped, 1, "{report:?}");
+        assert_eq!(report.failures.len(), 1, "{report:?}");
+        assert_eq!(
+            load_generation_ledger(good_worktree.path(), good_owner)
+                .unwrap()
+                .unwrap()
+                .current_effective_status(),
+            Some(ExecutionControlStatus::Blocked),
+        );
+        assert_eq!(std::fs::read(malformed_ledger).unwrap(), malformed_before);
+    }
+
+    #[test]
+    fn startup_reaper_blocks_owner_whose_original_worktree_is_gone() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let vanished = tempfile::tempdir().unwrap();
+        let surviving_repo_worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(vanished.path());
+        crate::cli::trusted_store::init_git_repo_with_origin(surviving_repo_worktree.path());
+        let owner = generation_owner();
+        let holder = "startup-vanished-worktree-holder";
+        let mut active = active_record(holder);
+        active.owner_number = owner.number;
+        save(vanished.path(), &active).unwrap();
+        ensure_generation_ledger(vanished.path(), owner, LegacyActiveDisposition::Live).unwrap();
+        vanished.close().expect("remove original worktree");
+        let worktrees = vec![surviving_repo_worktree.path().to_path_buf()];
+
+        let scan = scan_startup_generation_reap_candidates(&worktrees);
+
+        assert!(scan.failures.is_empty(), "{:?}", scan.failures);
+        assert_eq!(scan.candidates.len(), 1, "{scan:?}");
+        assert!(scan.candidates[0].bound_worktree.is_none());
+        let report = reap_startup_defunct_active_generations(
+            &worktrees,
+            &gwt_core::paths::gwt_sessions_dir(),
+            &std::collections::HashSet::new(),
+        );
+        assert_eq!(report.reaped, 1, "{report:?}");
+        assert_eq!(
+            load_owner_generation_ledger(surviving_repo_worktree.path(), owner)
+                .unwrap()
+                .unwrap()
+                .current_effective_status(),
+            Some(ExecutionControlStatus::Blocked),
+        );
+        prepare_fresh_linked_owner_launch_successor(
+            surviving_repo_worktree.path(),
+            owner,
+            &successor_request(
+                "startup-after-vanished-worktree",
+                "gwt-host-launch",
+                FRESH_LINKED_OWNER_LAUNCH_SOURCE,
+            ),
+        )
+        .expect("the ledger-only Blocked owner must admit a successor on a surviving worktree");
+    }
+
+    #[test]
+    fn startup_reaper_recovers_existing_worktree_omitted_from_startup_inventory() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let omitted = tempfile::tempdir().unwrap();
+        let inventory_anchor = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(omitted.path());
+        crate::cli::trusted_store::init_git_repo_with_origin(inventory_anchor.path());
+        let owner = generation_owner();
+        let mut active = active_record("startup-omitted-worktree");
+        active.owner_number = owner.number;
+        save(omitted.path(), &active).unwrap();
+        ensure_generation_ledger(omitted.path(), owner, LegacyActiveDisposition::Live).unwrap();
+
+        let scan =
+            scan_startup_generation_reap_candidates(&[inventory_anchor.path().to_path_buf()]);
+
+        assert!(scan.failures.is_empty(), "{scan:?}");
+        assert_eq!(scan.candidates.len(), 1, "{scan:?}");
+        assert_eq!(
+            scan.candidates[0].bound_worktree.as_deref(),
+            Some(omitted.path()),
+        );
+    }
+
+    #[test]
+    fn startup_reaper_reaps_terminal_holder_and_preserves_exact_live_holder() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let live_worktree = tempfile::tempdir().unwrap();
+        let terminal_worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(live_worktree.path());
+        crate::cli::trusted_store::init_git_repo_with_origin(terminal_worktree.path());
+        let live_owner = generation_owner();
+        let terminal_owner = ExecutionOwnerKey {
+            kind: ExecutionOwnerKind::Issue,
+            number: live_owner.number + 1,
+        };
+        let live_holder = "startup-exact-live";
+        let terminal_holder = "startup-exact-terminal";
+        for (worktree, owner, holder) in [
+            (live_worktree.path(), live_owner, live_holder),
+            (terminal_worktree.path(), terminal_owner, terminal_holder),
+        ] {
+            let mut active = active_record(holder);
+            active.owner_kind = owner.kind;
+            active.owner_number = owner.number;
+            save(worktree, &active).unwrap();
+            ensure_generation_ledger(worktree, owner, LegacyActiveDisposition::Live).unwrap();
+            let binding = current_execution_binding(worktree, owner).unwrap().unwrap();
+            persist_generation_session_binding(worktree, owner, holder, binding);
+        }
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let live_session =
+            gwt_agent::Session::load(&sessions_dir.join(format!("{live_holder}.toml"))).unwrap();
+        let live_identity = gwt_agent::SessionExecutionIdentity::from_session(&live_session)
+            .unwrap()
+            .unwrap();
+        let process_started_at = crate::process::host_process_start_time(std::process::id())
+            .expect("current test process start time");
+        gwt_agent::SessionRuntimeState::for_execution_process(
+            gwt_agent::AgentStatus::Running,
+            &live_identity,
+            1,
+            process_started_at,
+            std::process::id(),
+            process_started_at,
+        )
+        .save(&gwt_agent::runtime_state_path(&sessions_dir, live_holder))
+        .unwrap();
+        assert_eq!(
+            classify_exact_session_runtime(&sessions_dir, &live_identity).unwrap(),
+            ExactSessionRuntimeDisposition::Live,
+        );
+        let terminal_path = sessions_dir.join(format!("{terminal_holder}.toml"));
+        let mut terminal_session = gwt_agent::Session::load(&terminal_path).unwrap();
+        // Provider identity is not execution ownership evidence. A terminal
+        // exact binding remains eligible even when this descriptive field is
+        // different from the original holder fixture.
+        terminal_session.agent_id = gwt_agent::AgentId::ClaudeCode;
+        terminal_session.update_status(gwt_agent::AgentStatus::Stopped);
+        terminal_session.save(&sessions_dir).unwrap();
+        let terminal_identity =
+            gwt_agent::SessionExecutionIdentity::from_session(&terminal_session)
+                .unwrap()
+                .unwrap();
+        gwt_agent::SessionRuntimeState::for_execution_process(
+            gwt_agent::AgentStatus::Stopped,
+            &terminal_identity,
+            1,
+            process_started_at,
+            i32::MAX as u32,
+            1,
+        )
+        .save(&gwt_agent::runtime_state_path(
+            &sessions_dir,
+            terminal_holder,
+        ))
+        .unwrap();
+        let live_before = generation_authority_bytes(live_worktree.path(), live_owner);
+
+        let report = reap_startup_defunct_active_generations(
+            &[
+                live_worktree.path().to_path_buf(),
+                terminal_worktree.path().to_path_buf(),
+            ],
+            &sessions_dir,
+            &std::collections::HashSet::new(),
+        );
+
+        assert_eq!(report.reaped, 1, "{report:?}");
+        assert_eq!(report.retained, 1, "{report:?}");
+        assert!(report.failures.is_empty(), "{report:?}");
+        assert_eq!(
+            generation_authority_bytes(live_worktree.path(), live_owner),
+            live_before,
+        );
+        assert_eq!(
+            load_generation_ledger(terminal_worktree.path(), terminal_owner)
+                .unwrap()
+                .unwrap()
+                .current_effective_status(),
+            Some(ExecutionControlStatus::Blocked),
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn startup_reaper_treats_dangling_runtime_sidecar_as_unknown() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        let owner = generation_owner();
+        let holder = "startup-dangling-runtime";
+        let mut active = active_record(holder);
+        active.owner_number = owner.number;
+        save(worktree.path(), &active).unwrap();
+        ensure_generation_ledger(worktree.path(), owner, LegacyActiveDisposition::Live).unwrap();
+        let binding = current_execution_binding(worktree.path(), owner)
+            .unwrap()
+            .unwrap();
+        persist_generation_session_binding(worktree.path(), owner, holder, binding);
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let runtime_dir = sessions_dir
+            .join("runtime")
+            .join(std::process::id().to_string());
+        std::fs::create_dir_all(&runtime_dir).unwrap();
+        std::os::unix::fs::symlink(
+            runtime_dir.join("missing-runtime.json"),
+            runtime_dir.join(format!("{holder}.json")),
+        )
+        .unwrap();
+        let before = generation_authority_bytes(worktree.path(), owner);
+
+        let report = reap_startup_defunct_active_generations(
+            &[worktree.path().to_path_buf()],
+            &sessions_dir,
+            &std::collections::HashSet::new(),
+        );
+
+        assert_eq!(report.reaped, 0, "{report:?}");
+        assert_eq!(report.retained, 1, "{report:?}");
+        assert_eq!(generation_authority_bytes(worktree.path(), owner), before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn startup_reaper_rejects_symlinked_owner_root_and_ledger() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+
+        for case in ["owner-root", "ledger"] {
+            let worktree = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+            let owner = generation_owner();
+            let mut active = active_record(&format!("startup-symlink-{case}"));
+            active.owner_number = owner.number;
+            save(worktree.path(), &active).unwrap();
+            ensure_generation_ledger(worktree.path(), owner, LegacyActiveDisposition::Live)
+                .unwrap();
+            let owner_dir = generation_owner_dir(worktree.path(), owner).unwrap();
+            let repository = owner_dir.parent().unwrap().parent().unwrap();
+            if case == "owner-root" {
+                let owners_root = owner_dir.parent().unwrap();
+                let relocated = repository.join("relocated-execution-owners");
+                std::fs::rename(owners_root, &relocated).unwrap();
+                std::os::unix::fs::symlink(&relocated, owners_root).unwrap();
+            } else {
+                let ledger = owner_dir.join(GENERATION_LEDGER_FILE);
+                let relocated = repository.join("relocated-generation-ledger.json");
+                std::fs::rename(&ledger, &relocated).unwrap();
+                std::os::unix::fs::symlink(&relocated, &ledger).unwrap();
+            }
+
+            let scan = scan_startup_generation_reap_candidates(&[worktree.path().to_path_buf()]);
+
+            assert!(scan.candidates.is_empty(), "{case}: {scan:?}");
+            assert_eq!(scan.failures.len(), 1, "{case}: {scan:?}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn startup_reaper_treats_dangling_session_and_runtime_io_error_as_unknown() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let dangling_worktree = tempfile::tempdir().unwrap();
+        let io_worktree = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dangling_worktree.path());
+        crate::cli::trusted_store::init_git_repo_with_origin(io_worktree.path());
+        let dangling_owner = generation_owner();
+        let io_owner = ExecutionOwnerKey {
+            kind: ExecutionOwnerKind::Issue,
+            number: dangling_owner.number + 1,
+        };
+        let dangling_holder = "startup-dangling-session";
+        let io_holder = "startup-runtime-io";
+        for (worktree, owner, holder) in [
+            (dangling_worktree.path(), dangling_owner, dangling_holder),
+            (io_worktree.path(), io_owner, io_holder),
+        ] {
+            let mut active = active_record(holder);
+            active.owner_kind = owner.kind;
+            active.owner_number = owner.number;
+            save(worktree, &active).unwrap();
+            ensure_generation_ledger(worktree, owner, LegacyActiveDisposition::Live).unwrap();
+        }
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        std::os::unix::fs::symlink(
+            sessions_dir.join("does-not-exist.toml"),
+            sessions_dir.join(format!("{dangling_holder}.toml")),
+        )
+        .unwrap();
+        std::fs::write(sessions_dir.join("runtime"), b"not a directory").unwrap();
+        let dangling_before = generation_authority_bytes(dangling_worktree.path(), dangling_owner);
+        let io_before = generation_authority_bytes(io_worktree.path(), io_owner);
+
+        let report = reap_startup_defunct_active_generations(
+            &[
+                dangling_worktree.path().to_path_buf(),
+                io_worktree.path().to_path_buf(),
+            ],
+            &sessions_dir,
+            &std::collections::HashSet::new(),
+        );
+
+        assert_eq!(report.reaped, 0, "{report:?}");
+        assert_eq!(report.failures.len(), 2, "{report:?}");
+        assert_eq!(
+            generation_authority_bytes(dangling_worktree.path(), dangling_owner),
+            dangling_before,
+        );
+        assert_eq!(
+            generation_authority_bytes(io_worktree.path(), io_owner),
+            io_before,
         );
     }
 
