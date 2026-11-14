@@ -224,21 +224,20 @@ export function subscribeIssueMonitorStatus(doc, model) {
   let selected;
   let selectedKey;
   return model.subscribeFrame(state => {
-    const summary = state.humanAttention?.summary;
-    const reviewSummary = state.reviewAttention?.summary;
-    const steeringSummary = state.steeringAttention?.summary;
+    // SPEC #5016 AC-HS1/HS2: read only the model's combined attention value.
+    const summary = state.decisionAttention?.summary;
     // Subscribe to the strip's presentation, not unrelated Monitor settings.
     const key = JSON.stringify([issueMonitorStatusStripView(state.status ?? {},
-      state.counts ?? { queue: 0, active: 0, maxActive: 1 }), summary, reviewSummary, steeringSummary]);
+      state.counts ?? { queue: 0, active: 0, maxActive: 1 }), summary]);
     if (!selected || selectedKey !== key) {
       selectedKey = key;
-      selected = { status: state.status, counts: state.counts, summary, reviewSummary, steeringSummary };
+      selected = { status: state.status, counts: state.counts, summary };
     }
     return selected;
-  }, state => renderIssueMonitorStatus(doc, state, state.summary, state.reviewSummary, state.steeringSummary));
+  }, state => renderIssueMonitorStatus(doc, state, state.summary));
 }
 
-export function renderIssueMonitorStatus(doc, { status = {}, counts = { queue: 0, active: 0, maxActive: 1 } } = {}, humanSummary = "", reviewSummary = "", steeringSummary = "") {
+export function renderIssueMonitorStatus(doc, { status = {}, counts = { queue: 0, active: 0, maxActive: 1 } } = {}, attentionSummary = "") {
   const cell = doc.getElementById("op-strip-issue-monitor");
   const value = doc.getElementById("op-strip-issue-monitor-value");
   if (!cell || !value) return;
@@ -247,8 +246,8 @@ export function renderIssueMonitorStatus(doc, { status = {}, counts = { queue: 0
   const view = issueMonitorStatusStripView(status, counts);
   value.textContent = view.value;
   cell.dataset.state = view.state;
-  cell.setAttribute("aria-label", [`Open Issues: ${view.value}`, humanSummary, reviewSummary, steeringSummary].filter(Boolean).join(". "));
-  cell.setAttribute("title", ["Open Issues", view.title, humanSummary, reviewSummary, steeringSummary].filter(Boolean).join(" | "));
+  cell.setAttribute("aria-label", [`Open Issues: ${view.value}`, attentionSummary].filter(Boolean).join(". "));
+  cell.setAttribute("title", ["Open Issues", view.title, attentionSummary].filter(Boolean).join(" | "));
   if (view.alert) {
     cell.classList.add("op-status-strip__cell--alert");
   } else {

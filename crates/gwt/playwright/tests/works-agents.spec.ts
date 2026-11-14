@@ -50,6 +50,16 @@ test.describe("Works and Agents approved baseline", () => {
     expect((await sent(page)).filter(message => ["close_window", "stop_agent", "stop_window", "restart_window"].includes(message.kind))).toEqual([]);
   });
 
+  test("a workspace snapshot cannot roll back a later runtime status in the same burst", async ({ page }) => {
+    await page.evaluate(() => {
+      const fixture = (window as any).__worksAgentsFixture;
+      fixture.workspaceStatus("starting");
+      fixture.status("agent-one", "idle");
+    });
+    await expect(workRow(page, "agent-one")).toHaveAttribute("data-state", "idle");
+    await expect(workRow(page, "agent-one").locator(".work-state")).toHaveText("Idle");
+  });
+
   test("live Works never disappear while activity and catalogs converge", async ({ page }, info) => {
     await page.evaluate(() => {
       const surface = document.querySelector(".works-surface:not(.works-surface--preview)")!;
@@ -633,6 +643,40 @@ test.describe("Works and Agents approved baseline", () => {
         await page.screenshot({ path: info.outputPath(`agents-${tab.toLowerCase()}-${width}.png`) });
       }
     }
+  });
+
+  // SPEC #6476 T-005wo (AC-1): each Works row's Open terminal (97x28px) and
+  // member name link (about 40x24px) kept their desktop size on a phone. Below
+  // 601px both are 44px tap targets that still open the full terminal view or
+  // the member in Agents; wider layouts keep their size.
+  test("Works row controls are 44px tap targets on a phone and keep their desktop size", async ({ page }, info) => {
+    const open = works(page).locator(".work-row :is(.work-open, .work-member):visible");
+    await expect(open).toHaveCount(5);
+    const minHeights = () => open.evaluateAll(nodes => nodes.map(node => `${getComputedStyle(node).minWidth}x${getComputedStyle(node).minHeight}`));
+    const desktop = await minHeights();
+    expect(desktop.join(" ")).not.toContain("44px");
+    await page.setViewportSize({ width: 601, height: 1000 });
+    expect(await minHeights(), "601px keeps the desktop size").toEqual(desktop);
+    for (const width of [320, 390]) {
+      await page.setViewportSize({ width, height: 844 });
+      const sizes = await works(page).locator(":is(button, input, select, textarea):visible").evaluateAll(nodes => nodes.map(node => {
+        const box = node.getBoundingClientRect();
+        return { name: node.getAttribute("aria-label") || node.textContent!.trim().slice(0, 40), width: box.width, height: box.height };
+      }));
+      expect(sizes.filter(control => control.name === "Open terminal")).toHaveLength(3);
+      expect(sizes.filter(control => /^View .* in Agents$/.test(control.name))).toHaveLength(2);
+      for (const control of sizes) {
+        expect(control.height, `${control.name} height at ${width}px`).toBeGreaterThanOrEqual(44);
+        expect(control.width, `${control.name} width at ${width}px`).toBeGreaterThanOrEqual(44);
+      }
+      await expectNoHorizontalOverflow(page, ".works-surface:not(.works-surface--preview)");
+      await page.screenshot({ path: info.outputPath(`works-open-${width}.png`) });
+    }
+    await workRow(page, "agent-one").locator(".work-member").click();
+    await expect(main(page)).toHaveAttribute("data-surface", "agents");
+    await openRail(page, "works");
+    await workRow(page, "agent-one").locator(".work-open").click();
+    await expect(full(page)).toBeVisible();
   });
 
   test("Agents recovers lost registration catalogs on reconnect without losing the name draft", async ({ page }, info) => {

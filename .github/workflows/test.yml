@@ -1042,6 +1042,9 @@ jobs:
         continue-on-error: true
       # This feature set and isolated measurement do not depend on regressions.
       - name: Build warm latency target once
+        # Omit this test artifact's line tables after restoring the shared cache.
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
         run: node scripts/ci-windows-tests.mjs build warm
         timeout-minutes: 30
       # Issue #3777: measure the warm 250ms acceptance contract without other
@@ -1232,7 +1235,7 @@ jobs:
             --mount "type=bind,source=$GITHUB_WORKSPACE,target=/workspace" \
             --workdir /workspace --env CI=true \
             "mcr.microsoft.com/playwright:v${version}-noble" \
-            bash scripts/run-visual-tests.sh
+            bash scripts/run-visual-tests.sh --workers=2
         # The full serial suite measured 14.7m before image/bootstrap overhead.
         # Retain all cases and retries with finite execution headroom.
         timeout-minutes: 25

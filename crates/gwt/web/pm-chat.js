@@ -248,7 +248,7 @@ export function createPmWindowModel() {
 
 // Read-only report view. The caller owns polling and the unchanged terminal.
 export function createPmChat({ document, root, sessionId, onLogVisibility, onChatVisible = () => {}, onTaskDetail = () => {}, onSend = () => {}, onOpenTerminal = () => false,
-  onViewNotification = () => {},
+  onViewNotification = () => {}, onDecisionsWaiting = () => {}, onReviewAttention = () => {},
   copyText = text => document.defaultView.navigator.clipboard.writeText(text) }) {
   let session = sessionId;
   let disposed = false;
@@ -259,6 +259,10 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   let chatDigest;
   let chatSend = null;
   let draftSend = null;
+  let publishedWaiting;
+  let publishedReviews;
+  // SPEC #5016 HSF: the shared needs_human value the status strip reads.
+  let humanAttention = null;
   const taskRows = new Map();
   let digest = '';
   let currentDigest;
@@ -508,6 +512,11 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
       })) : null,
     });
   }
+  function receiveHumanAttention(count) {
+    if (disposed) return;
+    humanAttention = Number.isFinite(count) ? count : null;
+    renderCurrent(latestState?.current);
+  }
   function receiveLog(groups) {
     if (disposed) return;
     taskLog.receive(groups || []);
@@ -587,7 +596,26 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     renderHome(state, decisions);
     renderDecisions(state, decisions);
     renderReportDecisions(decisions);
+    publishWaitingDecisions(decisions);
     return decisions;
+  }
+  // SPEC #5016 HSK: the shared attention model gets the same waiting set
+  // that Home counts; `null` while reports are not loaded.
+  function publishWaitingDecisions({ items, answered, waiting }) {
+    const ids = waiting == null ? null : items.filter(item => !answered[item.id]).map(item => item.id);
+    const key = JSON.stringify(ids);
+    if (key === publishedWaiting) return;
+    publishedWaiting = key;
+    onDecisionsWaiting(ids && { waiting: ids.length, ids });
+  }
+  // SPEC #5016 HSV: unresolved reviews from the PM current facts join the
+  // shared attention model; `null` when this window has not observed them.
+  function publishReviewAttention(facts) {
+    const items = Array.isArray(facts?.review_attention) ? facts.review_attention : null;
+    const key = JSON.stringify(items);
+    if (key === publishedReviews) return;
+    publishedReviews = key;
+    onReviewAttention(items);
   }
   function renderDecisions(state, { items, answered }) {
     taskDecisions.receive({
@@ -933,7 +961,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     submitDraft(event);
   }
   function renderCurrent(current) {
-    const nextDigest = JSON.stringify(current ? [current.status, current.facts, current.stale_minutes] : null);
+    const nextDigest = JSON.stringify(current ? [current.status, current.facts, current.stale_minutes, humanAttention] : null);
     if (currentDigest === nextDigest) return;
     currentDigest = nextDigest;
     const authored = element('section', 'pm-chat__current-authored');
@@ -996,7 +1024,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
       }
       automatic.append(element('p', '', `Active windows: ${(facts.active_windows || []).length}${facts.inventory_incomplete ? ' (incomplete observation)' : ''}`), windows,
         element('p', '', `Queue head: ${facts.queue_head ? issueLabel(facts.queue_head) : facts.source === 'unavailable' ? 'Unknown' : 'None'}`),
-        element('p', '', `needs_human: ${facts.needs_human_count ?? 'Unknown'}`),
+        element('p', '', `needs_human: ${humanAttention ?? 'Unknown'}`),
         element('p', '', `Release: ${facts.release ? `#${facts.release.number} ${facts.release.title}` : facts.release_observed_at ? 'No active PR' : 'Unknown'}`),
         element('p', '', `Pending update: ${facts.pending_update ? `v${facts.pending_update}` : facts.update_known ? 'None' : 'Unknown'}`));
       if (facts.release_observed_at) {
@@ -1019,6 +1047,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     renderComposer(state.chatSend);
     if (transcript.childElementCount) rememberScroll();
     renderCurrent(state.current);
+    publishReviewAttention(state.current?.facts);
     const reports = state.reports;
     const visibleReports = kindSelect.value === 'all' ? reports : reports.filter(report => report.kind === kindSelect.value);
     const nextDigest = JSON.stringify([kindSelect.value, visibleReports]);
@@ -1162,6 +1191,6 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   kindSelect.addEventListener('change', filterReports);
   update({ sessionId, revision: 0, reports: [], loaded: false });
   showHome();
-  return { update, setSession, showHome, showDecisions, showProgress, showChat, showTasks, showTaskLog, showReports, receiveLog, dispose,
+  return { update, setSession, showHome, showDecisions, showProgress, showChat, showTasks, showTaskLog, showReports, receiveLog, receiveHumanAttention, dispose,
     isChatVisible: () => !disposed && activeView === 'chat' };
 }

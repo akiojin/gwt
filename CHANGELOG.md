@@ -1,6 +1,125 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.165.0] - 2026-11-14
+
+### Bug Fixes
+
+- **worktree:** 作業メモだけの worktree を整理候補に含める
+- **worktree:** 完了済み Work の残存 Workspace を安全に整理可能にする
+- **gui:** スマートフォン幅で Board の操作を 44px のタッチ目標にする
+- **launch:** Preserve assets when runner health checks fail
+- **workspace:** Restore canonical close proof for active producers
+- **workspace:** Retain binary test entrypoint after intake move
+- **workspace:** Preserve terminal provenance through proof recovery
+- **monitor:** Scan却下時の失敗effect再実行ループを止める
+- **mobile:** Keep settings and status controls usable on phones
+- **mobile:** Preserve usage readability with long diagnostics
+- **ui:** Derive one awaiting-attention count for the Issues strip and pill
+- **gui:** Preserve runtime status order across workspace snapshots
+- **deps:** Update ammonia to 4.2.5
+- **ui:** Count unanswered PM decisions in the shared awaiting-attention value
+- **mobile:** Issuesタブのタッチ領域と操作行を確保する
+- **ui:** Count unresolved reviews in the shared awaiting-attention value
+- **ci:** Restore Windows nightly fixture assumptions
+- **pm:** 連結された自動通知のQ&A誤判定を防ぐ
+- **ui:** Show the shared needs_human value in PM Live facts
+- **terminal:** MacOSのOptionドラッグ選択を復旧する
+- **mobile:** 共通chromeのCheckと通知の閉じるを44pxのタッチ目標にする
+- **issue-monitor:** Unify priority order and report queue reasons
+- **mobile:** Issues上部の操作行・検索・New/Refreshを44pxのタッチ目標にする
+- **test:** Codex trust の書込みを test 時に実ユーザー config から隔離する
+- **launch:** Trust repositories for Grok host launches
+- **mobile:** Issuesカード内の選択・操作・メニューを44pxのタッチ目標にする
+- **terminal:** Retain Codex partial-region scrollback
+- **launch:** Bind Grok trust to the provider cwd
+- **mobile:** Works一覧のOpen terminalとメンバー名を44pxのタッチ目標にする
+- **mobile:** Settings panel内のフォーム操作を44pxのタッチ目標にする
+- **mobile:** PM surfaceのview切替と操作を狭画面で44pxのタッチ目標にする
+- **mobile:** Logsの操作を狭画面で44pxのタッチ目標にしdetailを積み重ねる
+- **mobile:** Indexの操作を狭画面で44pxのタッチ目標にし結果と詳細を積み重ねる
+
+### Features
+
+- **issue-monitor:** 同一ワークツリーの重複 Session を status に出す
+
+### Miscellaneous Tasks
+
+- **work:** T-005g 配送精算の Work イベントを保存する
+- **work:** T-005g2 の配送記録を精算
+- **work:** Issue #3447 の PR 関連付けを記録
+- **work:** T-005b2 着手時の Work イベントを保存する
+- **work:** Issue 7102 の Work 記録を追加する
+- **work:** Record Issue 7102 acceptance audit and delivery
+- **work:** Link Issue #3725 to PR #7190
+- **work:** PR #7197 の関連付けを記録
+- **work:** Record issue 6979 metadata delivery
+- **work:** Boardモバイル操作の独立監査を記録
+- **work:** 監査PRの紐付けを記録
+- **work:** Record mobile UI pull request
+- **work:** PR #7197 の配送確認を記録
+- **work:** PR #7201 の関連付けを記録
+- **work:** Record Issue 6072 pull request
+- **work:** Record Issue 7206 PR association
+- **work:** Record HSJ delivery work events
+- **work:** Record HSK work events
+- **work:** Issue 7209 の CI 復旧確認を記録
+- **work:** Issue 7209 の PR 関連付けを記録
+- **work:** PR #7214の関連付けを記録する
+- **work:** Record HSK delivery work events
+- **work:** Record HSV work events
+- **work:** Issue 5469 の main 配信監査を記録
+- **work:** Record Issue 5941 pull request
+- **work:** Issue 5541 の PR 関連付けを記録
+- **work:** Record HSV delivery work events
+- **work:** Record HSF work events
+- **work:** Issue 5132 の Work イベントを記録
+- **work:** PR 7220 の関連付けを記録
+- **work:** PR #7223 の関連付けを記録する
+- **work:** T-005b2 配送精算の Work イベントを保存する
+- **work:** T-005c の Work イベントを保存する
+- **work:** Record Issue 5083 pull request linkage
+- **work:** T-005c 配送精算の Work イベントを保存する
+- **work:** T-005q の Work イベントを保存する
+- **work:** Record grok trust scope investigation
+- **work:** Correct main delivery evidence
+- **work:** Link Grok trust fix to PR 7229
+- **work:** T-005ic の Work イベントを保存する
+- **work:** Record scrollback PR handoff
+- **work:** Record Grok trust follow-up pull request
+- **work:** T-005wo の Work イベントを保存する
+- **work:** T-005sf の Work イベントを保存する
+- **work:** T-005 狭画面タッチ寸法の配送精算 Work イベントを保存する
+- **work:** T-005pm の Work イベントを保存する
+- **work:** T-005lg の Work イベントを保存する
+- **work:** T-005ix の Work イベントを保存する
+
+### Performance
+
+- **index:** Share raw issue metadata across source readers
+- **ci:** Embedded E2Eを2ワーカーで実行する
+- **ci:** Trim macOS test debug information
+- **ci:** Trim Windows warm test debug information
+
+### Testing
+
+- **workspace:** Include close proof recovery in probe contract
+- **workspace:** Cover missing-session close proof recovery probe
+- **workspace:** Preserve legacy compacted done abort fixture
+- **workspace:** Reserve stopped host port during build probe
+- **ci:** Develop Coverage を落とす2件の flake を根本原因で止める
+- **ci:** PM delivery fixture の待機から壁時計 deadline を除く
+- **ci:** Develop Coverage の残り2件の flake を壁時計 budget から切り離す
+- **ci:** Held PM wake テストで env lock を実際に取得する
+- **e2e:** Replay計測前に初期描画を待つ
+- **issue-monitor:** Align status snapshot with priority provenance
+- **launch:** Explain live startup clock measurement
+- **terminal:** Wait for the real shell view before scrollback checks
+- **launch:** Isolate Grok cleanup fixture homes
+- **mobile:** Works行操作の受入名とdesktop寸法の比較を実態に合わせる
+- **mobile:** Index受入で結果一覧の内部スクロールとsurfaceの横overflowを固定する
+- **mobile:** Index受入の寸法測定をpanel再描画の完了まで再試行する
+
 ## [9.164.1] - 2026-11-13
 
 ### Bug Fixes

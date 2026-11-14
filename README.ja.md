@@ -146,7 +146,11 @@ Codex の警告が端末に表示されます。[Codex の速度要件](https://
 
   Grok Build は xAI 公式の `grok` command で提供されます。
   `npm install -g @xai-official/grok` でインストールし、初回起動時に認証するか、
-  API-key workflow では `XAI_API_KEY` を設定してください。
+  API-key workflow では `XAI_API_KEY` を設定してください。ホスト起動では、gwt が
+  Grok 公式の `--trust` を付け、対象 Git リポジトリ（main checkout と全 worktree）
+  の hook・MCP/LSP・instructions・skills を許可します。この許可は
+  `trusted_folders.toml` に保存され、同じ trust store と repo key を使う後続の手動起動
+  にも適用されます。CLI 全体の既定設定や他のリポジトリの許可は変更しません。
 - エージェント利用時は必要な API キーを設定すること
   - `ANTHROPIC_API_KEY` または `ANTHROPIC_AUTH_TOKEN`
   - `OPENAI_API_KEY`
@@ -1017,9 +1021,18 @@ Issueのcloseやcancelだけでは数えません。エージェントによる�
 
 Workspace パネルの `Clean Up Ready` 件数も、worktree 単位で同じ考え方を使います。
 マージ済みまたは差分の無い Workspace は、未コミットの差分が gwt 自身の書き込み
-（`.gwt/` namespace、materialize された `gwt-*` skill / command、手書きの内容を含まない
+（`.gwt/` namespace、agent の作業メモ `tasks/todo.md`、materialize された `gwt-*` skill / command、手書きの内容を含まない
 `.codex/hooks.json` / `.claude/settings.local.json`）だけであれば cleanup-ready のまま
 数えられます。それ以外の未コミット変更があれば、その Workspace は件数から外れます。
+`tasks/` 内のほかのファイルもローカルの作業として扱います。ブランチは canonical base と
+直接比較するため、リモートの作業ブランチが削除済みでもマージ済み Workspace は整理候補になります。
+
+堆積した worktree を整理するには、`Issues` の `Other` を展開し、Workspace の
+`Clean Up` または候補をまとめる `Clean Up Ready` を使います。既存の Issue worktree は
+Work を閉じた後も一覧に残り、Work 履歴は閉じたまま、稼働中の owner を持ちません。
+削除前に確認画面を表示し、worktree 全体の
+自動 prune は行いません。稼働中の agent / process や製品ファイルの変更がある
+Workspace は整理可能なグループから除外します。
 
 ### プロバイダの無料リセット
 

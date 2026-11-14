@@ -18,6 +18,32 @@ User Verification Result: n/a (autonomous)
 
 Agent Visual Check: n/a (no UI surface)
 
+## 2026-11-13: 失敗effectとscan却下の相互再試行（鈴木 和斗）
+
+v9.164.0 の稼働GUI（PID92211、17:48:21 JST起動）を読み取り専用で観測した。
+[計測要約](failed-effect-baseline.json) はbinary hash、時刻窓、raw hashを保持する。
+起動後600秒のscan内gh起動は90回（issues22、PR lifecycle50、timeline8、
+closed pulls7、open pulls3）。実起動・明示的controlと通信失敗を含み、
+定常時の値として扱わない。AC-2の20回以下は証明できていない。
+
+17:58:50以上18:00:00未満の70秒には、timeline取得167回が全て接続エラーに
+なった。pending effectの失敗がrevisionを進め、並行scanが却下され、
+その却下が同じeffectを再起動する循環が確認された。timelineのページ数や
+TTLを変えず、同じauthorityで却下されたscanからeffectの再実行を要求する
+経路を除く。authority変更で採用したjournal、通常scanとtimerによる再試行、
+未完了の安全処理の永続記録は維持する。
+
+観測中にmainはv9.164.1へ進んだ。従来のFR-6877-8と関連の既存修正はmainに
+含まれるが、このv9.164.0の計測で新しいmainや今回の修正の合格を主張しない。
+実装agent6本の継続稼働と5分/60分CPU対は記録されておらず、AC-4/5も未確認。
+Issue #6877のAC-2/4/5は未チェックを維持する。
+
+Acceptance Surface: non-user-facing (daemon retry scheduling and measurement evidence).
+
+User Verification Result: n/a (autonomous)
+
+Agent Visual Check: n/a (no UI surface)
+
 ## 2026-11-13: 回収・配信確認と実測の制約（鈴木 和斗）
 
 Producer `c830090e7249d84339a2b15e775c89c35ac13410` を remote branch から

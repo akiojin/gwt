@@ -3165,6 +3165,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           lineHeight: isBlinkBrowser() ? 1.35 : 1.3,
           scrollback: 5000,
           macOptionClickForcesSelection: true,
+          // The context menu copies the existing range on every platform.
+          rightClickSelectsWord: false,
           // SPEC-3671 FR-008.
           disableStdin: options.readOnly === true,
         });
@@ -3608,6 +3610,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         applyIssueMonitorStatus: applyKnowledgeIssueMonitorStatus,
         applyRepositoryLabels,
         applyIssueMonitorInbox: applyKnowledgeIssueMonitorInbox,
+        applyPmDecisions,
+        applyPmReviewAttention,
         scheduleIssueMonitorProjectionRefresh,
         handleKnowledgeTransportChange,
         refreshVisibleKnowledgeWindows,
@@ -4224,7 +4228,10 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         if (!view) return;
         view.unsubscribe();
         view.unsubscribeLog?.();
+        view.unsubscribeHumanAttention?.();
         view.controller.dispose();
+        applyPmDecisions(windowId, null);
+        applyPmReviewAttention(windowId, null);
         view.body.classList.remove("pm-conversation-body");
         // Return the terminal nodes to their original body when PM ownership ends.
         view.body.append(...view.logHost.childNodes);
@@ -4292,6 +4299,10 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           // SPEC #7007 T-013: a Log group opens the notification drawer at
           // its original record (keyed rows focus their history row).
           onViewNotification: entry => notificationCenter.open(entry?.key || undefined),
+          // SPEC #5016 HSK: unanswered decisions join the shared attention count.
+          onDecisionsWaiting: decisions => applyPmDecisions(windowData.id, decisions),
+          // SPEC #5016 HSV: unresolved reviews join the same shared count.
+          onReviewAttention: items => applyPmReviewAttention(windowData.id, items),
         });
         pmChatViews.set(windowData.id, view);
         // SPEC #7007 T-013: the Log view mirrors this page's notification
@@ -4300,6 +4311,9 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         view.unsubscribeLog = notificationCenter.subscribe(state => state.rows, rows => {
           view.controller.receiveLog(logGroupsFromHistoryRows(rows));
         });
+        // SPEC #5016 HSF: Live facts shows the strip's needs_human value.
+        view.unsubscribeHumanAttention = issueMonitorModel.subscribe(model => model.humanAttention.count,
+          count => view.controller.receiveHumanAttention(count));
         bindPmWindowState(windowData.id, windowData.session_id);
         view.unsubscribe = subscribePmWindowState(state => state.windows[windowData.id], state => {
           view.controller.update(state);

@@ -4944,9 +4944,21 @@ impl WorkItemsIntakeSnapshot {
         if dry_run {
             return self.check_container_repair_snapshot();
         }
+        self.commit_repair_with_preflight(prepared, || Ok(()))
+    }
+
+    /// The caller's authority check observes the same final locked snapshot
+    /// that will be published. Unlike ordinary intake this never recovers a
+    /// pending lifecycle transaction while repairing derived state.
+    pub(crate) fn commit_repair_with_preflight(
+        &self,
+        prepared: Option<&PreparedWorkItemsPublication>,
+        before_publication: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
         let works_path = &self.files[0].0;
         with_workspace_work_items_locks(std::slice::from_ref(works_path), || {
             self.check_container_repair_snapshot()?;
+            before_publication()?;
             if let Some(prepared) = prepared {
                 publish_work_items_with_close_proofs(works_path, prepared)?;
             }
@@ -9597,7 +9609,7 @@ fn read_machine_local_workspace_work_events_from_path(path: &Path) -> Result<Vec
 
 // Confirm-only authority readback must validate the writer-owned ledger
 // without repairing its tail or otherwise changing durable bytes.
-fn read_machine_local_workspace_work_events_from_path_read_only(
+pub fn read_machine_local_workspace_work_events_from_path_read_only(
     path: &Path,
 ) -> Result<Vec<WorkEvent>> {
     let content = match fs::read(path) {
@@ -9616,7 +9628,7 @@ fn read_machine_local_workspace_work_events_from_path_read_only(
         .collect()
 }
 
-fn machine_local_close_event_matches_projected_lifecycle(
+pub(crate) fn machine_local_close_event_matches_projected_lifecycle(
     durable: &WorkEvent,
     projected: &WorkEvent,
 ) -> bool {

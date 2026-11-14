@@ -17,9 +17,11 @@ const structuredReport = (id = 'typed') => ({ ...report(id),
 function fixture({ tasksDefault = false, onOpenTerminal } = {}) {
   const { document } = parseHTML('<html><body><div id="host"></div></body></html>');
   const root = document.getElementById('host');
-  const visibility = [], copied = [], sent = [];
+  const visibility = [], copied = [], sent = [], waiting = [], reviews = [];
   let model;
   const view = createPmChat({ document, root, sessionId: 'session', onOpenTerminal,
+    onDecisionsWaiting: decisions => waiting.push(decisions),
+    onReviewAttention: items => reviews.push(items),
     onTaskDetail: key => { const request = model.requestPmTaskDetail('pm', key); if (request) sent.push(request); },
     onLogVisibility: visible => visibility.push(visible), copyText: async text => copied.push(text),
     onSend: text => { const request = model.requestPmChatSend('pm', text); if (request) sent.push(request); } });
@@ -37,7 +39,7 @@ function fixture({ tasksDefault = false, onOpenTerminal } = {}) {
     model.applyPmWindowReceiveEvent(event);
     return event;
   };
-  return { root, model, view, visibility, copied, sent, update };
+  return { root, model, view, visibility, copied, sent, waiting, reviews, update };
 }
 
 test('Chat opens its bound PM terminal in Works without losing the draft', () => {
@@ -436,7 +438,7 @@ test('Reports has a single scroll body and compact token-based history', async (
 });
 
 test('current card stays above history and distinguishes PM explanation from automatic facts', () => {
-  const { root, model, update } = fixture();
+  const { root, model, view, update } = fixture();
   const card = root.querySelector('[aria-label="PM status"]');
   assert.ok(card, 'current card exists before any PM post');
   assert.match(card.textContent, /No current status reported yet/);
@@ -450,6 +452,7 @@ test('current card stays above history and distinguishes PM explanation from aut
       release_observed_at: '2026-10-13T09:18:00Z', pending_update: '9.117.2', error: null },
   };
   const older = update([report()], null, current);
+  view.receiveHumanAttention(2);
   assert.equal(root.querySelector('.pm-chat__body').firstElementChild, card);
   assert.match(card.querySelector('[aria-label="PM notes"]').textContent, /Waiting.*v9.117.2/s);
   assert.equal(card.querySelector('[aria-label="PM notes"] time').getAttribute('datetime'), current.status.items[0].started_at);
@@ -481,6 +484,20 @@ test('current card marks unknown automatic data instead of claiming an empty fle
   assert.match(facts.textContent, /Issues unavailable/);
   assert.match(facts.textContent, /needs_human: Unknown/);
   assert.match(facts.textContent, /Release: Unknown/);
+});
+
+// SPEC #5016 HSF (AC-HS1/HS2): Live facts shows the shared needs_human
+// value the status strip reads, never its own count of the raw facts list.
+test('Live facts needs_human reads the shared attention count, not the facts field', () => {
+  const { root, view, update } = fixture();
+  update([], null, { status: null, facts: { source: 'daemon', active_windows: [], queue_head: null,
+    needs_human_count: 5, release: null, release_observed_at: null, pending_update: null, error: null } });
+  const facts = () => root.querySelector('[aria-label="Live facts"]').textContent;
+  assert.match(facts(), /needs_human: Unknown/, 'the raw facts count is not a second definition');
+  view.receiveHumanAttention(1);
+  assert.match(facts(), /needs_human: 1/);
+  view.receiveHumanAttention(null);
+  assert.match(facts(), /needs_human: Unknown/);
 });
 
 test('Reports renders shared Markdown, metadata and copy, with no input or submit surface', async () => {
@@ -1415,6 +1432,43 @@ test('Home and Decide read one waiting-decision count after an answer', async ()
   const actionable = [...root.querySelectorAll('.task-decisions__card')]
     .filter(card => card.querySelector('.task-decisions__option'));
   assert.equal(actionable.length, 1, 'Decide leaves the same one decision actionable');
+});
+
+// SPEC #5016 HSK: the shared attention model receives the same waiting
+// decisions that Home counts, never a recount of the raw reports.
+test('PM decisions waiting are published from the one derivation Home reads', async () => {
+  const { root, model, view, waiting, update } = fixture({ tasksDefault: true });
+  update([decisionReport('decision-1'), decisionReport('decision-2')], null, { request_tasks: taskOverview([]) });
+  assert.deepEqual(waiting.at(-1), { waiting: 2, ids: ['decision-2', 'decision-1'] });
+  view.showDecisions();
+  root.querySelector('.task-decisions__option').click();
+  model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', window_id: 'pm', ok: true });
+  const home = () => root.querySelector('.task-home')?.textContent ?? '';
+  for (let attempt = 0; attempt < 80 && !/1 decision needs/.test(home()); attempt++) {
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  assert.equal(waiting.at(-1).waiting, 1);
+  assert.equal(waiting.at(-1).ids.length, 1);
+  assert.match(home(), /1 decision needs your attention/, 'Home shows the published count');
+  const published = waiting.length;
+  view.update(model.readPmWindowState().windows.pm);
+  assert.equal(waiting.length, published, 'an unchanged waiting set is not republished');
+});
+
+// SPEC #5016 HSV: unresolved reviews observed by the PM current facts are
+// published once per change; an absent observation is unknown, not zero.
+test('PM current review attention is published from the facts the PM window received', () => {
+  const { reviews, update } = fixture({ tasksDefault: true });
+  update([], null, { facts: { source: 'daemon', active_windows: [] } });
+  assert.equal(reviews.at(-1), null, 'facts without the observation publish unknown');
+  const items = [{ pr_number: 71, issue_numbers: [5016], reason: 'Changes requested' }];
+  update([], null, { facts: { source: 'daemon', active_windows: [], review_attention: items } });
+  assert.deepEqual(reviews.at(-1), items);
+  const published = reviews.length;
+  update([], null, { facts: { source: 'daemon', active_windows: [], review_attention: items } });
+  assert.equal(reviews.length, published, 'an unchanged observation is not republished');
+  update([], null, { facts: { source: 'daemon', active_windows: [], review_attention: [] } });
+  assert.deepEqual(reviews.at(-1), [], 'an observed empty list clears the count');
 });
 
 test('Decide forgets session answers when the PM session changes', () => {

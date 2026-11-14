@@ -1108,6 +1108,20 @@ mod tests {
             repo,
         );
 
+        // Issue #3447: delivery may delete the remote work branch. Cleanup
+        // must compare the local branch to the base without requiring it.
+        run(
+            &["update-ref", "refs/remotes/origin/work/sq", "work/sq"],
+            repo,
+        );
+        let before_remote_delete = cleanup_readiness_base_target(repo, "work/sq").unwrap();
+        assert!(before_remote_delete.is_some());
+        run(&["update-ref", "-d", "refs/remotes/origin/work/sq"], repo);
+        assert_eq!(
+            cleanup_readiness_base_target(repo, "work/sq").unwrap(),
+            before_remote_delete
+        );
+
         let target = merged_base_target(repo, "work/sq").unwrap();
         assert!(target.is_some(), "squash-merged branch must resolve a base");
 

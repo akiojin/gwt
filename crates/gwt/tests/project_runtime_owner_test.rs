@@ -93,6 +93,16 @@ impl RealOwnerFixture {
         ] {
             command.env_remove(key);
         }
+        // Issue #7204 (SPEC #4740): these tests are about the owner runtime,
+        // not how fast `gwtd` takes its startup lease. A loaded runner spent
+        // the 250 ms prefs budget before the uncontended lease lock was taken,
+        // so pin that budget for the child; load mode stays inherited.
+        command.env(
+            "GWT_TEST_BUDGET_ISSUE_MONITOR_PREFS_MS",
+            gwt_core::deadline_budget::HANG_GUARD
+                .as_millis()
+                .to_string(),
+        );
         let mut child = ChildGuard(command.spawn().unwrap());
         child
         .0

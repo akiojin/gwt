@@ -959,6 +959,7 @@ body::after {
   }
 
   .project-actions > .arrange-button,
+  .project-actions .update-check > .arrange-button,
   .project-actions > .app-version,
   .project-actions .op-theme-toggle__option {
     min-width: 44px;
@@ -4774,6 +4775,12 @@ button.workspace-board-ref:focus-visible {
     max-width: 100%;
   }
 
+  :root[data-theme] .settings-tabs .settings-tab,
+  :root[data-theme] .index-window-tabs .settings-tab {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
   :root[data-theme] .settings-body {
     padding: var(--space-2);
   }
@@ -4787,6 +4794,19 @@ button.workspace-board-ref:focus-visible {
   :root[data-theme] .settings-field > :last-child,
   :root[data-theme] [data-settings-issues-controls] .settings-field > :last-child {
     grid-column: 1;
+  }
+
+  /* T-005sf: panel form controls kept their 13-36px desktop size. Every
+     Settings checkbox sits inside a label, so the label is its target.
+     Caption labels for selects and inputs keep their own height. */
+  :root[data-theme] .settings-root :is(button, select, textarea, input:not([type="checkbox"])):not(.settings-tabs *),
+  :root[data-theme] .settings-root label:has(input[type="checkbox"]) {
+    min-height: 44px;
+  }
+
+  /* The 24px-wide icon buttons (custom agent edit/delete, env row remove). */
+  :root[data-theme] .settings-root .icon-button {
+    min-width: 44px;
   }
 }
 
@@ -6016,6 +6036,7 @@ button.workspace-board-ref:focus-visible {
   }
   .workspace-state-notice span {
     max-height: 25vh;
+    max-height: min(25vh, 4lh);
     overflow-y: auto;
   }
 }
@@ -6094,6 +6115,15 @@ button.workspace-board-ref:focus-visible {
 @container (max-width: 760px) {
   .pm-chat--chat .pm-chat__workspace { flex-direction: column; }
   .pm-chat--chat .pm-chat__tasks { order: -1; flex-basis: 35%; max-height: 40%; max-width: none; border-inline-start: 0; border-bottom: 1px solid var(--color-border); }
+}
+/* T-005pm: on a phone the view toolbar stayed one row wider than the window,
+   so the last views sat off screen, and PM buttons, the report filter and
+   the expanders were 18-31px tall. Wrap the toolbars and make every control
+   a 44px target; an expander keeps its marker and centers its text. */
+@media (max-width: 600px) {
+  .pm-chat__toolbar { flex-wrap: wrap; }
+  .pm-chat :is(button, select, summary) { min-width: 44px; min-height: 44px; }
+  .pm-chat summary { align-content: center; }
 }
 .task-home { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; overflow-wrap: anywhere; gap: var(--space-3); padding: var(--space-3); }
 .task-home__header { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-3); }

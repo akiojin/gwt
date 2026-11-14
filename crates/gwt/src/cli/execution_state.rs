@@ -13664,7 +13664,7 @@ enum ExecutionDiagnosisMode {
     Projection,
 }
 
-const PROTECTED_RECOVERY_OPERATIONS: [&str; 8] = [
+const PROTECTED_RECOVERY_OPERATIONS: [&str; 9] = [
     "build.abort",
     "execution.continue",
     "execution.repair",
@@ -13673,6 +13673,7 @@ const PROTECTED_RECOVERY_OPERATIONS: [&str; 8] = [
     "workspace.update",
     "workspace.ensure",
     "workspace.reopen",
+    "workspace.repair_close_proof",
 ];
 
 /// Verification recoveries that `verify.*` accepts only from the Session
@@ -13743,7 +13744,7 @@ fn gate_closed_refused_recoveries(
 /// Ordered so that a name containing another is matched first;
 /// [`recovery_operations_named_in`] then reports the specific operation rather
 /// than the one embedded in it.
-pub const AGENT_RECOVERY_OPERATIONS: [&str; 22] = [
+pub const AGENT_RECOVERY_OPERATIONS: [&str; 23] = [
     "execution.settle_delivered",
     "pr.create_from_ci",
     "execution.release_prepared",
@@ -13756,6 +13757,7 @@ pub const AGENT_RECOVERY_OPERATIONS: [&str; 22] = [
     "workspace.ensure",
     "workspace.update",
     "workspace.reopen",
+    "workspace.repair_close_proof",
     // Issue #4465: the container-ambiguity refusal names these three. They
     // were absent, so the one refusal that actually needed a prune route could
     // not carry it across the bridge and the agent was left guessing.
@@ -14658,6 +14660,7 @@ fn finalize_recovery_probes(
             ),
             crate::cli::workspace::probe_workspace_ensure(worktree, &ensure_candidate),
             workspace_reopen_recovery_probe(&snapshot, caller, recovery_context),
+            workspace_close_proof_repair_recovery_probe(&snapshot, caller, recovery_context),
         ]
     } else {
         [
@@ -14669,6 +14672,7 @@ fn finalize_recovery_probes(
             "workspace.update",
             "workspace.ensure",
             "workspace.reopen",
+            "workspace.repair_close_proof",
         ]
         .into_iter()
         .map(invalid_execution_recovery_scope_probe)
@@ -14815,6 +14819,47 @@ fn workspace_reopen_recovery_probe(
         _ => unavailable(
             GovernanceCause::Authority,
             "workspace_reopen_primary_or_terminal_authority_unavailable",
+        ),
+    }
+}
+
+fn workspace_close_proof_repair_recovery_probe(
+    snapshot: &ExecutionDiagnosisSnapshot,
+    caller: &str,
+    recovery_context: Option<
+        &Result<crate::agent_project_state::ExecutionRecoveryContext, gwt_core::GwtError>,
+    >,
+) -> crate::cli::governance::RecoveryProbe {
+    use crate::cli::governance::{GovernanceCause, RecoveryProbe};
+    let operation = "workspace.repair_close_proof";
+    if snapshot.ecr_status != ExecutionDiagnosisState::Active
+        || snapshot.binding_state != ExecutionBindingState::Bound
+    {
+        return RecoveryProbe::unavailable(
+            operation,
+            protected_recovery_metadata(Some(GovernanceCause::DomainInvalid), false),
+            "close_proof_repair_requires_current_active_execution",
+        );
+    }
+    let Some(Ok(context)) = recovery_context else {
+        return invalid_execution_recovery_scope_probe(operation);
+    };
+    let claim = crate::cli::workspace::native_primary_provider_session_id();
+    match crate::agent_project_state::close_proof_repair_needed_for_session(
+        context.project_state_root(),
+        caller,
+        claim.as_deref(),
+    ) {
+        Ok(true) => RecoveryProbe::available(operation, protected_recovery_metadata(None, false)),
+        Ok(false) => RecoveryProbe::unavailable(
+            operation,
+            protected_recovery_metadata(Some(GovernanceCause::DomainInvalid), false),
+            "close_proof_repair_not_needed",
+        ),
+        Err(_) => RecoveryProbe::unavailable(
+            operation,
+            protected_recovery_metadata(Some(GovernanceCause::Authority), false),
+            "close_proof_repair_primary_or_done_authority_unavailable",
         ),
     }
 }
@@ -29831,7 +29876,7 @@ exit 1
             let probes = snapshot["recovery_probes"]
                 .as_array()
                 .expect("status recovery probes");
-            assert_eq!(probes.len(), 10);
+            assert_eq!(probes.len(), 11);
             assert!(probes.iter().all(|probe| {
                 let operation = probe["operation"].as_str().unwrap_or_default();
                 let expected_reason = if VERIFICATION_RECOVERY_OPERATIONS.contains(&operation) {
@@ -30585,6 +30630,7 @@ exit 1
                     "verify.run",
                     "workspace.ensure",
                     "workspace.reopen",
+                    "workspace.repair_close_proof",
                     "workspace.update",
                 ],
             );

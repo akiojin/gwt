@@ -1196,7 +1196,10 @@ export function createKnowledgeKanbanSurface({
       const issueMonitorModel = createUiStateStore({ inboxByIssue: {}, counts: issueMonitorCounts(),
         humanAttention: { count: null, summary: "", byIssue: {} },
         steeringAttention: { count: null, summary: "", byIssue: {} },
-        reviewAttention: { count: null, summary: "", byIssue: {} }, status: {
+        reviewAttention: { count: null, summary: "", byIssue: {} },
+        pmDecisionAttention: { count: null, summary: "", byWindow: {} },
+        prReviewAttention: { count: null, summary: "", byIssue: {}, byWindow: {} },
+        decisionAttention: { count: null, summary: "" }, status: {
         enabled: false,
         state: "disabled",
         queue_len: 0,
@@ -1424,9 +1427,7 @@ export function createKnowledgeKanbanSurface({
             errorKey ? "Details in notifications" : state === "quota_hold"
               ? `Provider ${quotaHold.provider} | Reset ${quotaHold.reset_at}` : "",
             issueMonitorGitHubBudgetText(issueMonitorModel.read().status),
-            issueMonitorModel.read().humanAttention.summary,
-            issueMonitorModel.read().reviewAttention.summary,
-            issueMonitorModel.read().steeringAttention.summary,
+            issueMonitorModel.read().decisionAttention.summary,
           ].filter(Boolean).join(" | ");
 
           explainIssueControl(pill, `Issues status: ${view.label}. ${pill.title || "The monitor checks the launch queue for eligible issues."}`);
@@ -1523,7 +1524,64 @@ export function createKnowledgeKanbanSurface({
 
       }
 
+      // SPEC #5016 AC-HS1/HS2: the one place that combines the components.
+      // An Issue in several components counts once; views read only this value.
+      // PM decisions belong to a PM window, not an Issue, so they add to the
+      // Issue union instead of joining it.
+      function withDecisionAttention(model) {
+        const issueParts = [model.humanAttention, model.reviewAttention, model.steeringAttention,
+          model.prReviewAttention]
+          .filter(part => part?.count != null);
+        const decisions = model.pmDecisionAttention?.count != null ? model.pmDecisionAttention : null;
+        const parts = decisions ? [...issueParts, decisions] : issueParts;
+        if (!parts.length) return { ...model, decisionAttention: { count: null, summary: "" } };
+        const count = new Set(issueParts.flatMap(part => Object.keys(part.byIssue || {}))).size
+          + (decisions?.count ?? 0);
+        return { ...model, decisionAttention: { count,
+          summary: [`Awaiting attention ${count}`, ...parts.map(part => part.summary)].join(" | ") } };
+      }
+
+      // SPEC #5016 HSK: pm-chat publishes the unanswered decisions of one PM
+      // window from its single derivation; `null` (not loaded, or closed)
+      // removes that window from the count.
+      function applyPmDecisions(windowId, decisions) {
+        issueMonitorModel.update(model => {
+          const byWindow = { ...model.pmDecisionAttention.byWindow };
+          if (Array.isArray(decisions?.ids)) byWindow[windowId] = [...decisions.ids];
+          else delete byWindow[windowId];
+          const windows = Object.values(byWindow);
+          const count = windows.length ? windows.reduce((sum, ids) => sum + ids.length, 0) : null;
+          return withDecisionAttention({ ...model, pmDecisionAttention: { count, byWindow,
+            summary: count == null ? "" : `PM decisions ${count}` } });
+        });
+      }
+
+      // SPEC #5016 HSV: a PM window publishes the unresolved reviews its
+      // current facts observed; `null` (not loaded, or closed) removes it.
+      // A PR without an Issue is its own entry in the Issue union.
+      function applyPmReviewAttention(windowId, items) {
+        issueMonitorModel.update(model => {
+          const byWindow = { ...model.prReviewAttention.byWindow };
+          if (Array.isArray(items)) byWindow[windowId] = items.map(item => ({ ...item }));
+          else delete byWindow[windowId];
+          const windows = Object.values(byWindow);
+          const byIssue = {};
+          for (const item of windows.flat()) {
+            const numbers = Array.isArray(item.issue_numbers) ? item.issue_numbers : [];
+            const keys = numbers.length ? numbers.map(String) : [`pr-${item.pr_number}`];
+            for (const key of keys) byIssue[key] ??= { reason: String(item.reason || "").trim() || "Review unresolved" };
+          }
+          const count = windows.length ? Object.keys(byIssue).length : null;
+          return withDecisionAttention({ ...model, prReviewAttention: { count, byIssue, byWindow,
+            summary: count == null ? "" : `Unresolved reviews ${count}` } });
+        });
+      }
+
       function withMonitorAttention(model) {
+        return withDecisionAttention(withMonitorHolds(model));
+      }
+
+      function withMonitorHolds(model) {
         const records = model.status.autonomous_issues;
         if (!Array.isArray(records) || model.humanAttention.count === null) return model;
         // Dispatch holds include automatic capacity/retry waits, not just
@@ -6229,6 +6287,8 @@ export function createKnowledgeKanbanSurface({
         applyIssueMonitorStatus,
         applyRepositoryLabels,
         applyIssueMonitorInbox,
+        applyPmDecisions,
+        applyPmReviewAttention,
         applyIssueMonitorQueueResult,
         scheduleIssueMonitorProjectionRefresh,
         handleKnowledgeTransportChange,

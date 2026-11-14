@@ -62,8 +62,8 @@ test("Issues strip batches the latest status while model reads and other subscri
     assert.equal(frames.size, 0, "status fields outside the strip and equal counts must not reserve a frame");
     flush();
     assert.equal(renders, 1, "unchanged strip presentation must not redraw");
-    for (const [field, summary] of [["humanAttention", "Needs human 1"], ["reviewAttention", "Review holds 2"], ["steeringAttention", "PM steering 3"]]) {
-      model.update(state => ({ ...state, [field]: { summary } }));
+    for (const summary of ["Awaiting attention 1 | Needs human 1", "Awaiting attention 2 | Review holds 2", "Awaiting attention 3 | PM steering 3"]) {
+      model.update(state => ({ ...state, decisionAttention: { summary } }));
       flush();
       assert.ok(cell.title.includes(summary));
     }

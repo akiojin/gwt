@@ -289,3 +289,67 @@ original 16-ID checks: 47 reads and 570.835ms. Both see the same complete ordere
 ID hash `4c6e0ab73f76bccc9d81caeecb0b337a7513333e22bdfaca4b8fc68982417e83`.
 No model is imported. This tests the read-grouping mechanism, rather than
 establishing the five-second or one-hour acceptance criteria.
+
+## Windows Monitor connection investigation (2026-11-13)
+
+The later `after-s7g-120` diagnostic reported a 4,176ms List response. Its native
+events separate three boundaries: `ListIssueMonitor` returned in 0ms at
+11:02:17.281 JST, the background reader reported `status connect timeout after
+200ms` at 11:02:17.567, and `IssueMonitorListPrepared` completed in 1ms. The
+measurement helper ignored the error notification and accepted the next periodic
+status at 11:02:21.132 as the reply. Preserve the original failed diagnostic;
+4,176ms is not evidence of a four-second synchronous GUI callback. The corrected
+private helper records error notifications as request failures immediately.
+
+An independent Windows accept-cancellation defect was reproduced and proposed
+for separate ownership. Normal Monitor scans do not change daemon residency,
+so that defect was not established as the historical timeout's cause and no
+runtime change for it is included here.
+
+## Admitted diagnostic and metadata source reuse (2026-11-13)
+
+The unchanged delivered runner `7c687948` was measured with the fixed corpus,
+real E5, normal broker and actual headed dark/light Chromium in a fresh HOME.
+Canonical `verify.run` record `vrr-e79b5aa3a68140ca964eb89bb12683be` acquired the
+normal exclusive admission; other managed heavy jobs waited. Optional native
+function timers were enabled. This remains a failed diagnostic, not a matched
+one-hour result or a controlled before/after comparison.
+
+| Boundary | Result |
+| --- | ---: |
+| Issue claim / handler | 6,670 / 6,031.896ms |
+| File claim / handler | 8,110 / 7,549.017ms |
+| Timed application writer bytes | 2,640,444 |
+| Actual Monitor scans / maximum control-to-commit | 5 / 13,121ms |
+| Headed dark / light actions | 58 / 58 |
+| Maximum headed action / errors / one-second overruns | 196.428ms / 0 / 0 |
+| Completed native callback maximum / watchdog overruns | 42ms / 0 |
+| Sampled host CPU mean / maximum | 34.75% / 61% |
+
+The source trace has no unexpected changes, writer instrumentation is proven,
+and the owned GUI and frozen provider were stopped. Unowned desktop activity
+remained outside admission's control. The earlier direct `after-codex1-120`
+run also overlapped diagnostic fixture enumeration; preserve it as a
+contaminated diagnostic, not performance-comparison evidence.
+
+The Issue's four payload verifications are necessary: initial and final
+5,889-record checks plus the new record before and after its upsert. Existing
+verified records are already passed to the writer. They are not four full
+scans and are retained. File source capture and publication checks also remain.
+
+A separate, proved duplication occurs before generation work: the ordinary
+Issue and SPEC readers enumerate and decode the same `meta.json` files. They
+now share raw metadata through one kind of the existing bounded source-revision
+cache. Legacy sources remain fresh, and a revision changing during a read is
+not cached. Body reads, manifest stats, raw SPEC numbers, normalization,
+initial/final health and the 16-entry cache bound are unchanged.
+
+The existing canonical-source regression fails with two reads per metadata
+file before the change and passes with one after it. Source-cache, UTF-8 and
+revision/publication regressions pass. Comparing closed-fixture outputs before
+and after gives identical 2,101 documents, 138 SPEC/manifest entries and 5,889
+records; the canonical record SHA256 is
+`19e61c5ccffb9c8998b0834baa0c6747acbdddffe23dc4371e395f562c2014ea`.
+This proves input equivalence and the eliminated read, not a latency speedup.
+Owner AC-2/3 still require the original successful pilot, matched after-hour,
+raw recomputation and delivery proof.
