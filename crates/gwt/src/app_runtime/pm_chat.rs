@@ -13,7 +13,10 @@ pub(super) enum PmRequestTaskOperation {
         task_key: Option<String>,
         receipt_operation_id: Option<String>,
     },
-    Reopen(gwt::protocol::PmRequestTaskUserRequest),
+    Reopen {
+        request: gwt::protocol::PmRequestTaskUserRequest,
+        task_key: Option<String>,
+    },
     Cancel {
         request: gwt::protocol::PmRequestTaskUserRequest,
         task_key: Option<String>,
@@ -85,12 +88,48 @@ pub(super) fn rejected_request_task_events(
     )])
 }
 
+fn resolve_request_task_id(
+    store: &TaskStore,
+    task_id: String,
+    task_key: Option<String>,
+) -> Result<String, TaskError> {
+    let Some(selected_key) = task_key else {
+        return Ok(task_id);
+    };
+    if selected_key.trim().is_empty() || !task_id.is_empty() {
+        return Err(TaskError::Invalid(
+            "task_key requires a nonempty key without task_id".into(),
+        ));
+    }
+    let state = store.read().map_err(|error| match error {
+        TaskError::Unreadable(_) => TaskError::Unreadable(
+            "Request tasks could not be read. Restore this project's saved task store and reload details.".into(),
+        ),
+        error => error,
+    })?.ok_or(TaskError::MissingTask)?;
+    state
+        .tasks
+        .keys()
+        .find(|id| format!("{:x}", Sha256::digest(id.as_bytes())) == selected_key)
+        .cloned()
+        .ok_or(TaskError::MissingTask)
+}
+
 fn request_task_result(
     store: &TaskStore,
     client_id: &str,
     operation: PmRequestTaskOperation,
 ) -> Result<PmRequestTaskResult, TaskError> {
-    let mut keyed_cancel = false;
+    let keyed_mutation = matches!(
+        &operation,
+        PmRequestTaskOperation::Reopen {
+            task_key: Some(_),
+            ..
+        } | PmRequestTaskOperation::Cancel {
+            task_key: Some(_),
+            ..
+        }
+    );
     let (request, action) = match operation {
         PmRequestTaskOperation::Read {
             task_id,
@@ -144,7 +183,11 @@ fn request_task_result(
                 receipt,
             });
         }
-        PmRequestTaskOperation::Reopen(request) => {
+        PmRequestTaskOperation::Reopen {
+            mut request,
+            task_key,
+        } => {
+            request.task_id = resolve_request_task_id(store, request.task_id, task_key)?;
             let action = Action::Reopen {
                 task_id: request.task_id.clone(),
             };
@@ -154,26 +197,7 @@ fn request_task_result(
             mut request,
             task_key,
         } => {
-            if let Some(selected_key) = task_key {
-                if selected_key.trim().is_empty() || !request.task_id.is_empty() {
-                    return Err(TaskError::Invalid(
-                        "task_key requires a nonempty key without task_id".into(),
-                    ));
-                }
-                let state = store.read().map_err(|error| match error {
-                    TaskError::Unreadable(_) => TaskError::Unreadable(
-                        "Request tasks could not be read. Restore this project's saved task store and reload details.".into(),
-                    ),
-                    error => error,
-                })?.ok_or(TaskError::MissingTask)?;
-                request.task_id = state
-                    .tasks
-                    .keys()
-                    .find(|id| format!("{:x}", Sha256::digest(id.as_bytes())) == selected_key)
-                    .cloned()
-                    .ok_or(TaskError::MissingTask)?;
-                keyed_cancel = true;
-            }
+            request.task_id = resolve_request_task_id(store, request.task_id, task_key)?;
             let action = Action::Cancel {
                 task_id: request.task_id.clone(),
             };
@@ -228,7 +252,7 @@ fn request_task_result(
             action,
         },
     )?;
-    if keyed_cancel {
+    if keyed_mutation {
         return current_request_task_result(store, &request.task_id, receipt);
     }
     // An exact retry returns its original applied snapshot, not a claim

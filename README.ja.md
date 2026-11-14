@@ -1196,7 +1196,13 @@ project に紐づくブラウザ protocol の `load_pm_request_task` は、1 件
 operation で確認することも有効で、Task 差分が空の receipt を保存する場合があります。
 同じ Update や Complete を再実行しても元の receipt は変わらず、現在の Task は
 後続の変更や再開を反映する場合があります。
-Reopen と Cancel は引き続き receipt の適用時点の Task 状態を返します。
+生 ID を使う Reopen と Cancel は引き続き receipt の適用時点の Task 状態を返します。
+Reopen と Cancel は、選択 Task の projection から得た `task_key` をトップレベルに
+指定し、`request.task_id` を空にする方法でも呼び出せます。空・不明・混在した selector
+は拒否します。この方法では現在の保存済み Task と revision に元の receipt を添えて
+返すため、再実行時に古い receipt の Task 状態を現在状態として扱いません。再開時の
+ユーザー監査・CAS・未完了＋再評価待ちの規則は同じです。Tasks 詳細の再開ボタンは
+別の作業です。
 応答を失ったら、現在の Task と元の receipt を読み直してください。新しい接続は別の
 actor になるため、旧 operation の再実行は競合になります。現在の Task と receipt 内の
 過去状態は、それぞれの revision を保持します。欠測・読取不能は診断と回復用の参照を
