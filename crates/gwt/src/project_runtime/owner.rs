@@ -5803,7 +5803,7 @@ impl OwnerState {
             let output_id = id.clone();
             let output_operation_id = operation_id.clone();
             let mut purpose_title = None;
-            let mut manual_successor_prepared = false;
+            let mut manual_successor_prepared = None;
             let result = manual_stop_result
                 .map_err(AgentLaunchError::from)
                 .and_then(|()| {
@@ -5838,10 +5838,12 @@ impl OwnerState {
                             None => false,
                         },
                     );
-                    manual_successor_prepared = matches!(
-                        &config.execution_intent,
-                        gwt_agent::ExecutionLaunchIntent::PreparedManualSuccessor(_)
-                    );
+                    manual_successor_prepared = match &config.execution_intent {
+                        gwt_agent::ExecutionLaunchIntent::PreparedManualSuccessor(binding) => {
+                            Some((config.working_dir.clone(), binding.clone()))
+                        }
+                        _ => None,
+                    };
                     preparation.map_err(AgentLaunchError::from)?;
                     let phase = super::launch::LaunchPhaseTimer::start("owner_admission");
                     let host_project_roots = super::installation::owner_host_project_roots(&root)
@@ -6281,7 +6283,7 @@ impl OwnerState {
                         .is_some_and(|restore| restore.refusal.is_some())
                     && result.is_err()
                     && input.failed_launch.is_none());
-            let unproved_manual_cleanup = manual_successor_prepared
+            let unproved_manual_cleanup = manual_successor_prepared.is_some()
                 && !input.current.load(Ordering::Acquire)
                 && result.is_err()
                 && materialized_snapshot.is_none()
@@ -6290,7 +6292,32 @@ impl OwnerState {
                 && !input.physical_spawn_started
                 && input.pending_fresh_execution.is_none()
                 && input.pending_continue_work.is_none();
-            let cancelled_cleanup = cancelled_cleanup && !unproved_manual_cleanup;
+            let cancelled_cleanup = if unproved_manual_cleanup {
+                let (worktree, binding) = manual_successor_prepared
+                    .as_ref()
+                    .expect("unmaterialized Manual cleanup has a captured preparation");
+                match worktree.as_ref().map_or(Ok(false), |worktree| {
+                    super::continuation::abort_unmaterialized_manual_successor(
+                        &root,
+                        &sessions_dir,
+                        worktree,
+                        binding,
+                        &operation_id,
+                    )
+                }) {
+                    Ok(true) => {
+                        durable_candidate_removed = true;
+                        cancelled_cleanup
+                    }
+                    Ok(false) => false,
+                    Err(error) => {
+                        tracing::warn!(%error, "cancelled Manual preparation requires reconciliation");
+                        false
+                    }
+                }
+            } else {
+                cancelled_cleanup
+            };
             let cleanup_monitor_window_record = || -> Result<(), String> {
                 if let (Ok(registry), Ok(expected)) = (&owner_registry, &expected_registry_row) {
                     super::agent_dispatch::OwnedWindowRecordCleanup {
