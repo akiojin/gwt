@@ -158,12 +158,12 @@ class FlakeDetectionTests(unittest.TestCase):
 
 
 class ChangedTestSelectionTests(unittest.TestCase):
-    def select_suite(self, changed, merged_checkout=False):
+    def select_suite(self, changed, merged_checkout=False, library=False, dependencies=None):
         code = SCRIPT.read_text().split("# changed-test-selection-begin\n", 1)[1].split(
             "# changed-test-selection-end\n", 1
         )[0]
         tests = ["changed::first", "changed::first_extra", "unrelated::first"]
-        with tempfile.TemporaryDirectory(prefix="gwt-flake-selection-") as directory:
+        with tempfile.TemporaryDirectory(prefix="gwt flake selection ") as directory:
             root = Path(directory)
             crate = root / "crates/gwt"
             (crate / "tests/suites").mkdir(parents=True)
@@ -176,6 +176,10 @@ class ChangedTestSelectionTests(unittest.TestCase):
             )
             (crate / "tests/changed.rs").write_text("fn first() {}\n")
             (crate / "tests/unrelated.rs").write_text("fn first() {}\n")
+            if library:
+                (crate / "src").mkdir()
+                (crate / "src/lib.rs").write_text("fn first() {}\n")
+                (crate / "src/main.rs").write_text("fn main() {}\n")
             git = ["git", "-c", "user.name=CI fixture", "-c", "user.email=ci@example.invalid"]
             for args in (["init", "--quiet"], ["add", "."], ["commit", "--quiet", "-m", "base"]):
                 subprocess.run(git + args, cwd=root, check=True, capture_output=True)
@@ -200,14 +204,44 @@ class ChangedTestSelectionTests(unittest.TestCase):
                 subprocess.run(git + ["merge", "--quiet", "--no-edit", upstream],
                                cwd=root, check=True, capture_output=True)
             listing = root / "tests.txt"
-            listing.write_text("\n".join(f"{test}: test" for test in tests))
+            header = ""
+            if library:
+                binary = root / "target/debug/deps/gwt-fixture"
+                binary.parent.mkdir(parents=True)
+                header = f"\x1b[1m     Running\x1b[0m unittests src/lib.rs ({binary})\n"
+                if dependencies is not None:
+                    rule = dependencies
+                    if isinstance(rule, list):
+                        sources = [(crate / name).as_posix().replace(" ", "\\ ") for name in rule]
+                        rule = f"{binary}: " + " ".join(sources) + "\n"
+                    binary.with_suffix(".d").write_text(rule)
+            listing.write_text(header + "\n".join(f"{test}: test" for test in tests))
+            entry = "gwt|lib|" if library else "gwt|test|ci_contracts"
             result = subprocess.run(
-                [sys.executable, "-c", code, "gwt|test|ci_contracts", str(listing), base],
+                [sys.executable, "-c", code, entry, str(listing), base],
                 cwd=root, env=dict(os.environ, PYTHONPATH=str(SCRIPT.parent.resolve()),
                                   GWT_FLAKE_HEAD_SHA=head),
                 capture_output=True, text=True, check=True,
             )
             return result.stdout.splitlines()
+
+    def test_library_ignores_only_sources_proven_absent_from_its_compilation(self):
+        changed = {"../src/lib.rs": "fn first() {} // changed\n",
+                   "../src/main.rs": "fn main() {} // binary-only\n"}
+        self.assertEqual(self.select_suite(changed, library=True, dependencies=["src/lib.rs"]),
+                         ["changed::first", "unrelated::first"])
+
+    def test_library_keeps_full_fallback_without_proof_or_for_unknown_and_deleted_sources(self):
+        full = ["changed::first", "changed::first_extra", "unrelated::first"]
+        changed = {"../src/lib.rs": "fn first() {} // changed\n",
+                   "../src/main.rs": "fn main() {} // binary-only\n"}
+        for dependencies in (None, "malformed\n", ["src/main.rs"],
+                             ["src/lib.rs", "src/main.rs"]):
+            with self.subTest(dependencies=dependencies):
+                self.assertEqual(self.select_suite(changed, library=True,
+                                                   dependencies=dependencies), full)
+        changed["../src/main.rs"] = None
+        self.assertEqual(self.select_suite(changed, library=True, dependencies=["src/lib.rs"]), full)
 
     def test_consolidated_suite_repeats_only_the_changed_file(self):
         self.assertEqual(self.select_suite({"changed.rs": "fn first() { assert!(true); }\n"}),
