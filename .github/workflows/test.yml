@@ -387,7 +387,8 @@ jobs:
     concurrency:
       group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-test-rust-required
       cancel-in-progress: ${{ needs.source-sync.outputs.cancel_running == 'true' }}
-    runs-on: ubuntu-latest
+    # Result and inventory aggregation needs only Bash, Git and Python.
+    runs-on: ubuntu-slim
     needs: [test, test-linux-infrastructure, source-sync]
     if: ${{ !cancelled() }}
     steps:
@@ -1082,7 +1083,8 @@ jobs:
       cancel-in-progress: ${{ needs.source-sync.outputs.cancel_running == 'true' }}
     needs: [test-windows-core-stability, test-windows-index-stability, test-windows-rust, test-windows-rust-lib, test-windows-warm, source-sync]
     if: ${{ always() }}
-    runs-on: ubuntu-latest
+    # This job only evaluates the completed Windows results.
+    runs-on: ubuntu-slim
     steps:
       - name: Require all five core stability runs and Windows regressions
         shell: bash
