@@ -5525,6 +5525,9 @@ pub struct IssueMonitorState {
     requeue_audit: Vec<IssueMonitorReleasedFailure>,
     #[serde(default)]
     event_history: Vec<IssueMonitorEvent>,
+    /// Transient identity/time/sequence while applying one accepted control.
+    #[serde(skip)]
+    event_control_context: Option<(String, String, usize)>,
     /// Highest release version this process has issued or observed.
     #[serde(default)]
     failure_release_version: u64,
@@ -8604,6 +8607,7 @@ impl IssueMonitorState {
             released_failures: BTreeMap::new(),
             requeue_audit: Vec::new(),
             event_history: Vec::new(),
+            event_control_context: None,
             failure_release_version: 0,
             queue: VecDeque::new(),
             pending_launches: VecDeque::new(),
@@ -20583,10 +20587,42 @@ impl IssueMonitorState {
         });
     }
 
-    fn enqueue_autonomous_notice(&mut self, notice: AutonomousNotice) {
+    /// A receipt retry must reproduce the events of its first application.
+    pub(crate) fn with_control_event_context<T>(
+        &mut self,
+        control_id: &str,
+        processed_at: &str,
+        apply: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let recorded_at = parse_rfc3339_utc(processed_at)
+            .map(|time| time.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true))
+            .unwrap_or_else(|| processed_at.to_string());
+        let previous = self
+            .event_control_context
+            .replace((control_id.to_string(), recorded_at, 0));
+        let result = apply(self);
+        self.event_control_context = previous;
+        result
+    }
+
+    fn enqueue_autonomous_notice(&mut self, mut notice: AutonomousNotice) {
+        let (id, recorded_at) = match self.event_control_context.as_mut() {
+            Some((control_id, recorded_at, sequence)) => {
+                let id = format!("control:{control_id}:{sequence:010}");
+                *sequence += 1;
+                if notice.notification_transition.is_some() {
+                    notice.notification_transition_id = Some(id.clone());
+                }
+                (id, recorded_at.clone())
+            }
+            None => (
+                uuid::Uuid::new_v4().to_string(),
+                chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
+            ),
+        };
         self.merge_event_history(std::iter::once(IssueMonitorEvent {
-            id: uuid::Uuid::new_v4().to_string(),
-            recorded_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
+            id,
+            recorded_at,
             notice: notice.clone(),
         }));
         while self.pending_autonomous_notices.len() >= AUTONOMOUS_NOTICE_CAP {
@@ -50398,6 +50434,40 @@ mod tests {
             .unwrap()
             .contains("autonomous attempts exhausted (3/3)"));
         assert_eq!(history.last().unwrap()["issue_number"], 8);
+    }
+
+    #[test]
+    fn monitor_event_history_control_replay_preserves_identity_and_order() {
+        let now = "2000-01-01T00:00:00Z";
+        let mut committed = autonomous_state();
+        committed.record_attempt(7);
+        committed.record_attempt(7);
+        let mut replay = committed.clone();
+        let apply = |monitor: &mut IssueMonitorState| {
+            monitor.record_autonomous_failure(7, "retry", now);
+            monitor.escalate_to_needs_human(7, NeedsHumanKind::UserChoiceRequired, "choice");
+        };
+        committed.with_control_event_context("control-7", now, apply);
+        replay.with_control_event_context("control-7", now, apply);
+        replay.rebase_gui_observer_prefs(&committed.prefs());
+        let history = committed.prefs().event_history;
+        assert_eq!(history.len(), 3);
+        assert_eq!(replay.prefs().event_history, history);
+        assert!(history[0].notice.message.contains("attempt 3/3 failed"));
+        assert!(history[1].notice.message.contains("steering requested"));
+        assert!(history[2].notice.message.contains("needs human"));
+        assert!(history
+            .iter()
+            .all(|event| event.recorded_at == "2000-01-01T00:00:00.000000000Z"));
+        assert_eq!(
+            history[2].notice.notification_transition_id.as_deref(),
+            Some(history[2].id.as_str())
+        );
+        replay.with_control_event_context("another-control", now, |monitor| {
+            monitor.push_unconditional_notice("warn", 7, "another admission".to_string());
+        });
+        assert_eq!(replay.prefs().event_history.len(), 4);
+        assert_eq!(replay.event_control_context, None);
     }
 
     #[test]
