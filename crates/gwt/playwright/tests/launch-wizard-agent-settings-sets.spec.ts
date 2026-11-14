@@ -228,6 +228,98 @@ test.describe("Launch Wizard — Issues Agent Settings sets", () => {
     ).toHaveCount(1);
     expect(browserErrors).toEqual([]);
   });
+
+  // SPEC #6476 T-005lw (AC-1): on a phone the wizard kept its desktop control
+  // sizes (segmented 32px, footer 36px, set reorder icons 24px, selects 38px).
+  test.describe("Launch Wizard touch targets", () => {
+    test.use({ hasTouch: true });
+    const LAUNCH_WIZARD = {
+      ...SETTINGS_WIZARD,
+      title: "Launch Agent",
+      primary_action_label: "Launch",
+      show_branch_controls: true,
+      show_back_button: true,
+      issue_monitor_pool: null,
+      selected_agent_id: "claude",
+      agent_member_options: [],
+      selected_agent_member_id: "",
+      show_fast_mode: true,
+      fast_mode: false,
+      show_reasoning: true,
+      reasoning_options: [
+        { value: "auto", label: "Auto", description: "Let the agent decide" },
+        { value: "low", label: "Low", description: "" },
+        { value: "medium", label: "Medium", description: "" },
+        { value: "high", label: "High", description: "" },
+      ],
+      selected_reasoning: "medium",
+      progress_steps: [
+        { key: "path", label: "Branch", state: "done" },
+        { key: "setup", label: "Settings", state: "active" },
+        { key: "runtime", label: "Runtime", state: "pending" },
+        { key: "start", label: "Start", state: "pending" },
+      ],
+    };
+    const CONTROLS = [
+      "button", "select", "textarea", '[role="button"]',
+      'input:not([type="checkbox"])', 'label:has(input[type="checkbox"])',
+    ].map(selector => `#wizard-modal .modal-shell ${selector}:visible`).join(", ");
+
+    for (const [name, wizard] of [["launch", LAUNCH_WIZARD], ["issues settings", SETTINGS_WIZARD]] as const) {
+      test(`${name} wizard controls are 44px tap targets on a phone`, async ({ page }, info) => {
+        const browserErrors = collectBrowserErrors(page);
+        await installEmbeddedRoutes(page);
+        await installWorkspaceFixture(page);
+        await page.setViewportSize({ width: 601, height: 900 });
+        await page.goto(APP_URL);
+        await keepLaunchWizardModalVisible(page);
+        await expect(page.locator("#close-project-button")).toBeVisible({ timeout: 10_000 });
+        await injectWizard(page, wizard);
+        const modal = page.locator("#wizard-modal");
+        await expect(modal).toHaveClass(/open/);
+        const measure = () => page.locator(CONTROLS).evaluateAll(nodes => nodes.map(node => {
+          const box = node.getBoundingClientRect();
+          return { name: node.getAttribute("aria-label") || node.textContent!.trim().slice(0, 24) || node.className,
+            left: box.left, right: box.right, width: box.width, height: box.height,
+            minSize: `${getComputedStyle(node).minWidth} ${getComputedStyle(node).minHeight}` };
+        }));
+        const desktop = (await measure()).map(control => control.minSize);
+        expect(desktop.join(" "), "601px keeps the desktop control sizes").not.toContain("44px");
+        const shell = modal.locator(".modal-shell");
+        for (const [width, height] of [[320, 568], [390, 844]]) {
+          await page.setViewportSize({ width, height });
+          await expect(async () => {
+            const measured = await measure();
+            expect(measured.length).toBeGreaterThan(5);
+            for (const control of measured) {
+              expect(control.height, `${control.name} height at ${width}px`).toBeGreaterThanOrEqual(44);
+              expect(control.width, `${control.name} width at ${width}px`).toBeGreaterThanOrEqual(44);
+              expect(control.left, `${control.name} is on screen at ${width}px`).toBeGreaterThanOrEqual(0);
+              expect(control.right, `${control.name} is on screen at ${width}px`).toBeLessThanOrEqual(width);
+            }
+            expect(await shell.evaluate(node => node.scrollWidth - node.clientWidth),
+              `the wizard must not scroll sideways at ${width}px`).toBeLessThanOrEqual(0);
+          }).toPass({ timeout: 5_000 });
+          // The footer actions stay on screen while the form scrolls.
+          const primary = modal.locator(".wizard-button.primary");
+          await expect(primary).toBeInViewport({ ratio: 1 });
+          const model = modal.getByRole("combobox", { name: "Model", exact: true });
+          await model.scrollIntoViewIfNeeded();
+          await expect(model, `the form scrolls to Model at ${width}px`).toBeInViewport({ ratio: 1 });
+          await expect(primary).toBeInViewport({ ratio: 1 });
+          await page.screenshot({ path: info.outputPath(`wizard-${name.replace(" ", "-")}-${width}.png`) });
+        }
+        // A tap on an enlarged option still reaches the backend.
+        await modal.getByRole("radio", { name: "Shell" }).tap();
+        await expect.poll(() => sentWizardActions(page)).toContainEqual(
+          expect.objectContaining({ kind: expect.stringMatching(/launch_target/) }));
+        await page.setViewportSize({ width: 601, height: 900 });
+        await expect.poll(async () => (await measure()).map(control => control.minSize),
+          { message: "601px returns to the desktop control sizes" }).toEqual(desktop);
+        expect(browserErrors).toEqual([]);
+      });
+    }
+  });
 });
 
 function collectBrowserErrors(page: any): string[] {

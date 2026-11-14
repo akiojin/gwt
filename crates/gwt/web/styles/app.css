@@ -6231,6 +6231,20 @@ body {
   }
 }
 
+/* SPEC #6476 T-005lw: the wizard controls kept their 24-38px desktop sizes on
+   a phone. Checkboxes and toggles sit inside a label, so the label is the
+   target; the 24px set reorder icons also need the width. */
+@media (max-width: 600px) {
+  #wizard-modal :is(button, select, textarea, [role="button"], input:not([type="checkbox"])),
+  #wizard-modal label:has(input[type="checkbox"]) {
+    min-height: 44px;
+  }
+
+  #wizard-modal .icon-button {
+    min-width: 44px;
+  }
+}
+
 .project-picker,
 .project-onboarding {
   position: absolute;
