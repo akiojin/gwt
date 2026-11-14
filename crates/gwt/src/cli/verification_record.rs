@@ -8125,6 +8125,9 @@ pub(crate) mod tests {
 
     #[test]
     fn non_admitted_cargo_reports_failed_target_resolution() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let worktree = tempfile::tempdir().unwrap();
         fs::write(worktree.path().join("Cargo.toml"), "invalid manifest").unwrap();
         for (command, isolated_baseline) in [
@@ -8148,6 +8151,9 @@ pub(crate) mod tests {
     #[cfg(unix)]
     #[test]
     fn non_admitted_cargo_rejects_unresolved_artifact_target() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let worktree = tempfile::tempdir().unwrap();
         let cargo = worktree.path().join("cargo");
         gwt_core::test_support::write_executable_script(
