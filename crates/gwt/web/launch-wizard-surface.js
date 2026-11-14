@@ -431,9 +431,13 @@ export function createLaunchWizardSurface({
         });
       }
 
+      function isIntakeLaunch() {
+        return Boolean(launchWizard?.is_intake_session);
+      }
+
       // SPEC-2359 US-80 — is this a Start Work launch (where the work branch is
-      // auto-created)? Start Work hides the branch controls; that is the signal
-      // for showing the optional intake prompt + duplicate-work advisory.
+      // auto-created)? Start Work hides the branch controls; Intake uses the
+      // same shared form with Curate-lane copy.
       function isStartWorkLaunch() {
         return Boolean(launchWizard) && launchWizard.show_branch_controls === false;
       }
@@ -673,11 +677,11 @@ export function createLaunchWizardSurface({
         renderLaunchWizard();
       }
 
-      function openStartWorkPendingWizard() {
+      function openIntakePendingWizard() {
         openLaunchPendingWizard({
-          title: "Start Work",
-          meta: "Plan Agent launch",
-          message: "Preparing Plan Agent...",
+          title: "Intake",
+          meta: "Curate lane",
+          message: "Preparing Intake...",
         });
       }
 
@@ -839,9 +843,11 @@ export function createLaunchWizardSurface({
             wizardTitle.textContent = launchWizardOpenError.title || "Launch Agent";
           }
           wizardMeta.textContent =
-            launchWizardOpenError.title === "Start Work"
-              ? "Plan Agent launch"
-              : "Launch Agent";
+            launchWizardOpenError.title === "Intake"
+              ? "Curate lane"
+              : launchWizardOpenError.title === "Start Work"
+                ? "Plan Agent launch"
+                : "Launch Agent";
           wizardBackButton.hidden = true;
           wizardBackButton.disabled = false;
           wizardSubmitButton.hidden = true;
@@ -866,8 +872,11 @@ export function createLaunchWizardSurface({
         );
         wizardCancelButton.textContent = "Cancel";
         if (wizardTitle) wizardTitle.textContent = launchWizard.title || "Launch Agent";
-        wizardMeta.textContent = launchWizard.show_branch_controls === false
-          ? "Plan Agent launch"
+        const isIntakeWizard = isIntakeLaunch();
+        wizardMeta.textContent = isIntakeWizard
+          ? "Curate lane"
+          : launchWizard.show_branch_controls === false
+            ? "Plan Agent launch"
           : `Selected branch · ${
             displayBranchName(
               launchWizard.selected_branch_name || launchWizard.branch_name || "Work",
@@ -967,12 +976,14 @@ export function createLaunchWizardSurface({
           );
         }
 
-        // SPEC-3165 — Start Work is now the Plan Agent entrypoint. The prompt
-        // is still skippable and still drives the duplicate-work advisory.
+        // SPEC-3165 / SPEC-3245 — branchless Intake and remaining Start Work
+        // flows share the skippable Issue/SPEC registration prompt.
         if (isStartWorkLaunch()) {
           const section = createLaunchSection(
             "Register an Issue",
-            "Optional — describe the work for the Plan Agent to turn into an Issue or SPEC. You can skip this.",
+            isIntakeWizard
+              ? "Optional — describe the work for the Intake agent to turn into an Issue or SPEC. You can skip this."
+              : "Optional — describe the work for the Plan Agent to turn into an Issue or SPEC. You can skip this.",
           );
           const textarea = createNode("textarea", "launch-intake-input");
           textarea.placeholder = "e.g. register an issue for the login auth bug";
@@ -1019,8 +1030,10 @@ export function createLaunchWizardSurface({
 
         if (showStartMethods) {
           const section = createLaunchSection(
-            "Start methods",
-            "Pick the safest next step for this agent on the selected branch.",
+            isIntakeWizard ? "Intake methods" : "Start methods",
+            isIntakeWizard
+              ? "Pick how to start the branchless Intake agent."
+              : "Pick the safest next step for this agent on the selected branch.",
           );
 
           const methodList = createNode("div", "start-method-list");
@@ -1033,12 +1046,16 @@ export function createLaunchWizardSurface({
             {
               id: "available",
               title: "Available",
-              copy: "Other ways to start or resume this agent.",
+              copy: isIntakeWizard
+                ? "Other ways to start or resume this Intake agent."
+                : "Other ways to start or resume this agent.",
             },
             {
               id: "unavailable",
               title: "Unavailable",
-              copy: "Requires saved settings, saved sessions, or a running agent.",
+              copy: isIntakeWizard
+                ? "Requires saved settings, saved sessions, or a running Intake agent."
+                : "Requires saved settings, saved sessions, or a running agent.",
             },
           ];
           const methodsByGroup = new Map(
@@ -1825,7 +1842,7 @@ export function createLaunchWizardSurface({
         syncWizardDraftState,
         flushWizardBranchDraft,
         renderLaunchWizard,
-        openStartWorkPendingWizard,
+        openIntakePendingWizard,
         openLaunchAgentPendingWizard,
         applyLaunchWizardStateEvent,
         applyLaunchWizardOpenErrorEvent,

@@ -260,6 +260,7 @@ pub struct LaunchWizardProgressStepView {
 pub struct LaunchWizardView {
     pub title: String,
     pub mode: LaunchWizardMode,
+    pub is_intake_session: bool,
     pub branch_name: String,
     pub selected_branch_name: String,
     /// SPEC-2359 US-83 / FR-444: existing remote branches offered by the "open

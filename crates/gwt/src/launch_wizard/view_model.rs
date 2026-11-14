@@ -27,13 +27,17 @@ impl LaunchWizardState {
         let fast_mode = self.fast_mode_enabled_for_current_agent();
         let show_hermes_options = show_manual_setup && self.current_agent_supports_hermes_options();
         let show_opencode_options = show_manual_setup && self.current_agent_is_opencode();
+        let is_intake_session = self.context.ephemeral_base_ref.is_some();
         LaunchWizardView {
-            title: if self.wizard_mode == LaunchWizardMode::StartWork {
+            title: if is_intake_session {
+                "Intake".to_string()
+            } else if self.wizard_mode == LaunchWizardMode::StartWork {
                 "Start Work".to_string()
             } else {
                 "Launch Agent".to_string()
             },
             mode: self.wizard_mode,
+            is_intake_session,
             branch_name: self.branch_name.clone(),
             selected_branch_name: self.context.selected_branch.name.clone(),
             open_branch_candidates: self.open_branch_candidates.clone(),

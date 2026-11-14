@@ -4563,7 +4563,7 @@ fn app_runtime_open_intake_session_failure_surfaces_launch_wizard_open_error() {
     assert!(matches!(
         events.first().map(|event| &event.event),
         Some(BackendEvent::LaunchWizardOpenError { title, message })
-            if title == "Start Work" && !message.is_empty()
+            if title == "Intake" && !message.is_empty()
     ));
 }
 
@@ -17412,6 +17412,15 @@ fn open_intake_session_opens_ephemeral_branchless_wizard() {
         .expect("intake wizard")
         .wizard;
     assert_eq!(
+        wizard.view().title,
+        "Intake",
+        "intake wizard must not surface the retired Start Work title"
+    );
+    assert!(
+        wizard.view().is_intake_session,
+        "view model must expose an explicit Intake discriminator for frontend copy"
+    );
+    assert_eq!(
         wizard.context.ephemeral_base_ref.as_deref(),
         Some(gwt::start_work::START_WORK_BASE_BRANCH_CANDIDATES[0]),
         "intake wizard is flagged ephemeral on the base ref"
@@ -17446,7 +17455,7 @@ fn open_intake_session_refuses_while_migration_pending() {
                 event: BackendEvent::LaunchWizardOpenError { message, .. },
             } if message == "Complete the project migration before starting an intake session"
         )),
-        "Start Work on a migration_pending tab must surface a clear error: {events:?}"
+        "Intake on a migration_pending tab must surface a clear error: {events:?}"
     );
 }
 

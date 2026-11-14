@@ -1,5 +1,6 @@
-// SPEC-2359 US-80 — the Launch Wizard exposes an optional, always-skippable
-// Start Work intake prompt that drives a non-blocking duplicate-work advisory.
+// SPEC-2359 US-80 / SPEC-3245 — the Launch Wizard exposes an optional,
+// always-skippable Intake prompt that drives a non-blocking duplicate-work
+// advisory without surfacing the retired Start Work entry.
 // These source-assertions lock in the wiring contract between the wizard
 // surface and the app shell.
 
@@ -23,9 +24,11 @@ test("wizard surface dispatches set_initial_prompt and request_work_advisory", (
   assert.match(surface, /requestWorkAdvisory\(\{/);
 });
 
-test("intake panel is gated on the Start Work launch and is skippable copy", () => {
+test("intake panel is gated on branchless launches and carries Intake copy", () => {
   assert.match(surface, /isStartWorkLaunch/);
+  assert.match(surface, /isIntakeWizard/);
   assert.match(surface, /Register an Issue/);
+  assert.match(surface, /Intake agent/);
   assert.match(surface, /Plan Agent/);
   assert.match(surface, /You can skip this/);
 });

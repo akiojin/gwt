@@ -3689,8 +3689,8 @@ function cssBlockContaining(css, selector) {
 
 // === merged from origin/develop: SPEC-1939/2014 perf + Launch Wizard coverage ===
 
-// SPEC-3245 Phase 3: the Intake session command reuses the pending-wizard
-// mechanism (formerly Start Work) to keep the modal open before backend state.
+// SPEC-3245 Phase 3: the Intake command uses the shared pending-wizard
+// mechanism, but the user-visible chrome must stay in the Curate lane.
 test("Intake session command opens a pending wizard before backend state arrives", () => {
   const commandCase = appSource.match(
     /case\s+"intake-session":[\s\S]*?case\s+"theme-cycle"/,
@@ -3698,8 +3698,18 @@ test("Intake session command opens a pending wizard before backend state arrives
   assert.ok(commandCase, "expected Intake session command case");
   assert.match(
     commandCase[0],
-    /openStartWorkPendingWizard\(\)[\s\S]*?kind:\s*"open_intake_session"/,
-    "expected Intake session to render a local pending wizard before sending open_intake_session",
+    /openIntakePendingWizard\(\)[\s\S]*?kind:\s*"open_intake_session"/,
+    "expected Intake session to render an Intake pending wizard before sending open_intake_session",
+  );
+  assert.doesNotMatch(
+    commandCase[0],
+    /openStartWorkPendingWizard\(\)/,
+    "Intake must not open the retired Start Work pending chrome",
+  );
+  assert.match(
+    launchWizardSource,
+    /title:\s*"Intake"[\s\S]{0,120}message:\s*"Preparing Intake\.\.\."/,
+    "expected pending Intake copy",
   );
   assert.match(
     launchWizardSource,
@@ -3709,7 +3719,7 @@ test("Intake session command opens a pending wizard before backend state arrives
   assert.match(
     launchWizardSource,
     /if\s*\(!launchWizard\s*&&\s*!launchWizardOpenError\s*&&\s*!launchWizardOpening\)/,
-    "renderLaunchWizard must keep the modal open for local pending Start Work state",
+    "renderLaunchWizard must keep the modal open for local pending Intake state",
   );
 });
 

@@ -60,6 +60,10 @@ fn start_work_open_error(client_id: &str, message: impl Into<String>) -> Vec<Out
     vec![launch_wizard_open_error(client_id, "Start Work", message)]
 }
 
+fn intake_open_error(client_id: &str, message: impl Into<String>) -> Vec<OutboundEvent> {
+    vec![launch_wizard_open_error(client_id, "Intake", message)]
+}
+
 fn issue_monitor_auto_launch_geometry(index: usize) -> WindowGeometry {
     let offset = ((index % 8) as f64) * 24.0;
     WindowGeometry {
@@ -431,19 +435,19 @@ impl AppRuntime {
     /// primary "start new work" entry that replaces Start Work.
     pub(crate) fn open_intake_session(&mut self, client_id: &str) -> Vec<OutboundEvent> {
         let Some(tab_id) = self.active_tab_id.clone() else {
-            return start_work_open_error(
+            return intake_open_error(
                 client_id,
                 "Open a project before starting an intake session",
             );
         };
         let Some(tab) = self.tab(&tab_id) else {
-            return start_work_open_error(client_id, "Project tab not found");
+            return intake_open_error(client_id, "Project tab not found");
         };
         if tab.kind != gwt::ProjectKind::Git {
-            return start_work_open_error(client_id, "An intake session requires a Git project");
+            return intake_open_error(client_id, "An intake session requires a Git project");
         }
         if tab.migration_pending {
-            return start_work_open_error(
+            return intake_open_error(
                 client_id,
                 "Complete the project migration before starting an intake session",
             );
@@ -452,7 +456,7 @@ impl AppRuntime {
         let project_root = tab.project_root.clone();
         match self.open_intake_session_for_project(&tab_id, &project_root) {
             Ok(()) => vec![self.launch_wizard_state_outbound()],
-            Err(error) => start_work_open_error(client_id, error),
+            Err(error) => intake_open_error(client_id, error),
         }
     }
 
