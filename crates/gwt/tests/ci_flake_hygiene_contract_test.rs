@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 const TEST_WORKFLOW: &str = ".github/workflows/test.yml";
 const ORPHAN_SCRIPT: &str = "scripts/ci-check-orphan-processes.sh";
 const FLAKE_SCRIPT: &str = "scripts/ci-flake-detect.sh";
-const CHANGES_JOB: &str = "changes";
+const CHANGES_JOB: &str = "source-sync";
 const RUST_TEST_JOB: &str = "test";
 const FLAKE_JOB: &str = "flake-detection";
 const TARGETS_OUTPUT: &str = "flake_targets";
@@ -131,11 +131,11 @@ fn the_change_classifier_publishes_the_changed_test_targets() {
         .get("outputs")
         .and_then(Value::as_mapping)
         .cloned()
-        .expect("the `changes` job must declare outputs");
+        .expect("the classification job must declare outputs");
 
     assert!(
         outputs.contains_key(Value::String(TARGETS_OUTPUT.to_string())),
-        "the `changes` job must publish a `{TARGETS_OUTPUT}` output (SPEC #4551 T-055)"
+        "the classification job must publish a `{TARGETS_OUTPUT}` output (SPEC #4551 T-055)"
     );
 }
 

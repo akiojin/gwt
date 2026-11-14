@@ -208,7 +208,7 @@ fn consolidated_gwt_suites_register_every_integration_source_once() {
 
     let workflow: serde_yaml::Value =
         serde_yaml::from_str(&read(TEST_WORKFLOW)).expect("test workflow");
-    let steps = workflow["jobs"]["changes"]["steps"]
+    let steps = workflow["jobs"]["source-sync"]["steps"]
         .as_sequence()
         .expect("classification steps");
     let classify = steps
