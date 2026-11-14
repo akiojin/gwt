@@ -13806,3 +13806,108 @@ fn execution_pr_metadata_preserves_done_and_rejects_unproven_targets() {
     save_workspace_work_items_projection_to_path(&works, &ambiguous).unwrap();
     assert!(write("Issue #42", "delivery-session").is_err());
 }
+
+/// Issue #4406 AC-4: build a projection whose single Work item has been
+/// through inline-history compaction, plus a machine-local lifecycle log that
+/// still offers the compacted-away event.
+fn compacted_item_with_durable_log(
+    tmp: &Path,
+) -> (
+    super::WorkItemsProjection,
+    std::path::PathBuf,
+    DateTime<Utc>,
+) {
+    let folded_at = chrono::Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap();
+    let watermark = chrono::Utc.with_ymd_and_hms(2026, 9, 2, 0, 0, 0).unwrap();
+    let retained_at = chrono::Utc.with_ymd_and_hms(2026, 9, 3, 0, 0, 0).unwrap();
+
+    let mut projection = super::WorkItemsProjection::empty(retained_at);
+    let mut start = super::WorkEvent::new(super::WorkEventKind::Start, "compacted-work", folded_at);
+    start.title = Some("Compacted work".to_string());
+    let folded_id = start.id.clone();
+    projection.apply_event(start.clone());
+    let retained =
+        super::WorkEvent::new(super::WorkEventKind::Update, "compacted-work", retained_at);
+    projection.apply_event(retained);
+
+    // Exactly what `compact_work_item` leaves behind: the dropped event is
+    // gone from the inline tail, and the trio that `events_compacted_through`
+    // reads back records how far the folded state already covers.
+    let item = &mut projection.work_items[0];
+    item.events.retain(|event| event.id != folded_id);
+    item.legacy_metadata_authoritative = true;
+    item.legacy_metadata_snapshot = None;
+    item.legacy_metadata_snapshot_at = Some(watermark);
+
+    let events_path = tmp.join("work-events-closed.jsonl");
+    fs::write(
+        &events_path,
+        format!("{}\n", serde_json::to_string(&start).expect("event json")),
+    )
+    .expect("write machine-local lifecycle log");
+
+    (projection, events_path, watermark)
+}
+
+/// Issue #4406 AC-4: an event dropped by inline-history compaction is already
+/// folded into its Work item's authoritative state, but the machine-local
+/// lifecycle log is append-only and keeps offering it. Without the
+/// `compacted_through` watermark that the intake path already applies
+/// (Issue #4508), recovery treats every such event as unprojected and refolds
+/// the entire durable history on every workspace-state transaction. Measured
+/// on the fleet that is 632,486 of 632,486 events re-folded per transaction,
+/// while holding the cross-process works.json lock on the GUI event loop.
+#[test]
+fn recovery_skips_machine_local_events_already_covered_by_inline_compaction() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (mut projection, events_path, _) = compacted_item_with_durable_log(tmp.path());
+    let before = projection.work_items.clone();
+
+    let recovered =
+        super::recover_unprojected_workspace_work_events_locked(&mut projection, &events_path)
+            .expect("recovery must succeed");
+
+    assert!(
+        !recovered,
+        "an event already covered by the compaction watermark must not re-enter the projection"
+    );
+    assert_eq!(
+        projection.work_items, before,
+        "recovery must leave the compacted projection byte-identical"
+    );
+    assert_eq!(
+        projection.work_items[0].events.len(),
+        1,
+        "the compacted inline tail must not re-grow"
+    );
+}
+
+/// Issue #4406 AC-4 / FR-384: close state is owned by the machine-local
+/// lifecycle log, so the watermark must not swallow a close. A Done stamped
+/// after the compaction boundary still has to close the Work.
+#[test]
+fn recovery_still_applies_a_close_recorded_after_the_compaction_watermark() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (mut projection, events_path, watermark) = compacted_item_with_durable_log(tmp.path());
+    let closed_at = watermark + chrono::Duration::days(5);
+    let close = super::WorkEvent::new(super::WorkEventKind::Done, "compacted-work", closed_at);
+    let mut log = fs::read_to_string(&events_path).expect("read log");
+    log.push_str(&format!(
+        "{}\n",
+        serde_json::to_string(&close).expect("event json")
+    ));
+    fs::write(&events_path, log).expect("append close");
+
+    let recovered =
+        super::recover_unprojected_workspace_work_events_locked(&mut projection, &events_path)
+            .expect("recovery must succeed");
+
+    assert!(
+        recovered,
+        "a close recorded after the compaction watermark must still be recovered"
+    );
+    assert!(
+        projection.work_items[0].is_terminal(),
+        "the recovered Done must close the Work"
+    );
+}

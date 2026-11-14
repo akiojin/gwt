@@ -6241,9 +6241,35 @@ fn recover_unprojected_workspace_work_events_locked(
         .iter()
         .flat_map(|item| item.events.iter().map(|event| event.id.clone()))
         .collect::<HashSet<_>>();
+    // Issue #4406 AC-4 / Issue #4508: inline-history compaction drops events
+    // that are already folded into the Work item's authoritative state, but
+    // this log is append-only and keeps offering them. Without the same
+    // watermark the intake path applies, each one reads as unprojected and
+    // drags the entire durable history back through a full refold — measured
+    // on the fleet at 632,486 events per transaction, taken while the
+    // cross-process works.json lock is held on the GUI event loop.
+    //
+    // Close kinds stay exempt for the same reason they are exempt there:
+    // close state is owned by this machine-local lifecycle log (FR-384), and
+    // re-applying one is already refused by the terminal cutoff.
+    let compacted_through = projection
+        .work_items
+        .iter()
+        .filter_map(|item| {
+            item.events_compacted_through()
+                .map(|through| (item.id.clone(), through))
+        })
+        .collect::<HashMap<_, _>>();
     let mut durable_events = Vec::new();
     for event in events {
         if seen_event_ids.contains(&event.id) {
+            continue;
+        }
+        if !crate::work_events_intake::is_close_kind(event.kind)
+            && compacted_through
+                .get(&event.work_item_id)
+                .is_some_and(|through| event.updated_at <= *through)
+        {
             continue;
         }
         durable_events.push(event);

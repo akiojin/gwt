@@ -71,7 +71,7 @@ impl SharedWorkEventsSource {
     }
 }
 
-fn is_close_kind(kind: WorkEventKind) -> bool {
+pub(crate) fn is_close_kind(kind: WorkEventKind) -> bool {
     matches!(
         kind,
         WorkEventKind::Pause | WorkEventKind::Done | WorkEventKind::Discard
