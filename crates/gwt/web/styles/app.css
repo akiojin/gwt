@@ -4106,6 +4106,22 @@ body {
 .notification-center__dismiss:hover {
   color: var(--color-text-strong);
 }
+/* SPEC #6476 T-005nc: the drawer controls kept their 20-28px desktop sizes on
+   a phone. The triage row grows to the 44px dismiss; Details stays text-wide. */
+@media (max-width: 600px) {
+  .op-drawer__close,
+  .notification-center__clear,
+  .notification-center__dismiss {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .notification-center__details > summary {
+    display: flex;
+    align-items: center;
+    min-height: 44px;
+  }
+}
 
 .attachment-progress {
   position: absolute;
