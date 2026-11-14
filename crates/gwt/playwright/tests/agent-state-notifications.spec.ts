@@ -203,3 +203,62 @@ test(controllerTestTitle, async ({ page }, testInfo) => {
   await expect(page.locator("#notification-center .notification-center__item")).toHaveCount(0);
   await page.screenshot({ path: testInfo.outputPath("server-notification-intent.png"), fullPage: true });
 });
+
+// SPEC #6476 T-005nc (AC-1): on a phone the drawer kept its desktop sizes
+// (dismiss 20px, close 28px, Clear all 24px).
+test.describe("Notification center touch targets", () => {
+  test.use({ hasTouch: true });
+  test("drawer controls are 44px tap targets on a phone", async ({ page }, testInfo) => {
+    const inject = (detail: Record<string, unknown>) => page.evaluate((payload) => {
+      window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: payload }));
+    }, detail);
+    await inject({
+      kind: "issue_monitor_toast", level: "warn", issue_number: 4665,
+      notification_transition: "needs_human", message: "Issue #4665 needs human attention.",
+    });
+    await inject({ kind: "window_command_error", id: "tab-1::agent", message: "spawn failed: permission denied" });
+    await page.setViewportSize({ width: 601, height: 900 });
+    await page.locator("#op-notifications-button").click();
+    const drawer = page.locator("#notification-center");
+    const rows = drawer.locator(".notification-center__item");
+    await expect(rows).toHaveCount(2);
+    const controls = "#notification-center :is(button, summary):visible";
+    const measure = () => page.locator(controls).evaluateAll(nodes => nodes.map(node => {
+      const box = node.getBoundingClientRect();
+      const style = getComputedStyle(node);
+      return { name: node.getAttribute("aria-label") || node.textContent!.trim().slice(0, 24) || node.className,
+        left: box.left, right: box.right, width: box.width, height: box.height,
+        minSize: `${style.minWidth} ${style.minHeight}` };
+    }));
+    const desktop = (await measure()).map(control => control.minSize);
+    expect(desktop.join(" "), "601px keeps the desktop control sizes").not.toContain("44px");
+    for (const [width, height] of [[320, 568], [390, 844]]) {
+      await page.setViewportSize({ width, height });
+      await expect(async () => {
+        const measured = await measure();
+        expect(measured.map(control => control.name)).toEqual(expect.arrayContaining(
+          ["Clear all", "Close notifications", "Dismiss notification", "Details"]));
+        for (const control of measured) {
+          expect(control.height, `${control.name} height at ${width}px`).toBeGreaterThanOrEqual(44);
+          if (control.name !== "Details") {
+            expect(control.width, `${control.name} width at ${width}px`).toBeGreaterThanOrEqual(44);
+          }
+          expect(control.left, `${control.name} is on screen at ${width}px`).toBeGreaterThanOrEqual(0);
+          expect(control.right, `${control.name} is on screen at ${width}px`).toBeLessThanOrEqual(width);
+        }
+        for (const target of [drawer, drawer.locator(".notification-center__body")]) {
+          expect(await target.evaluate(node => node.scrollWidth - node.clientWidth),
+            `the drawer must not scroll sideways at ${width}px`).toBeLessThanOrEqual(0);
+        }
+        expect(await drawer.locator(".notification-center__details > summary")
+          .evaluate(node => getComputedStyle(node).display), "Details keeps its disclosure marker").toBe("list-item");
+      }).toPass({ timeout: 5_000 });
+      await page.screenshot({ path: testInfo.outputPath(`notifications-${width}.png`) });
+    }
+    await rows.filter({ hasText: "#4665" }).getByRole("button", { name: "Dismiss notification" }).tap();
+    await expect(rows).toHaveCount(1);
+    await page.setViewportSize({ width: 601, height: 900 });
+    await expect.poll(async () => (await measure()).map(control => control.minSize).join(" "),
+      { message: "601px returns to the desktop control sizes" }).not.toContain("44px");
+  });
+});
