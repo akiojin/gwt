@@ -1588,6 +1588,7 @@ fn same_session_restore_retires_placeholder_so_authenticated_name_succeeds() {
     let project = temp.path().join("project");
     control_init_repo(&project);
     seed_owner_fixture_roster(&project, 8);
+    configure_owner_fixture_tools(&project, &["pane-contract-fixture"]);
     gwt_agent::save_stored_custom_agents_to_path(
         &gwt_core::paths::gwt_config_path(),
         &[gwt_agent::StoredCustomAgent::new(control_custom_agent())],
