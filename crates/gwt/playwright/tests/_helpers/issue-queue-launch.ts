@@ -12,6 +12,7 @@ import { startExactRelaunchFixture, writeFixtureNodeCommand, type ExactRelaunchS
 export async function startIssueQueueLaunchFixture(info: TestInfo, options: {
   issueNumber?: number;
   additionalIssueNumbers?: number[];
+  initialBodies?: Record<number, string>;
   initialComments?: Record<number, { body: string; updated_at: string }[]>;
   monitorPreferences?: Record<string, unknown>;
   targetIssueNumber?: 44; switching?: boolean; positive?: boolean; terminalConvergence?: boolean; autonomousMode?: boolean;
@@ -31,6 +32,11 @@ export async function startIssueQueueLaunchFixture(info: TestInfo, options: {
     title: "Next planned switch fixture", url: `https://github.com/fixture/queue/issues/${options.targetIssueNumber}` }] : []),
     ...(options.additionalIssueNumbers ?? []).map(number => ({ ...issue, number,
       title: `Queue refill fixture ${number}`, url: `https://github.com/fixture/queue/issues/${number}` }))];
+  for (const [number, body] of Object.entries(options.initialBodies ?? {})) {
+    const selected = issues.find(value => value.number === Number(number));
+    if (!selected) throw new Error(`Initial body references unknown Issue ${number}`);
+    selected.body = body;
+  }
   const issueComments = new Map(issues.map(value => [value.number, value.number === issue.number ? comments : [] as typeof comments]));
   let nextCommentId = 1;
   for (const [number, initial] of Object.entries(options.initialComments ?? {})) {
