@@ -75,6 +75,8 @@ impl IssueMonitorUrgentQueue {
     pub fn projection(
         &self,
         queue: &IssueMonitorTerminalQueue,
+        priority_order: &[u64],
+        priority_launch_now: Option<u64>,
     ) -> IssueMonitorUrgentQueueProjection {
         let mut urgent = queue
             .entries
@@ -119,9 +121,15 @@ impl IssueMonitorUrgentQueue {
                 if self.demoted.contains(&entry.number) {
                     "pm_demoted"
                 } else if is_urgent {
-                    "urgent_label"
+                    "urgent"
                 } else if grant.is_some() {
                     "urgent_limit_reached"
+                } else if priority_order.first() == Some(&entry.number)
+                    && priority_launch_now == Some(entry.number)
+                {
+                    "launch_now"
+                } else if priority_order.contains(&entry.number) {
+                    "priority_order"
                 } else {
                     "normal_order"
                 }
@@ -181,7 +189,8 @@ impl IssueMonitorState {
                 .entries
                 .retain(|entry| !self.label_excluded_issues.contains(&entry.number));
         }
-        self.urgent_queue.projection(&queue)
+        self.urgent_queue
+            .projection(&queue, &self.priority_order, self.priority_launch_now)
     }
 
     pub(crate) fn observe_urgent_issue(&mut self, issue: &IssueMonitorIssue, now: &str) {

@@ -98,6 +98,88 @@ test.describe("Issues touch navigation", () => {
       await expect(detail).toBeHidden();
     }
   });
+
+  // SPEC #6476 T-005q: the monitor row, search and New/Refresh measured
+  // 30-42px tall on a phone. Below 601px they are 44px tap targets.
+  test("Issues monitor controls, search and actions are 44px tap targets on a phone", async ({ page }, info) => {
+    const root = page.locator(".issue-bridge-root");
+    const controls = root.locator(".knowledge-monitor-controls :is(button, input):visible, .knowledge-search:visible, .workspace-toolbar-actions button:visible");
+    const sizes = () => controls.evaluateAll(nodes => nodes.map(node => {
+      const rect = node.getBoundingClientRect();
+      return { label: node.getAttribute("aria-label") || node.textContent!.trim().slice(0, 30) || node.className, width: rect.width, height: rect.height };
+    }));
+    const minHeights = () => controls.evaluateAll(nodes => nodes.map(node => getComputedStyle(node).minHeight));
+    expect((await sizes()).some(control => control.height < 44), "the fixture starts with desktop-sized controls").toBe(true);
+    const desktop = await minHeights();
+    expect(desktop).not.toContain("44px");
+    await page.setViewportSize({ width: 601, height: 900 });
+    expect(await minHeights(), "601px retains desktop control sizes").toEqual(desktop);
+    for (const width of [320, 390]) {
+      await page.setViewportSize({ width, height: 844 });
+      const measured = await sizes();
+      expect(measured.map(control => control.label)).toEqual(expect.arrayContaining(["Auto-refill", "Autonomous mode", "Agent limit", "Issues settings", "Refresh cached work items"]));
+      expect(measured).toHaveLength(9);
+      for (const control of measured) {
+        expect(control.width, `${control.label} width at ${width}px`).toBeGreaterThanOrEqual(44);
+        expect(control.height, `${control.label} height at ${width}px`).toBeGreaterThanOrEqual(44);
+      }
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth),
+        "the page does not scroll sideways").toBe(true);
+      await page.screenshot({ path: info.outputPath(`issues-controls-${width}.png`) });
+    }
+    const toggle = root.getByRole("switch", { name: "Auto-refill", exact: true });
+    await toggle.scrollIntoViewIfNeeded();
+    await toggle.tap();
+    await expect.poll(() => messages(page)).toEqual([expect.objectContaining({ kind: "set_issue_monitor_auto_refill", enabled: true })]);
+  });
+
+  // SPEC #6476 T-005ic: card controls measured 13-36px on a phone (selection
+  // 19px with a 13px box, card 35px, actions 36px, menu 28px, items 31px).
+  test("Issues card selection, actions and menu are 44px tap targets on a phone", async ({ page }, info) => {
+    const board = page.locator(".issue-queue-board");
+    const cardControls = ".issue-queue-select:visible, .knowledge-row-select:visible, .knowledge-row-actions button:visible, .knowledge-row-menu-trigger:visible, .knowledge-row-menu-item:visible";
+    const sizes = () => board.locator(cardControls).evaluateAll(nodes => nodes.map(node => {
+      const rect = node.getBoundingClientRect();
+      return { name: `${node.className.split(" ").at(-1)} ${node.getAttribute("data-action") ?? ""}`.trim(), width: rect.width, height: rect.height };
+    }));
+    const minHeights = () => board.locator(cardControls).evaluateAll(nodes => nodes.map(node =>
+      `${node.className.split(" ").at(-1)} ${node.getAttribute("data-action") ?? ""} ${getComputedStyle(node).minHeight}`));
+    const menu = row(page, 3).locator(".knowledge-row-menu");
+    await menu.locator("summary").click();
+    await expect(menu).toHaveAttribute("open", "");
+    const desktop = await minHeights();
+    expect(desktop.length, "desktop card controls, including open menu items, are present").toBeGreaterThan(5);
+    expect(desktop.join("\n")).not.toContain("44px");
+    await page.setViewportSize({ width: 601, height: 900 });
+    expect(await minHeights(), "601px retains each desktop card control size").toEqual(desktop);
+    await menu.locator("summary").click();
+    await expect(menu).not.toHaveAttribute("open", "");
+    for (const width of [320, 390]) {
+      await page.setViewportSize({ width, height: 844 });
+      const card = row(page, 3);
+      await card.scrollIntoViewIfNeeded();
+      await card.locator(".knowledge-row-menu-trigger").tap();
+      await expect(card.locator(".knowledge-row-menu")).toHaveAttribute("open", "");
+      const measured = await sizes();
+      expect(measured.map(control => control.name)).toEqual(expect.arrayContaining(
+        ["issue-queue-select", "knowledge-row-select", "knowledge-row-action queue-push", "knowledge-row-menu-trigger", "knowledge-row-menu-item move-down"]));
+      for (const control of measured) {
+        expect(control.width, `${control.name} width at ${width}px`).toBeGreaterThanOrEqual(44);
+        expect(control.height, `${control.name} height at ${width}px`).toBeGreaterThanOrEqual(44);
+      }
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth),
+        "the page does not scroll sideways").toBe(true);
+      await page.screenshot({ path: info.outputPath(`issues-cards-${width}.png`) });
+      await card.locator(".knowledge-row-menu-trigger").tap();
+      await expect(card.locator(".knowledge-row-menu")).not.toHaveAttribute("open", "");
+      const select = card.locator(".issue-queue-select");
+      const box = (await select.boundingBox())!;
+      // Tap the label's enlarged lower-right area, away from the 13px box itself.
+      await select.tap({ position: { x: box.width - 4, y: box.height - 4 } });
+      await expect(select.locator("input")).toBeChecked();
+      await select.locator("input").uncheck();
+    }
+  });
 });
 
 test("Issue #6994 merged work awaits measurement in Backlog with an explicit requeue action", async ({ page }) => {
@@ -354,6 +436,9 @@ test("Issue #5400 unchanged entry revisions retain the list and current detail",
 });
 
 test("Issue #5401 replays retain focus and only changed Issue keys replace rows", async ({ page }, info) => {
+  // The initial census moves Issue 5 independently of the entries response.
+  // Finish that move before counting mutations caused by entry replays.
+  await expect(column(page, "active").locator('[data-issue-number="5"]')).toBeVisible();
   const select = row(page, 2).locator(".knowledge-row-select");
   await select.focus();
   await page.evaluate(() => {
@@ -1614,7 +1699,7 @@ test("T-F2: exact running profile stays distinct from the next override in both 
 
 test("urgent priority, cap fallback and PM demotion preserve assignment provenance", async ({page}) => {
   await confirm(page, [3, 4, 1], { terminal_queue: [
-    {number: 3, queued_by: "operator", priority: "urgent", priority_reason: "urgent_label", assigned_by: "alice", assigned_at: "2026-10-03T01:00:00Z"},
+    {number: 3, queued_by: "operator", priority: "urgent", priority_reason: "urgent", assigned_by: "alice", assigned_at: "2026-10-03T01:00:00Z"},
     {number: 4, queued_by: "auto-refill", priority: "normal", priority_reason: "urgent_limit_reached"},
     {number: 1, queued_by: "operator", priority: "normal", priority_reason: "pm_demoted", assigned_by: "pm-session", assigned_at: "2026-10-03T02:00:00Z"},
   ]});

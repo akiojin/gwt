@@ -1048,6 +1048,9 @@ pub struct IssueMonitorPrefs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_active_last_change: Option<IssueMonitorMaxActiveChange>,
     pub priority_order: Vec<u64>,
+    /// Latest launch-now target; ordinary order writes clear this provenance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority_launch_now: Option<u64>,
     /// Latest explicitly reasoned order, retained as history after later unreasoned writes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority_reason_note: Option<IssueMonitorPriorityReasonNote>,
@@ -1393,6 +1396,7 @@ impl Default for IssueMonitorPrefs {
             max_active_agents_mode: IssueMonitorMaxActiveMode::Auto,
             max_active_last_change: None,
             priority_order: Vec::new(),
+            priority_launch_now: None,
             priority_reason_note: None,
             allowed_labels: Vec::new(),
             monitor_runtime_counts: BTreeMap::new(),
@@ -5355,6 +5359,8 @@ pub struct IssueMonitorState {
     retired_completed_sessions: BTreeSet<String>,
     priority_order: Vec<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    priority_launch_now: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     priority_reason_note: Option<IssueMonitorPriorityReasonNote>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     terminal_queues: BTreeMap<String, IssueMonitorTerminalQueue>,
@@ -8511,6 +8517,7 @@ impl IssueMonitorState {
             allowed_labels: Vec::new(),
             label_excluded_issues: BTreeSet::new(),
             priority_order: Vec::new(),
+            priority_launch_now: None,
             priority_reason_note: None,
             monitor_runtime_counts: BTreeMap::new(),
             monitor_runtime_stop_requests: Vec::new(),
@@ -8615,6 +8622,7 @@ impl IssueMonitorState {
         state.launch_usage_threshold_percent = prefs.launch_usage_threshold_percent;
         state.allowed_labels = normalize_issue_monitor_allowed_labels(prefs.allowed_labels);
         state.priority_order = prefs.priority_order;
+        state.priority_launch_now = prefs.priority_launch_now;
         state.priority_reason_note = prefs.priority_reason_note;
         state.monitor_runtime_counts = prefs.monitor_runtime_counts;
         state.monitor_runtime_stop_requests = prefs.monitor_runtime_stop_requests;
@@ -8801,6 +8809,7 @@ impl IssueMonitorState {
             max_active_agents_mode: self.max_active_agents_mode,
             max_active_last_change: self.max_active_last_change.clone(),
             priority_order: self.priority_order.clone(),
+            priority_launch_now: self.priority_launch_now,
             priority_reason_note: self.priority_reason_note.clone(),
             allowed_labels: self.allowed_labels.clone(),
             monitor_runtime_counts: self.monitor_runtime_counts.clone(),
@@ -12186,6 +12195,7 @@ impl IssueMonitorState {
         self.max_active_last_change = disk.max_active_last_change.clone();
         self.apply_agent_capacity_limit();
         self.priority_order = disk.priority_order.clone();
+        self.priority_launch_now = disk.priority_launch_now;
         self.priority_reason_note = disk.priority_reason_note.clone();
         self.terminal_queues = disk.terminal_queues.clone();
 
@@ -19125,6 +19135,7 @@ impl IssueMonitorState {
 
     pub fn set_priority_order(&mut self, issue_numbers: Vec<u64>) {
         self.priority_order = issue_numbers;
+        self.priority_launch_now = None;
         if let Some(queue) = self
             .terminal_queues
             .get_mut(&crate::process::current_hostname())
@@ -19138,6 +19149,14 @@ impl IssueMonitorState {
         }
         self.apply_priority_order_to_queue();
         self.apply_priority_order_to_inbox();
+    }
+
+    pub(crate) fn prioritize_launch_now(&mut self, number: u64) {
+        let mut order = self.priority_order.clone();
+        order.retain(|existing| *existing != number);
+        order.insert(0, number);
+        self.set_priority_order(order);
+        self.priority_launch_now = Some(number);
     }
 
     /// Stored membership, including entries hidden by admission/display filters.
@@ -19415,9 +19434,7 @@ impl IssueMonitorState {
                 .copied()
                 .filter(|number| !order.contains(number)),
         );
-        self.priority_order = priority;
-        self.apply_priority_order_to_queue();
-        self.apply_priority_order_to_inbox();
+        self.set_priority_order(priority);
         true
     }
 
@@ -27221,31 +27238,38 @@ mod tests {
     fn priority_reason_note_survives_state_roundtrip_and_disk_rebase() {
         let legacy = serde_json::to_value(IssueMonitorPrefs::default()).unwrap();
         assert!(legacy.get("priority_reason_note").is_none());
+        assert!(legacy.get("priority_launch_now").is_none());
         let note = serde_json::json!({
             "reason":"Unblock the release", "priority_order":[2,1],
             "recorded_at":"2026-10-23T00:00:00Z"
         });
         let mut raw = legacy;
         raw["priority_order"] = serde_json::json!([2, 1]);
+        raw["priority_launch_now"] = serde_json::json!(2);
         raw["priority_reason_note"] = note.clone();
         let disk: IssueMonitorPrefs = serde_json::from_value(raw).unwrap();
         let restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), disk.clone());
+        assert_eq!(restored.prefs().priority_launch_now, Some(2));
         assert_eq!(
             serde_json::to_value(restored.prefs()).unwrap()["priority_reason_note"],
             note
         );
         let mut stale = IssueMonitorState::new(IssueMonitorConfig::default());
         stale.rebase_daemon_driver_prefs(&disk);
+        assert_eq!(stale.prefs().priority_launch_now, Some(2));
         assert_eq!(
             serde_json::to_value(stale.prefs()).unwrap()["priority_reason_note"],
             note
         );
         let mut stale_gui = IssueMonitorState::new(IssueMonitorConfig::default());
         stale_gui.rebase_gui_observer_prefs(&disk);
+        assert_eq!(stale_gui.prefs().priority_launch_now, Some(2));
         assert_eq!(
             serde_json::to_value(stale_gui.prefs()).unwrap()["priority_reason_note"],
             note
         );
+        stale_gui.reorder_queued_issues(&[2, 1]);
+        assert_eq!(stale_gui.prefs().priority_launch_now, None);
     }
 
     #[test]
@@ -49082,6 +49106,9 @@ mod tests {
         );
         assert_eq!(monitor.local_terminal_queue_numbers(), vec![3, 4, 1, 2]);
 
+        monitor.prioritize_launch_now(1);
+        assert_eq!(monitor.local_terminal_queue_numbers(), vec![3, 4, 1, 2]);
+
         let mut second = issue(2);
         second.labels.push("urgent".to_string());
         scan_issue_monitor_candidates(
@@ -49091,10 +49118,7 @@ mod tests {
         );
         assert_eq!(monitor.local_terminal_queue_numbers(), vec![3, 4, 1, 2]);
         let status = serde_json::to_value(monitor.status_view()).unwrap();
-        assert_eq!(
-            status["terminal_queue"][0]["priority_reason"],
-            "urgent_label"
-        );
+        assert_eq!(status["terminal_queue"][0]["priority_reason"], "urgent");
         assert_eq!(
             status["terminal_queue"][3]["priority_reason"],
             "urgent_limit_reached"

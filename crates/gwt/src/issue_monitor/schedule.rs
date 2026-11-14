@@ -104,7 +104,7 @@ impl IssueMonitorPrefs {
                 (
                     host,
                     self.urgent_queue
-                        .projection(queue)
+                        .projection(queue, &self.priority_order, self.priority_launch_now)
                         .entries
                         .into_iter()
                         .map(|entry| entry.number)
@@ -238,7 +238,12 @@ fn reconcile_with_health(
     let queue = prefs
         .terminal_queues
         .get(host)
-        .map(|queue| prefs.urgent_queue.projection(queue).entries)
+        .map(|queue| {
+            prefs
+                .urgent_queue
+                .projection(queue, &prefs.priority_order, prefs.priority_launch_now)
+                .entries
+        })
         .unwrap_or_default();
     let pool = prefs.launch_profile_pool();
     let bound = pool
@@ -429,7 +434,7 @@ fn reconcile_with_health(
         .map(|queue| {
             prefs
                 .urgent_queue
-                .projection(queue)
+                .projection(queue, &prefs.priority_order, prefs.priority_launch_now)
                 .entries
                 .into_iter()
                 .map(|entry| entry.number)

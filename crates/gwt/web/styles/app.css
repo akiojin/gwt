@@ -3838,6 +3838,16 @@ body {
 .toast-alerts__dismiss:hover {
   color: var(--color-text-strong);
 }
+/* SPEC #6476 T-005c: a 20px dismiss is too small to tap on a phone. The
+   negative block margins extend the 44px target into the item's top padding
+   and keep the title row at its original 20px, so the message stays close. */
+@media (max-width: 600px) {
+  .toast-alerts__dismiss {
+    min-width: 44px;
+    min-height: 44px;
+    margin-block: calc(-1 * var(--space-2)) calc(var(--space-5) + var(--space-2) - 44px);
+  }
+}
 @keyframes toast-alerts-in {
   from {
     opacity: 0;
@@ -4314,6 +4324,18 @@ body {
   line-height: 1.5;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+/* SPEC #6476 T-005lg: on a phone the Logs refresh was 24px and the filters
+   32px tall, and the two columns left the detail pane a sliver. Make them 44px
+   tap targets and stack the timeline above the detail below 601px; a short
+   screen scrolls the surface instead of collapsing either pane. */
+@media (max-width: 600px) {
+  .logs-root { overflow-y: auto; }
+  .logs-root .workspace-toolbar-actions button,
+  .logs-filter-field :is(select, input) { min-width: 44px; min-height: 44px; }
+  .logs-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(120px, 1fr) minmax(120px, 1fr); }
+  .logs-timeline { border-right: 0; border-bottom: 1px solid var(--color-border); }
 }
 
 .branch-list-root {
@@ -6485,7 +6507,21 @@ body.route-body {
 
 /* SPEC #6476: keep phone tabs tappable and toolbar rows clear of each other. */
 @media (max-width: 600px) {
-  .issue-bridge-root .knowledge-state-filter button { min-height: 44px; }
+  .issue-bridge-root .knowledge-state-filter button,
+  .issue-bridge-root .knowledge-monitor-controls :is(button, input),
+  .issue-bridge-root .knowledge-search,
+  .issue-bridge-root .workspace-toolbar-actions button,
+  .issue-bridge-root .issue-queue-select,
+  .issue-bridge-root .knowledge-row-select,
+  .issue-bridge-root .knowledge-row-actions button,
+  .issue-bridge-root .knowledge-row-menu-item { min-height: 44px; }
+  .issue-bridge-root .knowledge-row-select { align-content: center; }
+  .issue-bridge-root .knowledge-row-menu > summary {
+    display: grid;
+    place-items: center;
+    min-width: 44px;
+    min-height: 44px;
+  }
   .issue-bridge-root .workspace-toolbar-main { flex-basis: 100%; grid-template-columns: minmax(0, 1fr) max-content; }
   .issue-bridge-root .issue-filter-hint { grid-column: 1 / -1; }
 }

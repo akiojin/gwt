@@ -32,8 +32,10 @@ test.describe("mobile project chrome", () => {
     await expect(page.locator("#app-version")).toBeVisible();
     for (const width of [320, 390]) {
       await page.setViewportSize({ width, height: 844 });
-      const controls = page.locator(".project-actions > button:visible, .project-actions > [role=button]:visible, .op-theme-toggle__option");
-      await expect(controls).toHaveCount(6);
+      // T-005c: the update Check button sits inside `.update-check`, so the
+      // direct-child selector missed it and it stayed 38px tall.
+      const controls = page.locator(".project-actions > button:visible, .project-actions > [role=button]:visible, #update-check-button:visible, .op-theme-toggle__option");
+      await expect(controls).toHaveCount(7);
       for (const control of await controls.all()) {
         await expect(control).toBeInViewport({ ratio: 1 });
         const bounds = await control.boundingBox();
