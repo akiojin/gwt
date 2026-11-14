@@ -70,20 +70,8 @@ struct HostToken {
     generation: Uuid,
     project: String,
     host_epoch: Uuid,
-    #[serde(deserialize_with = "borrowed_secret")]
+    #[serde(deserialize_with = "super::borrowed_hex_secret")]
     secret: Zeroizing<[u8; 32]>,
-}
-
-/// Decodes the hex secret straight from the borrowed token bytes, so no owned
-/// copy is left unwiped. An escaped string cannot be borrowed and is refused.
-fn borrowed_secret<'de, D>(deserializer: D) -> Result<Zeroizing<[u8; 32]>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let hex_secret = <&'de str>::deserialize(deserializer)?;
-    let mut secret = Zeroizing::new([0u8; 32]);
-    hex::decode_to_slice(hex_secret, &mut *secret).map_err(serde::de::Error::custom)?;
-    Ok(secret)
 }
 
 struct HostCredentials {
