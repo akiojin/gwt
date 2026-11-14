@@ -270,10 +270,14 @@ fn build_knowledge_launch_wizard_session_from_inputs(
     // SPEC #3431 FR-070: this must be the spelling the durable execution
     // binding produces, not a display label. `workspace.ensure` compares
     // the two verbatim, so `SPEC #<n>` here wedges the Work forever.
-    let owner_label = match canonical_owner_kind {
-        LinkedIssueKind::Issue => format!("Issue #{issue_number}"),
-        LinkedIssueKind::Spec => format!("SPEC-{issue_number}"),
-    };
+    let owner_label = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: match canonical_owner_kind {
+            LinkedIssueKind::Issue => gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+            LinkedIssueKind::Spec => gwt::cli::execution_state::ExecutionOwnerKind::Spec,
+        },
+        number: issue_number,
+    }
+    .canonical_work_owner_label();
     let workspace_resume_context = Some(linked_issue_workspace_context(
         project_root,
         issue_number,

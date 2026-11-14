@@ -612,6 +612,15 @@ impl ExecutionOwnerKey {
     fn storage_key(self) -> String {
         format!("owner-{}", self.number)
     }
+
+    /// Canonical spelling persisted in Work owner fields.
+    #[must_use]
+    pub fn canonical_work_owner_label(self) -> String {
+        match self.kind {
+            ExecutionOwnerKind::Issue => format!("Issue #{}", self.number),
+            ExecutionOwnerKind::Spec => format!("SPEC-{}", self.number),
+        }
+    }
 }
 
 /// Canonical paths and identity captured once for one owner-ledger
@@ -10383,10 +10392,7 @@ fn recover_terminal_workspace_commit(
         if expected.decision == ExternalWorkspaceCommitDecision::Commit {
             validate_generation_activation_owner(context, true)?;
         }
-        let owner_label = match owner.kind {
-            ExecutionOwnerKind::Issue => format!("Issue #{}", owner.number),
-            ExecutionOwnerKind::Spec => format!("SPEC-{}", owner.number),
-        };
+        let owner_label = owner.canonical_work_owner_label();
         let resolution =
             gwt_core::workspace_projection::resolve_workspace_state_external_commit_for_authority(
                 &context.worktree,
@@ -19450,6 +19456,19 @@ fn run_adopt_locked(
 mod tests {
     use super::*;
     use gwt_core::test_support::ScopedEnvVar;
+
+    #[test]
+    fn execution_owner_key_generates_the_canonical_work_owner_label() {
+        for (kind, number, expected) in [
+            (ExecutionOwnerKind::Issue, 3441, "Issue #3441"),
+            (ExecutionOwnerKind::Spec, 2359, "SPEC-2359"),
+        ] {
+            assert_eq!(
+                ExecutionOwnerKey { kind, number }.canonical_work_owner_label(),
+                expected,
+            );
+        }
+    }
 
     #[test]
     fn issue_5644_expired_runtime_scan_cannot_prove_absence() {

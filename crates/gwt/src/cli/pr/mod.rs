@@ -1215,11 +1215,16 @@ fn record_mutated_workspace_pr_metadata<E: CliEnv>(
             }) {
                 return Ok(());
             }
-            let owner = match binding.owner_kind.as_str() {
-                "issue" => format!("Issue #{}", binding.owner_number),
-                "spec" => format!("SPEC-{}", binding.owner_number),
+            let kind = match binding.owner_kind.as_str() {
+                "issue" => crate::cli::execution_state::ExecutionOwnerKind::Issue,
+                "spec" => crate::cli::execution_state::ExecutionOwnerKind::Spec,
                 _ => return Err(std::io::Error::other("invalid execution owner kind")),
             };
+            let owner = crate::cli::execution_state::ExecutionOwnerKey {
+                kind,
+                number: binding.owner_number,
+            }
+            .canonical_work_owner_label();
             let container = gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
                 branch: Some(branch),
                 worktree_path: Some(std::fs::canonicalize(&worktree)?),

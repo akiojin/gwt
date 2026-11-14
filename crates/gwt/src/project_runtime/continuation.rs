@@ -1953,7 +1953,7 @@ impl ContinueWorkCoordinator<'_> {
         let resume_context = WorkspaceResumeContext {
             title: non_empty_workspace_text(Some(&item.title)),
             owner: non_empty_workspace_text(item.owner.as_deref())
-                .or_else(|| Some(format!("Issue #{}", owner.number))),
+                .or_else(|| Some(owner.canonical_work_owner_label())),
             summary: non_empty_workspace_text(item.summary.as_deref())
                 .or_else(|| non_empty_workspace_text(item.intent.as_deref())),
             next_action: item.latest_next_action().map(str::to_string),
