@@ -1,0 +1,276 @@
+- generic [ref=e1]:
+  - generic [ref=e2]:
+    - generic [ref=e3]:
+      - generic [ref=e4]:
+        - text: ⌜ GWT · OPERATOR ⌟
+        - 'button "gwt Issue #3461 Close gwt Issue #3461" [ref=e6] [cursor=pointer]':
+          - generic [ref=e7]: "gwt Issue #3461"
+          - 'button "Close gwt Issue #3461" [ref=e8]': ×
+        - generic [ref=e9]:
+          - button "Switch projects" [ref=e11] [cursor=pointer]: Projects
+          - button "v9.76.0 -> v9.77.0" [ref=e107] [cursor=pointer]
+          - 'radiogroup "Theme: auto (currently light)" [ref=e13]':
+            - radio "AUTO" [checked] [ref=e14] [cursor=pointer]:
+              - generic [ref=e16]: ▯
+            - radio "DARK" [ref=e17] [cursor=pointer]
+            - radio "LIGHT" [ref=e18] [cursor=pointer]
+      - complementary "Command rail" [ref=e19]:
+        - group "Navigate" [ref=e20]:
+          - generic [ref=e21]:
+            - button "Project Manager" [ref=e22] [cursor=pointer]:
+              - generic [ref=e23]: ◎
+              - generic: PM
+            - button "Project Manager settings" [ref=e24] [cursor=pointer]:
+              - generic [ref=e25]: ⚙
+          - button "Intake" [ref=e26] [cursor=pointer]:
+            - generic [ref=e27]: ▶
+          - button "Workspace" [ref=e28] [cursor=pointer]:
+            - generic [ref=e29]: ◆
+            - generic:
+              - generic: Workspace
+              - generic: ⌘ G
+        - group "Windows" [ref=e31]:
+          - button "Tile windows" [ref=e32] [cursor=pointer]:
+            - generic [ref=e33]: ⊞
+            - generic: Tile
+          - button "Stack windows" [ref=e34] [cursor=pointer]:
+            - generic [ref=e35]: ⊟
+            - generic: Stack
+          - button "Align windows without resizing" [ref=e36] [cursor=pointer]:
+            - generic [ref=e37]: ⊜
+            - generic: Align
+          - button "List windows" [ref=e39] [cursor=pointer]:
+            - generic [ref=e40]: ❒
+            - generic: "1"
+            - generic: Windows
+          - button "Add window" [ref=e41] [cursor=pointer]:
+            - generic [ref=e42]: ＋
+        - group "Agents" [ref=e43]:
+          - button "Stop all agents" [ref=e44] [cursor=pointer]:
+            - generic [ref=e45]: ⏹
+        - group "System" [ref=e47]:
+          - button "Command palette" [ref=e48] [cursor=pointer]:
+            - generic [ref=e49]: ⌘K
+            - generic:
+              - generic: Palette
+              - generic: ⌘ K
+      - generic [ref=e50]:
+        - generic [ref=e108]:
+          - generic [ref=e109]:
+            - generic [ref=e110]:
+              - generic "Project Manager" [ref=e111]
+              - generic [ref=e112]: PM
+              - generic "Idle" [ref=e113]
+            - generic [ref=e116]:
+              - button "Stop agent" [ref=e117] [cursor=pointer]: ■
+              - button "Close window" [ref=e118] [cursor=pointer]: ×
+          - generic [ref=e123]:
+            - textbox "Terminal input" [ref=e124]
+            - generic:
+              - generic:
+                - generic: "*"
+                - generic: ░░░░
+              - generic: ░░░░░░░░
+              - generic: ░░░░░░░░░░░░░░░░
+              - generic:
+                - generic: █████████
+                - generic: "*"
+              - generic:
+                - generic: ██▄█████▄██
+                - generic: "*"
+              - generic:
+                - generic: █████████
+                - generic: "*"
+              - generic:
+                - generic: …………………
+                - generic: █
+                - generic: █
+                - generic: █
+                - generic: █
+                - generic: ………………………………………………………………………………………………………………
+              - generic: Browser didn't open? Use the url below to sign in (c to copy)
+              - generic: https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e&re
+              - generic: sponse_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=or
+              - generic: g%3Acreate_api_key+user%3Aprofile+user%3Ainference+user%3Asessions%3Aclaude_code+user%3Amcp_server
+              - generic: s+user%3Afile_upload&code_challenge=Sf2bmWoMffOYRCbPou37BnwjDCx8eYSYI_-VyPm_35w&code_challenge_met
+              - generic: hod=S256&state=Rf9AW_RH06djL9vcwCko5aXK7O-KCS_1iUPlcZKLjaA
+              - generic: Paste code here if prompted >
+        - generic "Fleet minimap" [ref=e56]:
+          - button "Project Manager" [ref=e128] [cursor=pointer]
+          - generic [ref=e57]:
+            - button "Zoom minimap in" [ref=e58] [cursor=pointer]: +
+            - button "Zoom minimap out" [ref=e59] [cursor=pointer]: −
+        - text: ⌜ ⌟ ⌜ ⌟ ⌜ ⌟
+      - status "Operator status strip" [ref=e64]:
+        - generic [ref=e65]: ONLINE
+        - generic [ref=e68]:
+          - generic [ref=e69]: RUNNING
+          - generic "Running agents" [ref=e70]: "1"
+        - generic [ref=e71]:
+          - generic [ref=e72]: IDLE
+          - generic "Idle agents" [ref=e73]: "1"
+        - generic [ref=e74]:
+          - generic [ref=e75]: WAITING
+          - generic "Agents waiting for input" [ref=e76]: "0"
+        - generic [ref=e77]:
+          - generic [ref=e78]: ERROR
+          - generic "Agents with runtime errors" [ref=e79]: "0"
+        - generic [ref=e80]:
+          - generic [ref=e81]: MISSION
+          - generic "Agents completed out of total" [ref=e82]: 0/1
+        - generic [ref=e83]:
+          - generic [ref=e84]: WORK
+          - generic "Work" [ref=e85]: "1"
+        - 'button "Issue Monitor: Off" [ref=e86] [cursor=pointer]':
+          - generic [ref=e87]: MONITOR
+          - generic "Issue Monitor status" [ref=e88]: "Off"
+        - generic "Runtime performance" [ref=e89]:
+          - generic [ref=e90]: PERF
+          - generic "Runtime performance" [ref=e91]: HOT 100% 16.9G
+        - generic [ref=e92]:
+          - generic [ref=e93]: ZOOM
+          - button "Zoom out" [ref=e94] [cursor=pointer]: "-"
+          - button "Reset zoom" [ref=e95] [cursor=pointer]: 100%
+          - button "Zoom in" [ref=e96] [cursor=pointer]: +
+        - button "Provider usage and limits" [ref=e129] [cursor=pointer]:
+          - generic [ref=e130]: USAGE
+          - generic [ref=e131]: ⬡ 23%
+          - generic [ref=e132]: ◇ off
+        - generic [ref=e98]:
+          - text: "16"
+          - generic [ref=e137]: ":"
+          - text: "44"
+          - generic [ref=e138]: ":"
+          - text: "49"
+    - text: ok ok ok ok
+    - generic:
+      - dialog:
+        - combobox
+        - listbox
+    - generic:
+      - dialog:
+        - heading [level=2]: Operator Hotkeys
+        - generic:
+          - heading [level=3]: Navigation
+          - generic:
+            - generic: Command palette
+            - generic: ⌘ K
+          - generic:
+            - generic: Project switcher
+            - generic: ⌘ P
+          - generic:
+            - generic: Board surface
+            - generic: ⌘ B
+          - generic:
+            - generic: Workspace surface
+            - generic: ⌘ G
+          - generic:
+            - generic: Logs surface
+            - generic: ⌘ L
+        - generic:
+          - heading [level=3]: Canvas
+          - generic:
+            - generic: Pan canvas
+            - generic: Scroll / drag
+          - generic:
+            - generic: Pan anywhere
+            - generic: Middle-drag
+          - generic:
+            - generic: Zoom canvas
+            - generic: Ctrl/⌘ + wheel
+          - generic:
+            - generic: Move window
+            - generic: Drag titlebar
+        - generic:
+          - heading [level=3]: Help
+          - generic:
+            - generic: This card
+            - generic: ⌘ ?
+          - generic:
+            - generic: Close overlay
+            - generic: Esc
+    - dialog [ref=e140]:
+      - paragraph [ref=e141]:
+        - generic [ref=e142]: ▸
+        - text: DEPLOY A SURFACE
+      - heading "Add window" [level=2] [ref=e143]
+      - generic [ref=e144]:
+        - generic [ref=e145]:
+          - generic [ref=e146]: ▸ Surfaces
+          - generic [ref=e147]:
+            - button "File Tree Browse repository files in a read-only tree" [active] [ref=e148] [cursor=pointer]:
+              - generic [ref=e149]: ⊟
+              - generic [ref=e150]:
+                - strong [ref=e151]: File Tree
+                - generic [ref=e152]: Browse repository files in a read-only tree
+            - button "Logs Open the logs surface" [ref=e153] [cursor=pointer]:
+              - generic [ref=e154]: ≡
+              - generic [ref=e155]:
+                - strong [ref=e156]: Logs
+                - generic [ref=e157]: Open the logs surface
+            - button "Console External process stdout/stderr per kind" [ref=e158] [cursor=pointer]:
+              - generic [ref=e159]: ❯
+              - generic [ref=e160]:
+                - strong [ref=e161]: Console
+                - generic [ref=e162]: External process stdout/stderr per kind
+            - button "Board Open the board surface" [ref=e163] [cursor=pointer]:
+              - generic [ref=e164]: ▦
+              - generic [ref=e165]:
+                - strong [ref=e166]: Board
+                - generic [ref=e167]: Open the board surface
+            - button "Workspace Open the Workspace overview" [ref=e168] [cursor=pointer]:
+              - generic [ref=e169]: ◆
+              - generic [ref=e170]:
+                - strong [ref=e171]: Workspace
+                - generic [ref=e172]: Open the Workspace overview
+            - button "Improvement Inbox Review gwt improvement candidates" [ref=e173] [cursor=pointer]:
+              - generic [ref=e174]: ◇
+              - generic [ref=e175]:
+                - strong [ref=e176]: Improvement Inbox
+                - generic [ref=e177]: Review gwt improvement candidates
+        - generic [ref=e178]:
+          - generic [ref=e179]: ▸ GitHub & Knowledge
+          - generic [ref=e180]:
+            - button "Issue Open the Issue surface" [ref=e181] [cursor=pointer]:
+              - generic [ref=e182]: ◍
+              - generic [ref=e183]:
+                - strong [ref=e184]: Issue
+                - generic [ref=e185]: Open the Issue surface
+            - button "PR Open the PR surface" [ref=e186] [cursor=pointer]:
+              - generic [ref=e187]: ⇄
+              - generic [ref=e188]:
+                - strong [ref=e189]: PR
+                - generic [ref=e190]: Open the PR surface
+            - button "Index Search indexed project content" [ref=e191] [cursor=pointer]:
+              - generic [ref=e192]: ⌕
+              - generic [ref=e193]:
+                - strong [ref=e194]: Index
+                - generic [ref=e195]: Search indexed project content
+        - generic [ref=e196]:
+          - generic [ref=e197]: ▸ Configuration
+          - generic [ref=e198]:
+            - button "Settings Manage custom agents and launch presets" [ref=e199] [cursor=pointer]:
+              - generic [ref=e200]: ⚙
+              - generic [ref=e201]:
+                - strong [ref=e202]: Settings
+                - generic [ref=e203]: Manage custom agents and launch presets
+            - button "Profile Manage env profiles and variables" [ref=e204] [cursor=pointer]:
+              - generic [ref=e205]: ◑
+              - generic [ref=e206]:
+                - strong [ref=e207]: Profile
+                - generic [ref=e208]: Manage env profiles and variables
+      - generic [ref=e209]:
+        - generic [ref=e210]: ↑↓←→ move · ↵ deploy · esc close
+        - button "Cancel" [ref=e211] [cursor=pointer]
+    - text: ⌜ ⌟
+    - dialog [ref=e101]:
+      - banner [ref=e102]:
+        - heading "Detail" [level=2] [ref=e103]
+        - button "Close detail drawer" [ref=e104] [cursor=pointer]: ×
+      - contentinfo [ref=e106]
+  - generic:
+    - status "Agent notifications"
+    - generic:
+      - 'button "Update available: v9.77.0 - Click to update" [ref=e135] [cursor=pointer]'
+      - button "Dismiss update notification" [ref=e136] [cursor=pointer]: ×
+  - log "Autonomous Issue Monitor notifications"

@@ -1,0 +1,376 @@
+- generic [ref=e1]:
+  - generic [ref=e2]:
+    - generic [ref=e3]:
+      - generic [ref=e4]:
+        - text: ⌜ GWT · OPERATOR ⌟
+        - generic [ref=e5]:
+          - button "1 blocked agent gwt Close gwt" [ref=e6] [cursor=pointer]:
+            - generic "1 blocked agent" [ref=e7]: BLOCK
+            - generic [ref=e8]: gwt
+            - button "Close gwt" [ref=e9]: ×
+          - button "llmlb Close llmlb" [ref=e10] [cursor=pointer]:
+            - generic [ref=e11]: llmlb
+            - button "Close llmlb" [ref=e12]: ×
+          - button "event-magazine Close event-magazine" [ref=e13] [cursor=pointer]:
+            - generic [ref=e14]: event-magazine
+            - button "Close event-magazine" [ref=e15]: ×
+        - generic [ref=e16]:
+          - button "Switch projects" [ref=e18] [cursor=pointer]: Projects
+          - button "v9.75.1" [ref=e19] [cursor=pointer]
+          - 'radiogroup "Theme: auto (currently light)" [ref=e20]':
+            - radio "AUTO" [checked] [ref=e21] [cursor=pointer]:
+              - generic [ref=e23]: ▯
+            - radio "DARK" [ref=e24] [cursor=pointer]
+            - radio "LIGHT" [ref=e25] [cursor=pointer]
+      - complementary "Command rail" [ref=e26]:
+        - group "Navigate" [ref=e27]:
+          - generic [ref=e28]:
+            - button "Project Manager" [ref=e29] [cursor=pointer]:
+              - generic [ref=e30]: ◎
+              - generic: PM
+            - button "Project Manager settings" [ref=e31] [cursor=pointer]:
+              - generic [ref=e32]: ⚙
+          - button "Intake" [ref=e33] [cursor=pointer]:
+            - generic [ref=e34]: ▶
+          - button "Workspace" [ref=e35] [cursor=pointer]:
+            - generic [ref=e36]: ◆
+            - generic:
+              - generic: Workspace
+              - generic: ⌘ G
+        - group "Windows" [ref=e38]:
+          - button "Tile windows" [ref=e39] [cursor=pointer]:
+            - generic [ref=e40]: ⊞
+            - generic: Tile
+          - button "Stack windows" [ref=e41] [cursor=pointer]:
+            - generic [ref=e42]: ⊟
+            - generic: Stack
+          - button "Align windows without resizing" [ref=e43] [cursor=pointer]:
+            - generic [ref=e44]: ⊜
+            - generic: Align
+          - button "List windows" [ref=e46] [cursor=pointer]:
+            - generic [ref=e47]: ❒
+            - generic: "16"
+            - generic: Windows
+          - button "Add window" [ref=e48] [cursor=pointer]:
+            - generic [ref=e49]: ＋
+        - group "Agents" [ref=e50]:
+          - button "Stop all agents" [ref=e51] [cursor=pointer]:
+            - generic [ref=e52]: ⏹
+        - group "System" [ref=e54]:
+          - button "Command palette" [ref=e55] [cursor=pointer]:
+            - generic [ref=e56]: ⌘K
+            - generic:
+              - generic: Palette
+              - generic: ⌘ K
+      - generic [ref=e57]:
+        - generic [ref=e59]:
+          - text: ⌜ · · ⌟
+          - generic [ref=e316]:
+            - generic [ref=e317]:
+              - generic [ref=e318]:
+                - 'generic "Issue #1974 completion" [ref=e319]'
+                - generic "Execution lane" [ref=e320]: Execution
+                - generic [ref=e321]: Codex
+                - generic "Running" [ref=e322]
+              - generic [ref=e325]:
+                - button "Stop agent" [ref=e326] [cursor=pointer]: ■
+                - button "Close window" [ref=e327] [cursor=pointer]: ×
+            - generic "Window tabs" [ref=e328]:
+              - generic [ref=e329]:
+                - button "Activate Codex (RUN)" [ref=e330]:
+                  - generic [ref=e331]: RUN
+                  - generic [ref=e332]: Codex
+                - button "Close Codex" [ref=e333] [cursor=pointer]: ×
+              - generic [ref=e334]:
+                - button "Activate Codex (IDLE)" [ref=e335]:
+                  - generic [ref=e336]: IDLE
+                  - generic [ref=e337]: Codex
+                - button "Close Codex" [ref=e338] [cursor=pointer]: ×
+              - generic [ref=e339]:
+                - button "Activate Claude Code (IDLE)" [ref=e340]:
+                  - generic [ref=e341]: IDLE
+                  - generic [ref=e342]: Claude Code
+                - button "Close Claude Code" [ref=e343] [cursor=pointer]: ×
+              - generic [ref=e344]:
+                - button "Activate Claude Code (IDLE)" [ref=e345]:
+                  - generic [ref=e346]: IDLE
+                  - generic [ref=e347]: Claude Code
+                - button "Close Claude Code" [ref=e348] [cursor=pointer]: ×
+              - generic [ref=e349]:
+                - button "Activate Claude Code (IDLE)" [ref=e350]:
+                  - generic [ref=e351]: IDLE
+                  - generic [ref=e352]: Claude Code
+                - button "Close Claude Code" [ref=e353] [cursor=pointer]: ×
+              - generic [ref=e354]:
+                - button "Activate Codex (IDLE)" [ref=e355]:
+                  - generic [ref=e356]: IDLE
+                  - generic [ref=e357]: Codex
+                - button "Close Codex" [ref=e358] [cursor=pointer]: ×
+              - generic [ref=e359]:
+                - button "Activate Codex (IDLE)" [ref=e360]:
+                  - generic [ref=e361]: IDLE
+                  - generic [ref=e362]: Codex
+                - button "Close Codex" [ref=e363] [cursor=pointer]: ×
+              - generic [ref=e364]:
+                - button "Activate Claude Code (RUN)" [ref=e365]:
+                  - generic [ref=e366]: RUN
+                  - generic [ref=e367]: Claude Code
+                - button "Close Claude Code" [ref=e368] [cursor=pointer]: ×
+            - generic [ref=e373]:
+              - textbox "Terminal input" [active] [ref=e374]
+              - generic:
+                - generic:
+                  - generic: ✔
+                  - generic: You
+                  - generic: approved
+                  - generic: codex to run
+                  - generic: printf '%s\n'
+                - generic:
+                  - generic: "'{\"schema_version\":1,\"operation\":\"issue.spec.section\",\"params\":..."
+                  - generic: this time
+                - generic:
+                  - generic: •
+                  - generic: Running
+                  - generic: printf
+                  - generic: "'%s\\n'"
+                - generic:
+                  - generic: │
+                  - generic: "'{\"schema_version\":1,\"operation\":\"issue.spec.section\",\"params\":"
+                - generic:
+                  - generic: │
+                  - generic: "{\"number\":1921,\"section\":\"tasks\"}}'"
+                  - generic: "|"
+                  - generic: ./target/debug/gwtd
+                  - generic: "|"
+                  - generic: jq
+                  - generic: "-"
+                  - generic: c
+                - generic: │ … +5 lines
+                - generic:
+                  - generic: •
+                  - generic: Wor
+                  - generic: k
+                  - generic: i
+                  - generic: "n"
+                  - generic: g
+                  - generic: (27s • esc to interrupt)
+                - generic:
+                  - generic: ›
+                  - generic: ちゃんとあなた自身で
+                  - generic: E
+                  - generic: 2E
+                  - generic: テスト
+                - generic:
+                  - generic: tab to queue message
+                  - generic: 29% context left
+          - generic [ref=e120]:
+            - generic [ref=e121]:
+              - generic [ref=e122]:
+                - generic "Project Manager" [ref=e123]
+                - generic [ref=e124]: PM
+                - generic "Running" [ref=e125]
+              - generic [ref=e128]:
+                - button "Stop agent" [ref=e129] [cursor=pointer]: ■
+                - button "Close window" [ref=e130] [cursor=pointer]: ×
+            - generic "Window tabs" [ref=e131]:
+              - generic [ref=e132]:
+                - button "Activate Issue Monitor" [ref=e133]:
+                  - generic [ref=e134]: Issue Monitor
+                - button "Close Issue Monitor" [ref=e135] [cursor=pointer]: ×
+              - generic [ref=e136]:
+                - button "Activate Workspace" [ref=e137]:
+                  - generic [ref=e138]: Workspace
+                - button "Close Workspace" [ref=e139] [cursor=pointer]: ×
+              - generic [ref=e140]:
+                - button "Activate Issue" [ref=e141]:
+                  - generic [ref=e142]: Issue
+                - button "Close Issue" [ref=e143] [cursor=pointer]: ×
+              - generic [ref=e144]:
+                - button "Activate Claude Code (RUN)" [ref=e145]:
+                  - generic [ref=e146]: RUN
+                  - generic [ref=e147]: Claude Code
+                - button "Close Claude Code" [ref=e148] [cursor=pointer]: ×
+            - generic [ref=e153]:
+              - textbox "Terminal input" [ref=e154]
+              - generic:
+                - generic: == 8765
+                - generic:
+                  - generic: …
+                  - generic: "+14"
+                  - generic: lines
+                  - generic: (ctrl+o
+                  - generic: to
+                  - generic: expand)
+                - generic:
+                  - generic: Called plugin:playwright:playwright
+                  - generic: "9"
+                  - generic: times (ctrl+o to expand)
+                - generic:
+                  - generic: ⏺
+                  - generic: agent-118
+                  - generic: のクローズを確定しました。次に承認プロンプト待ちの
+                - generic:
+                  - generic: codex
+                  - generic: （
+                  - generic: "#1974"
+                  - generic: 、
+                  - generic: RUN
+                  - generic: 表示のタブ）を開きます。
+                - generic: Called plugin:playwright:playwright (ctrl+o to expand)
+                - generic:
+                  - generic: ❯
+                  - generic: "[gwt] Issue Monitor activity while the resident PM loop was idle"
+                - generic: "(issue:3503, issue:3504). Run one reconcile cycle now: read a fresh"
+                - generic: "`issue.monitor.status` snapshot, triage the new items, and report the"
+                - generic: milestone digest.
+                - generic:
+                  - generic: Calling plugin:playwright:playwright
+                  - generic: "2"
+                  - generic: times…
+                  - generic: (ctrl+o to expand)
+                - generic:
+                  - generic: ·
+                  - generic: Imagining…
+                  - generic: (3m 34s · ↓
+                  - generic: 6.5k tokens)
+                - generic:
+                  - generic: ⎿
+                  - generic: "Tip: Hit shift+tab to cycle between manual mode, auto-accept edit mode,"
+                - generic: and plan mode
+                - generic:
+                  - generic: ───────────────────────────────────
+                  - generic: pm-runtime-independence-task-automation
+                  - generic: ──
+                - generic: ❯
+                - generic: ──────────────────────────────────────────────────────────────────────────────
+                - generic:
+                  - generic: ⏵⏵
+                  - generic: bypass
+                  - generic: permissions
+                  - generic: "on"
+                  - generic: (shift+tab
+                  - generic: to
+                  - generic: cycle)
+                  - generic: ·
+                  - generic: esc
+                  - generic: to
+                  - generic: interrupt
+                  - generic: ·
+                  - generic: ←
+                  - generic: for
+                  - generic: …
+        - generic "Fleet minimap" [ref=e158]:
+          - generic:
+            - button "Issue Monitor" [ref=e159] [cursor=pointer]
+            - button "Workspace" [ref=e160] [cursor=pointer]
+            - button "Issue" [ref=e161] [cursor=pointer]
+            - 'button "Issue #1974 completion - Execution lane" [ref=e162] [cursor=pointer]': E
+            - button "#3431 起動復旧 - Execution lane" [ref=e163] [cursor=pointer]: E
+            - 'button "Issue #3410 - Execution lane" [ref=e164] [cursor=pointer]': E
+            - 'button "Issue #3245 - Execution lane" [ref=e165] [cursor=pointer]': E
+            - button "Work progress summary detail - Execution lane" [ref=e166] [cursor=pointer]: E
+            - button "Issue 3461 の実装 - Execution lane" [ref=e167] [cursor=pointer]: E
+            - 'button "Issue #3398 の実装 - Execution lane" [ref=e168] [cursor=pointer]': E
+            - 'button "SPEC #3431 PM 実地欠陥修正 slice（scan 不発・endpoint 不達） · PM handoff 4 欠陥の一次資料調査と根本原因確定 - Execution lane" [ref=e169] [cursor=pointer]': E
+            - button "Project Manager" [ref=e171] [cursor=pointer]
+          - generic [ref=e172]:
+            - button "Zoom minimap in" [ref=e173] [cursor=pointer]: +
+            - button "Zoom minimap out" [ref=e174] [cursor=pointer]: −
+        - text: ⌜ ⌟ ⌜ ⌟ ⌜ ⌟
+      - status "Operator status strip" [ref=e175]:
+        - generic [ref=e176]: ONLINE
+        - generic [ref=e179]:
+          - generic [ref=e180]: RUNNING
+          - generic "Running agents" [ref=e181]: "8"
+        - generic [ref=e182]:
+          - generic [ref=e183]: IDLE
+          - generic "Idle agents" [ref=e184]: "6"
+        - generic [ref=e185]:
+          - generic [ref=e186]: WAITING
+          - generic "Agents waiting for input" [ref=e187]: "0"
+        - generic [ref=e188]:
+          - generic [ref=e189]: ERROR
+          - generic "Agents with runtime errors" [ref=e190]: "0"
+        - generic [ref=e191]:
+          - generic [ref=e192]: MISSION
+          - generic "Agents completed out of total" [ref=e193]: 0/9
+        - generic [ref=e194]:
+          - generic [ref=e195]: WORK
+          - generic "Work" [ref=e196]: "8"
+        - 'button "Issue Monitor: Run Q71 A1/2" [ref=e222] [cursor=pointer]':
+          - generic [ref=e198]: MONITOR
+          - generic "Issue Monitor status" [ref=e199]: Run Q71 A1/2
+        - generic "Runtime performance" [ref=e200]:
+          - generic [ref=e201]: PERF
+          - generic "Runtime performance" [ref=e202]: HOT 235% 13.0G
+        - generic [ref=e203]:
+          - generic [ref=e204]: ZOOM
+          - button "Zoom out" [ref=e205] [cursor=pointer]: "-"
+          - button "Reset zoom" [ref=e206] [cursor=pointer]: 100%
+          - button "Zoom in" [ref=e207] [cursor=pointer]: +
+        - button "Provider usage and limits" [ref=e223] [cursor=pointer]:
+          - generic [ref=e376]: USAGE
+          - generic [ref=e377]: ⬡ 26%
+          - generic [ref=e378]: ◇ 30%
+        - generic [ref=e209]:
+          - text: "18"
+          - generic [ref=e381]: ":"
+          - text: "00"
+          - generic [ref=e382]: ":"
+          - text: "45"
+    - text: ok ok ok ok
+    - generic:
+      - dialog:
+        - combobox
+        - listbox
+    - generic:
+      - dialog:
+        - heading [level=2]: Operator Hotkeys
+        - generic:
+          - heading [level=3]: Navigation
+          - generic:
+            - generic: Command palette
+            - generic: ⌘ K
+          - generic:
+            - generic: Project switcher
+            - generic: ⌘ P
+          - generic:
+            - generic: Board surface
+            - generic: ⌘ B
+          - generic:
+            - generic: Workspace surface
+            - generic: ⌘ G
+          - generic:
+            - generic: Logs surface
+            - generic: ⌘ L
+        - generic:
+          - heading [level=3]: Canvas
+          - generic:
+            - generic: Pan canvas
+            - generic: Scroll / drag
+          - generic:
+            - generic: Pan anywhere
+            - generic: Middle-drag
+          - generic:
+            - generic: Zoom canvas
+            - generic: Ctrl/⌘ + wheel
+          - generic:
+            - generic: Move window
+            - generic: Drag titlebar
+        - generic:
+          - heading [level=3]: Help
+          - generic:
+            - generic: This card
+            - generic: ⌘ ?
+          - generic:
+            - generic: Close overlay
+            - generic: Esc
+    - text: ▸ ▸ ▸ ⌜ ⌟
+    - dialog [ref=e212]:
+      - banner [ref=e213]:
+        - heading "Detail" [level=2] [ref=e214]
+        - button "Close detail drawer" [ref=e215] [cursor=pointer]: ×
+      - contentinfo [ref=e217]
+  - generic:
+    - status "Agent notifications"
+  - log "Autonomous Issue Monitor notifications"

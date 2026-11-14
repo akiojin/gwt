@@ -1,0 +1,514 @@
+- generic [ref=e1]:
+  - generic [ref=e2]:
+    - generic [ref=e3]:
+      - generic [ref=e4]:
+        - text: ⌜ GWT · OPERATOR ⌟
+        - generic [ref=e5]:
+          - button "2 blocked agents gwt Close gwt" [ref=e6] [cursor=pointer]:
+            - generic "2 blocked agents" [ref=e7]: BLOCK 2
+            - generic [ref=e8]: gwt
+            - button "Close gwt" [ref=e9]: ×
+          - button "llmlb Close llmlb" [ref=e10] [cursor=pointer]:
+            - generic [ref=e11]: llmlb
+            - button "Close llmlb" [ref=e12]: ×
+          - button "1 running agent event-magazine Close event-magazine" [ref=e13] [cursor=pointer]:
+            - generic "1 running agent" [ref=e14]: RUN
+            - generic [ref=e15]: event-magazine
+            - button "Close event-magazine" [ref=e16]: ×
+        - generic [ref=e17]:
+          - button "Switch projects" [ref=e19] [cursor=pointer]: Projects
+          - button "v9.76.0" [ref=e20] [cursor=pointer]
+          - 'radiogroup "Theme: auto (currently light)" [ref=e21]':
+            - radio "AUTO" [checked] [ref=e22] [cursor=pointer]:
+              - generic [ref=e24]: ▯
+            - radio "DARK" [ref=e25] [cursor=pointer]
+            - radio "LIGHT" [ref=e26] [cursor=pointer]
+      - complementary "Command rail" [ref=e27]:
+        - group "Navigate" [ref=e28]:
+          - generic [ref=e29]:
+            - button "Project Manager" [ref=e30] [cursor=pointer]:
+              - generic [ref=e31]: ◎
+              - generic: PM
+            - button "Project Manager settings" [ref=e32] [cursor=pointer]:
+              - generic [ref=e33]: ⚙
+          - button "Intake" [ref=e34] [cursor=pointer]:
+            - generic [ref=e35]: ▶
+          - button "Workspace" [ref=e36] [cursor=pointer]:
+            - generic [ref=e37]: ◆
+            - generic:
+              - generic: Workspace
+              - generic: ⌘ G
+        - group "Windows" [ref=e39]:
+          - button "Tile windows" [ref=e40] [cursor=pointer]:
+            - generic [ref=e41]: ⊞
+            - generic: Tile
+          - button "Stack windows" [ref=e42] [cursor=pointer]:
+            - generic [ref=e43]: ⊟
+            - generic: Stack
+          - button "Align windows without resizing" [ref=e44] [cursor=pointer]:
+            - generic [ref=e45]: ⊜
+            - generic: Align
+          - button "List windows" [ref=e47] [cursor=pointer]:
+            - generic [ref=e48]: ❒
+            - generic: "19"
+            - generic: Windows
+          - button "Add window" [ref=e49] [cursor=pointer]:
+            - generic [ref=e50]: ＋
+        - group "Agents" [ref=e51]:
+          - button "Stop all agents" [ref=e52] [cursor=pointer]:
+            - generic [ref=e53]: ⏹
+        - group "System" [ref=e55]:
+          - button "Command palette" [ref=e56] [cursor=pointer]:
+            - generic [ref=e57]: ⌘K
+            - generic:
+              - generic: Palette
+              - generic: ⌘ K
+      - generic [ref=e58]:
+        - generic [ref=e60]:
+          - generic [ref=e61]:
+            - generic [ref=e62]:
+              - generic [ref=e63]:
+                - generic "Google・Apple OAuth" [ref=e64]
+                - img "Branch-backed worktree" [ref=e65]: Branch-backed
+                - generic [ref=e66]: Codex
+                - generic "Running" [ref=e67]
+              - generic [ref=e70]:
+                - button "Stop agent" [ref=e71] [cursor=pointer]: ■
+                - button "Close window" [ref=e72] [cursor=pointer]: ×
+            - generic [ref=e77]:
+              - textbox "Terminal input" [ref=e78]
+              - generic:
+                - generic:
+                  - generic: Search
+                  - generic: export type FunctionResources|interface FunctionResources|
+                - generic:
+                  - generic: FunctionResources
+                  - generic: in
+                  - generic: plugin-types
+                - generic:
+                  - generic: Search
+                  - generic: type Auth.*Resources|Auth.*Resources|cfnResources
+                  - generic: in
+                  - generic: lib
+                - generic:
+                  - generic: •
+                  - generic: Ran
+                  - generic: sed
+                  - generic: "-"
+                  - generic: "n"
+                  - generic: "'1,180p'"
+                  - generic: web/node_modules/@aws-amplify/backend-auth/lib/
+                - generic:
+                  - generic: │
+                  - generic: factory.d.ts
+                  - generic: "2"
+                  - generic: ">"
+                  - generic: /dev/null
+                  - generic: "||"
+                  - generic: "true"
+                - generic: "└ import { UserPoolSESOptions } from 'aws-cdk-lib/aws-cognito';"
+                - generic: "import { AuthProps, TriggerEvent, UserPoolSnsOptions } from '@aws-amplify/"
+                - generic: … +60 lines (ctrl + t to view transcript)
+                - generic: ConstructFactory<BackendAuth>;
+                - generic: //# sourceMappingURL=factory.d.ts.map
+                - generic:
+                  - generic: •
+                  - generic: Explored
+                - generic:
+                  - generic: └
+                  - generic: List
+                  - generic: lib
+                - generic:
+                  - generic: Read
+                  - generic: function_resources.d.ts
+                - generic:
+                  - generic: Search
+                  - generic: export type AuthResources|interface AuthResources|AuthResources =
+                  - generic: in
+                - generic: lib
+                - generic:
+                  - generic: Read
+                  - generic: auth_resources.d.ts
+                  - generic: ","
+                  - generic: access_builder.d.ts
+                  - generic: ","
+                  - generic: types.d.ts
+                  - generic: ","
+                - generic:
+                  - generic: auth_access_policy_arbiter.js
+                  - generic: ","
+                  - generic: userpool_access_policy_factory.js
+                  - generic: ","
+                - generic: resource_access_acceptor.d.ts
+                - generic:
+                  - generic: •
+                  - generic: Working
+                  - generic: (27s • esc to interrupt)
+                - generic:
+                  - generic: ›
+                  - generic: I
+                  - generic: "mplement {feature}"
+                - generic:
+                  - generic: gpt-5.5 xhigh fast
+                  - generic: ·
+                  - generic: ~/Workbench/event-magazine/work/2…
+                  - generic: Pursuing goal (22m)
+          - generic [ref=e80]:
+            - generic [ref=e81]:
+              - generic [ref=e82]:
+                - generic "Project Manager" [ref=e83]
+                - generic [ref=e84]: PM
+                - generic "Idle" [ref=e85]
+              - generic [ref=e88]:
+                - button "Stop agent" [ref=e89] [cursor=pointer]: ■
+                - button "Close window" [ref=e90] [cursor=pointer]: ×
+            - generic [ref=e95]:
+              - textbox "Terminal input" [ref=e96]
+              - generic:
+                - generic:
+                  - generic: "1."
+                  - generic: staging OAuth credentials
+                  - generic: —
+                  - generic: 上記を用意するか、
+                  - generic: staging
+                - generic: 検証は保留のまま先へ進めるか。
+                - generic:
+                  - generic: "2."
+                  - generic: Issue Monitor
+                  - generic: の
+                  - generic: 再開
+                  - generic: — queue 4
+                  - generic: 件を流すには、
+                  - generic: launch profile
+                  - generic: の保存（
+                  - generic: GUI
+                - generic:
+                  - generic: 側）と
+                  - generic: enabled
+                  - generic: の
+                  - generic: "ON"
+                  - generic: が必要です。指示があれば
+                  - generic: enabled
+                  - generic: は私が
+                  - generic: "ON"
+                  - generic: にできます。
+                - generic:
+                  - generic: ⎿
+                  - generic: "Stop says: # Project Manager"
+                - generic:
+                  - generic: あなたはこのプロジェクトの常駐
+                  - generic: PM
+                  - generic: です。行動規範は
+                  - generic: "`gwt-pm` skill"
+                - generic:
+                  - generic: であり、一般の
+                  - generic: agent
+                  - generic: 向け指示より優先されます。
+                - generic:
+                  - generic: 報告はユーザーとの会話で、節目ごとに
+                  - generic: digest
+                  - generic: として行います（
+                  - generic: "`needs_human`"
+                - generic:
+                  - generic: と致命的失敗は即時）。
+                  - generic: "`board.post`"
+                  - generic: は他
+                  - generic: agent
+                  - generic: へ話しかけるときだけ
+                - generic:
+                  - generic: mention
+                  - generic: 付きで使い、
+                  - generic: "`board.show`"
+                  - generic: は他
+                  - generic: agent
+                - generic:
+                  - generic: の自己申告を読むために使います。自分の作業
+                  - generic: phase
+                  - generic: を
+                  - generic: Board
+                - generic: に流さないでください。
+                - generic:
+                  - generic: 毎周回、
+                  - generic: "`issue.monitor.status`"
+                  - generic: を取り直して照合し、動いている
+                  - generic: agent
+                - generic: を確認します。
+                - generic:
+                  - generic: ✻
+                  - generic: Churned
+                  - generic: for
+                  - generic: 1m
+                  - generic: 13s
+                - generic: ──────────────────────────────────────────────────────────────────────────────
+                - generic: ❯
+                - generic: ──────────────────────────────────────────────────────────────────────────────
+                - generic:
+                  - generic: ⏵⏵
+                  - generic: bypass
+                  - generic: permissions
+                  - generic: "on"
+                  - generic: (shift+tab
+                  - generic: to
+                  - generic: cycle)
+                  - generic: ·
+                  - generic: ←
+                  - generic: for
+                  - generic: agents
+          - generic [ref=e100]:
+            - generic [ref=e101]:
+              - generic "Issue Monitor" [ref=e103]
+              - button "Close window" [ref=e105] [cursor=pointer]: ×
+            - region "Issue Monitor" [ref=e107]:
+              - generic [ref=e108]:
+                - generic [ref=e109]:
+                  - generic [ref=e110]:
+                    - generic [ref=e111]: Stopped
+                    - generic [ref=e112]: Queue 0 | Active 0/1
+                  - generic [ref=e113]: "Agent settings Missing saved profile: configure before auto start"
+                - generic [ref=e114]:
+                  - button "Agent settings" [ref=e115] [cursor=pointer]
+                  - generic [ref=e116]:
+                    - generic [ref=e117]: Max active
+                    - spinbutton "Max active" [ref=e118]: "1"
+                  - button "Start" [ref=e119] [cursor=pointer]
+                  - 'button "Autonomous: OFF" [ref=e120] [cursor=pointer]'
+              - generic [ref=e121]:
+                - textbox "Quick issue title" [ref=e122]:
+                  - /placeholder: Quick issue title…
+                - button "⚡ Register & Launch" [ref=e123] [cursor=pointer]
+              - list [ref=e124]:
+                - generic [ref=e125]: No queued issues
+        - generic "Fleet minimap" [ref=e127]:
+          - generic:
+            - button "Google・Apple OAuth - Branch-backed worktree" [ref=e128] [cursor=pointer]: B
+            - button "Project Manager" [ref=e129] [cursor=pointer]
+            - button "Issue Monitor" [ref=e130] [cursor=pointer]
+          - generic [ref=e131]:
+            - button "Zoom minimap in" [ref=e132] [cursor=pointer]: +
+            - button "Zoom minimap out" [ref=e133] [cursor=pointer]: −
+        - text: ⌜ ⌟ ⌜ ⌟ ⌜ ⌟
+      - status "Operator status strip" [ref=e134]:
+        - generic [ref=e135]: ONLINE
+        - generic [ref=e138]:
+          - generic [ref=e139]: RUNNING
+          - generic "Running agents" [ref=e140]: "2"
+        - generic [ref=e141]:
+          - generic [ref=e142]: IDLE
+          - generic "Idle agents" [ref=e143]: "1"
+        - generic [ref=e144]:
+          - generic [ref=e145]: WAITING
+          - generic "Agents waiting for input" [ref=e146]: "0"
+        - generic [ref=e147]:
+          - generic [ref=e148]: ERROR
+          - generic "Agents with runtime errors" [ref=e149]: "0"
+        - generic [ref=e150]:
+          - generic [ref=e151]: MISSION
+          - generic "Agents completed out of total" [ref=e152]: 0/2
+        - generic [ref=e153]:
+          - generic [ref=e154]: WORK
+          - generic "Work" [ref=e155]: —
+        - 'button "Issue Monitor: Off" [ref=e156] [cursor=pointer]':
+          - generic [ref=e157]: MONITOR
+          - generic "Issue Monitor status" [ref=e158]: "Off"
+        - generic "Runtime performance" [ref=e159]:
+          - generic [ref=e160]: PERF
+          - generic "Runtime performance" [ref=e161]: CPU -- MEM --
+        - generic [ref=e162]:
+          - generic [ref=e163]: ZOOM
+          - button "Zoom out" [ref=e164] [cursor=pointer]: "-"
+          - button "Reset zoom" [ref=e165] [cursor=pointer]: 100%
+          - button "Zoom in" [ref=e166] [cursor=pointer]: +
+        - button "Provider usage and limits"
+        - generic [ref=e168]:
+          - text: "12"
+          - generic [ref=e169]: ":"
+          - text: "01"
+          - generic [ref=e170]: ":"
+          - text: "31"
+    - text: ok ok ok ok
+    - generic:
+      - dialog:
+        - combobox
+        - listbox
+    - generic:
+      - dialog:
+        - heading [level=2]: Operator Hotkeys
+        - generic:
+          - heading [level=3]: Navigation
+          - generic:
+            - generic: Command palette
+            - generic: ⌘ K
+          - generic:
+            - generic: Project switcher
+            - generic: ⌘ P
+          - generic:
+            - generic: Board surface
+            - generic: ⌘ B
+          - generic:
+            - generic: Workspace surface
+            - generic: ⌘ G
+          - generic:
+            - generic: Logs surface
+            - generic: ⌘ L
+        - generic:
+          - heading [level=3]: Canvas
+          - generic:
+            - generic: Pan canvas
+            - generic: Scroll / drag
+          - generic:
+            - generic: Pan anywhere
+            - generic: Middle-drag
+          - generic:
+            - generic: Zoom canvas
+            - generic: Ctrl/⌘ + wheel
+          - generic:
+            - generic: Move window
+            - generic: Drag titlebar
+        - generic:
+          - heading [level=3]: Help
+          - generic:
+            - generic: This card
+            - generic: ⌘ ?
+          - generic:
+            - generic: Close overlay
+            - generic: Esc
+    - text: ▸ ▸ ▸
+    - dialog [active] [ref=e172]:
+      - generic [ref=e174]:
+        - heading "⌜ Start Work ⌟" [level=2] [ref=e175]
+        - generic [ref=e176]: Plan Agent launch
+      - generic [ref=e177]:
+        - generic [ref=e178]:
+          - generic [ref=e179]: Workspace
+          - generic [ref=e180]: Current project
+        - generic [ref=e181]:
+          - generic [ref=e182]: Target
+          - generic [ref=e183]: Agent
+        - generic [ref=e184]:
+          - generic [ref=e185]: Agent
+          - generic [ref=e186]: Codex
+        - generic [ref=e187]:
+          - generic [ref=e188]: Model
+          - generic [ref=e189]: gpt-5.6-sol
+        - generic [ref=e190]:
+          - generic [ref=e191]: Reasoning
+          - generic [ref=e192]: xhigh
+        - generic [ref=e193]:
+          - generic [ref=e194]: Version
+          - generic [ref=e195]: latest
+        - generic [ref=e196]:
+          - generic [ref=e197]: Runtime
+          - generic [ref=e198]: host
+        - generic [ref=e199]:
+          - generic [ref=e200]: Permissions
+          - generic [ref=e201]: skip
+        - generic [ref=e202]:
+          - generic [ref=e203]: Fast mode
+          - generic [ref=e204]: "on"
+      - generic [ref=e206]:
+        - complementary "Launch progress" [ref=e207]:
+          - button "Go to Setup step" [ref=e208] [cursor=pointer]:
+            - generic [ref=e210]: Setup
+          - button "Go to Settings step" [ref=e212] [cursor=pointer]:
+            - generic [ref=e214]: Settings
+          - button "Go to Runtime step" [ref=e216] [cursor=pointer]:
+            - generic [ref=e218]:
+              - generic [ref=e219]: Runtime
+              - generic [ref=e220]: Preparing runtime context...
+          - generic [ref=e221]: Start
+        - generic [ref=e225]:
+          - generic:
+            - generic: Preparing runtime context...
+            - generic:
+              - generic:
+                - generic:
+                  - generic: Register an Issue
+                  - generic: Optional — describe the work for the Plan Agent to turn into an Issue or SPEC. You can skip this.
+              - textbox "e.g. register an issue for the login auth bug" [disabled]
+            - generic:
+              - generic:
+                - generic:
+                  - generic: Launch
+                  - generic: Choose what to launch on the selected branch.
+              - generic:
+                - generic:
+                  - generic: Target
+                  - radiogroup "Target":
+                    - radio "Agent" [checked] [disabled]
+                    - radio "Shell" [disabled]
+                - generic:
+                  - generic: Agent
+                  - combobox "Agent" [disabled]:
+                    - option "Claude Code" [disabled]
+                    - option "Codex" [disabled] [selected]
+                    - option "Antigravity CLI" [disabled]
+                    - option "Gemini CLI (legacy)" [disabled]
+                    - option "OpenCode" [disabled]
+                    - option "OpenClaw" [disabled]
+                    - option "Hermes Agent" [disabled]
+                    - option "GitHub Copilot" [disabled]
+                - generic:
+                  - generic: Model
+                  - combobox "Model" [disabled]:
+                    - option "gpt-5.5" [disabled]
+                    - option "gpt-5.6-sol" [disabled] [selected]
+                    - option "gpt-5.6-terra" [disabled]
+                    - option "gpt-5.6-luna" [disabled]
+                    - option "gpt-5.4" [disabled]
+                    - option "gpt-5.4-mini" [disabled]
+                    - option "gpt-5.3-codex-spark" [disabled]
+                - generic:
+                  - generic: Reasoning
+                  - generic:
+                    - slider "Reasoning" [disabled]: "3"
+                    - generic:
+                      - generic: Low
+                      - generic: Medium
+                      - generic: High
+                      - generic: Extra high
+                      - generic: Max
+                      - generic: Ultra
+                  - generic: Extra high reasoning depth for complex problems
+            - generic:
+              - generic:
+                - generic:
+                  - generic: Launch settings
+                  - generic: Version, permissions, and tool-specific launch behavior.
+              - generic:
+                - generic:
+                  - generic: Version
+                  - combobox "Version" [disabled]:
+                    - option "Installed" [disabled]
+                    - option "latest" [disabled] [selected]
+                - generic:
+                  - generic: Permissions
+                  - generic:
+                    - generic:
+                      - checkbox "Skip permission prompts" [checked] [disabled]
+                    - generic: Skip permission prompts
+                - generic:
+                  - generic: Fast mode
+                  - generic:
+                    - generic:
+                      - checkbox "Use the agent's Fast mode" [checked] [disabled]
+                    - generic: Use the agent's Fast mode
+      - generic [ref=e227]:
+        - button "Cancel" [ref=e228] [cursor=pointer]
+        - button "Preparing..." [disabled] [ref=e229] [cursor=pointer]
+    - dialog [ref=e230]:
+      - banner [ref=e231]:
+        - heading "Detail" [level=2] [ref=e232]
+        - button "Close detail drawer" [ref=e233] [cursor=pointer]: ×
+      - contentinfo [ref=e235]
+  - generic:
+    - status "Agent notifications":
+      - generic:
+        - 'button "Agent error Dismiss notification SPEC #3431 PM 実地欠陥修正 slice（scan 不発・常駐ループ） hit an error: Prepared continuation no longer matches its owner generation attempt" [ref=e236] [cursor=pointer]':
+          - generic [ref=e237]: Agent error
+          - button "Dismiss notification" [ref=e238]: ×
+          - generic [ref=e239]: "SPEC #3431 PM 実地欠陥修正 slice（scan 不発・常駐ループ） hit an error: Prepared continuation no longer matches its owner generation attempt"
+        - 'button "Agent error Dismiss notification Issue 3461 の実装 hit an error: managed asset setup failed for worktree /Users/akiojin/Workbench/gwt/work/issue-3461: failed to regenerate Codex hook settings: No such file or directory (os error 2)" [ref=e240] [cursor=pointer]':
+          - generic [ref=e241]: Agent error
+          - button "Dismiss notification" [ref=e242]: ×
+          - generic [ref=e243]: "Issue 3461 の実装 hit an error: managed asset setup failed for worktree /Users/akiojin/Workbench/gwt/work/issue-3461: failed to regenerate Codex hook settings: No such file or directory (os error 2)"
+  - log "Autonomous Issue Monitor notifications"

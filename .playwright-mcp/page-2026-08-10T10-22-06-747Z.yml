@@ -1,0 +1,1679 @@
+- generic [ref=e1]:
+  - generic [ref=e2]:
+    - generic [ref=e3]:
+      - generic [ref=e4]:
+        - text: ⌜ GWT · OPERATOR ⌟
+        - generic [ref=e5]:
+          - button "5 running agents gwt Close gwt" [ref=e1103] [cursor=pointer]:
+            - generic "5 running agents" [ref=e1104]: RUN 5
+            - generic [ref=e8]: gwt
+            - button "Close gwt" [ref=e9]: ×
+          - button "llmlb Close llmlb" [ref=e10] [cursor=pointer]:
+            - generic [ref=e11]: llmlb
+            - button "Close llmlb" [ref=e12]: ×
+          - button "event-magazine Close event-magazine" [ref=e13] [cursor=pointer]:
+            - generic [ref=e14]: event-magazine
+            - button "Close event-magazine" [ref=e15]: ×
+        - generic [ref=e16]:
+          - button "Switch projects" [ref=e18] [cursor=pointer]: Projects
+          - button "v9.75.1" [ref=e19] [cursor=pointer]
+          - 'radiogroup "Theme: auto (currently light)" [ref=e20]':
+            - radio "AUTO" [checked] [ref=e21] [cursor=pointer]:
+              - generic [ref=e23]: ▯
+            - radio "DARK" [ref=e24] [cursor=pointer]
+            - radio "LIGHT" [ref=e25] [cursor=pointer]
+      - complementary "Command rail" [ref=e26]:
+        - group "Navigate" [ref=e27]:
+          - generic [ref=e28]:
+            - button "Project Manager" [ref=e29] [cursor=pointer]:
+              - generic [ref=e30]: ◎
+              - generic: PM
+            - button "Project Manager settings" [ref=e31] [cursor=pointer]:
+              - generic [ref=e32]: ⚙
+          - button "Intake" [ref=e33] [cursor=pointer]:
+            - generic [ref=e34]: ▶
+          - button "Workspace" [ref=e35] [cursor=pointer]:
+            - generic [ref=e36]: ◆
+            - generic:
+              - generic: Workspace
+              - generic: ⌘ G
+        - group "Windows" [ref=e38]:
+          - button "Tile windows" [ref=e39] [cursor=pointer]:
+            - generic [ref=e40]: ⊞
+            - generic: Tile
+          - button "Stack windows" [ref=e41] [cursor=pointer]:
+            - generic [ref=e42]: ⊟
+            - generic: Stack
+          - button "Align windows without resizing" [ref=e43] [cursor=pointer]:
+            - generic [ref=e44]: ⊜
+            - generic: Align
+          - button "List windows" [ref=e46] [cursor=pointer]:
+            - generic [ref=e47]: ❒
+            - generic: "17"
+            - generic: Windows
+          - button "Add window" [ref=e48] [cursor=pointer]:
+            - generic [ref=e49]: ＋
+        - group "Agents" [ref=e50]:
+          - button "Stop all agents" [ref=e51] [cursor=pointer]:
+            - generic [ref=e52]: ⏹
+        - group "System" [ref=e54]:
+          - button "Command palette" [ref=e55] [cursor=pointer]:
+            - generic [ref=e56]: ⌘K
+            - generic:
+              - generic: Palette
+              - generic: ⌘ K
+      - generic [ref=e57]:
+        - generic [ref=e59]:
+          - generic [ref=e1169]:
+            - generic [ref=e1170]:
+              - generic "Issue Monitor" [ref=e1172]
+              - button "Close window" [ref=e1174] [cursor=pointer]: ×
+            - generic "Window tabs" [ref=e1175]:
+              - generic [ref=e1176]:
+                - button "Activate Issue Monitor" [ref=e1177]:
+                  - generic [ref=e1178]: Issue Monitor
+                - button "Close Issue Monitor" [ref=e1179] [cursor=pointer]: ×
+              - generic [ref=e1180]:
+                - button "Activate Workspace" [ref=e1181]:
+                  - generic [ref=e1182]: Workspace
+                - button "Close Workspace" [ref=e1183] [cursor=pointer]: ×
+              - generic [ref=e1184]:
+                - button "Activate Issue" [ref=e1185]:
+                  - generic [ref=e1186]: Issue
+                - button "Close Issue" [ref=e1187] [cursor=pointer]: ×
+              - generic [ref=e1188]:
+                - button "Activate Claude Code (RUN)" [ref=e1189]:
+                  - generic [ref=e1190]: RUN
+                  - generic [ref=e1191]: Claude Code
+                - button "Close Claude Code" [ref=e1192] [cursor=pointer]: ×
+            - region "Issue Monitor" [ref=e1194]:
+              - generic [ref=e1195]:
+                - generic [ref=e1196]:
+                  - generic [ref=e1197]:
+                    - generic [ref=e1198]: Active
+                    - generic [ref=e1199]: "Queue 72 | Active 2/2 | Total 79 | Active #1974 | Scan 2026-08-10T09:19:44Z | Autonomous ON"
+                  - generic [ref=e1200]: "Agent settings Saved: codex / gpt-5.6-sol / xhigh / host"
+                - generic [ref=e1201]:
+                  - button "Agent settings" [ref=e1202] [cursor=pointer]
+                  - generic [ref=e1203]:
+                    - generic [ref=e1204]: Max active
+                    - spinbutton "Max active" [ref=e1205]: "2"
+                  - button "Stop" [ref=e1206] [cursor=pointer]
+                  - 'button "Autonomous: ON" [ref=e1207] [cursor=pointer]'
+              - generic [ref=e1208]:
+                - textbox "Quick issue title" [ref=e1209]:
+                  - /placeholder: Quick issue title…
+                - button "⚡ Register & Launch" [ref=e1210] [cursor=pointer]
+              - list [ref=e1211]:
+                - listitem [ref=e1212]:
+                  - generic [ref=e1214]:
+                    - generic [ref=e1215]:
+                      - generic [ref=e1216]: Queued
+                      - generic [ref=e1217]: "#3505 fix(monitor): production に scheduled scan の駆動が存在せず autonomous launch が一切発生しない"
+                    - generic [ref=e1218]: "Prompt: $gwt-execute #3505 | Branch: work/issue-3505"
+                  - generic [ref=e1219]:
+                    - button "Detail" [ref=e1220] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e1221]: ◎
+                    - button "Move up" [disabled] [ref=e1222]: ↑
+                    - button "Move down" [ref=e1223] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e1224] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e1225] [cursor=pointer]: ▶
+                - listitem [ref=e1226]:
+                  - generic [ref=e1228]:
+                    - generic [ref=e1229]:
+                      - generic [ref=e1230]: Queued
+                      - generic [ref=e1231]: "#3492 fix(daemon): PM worktree から daemon.subscribe が到達不能（endpoint が worktree-hash 単位で、PM 常駐ループ契約が履行できない）"
+                    - generic [ref=e1232]: "Prompt: $gwt-execute #3492 | Branch: work/issue-3492"
+                  - generic [ref=e1233]:
+                    - button "Detail" [ref=e1234] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e1235]: ◎
+                    - button "Move up" [ref=e1236] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e1237] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e1238] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e1239] [cursor=pointer]: ▶
+                - listitem [ref=e1240]:
+                  - generic [ref=e1242]:
+                    - generic [ref=e1243]:
+                      - generic [ref=e1244]: Queued
+                      - generic [ref=e1245]: "#3376 feat(gwtd): issue.close / issue.reopen / issue.label operation の追加 — ラベルポリシー維持と auto-merge opt-out を agent が実行できない"
+                    - generic [ref=e1246]: "Prompt: $gwt-execute #3376 | Branch: work/issue-3376"
+                  - generic [ref=e1247]:
+                    - button "Detail" [ref=e1248] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e1249]: ◎
+                    - button "Move up" [ref=e1250] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e1251] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e1252] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e1253] [cursor=pointer]: ▶
+                - listitem [ref=e1254]:
+                  - generic [ref=e1256]:
+                    - generic [ref=e1257]:
+                      - generic [ref=e1258]: Queued
+                      - generic [ref=e1259]: "#3391 fix(issue-cache): issue.view / comments / linked_prs が TTL を無視して無期限に古いキャッシュを返す"
+                    - generic [ref=e1260]: "Prompt: $gwt-execute #3391 | Branch: work/issue-3391"
+                  - generic [ref=e1261]:
+                    - button "Detail" [ref=e1262] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e1263]: ◎
+                    - button "Move up" [ref=e1264] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e1265] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e1266] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e1267] [cursor=pointer]: ▶
+                - listitem [ref=e1268]:
+                  - generic [ref=e1270]:
+                    - generic [ref=e1271]:
+                      - generic [ref=e1272]: Queued
+                      - generic [ref=e1273]: "#3503 fix(pane): error 状態の残置 pane を PM セッションから pane.close/pane.stop できない（correlated acceptance 拒否）"
+                    - generic [ref=e1274]: "Prompt: $gwt-execute #3503 | Branch: work/issue-3503"
+                  - generic [ref=e1275]:
+                    - button "Detail" [ref=e1276] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e1277]: ◎
+                    - button "Move up" [ref=e1278] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e1279] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e1280] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e1281] [cursor=pointer]: ▶
+                - listitem [ref=e1282]:
+                  - generic [ref=e1284]:
+                    - generic [ref=e1285]:
+                      - generic [ref=e1286]: Queued
+                      - generic [ref=e1287]: "#3504 feat(pane): 承認プロンプト待ちの Agent pane を検出・通知可能にする（pane.list state / needs_human 経路）"
+                    - generic [ref=e1288]: "Prompt: $gwt-execute #3504 | Branch: work/issue-3504"
+                  - generic [ref=e1289]:
+                    - button "Detail" [ref=e1290] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e1291]: ◎
+                    - button "Move up" [ref=e1292] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e1293] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e1294] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e1295] [cursor=pointer]: ▶
+                - listitem [ref=e1296]:
+                  - generic [ref=e1298]:
+                    - generic [ref=e1299]:
+                      - generic [ref=e1300]: Queued
+                      - generic [ref=e1301]: "#3466 fix(workspace): 同一リポジトリが GUI と agent session で別 project store に分裂する（origin 検出不能なレイアウト root が path-hash にフォールバック）"
+                    - generic [ref=e1302]: "Prompt: $gwt-execute #3466 | Branch: work/issue-3466"
+                  - generic [ref=e1303]:
+                    - button "Detail" [ref=e1304] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e1305]: ◎
+                    - button "Move up" [ref=e1306] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e1307] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e1308] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e1309] [cursor=pointer]: ▶
+                - listitem [ref=e1310]:
+                  - generic [ref=e1312]:
+                    - generic [ref=e1313]:
+                      - generic [ref=e1314]: Queued
+                      - generic [ref=e1315]: "#3395 chore(security): Dependabot アラート4件の対応 — cmov/quinn-proto lockfile bump・glib 0.20 系更新・chromadb 露出評価と security PR デッドロック解消"
+                    - generic [ref=e1316]: "Prompt: $gwt-execute #3395 | Branch: work/issue-3395"
+                  - generic [ref=e1317]:
+                    - button "Detail" [ref=e1318] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e1319]: ◎
+                    - button "Move up" [ref=e1320] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e1321] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e1322] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e1323] [cursor=pointer]: ▶
+                - listitem [ref=e1324]:
+                  - generic [ref=e1326]:
+                    - generic [ref=e1327]:
+                      - generic [ref=e1328]: Queued
+                      - generic [ref=e1329]: "#3471 fix(launch): Issue ウィンドウの Resume が operation_id 欠落で必ず失敗し、Resuming... のまま固着して失敗も見えない"
+                    - generic [ref=e1330]: "Prompt: $gwt-execute #3471 | Branch: work/issue-3471"
+                  - generic [ref=e1331]:
+                    - button "Detail" [ref=e1332] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e1333]: ◎
+                    - button "Move up" [ref=e1334] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e1335] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e1336] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e1337] [cursor=pointer]: ▶
+                - listitem [ref=e1338]:
+                  - generic [ref=e1340]:
+                    - generic [ref=e1341]:
+                      - generic [ref=e1342]: Queued
+                      - generic [ref=e1343]: "#3472 fix(launch): Completed generation を持つ owner への fresh launch が拒否され、完了済み Issue を再起動できない"
+                    - generic [ref=e1344]: "Prompt: $gwt-execute #3472 | Branch: work/issue-3472"
+                  - generic [ref=e1345]:
+                    - button "Detail" [ref=e1346] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e1347]: ◎
+                    - button "Move up" [ref=e1348] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e1349] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e1350] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e1351] [cursor=pointer]: ▶
+                - listitem [ref=e1352]:
+                  - generic [ref=e1354]:
+                    - generic [ref=e1355]:
+                      - generic [ref=e1356]: Queued
+                      - generic [ref=e1357]: "#3473 fix(execution): セッション異常終了で Active generation が永久滞留するため、起動時 reaper で stale generation を回収する"
+                    - generic [ref=e1358]: "Prompt: $gwt-execute #3473 | Branch: work/issue-3473"
+                  - generic [ref=e1359]:
+                    - button "Detail" [ref=e1360] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e1361]: ◎
+                    - button "Move up" [ref=e1362] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e1363] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e1364] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e1365] [cursor=pointer]: ▶
+                - listitem [ref=e1366]:
+                  - generic [ref=e1368]:
+                    - generic [ref=e1369]:
+                      - generic [ref=e1370]: Queued
+                      - generic [ref=e1371]: "#3426 fix(launch): 滞留 Active generation を持つ owner への fresh launch が『an execution generation already exists』で失敗し続け、次アクションへ誘導されない"
+                    - generic [ref=e1372]: "Prompt: $gwt-execute #3426 | Branch: work/issue-3426"
+                  - generic [ref=e1373]:
+                    - button "Detail" [ref=e1374] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e1375]: ◎
+                    - button "Move up" [ref=e1376] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e1377] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e1378] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e1379] [cursor=pointer]: ▶
+                - listitem [ref=e1380]:
+                  - generic [ref=e1382]:
+                    - generic [ref=e1383]:
+                      - generic [ref=e1384]: Queued
+                      - generic [ref=e1385]: "#3485 Issue Monitor から「Launch」するとき、Agent の起動に失敗すると Issue を Continue することにも失敗する"
+                    - generic [ref=e1386]: "Prompt: $gwt-execute #3485 | Branch: work/issue-3485"
+                  - generic [ref=e1387]:
+                    - button "Detail" [ref=e1388] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e1389]: ◎
+                    - button "Move up" [ref=e1390] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e1391] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e1392] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e1393] [cursor=pointer]: ▶
+                - listitem [ref=e1394]:
+                  - generic [ref=e1396]:
+                    - generic [ref=e1397]:
+                      - generic [ref=e1398]: Queued
+                      - generic [ref=e1399]: "#3462 fix(launch): Resume / Continue 起動で Skip Permission が適用されない"
+                    - generic [ref=e1400]: "Prompt: $gwt-execute #3462 | Branch: work/issue-3462"
+                  - generic [ref=e1401]:
+                    - button "Detail" [ref=e1402] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e1403]: ◎
+                    - button "Move up" [ref=e1404] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e1405] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e1406] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e1407] [cursor=pointer]: ▶
+                - listitem [ref=e1408]:
+                  - generic [ref=e1410]:
+                    - generic [ref=e1411]:
+                      - generic [ref=e1412]: Queued
+                      - generic [ref=e1413]: "#3489 fix(launch): Continue work の DurableSession 起点起動が owner linkage を再解決せず、PTY 起動前に execution binding owner mismatch で失敗する"
+                    - generic [ref=e1414]: "Prompt: $gwt-execute #3489 | Branch: work/issue-3489"
+                  - generic [ref=e1415]:
+                    - button "Detail" [ref=e1416] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e1417]: ◎
+                    - button "Move up" [ref=e1418] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e1419] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e1420] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e1421] [cursor=pointer]: ▶
+                - listitem [ref=e1422]:
+                  - generic [ref=e1424]:
+                    - generic [ref=e1425]:
+                      - generic [ref=e1426]: Queued
+                      - generic [ref=e1427]: "#3457 fix(launch): model 切替などの relaunch が execution binding を引き継がず、作業中セッションが成果を確定できなくなる"
+                    - generic [ref=e1428]: "Prompt: $gwt-execute #3457 | Branch: work/issue-3457"
+                  - generic [ref=e1429]:
+                    - button "Detail" [ref=e1430] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e1431]: ◎
+                    - button "Move up" [ref=e1432] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e1433] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e1434] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e1435] [cursor=pointer]: ▶
+                - listitem [ref=e1436]:
+                  - generic [ref=e1438]:
+                    - generic [ref=e1439]:
+                      - generic [ref=e1440]: Queued
+                      - generic [ref=e1441]: "#3458 fix(execution): execution.adopt が adopting session に execution binding を install せず、adopt 後は verify/pr.create/reopen が恒久拒否される"
+                    - generic [ref=e1442]: "Prompt: $gwt-execute #3458 | Branch: work/issue-3458"
+                  - generic [ref=e1443]:
+                    - button "Detail" [ref=e1444] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e1445]: ◎
+                    - button "Move up" [ref=e1446] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e1447] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e1448] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e1449] [cursor=pointer]: ▶
+                - listitem [ref=e1450]:
+                  - generic [ref=e1452]:
+                    - generic [ref=e1453]:
+                      - generic [ref=e1454]: Queued
+                      - generic [ref=e1455]: "#3480 fix(launch/readiness): hook-live fail-open と daemon fan-out nonce 欠落で resume readiness を誤判定する"
+                    - generic [ref=e1456]: "Prompt: $gwt-execute #3480 | Branch: work/issue-3480"
+                  - generic [ref=e1457]:
+                    - button "Detail" [ref=e1458] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e1459]: ◎
+                    - button "Move up" [ref=e1460] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e1461] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e1462] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e1463] [cursor=pointer]: ▶
+                - listitem [ref=e1464]:
+                  - generic [ref=e1466]:
+                    - generic [ref=e1467]:
+                      - generic [ref=e1468]: Queued
+                      - generic [ref=e1469]: "#3481 fix(launch): codex@latest が version discovery を迂回し resume readiness 判定を欠落させる"
+                    - generic [ref=e1470]: "Prompt: $gwt-execute #3481 | Branch: work/issue-3481"
+                  - generic [ref=e1471]:
+                    - button "Detail" [ref=e1472] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e1473]: ◎
+                    - button "Move up" [ref=e1474] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e1475] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e1476] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e1477] [cursor=pointer]: ▶
+                - listitem [ref=e1478]:
+                  - generic [ref=e1480]:
+                    - generic [ref=e1481]:
+                      - generic [ref=e1482]: Queued
+                      - generic [ref=e1483]: "#3482 fix(launch): readiness timeout abort が生存 pane を kill し進捗中 resume を破棄する"
+                    - generic [ref=e1484]: "Prompt: $gwt-execute #3482 | Branch: work/issue-3482"
+                  - generic [ref=e1485]:
+                    - button "Detail" [ref=e1486] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e1487]: ◎
+                    - button "Move up" [ref=e1488] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e1489] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e1490] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e1491] [cursor=pointer]: ▶
+                - listitem [ref=e1492]:
+                  - generic [ref=e1494]:
+                    - generic [ref=e1495]:
+                      - generic [ref=e1496]: Queued
+                      - generic [ref=e1497]: "#3456 fix(launch): Windows で Codex 起動時にプロンプト末尾引数が分割され unexpected argument で失敗する"
+                    - generic [ref=e1498]: "Prompt: $gwt-execute #3456 | Branch: work/issue-3456"
+                  - generic [ref=e1499]:
+                    - button "Detail" [ref=e1500] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e1501]: ◎
+                    - button "Move up" [ref=e1502] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e1503] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e1504] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e1505] [cursor=pointer]: ▶
+                - listitem [ref=e1506]:
+                  - generic [ref=e1508]:
+                    - generic [ref=e1509]:
+                      - generic [ref=e1510]: Queued
+                      - generic [ref=e1511]: "#3490 fix(agent): Codex の同時多重起動が共有 ~/.codex の SQLite ロック競合で失敗する（database is locked）"
+                    - generic [ref=e1512]: "Prompt: $gwt-execute #3490 | Branch: work/issue-3490"
+                  - generic [ref=e1513]:
+                    - button "Detail" [ref=e1514] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e1515]: ◎
+                    - button "Move up" [ref=e1516] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e1517] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e1518] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e1519] [cursor=pointer]: ▶
+                - listitem [ref=e1520]:
+                  - generic [ref=e1522]:
+                    - generic [ref=e1523]:
+                      - generic [ref=e1524]: Queued
+                      - generic [ref=e1525]: "#1764 Windows 11 で v8.17.0 以降を起動すると、起動直後に勝手にウィンドウが閉じて終了してしまう"
+                    - generic [ref=e1526]: "Prompt: $gwt-execute #1764 | Branch: work/issue-1764"
+                  - generic [ref=e1527]:
+                    - button "Detail" [ref=e1528] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e1529]: ◎
+                    - button "Move up" [ref=e1530] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e1531] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e1532] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e1533] [cursor=pointer]: ▶
+                - listitem [ref=e1534]:
+                  - generic [ref=e1536]:
+                    - generic [ref=e1537]:
+                      - generic [ref=e1538]: Queued
+                      - generic [ref=e1539]: "#3491 fix(workspace): detached HEAD の worktree では workspace.update が恒久的に失敗し、原因も文言から読み取れない"
+                    - generic [ref=e1540]: "Prompt: $gwt-execute #3491 | Branch: work/issue-3491"
+                  - generic [ref=e1541]:
+                    - button "Detail" [ref=e1542] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e1543]: ◎
+                    - button "Move up" [ref=e1544] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e1545] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e1546] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e1547] [cursor=pointer]: ▶
+                - listitem [ref=e1548]:
+                  - generic [ref=e1550]:
+                    - generic [ref=e1551]:
+                      - generic [ref=e1552]: Queued
+                      - generic [ref=e1553]: "#3477 fix(pm/workspace): detached PM から workspace.update が branch identity 不在で拒否される"
+                    - generic [ref=e1554]: "Prompt: $gwt-execute #3477 | Branch: work/issue-3477"
+                  - generic [ref=e1555]:
+                    - button "Detail" [ref=e1556] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e1557]: ◎
+                    - button "Move up" [ref=e1558] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e1559] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e1560] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e1561] [cursor=pointer]: ▶
+                - listitem [ref=e1562]:
+                  - generic [ref=e1564]:
+                    - generic [ref=e1565]:
+                      - generic [ref=e1566]: Queued
+                      - generic [ref=e1567]: "#3441 fix(workspace): gwt-spec Issue の Work owner が \"SPEC #N\" で永続化され canonical \"SPEC-N\" と不一致 — owner upgrade 対象外で ensure/update/build.* が恒久デッドロック"
+                    - generic [ref=e1568]: "Prompt: $gwt-execute #3441 | Branch: work/issue-3441"
+                  - generic [ref=e1569]:
+                    - button "Detail" [ref=e1570] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e1571]: ◎
+                    - button "Move up" [ref=e1572] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e1573] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e1574] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e1575] [cursor=pointer]: ▶
+                - listitem [ref=e1576]:
+                  - generic [ref=e1578]:
+                    - generic [ref=e1579]:
+                      - generic [ref=e1580]: Queued
+                      - generic [ref=e1581]: "#3448 fix(workspace): 完了済み Work が active のまま滞留し、owner 表記揺れで同一 Issue が分裂する（agent 一括整理の canonical op も不在）"
+                    - generic [ref=e1582]: "Prompt: $gwt-execute #3448 | Branch: work/issue-3448"
+                  - generic [ref=e1583]:
+                    - button "Detail" [ref=e1584] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e1585]: ◎
+                    - button "Move up" [ref=e1586] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e1587] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e1588] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e1589] [cursor=pointer]: ▶
+                - listitem [ref=e1590]:
+                  - generic [ref=e1592]:
+                    - generic [ref=e1593]:
+                      - generic [ref=e1594]: Queued
+                      - generic [ref=e1595]: "#3443 fix(workspace): 再開可能な foreign Idle Work が競合判定から除外され、同一 branch/worktree に稼働可能な authority が二重に残る（PR #3435 review thread follow-up）"
+                    - generic [ref=e1596]: "Prompt: $gwt-execute #3443 | Branch: work/issue-3443"
+                  - generic [ref=e1597]:
+                    - button "Detail" [ref=e1598] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e1599]: ◎
+                    - button "Move up" [ref=e1600] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e1601] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e1602] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e1603] [cursor=pointer]: ▶
+                - listitem [ref=e1604]:
+                  - generic [ref=e1606]:
+                    - generic [ref=e1607]:
+                      - generic [ref=e1608]: Queued
+                      - generic [ref=e1609]: "#3455 fix(workspace): Work 一覧が owner 未設定の行に現在 Work の owner を継承表示する（実測 648/783 行が無関係な owner を表示）"
+                    - generic [ref=e1610]: "Prompt: $gwt-execute #3455 | Branch: work/issue-3455"
+                  - generic [ref=e1611]:
+                    - button "Detail" [ref=e1612] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e1613]: ◎
+                    - button "Move up" [ref=e1614] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e1615] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e1616] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e1617] [cursor=pointer]: ▶
+                - listitem [ref=e1618]:
+                  - generic [ref=e1620]:
+                    - generic [ref=e1621]:
+                      - generic [ref=e1622]: Queued
+                      - generic [ref=e1623]: "#3459 fix(workspace): terminal になった Work は settlement receipt を作れず PR ゲートが恒久的に閉じる"
+                    - generic [ref=e1624]: "Prompt: $gwt-execute #3459 | Branch: work/issue-3459"
+                  - generic [ref=e1625]:
+                    - button "Detail" [ref=e1626] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e1627]: ◎
+                    - button "Move up" [ref=e1628] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e1629] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e1630] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e1631] [cursor=pointer]: ▶
+                - listitem [ref=e1632]:
+                  - generic [ref=e1634]:
+                    - generic [ref=e1635]:
+                      - generic [ref=e1636]: Queued
+                      - generic [ref=e1637]: "#3465 fix(hooks): 他 session が所有する discussion proposal が同一プロジェクトの全 session の Stop をブロックする"
+                    - generic [ref=e1638]: "Prompt: $gwt-execute #3465 | Branch: work/issue-3465"
+                  - generic [ref=e1639]:
+                    - button "Detail" [ref=e1640] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e1641]: ◎
+                    - button "Move up" [ref=e1642] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e1643] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e1644] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e1645] [cursor=pointer]: ▶
+                - listitem [ref=e1646]:
+                  - generic [ref=e1648]:
+                    - generic [ref=e1649]:
+                      - generic [ref=e1650]: Queued
+                      - generic [ref=e1651]: "#3432 fix(daemon): issue_monitor の gui_connected が receiver_count 判定のため、非 GUI 購読者が GUI 偽装になり launch_request と NeedsHuman 通知が消失する"
+                    - generic [ref=e1652]: "Prompt: $gwt-execute #3432 | Branch: work/issue-3432"
+                  - generic [ref=e1653]:
+                    - button "Detail" [ref=e1654] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e1655]: ◎
+                    - button "Move up" [ref=e1656] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e1657] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e1658] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e1659] [cursor=pointer]: ▶
+                - listitem [ref=e1660]:
+                  - generic [ref=e1662]:
+                    - generic [ref=e1663]:
+                      - generic [ref=e1664]: Queued
+                      - generic [ref=e1665]: "#3474 fix(hooks): コミット済み .codex/hooks.json が旧テンプレートのまま収束せず、ほぼ全 Work が恒常的に Hook error になる"
+                    - generic [ref=e1666]: "Prompt: $gwt-execute #3474 | Branch: work/issue-3474"
+                  - generic [ref=e1667]:
+                    - button "Detail" [ref=e1668] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e1669]: ◎
+                    - button "Move up" [ref=e1670] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e1671] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e1672] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e1673] [cursor=pointer]: ▶
+                - listitem [ref=e1674]:
+                  - generic [ref=e1676]:
+                    - generic [ref=e1677]:
+                      - generic [ref=e1678]: Queued
+                      - generic [ref=e1679]: "#3476 fix(daemon): 長い runtime path で Unix socket path が SUN_LEN を超える"
+                    - generic [ref=e1680]: "Prompt: $gwt-execute #3476 | Branch: work/issue-3476"
+                  - generic [ref=e1681]:
+                    - button "Detail" [ref=e1682] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e1683]: ◎
+                    - button "Move up" [ref=e1684] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e1685] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e1686] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e1687] [cursor=pointer]: ▶
+                - listitem [ref=e1688]:
+                  - generic [ref=e1690]:
+                    - generic [ref=e1691]:
+                      - generic [ref=e1692]: Queued
+                      - generic [ref=e1693]: "#3341 fix(agent): エージェント突然死（ターン途中の exit 0 終了）の原因を特定できるようにする — exit 観測性強化と Codex file logging"
+                    - generic [ref=e1694]: "Prompt: $gwt-execute #3341 | Branch: work/issue-3341"
+                  - generic [ref=e1695]:
+                    - button "Detail" [ref=e1696] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e1697]: ◎
+                    - button "Move up" [ref=e1698] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e1699] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e1700] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e1701] [cursor=pointer]: ▶
+                - listitem [ref=e1702]:
+                  - generic [ref=e1704]:
+                    - generic [ref=e1705]:
+                      - generic [ref=e1706]: Queued
+                      - generic [ref=e1707]: "#3355 fix(gui): Windows レールのバッジとウィンドウ一覧をアクティブプロジェクト限定にし stopped ウィンドウの計上・蓄積を解消"
+                    - generic [ref=e1708]: "Prompt: $gwt-execute #3355 | Branch: work/issue-3355"
+                  - generic [ref=e1709]:
+                    - button "Detail" [ref=e1710] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e1711]: ◎
+                    - button "Move up" [ref=e1712] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e1713] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e1714] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e1715] [cursor=pointer]: ▶
+                - listitem [ref=e1716]:
+                  - generic [ref=e1718]:
+                    - generic [ref=e1719]:
+                      - generic [ref=e1720]: Queued
+                      - generic [ref=e1721]: "#3233 bug(skills): runtime materialization が deliver-flow.md を .claude のみに書き、ローカル parity test が失敗する"
+                    - generic [ref=e1722]: "Prompt: $gwt-execute #3233 | Branch: work/issue-3233"
+                  - generic [ref=e1723]:
+                    - button "Detail" [ref=e1724] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e1725]: ◎
+                    - button "Move up" [ref=e1726] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e1727] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e1728] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e1729] [cursor=pointer]: ▶
+                - listitem [ref=e1730]:
+                  - generic [ref=e1732]:
+                    - generic [ref=e1733]:
+                      - generic [ref=e1734]: Queued
+                      - generic [ref=e1735]: "#3268 fix(ci): Prepare Release が GH006（develop の branch protection）で push 拒否され全 run 失敗する"
+                    - generic [ref=e1736]: "Prompt: $gwt-execute #3268 | Branch: work/issue-3268"
+                  - generic [ref=e1737]:
+                    - button "Detail" [ref=e1738] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e1739]: ◎
+                    - button "Move up" [ref=e1740] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e1741] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e1742] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e1743] [cursor=pointer]: ▶
+                - listitem [ref=e1744]:
+                  - generic [ref=e1746]:
+                    - generic [ref=e1747]:
+                      - generic [ref=e1748]: Queued
+                      - generic [ref=e1749]: "#2791 fix(gwt): `gwt --help` ignores argv and starts the GUI instead of printing help"
+                    - generic [ref=e1750]: "Prompt: $gwt-execute #2791 | Branch: work/issue-2791"
+                  - generic [ref=e1751]:
+                    - button "Detail" [ref=e1752] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e1753]: ◎
+                    - button "Move up" [ref=e1754] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e1755] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e1756] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e1757] [cursor=pointer]: ▶
+                - listitem [ref=e1758]:
+                  - generic [ref=e1760]:
+                    - generic [ref=e1761]:
+                      - generic [ref=e1762]: Queued
+                      - generic [ref=e1763]: "#3453 fix(test): Windows で cargo test -p gwt --lib が develop 単体でも失敗する（8.3 パス比較と Windows 非対応 fixture）"
+                    - generic [ref=e1764]: "Prompt: $gwt-execute #3453 | Branch: work/issue-3453"
+                  - generic [ref=e1765]:
+                    - button "Detail" [ref=e1766] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e1767]: ◎
+                    - button "Move up" [ref=e1768] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e1769] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e1770] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e1771] [cursor=pointer]: ▶
+                - listitem [ref=e1772]:
+                  - generic [ref=e1774]:
+                    - generic [ref=e1775]:
+                      - generic [ref=e1776]: Queued
+                      - generic [ref=e1777]: "#3506 test(index): runner_deadline_expiry_maps_to_search_unavailable_and_reaps_process_tree がコールドスタートで flaky（deadline 500ms に fake runner の fork が間に合わない）"
+                    - generic [ref=e1778]: "Prompt: $gwt-execute #3506 | Branch: work/issue-3506"
+                  - generic [ref=e1779]:
+                    - button "Detail" [ref=e1780] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e1781]: ◎
+                    - button "Move up" [ref=e1782] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e1783] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e1784] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e1785] [cursor=pointer]: ▶
+                - listitem [ref=e1786]:
+                  - generic [ref=e1788]:
+                    - generic [ref=e1789]:
+                      - generic [ref=e1790]: Queued
+                      - generic [ref=e1791]: "#3040 test(gwt): status_thread_reports_process_exit_without_reader_eof が並列実行で join hang する flake"
+                    - generic [ref=e1792]: "Prompt: $gwt-execute #3040 | Branch: work/issue-3040"
+                  - generic [ref=e1793]:
+                    - button "Detail" [ref=e1794] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e1795]: ◎
+                    - button "Move up" [ref=e1796] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e1797] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e1798] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e1799] [cursor=pointer]: ▶
+                - listitem [ref=e1800]:
+                  - generic [ref=e1802]:
+                    - generic [ref=e1803]:
+                      - generic [ref=e1804]: Queued
+                      - generic [ref=e1805]: "#3404 test: 締切(時間)依存テストが並列実行で不安定 — Windows では RUST_TEST_THREADS=1 のみ確定 PASS"
+                    - generic [ref=e1806]: "Prompt: $gwt-execute #3404 | Branch: work/issue-3404"
+                  - generic [ref=e1807]:
+                    - button "Detail" [ref=e1808] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e1809]: ◎
+                    - button "Move up" [ref=e1810] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e1811] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e1812] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e1813] [cursor=pointer]: ▶
+                - listitem [ref=e1814]:
+                  - generic [ref=e1816]:
+                    - generic [ref=e1817]:
+                      - generic [ref=e1818]: Queued
+                      - generic [ref=e1819]: "#3383 fix(worktree): .intake-* ephemeral worktree が prune されず堆積する（実測 37 個）— .gwt/ が disposable 判定から漏れている"
+                    - generic [ref=e1820]: "Prompt: $gwt-execute #3383 | Branch: work/issue-3383"
+                  - generic [ref=e1821]:
+                    - button "Detail" [ref=e1822] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e1823]: ◎
+                    - button "Move up" [ref=e1824] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e1825] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e1826] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e1827] [cursor=pointer]: ▶
+                - listitem [ref=e1828]:
+                  - generic [ref=e1830]:
+                    - generic [ref=e1831]:
+                      - generic [ref=e1832]: Queued
+                      - generic [ref=e1833]: "#3447 fix(worktree): merge 済み Issue の work/issue-* worktree が cleanup されず堆積する（実測 74 個・うち 42 個が削除安全）"
+                    - generic [ref=e1834]: "Prompt: $gwt-execute #3447 | Branch: work/issue-3447"
+                  - generic [ref=e1835]:
+                    - button "Detail" [ref=e1836] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e1837]: ◎
+                    - button "Move up" [ref=e1838] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e1839] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e1840] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e1841] [cursor=pointer]: ▶
+                - listitem [ref=e1842]:
+                  - generic [ref=e1844]:
+                    - generic [ref=e1845]:
+                      - generic [ref=e1846]: Queued
+                      - generic [ref=e1847]: "#2896 feat: allow gh CLI commands targeting non-gwt repositories"
+                    - generic [ref=e1848]: "Prompt: $gwt-execute #2896 | Branch: work/issue-2896"
+                  - generic [ref=e1849]:
+                    - button "Detail" [ref=e1850] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e1851]: ◎
+                    - button "Move up" [ref=e1852] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e1853] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e1854] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e1855] [cursor=pointer]: ▶
+                - listitem [ref=e1856]:
+                  - generic [ref=e1858]:
+                    - generic [ref=e1859]:
+                      - generic [ref=e1860]: Queued
+                      - generic [ref=e1861]: "#3019 feat(installer): show progress and completion feedback for Windows MSI install"
+                    - generic [ref=e1862]: "Prompt: $gwt-execute #3019 | Branch: work/issue-3019"
+                  - generic [ref=e1863]:
+                    - button "Detail" [ref=e1864] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e1865]: ◎
+                    - button "Move up" [ref=e1866] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e1867] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e1868] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e1869] [cursor=pointer]: ▶
+                - listitem [ref=e1870]:
+                  - generic [ref=e1872]:
+                    - generic [ref=e1873]:
+                      - generic [ref=e1874]: Queued
+                      - generic [ref=e1875]: "#3023 chore(gwt): 汚染 events.jsonl の浄化と info/exclude carve-out (v9.54.0+) の実機検証"
+                    - generic [ref=e1876]: "Prompt: $gwt-execute #3023 | Branch: work/issue-3023"
+                  - generic [ref=e1877]:
+                    - button "Detail" [ref=e1878] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e1879]: ◎
+                    - button "Move up" [ref=e1880] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e1881] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e1882] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e1883] [cursor=pointer]: ▶
+                - listitem [ref=e1884]:
+                  - generic [ref=e1886]:
+                    - generic [ref=e1887]:
+                      - generic [ref=e1888]: Queued
+                      - generic [ref=e1889]: "#2790 bug: managed info/exclude misses Gemini gwt artifacts and legacy index cleanup dirties worktrees"
+                    - generic [ref=e1890]: "Prompt: $gwt-execute #2790 | Branch: work/issue-2790"
+                  - generic [ref=e1891]:
+                    - button "Detail" [ref=e1892] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e1893]: ◎
+                    - button "Move up" [ref=e1894] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e1895] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e1896] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e1897] [cursor=pointer]: ▶
+                - listitem [ref=e1898]:
+                  - generic [ref=e1900]:
+                    - generic [ref=e1901]:
+                      - generic [ref=e1902]: Queued
+                      - generic [ref=e1903]: "#2804 File Tree から .claude/ ディレクトリが見えない"
+                    - generic [ref=e1904]: "Prompt: $gwt-execute #2804 | Branch: work/issue-2804"
+                  - generic [ref=e1905]:
+                    - button "Detail" [ref=e1906] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e1907]: ◎
+                    - button "Move up" [ref=e1908] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e1909] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e1910] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e1911] [cursor=pointer]: ▶
+                - listitem [ref=e1912]:
+                  - generic [ref=e1914]:
+                    - generic [ref=e1915]:
+                      - generic [ref=e1916]: Queued
+                      - generic [ref=e1917]: "#3032 bug: Docker runtime の複数 worktree 同時起動でホストポート競合（PortAllocator が launch 経路に未配線）"
+                    - generic [ref=e1918]: "Prompt: $gwt-execute #3032 | Branch: work/issue-3032"
+                  - generic [ref=e1919]:
+                    - button "Detail" [ref=e1920] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e1921]: ◎
+                    - button "Move up" [ref=e1922] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e1923] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e1924] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e1925] [cursor=pointer]: ▶
+                - listitem [ref=e1926]:
+                  - generic [ref=e1928]:
+                    - generic [ref=e1929]:
+                      - generic [ref=e1930]: Queued
+                      - generic [ref=e1931]: "#3160 feat(gui): Hermes \"Run Hermes setup\" in-pane launcher (FR-006 follow-up of SPEC-3152)"
+                    - generic [ref=e1932]: "Prompt: $gwt-execute #3160 | Branch: work/issue-3160"
+                  - generic [ref=e1933]:
+                    - button "Detail" [ref=e1934] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e1935]: ◎
+                    - button "Move up" [ref=e1936] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e1937] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e1938] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e1939] [cursor=pointer]: ▶
+                - listitem [ref=e1940]:
+                  - generic [ref=e1942]:
+                    - generic [ref=e1943]:
+                      - generic [ref=e1944]: Queued
+                      - generic [ref=e1945]: "#3143 test: critical-path E2E/統合テスト coverage gap の追跡（umbrella）"
+                    - generic [ref=e1946]: "Prompt: $gwt-execute #3143 | Branch: work/issue-3143"
+                  - generic [ref=e1947]:
+                    - button "Detail" [ref=e1948] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e1949]: ◎
+                    - button "Move up" [ref=e1950] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e1951] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e1952] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e1953] [cursor=pointer]: ▶
+                - listitem [ref=e1954]:
+                  - generic [ref=e1956]:
+                    - generic [ref=e1957]:
+                      - generic [ref=e1958]: Queued
+                      - generic [ref=e1959]: "#2584 follow-up(spec-1939): Phase 12 verification (T-IDX-109..112)"
+                    - generic [ref=e1960]: "Prompt: $gwt-execute #2584 | Branch: work/issue-2584"
+                  - generic [ref=e1961]:
+                    - button "Detail" [ref=e1962] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e1963]: ◎
+                    - button "Move up" [ref=e1964] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e1965] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e1966] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e1967] [cursor=pointer]: ▶
+                - listitem [ref=e1968]:
+                  - generic [ref=e1970]:
+                    - generic [ref=e1971]:
+                      - generic [ref=e1972]: Queued
+                      - generic [ref=e1973]: "#3401 gwtd に pr.update_branch を追加する（GitHub updatePullRequestBranch のサーバーサイド実行）"
+                    - generic [ref=e1974]: "Prompt: $gwt-execute #3401 | Branch: work/issue-3401"
+                  - generic [ref=e1975]:
+                    - button "Detail" [ref=e1976] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e1977]: ◎
+                    - button "Move up" [ref=e1978] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e1979] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e1980] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e1981] [cursor=pointer]: ▶
+                - listitem [ref=e1982]:
+                  - generic [ref=e1984]:
+                    - generic [ref=e1985]:
+                      - generic [ref=e1986]: Queued
+                      - generic [ref=e1987]: "#3214 SPEC: autonomous 時代の作業モデル — intake ephemeral worktree・Issue Monitor 主実行・Start Work 縮退"
+                    - generic [ref=e1988]: "Prompt: $gwt-execute #3214 | Branch: work/issue-3214"
+                  - generic [ref=e1989]:
+                    - button "Detail" [ref=e1990] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e1991]: ◎
+                    - button "Move up" [ref=e1992] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e1993] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e1994] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e1995] [cursor=pointer]: ▶
+                - listitem [ref=e1996]:
+                  - generic [ref=e1998]:
+                    - generic [ref=e1999]:
+                      - generic [ref=e2000]: Queued
+                      - generic [ref=e2001]: "#2359 SPEC: Workspace / Start Work — ブランチレス作業開始・現在作業 Projection"
+                    - generic [ref=e2002]: "Prompt: $gwt-execute #2359 | Branch: work/issue-2359"
+                  - generic [ref=e2003]:
+                    - button "Detail" [ref=e2004] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e2005]: ◎
+                    - button "Move up" [ref=e2006] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e2007] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e2008] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e2009] [cursor=pointer]: ▶
+                - listitem [ref=e2010]:
+                  - generic [ref=e2012]:
+                    - generic [ref=e2013]:
+                      - generic [ref=e2014]: Queued
+                      - generic [ref=e2015]: "#1939 SPEC-1939: セマンティック検索基盤 — ChromaDB・e5 埋込・watcher・runtime contract"
+                    - generic [ref=e2016]: "Prompt: $gwt-execute #1939 | Branch: work/issue-1939"
+                  - generic [ref=e2017]:
+                    - button "Detail" [ref=e2018] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e2019]: ◎
+                    - button "Move up" [ref=e2020] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e2021] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e2022] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e2023] [cursor=pointer]: ▶
+                - listitem [ref=e2024]:
+                  - generic [ref=e2026]:
+                    - generic [ref=e2027]:
+                      - generic [ref=e2028]: Queued
+                      - generic [ref=e2029]: "#1921 SPEC-1921: エージェント管理 — 検出・起動ウィザード・カスタムエージェント・バージョンキャッシュ"
+                    - generic [ref=e2030]: "Prompt: $gwt-execute #1921 | Branch: work/issue-1921"
+                  - generic [ref=e2031]:
+                    - button "Detail" [ref=e2032] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e2033]: ◎
+                    - button "Move up" [ref=e2034] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e2035] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e2036] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e2037] [cursor=pointer]: ▶
+                - listitem [ref=e2038]:
+                  - generic [ref=e2040]:
+                    - generic [ref=e2041]:
+                      - generic [ref=e2042]: Queued
+                      - generic [ref=e2043]: "#3393 SPEC: Hooks 再設計 — 3問テストによる gate triage・詰み解消・エージェント自力復旧"
+                    - generic [ref=e2044]: "Prompt: $gwt-execute #3393 | Branch: work/issue-3393"
+                  - generic [ref=e2045]:
+                    - button "Detail" [ref=e2046] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e2047]: ◎
+                    - button "Move up" [ref=e2048] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e2049] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e2050] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e2051] [cursor=pointer]: ▶
+                - listitem [ref=e2052]:
+                  - generic [ref=e2054]:
+                    - generic [ref=e2055]:
+                      - generic [ref=e2056]: Queued
+                      - generic [ref=e2057]: "#3165 SPEC: Issue auto-improve monitor"
+                    - generic [ref=e2058]: "Prompt: $gwt-execute #3165 | Branch: work/issue-3165"
+                  - generic [ref=e2059]:
+                    - button "Detail" [ref=e2060] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e2061]: ◎
+                    - button "Move up" [ref=e2062] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e2063] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e2064] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e2065] [cursor=pointer]: ▶
+                - listitem [ref=e2066]:
+                  - generic [ref=e2068]:
+                    - generic [ref=e2069]:
+                      - generic [ref=e2070]: Queued
+                      - generic [ref=e2071]: "#3164 SPEC: gwt自己改善フィードバックループ — Improvement Inbox・自動Issue化・高確度Stop-block"
+                    - generic [ref=e2072]: "Prompt: $gwt-execute #3164 | Branch: work/issue-3164"
+                  - generic [ref=e2073]:
+                    - button "Detail" [ref=e2074] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e2075]: ◎
+                    - button "Move up" [ref=e2076] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e2077] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e2078] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e2079] [cursor=pointer]: ▶
+                - listitem [ref=e2080]:
+                  - generic [ref=e2082]:
+                    - generic [ref=e2083]:
+                      - generic [ref=e2084]: Queued
+                      - generic [ref=e2085]: "#3287 SPEC: Project-per-Browser-Tab — per-project URL・per-client 状態・ハブ・トレイ Projects submenu・ポート安定化"
+                    - generic [ref=e2086]: "Prompt: $gwt-execute #3287 | Branch: work/issue-3287"
+                  - generic [ref=e2087]:
+                    - button "Detail" [ref=e2088] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e2089]: ◎
+                    - button "Move up" [ref=e2090] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e2091] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e2092] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e2093] [cursor=pointer]: ▶
+                - listitem [ref=e2094]:
+                  - generic [ref=e2096]:
+                    - generic [ref=e2097]:
+                      - generic [ref=e2098]: Queued
+                      - generic [ref=e2099]: "#3340 SPEC: Agent interruption lifecycle — runtime state・Stop retention・exact retry・DONE removal"
+                    - generic [ref=e2100]: "Prompt: $gwt-execute #3340 | Branch: work/issue-3340"
+                  - generic [ref=e2101]:
+                    - button "Detail" [ref=e2102] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e2103]: ◎
+                    - button "Move up" [ref=e2104] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e2105] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e2106] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e2107] [cursor=pointer]: ▶
+                - listitem [ref=e2108]:
+                  - generic [ref=e2110]:
+                    - generic [ref=e2111]:
+                      - generic [ref=e2112]: Queued
+                      - generic [ref=e2113]: "#3151 SPEC: OpenCode エージェント整合 — npm パッケージ起動経路・hook 配線検証・resume/model parity"
+                    - generic [ref=e2114]: "Prompt: $gwt-execute #3151 | Branch: work/issue-3151"
+                  - generic [ref=e2115]:
+                    - button "Detail" [ref=e2116] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e2117]: ◎
+                    - button "Move up" [ref=e2118] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e2119] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e2120] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e2121] [cursor=pointer]: ▶
+                - listitem [ref=e2122]:
+                  - generic [ref=e2124]:
+                    - generic [ref=e2125]:
+                      - generic [ref=e2126]: Queued
+                      - generic [ref=e2127]: "#3263 SPEC: Canvas ウィンドウ操作性向上 — 起動時カメラフレーミング・8方向リサイズ・パン/俯瞰導線"
+                    - generic [ref=e2128]: "Prompt: $gwt-execute #3263 | Branch: work/issue-3263"
+                  - generic [ref=e2129]:
+                    - button "Detail" [ref=e2130] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e2131]: ◎
+                    - button "Move up" [ref=e2132] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e2133] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e2134] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e2135] [cursor=pointer]: ▶
+                - listitem [ref=e2136]:
+                  - generic [ref=e2138]:
+                    - generic [ref=e2139]:
+                      - generic [ref=e2140]: Queued
+                      - generic [ref=e2141]: "#2963 SPEC: Board remote provider — Slack/Teams 切替（remote-sole・OAuth・hook 再配線）"
+                    - generic [ref=e2142]: "Prompt: $gwt-execute #2963 | Branch: work/issue-2963"
+                  - generic [ref=e2143]:
+                    - button "Detail" [ref=e2144] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e2145]: ◎
+                    - button "Move up" [ref=e2146] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e2147] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e2148] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e2149] [cursor=pointer]: ▶
+                - listitem [ref=e2150]:
+                  - generic [ref=e2152]:
+                    - generic [ref=e2153]:
+                      - generic [ref=e2154]: Queued
+                      - generic [ref=e2155]: "#2970 SPEC: Provider Usage & Rate Limits — Codex/Claude Code 使用量・レートリミット表示"
+                    - generic [ref=e2156]: "Prompt: $gwt-execute #2970 | Branch: work/issue-2970"
+                  - generic [ref=e2157]:
+                    - button "Detail" [ref=e2158] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e2159]: ◎
+                    - button "Move up" [ref=e2160] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e2161] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e2162] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e2163] [cursor=pointer]: ▶
+                - listitem [ref=e2164]:
+                  - generic [ref=e2166]:
+                    - generic [ref=e2167]:
+                      - generic [ref=e2168]: Queued
+                      - generic [ref=e2169]: "#3431 SPEC: PM エージェント — 常駐プロジェクトマネージャー（唯一の対話窓口・Issue 分解/登録/計画・意味的順序決定・Monitor 経由起動指示）"
+                    - generic [ref=e2170]: "Prompt: $gwt-execute #3431 | Branch: work/issue-3431"
+                  - generic [ref=e2171]:
+                    - button "Detail" [ref=e2172] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e2173]: ◎
+                    - button "Move up" [ref=e2174] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e2175] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e2176] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e2177] [cursor=pointer]: ▶
+                - listitem [ref=e2178]:
+                  - generic [ref=e2180]:
+                    - generic [ref=e2181]:
+                      - generic [ref=e2182]: Launched
+                      - generic [ref=e2183]: "#3461 feat(gui): Issues ビューと Issue Monitor を単一 Issue サーフェスへ統合する（SPEC #3214 FR-035・Phase 15）"
+                    - generic [ref=e2184]: "Prompt: $gwt-execute #3461 | Branch: work/issue-3461"
+                  - generic [ref=e2185]:
+                    - button "Detail" [ref=e2186] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [ref=e2187] [cursor=pointer]: ◎
+                    - button "Move up" [disabled] [ref=e2188]: ↑
+                    - button "Move down" [disabled] [ref=e2189]: ↓
+                - listitem [ref=e2190]:
+                  - generic [ref=e2192]:
+                    - generic [ref=e2193]:
+                      - generic [ref=e2194]: Queued
+                      - generic [ref=e2195]: "#3403 fix(execution): workspace.ensure が通らないセッションで build.start が「閉じられないライフサイクル記録」を作る"
+                    - generic [ref=e2196]: "Prompt: $gwt-execute #3403 | Branch: work/issue-3403"
+                  - generic [ref=e2197]:
+                    - button "Detail" [ref=e2198] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e2199]: ◎
+                    - button "Move up" [ref=e2200] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e2201] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e2202] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e2203] [cursor=pointer]: ▶
+                - listitem [ref=e2204]:
+                  - generic [ref=e2206]:
+                    - generic [ref=e2207]:
+                      - generic [ref=e2208]: Queued
+                      - generic [ref=e2209]: "#3425 fix(hooks): unbound resume session では prompt-to-action 義務が settle 不能になり Stop が永久ブロックされる（verify authority × 他 session terminal ECR × ensure 全拒否）"
+                    - generic [ref=e2210]: "Prompt: $gwt-execute #3425 | Branch: work/issue-3425"
+                  - generic [ref=e2211]:
+                    - button "Detail" [ref=e2212] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e2213]: ◎
+                    - button "Move up" [ref=e2214] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e2215] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e2216] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e2217] [cursor=pointer]: ▶
+                - listitem [ref=e2218]:
+                  - generic [ref=e2220]:
+                    - generic [ref=e2221]:
+                      - generic [ref=e2222]: Queued
+                      - generic [ref=e2223]: "#3384 refactor(gui): WindowLaneKind の語彙を worktree 形態ベースへ改称する（Intake / Execution は行動レーン廃止で誤称になる）"
+                    - generic [ref=e2224]: "Prompt: $gwt-execute #3384 | Branch: work/issue-3384"
+                  - generic [ref=e2225]:
+                    - button "Detail" [ref=e2226] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e2227]: ◎
+                    - button "Move up" [ref=e2228] [cursor=pointer]: ↑
+                    - button "Move down" [ref=e2229] [cursor=pointer]: ↓
+                    - button "Project Agent settings" [ref=e2230] [cursor=pointer]: ⚙
+                    - button "Launch now" [ref=e2231] [cursor=pointer]: ▶
+                - listitem [ref=e2232]:
+                  - generic [ref=e2234]:
+                    - generic [ref=e2235]:
+                      - generic [ref=e2236]: Launched
+                      - generic [ref=e2237]: "#1974 SPEC-1974: Coordination ドメイン — Shared Board・Agent Card・repo-local Provider"
+                    - generic [ref=e2238]: "Prompt: $gwt-execute #1974 | Branch: work/issue-1974"
+                  - generic [ref=e2239]:
+                    - button "Detail" [ref=e2240] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [ref=e2241] [cursor=pointer]: ◎
+                    - button "Move up" [disabled] [ref=e2242]: ↑
+                    - button "Move down" [disabled] [ref=e2243]: ↓
+                - listitem [ref=e2244]:
+                  - generic [ref=e2246]:
+                    - generic [ref=e2247]:
+                      - generic [ref=e2248]: Merged
+                      - generic [ref=e2249]: "#3170 SPEC: Launch フロー open/switch のメインスレッドブロック解消 — wizard open / project open / project switch の応答性"
+                    - generic [ref=e2250]: "Prompt: $gwt-execute #3170 | Branch: work/issue-3170"
+                  - generic [ref=e2251]:
+                    - button "Detail" [ref=e2252] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e2253]: ◎
+                    - button "Move up" [disabled] [ref=e2254]: ↑
+                    - button "Move down" [disabled] [ref=e2255]: ↓
+                - listitem [ref=e2256]:
+                  - generic [ref=e2258]:
+                    - generic [ref=e2259]:
+                      - generic [ref=e2260]: Merged
+                      - generic [ref=e2261]: "#3200 SPEC: Issue Monitor Autonomous Mode (opt-in unattended issue resolution with a strong automated merge gate)"
+                    - generic [ref=e2262]: "Prompt: $gwt-execute #3200 | Branch: work/issue-3200"
+                  - generic [ref=e2263]:
+                    - button "Detail" [ref=e2264] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e2265]: ◎
+                    - button "Move up" [disabled] [ref=e2266]: ↑
+                    - button "Move down" [disabled] [ref=e2267]: ↓
+                - listitem [ref=e2268]:
+                  - generic [ref=e2270]:
+                    - generic [ref=e2271]:
+                      - generic [ref=e2272]: Merged
+                      - generic [ref=e2273]: "#3206 SPEC: 通知トースト統一 — 共有 toast-host primitive と通知センター"
+                    - generic [ref=e2274]: "Prompt: $gwt-execute #3206 | Branch: work/issue-3206"
+                  - generic [ref=e2275]:
+                    - button "Detail" [ref=e2276] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e2277]: ◎
+                    - button "Move up" [disabled] [ref=e2278]: ↑
+                    - button "Move down" [disabled] [ref=e2279]: ↓
+                - listitem [ref=e2280]:
+                  - generic [ref=e2282]:
+                    - generic [ref=e2283]:
+                      - generic [ref=e2284]: Merged
+                      - generic [ref=e2285]: "#3248 SPEC: gwt managed-hooks v2 — lane-first re-architecture"
+                    - generic [ref=e2286]: "Prompt: $gwt-execute #3248 | Branch: work/issue-3248"
+                  - generic [ref=e2287]:
+                    - button "Detail" [ref=e2288] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e2289]: ◎
+                    - button "Move up" [disabled] [ref=e2290]: ↑
+                    - button "Move down" [disabled] [ref=e2291]: ↓
+                - listitem [ref=e2292]:
+                  - generic [ref=e2294]:
+                    - generic [ref=e2295]:
+                      - generic [ref=e2296]: Merged
+                      - generic [ref=e2297]: "#3273 SPEC: 作業アイテムモデル統一 — タグのみの SPEC/Issue 区別と Execute/Curate 入口一本化"
+                    - generic [ref=e2298]: "Prompt: $gwt-execute #3273 | Branch: work/issue-3273"
+                  - generic [ref=e2299]:
+                    - button "Detail" [ref=e2300] [cursor=pointer]: ℹ
+                    - button "Focus the launched agent window" [disabled] [ref=e2301]: ◎
+                    - button "Move up" [disabled] [ref=e2302]: ↑
+                    - button "Move down" [disabled] [ref=e2303]: ↓
+              - generic [ref=e2310]: "INFO #3505: Issue Monitor launch prepared"
+          - text: ⌜ · · ⌟
+          - generic [ref=e60]:
+            - generic [ref=e61]:
+              - generic [ref=e62]:
+                - 'generic "配信: pr.create と auto-merge 監視" [ref=e1158]': "SPEC #3431 PM 実地欠陥修正 slice（scan 不発・常駐ループ）"
+                - generic "Execution lane" [ref=e64]: Execution
+                - generic [ref=e65]: Claude Code
+                - generic "Running" [ref=e66]
+              - generic [ref=e69]:
+                - button "Stop agent" [ref=e70] [cursor=pointer]: ■
+                - button "Close window" [ref=e71] [cursor=pointer]: ×
+            - generic "Window tabs" [ref=e72]:
+              - generic [ref=e73]:
+                - button "Activate Codex (RUN)" [ref=e74]:
+                  - generic [ref=e75]: RUN
+                  - generic [ref=e1082]: Codex
+                - button "Close Codex" [ref=e76] [cursor=pointer]: ×
+              - generic [ref=e77]:
+                - button "Activate Codex (RUN)" [ref=e1159]:
+                  - generic [ref=e79]: RUN
+                  - generic [ref=e1083]: Codex
+                - button "Close Codex" [ref=e80] [cursor=pointer]: ×
+              - generic [ref=e81]:
+                - button "Activate Claude Code (IDLE)" [ref=e82]:
+                  - generic [ref=e83]: IDLE
+                  - generic [ref=e84]: Claude Code
+                - button "Close Claude Code" [ref=e85] [cursor=pointer]: ×
+              - generic [ref=e86]:
+                - button "Activate Claude Code (IDLE)" [ref=e1160]:
+                  - generic [ref=e88]: IDLE
+                  - generic [ref=e89]: Claude Code
+                - button "Close Claude Code" [ref=e90] [cursor=pointer]: ×
+              - generic [ref=e91]:
+                - button "Activate Claude Code (IDLE)" [ref=e92]:
+                  - generic [ref=e93]: IDLE
+                  - generic [ref=e94]: Claude Code
+                - button "Close Claude Code" [ref=e95] [cursor=pointer]: ×
+              - generic [ref=e96]:
+                - button "Activate Codex (DONE)" [ref=e1161]:
+                  - generic [ref=e98]: DONE
+                  - generic [ref=e1084]: Codex
+                - button "Close Codex" [ref=e99] [cursor=pointer]: ×
+              - generic [ref=e100]:
+                - button "Activate Codex (IDLE)" [ref=e101]:
+                  - generic [ref=e102]: IDLE
+                  - generic [ref=e1085]: Codex
+                - button "Close Codex" [ref=e103] [cursor=pointer]: ×
+              - generic [ref=e104]:
+                - button "Activate Claude Code (RUN)" [ref=e105]:
+                  - generic [ref=e106]: RUN
+                  - generic [ref=e107]: Claude Code
+                - button "Close Claude Code" [ref=e108] [cursor=pointer]: ×
+            - generic [ref=e117]:
+              - textbox "Terminal input" [ref=e118]
+              - generic:
+                - generic:
+                  - generic: …
+                  - generic: "+13"
+                  - generic: lines
+                  - generic: (ctrl+o
+                  - generic: to
+                  - generic: expand)
+                - generic:
+                  - generic: ⎿
+                  - generic: (timeout
+                  - generic: 7m)
+                - generic:
+                  - generic: ⏺
+                  - generic: cfg
+                  - generic: 復元完了・
+                  - generic: push
+                  - generic: 済み（原状の
+                  - generic: gating
+                  - generic: 形に一致）。
+                  - generic: CI
+                  - generic: 再実行を待ちます。
+                - generic:
+                  - generic: ⏺
+                  - generic: Bash
+                  - generic: (sleep 580; ./target/debug/gwtd <<'JSON' 2>&1 | head -2
+                - generic: "{\"schema_version\":1,\"operation\":\"pr.view\",\"params\":{\"number\":3507}}…)"
+                - generic:
+                  - generic: ⎿
+                  - generic: "{"
+                - generic: "\"exit_code\": 0,"
+                - generic: "\"ok\": true,"
+                - generic:
+                  - generic: …
+                  - generic: "+6"
+                  - generic: lines
+                  - generic: (ctrl+o
+                  - generic: to
+                  - generic: expand)
+                - generic:
+                  - generic: ⎿
+                  - generic: (timeout
+                  - generic: 10m)
+                - generic:
+                  - generic: Bash
+                  - generic: (sleep 580; ./target/debug/gwtd <<'JSON' 2>&1 | head -2
+                - generic: "{\"schema_version\":1,\"operation\":\"pr.view\",\"params\":{\"number\":3507}}…)"
+                - generic:
+                  - generic: ⎿
+                  - generic: Running… (7m 9s · timeout 10m)
+                - generic: (ctrl+b to run in background)
+                - generic:
+                  - generic: ·
+                  - generic: Sublimating…
+                  - generic: (1h 26m 8s · ↓
+                  - generic: 63.1k tokens)
+                - generic:
+                  - generic: ⎿
+                  - generic: "Tip: Use /clear to start fresh when switching topics and free up context"
+                - generic: ───────────────────────────────────────────────────────────────────────────────
+                - generic: ❯
+                - generic: ───────────────────────────────────────────────────────────────────────────────
+                - generic:
+                  - generic: ⏵⏵
+                  - generic: bypass
+                  - generic: permissions
+                  - generic: "on"
+                  - generic: (shift+tab
+                  - generic: to
+                  - generic: cycle)
+                  - generic: ·
+                  - generic: esc to interrupt · ← for a…
+          - generic [ref=e1110]:
+            - generic [ref=e1111]:
+              - generic [ref=e1112]:
+                - 'generic "SPEC #3214 T-140/T-141 monitor snapshot projection の RED→GREEN" [ref=e1113]': Issue 3461 の実装
+                - generic "Execution lane" [ref=e1114]: Execution
+                - generic [ref=e1115]: Codex
+                - generic "Running" [ref=e1116]
+              - generic [ref=e1119]:
+                - button "Stop agent" [ref=e1120] [cursor=pointer]: ■
+                - button "Close window" [ref=e1121] [cursor=pointer]: ×
+            - generic [ref=e1126]:
+              - textbox "Terminal input" [ref=e1127]
+              - generic:
+                - generic:
+                  - generic: "31"
+                  - generic: "-"
+                  - generic: "-"
+                  - generic: "production code / tests:"
+                  - generic: 未変更（
+                  - generic: SPEC / Issue
+                  - generic: 同期後に
+                  - generic: TDD
+                  - generic: 開始）
+                - generic:
+                  - generic: "31"
+                  - generic: "-"
+                  - generic: "T-140 RED:"
+                  - generic: "`"
+                  - generic: cargo test -p gwt --bin gwt app_runtime_knowledge_load_joins_latest_project_monitor_snapshot -- --nocapture
+                  - generic: "`"
+                  - generic: は
+                  - generic: "`"
+                  - generic: "left: (None, N"
+                - generic:
+                  - generic: one, None)
+                  - generic: "`"
+                  - generic: /
+                  - generic: "`"
+                  - generic: "right: (Some(Queued), Some(1), None)"
+                  - generic: "`"
+                  - generic: で期待どおり失敗
+                - generic: ⋮
+                - generic:
+                  - generic: "33"
+                  - generic: "-"
+                  - generic: "T-142 RED:"
+                  - generic: "`"
+                  - generic: knowledge-issue-monitor.test.mjs
+                  - generic: "`"
+                  - generic: は
+                  - generic: exhaustive renderer
+                  - generic: と統合
+                  - generic: row/controls
+                  - generic: の
+                  - generic: 2 tests
+                  - generic: が失敗（未実装）。
+                  - generic: failure
+                  - generic: 後の
+                  - generic: auto-ref
+                - generic:
+                  - generic: resh timer
+                  - generic: は
+                  - generic: test cleanup
+                  - generic: を追加
+                - generic:
+                  - generic: "34"
+                  - generic: +
+                  - generic: "-"
+                  - generic: "T-142 GREEN:"
+                  - generic: "`"
+                  - generic: knowledge-issue-monitor.test.mjs
+                  - generic: "`"
+                  - generic: 2 passed
+                  - generic: 。現行
+                  - generic: 12 wire state / unknown fallback
+                  - generic: 、
+                  - generic: Knowledge row
+                  - generic: の
+                  - generic: projection
+                  - generic: 、
+                  - generic: full canonica
+                - generic:
+                  - generic: l queue reorder
+                  - generic: 、
+                  - generic: Launch now / max_active / Start / Autonomous / settings / Quick issue
+                  - generic: 、
+                  - generic: nested interactive
+                  - generic: 回避を確認
+                - generic:
+                  - generic: "35"
+                  - generic: +
+                  - generic: "-"
+                  - generic: "T-143 RED: legacy"
+                  - generic: "`"
+                  - generic: issue_monitor
+                  - generic: "`"
+                  - generic: preset
+                  - generic: は
+                  - generic: backend knowledge kind
+                  - generic: を解決できず、
+                  - generic: focused Rust test
+                  - generic: が
+                  - generic: "`"
+                  - generic: None != Some(Issue)
+                  - generic: "`"
+                  - generic: で期待どおり失
+                - generic: 敗
+                - generic:
+                  - generic: "36"
+                  - generic: +
+                  - generic: "-"
+                  - generic: "T-143 GREEN: legacy preset"
+                  - generic: を
+                  - generic: Knowledge/Issue
+                  - generic: へ
+                  - generic: redirect
+                  - generic: し、
+                  - generic: Add Window
+                  - generic: の重複導線・
+                  - generic: "`"
+                  - generic: WindowSurface::IssueMonitor
+                  - generic: "`"
+                  - generic: ・独立
+                  - generic: JS asset
+                  - generic: を撤去。
+                  - generic: fo
+                - generic:
+                  - generic: cused Rust embedded tests 2 passed
+                  - generic: 、
+                  - generic: preset modal tests 23 passed
+                - generic:
+                  - generic: "37"
+                  - generic: +
+                  - generic: "-"
+                  - generic: "Playwright:"
+                  - generic: 統合
+                  - generic: Issue surface
+                  - generic: の
+                  - generic: monitor projection / controls / legacy redirect
+                  - generic: は
+                  - generic: dark
+                  - generic: で
+                  - generic: 2 passed
+                  - generic: 。既存
+                  - generic: selection
+                  - generic: 回帰を検出し、専用
+                  - generic: se
+                - generic:
+                  - generic: lection button
+                  - generic: を正本
+                  - generic: selector
+                  - generic: に更新後、関連
+                  - generic: 7 tests
+                  - generic: は
+                  - generic: dark
+                  - generic: で
+                  - generic: PASS
+                  - generic: （
+                  - generic: p95 16.8ms
+                  - generic: ）
+                - generic:
+                  - generic: •
+                  - generic: Ran
+                  - generic: rg
+                  - generic: "-"
+                  - generic: "n"
+                  - generic: "'build\\.phase|build.start|workspace.update'"
+                  - generic: .gwt/work/events.jsonl tasks/todo.md
+                  - generic: "|"
+                  - generic: tail
+                  - generic: "-"
+                  - generic: "n"
+                  - generic: "40"
+                  - generic: "&&"
+                  - generic: ./target/debug/gwtd
+                  - generic: <<
+                  - generic: "'"
+                  - generic: JSON
+                  - generic: "'"
+                - generic:
+                  - generic: │
+                  - generic: "{\"schema_version\":1,\"operation\":\"build.phase.set\",\"params\":{\"phase\":\"GREEN\",\"evidence\":\"T-140/T-141 backend monitor projection tests, T-142"
+                - generic:
+                  - generic: │
+                  - generic: "integrated Issue surface unit tests, and T-143 legacy redirect/asset contract tests are GREEN; embedded Playwright integration is GREEN.\"}}"
+                - generic: │ … +1 lines
+                - generic: "└ .gwt/work/events.jsonl:403:{\"id\":\"5c943c7d-f1bc-499f-9cab-6274c2790dff\",\"work_item_id\":\"work-feature-spec-3214-b4e4cf27\",\"kind\":\"update\",\"title\":"
+                - generic: "\"SPEC-3245 Intake/Execution lane visual identity\",\"intent\":\"Fresh browser-check relaunched at http://127.0.0.1:53175/ with the spec-3214 checkout"
+                - generic: … +115 lines (ctrl + t to view transcript)
+                - generic: "issue-3477\",\"pr_number\":null,\"pr_url\":null,\"pr_state\":null},\"related_work_item_id\":null,\"updated_at\":\"2026-08-06T04:08:08.163505Z\"}"
+                - generic: "gwtd: unknown subcommand: build.phase.set"
+                - generic:
+                  - generic: •
+                  - generic: W
+                  - generic: o
+                  - generic: r
+                  - generic: k
+                  - generic: i
+                  - generic: "n"
+                  - generic: g
+                  - generic: (2m 40s • esc to interrupt)
+                - generic:
+                  - generic: ›
+                  - generic: I
+                  - generic: "mplement {feature}"
+                - generic:
+                  - generic: gpt-5.6-sol xhigh fast
+                  - generic: ·
+                  - generic: ~/Workbench/gwt/work/issue-3461
+                  - generic: · Main [default]
+        - generic "Fleet minimap" [ref=e158]:
+          - generic:
+            - button "Issue Monitor" [ref=e159] [cursor=pointer]
+            - button "Workspace" [ref=e160] [cursor=pointer]
+            - button "Issue" [ref=e161] [cursor=pointer]
+            - 'button "Issue #1974 completion - Execution lane" [ref=e162] [cursor=pointer]': E
+            - 'button "#3431 起動復旧 · Codex started work on Issue #3415 feat(governance): エージェント統治を「壁」から「安全網」へ — セッション内完遂可能性の保証と hard block の適用範囲限定 (work/issue-3415) - Execution lane" [ref=e1129] [cursor=pointer]': E
+            - 'button "Issue #3410 - Execution lane" [ref=e164] [cursor=pointer]': E
+            - 'button "Issue #3245 - Execution lane" [ref=e165] [cursor=pointer]': E
+            - button "Work progress summary detail - Execution lane" [ref=e166] [cursor=pointer]: E
+            - button "Issue 3461 の実装" [ref=e1130] [cursor=pointer]
+            - 'button "Issue #3398 の実装 - Execution lane" [ref=e168] [cursor=pointer]': E
+            - 'button "SPEC #3431 PM 実地欠陥修正 slice（scan 不発・常駐ループ） · 配信: pr.create と auto-merge 監視 - Execution lane" [ref=e1131] [cursor=pointer]': E
+            - button "Project Manager" [ref=e171] [cursor=pointer]
+            - 'button "Issue 3461 の実装 · SPEC #3214 T-140/T-141 monitor snapshot projection の RED→GREEN - Execution lane" [ref=e1132] [cursor=pointer]': E
+          - generic [ref=e172]:
+            - button "Zoom minimap in" [ref=e173] [cursor=pointer]: +
+            - button "Zoom minimap out" [ref=e174] [cursor=pointer]: −
+        - text: ⌜ ⌟ ⌜ ⌟ ⌜ ⌟
+      - status "Operator status strip" [ref=e175]:
+        - generic [ref=e176]: ONLINE
+        - generic [ref=e179]:
+          - generic [ref=e180]: RUNNING
+          - generic "Running agents" [ref=e181]: "7"
+        - generic [ref=e182]:
+          - generic [ref=e183]: IDLE
+          - generic "Idle agents" [ref=e184]: "4"
+        - generic [ref=e185]:
+          - generic [ref=e186]: WAITING
+          - generic "Agents waiting for input" [ref=e187]: "0"
+        - generic [ref=e188]:
+          - generic [ref=e189]: ERROR
+          - generic "Agents with runtime errors" [ref=e190]: "0"
+        - generic [ref=e191]:
+          - generic [ref=e192]: MISSION
+          - generic "Agents completed out of total" [ref=e193]: 1/10
+        - generic [ref=e194]:
+          - generic [ref=e195]: WORK
+          - generic "Work" [ref=e196]: "7"
+        - 'button "Issue Monitor: Run Q72 A2/2" [ref=e1133] [cursor=pointer]':
+          - generic [ref=e198]: MONITOR
+          - generic "Issue Monitor status" [ref=e199]: Run Q72 A2/2
+        - generic "Runtime performance" [ref=e200]:
+          - generic [ref=e201]: PERF
+          - generic "Runtime performance" [ref=e202]: HOT 105% 15.6G
+        - generic [ref=e203]:
+          - generic [ref=e204]: ZOOM
+          - button "Zoom out" [ref=e205] [cursor=pointer]: "-"
+          - button "Reset zoom" [ref=e206] [cursor=pointer]: 100%
+          - button "Zoom in" [ref=e207] [cursor=pointer]: +
+        - button "Provider usage and limits" [ref=e223] [cursor=pointer]:
+          - generic [ref=e2311]: USAGE
+          - generic [ref=e2312]: ⬡ 35%
+          - generic [ref=e2313]: ◇ 35%
+        - generic [ref=e209]:
+          - text: "19"
+          - generic [ref=e2314]: ":"
+          - text: "22"
+          - generic [ref=e2315]: ":"
+          - text: "05"
+    - text: ok ok ok ok
+    - generic:
+      - dialog:
+        - combobox
+        - listbox
+    - generic:
+      - dialog:
+        - heading [level=2]: Operator Hotkeys
+        - generic:
+          - heading [level=3]: Navigation
+          - generic:
+            - generic: Command palette
+            - generic: ⌘ K
+          - generic:
+            - generic: Project switcher
+            - generic: ⌘ P
+          - generic:
+            - generic: Board surface
+            - generic: ⌘ B
+          - generic:
+            - generic: Workspace surface
+            - generic: ⌘ G
+          - generic:
+            - generic: Logs surface
+            - generic: ⌘ L
+        - generic:
+          - heading [level=3]: Canvas
+          - generic:
+            - generic: Pan canvas
+            - generic: Scroll / drag
+          - generic:
+            - generic: Pan anywhere
+            - generic: Middle-drag
+          - generic:
+            - generic: Zoom canvas
+            - generic: Ctrl/⌘ + wheel
+          - generic:
+            - generic: Move window
+            - generic: Drag titlebar
+        - generic:
+          - heading [level=3]: Help
+          - generic:
+            - generic: This card
+            - generic: ⌘ ?
+          - generic:
+            - generic: Close overlay
+            - generic: Esc
+    - text: ▸ ▸ ▸
+    - dialog [active] [ref=e2317]:
+      - generic [ref=e2319]:
+        - heading "⌜ Launch Agent ⌟" [level=2] [ref=e2320]
+        - generic [ref=e2321]: Plan Agent launch
+      - generic [ref=e2322]:
+        - generic [ref=e2323]:
+          - generic [ref=e2324]: Branch
+          - generic [ref=e2325]: work/issue-3505
+        - generic [ref=e2326]:
+          - generic [ref=e2327]: Target
+          - generic [ref=e2328]: Agent
+        - generic [ref=e2329]:
+          - generic [ref=e2330]: Agent
+          - generic [ref=e2331]: Codex
+        - generic [ref=e2332]:
+          - generic [ref=e2333]: Model
+          - generic [ref=e2334]: gpt-5.6-sol
+        - generic [ref=e2335]:
+          - generic [ref=e2336]: Reasoning
+          - generic [ref=e2337]: xhigh
+        - generic [ref=e2338]:
+          - generic [ref=e2339]: Version
+          - generic [ref=e2340]: latest
+        - generic [ref=e2341]:
+          - generic [ref=e2342]: Runtime
+          - generic [ref=e2343]: host
+        - generic [ref=e2344]:
+          - generic [ref=e2345]: Permissions
+          - generic [ref=e2346]: skip
+        - generic [ref=e2347]:
+          - generic [ref=e2348]: Fast mode
+          - generic [ref=e2349]: "on"
+      - generic [ref=e2351]:
+        - complementary "Launch progress" [ref=e2352]:
+          - button "Go to Setup step" [ref=e2353] [cursor=pointer]:
+            - generic [ref=e2355]: Setup
+          - generic [ref=e2357]: Settings
+          - generic [ref=e2361]: Runtime
+          - generic [ref=e2365]: Start
+        - generic [ref=e2370]:
+          - generic [ref=e2371]:
+            - generic [ref=e2373]:
+              - generic [ref=e2374]: Register an Issue
+              - generic [ref=e2375]: Optional — describe the work for the Plan Agent to turn into an Issue or SPEC. You can skip this.
+            - textbox "e.g. register an issue for the login auth bug" [ref=e2376]
+          - generic [ref=e2377]:
+            - generic [ref=e2379]:
+              - generic [ref=e2380]: Start methods
+              - generic [ref=e2381]: Pick the safest next step for this agent on the selected branch.
+            - generic [ref=e2382]:
+              - generic [ref=e2383]:
+                - generic [ref=e2384]:
+                  - generic [ref=e2385]: Recommended
+                  - generic [ref=e2386]: Best next step for the current state.
+                - button "Start with last settings New New session with saved settings" [ref=e2387] [cursor=pointer]:
+                  - generic [ref=e2388]:
+                    - generic [ref=e2389]: Start with last settings
+                    - generic [ref=e2390]: New
+                  - generic [ref=e2391]: New session with saved settings
+              - generic [ref=e2392]:
+                - generic [ref=e2393]:
+                  - generic [ref=e2394]: Available
+                  - generic [ref=e2395]: Other ways to start, resume, or focus this agent.
+                - button "Configure and start Settings Edit settings before launch" [ref=e2396] [cursor=pointer]:
+                  - generic [ref=e2397]:
+                    - generic [ref=e2398]: Configure and start
+                    - generic [ref=e2399]: Settings
+                  - generic [ref=e2400]: Edit settings before launch
+                - button "Open session picker Picker Choose a saved session Opens the agent's session picker" [ref=e2401] [cursor=pointer]:
+                  - generic [ref=e2402]:
+                    - generic [ref=e2403]: Open session picker
+                    - generic [ref=e2404]: Picker
+                  - generic [ref=e2405]: Choose a saved session
+                  - generic [ref=e2406]: Opens the agent's session picker
+              - generic [ref=e2407]:
+                - generic [ref=e2408]:
+                  - generic [ref=e2409]: Unavailable
+                  - generic [ref=e2410]: Requires saved settings, saved sessions, or a running agent.
+                - button "Continue last session Session Resume recent session No saved session" [disabled] [ref=e2411]:
+                  - generic [ref=e2412]:
+                    - generic [ref=e2413]: Continue last session
+                    - generic [ref=e2414]: Session
+                  - generic [ref=e2415]: Resume recent session
+                  - generic [ref=e2416]: No saved session
+                - button "Focus running session Running Switch to running session No running session" [disabled] [ref=e2417]:
+                  - generic [ref=e2418]:
+                    - generic [ref=e2419]: Focus running session
+                    - generic [ref=e2420]: Running
+                  - generic [ref=e2421]: Switch to running session
+                  - generic [ref=e2422]: No running session
+      - generic [ref=e2424]:
+        - button "Cancel" [ref=e2425] [cursor=pointer]
+        - button "Choose start method" [disabled] [ref=e2426] [cursor=pointer]
+    - dialog [ref=e212]:
+      - banner [ref=e213]:
+        - heading "Detail" [level=2] [ref=e214]
+        - button "Close detail drawer" [ref=e215] [cursor=pointer]: ×
+      - contentinfo [ref=e217]
+  - generic:
+    - status "Agent notifications"
+  - log "Autonomous Issue Monitor notifications":
+    - generic [ref=e1149]:
+      - generic [ref=e2427]:
+        - generic [ref=e2428]: "Issue Monitor #3505"
+        - button "Dismiss notification" [ref=e2429] [cursor=pointer]: ×
+        - generic [ref=e2430]: Issue Monitor launch prepared
+      - generic [ref=e1150]:
+        - generic [ref=e1151]: Issue Monitor
+        - button "Dismiss notification" [ref=e1152] [cursor=pointer]: ×
+        - generic [ref=e1153]: Process exited
+      - generic [ref=e1154]:
+        - generic [ref=e1155]: Issue Monitor
+        - button "Dismiss notification" [ref=e1156] [cursor=pointer]: ×
+        - generic [ref=e1157]: Process exited

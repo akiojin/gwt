@@ -1,0 +1,265 @@
+- generic [ref=f1e1]:
+  - generic [ref=f1e2]:
+    - generic [ref=f1e3]:
+      - generic [ref=f1e4]:
+        - text: ⌜ GWT · OPERATOR ⌟
+        - button "1 running agent gwt issue-3398 Close gwt issue-3398" [ref=f1e127] [cursor=pointer]:
+          - generic "1 running agent" [ref=f1e128]: RUN
+          - generic [ref=f1e7]: gwt issue-3398
+          - button "Close gwt issue-3398" [ref=f1e8]: ×
+        - generic [ref=f1e9]:
+          - generic [ref=f1e10]:
+            - button "Switch projects" [expanded] [ref=f1e11] [cursor=pointer]: Projects
+            - listbox "Projects" [ref=f1e129]:
+              - text: Open Projects
+              - option "gwt issue-3398 1 running 1 running agents" [active] [selected] [ref=f1e130] [cursor=pointer]:
+                - generic [ref=f1e131]: gwt issue-3398
+                - generic [ref=f1e132]: 1 running
+                - generic "1 running agents" [ref=f1e133]: "1"
+              - button "Enable desktop notifications" [ref=f1e134] [cursor=pointer]
+              - button "Open Folder…" [ref=f1e135] [cursor=pointer]
+              - button "Clone from GitHub…" [ref=f1e136] [cursor=pointer]
+          - button "v9.76.0" [ref=f1e12] [cursor=pointer]
+          - 'radiogroup "Theme: auto (currently light)" [ref=f1e13]':
+            - radio "AUTO" [checked] [ref=f1e14] [cursor=pointer]:
+              - generic [ref=f1e16]: ▯
+            - radio "DARK" [ref=f1e17] [cursor=pointer]
+            - radio "LIGHT" [ref=f1e18] [cursor=pointer]
+      - complementary "Command rail" [ref=f1e19]:
+        - group "Navigate" [ref=f1e20]:
+          - generic [ref=f1e21]:
+            - button "Project Manager" [ref=f1e22] [cursor=pointer]:
+              - generic [ref=f1e23]: ◎
+              - generic: PM
+            - button "Project Manager settings" [ref=f1e24] [cursor=pointer]:
+              - generic [ref=f1e25]: ⚙
+          - button "Intake" [ref=f1e26] [cursor=pointer]:
+            - generic [ref=f1e27]: ▶
+          - button "Workspace" [ref=f1e28] [cursor=pointer]:
+            - generic [ref=f1e29]: ◆
+            - generic:
+              - generic: Workspace
+              - generic: ⌘ G
+        - group "Windows" [ref=f1e31]:
+          - button "Tile windows" [ref=f1e32] [cursor=pointer]:
+            - generic [ref=f1e33]: ⊞
+            - generic: Tile
+          - button "Stack windows" [ref=f1e34] [cursor=pointer]:
+            - generic [ref=f1e35]: ⊟
+            - generic: Stack
+          - button "Align windows without resizing" [ref=f1e36] [cursor=pointer]:
+            - generic [ref=f1e37]: ⊜
+            - generic: Align
+          - button "List windows" [ref=f1e39] [cursor=pointer]:
+            - generic [ref=f1e40]: ❒
+            - generic: "1"
+            - generic: Windows
+          - button "Add window" [ref=f1e41] [cursor=pointer]:
+            - generic [ref=f1e42]: ＋
+        - group "Agents" [ref=f1e43]:
+          - button "Stop all agents" [ref=f1e44] [cursor=pointer]:
+            - generic [ref=f1e45]: ⏹
+        - group "System" [ref=f1e47]:
+          - button "Command palette" [ref=f1e48] [cursor=pointer]:
+            - generic [ref=f1e49]: ⌘K
+            - generic:
+              - generic: Palette
+              - generic: ⌘ K
+      - generic [ref=f1e50]:
+        - generic [ref=f1e53]:
+          - generic [ref=f1e54]:
+            - generic [ref=f1e55]:
+              - generic "Project Manager" [ref=f1e56]
+              - generic [ref=f1e57]: PM
+              - generic "Running" [ref=f1e137]
+            - generic [ref=f1e61]:
+              - button "Stop agent" [ref=f1e62] [cursor=pointer]: ■
+              - button "Close window" [ref=f1e63] [cursor=pointer]: ×
+          - generic [ref=f1e68]:
+            - textbox "Terminal input" [ref=f1e118]
+            - generic:
+              - generic:
+                - generic: │
+                - generic: ▝▜
+                - generic: █████
+                - generic: ▛▘
+                - generic: │
+                - generic: Fixed feature flags being evaluated with…
+                - generic: │
+              - generic:
+                - generic: │
+                - generic: ▘▘
+                - generic: ▝▝
+                - generic: │
+                - generic: "Fixed every Bash command failing under `…"
+                - generic: │
+              - generic:
+                - generic: │
+                - generic: claude-fable-5[1m]
+                - generic: ·
+                - generic: Claude
+                - generic: Max
+                - generic: ·
+                - generic: │
+                - generic: "Fixed `/tui` bringing back a conversatio…"
+                - generic: │
+              - generic:
+                - generic: │
+                - generic: akio-jinsenji@cloud-creative-studio's
+                - generic: Organization
+                - generic: │
+                - generic: /release-notes
+                - generic: for
+                - generic: more
+                - generic: │
+              - generic:
+                - generic: │
+                - generic: /…/.gwt/projects/99a8660247f5bc49/pm/worktree
+                - generic: │
+                - generic: │
+              - generic: ╰────────────────────────────────────────────────────────────────────────────────────────────────╯
+              - generic:
+                - generic: ↑
+                - generic: Opus
+                - generic: now
+                - generic: defaults
+                - generic: to
+                - generic: 1M
+                - generic: context
+                - generic: ·
+                - generic: 5x
+                - generic: more
+                - generic: room,
+                - generic: same
+                - generic: pricing
+              - generic:
+                - generic: ❯
+                - generic: $gwt-pm
+              - generic:
+                - generic: ✽
+                - generic: Frosting…
+              - generic: ──────────────────────────────────────────────────────────────────────────────────────────────────
+              - generic: ❯
+              - generic: ──────────────────────────────────────────────────────────────────────────────────────────────────
+              - generic:
+                - generic: ⏵⏵
+                - generic: bypass
+                - generic: permissions
+                - generic: "on"
+                - generic: (shift+tab
+                - generic: to
+                - generic: cycle)
+                - generic: ·
+                - generic: esc
+                - generic: to…
+                - generic: Fast
+                - generic: mode
+                - generic: is
+                - generic: now
+                - generic: available
+                - generic: ·
+                - generic: /fast
+                - generic: to…
+        - generic "Fleet minimap" [ref=f1e70]:
+          - button "Project Manager" [ref=f1e71] [cursor=pointer]
+          - generic [ref=f1e72]:
+            - button "Zoom minimap in" [ref=f1e73] [cursor=pointer]: +
+            - button "Zoom minimap out" [ref=f1e74] [cursor=pointer]: −
+        - text: ⌜ ⌟ ⌜ ⌟ ⌜ ⌟
+      - status "Operator status strip" [ref=f1e75]:
+        - generic [ref=f1e76]: ONLINE
+        - generic [ref=f1e79]:
+          - generic [ref=f1e80]: RUNNING
+          - generic "Running agents" [ref=f1e81]: "1"
+        - generic [ref=f1e82]:
+          - generic [ref=f1e83]: IDLE
+          - generic "Idle agents" [ref=f1e84]: "0"
+        - generic [ref=f1e85]:
+          - generic [ref=f1e86]: WAITING
+          - generic "Agents waiting for input" [ref=f1e87]: "0"
+        - generic [ref=f1e88]:
+          - generic [ref=f1e89]: ERROR
+          - generic "Agents with runtime errors" [ref=f1e90]: "0"
+        - generic [ref=f1e91]:
+          - generic [ref=f1e92]: MISSION
+          - generic "Agents completed out of total" [ref=f1e93]: 0/1
+        - generic [ref=f1e94]:
+          - generic [ref=f1e95]: WORK
+          - generic "Work" [ref=f1e96]: "1"
+        - 'button "Issue Monitor: Off" [ref=f1e97] [cursor=pointer]':
+          - generic [ref=f1e98]: MONITOR
+          - generic "Issue Monitor status" [ref=f1e99]: "Off"
+        - generic "Runtime performance" [ref=f1e100]:
+          - generic [ref=f1e101]: PERF
+          - generic "Runtime performance" [ref=f1e102]: HOT 107% 15.9G
+        - generic [ref=f1e103]:
+          - generic [ref=f1e104]: ZOOM
+          - button "Zoom out" [ref=f1e105] [cursor=pointer]: "-"
+          - button "Reset zoom" [ref=f1e106] [cursor=pointer]: 100%
+          - button "Zoom in" [ref=f1e107] [cursor=pointer]: +
+        - button "Provider usage and limits" [ref=f1e121] [cursor=pointer]:
+          - generic [ref=f1e122]: USAGE
+          - generic [ref=f1e123]: ⬡ 19%
+          - generic [ref=f1e124]: ◇ off
+        - generic [ref=f1e109]:
+          - text: "14"
+          - generic [ref=f1e139]: ":"
+          - text: "41"
+          - generic [ref=f1e140]: ":"
+          - text: "06"
+    - text: ok ok ok ok
+    - generic:
+      - dialog:
+        - combobox
+        - listbox
+    - generic:
+      - dialog:
+        - heading [level=2]: Operator Hotkeys
+        - generic:
+          - heading [level=3]: Navigation
+          - generic:
+            - generic: Command palette
+            - generic: ⌘ K
+          - generic:
+            - generic: Project switcher
+            - generic: ⌘ P
+          - generic:
+            - generic: Board surface
+            - generic: ⌘ B
+          - generic:
+            - generic: Workspace surface
+            - generic: ⌘ G
+          - generic:
+            - generic: Logs surface
+            - generic: ⌘ L
+        - generic:
+          - heading [level=3]: Canvas
+          - generic:
+            - generic: Pan canvas
+            - generic: Scroll / drag
+          - generic:
+            - generic: Pan anywhere
+            - generic: Middle-drag
+          - generic:
+            - generic: Zoom canvas
+            - generic: Ctrl/⌘ + wheel
+          - generic:
+            - generic: Move window
+            - generic: Drag titlebar
+        - generic:
+          - heading [level=3]: Help
+          - generic:
+            - generic: This card
+            - generic: ⌘ ?
+          - generic:
+            - generic: Close overlay
+            - generic: Esc
+    - text: ▸ ▸ ▸ ⌜ ⌟
+    - dialog [ref=f1e112]:
+      - banner [ref=f1e113]:
+        - heading "Detail" [level=2] [ref=f1e114]
+        - button "Close detail drawer" [ref=f1e115] [cursor=pointer]: ×
+      - contentinfo [ref=f1e117]
+  - generic:
+    - status "Agent notifications"
+  - log "Autonomous Issue Monitor notifications"
