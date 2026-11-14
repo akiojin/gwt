@@ -375,7 +375,7 @@ test.describe("Issue queue real backend launch", () => {
     expect(errors).toEqual([]);
   });
 
-  for (const afterAck of ["unchanged", "input", "source edit", "cancel", "target removed"] as const) test(afterAck === "input"
+  for (const afterAck of ["unchanged", "input", "source edit", "cancel", "target removed", "worktree job"] as const) test(afterAck === "input"
     ? "T94421 input after checkpoint ACK preserves the source without switching"
     : afterAck === "source edit"
       ? "T94422 source edit after checkpoint ACK preserves unsaved work without switching"
@@ -383,7 +383,9 @@ test.describe("Issue queue real backend launch", () => {
         ? "T94423 cancellation after checkpoint ACK survives the delayed Normal Stop"
         : afterAck === "target removed"
           ? "T94424 target removal after checkpoint ACK preserves the source after delayed Stop"
-          : "T20b saved checkpoint switches through the real Host and Issues", async ({ page }, info) => {
+          : afterAck === "worktree job"
+            ? "T94425 worktree job after checkpoint ACK holds the source until ordinary job exit"
+            : "T20b saved checkpoint switches through the real Host and Issues", async ({ page }, info) => {
     test.skip(process.platform !== "linux" || process.env.GWT_PLAYWRIGHT_SWITCH_POSITIVE !== "1",
       "positive proof requires the isolated Linux root process namespace");
     const fixture = await startIssueQueueLaunchFixture(info, {
@@ -391,6 +393,8 @@ test.describe("Issue queue real backend launch", () => {
     });
     const errors: string[] = [];
     const theme = info.project.name.includes("light") ? "light" : "dark";
+    let job: ChildProcess | undefined;
+    let jobClosed: Promise<void> | undefined;
     page.on("pageerror", error => errors.push(error.message));
     page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
     const preferences = async () => JSON.parse((await fixture.monitorPreferencesBytes()).toString());
@@ -659,6 +663,63 @@ test.describe("Issue queue real backend launch", () => {
           contentType: "application/json" });
         await info.attach(`post-ack-${targetRemoved ? "target-removal" : "cancellation"}-preserved-source-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
       } else {
+        if (afterAck === "worktree job") {
+          const acknowledged = (await preferences()).agent_switch_intents[waiting.operation];
+          expect(acknowledged.stage).toBe("checkpoint_verified");
+          const checkpoint = fixture.savedSource(source.cwd);
+          job = spawn(process.execPath, ["-e",
+            "process.stdout.write(JSON.stringify({pid:process.pid,cwd:process.cwd()})+'\\n');process.stdin.resume();process.stdin.on('end',()=>process.exit(0))"], {
+            cwd: source.cwd, env: { HOME: fixture.home, PATH: process.env.PATH ?? "" }, stdio: ["pipe", "pipe", "ignore"],
+          });
+          jobClosed = new Promise(resolve => job!.once("close", () => resolve()));
+          const ready = await new Promise<{ pid: number; cwd: string }>((resolve, reject) => {
+            const timer = setTimeout(() => reject(new Error("Owned worktree job did not start")), 5_000);
+            job!.once("error", error => { clearTimeout(timer); reject(error); });
+            job!.stdout!.once("data", bytes => {
+              clearTimeout(timer);
+              try { resolve(JSON.parse(bytes.toString())); } catch (error) { reject(error); }
+            });
+          });
+          expect(ready).toEqual({ pid: job.pid, cwd: source.cwd });
+          await writeFile(join(fixture.home, `normal-n2-${waiting.operation}.json`), JSON.stringify({ operation: waiting.operation }));
+          await expect.poll(async () => (await fixture.actorEvents()).some((entry: any) =>
+            entry.stage === "normal_n2_hook_returned" && entry.operation === waiting.operation
+              && entry.pid === source.pid && entry.gwt_session_id === source.gwt_session_id),
+          { timeout: Math.max(1, handoffDeadline - Date.now()) }).toBe(true);
+          await expect.poll(async () => {
+            const reason = (await preferences()).agent_switch_intents[waiting.operation]?.reason || "";
+            const pids = /Observed worktree PIDs: \[([\d, ]*)\]/.exec(reason)?.[1]
+              .split(",").map((value: string) => Number(value.trim()));
+            return pids?.includes(ready.pid) && reason.includes("unknown cwd PIDs: [] (0 total); census complete: true.");
+          }, { timeout: Math.max(1, handoffDeadline - Date.now()), message: "complete post-ACK census identifies the real unfinished job" }).toBe(true);
+          const prefs = await preferences();
+          const held = prefs.agent_switch_intents[waiting.operation];
+          expect(held).toMatchObject({ stage: "checkpoint_verified", source: acknowledged.source, checkpoint: acknowledged.checkpoint });
+          expect(held.runtime_exit_confirmed).not.toBe(true);
+          expect(prefs.monitor_runtime_stop_requests || []).toEqual([]);
+          expect(prefs.agent_roster.members.find((value: any) => value.agent_member_id === member.agent_member_id)
+            .assignment).toEqual(acknowledged.source.assignment);
+          expect(prefs.launched_claims[43]).toBe(acknowledged.source.claim_id);
+          expect(fixture.processAlive(source.pid)).toBe(true);
+          expect(fixture.processAlive(idle.tree_child_pid)).toBe(true);
+          expect(fixture.processAlive(ready.pid)).toBe(true);
+          expect(await fixture.launchIssues()).toEqual([43]);
+          expect(fixture.requests.filter(request => request.method === "POST"
+            && request.url === "/repos/fixture/queue/issues/44/comments")).toEqual([]);
+          expect(fixture.executionStatus(source.cwd).ecr_status).toBe("active");
+          expect(fixture.savedSource(source.cwd)).toEqual(checkpoint);
+          const work = (await fixture.workItems()).work_items.find((value: any) => value.id === acknowledged.checkpoint.work_id);
+          expect(work).toMatchObject({ owner: "Issue #43", status_category: "idle" });
+          expect(work.board_refs).toContain(acknowledged.checkpoint.board_entry_id);
+          await expect(plans.locator(".roster-switch-status")).toContainText("Waiting for background work");
+          await info.attach("post-ack-worktree-job-held", { body: JSON.stringify({ ready, held, checkpoint }), contentType: "application/json" });
+          await info.attach(`post-ack-worktree-job-held-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
+          job.stdin!.end();
+          await expect.poll(() => job!.exitCode, { timeout: 5_000 }).toBe(0);
+          await jobClosed;
+          expect(job.signalCode).toBeNull();
+          expect(fixture.processAlive(ready.pid)).toBe(false);
+        }
         await writeFile(join(fixture.home, `normal-n2-${waiting.operation}.json`), JSON.stringify({ operation: waiting.operation }));
         await expect.poll(async () => (await fixture.launches()).length === 2
           || (await fixture.actorEvents()).some((entry: any) => entry.stage === "normal_n2_hook_returned"
@@ -751,7 +812,20 @@ test.describe("Issue queue real backend launch", () => {
         }
         await info.attach("agent-switch-actor-events", { body: JSON.stringify(await fixture.actorEvents()), contentType: "application/json" });
       } finally {
-        try { await page.close(); } finally { await fixture.stop(); }
+        try { await page.close(); } finally {
+          try { await fixture.stop(); } finally {
+            if (job && jobClosed) {
+              if (job.exitCode === null && job.signalCode === null) job.kill("SIGTERM");
+              const escalation = setTimeout(() => job!.kill("SIGKILL"), 2_500);
+              let timer: ReturnType<typeof setTimeout> | undefined;
+              try {
+                await Promise.race([jobClosed, new Promise<never>((_, reject) => {
+                  timer = setTimeout(() => reject(new Error("Owned worktree job did not close")), 5_000);
+                })]);
+              } finally { clearTimeout(escalation); clearTimeout(timer); }
+            }
+          }
+        }
       }
     }
     expect(errors).toEqual([]);
