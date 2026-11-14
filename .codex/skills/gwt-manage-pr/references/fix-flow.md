@@ -156,7 +156,7 @@ Send one envelope per thread:
 - CI pending/queued --> check at most 3 times with JSON operation `pr.checks`, waiting no more than 30 seconds between checks.
 - If checks are still pending after the bounded checks, post JSON operation
   `board.post` with `params.kind:"status"` or `params.kind:"handoff"`, the PR
-  number, pending check names, and resume command. For autonomous / Issues
+  number, pending check names, and resume command. For autonomous / Issue Monitor
   launches, declare `issue.monitor.wait` with the explicit owner Issue number
   in `params.number`, `reason`, and `resume_condition`. Keep the execution Active
   and auto-merge enabled; resume bounded checks when CI progresses and clear
