@@ -1072,6 +1072,151 @@ mod tests {
     }
 
     #[test]
+    fn portable_worktree_path_hydrates_distinct_local_sources_for_shared_content() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let first_worktree = tmp.path().join("work/first");
+        let second_worktree = tmp.path().join("work/second");
+        let content: Arc<str> = Arc::from(event_json(
+            "evt-portable-local",
+            "work-portable-local",
+            "start",
+            "2026-08-25T01:00:00Z",
+            ",\"title\":\"portable local\",\"status_category\":\"active\",\"execution_container\":{\"branch\":\"work/portable\",\"worktree_path\":\".\"}",
+        ));
+        let sources = [first_worktree.clone(), second_worktree.clone()]
+            .into_iter()
+            .map(|worktree_path| {
+                SharedWorkEventsSource::new(
+                    Arc::clone(&content),
+                    Some(WorkspaceExecutionContainerRef {
+                        branch: Some("work/portable".to_string()),
+                        worktree_path: Some(worktree_path),
+                        pr_number: None,
+                        pr_url: None,
+                        pr_state: None,
+                    }),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut report = WorkEventsIntakeReport::default();
+        let mut decode_calls = 0;
+
+        let incoming =
+            collect_shared_work_event_sources_with_decoder(sources, &mut report, |line| {
+                decode_calls += 1;
+                decode_workspace_work_event_line(line)
+            })
+            .expect("collect portable local sources");
+
+        assert_eq!(decode_calls, 1, "shared Arc content decodes exactly once");
+        assert_eq!(
+            incoming.len(),
+            2,
+            "each source yields its own transient event"
+        );
+        let containers = incoming
+            .iter()
+            .map(|(event, _)| {
+                event
+                    .execution_container
+                    .as_ref()
+                    .expect("hydrated execution container")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            containers[0].worktree_path.as_deref(),
+            Some(first_worktree.as_path())
+        );
+        assert_eq!(
+            containers[1].worktree_path.as_deref(),
+            Some(second_worktree.as_path())
+        );
+        assert_ne!(
+            containers[0].worktree_path, containers[1].worktree_path,
+            "identical portable events must retain distinct source roots"
+        );
+        let process_cwd = std::env::current_dir().expect("process cwd");
+        assert!(containers.iter().all(|container| {
+            container.worktree_path.as_deref() != Some(process_cwd.as_path())
+        }));
+    }
+
+    #[test]
+    fn portable_worktree_path_becomes_none_for_ref_only_source_and_preserves_branch() {
+        let content: Arc<str> = Arc::from(event_json(
+            "evt-portable-ref",
+            "work-portable-ref",
+            "start",
+            "2026-08-25T01:01:00Z",
+            ",\"title\":\"portable ref\",\"status_category\":\"active\",\"execution_container\":{\"branch\":\"work/portable\",\"worktree_path\":\".\"}",
+        ));
+        let sources = vec![SharedWorkEventsSource::new(
+            content,
+            Some(source_container("origin/work/portable")),
+        )];
+        let mut report = WorkEventsIntakeReport::default();
+
+        let incoming = collect_shared_work_event_sources(sources, &mut report)
+            .expect("collect portable ref source");
+
+        let container = incoming[0]
+            .0
+            .execution_container
+            .as_ref()
+            .expect("portable execution container");
+        assert_eq!(container.branch.as_deref(), Some("work/portable"));
+        assert_eq!(
+            container.worktree_path, None,
+            "ref-only sources must not resolve portable dot through process cwd"
+        );
+    }
+
+    #[test]
+    fn historical_absolute_worktree_path_is_not_overwritten_by_source_context() {
+        let historical_path = std::path::PathBuf::from("/historical/worktree");
+        let content: Arc<str> = Arc::from(event_json(
+            "evt-historical-path",
+            "work-historical-path",
+            "start",
+            "2026-08-25T01:02:00Z",
+            ",\"title\":\"historical path\",\"status_category\":\"active\",\"execution_container\":{\"branch\":\"work/historical\",\"worktree_path\":\"/historical/worktree\"}",
+        ));
+        let original_content = Arc::clone(&content);
+        let original_bytes = original_content.as_bytes().to_vec();
+        let sources = vec![SharedWorkEventsSource::new(
+            content,
+            Some(WorkspaceExecutionContainerRef {
+                branch: Some("work/current".to_string()),
+                worktree_path: Some("/current/worktree".into()),
+                pr_number: None,
+                pr_url: None,
+                pr_state: None,
+            }),
+        )];
+        let mut report = WorkEventsIntakeReport::default();
+
+        let incoming = collect_shared_work_event_sources(sources, &mut report)
+            .expect("collect historical source");
+
+        let container = incoming[0]
+            .0
+            .execution_container
+            .as_ref()
+            .expect("historical execution container");
+        assert_eq!(container.branch.as_deref(), Some("work/historical"));
+        assert_eq!(
+            container.worktree_path.as_deref(),
+            Some(historical_path.as_path()),
+            "historical absolute paths remain reader-compatible"
+        );
+        assert_eq!(
+            original_content.as_bytes(),
+            original_bytes.as_slice(),
+            "source context hydration must not rewrite historical raw bytes"
+        );
+    }
+
+    #[test]
     fn ingest_restores_work_skeleton_from_source_content() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let works = tmp.path().join("works.json");

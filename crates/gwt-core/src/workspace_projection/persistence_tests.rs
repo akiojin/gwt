@@ -10069,6 +10069,246 @@ fn production_work_event_writer_creates_one_immutable_shard() {
 }
 
 #[test]
+fn production_work_event_writer_serializes_owning_root_as_portable_dot() {
+    let _guard = crate::test_support::env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let workspace = tempfile::tempdir().expect("workspace");
+    let repo = workspace.path().join("HOST-PRIVATE-TOKEN").join("repo");
+    init_test_git_repo(&repo);
+
+    let now = Utc.with_ymd_and_hms(2026, 8, 25, 9, 0, 0).unwrap();
+    let mut event = start_event("work-portable-root", now);
+    event.id = "event-portable-root".to_string();
+    event.execution_container = Some(WorkspaceExecutionContainerRef {
+        branch: Some("work/issue-3670".to_string()),
+        worktree_path: Some(repo.clone()),
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+    });
+
+    record_workspace_work_event(&repo, event.clone()).expect("record portable shard");
+
+    let shard = gwt_repo_local_work_event_shard_path(&repo, &event.id);
+    let bytes = std::fs::read(&shard).expect("read portable shard");
+    let persisted: WorkEvent = serde_json::from_slice(&bytes).expect("parse portable shard");
+    assert_eq!(
+        persisted
+            .execution_container
+            .as_ref()
+            .and_then(|container| container.worktree_path.as_deref()),
+        Some(Path::new(".")),
+        "the exact owning worktree root must be repository-relative"
+    );
+    let body = String::from_utf8(bytes).expect("UTF-8 shard");
+    assert!(
+        !body.contains(repo.to_str().expect("UTF-8 repository path")),
+        "tracked shard must not contain the host-absolute repository path"
+    );
+    assert!(
+        !body.contains("HOST-PRIVATE-TOKEN"),
+        "tracked shard must not leak host-specific path tokens"
+    );
+}
+
+#[test]
+fn production_work_event_batch_rejects_nonportable_worktree_paths_without_mutation() {
+    let _guard = crate::test_support::env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let workspace = tempfile::tempdir().expect("workspace");
+    let now = Utc.with_ymd_and_hms(2026, 8, 25, 9, 1, 0).unwrap();
+    let mut violations = Vec::new();
+
+    for (case, worktree_path) in [
+        ("posix-absolute", PathBuf::from("/foreign/host/repo")),
+        (
+            "windows-drive-backslash",
+            PathBuf::from(r"C:\Users\host\repo"),
+        ),
+        (
+            "windows-drive-forward-slash",
+            PathBuf::from("C:/Users/host/repo"),
+        ),
+        ("windows-unc", PathBuf::from(r"\\server\private-share\repo")),
+        (
+            "escaping-relative",
+            PathBuf::from("inside/../../outside-repo"),
+        ),
+    ] {
+        let repo = workspace.path().join(format!("repo-{case}"));
+        init_test_git_repo(&repo);
+        let work_items_path = gwt_workspace_work_items_path_for_repo_path(&repo);
+        let mut projection = WorkItemsProjection::empty(now);
+        projection.apply_event(start_event(&format!("work-preserved-{case}"), now));
+        save_workspace_work_items_projection_to_path(&work_items_path, &projection)
+            .expect("seed WorkItems");
+        let work_items_before = std::fs::read(&work_items_path).expect("WorkItems bytes");
+
+        let legacy = gwt_repo_local_work_events_path(&repo);
+        let mut legacy_event = start_event(
+            &format!("work-legacy-{case}"),
+            now - chrono::Duration::seconds(1),
+        );
+        legacy_event.id = format!("event-legacy-{case}");
+        append_workspace_work_event_to_path(&legacy, &legacy_event)
+            .expect("seed valid legacy monolith event");
+        let legacy_bytes = std::fs::read(&legacy).expect("legacy bytes");
+        let events_dir = gwt_repo_local_work_events_dir(&repo);
+        let shards_before = read_work_event_shards(&events_dir);
+
+        let mut valid = start_event(
+            &format!("work-valid-{case}"),
+            now + chrono::Duration::seconds(1),
+        );
+        valid.id = format!("event-valid-{case}");
+        valid.execution_container = Some(WorkspaceExecutionContainerRef {
+            branch: Some("work/issue-3670".to_string()),
+            worktree_path: Some(repo.clone()),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        });
+        let mut invalid = start_event(
+            &format!("work-rejected-{case}"),
+            now + chrono::Duration::seconds(2),
+        );
+        invalid.id = format!("event-rejected-{case}");
+        invalid.execution_container = Some(WorkspaceExecutionContainerRef {
+            branch: Some("work/issue-3670".to_string()),
+            worktree_path: Some(worktree_path),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        });
+
+        let result = record_workspace_work_events_to_store(
+            &work_items_path,
+            &events_dir,
+            vec![valid, invalid],
+        );
+
+        match result {
+            Ok(()) => violations.push(format!(
+                "{case} batch was accepted instead of being rejected as nonportable"
+            )),
+            Err(error) => {
+                let message = error.to_string().to_ascii_lowercase();
+                let identifies_nonportable =
+                    message.contains("nonportable") || message.contains("non-portable");
+                if !(identifies_nonportable
+                    && message.contains("worktree")
+                    && message.contains("path"))
+                {
+                    violations.push(format!(
+                        "{case} returned an unrelated error instead of a nonportable worktree path error: {error}"
+                    ));
+                }
+            }
+        }
+        if read_work_event_shards(&events_dir) != shards_before {
+            violations.push(format!("{case} published a shard before validation"));
+        }
+        if std::fs::read(&work_items_path).expect("WorkItems after refusal") != work_items_before {
+            violations.push(format!("{case} mutated WorkItems before validation"));
+        }
+        if std::fs::read(&legacy).expect("legacy after refusal") != legacy_bytes {
+            violations.push(format!("{case} mutated the frozen legacy monolith"));
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "nonportable path validation violations:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn manual_rebuild_preserves_historical_absolute_event_paths_and_source_bytes() {
+    let _guard = crate::test_support::env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let workspace = tempfile::tempdir().expect("workspace");
+    let repo = workspace.path().join("repo");
+    init_test_git_repo(&repo);
+
+    let now = Utc.with_ymd_and_hms(2026, 8, 25, 9, 2, 0).unwrap();
+    let mut historical_shard = start_event("work-historical-shard", now);
+    historical_shard.id = "event-historical-shard".to_string();
+    historical_shard.execution_container = Some(WorkspaceExecutionContainerRef {
+        branch: Some("work/legacy-layout".to_string()),
+        worktree_path: Some(repo.clone()),
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+    });
+    let shard = gwt_repo_local_work_event_shard_path(&repo, &historical_shard.id);
+    std::fs::create_dir_all(shard.parent().expect("shard bucket")).expect("create shard bucket");
+    let mut shard_bytes = serde_json::to_vec(&historical_shard).expect("serialize old shard");
+    shard_bytes.push(b'\n');
+    std::fs::write(&shard, &shard_bytes).expect("seed historical absolute shard");
+
+    let legacy_worktree_path = repo.join("legacy-worktree");
+    let mut historical_legacy =
+        start_event("work-historical-legacy", now + chrono::Duration::seconds(1));
+    historical_legacy.id = "event-historical-legacy".to_string();
+    historical_legacy.execution_container = Some(WorkspaceExecutionContainerRef {
+        branch: Some("work/legacy-monolith".to_string()),
+        worktree_path: Some(legacy_worktree_path.clone()),
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+    });
+    let legacy = gwt_repo_local_work_events_path(&repo);
+    append_workspace_work_event_to_path(&legacy, &historical_legacy)
+        .expect("seed historical legacy monolith");
+    let legacy_bytes = std::fs::read(&legacy).expect("read historical legacy monolith");
+
+    assert_eq!(
+        rebuild_work_items_from_events_for_repo(&repo).expect("rebuild historical events"),
+        WorkItemsRebuildOutcome::Applied
+    );
+    let work_items =
+        load_workspace_work_items_from_path(&gwt_workspace_work_items_path_for_repo_path(&repo))
+            .expect("load rebuilt WorkItems")
+            .expect("rebuilt WorkItems");
+    for (work_id, expected_path) in [
+        ("work-historical-shard", repo.as_path()),
+        ("work-historical-legacy", legacy_worktree_path.as_path()),
+    ] {
+        let item = work_items
+            .work_items
+            .iter()
+            .find(|item| item.id == work_id)
+            .unwrap_or_else(|| panic!("missing rebuilt WorkItem {work_id}"));
+        assert!(
+            item.execution_containers
+                .iter()
+                .any(|container| container.worktree_path.as_deref() == Some(expected_path)),
+            "{work_id} must retain its historical absolute execution-container path"
+        );
+    }
+    assert_eq!(
+        std::fs::read(&shard).expect("read historical shard after rebuild"),
+        shard_bytes,
+        "reader compatibility must never rewrite historical tracked bytes"
+    );
+    assert_eq!(
+        std::fs::read(&legacy).expect("read legacy monolith after rebuild"),
+        legacy_bytes,
+        "reader compatibility must never rewrite the legacy monolith"
+    );
+}
+
+#[test]
 fn manual_rebuild_reads_legacy_flat_and_canonical_bucketed_shards() {
     let _guard = crate::test_support::env_lock()
         .lock()
@@ -10199,6 +10439,42 @@ fn production_work_event_writer_rejects_divergent_same_id_without_mutation() {
 
     assert!(error.to_string().contains("divergent Work event shard"));
     assert_eq!(std::fs::read(&shard).expect("read refused shard"), before);
+}
+
+#[test]
+fn production_work_event_writer_accepts_absolute_retry_of_historical_absolute_shard() {
+    let _guard = crate::test_support::env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let workspace = tempfile::tempdir().expect("workspace");
+    let repo = workspace.path().join("repo");
+    init_test_git_repo(&repo);
+
+    let now = Utc.with_ymd_and_hms(2026, 8, 25, 9, 3, 0).unwrap();
+    let mut historical = start_event("work-portable-retry", now);
+    historical.id = "event-portable-retry".to_string();
+    historical.execution_container = Some(WorkspaceExecutionContainerRef {
+        branch: Some("work/issue-3670".to_string()),
+        worktree_path: Some(repo.clone()),
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+    });
+    let shard = gwt_repo_local_work_event_shard_path(&repo, &historical.id);
+    std::fs::create_dir_all(shard.parent().expect("shard bucket")).expect("create shard bucket");
+    let mut historical_bytes = serde_json::to_vec(&historical).expect("serialize old shard");
+    historical_bytes.push(b'\n');
+    std::fs::write(&shard, &historical_bytes).expect("seed historical absolute shard");
+
+    record_workspace_work_event(&repo, historical)
+        .expect("absolute retry must match the historical absolute shard semantically");
+    assert_eq!(
+        std::fs::read(&shard).expect("read unchanged historical shard"),
+        historical_bytes,
+        "idempotent retry must preserve the old-format shard byte-for-byte"
+    );
 }
 
 #[test]

@@ -1315,6 +1315,121 @@ mod tests {
     }
 
     #[test]
+    fn ingest_hydrates_portable_local_shard_and_preserves_historical_absolute_shard() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        init_repo(&repo);
+        assert_ne!(
+            repo,
+            std::env::current_dir().expect("process cwd"),
+            "portable source context must be independent of process cwd"
+        );
+
+        let portable_id = "evt-portable-local-shard";
+        let portable_event = session_event_line(SessionEventFixture {
+            id: portable_id,
+            work_id: "work-portable-local-shard",
+            kind: "start",
+            title: "Portable local shard",
+            session_id: "session-portable-local-shard",
+            branch: "main",
+            worktree_path: Path::new("."),
+            updated_at: "2026-08-25T02:00:00Z",
+        });
+        let historical_id = "evt-historical-absolute-shard";
+        let historical_worktree = Path::new("/historical/worktree");
+        let historical_event = session_event_line(SessionEventFixture {
+            id: historical_id,
+            work_id: "work-historical-absolute-shard",
+            kind: "start",
+            title: "Historical absolute shard",
+            session_id: "session-historical-absolute-shard",
+            branch: "work/historical",
+            worktree_path: historical_worktree,
+            updated_at: "2026-08-25T02:01:00Z",
+        });
+        let portable_hash = format!("{:x}", sha2::Sha256::digest(portable_id.as_bytes()));
+        let historical_hash = format!("{:x}", sha2::Sha256::digest(historical_id.as_bytes()));
+        let portable_shard = repo
+            .join(EVENTS_TREE_DIR)
+            .join(&portable_hash[..2])
+            .join(format!("{portable_hash}.jsonl"));
+        let historical_shard = repo
+            .join(EVENTS_TREE_DIR)
+            .join(&historical_hash[..2])
+            .join(format!("{historical_hash}.jsonl"));
+        std::fs::create_dir_all(portable_shard.parent().expect("portable bucket"))
+            .expect("portable event bucket");
+        std::fs::create_dir_all(historical_shard.parent().expect("historical bucket"))
+            .expect("historical event bucket");
+        std::fs::write(&portable_shard, format!("{portable_event}\n"))
+            .expect("portable event shard");
+        std::fs::write(&historical_shard, format!("{historical_event}\n"))
+            .expect("historical event shard");
+        let portable_bytes_before = std::fs::read(&portable_shard).expect("portable source bytes");
+        let historical_bytes_before =
+            std::fs::read(&historical_shard).expect("historical source bytes");
+
+        let work_items_path = temp.path().join("state/works.json");
+        let state_path = temp.path().join("state/work-events-intake.json");
+        let summary = ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
+
+        assert!(summary.projection_rebuilt, "initial rebuild: {summary:?}");
+        let projection =
+            gwt_core::workspace_projection::load_workspace_work_items_from_path(&work_items_path)
+                .expect("load")
+                .expect("projection");
+        let portable = projection
+            .work_items
+            .iter()
+            .find(|item| item.id == "work-portable-local-shard")
+            .expect("portable Work restored");
+        let portable_container = portable.events[0]
+            .execution_container
+            .as_ref()
+            .expect("portable event container");
+        let historical = projection
+            .work_items
+            .iter()
+            .find(|item| item.id == "work-historical-absolute-shard")
+            .expect("historical Work restored");
+        let historical_container = historical.events[0]
+            .execution_container
+            .as_ref()
+            .expect("historical event container");
+        assert_eq!(
+            historical_container.branch.as_deref(),
+            Some("work/historical")
+        );
+        assert_eq!(
+            historical_container.worktree_path.as_deref(),
+            Some(historical_worktree),
+            "historical absolute event remains reader-compatible"
+        );
+        assert_eq!(
+            std::fs::read(&portable_shard).expect("portable source after intake"),
+            portable_bytes_before,
+            "portable source bytes remain immutable"
+        );
+        assert_eq!(
+            std::fs::read(&historical_shard).expect("historical source after intake"),
+            historical_bytes_before,
+            "historical source bytes remain immutable"
+        );
+        assert_eq!(
+            portable_container.worktree_path.as_deref(),
+            Some(repo.as_path()),
+            "portable event hydrates from the discovered local worktree root"
+        );
+        assert!(portable.execution_containers.iter().any(|container| {
+            container.branch.as_deref() == Some("main")
+                && container.worktree_path.as_deref() == Some(repo.as_path())
+        }));
+    }
+
+    #[test]
     fn unchanged_pass_does_not_read_immutable_local_shard_bytes() {
         let temp = tempfile::tempdir().expect("tempdir");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
