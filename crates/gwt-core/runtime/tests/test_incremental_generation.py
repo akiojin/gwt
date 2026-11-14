@@ -543,6 +543,31 @@ class IncrementalGenerationTests(_IncrementalFixture):
             self.assertEqual(result.get("computed_embeddings"), 1, result)
             self.assertEqual(result.get("embedding_cache_hits"), 7, result)
 
+        overlay_path = "src/module_02.rs"
+        (project / overlay_path).write_text("//! uncommitted overlay\nfn overlay() {}\n", encoding="utf-8")
+        with mock.patch.object(runner, "_git_cat_file_batch", side_effect=AssertionError("unchanged canonical blobs must reuse verified payloads")), \
+                mock.patch.object(runner, "_record_from_bytes", wraps=runner._record_from_bytes) as parse:
+            overlay = self._build_protocol_v2(project, WORKTREE_HASH)
+        self.assertTrue(overlay.get("ok"), overlay)
+        self.assertEqual(overlay["base_generation_id"], result["base_generation_id"])
+        self.assertEqual({call.args[0] for call in parse.call_args_list}, {overlay_path})
+        self.assertEqual(overlay.get("computed_embeddings"), 1, overlay)
+
+        first_path, second_path = project / "src/first.rs", project / "src/second.rs"
+        first_path.write_text("fn first() {}\n", encoding="utf-8")
+        first_overlay = self._build_protocol_v2(project, WORKTREE_HASH)
+        self.assertTrue(first_overlay.get("ok"), first_overlay)
+        first_path.unlink()
+        second_path.write_text("fn second() {}\n", encoding="utf-8")
+        second_overlay = self._build_protocol_v2(project, WORKTREE_HASH)
+        self.assertTrue(second_overlay.get("ok"), second_overlay)
+        second_path.unlink()
+        first_path.write_text("fn first() {}\n", encoding="utf-8")
+        with mock.patch.object(runner, "_resolve_record_vector_batch", side_effect=AssertionError("healthy retained artifacts must remain warm")):
+            restored = self._build_protocol_v2(project, WORKTREE_HASH)
+        self.assertTrue(restored.get("ok"), restored)
+        self.assertEqual(restored["overlay_generation_id"], first_overlay["overlay_generation_id"])
+
     def test_new_base_repairs_unproven_members_without_reading_unused_cas(self):
         project = self._make_canonical_repo()
         first = self._build_protocol_v2(project, WORKTREE_HASH)
@@ -606,8 +631,61 @@ class IncrementalGenerationTests(_IncrementalFixture):
                 dict(zip(expected["ids"], zip(expected["documents"], expected["metadatas"]))),
                 "missing IDs and each invalid payload field must be repaired",
             )
+            collection.update(ids=[repair_ids[0]], documents=["same-tree payload corruption"],
+                              embeddings=[vectors[repair_ids[0]]])
         finally:
             runner._close_chroma_client(client)
+
+        previous_base = result["base_generation_id"]
+        repair_base = runner.resolve_file_index_v2_base_dir(
+            REPO_HASH, previous_base, db_root=self.db_root,
+        )
+        head_path = repair_base.parents[1] / "worktrees" / WORKTREE_HASH / "head.json"
+        retained = {path: path.read_bytes() for path in (
+            repair_base / "descriptor.json", repair_base / "manifest.json", head_path,
+        )}
+        # Force a real encode so background repair yields after this record.
+        runner._cas_entry_path(cas_root, entries[repaired_paths[0]]["cas_key"]).unlink()
+        with mock.patch.object(runner, "_pending_higher_priority", return_value=True):
+            yielded = self._build_protocol_v2(project, WORKTREE_HASH)
+        self.assertTrue(yielded.get("yielded"), yielded)
+        for path, contents in retained.items():
+            self.assertTrue(path.is_file(), f"interrupted repair removed {path}")
+            self.assertEqual(path.read_bytes(), contents)
+        # Recreate the corruption to check the ordinary repair path on resume.
+        client, collection = runner._open_file_index_v2_collection(store, runner.V2_FILES_CODE_COLLECTION)
+        try:
+            collection.update(ids=[repair_ids[0]], documents=["same-tree payload corruption"],
+                              embeddings=[vectors[repair_ids[0]]])
+        finally:
+            runner._close_chroma_client(client)
+        with mock.patch.object(runner, "_resolve_record_vector_batch", wraps=runner._resolve_record_vector_batch) as resolve, \
+                mock.patch.object(runner, "_record_from_bytes", wraps=runner._record_from_bytes) as parse:
+            result = self._build_protocol_v2(project, WORKTREE_HASH)
+        self.assertTrue(result.get("ok"), result)
+        self.assertEqual(result["base_generation_id"], previous_base)
+        self.assertEqual({call.args[0] for call in parse.call_args_list}, {repaired_paths[0]})
+        self.assertEqual({record["path"] for call in resolve.call_args_list for record in call.args[0]}, {repaired_paths[0]})
+        self.assertEqual(unused_cas.read_bytes(), b"invalid unused CAS")
+        client, collection = runner._open_file_index_v2_collection(store, runner.V2_FILES_CODE_COLLECTION)
+        try:
+            self.assertEqual(collection.get(ids=[repair_ids[0]], include=["documents"])["documents"],
+                             [expected["documents"][expected["ids"].index(repair_ids[0])]])
+            collection.update(ids=[repair_ids[0]], documents=["repair interrupted at publication"],
+                              embeddings=[vectors[repair_ids[0]]])
+        finally:
+            runner._close_chroma_client(client)
+        retained = {path: path.read_bytes() for path in retained}
+        with mock.patch.object(runner, "_durably_replace_file_index_v2_directory",
+                               side_effect=RuntimeError("publication interrupted")):
+            with self.assertRaisesRegex(RuntimeError, "publication interrupted"):
+                self._build_protocol_v2(project, WORKTREE_HASH)
+        for path, contents in retained.items():
+            self.assertTrue(path.is_file(), f"failed publication removed {path}")
+            self.assertEqual(path.read_bytes(), contents)
+        resumed = self._build_protocol_v2(project, WORKTREE_HASH)
+        self.assertTrue(resumed.get("ok"), resumed)
+        self.assertEqual(resumed["base_generation_id"], previous_base)
 
     def test_new_base_recreates_a_missing_native_collection(self):
         project = self._make_canonical_repo()

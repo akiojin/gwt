@@ -221,6 +221,38 @@ fn remove_restore_placeholders(
     Ok(())
 }
 
+/// Issue #4735 RSR: a restore rebound to its source's current Active binding
+/// keeps the source Session ID under a fresh pane. Retire only the captured
+/// placeholders that are neither that pane nor another live pane, so the
+/// restored Session maps to exactly one registry row.
+pub(crate) fn retire_same_session_restore_placeholders(
+    root: &Path,
+    restore: &OwnerSavedSessionRestore,
+    launched_session_id: &str,
+    is_live: impl Fn(&str) -> bool,
+) -> Result<(), String> {
+    if restore.source.id != launched_session_id {
+        return Ok(());
+    }
+    let project_key = gwt_core::paths::project_scope_hash(root).to_string();
+    for row in &restore.placeholders {
+        let canonical_id = format!("{project_key}::{}", row.id);
+        if is_live(&canonical_id) {
+            continue;
+        }
+        super::agent_dispatch::OwnedWindowRecordCleanup {
+            registry: restore.registry.clone(),
+            registry_path: crate::persistence::workspace_state_path(root),
+            root: root.into(),
+            project_key: project_key.clone(),
+            canonical_id,
+            expected_session_id: Some(restore.source.id.clone()),
+        }
+        .finish()?;
+    }
+    Ok(())
+}
+
 pub(crate) fn finish_owner_restore_failure(
     root: &Path,
     sessions_dir: &Path,

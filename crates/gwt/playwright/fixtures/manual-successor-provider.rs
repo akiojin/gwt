@@ -43,6 +43,11 @@ fn main() {
         println!("codex-cli 0.116.0");
         return;
     }
+    // Configuration is probed before a provider Session is created.
+    if args.windows(2).any(|pair| pair == ["features", "list"]) {
+        println!("shell_tool\tstable\ttrue");
+        return;
+    }
     let home = PathBuf::from(std::env::var_os("HOME").unwrap());
     let session = std::env::var("GWT_SESSION_ID").unwrap();
     // Private fixture input: never include bridge credentials in test artifacts.

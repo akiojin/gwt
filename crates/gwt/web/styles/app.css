@@ -4106,6 +4106,21 @@ body {
 .notification-center__dismiss:hover {
   color: var(--color-text-strong);
 }
+/* SPEC #6476 T-005nc: the drawer controls kept their 20-28px desktop sizes on
+   a phone. The triage row grows to the 44px dismiss; Details stays text-wide. */
+@media (max-width: 600px) {
+  .op-drawer__close,
+  .notification-center__clear,
+  .notification-center__dismiss {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  /* Keep the list-item display so the disclosure marker stays visible. */
+  .notification-center__details > summary {
+    line-height: 44px;
+  }
+}
 
 .attachment-progress {
   position: absolute;
@@ -5140,6 +5155,25 @@ body {
   justify-content: flex-end;
   gap: var(--space-3);
   margin-top: 10px;
+}
+
+/* SPEC #6476 T-005lw/T-005md: every modal kept its 19-38px desktop control
+   sizes on a phone. Checkboxes and toggles sit inside a label, so the label is
+   the target; 24px icon buttons also need the width. */
+@media (max-width: 600px) {
+  .modal-shell :is(button, select, textarea, [role="button"], input:not([type="checkbox"])),
+  .modal-shell label:has(input[type="checkbox"]) {
+    min-height: 44px;
+  }
+
+  /* A summary stays a list-item (keeps its marker), so center it by line. */
+  .modal-shell summary {
+    line-height: 44px;
+  }
+
+  .modal-shell :is(.icon-button, .text-button) {
+    min-width: 44px;
+  }
 }
 
 .text-button {

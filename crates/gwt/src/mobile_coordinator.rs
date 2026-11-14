@@ -14,6 +14,7 @@ pub mod admin;
 
 mod config;
 pub use config::{ConfigError, CoordinatorConfig, CoordinatorLimits, TlsError};
+mod host_route;
 pub mod listener;
 pub mod server;
 

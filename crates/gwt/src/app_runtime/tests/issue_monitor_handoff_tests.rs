@@ -4591,6 +4591,29 @@ fn app_runtime_monitor_fresh_required_delivery_skips_resumable_session() {
     let pane = pane.unwrap();
     assert_owner_monitor_fresh_successor(&pane, &fixture);
     authenticate_monitor_owner_readiness(&owner, &pane);
+    let projection =
+        gwt_core::workspace_projection::load_workspace_projection(&fixture.project_root)
+            .expect("SPEC Monitor Current projection")
+            .expect("Current");
+    assert_eq!(projection.owner.as_deref(), Some("SPEC-3165"));
+    let session_id = &pane.session.as_ref().expect("fresh SPEC Session").id;
+    let works = gwt_core::workspace_projection::load_workspace_work_items(&fixture.project_root)
+        .expect("SPEC Monitor WorkItems")
+        .expect("WorkItems");
+    let work = works
+        .work_items
+        .iter()
+        .find(|item| {
+            item.agents
+                .iter()
+                .any(|agent| &agent.session_id == session_id)
+        })
+        .expect("the authenticated Monitor Session's Work");
+    assert_eq!(
+        work.owner.as_deref(),
+        Some("SPEC-3165"),
+        "SPEC Monitor delivery must persist the canonical Work owner"
+    );
     close_test_owner_runtime(&mut fixture.runtime, &window_id);
 }
 

@@ -12423,24 +12423,26 @@ impl AppRuntime {
             FrontendEvent::ReopenPmRequestTask {
                 id,
                 request_id,
+                task_key,
                 request,
             } => self.pm_request_task_events(
                 context,
                 client_id,
                 &id,
                 request_id,
-                pm_chat::PmRequestTaskOperation::Reopen(request),
+                pm_chat::PmRequestTaskOperation::Reopen { request, task_key },
             ),
             FrontendEvent::CancelPmRequestTask {
                 id,
                 request_id,
+                task_key,
                 request,
             } => self.pm_request_task_events(
                 context,
                 client_id,
                 &id,
                 request_id,
-                pm_chat::PmRequestTaskOperation::Cancel(request),
+                pm_chat::PmRequestTaskOperation::Cancel { request, task_key },
             ),
             FrontendEvent::UpdatePmRequestTask {
                 id,

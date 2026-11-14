@@ -208,7 +208,7 @@ fn consolidated_gwt_suites_register_every_integration_source_once() {
 
     let workflow: serde_yaml::Value =
         serde_yaml::from_str(&read(TEST_WORKFLOW)).expect("test workflow");
-    let steps = workflow["jobs"]["changes"]["steps"]
+    let steps = workflow["jobs"]["source-sync"]["steps"]
         .as_sequence()
         .expect("classification steps");
     let classify = steps
@@ -405,6 +405,23 @@ fn workspace_shards_preserve_the_complete_serial_test_selection() {
             .find(|step| step["name"].as_str() == Some(name))
             .unwrap()
     };
+    // Keep every Cargo invocation on the same test profile without changing
+    // rust-cache's environment-derived key or the other jobs' build profiles.
+    assert!(workflow["env"]["CARGO_PROFILE_TEST_DEBUG"].is_null());
+    assert!(job["env"]["CARGO_PROFILE_TEST_DEBUG"].is_null());
+    let test_steps = [
+        "Build and inventory workspace tests",
+        RUN_TESTS_STEP,
+        "Run doctests",
+        "Run real-binary front-door tests (Xvfb)",
+    ];
+    for step in steps {
+        if test_steps.contains(&step["name"].as_str().unwrap_or_default()) {
+            assert_eq!(step["env"]["CARGO_PROFILE_TEST_DEBUG"], "0");
+        } else {
+            assert!(step["env"]["CARGO_PROFILE_TEST_DEBUG"].is_null());
+        }
+    }
     assert!(step("Build and inventory workspace tests")["run"]
         .as_str()
         .unwrap()

@@ -1205,7 +1205,13 @@ project に紐づくブラウザ protocol の `load_pm_request_task` は、1 件
 operation で確認することも有効で、Task 差分が空の receipt を保存する場合があります。
 同じ Update や Complete を再実行しても元の receipt は変わらず、現在の Task は
 後続の変更や再開を反映する場合があります。
-Reopen と Cancel は引き続き receipt の適用時点の Task 状態を返します。
+生 ID を使う Reopen と Cancel は引き続き receipt の適用時点の Task 状態を返します。
+Reopen と Cancel は、選択 Task の projection から得た `task_key` をトップレベルに
+指定し、`request.task_id` を空にする方法でも呼び出せます。空・不明・混在した selector
+は拒否します。この方法では現在の保存済み Task と revision に元の receipt を添えて
+返すため、再実行時に古い receipt の Task 状態を現在状態として扱いません。再開時の
+ユーザー監査・CAS・未完了＋再評価待ちの規則は同じです。Tasks 詳細の再開ボタンは
+別の作業です。
 応答を失ったら、現在の Task と元の receipt を読み直してください。新しい接続は別の
 actor になるため、旧 operation の再実行は競合になります。現在の Task と receipt 内の
 過去状態は、それぞれの revision を保持します。欠測・読取不能は診断と回復用の参照を
@@ -1633,6 +1639,19 @@ Managed hooks は user hook を保持しながら、Agent state、workflow guard
 Board reminders、discussion/plan/build Stop checks、coordination-event summaries
 を追加します。
 
+シェルのファイル操作ガードは、worktree 内または OS の一時ディレクトリ
+（`TMPDIR` / 各 OS の temp、Unix では `/tmp`・`/private/tmp` も対象）配下の
+`mkdir`・`rmdir`・`rm`・`touch`・`cp`・`mv` を許可します。harness の session
+scratchpad や検証ログも含みます。一時ディレクトリそのものへの操作と symlink を
+経由した領域外への操作は拒否します。拒否メッセージには許可ディレクトリと一時ログを
+保全する例を表示します。それ以外の外部成果物は、ツールの出力先を worktree または
+一時 scratchpad に指定するか、アクセスの許可を別途取得してください。
+
+このガードはシェルのファイル操作コマンドを判定するもので、OS の sandbox では
+ありません。リダイレクトと任意の Python / interpreter の I/O は検査対象外です。
+エージェントは書き方によらず同じ許可パスの境界を守り、別の構文で拒否を回避しては
+いけません。
+
 **Settings → Project → Hook Center** では、選択したプロジェクトの hook 設定、
 バイナリの fallback、Codex の探索・信頼状態、任意の profile 出力先を監査できます。
 **Regenerate managed hooks** は既存の managed hook だけを修復し、user hook を保持します。
@@ -2029,7 +2048,11 @@ criteria** を開くと、目的と先頭 5 件の完了条件を確認できま
 変更はそのタスクの保存済み差分を含む記録だけを対象とし、全操作の履歴ではありません。
 **Reload details** で再取得できます。更新や読取り失敗時は確認済みの詳細を古い情報と明示して残し、
 **Close details** で元のタスクにフォーカスを戻します。
-このプレビューではタスク編集・自動受付・過去履歴の取込みには対応していません。
+取消する場合は詳細画面に理由を入力し、**Cancel task** を選びます。
+ブラウザーで操作したユーザーと理由を記録し、原依頼と過去の変更は保持します。
+エージェントの停止や Issue・PR の変更は行いません。保存の確認後に状態を更新します。
+競合や応答未確認では最後に確認できた詳細を残すため、再接続して **Reload details** で
+確認してから再操作してください。タスクの編集・完了チェック・自動受付・過去履歴の取込みには対応していません。
 同じツールバーから **Reports** と **Execution log** に切り替えられます。
 
 PM ウィンドウは **Home** で開きます。ツールバーの **Chat** を選ぶ 1 操作で PM との会話を開けます。自分の発言は右、PM の応答は

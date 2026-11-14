@@ -1329,8 +1329,14 @@ children refuse completion. Repeating the same completion under a new operation
 is valid and may record an empty task delta.
 Replaying Update or Complete preserves
 the original receipt while the current task may reflect later changes, including
-a subsequent reopen. Reopen and Cancel
+a subsequent reopen. Raw-ID Reopen and Cancel
 continue to return their receipt's applied task state.
+Reopen and Cancel also accept a top-level `task_key` from the selected Task
+projection with an empty `request.task_id`. Empty, unknown or mixed selectors
+are rejected. These keyed operations return the current saved task and revision
+alongside the original receipt, so a retry cannot present an older receipt's
+task state as current. Reopen keeps the same user audit, CAS and pending
+reassessment rules; a Reopen control in the Tasks detail is separate work.
 After a connection loss, read the current task and original receipt: a new
 connection has a new actor, so replaying the old operation there is a conflict.
 The current task and the receipt's historical task state retain their own
@@ -1808,6 +1814,20 @@ Managed hooks preserve user hooks while adding gwt runtime behavior for agent
 state, workflow guardrails, Board reminders, discussion/plan/build Stop checks,
 and coordination-event summaries.
 
+The shell file-operation guard allows `mkdir`, `rmdir`, `rm`, `touch`, `cp`,
+and `mv` within the worktree or below the OS temporary directory (`TMPDIR` /
+platform temp; also `/tmp` and `/private/tmp` on Unix). This includes harness
+session scratchpads and verification logs. Temporary roots themselves and paths
+escaping through symlinks remain protected. On refusal, the message lists the
+allowed directories and shows how to preserve a temporary log. For other external
+artifacts, configure the tool to output into the worktree or temporary scratchpad,
+or obtain separate authorization for access.
+
+This guard recognizes shell file commands; it is not an OS sandbox. Redirection
+and arbitrary Python/interpreter I/O are outside its inspection. Agents must use
+the same authorized path boundaries regardless of syntax and must not use another
+syntax to bypass a refusal.
+
 **Settings → Project → Hook Center** audits the selected project's hook
 configuration, binary fallbacks, Codex discovery/trust, and opt-in profile path.
 **Regenerate managed hooks** uses the existing managed-only repair and preserves
@@ -2208,7 +2228,7 @@ gwt shows an actionable hint.
 
 ## PM project configuration
 
-The PM window's **Tasks** view is a read-only preview of saved request tasks. It
+The PM window's **Tasks** view shows saved request tasks. It
 shows unfinished work first, including parent relationships, assignees, waiting
 reasons, next actions, and pending PM reassessment. **Include completed** also
 shows completed and cancelled tasks. Parents show counts of their direct subtasks
@@ -2228,7 +2248,12 @@ characters of the original, 20 criteria, 10 evidence references, and 20 changes
 to 240. Counts and shortened text are explicit. Changes include only receipts
 with a saved change to that task, so this is not a complete operation history.
 **Reload details** refreshes it; changes or read failures retain confirmed detail
-with a stale warning. **Close details** returns focus to its task. Task editing, automatic intake, and history import
+with a stale warning. **Close details** returns focus to its task.
+To cancel tracking, enter a reason in the selected detail and choose **Cancel task**.
+This records the browser user's reason and preserves the original request and past changes;
+it does not stop agents or change Issues or pull requests. The state changes only after
+the host confirms it. A conflict or unconfirmed response keeps the last confirmed detail;
+reconnect and use **Reload details** before another attempt. Task editing, completion controls, automatic intake, and history import
 are not available in this preview. **Reports** and **Execution log** remain
 available from the same toolbar.
 

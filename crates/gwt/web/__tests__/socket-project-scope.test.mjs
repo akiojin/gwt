@@ -917,12 +917,16 @@ test("first project connection reads saved Works settings without a Settings hos
 });
 
 
-test("close choices and view receipts belong to their exact live connection and never queue", () => {
+test("close choices, Task cancellation and view receipts belong to their exact live connection and never queue", () => {
   const { context, sockets } = fixture({ routeProjectKey: projectA.project_key }); context.connectSocket();
-  for (const kind of ['preview_close_project', 'confirm_close_project', 'cancel_close_project', 'project_view_ready', 'restart_wedged_owner']) {
+  for (const kind of ['preview_close_project', 'confirm_close_project', 'cancel_close_project', 'project_view_ready', 'restart_wedged_owner', 'cancel_pm_request_task']) {
     assert.equal(context.send({ kind }), 'unavailable');
   }
   assert.deepEqual(context.pendingMessages, []);
   sockets.at(-1).open();
-  assert.equal(sockets.at(-1).sent.some(event => /close_project|project_view_ready/.test(event.kind)), false);
+  assert.equal(sockets.at(-1).sent.some(event => /close_project|project_view_ready|cancel_pm_request_task/.test(event.kind)), false);
+  assert.equal(context.send({ kind: 'cancel_pm_request_task' }), 'sent');
+  context.socketProjectKey = 'foreign';
+  assert.equal(context.send({ kind: 'cancel_pm_request_task' }), 'unavailable');
+  assert.deepEqual(context.pendingMessages, []);
 });

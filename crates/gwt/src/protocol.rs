@@ -809,11 +809,15 @@ pub enum FrontendEvent {
     ReopenPmRequestTask {
         id: String,
         request_id: u64,
+        #[serde(default)]
+        task_key: Option<String>,
         request: PmRequestTaskUserRequest,
     },
     CancelPmRequestTask {
         id: String,
         request_id: u64,
+        #[serde(default)]
+        task_key: Option<String>,
         request: PmRequestTaskUserRequest,
     },
     UpdatePmRequestTask {
@@ -4432,6 +4436,17 @@ mod tests {
             "request_id":2,"request":{"operation_id":"reopen","expected_revision":3,
                 "reason":"Needs a fresh assessment","task_id":"task"}});
         let _: FrontendEvent = serde_json::from_value(reopen.clone()).expect("user reopen");
+        let mut keyed = reopen.clone();
+        keyed["task_key"] = serde_json::json!("opaque-task-key");
+        keyed["request"]["task_id"] = serde_json::json!("");
+        let parsed: FrontendEvent =
+            serde_json::from_value(keyed.clone()).expect("keyed user reopen");
+        assert!(
+            matches!(parsed, FrontendEvent::ReopenPmRequestTask { task_key: Some(key), .. }
+            if key == "opaque-task-key")
+        );
+        keyed["request"]["actor"] = serde_json::json!({"kind":"pm","id":"claimed"});
+        assert!(serde_json::from_value::<FrontendEvent>(keyed).is_err());
         let mut forged = reopen;
         forged["request"]["actor"] = serde_json::json!({"kind":"pm","id":"claimed"});
         assert!(serde_json::from_value::<FrontendEvent>(forged).is_err());

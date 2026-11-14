@@ -346,7 +346,7 @@ test.describe('Manual successor retry (isolated checkout)', () => {
       expect(retired.discarded).toBe(true);
       expect(retired.execution_containers).toEqual([]);
       expect(retired.events).toEqual(expect.arrayContaining(invalidWork.events));
-      expect(retired.events.filter(event => event.id === `superseded-${invalidWork.id}`
+      expect(retired.events.filter(event => new RegExp(`^superseded-portable-${invalidWork.id}-[0-9a-f]{64}$`).test(event.id)
         && event.kind === 'discard' && event.related_work_item_id === oldWork.id
         && event.agent_session_id === null)).toHaveLength(1);
       expect(activated.works.work_items.find(work => work.id === oldWork.id)).toEqual(oldWork);
