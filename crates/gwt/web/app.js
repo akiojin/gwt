@@ -1776,9 +1776,20 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           windowData?.agent_id,
         ];
         if (windowData?.is_pm) {
-          // The assigned identity leads; the existing adjacent badge names
-          // the PM role independently from its current task.
-          return String(windowData?.agent_name || "").trim() || PM_WINDOW_TITLE;
+          // Issue #3823: only the registered PM's typed operation activity
+          // can change its title. Worker purpose, reports and chat stay out.
+          const name = String(windowData?.agent_name || "").trim();
+          const activity = {
+            __proto__: null,
+            starting: "Starting",
+            reconciling: "Reconciling",
+            driving_pr: "Driving PRs",
+            registering_issue: "Registering issues",
+            deciding: "Making a decision",
+            waiting: "Waiting for work",
+          }[windowData.pm_activity] || "Starting";
+          const identity = name ? `${PM_WINDOW_TITLE} · ${name}` : PM_WINDOW_TITLE;
+          return `${identity} — ${activity}`;
         }
         if (isAgentWindowPreset(windowData?.preset)) {
           const member = windowData?.session_id && rosterModel.read().members.find(member => !member.is_pm
@@ -1795,6 +1806,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       }
 
       function windowTitleTooltip(windowData) {
+        if (windowData?.is_pm) return windowDisplayTitle(windowData);
         const detail = String(windowData?.dynamic_title_detail || "").trim();
         if (detail) return detail;
         return windowDisplayTitle(windowData);

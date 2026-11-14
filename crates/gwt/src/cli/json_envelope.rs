@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use gwt_agent::session::GWT_SESSION_ID_ENV;
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -188,6 +190,13 @@ pub(super) fn dispatch_input<E: CliEnv>(
                 "output": output,
             });
             if code == 0 {
+                crate::pm_activity::record_successful_operation(
+                    requested_project_root
+                        .as_deref()
+                        .map(Path::new)
+                        .unwrap_or_else(|| env.repo_path()),
+                    &operation,
+                );
                 match operation.as_str() {
                     "issue.view" | "issue.monitor.status" => payload["kind"] = "issue".into(),
                     "pr.view" | "pr.list" => payload["kind"] = "pull_request".into(),

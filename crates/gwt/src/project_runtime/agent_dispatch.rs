@@ -3635,6 +3635,7 @@ pub(crate) fn owned_process_window_state(
         linked_issue_number: session.and_then(|session| session.linked_issue_number),
         runtime_started_at_ms: None,
         is_pm: false,
+        pm_activity: None,
     })
 }
 

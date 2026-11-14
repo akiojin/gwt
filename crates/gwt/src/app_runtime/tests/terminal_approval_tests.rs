@@ -822,142 +822,163 @@ fn app_runtime_coordination_hooks_still_emit_browser_hook_event() {
 
 #[test]
 fn app_runtime_pm_status_changed_refreshes_only_the_exact_registered_pm_without_state_changes() {
+    assert_pm_status_changed_case(true, true, true);
+}
+
+#[test]
+fn app_runtime_pm_status_changed_refreshes_only_the_exact_registered_pm_without_state_changes_retired_session(
+) {
+    assert_pm_status_changed_case(false, true, false);
+}
+
+#[test]
+fn app_runtime_pm_status_changed_refreshes_only_the_exact_registered_pm_without_state_changes_unregistered_pm(
+) {
+    assert_pm_status_changed_case(true, false, false);
+}
+
+// Each case owns one native PM fixture so nextest bounds individual cases,
+// rather than accumulating three Git/process fixture costs in one test timeout.
+fn assert_pm_status_changed_case(current_claim: bool, registered_pm: bool, should_refresh: bool) {
     use gwt::project_runtime::events::OwnerCommand;
-    for (current_claim, registered_pm, should_refresh) in [
-        (true, true, true),
-        (false, true, false),
-        (true, false, false),
-    ] {
-        let temp = tempdir().unwrap();
-        let _home = ScopedGwtHome::set(temp.path());
-        let root = temp.path().join("repo");
-        fs::create_dir_all(&root).unwrap();
-        init_repo_with_initial_commit(&root);
-        let tab = sample_project_tab_with_window_at(
-            "tab-1",
-            "agent-1",
-            root.clone(),
-            WindowPreset::Agent,
-            WindowProcessStatus::Waiting,
-        );
-        let (mut runtime, recorded_events) =
-            sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
-        let id = combined_window_id("tab-1", "agent-1");
-        let _pane = attach_live_pm_pane(&mut runtime, &id);
-        // Finish the real launch's background projection before observing only
-        // work caused by this notification.
-        runtime.blocking_tasks = BlockingTaskSpawner::thread();
-        runtime.active_work_projection_broadcast_for_tab("tab-1");
-        wait_for_active_work_projection(&mut runtime);
-        runtime_state_hook_events(&mut runtime, &id, "Running", 1);
-        assert_eq!(
-            owner_runtime_probe(&runtime, &id)
-                .active_session
-                .unwrap()
-                .agent_id,
-            "claude"
-        );
-        let prompt = b"\x1b[2J\x1b[HBash command\r\n\r\n cargo test -p gwt\r\n\r\n\
-            Do you want to proceed?\r\n > 1. Yes\r\n\
-            2. No, and tell Claude what to do differently\r\n\r\n\
-            Enter to confirm \xc2\xb7 Esc to cancel\r\n";
-        approval_owner_screen(&mut runtime, &id, prompt, approval_owner_future_anchor());
-        let owner = project_owner_fixture(&mut runtime, &id);
-        let before = owner_runtime_probe(&runtime, &id);
-        let session_id = &before.session.as_ref().unwrap().id;
-        let latch = before.policy.approval.expect("actual PM approval latch");
-        if !registered_pm {
-            assert!(
-                gwt::pm_registry::deregister_pm(
-                    &gwt::pm_registry::pm_prefs_path_for_repo_path(&root),
-                    session_id,
-                )
-                .unwrap()
-                .1
-            );
-        }
-        let (spawner, tasks) = BlockingTaskSpawner::queued();
-        runtime.blocking_tasks = spawner;
-        recorded_events.lock().unwrap().clear();
-        let status_before = runtime.window_status(&id);
-        let gui_latch_before = runtime.window_approval_waiting.get(&id).copied();
-        let mut event = runtime_hook_coordination_event(if current_claim {
-            session_id
-        } else {
-            "retired-session"
-        });
-        event.source_event = Some("PmStatusChanged".into());
-        event.message = Some("coordination:PmStatusChanged".into());
-        event.project_root = Some(root.display().to_string());
-        // A provider-id fallback match must never grant PM notification authority.
-        event.agent_session_id = Some(session_id.clone());
-
-        let mut source = owner.subscribe();
-        owner_fixture_block_on(async {
-            assert_eq!(
-                before.runtime_hook(&event).await.unwrap(),
-                if current_claim {
-                    reqwest::StatusCode::NO_CONTENT
-                } else {
-                    reqwest::StatusCode::UNAUTHORIZED
-                }
-            );
-            owner.command(OwnerCommand::Health).await.unwrap();
-        });
-        let events = relay_approval_owner_events(&mut runtime, &id, &mut source);
-        let after = owner_runtime_probe(&runtime, &id);
-        let status_after = runtime.window_status(&id);
-        let gui_latch_after = runtime.window_approval_waiting.get(&id).copied();
-        for task in std::mem::take(&mut *tasks.lock().unwrap()) {
-            task();
-        }
-        let completed = recorded_events.lock().unwrap();
-        let census = completed.iter().any(|event| {
-            matches!(
-                recorded_project_payload(event),
-                UserEvent::RemoteOwnerInventoryComplete(completion)
-                    if completion.context.project_root == root && completion.result.is_ok()
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let root = temp.path().join("repo");
+    fs::create_dir_all(&root).unwrap();
+    init_repo_with_initial_commit(&root);
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        root.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Waiting,
+    );
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let id = combined_window_id("tab-1", "agent-1");
+    let _pane = attach_live_pm_pane(&mut runtime, &id);
+    // Finish the real launch's background projection before observing only
+    // work caused by this notification.
+    runtime.blocking_tasks = BlockingTaskSpawner::thread();
+    runtime.active_work_projection_broadcast_for_tab("tab-1");
+    wait_for_active_work_projection(&mut runtime);
+    runtime_state_hook_events(&mut runtime, &id, "Running", 1);
+    assert_eq!(
+        owner_runtime_probe(&runtime, &id)
+            .active_session
+            .unwrap()
+            .agent_id,
+        "claude"
+    );
+    let prompt = b"\x1b[2J\x1b[HBash command\r\n\r\n cargo test -p gwt\r\n\r\n\
+        Do you want to proceed?\r\n > 1. Yes\r\n\
+        2. No, and tell Claude what to do differently\r\n\r\n\
+        Enter to confirm \xc2\xb7 Esc to cancel\r\n";
+    approval_owner_screen(&mut runtime, &id, prompt, approval_owner_future_anchor());
+    let owner = project_owner_fixture(&mut runtime, &id);
+    let before = owner_runtime_probe(&runtime, &id);
+    let session_id = &before.session.as_ref().unwrap().id;
+    let latch = before.policy.approval.expect("actual PM approval latch");
+    if !registered_pm {
+        assert!(
+            gwt::pm_registry::deregister_pm(
+                &gwt::pm_registry::pm_prefs_path_for_repo_path(&root),
+                session_id,
             )
-        });
-        let prepared = completed.iter().any(|event| {
-            matches!(
-                recorded_project_payload(event),
-                UserEvent::ActiveWorkProjectionPrepared(completion)
-                    if completion.project_root == root && completion.result.is_ok()
-            )
-        });
-        drop(completed);
-        close_test_owner_runtime(&mut runtime, &id);
-
-        assert_eq!(status_after, status_before);
-        assert_eq!(gui_latch_after, gui_latch_before);
-        let after_latch = after
-            .policy
-            .approval
-            .expect("PM notification keeps approval");
-        assert_eq!(after_latch.active_fingerprint, latch.active_fingerprint);
-        assert_eq!(
-            after_latch.resolving_fingerprint,
-            latch.resolving_fingerprint
-        );
-        assert_eq!(after_latch.resolution_started, latch.resolution_started);
-        assert_eq!(
-            after.policy.approval_settle_at,
-            before.policy.approval_settle_at
-        );
-        assert!(!events.iter().any(|event| matches!(
-            event.event,
-            BackendEvent::TerminalStatus { .. } | BackendEvent::WindowState { .. }
-        )));
-        assert_eq!(
-            census, should_refresh,
-            "only the exact registered PM refreshes the owner census"
-        );
-        assert_eq!(
-            prepared, should_refresh,
-            "only the exact registered PM prepares Work"
+            .unwrap()
+            .1
         );
     }
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    recorded_events.lock().unwrap().clear();
+    let status_before = runtime.window_status(&id);
+    let gui_latch_before = runtime.window_approval_waiting.get(&id).copied();
+    let mut event = runtime_hook_coordination_event(if current_claim {
+        session_id
+    } else {
+        "retired-session"
+    });
+    event.source_event = Some("PmStatusChanged".into());
+    event.message = Some("coordination:PmStatusChanged".into());
+    event.project_root = Some(root.display().to_string());
+    // A provider-id fallback match must never grant PM notification authority.
+    event.agent_session_id = Some(session_id.clone());
+
+    let legacy_events = runtime.handle_runtime_hook_event(event.clone());
+    assert_eq!(
+        legacy_events
+            .iter()
+            .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })),
+        should_refresh,
+        "only the exact registered PM refreshes legacy window metadata"
+    );
+
+    let mut source = owner.subscribe();
+    owner_fixture_block_on(async {
+        assert_eq!(
+            before.runtime_hook(&event).await.unwrap(),
+            if current_claim {
+                reqwest::StatusCode::NO_CONTENT
+            } else {
+                reqwest::StatusCode::UNAUTHORIZED
+            }
+        );
+        owner.command(OwnerCommand::Health).await.unwrap();
+    });
+    let events = relay_approval_owner_events(&mut runtime, &id, &mut source);
+    let after = owner_runtime_probe(&runtime, &id);
+    let status_after = runtime.window_status(&id);
+    let gui_latch_after = runtime.window_approval_waiting.get(&id).copied();
+    for task in std::mem::take(&mut *tasks.lock().unwrap()) {
+        task();
+    }
+    let completed = recorded_events.lock().unwrap();
+    let census = completed.iter().any(|event| {
+        matches!(
+            recorded_project_payload(event),
+            UserEvent::RemoteOwnerInventoryComplete(completion)
+                if completion.context.project_root == root && completion.result.is_ok()
+        )
+    });
+    let prepared = completed.iter().any(|event| {
+        matches!(
+            recorded_project_payload(event),
+            UserEvent::ActiveWorkProjectionPrepared(completion)
+                if completion.project_root == root && completion.result.is_ok()
+        )
+    });
+    drop(completed);
+    close_test_owner_runtime(&mut runtime, &id);
+
+    assert_eq!(status_after, status_before);
+    assert_eq!(gui_latch_after, gui_latch_before);
+    let after_latch = after
+        .policy
+        .approval
+        .expect("PM notification keeps approval");
+    assert_eq!(after_latch.active_fingerprint, latch.active_fingerprint);
+    assert_eq!(
+        after_latch.resolving_fingerprint,
+        latch.resolving_fingerprint
+    );
+    assert_eq!(after_latch.resolution_started, latch.resolution_started);
+    assert_eq!(
+        after.policy.approval_settle_at,
+        before.policy.approval_settle_at
+    );
+    assert!(!events.iter().any(|event| matches!(
+        event.event,
+        BackendEvent::TerminalStatus { .. } | BackendEvent::WindowState { .. }
+    )));
+    assert_eq!(
+        census, should_refresh,
+        "only the exact registered PM refreshes the owner census"
+    );
+    assert_eq!(
+        prepared, should_refresh,
+        "only the exact registered PM prepares Work"
+    );
 }
 
 #[test]

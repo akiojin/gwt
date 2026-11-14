@@ -105,7 +105,7 @@ test("Project window titles follow current member names only for an exact assign
   const data = { preset: "agent", session_id: "s1", agent_name: "Historical name", dynamic_title: "Current issue" };
   assert.equal(title(data), "Maple — Current issue");
   assert.equal(title({ ...data, session_id: "s2", agent_member_id: "m1" }), "Historical name — Current issue");
-  assert.equal(title({ ...data, is_pm: true }), "Historical name");
+  assert.equal(title({ ...data, is_pm: true }), "Project Manager · Historical name — Starting");
   assert.equal(data.agent_name, "Historical name", "current display never mutates Session or window history");
   const renderKeyFunctions = ["appendRenderKeyPart", "appendWindowPlacementRenderKey", "workspaceWindowsRenderKey"]
     .map(name => app.match(new RegExp(`      function ${name}\\([^]*?\\n      \\}`))[0]).join("\n");

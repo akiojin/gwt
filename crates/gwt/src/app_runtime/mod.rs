@@ -13845,6 +13845,20 @@ impl AppRuntime {
                         .runtimes
                         .get(&window.id)
                         .map(|runtime| runtime.started_at_ms);
+                    window.pm_activity = window.is_pm.then(|| {
+                        gwt::pm_registry::load_pm_prefs(
+                            &gwt::pm_registry::pm_prefs_path_for_repo_path(&tab.project_root),
+                        )
+                        .ok()
+                        .and_then(|prefs| {
+                            gwt::pm_activity::for_window(
+                                &prefs,
+                                window.session_id.as_deref(),
+                                window.runtime_started_at_ms,
+                            )
+                        })
+                        .unwrap_or(gwt::pm_activity::PmActivity::Starting)
+                    });
                     if worktree_form_projection == WorktreeFormProjection::Resolve {
                         window.worktree_form = self
                             .active_agent_sessions

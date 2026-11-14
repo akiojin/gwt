@@ -297,6 +297,7 @@ impl WindowRegistry {
             runtime_started_at_ms: None,
             surface_owner: None,
             is_pm: false,
+            pm_activity: None,
         };
         self.persisted.next_z_index += 1;
         self.persisted.windows.push(window.clone());
@@ -1043,6 +1044,7 @@ mod tests {
                 runtime_started_at_ms: None,
                 surface_owner: None,
                 is_pm: false,
+                pm_activity: None,
             }],
             next_z_index: 2,
         });
