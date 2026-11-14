@@ -2,10 +2,7 @@
 
 `gwt-verify` classifies every changed file into one of the abstract surfaces
 below. The surface determines (a) which test runners are relevant and (b)
-how to scope a User Verification Handoff if the owner explicitly requests
-one. User Verification Result is optional otherwise; no surface classification
-creates a human-check request. Required / Recommended below apply only within
-an explicitly requested handoff, while automated runner selection is unchanged.
+whether the User Verification Handoff is Required, Recommended, or Skipped.
 
 This taxonomy is intentionally project-agnostic. The patterns column shows
 **typical** signals for common project types; treat them as hints, not as
