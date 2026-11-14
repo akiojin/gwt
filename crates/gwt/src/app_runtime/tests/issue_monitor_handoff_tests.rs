@@ -3860,6 +3860,7 @@ fn assert_installed_resume_command(session: &gwt_agent::Session, installed_cli: 
 #[should_panic(expected = "exact Resume must use the installed fixture CLI")]
 fn installed_resume_command_rejects_cli_path_in_unrelated_arguments() {
     let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let installed_cli = temp.path().join("codex.cmd");
     let mut session = gwt_agent::Session::new(temp.path(), "develop", gwt_agent::AgentId::Codex);
     session.launch_command = "unrelated-command".to_string();
