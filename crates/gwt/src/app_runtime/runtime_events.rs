@@ -300,6 +300,11 @@ impl AppRuntime {
             WindowProcessStatus::Error | WindowProcessStatus::Stopped
         ) && !keep_active_agent_session_for_recovery
         {
+            // The process generation is terminal even when its pane remains
+            // visible for crash recovery. Invalidate the writer before
+            // removing runtime/session state so protected-delivery leases and
+            // ambiguous-body quarantine cannot survive into a PM successor.
+            self.deregister_pty_writer(&id);
             self.runtimes.remove(&id);
             self.remove_window_state_tracking(&id);
             if !self.stop_pending_continue_work_session_without_projection(&id) {

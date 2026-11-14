@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 /// Durable record of the one resident PM session for a project.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -173,6 +174,237 @@ pub fn pm_prefs_path_for_repo_path(repo_path: &Path) -> PathBuf {
     gwt_core::paths::gwt_project_dir_for_repo_path(repo_path).join("project-state/pm.json")
 }
 
+pub fn pm_delivery_receipts_path_for_repo_path(repo_path: &Path) -> PathBuf {
+    gwt_core::paths::gwt_project_dir_for_repo_path(repo_path)
+        .join("project-state/pm-delivery-receipts.jsonl")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PmDeliveryReceiptStatus {
+    Prepared,
+    Verified,
+    Refused,
+    Ambiguous,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PmDeliveryReceipt {
+    pub operation_id: String,
+    pub recorded_at: String,
+    pub status: PmDeliveryReceiptStatus,
+    pub principal_session_id: String,
+    pub target_window_id: String,
+    #[serde(default)]
+    pub target_session_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub body_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PmDeliveryPrepareOutcome {
+    Prepared,
+    Existing(PmDeliveryReceiptStatus),
+}
+
+fn is_canonical_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn repair_pm_delivery_receipt_tail(path: &Path) -> io::Result<()> {
+    let existing = match fs::read(path) {
+        Ok(existing) => existing,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if existing.is_empty() {
+        return Ok(());
+    }
+    let repaired_len = if existing.ends_with(b"\n") {
+        let row_end = existing.len() - 1;
+        let row_start = existing[..row_end]
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map_or(0, |position| position + 1);
+        let final_row = &existing[row_start..row_end];
+        if final_row.iter().all(u8::is_ascii_whitespace)
+            || serde_json::from_slice::<PmDeliveryReceipt>(final_row).is_ok()
+        {
+            return Ok(());
+        }
+        row_start
+    } else {
+        existing
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map_or(0, |position| position + 1)
+    };
+    let file = fs::OpenOptions::new().write(true).open(path)?;
+    file.set_len(repaired_len as u64)?;
+    file.sync_all()?;
+    sync_parent_directory(path)
+}
+
+fn load_pm_delivery_receipts_unlocked(path: &Path) -> io::Result<Vec<PmDeliveryReceipt>> {
+    repair_pm_delivery_receipt_tail(path)?;
+    match fs::read_to_string(path) {
+        Ok(raw) => raw
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str(line).map_err(io::Error::other))
+            .collect(),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(error),
+    }
+}
+
+fn append_pm_delivery_receipt_unlocked(path: &Path, receipt: &PmDeliveryReceipt) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    repair_pm_delivery_receipt_tail(path)?;
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    serde_json::to_writer(&mut file, receipt).map_err(io::Error::other)?;
+    file.write_all(b"\n")?;
+    file.sync_all()?;
+    sync_parent_directory(path)
+}
+
+pub fn append_pm_delivery_receipt(path: &Path, receipt: &PmDeliveryReceipt) -> io::Result<()> {
+    with_stable_pm_state_lock(path, || append_pm_delivery_receipt_unlocked(path, receipt))
+}
+
+pub fn load_pm_delivery_receipts(path: &Path) -> io::Result<Vec<PmDeliveryReceipt>> {
+    with_stable_pm_state_lock(path, || load_pm_delivery_receipts_unlocked(path))
+}
+
+pub fn prepare_pm_delivery_receipt(
+    path: &Path,
+    prepared: &PmDeliveryReceipt,
+) -> io::Result<PmDeliveryPrepareOutcome> {
+    if prepared.status != PmDeliveryReceiptStatus::Prepared
+        || uuid::Uuid::parse_str(&prepared.operation_id)
+            .ok()
+            .is_none_or(|operation_id| {
+                operation_id.hyphenated().to_string() != prepared.operation_id
+            })
+        || prepared.principal_session_id.is_empty()
+        || prepared.target_window_id.is_empty()
+        || prepared.target_session_id.is_empty()
+        || !is_canonical_sha256(&prepared.body_sha256)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "PM delivery Prepared receipt has an invalid identity",
+        ));
+    }
+    with_stable_pm_state_lock(path, || {
+        let receipts = load_pm_delivery_receipts_unlocked(path)?;
+        let existing: Vec<_> = receipts
+            .iter()
+            .filter(|receipt| receipt.operation_id == prepared.operation_id)
+            .collect();
+        if let Some(first) = existing.first() {
+            if first.principal_session_id != prepared.principal_session_id
+                || first.target_window_id != prepared.target_window_id
+                || first.target_session_id != prepared.target_session_id
+                || first.body_sha256 != prepared.body_sha256
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "PM delivery operation identity conflicts with its durable receipt",
+                ));
+            }
+            let status = existing
+                .iter()
+                .rev()
+                .find(|receipt| receipt.status != PmDeliveryReceiptStatus::Prepared)
+                .map_or(PmDeliveryReceiptStatus::Prepared, |receipt| receipt.status);
+            return Ok(PmDeliveryPrepareOutcome::Existing(status));
+        }
+        append_pm_delivery_receipt_unlocked(path, prepared)?;
+        Ok(PmDeliveryPrepareOutcome::Prepared)
+    })
+}
+
+pub fn finish_pm_delivery_receipt(
+    path: &Path,
+    operation_id: &str,
+    target_session_id: &str,
+    body_sha256: &str,
+    status: PmDeliveryReceiptStatus,
+    error_code: Option<&str>,
+) -> io::Result<PmDeliveryReceiptStatus> {
+    if status == PmDeliveryReceiptStatus::Prepared {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "PM delivery terminal receipt cannot be Prepared",
+        ));
+    }
+    with_stable_pm_state_lock(path, || {
+        let receipts = load_pm_delivery_receipts_unlocked(path)?;
+        let Some(prepared) = receipts.iter().find(|receipt| {
+            receipt.operation_id == operation_id
+                && receipt.status == PmDeliveryReceiptStatus::Prepared
+        }) else {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "PM delivery Prepared receipt is missing",
+            ));
+        };
+        if prepared.target_session_id != target_session_id {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "PM delivery acknowledgement came from a different target Session",
+            ));
+        }
+        if prepared.body_sha256 != body_sha256 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "PM delivery acknowledgement body does not match its Prepared receipt",
+            ));
+        }
+        if let Some(existing) = receipts.iter().rev().find(|receipt| {
+            receipt.operation_id == operation_id
+                && receipt.status != PmDeliveryReceiptStatus::Prepared
+        }) {
+            match (existing.status, status) {
+                (existing, requested) if existing == requested => return Ok(existing),
+                (PmDeliveryReceiptStatus::Verified, PmDeliveryReceiptStatus::Ambiguous) => {
+                    return Ok(PmDeliveryReceiptStatus::Verified)
+                }
+                (PmDeliveryReceiptStatus::Ambiguous, PmDeliveryReceiptStatus::Verified) => {}
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        "PM delivery already has a different terminal receipt",
+                    ));
+                }
+            }
+        }
+        let terminal = PmDeliveryReceipt {
+            operation_id: operation_id.to_string(),
+            recorded_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            status,
+            principal_session_id: prepared.principal_session_id.clone(),
+            target_window_id: prepared.target_window_id.clone(),
+            target_session_id: prepared.target_session_id.clone(),
+            body_sha256: prepared.body_sha256.clone(),
+            error_code: error_code.map(str::to_string),
+        };
+        append_pm_delivery_receipt_unlocked(path, &terminal)?;
+        Ok(status)
+    })
+}
+
 /// Canonical worktree for the project's resident PM session.
 pub fn pm_worktree_path_for_repo_path(repo_path: &Path) -> PathBuf {
     gwt_core::paths::gwt_project_dir_for_repo_path(repo_path).join("pm/worktree")
@@ -202,6 +434,33 @@ pub struct PmLoopState {
     /// window, without touching the Stop-gate floor clock.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_wake_at: Option<String>,
+    /// Exact protected-delivery operation acknowledged by UserPromptSubmit.
+    /// Only the canonical UUID marker is persisted; the prompt body is not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_delivery_operation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_delivery_submitted_at: Option<String>,
+    /// A syntactically valid operation whose self-contained body hash did not
+    /// match the submitted prompt. This lets the worker stop CR retries
+    /// without persisting any prompt content or crash-sensitive reservation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_delivery_rejected_operation_id: Option<String>,
+    /// Body-free crash fence for a wake selected by the GUI but not yet
+    /// committed by an exact UserPromptSubmit acknowledgement. A restart
+    /// must not inject another full body while the old pane generation may
+    /// still contain it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_delivery_operation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_delivery_window_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_delivery_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_delivery_body_sha256: Option<String>,
+}
+
+pub fn pm_delivery_prompt_sha256(prompt: &str) -> String {
+    format!("{:x}", Sha256::digest(prompt.as_bytes()))
 }
 
 /// `pm-loop.json` path derived from the PM worktree itself. The hook's cwd is
@@ -225,7 +484,7 @@ pub fn pm_loop_state_path_for_repo_path(repo_path: &Path) -> PathBuf {
     gwt_core::paths::gwt_project_dir_for_repo_path(repo_path).join("project-state/pm-loop.json")
 }
 
-pub fn load_pm_loop_state(path: &Path) -> io::Result<PmLoopState> {
+fn load_pm_loop_state_unlocked(path: &Path) -> io::Result<PmLoopState> {
     match fs::read_to_string(path) {
         Ok(raw) => serde_json::from_str(&raw)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error)),
@@ -234,13 +493,110 @@ pub fn load_pm_loop_state(path: &Path) -> io::Result<PmLoopState> {
     }
 }
 
+fn save_pm_loop_state_unlocked(path: &Path, state: &PmLoopState) -> io::Result<()> {
+    let content = serde_json::to_string_pretty(state).map_err(io::Error::other)?;
+    durable_atomic_write(path, content.as_bytes())
+}
+
+pub fn load_pm_loop_state(path: &Path) -> io::Result<PmLoopState> {
+    with_stable_pm_state_lock(path, || load_pm_loop_state_unlocked(path))
+}
+
 pub fn save_pm_loop_state(path: &Path, state: &PmLoopState) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+    with_stable_pm_state_lock(path, || save_pm_loop_state_unlocked(path, state))
+}
+
+/// Linearized cross-process read-modify-write for `pm-loop.json`.
+///
+/// The stable sibling lock survives the atomic rename and the durable writer
+/// syncs the scratch bytes plus parent directory before releasing that lock.
+pub fn mutate_pm_loop_state<T>(
+    path: &Path,
+    mutation: impl FnOnce(&mut PmLoopState) -> T,
+) -> io::Result<(PmLoopState, T)> {
+    with_stable_pm_state_lock(path, || {
+        let mut state = load_pm_loop_state_unlocked(path)?;
+        let result = mutation(&mut state);
+        save_pm_loop_state_unlocked(path, &state)?;
+        Ok((state, result))
+    })
+}
+
+pub fn prepare_pm_wake_delivery(
+    path: &Path,
+    operation_id: &str,
+    window_id: &str,
+    session_id: &str,
+    body_sha256: &str,
+) -> io::Result<bool> {
+    if uuid::Uuid::parse_str(operation_id)
+        .ok()
+        .is_none_or(|parsed| parsed.hyphenated().to_string() != operation_id)
+        || window_id.is_empty()
+        || session_id.is_empty()
+        || !is_canonical_sha256(body_sha256)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "PM wake delivery reservation has an invalid identity",
+        ));
     }
-    let scratch = unique_pm_scratch_path(path);
-    fs::write(&scratch, serde_json::to_string_pretty(state)?)?;
-    fs::rename(&scratch, path)
+    mutate_pm_loop_state(path, |state| {
+        let exact = state.pending_delivery_operation_id.as_deref() == Some(operation_id)
+            && state.pending_delivery_window_id.as_deref() == Some(window_id)
+            && state.pending_delivery_session_id.as_deref() == Some(session_id)
+            && state.pending_delivery_body_sha256.as_deref() == Some(body_sha256);
+        if exact {
+            return true;
+        }
+        if state.pending_delivery_operation_id.is_some()
+            || state.pending_delivery_window_id.is_some()
+            || state.pending_delivery_session_id.is_some()
+            || state.pending_delivery_body_sha256.is_some()
+        {
+            return false;
+        }
+        state.pending_delivery_operation_id = Some(operation_id.to_string());
+        state.pending_delivery_window_id = Some(window_id.to_string());
+        state.pending_delivery_session_id = Some(session_id.to_string());
+        state.pending_delivery_body_sha256 = Some(body_sha256.to_string());
+        true
+    })
+    .map(|(_, reserved)| reserved)
+}
+
+pub fn clear_pm_wake_delivery(
+    path: &Path,
+    operation_id: &str,
+    window_id: &str,
+) -> io::Result<bool> {
+    mutate_pm_loop_state(path, |state| {
+        if state.pending_delivery_operation_id.as_deref() != Some(operation_id)
+            || state.pending_delivery_window_id.as_deref() != Some(window_id)
+        {
+            return false;
+        }
+        state.pending_delivery_operation_id = None;
+        state.pending_delivery_window_id = None;
+        state.pending_delivery_session_id = None;
+        state.pending_delivery_body_sha256 = None;
+        true
+    })
+    .map(|(_, cleared)| cleared)
+}
+
+pub fn clear_pm_wake_delivery_for_window(path: &Path, window_id: &str) -> io::Result<bool> {
+    mutate_pm_loop_state(path, |state| {
+        if state.pending_delivery_window_id.as_deref() != Some(window_id) {
+            return false;
+        }
+        state.pending_delivery_operation_id = None;
+        state.pending_delivery_window_id = None;
+        state.pending_delivery_session_id = None;
+        state.pending_delivery_body_sha256 = None;
+        true
+    })
+    .map(|(_, cleared)| cleared)
 }
 
 /// Whether `path` is some project's canonical PM worktree.
@@ -319,7 +675,7 @@ fn durable_atomic_write(path: &Path, content: &[u8]) -> io::Result<()> {
         // Deadline-aware transactions must not become visible after their
         // acceptance boundary; recheck immediately before the canonical
         // rename (same convention as the Issue Monitor prefs writer).
-        gwt_core::operation_deadline::ensure_remaining("PM prefs durable rename")?;
+        gwt_core::operation_deadline::ensure_remaining("PM state durable rename")?;
         fs::rename(&scratch_path, path)?;
         sync_parent_directory(path)
     })();
@@ -329,7 +685,10 @@ fn durable_atomic_write(path: &Path, content: &[u8]) -> io::Result<()> {
     result
 }
 
-fn with_pm_prefs_lock<T>(path: &Path, operation: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+fn with_stable_pm_state_lock<T>(
+    path: &Path,
+    operation: impl FnOnce() -> io::Result<T>,
+) -> io::Result<T> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent)?;
@@ -352,6 +711,10 @@ fn with_pm_prefs_lock<T>(path: &Path, operation: impl FnOnce() -> io::Result<T>)
         (Err(error), _) => Err(error),
         (Ok(_), Err(error)) => Err(error),
     }
+}
+
+fn with_pm_prefs_lock<T>(path: &Path, operation: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+    with_stable_pm_state_lock(path, operation)
 }
 
 fn load_pm_prefs_unlocked(path: &Path) -> io::Result<PmPrefs> {
@@ -385,6 +748,37 @@ pub fn load_pm_prefs(path: &Path) -> io::Result<PmPrefs> {
 /// reconciliation without racing an in-flight registration update.
 pub fn load_pm_registration_locked(path: &Path) -> io::Result<Option<PmRegistration>> {
     with_pm_prefs_lock(path, || Ok(load_pm_prefs_unlocked(path)?.registration))
+}
+
+/// Hold `pm.lock` while the exact full registration remains current and run
+/// one protected operation. A missing or rotated registration returns `None`
+/// without invoking the closure or mutating durable state.
+pub fn with_exact_pm_registration<T>(
+    path: &Path,
+    expected: &PmRegistration,
+    operation: impl FnOnce(&PmRegistration) -> io::Result<T>,
+) -> io::Result<Option<T>> {
+    with_pm_prefs_lock(path, || {
+        let registration = load_pm_prefs_unlocked(path)?.registration;
+        let Some(registration) = registration.filter(|current| current == expected) else {
+            return Ok(None);
+        };
+        operation(&registration).map(Some)
+    })
+}
+
+/// Read the exact full registration under the singleton lock, then release
+/// the cross-process lock before the caller performs any potentially blocking
+/// external I/O. A matching result is the linearization point for one already
+/// accepted delivery mutation; later registration changes reject every later
+/// call but never make GUI registration/teardown wait on a stalled PTY.
+pub fn exact_pm_registration_is_current(
+    path: &Path,
+    expected: &PmRegistration,
+) -> io::Result<bool> {
+    with_pm_prefs_lock(path, || {
+        Ok(load_pm_prefs_unlocked(path)?.registration.as_ref() == Some(expected))
+    })
 }
 
 pub fn save_pm_prefs(path: &Path, prefs: &PmPrefs) -> io::Result<()> {
@@ -645,6 +1039,537 @@ mod tests {
             consecutive_crashes: 0,
             next_not_before: None,
         }
+    }
+
+    #[test]
+    fn pm_loop_mutation_serializes_concurrent_read_modify_write() {
+        use std::sync::{Arc, Barrier};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("project-state/pm-loop.json");
+        let writers = 12;
+        let barrier = Arc::new(Barrier::new(writers));
+        let mut threads = Vec::new();
+        for index in 0..writers {
+            let path = path.clone();
+            let barrier = Arc::clone(&barrier);
+            threads.push(std::thread::spawn(move || {
+                barrier.wait();
+                mutate_pm_loop_state(&path, |state| {
+                    state.consecutive_continuations =
+                        state.consecutive_continuations.saturating_add(1);
+                    state.last_continued_at = Some(format!("writer-{index}"));
+                })
+                .expect("linearized loop mutation");
+            }));
+        }
+        for thread in threads {
+            thread.join().expect("join loop writer");
+        }
+
+        let state = load_pm_loop_state(&path).expect("committed loop state");
+        assert_eq!(state.consecutive_continuations, writers as u32);
+        assert!(state.last_continued_at.is_some());
+        let names: Vec<String> = fs::read_dir(path.parent().expect("parent"))
+            .expect("read project state")
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert!(
+            names
+                .iter()
+                .all(|name| name == "pm-loop.json" || name == "pm-loop.lock"),
+            "durable mutation must leave only canonical state and its stable lock: {names:?}"
+        );
+    }
+
+    #[test]
+    fn delivery_receipt_is_durable_body_free_and_recovers_a_partial_tail() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("project-state/pm-delivery-receipts.jsonl");
+        let prepared = PmDeliveryReceipt {
+            operation_id: "72fc3cd4-ad49-43e3-bf3d-d791357643a3".to_string(),
+            recorded_at: "2026-08-11T00:00:00Z".to_string(),
+            status: PmDeliveryReceiptStatus::Prepared,
+            principal_session_id: "pm-session".to_string(),
+            target_window_id: "tab::agent".to_string(),
+            target_session_id: "agent-session".to_string(),
+            body_sha256: pm_delivery_prompt_sha256("body"),
+            error_code: None,
+        };
+        append_pm_delivery_receipt(&path, &prepared).expect("prepared receipt");
+        let mut bytes = fs::read(&path).expect("prepared bytes");
+        bytes.extend_from_slice(b"{\"operation_id\":\"partial");
+        fs::write(&path, bytes).expect("simulate torn append");
+        let terminal = PmDeliveryReceipt {
+            status: PmDeliveryReceiptStatus::Verified,
+            recorded_at: "2026-08-11T00:00:01Z".to_string(),
+            ..prepared.clone()
+        };
+
+        append_pm_delivery_receipt(&path, &terminal).expect("terminal receipt repairs tail");
+
+        assert_eq!(
+            load_pm_delivery_receipts(&path).expect("receipts"),
+            vec![prepared, terminal]
+        );
+        let raw = fs::read_to_string(&path).expect("receipt text");
+        assert!(!raw.contains("partial"));
+        assert!(!raw.contains("prompt"));
+        assert!(!raw.contains("text"));
+    }
+
+    #[test]
+    fn delivery_receipt_recovers_a_newline_terminated_torn_final_row() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("project-state/pm-delivery-receipts.jsonl");
+        let prepared = PmDeliveryReceipt {
+            operation_id: "72fc3cd4-ad49-43e3-bf3d-d791357643b0".to_string(),
+            recorded_at: "2026-08-11T00:00:00Z".to_string(),
+            status: PmDeliveryReceiptStatus::Prepared,
+            principal_session_id: "pm-session".to_string(),
+            target_window_id: "tab::agent".to_string(),
+            target_session_id: "agent-session".to_string(),
+            body_sha256: pm_delivery_prompt_sha256("body"),
+            error_code: None,
+        };
+        append_pm_delivery_receipt(&path, &prepared).expect("prepared receipt");
+        let mut bytes = fs::read(&path).expect("prepared bytes");
+        bytes.extend_from_slice(b"{\"operation_id\":\"torn\n");
+        fs::write(&path, bytes).expect("simulate newline-terminated torn append");
+
+        assert_eq!(
+            load_pm_delivery_receipts(&path).expect("valid prefix survives repair"),
+            vec![prepared]
+        );
+        let raw = fs::read_to_string(&path).expect("repaired receipt text");
+        assert!(!raw.contains("torn"));
+    }
+
+    #[test]
+    fn delivery_receipt_rejects_same_operation_with_a_different_body_hash() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("project-state/pm-delivery-receipts.jsonl");
+        let prepared = PmDeliveryReceipt {
+            operation_id: "72fc3cd4-ad49-43e3-bf3d-d791357643b1".to_string(),
+            recorded_at: "2026-08-11T00:00:00Z".to_string(),
+            status: PmDeliveryReceiptStatus::Prepared,
+            principal_session_id: "pm-session".to_string(),
+            target_window_id: "tab::agent".to_string(),
+            target_session_id: "agent-session".to_string(),
+            body_sha256: pm_delivery_prompt_sha256("original body"),
+            error_code: None,
+        };
+        prepare_pm_delivery_receipt(&path, &prepared).expect("prepare original body");
+        let conflicting = PmDeliveryReceipt {
+            body_sha256: pm_delivery_prompt_sha256("different body"),
+            ..prepared.clone()
+        };
+
+        let error = prepare_pm_delivery_receipt(&path, &conflicting)
+            .expect_err("one operation id cannot identify two bodies");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            load_pm_delivery_receipts(&path).expect("original receipt remains authoritative"),
+            vec![prepared]
+        );
+    }
+
+    #[test]
+    fn delivery_receipt_transition_is_idempotent_and_target_session_bound() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("project-state/pm-delivery-receipts.jsonl");
+        let prepared = PmDeliveryReceipt {
+            operation_id: "72fc3cd4-ad49-43e3-bf3d-d791357643a4".to_string(),
+            recorded_at: "2026-08-11T00:00:00Z".to_string(),
+            status: PmDeliveryReceiptStatus::Prepared,
+            principal_session_id: "pm-session".to_string(),
+            target_window_id: "tab::agent".to_string(),
+            target_session_id: "agent-session".to_string(),
+            body_sha256: pm_delivery_prompt_sha256("body"),
+            error_code: None,
+        };
+
+        assert_eq!(
+            prepare_pm_delivery_receipt(&path, &prepared).expect("prepare"),
+            PmDeliveryPrepareOutcome::Prepared
+        );
+        assert_eq!(
+            prepare_pm_delivery_receipt(&path, &prepared).expect("idempotent prepare"),
+            PmDeliveryPrepareOutcome::Existing(PmDeliveryReceiptStatus::Prepared)
+        );
+        assert!(finish_pm_delivery_receipt(
+            &path,
+            &prepared.operation_id,
+            "foreign-session",
+            &prepared.body_sha256,
+            PmDeliveryReceiptStatus::Verified,
+            None,
+        )
+        .is_err());
+        assert_eq!(
+            finish_pm_delivery_receipt(
+                &path,
+                &prepared.operation_id,
+                "agent-session",
+                &prepared.body_sha256,
+                PmDeliveryReceiptStatus::Verified,
+                None,
+            )
+            .expect("finish"),
+            PmDeliveryReceiptStatus::Verified
+        );
+        assert_eq!(
+            finish_pm_delivery_receipt(
+                &path,
+                &prepared.operation_id,
+                "agent-session",
+                &prepared.body_sha256,
+                PmDeliveryReceiptStatus::Verified,
+                None,
+            )
+            .expect("idempotent finish"),
+            PmDeliveryReceiptStatus::Verified
+        );
+        assert!(finish_pm_delivery_receipt(
+            &path,
+            &prepared.operation_id,
+            "agent-session",
+            &prepared.body_sha256,
+            PmDeliveryReceiptStatus::Refused,
+            Some("conflicting_terminal"),
+        )
+        .is_err());
+        assert_eq!(
+            load_pm_delivery_receipts(&path)
+                .expect("receipts")
+                .iter()
+                .filter(|receipt| receipt.operation_id == prepared.operation_id)
+                .count(),
+            2,
+            "one Prepared and one terminal row are durable exactly once"
+        );
+    }
+
+    #[test]
+    fn delivery_receipt_exact_verified_ack_upgrades_ambiguous_terminal() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("project-state/pm-delivery-receipts.jsonl");
+        let prepared = PmDeliveryReceipt {
+            operation_id: "72fc3cd4-ad49-43e3-bf3d-d791357643b2".to_string(),
+            recorded_at: "2026-08-11T00:00:00Z".to_string(),
+            status: PmDeliveryReceiptStatus::Prepared,
+            principal_session_id: "pm-session".to_string(),
+            target_window_id: "tab::agent".to_string(),
+            target_session_id: "agent-session".to_string(),
+            body_sha256: pm_delivery_prompt_sha256("body"),
+            error_code: None,
+        };
+        prepare_pm_delivery_receipt(&path, &prepared).expect("prepare delivery");
+        finish_pm_delivery_receipt(
+            &path,
+            &prepared.operation_id,
+            &prepared.target_session_id,
+            &prepared.body_sha256,
+            PmDeliveryReceiptStatus::Ambiguous,
+            Some("submit_unverified"),
+        )
+        .expect("record bounded-wait ambiguity");
+
+        assert_eq!(
+            finish_pm_delivery_receipt(
+                &path,
+                &prepared.operation_id,
+                &prepared.target_session_id,
+                &prepared.body_sha256,
+                PmDeliveryReceiptStatus::Verified,
+                None,
+            )
+            .expect("late exact acknowledgement upgrades ambiguity"),
+            PmDeliveryReceiptStatus::Verified
+        );
+        assert_eq!(
+            load_pm_delivery_receipts(&path)
+                .expect("receipts")
+                .iter()
+                .map(|receipt| receipt.status)
+                .collect::<Vec<_>>(),
+            vec![
+                PmDeliveryReceiptStatus::Prepared,
+                PmDeliveryReceiptStatus::Ambiguous,
+                PmDeliveryReceiptStatus::Verified,
+            ]
+        );
+    }
+
+    #[test]
+    fn delivery_receipt_verified_dominates_a_later_ambiguous_transition() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("project-state/pm-delivery-receipts.jsonl");
+        let prepared = PmDeliveryReceipt {
+            operation_id: "72fc3cd4-ad49-43e3-bf3d-d791357643b3".to_string(),
+            recorded_at: "2026-08-11T00:00:00Z".to_string(),
+            status: PmDeliveryReceiptStatus::Prepared,
+            principal_session_id: "pm-session".to_string(),
+            target_window_id: "tab::agent".to_string(),
+            target_session_id: "agent-session".to_string(),
+            body_sha256: pm_delivery_prompt_sha256("body"),
+            error_code: None,
+        };
+        prepare_pm_delivery_receipt(&path, &prepared).expect("prepare delivery");
+        finish_pm_delivery_receipt(
+            &path,
+            &prepared.operation_id,
+            &prepared.target_session_id,
+            &prepared.body_sha256,
+            PmDeliveryReceiptStatus::Verified,
+            None,
+        )
+        .expect("record exact acknowledgement");
+
+        assert_eq!(
+            finish_pm_delivery_receipt(
+                &path,
+                &prepared.operation_id,
+                &prepared.target_session_id,
+                &prepared.body_sha256,
+                PmDeliveryReceiptStatus::Ambiguous,
+                Some("late_timeout"),
+            )
+            .expect("late ambiguity preserves exact acknowledgement"),
+            PmDeliveryReceiptStatus::Verified
+        );
+        assert_eq!(
+            load_pm_delivery_receipts(&path)
+                .expect("receipts")
+                .iter()
+                .map(|receipt| receipt.status)
+                .collect::<Vec<_>>(),
+            vec![
+                PmDeliveryReceiptStatus::Prepared,
+                PmDeliveryReceiptStatus::Verified,
+            ]
+        );
+    }
+
+    #[test]
+    fn delivery_receipt_rejects_every_other_terminal_conflict() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for (operation_id, existing, requested) in [
+            (
+                "72fc3cd4-ad49-43e3-bf3d-d791357643b6",
+                PmDeliveryReceiptStatus::Ambiguous,
+                PmDeliveryReceiptStatus::Refused,
+            ),
+            (
+                "72fc3cd4-ad49-43e3-bf3d-d791357643b7",
+                PmDeliveryReceiptStatus::Refused,
+                PmDeliveryReceiptStatus::Ambiguous,
+            ),
+            (
+                "72fc3cd4-ad49-43e3-bf3d-d791357643b8",
+                PmDeliveryReceiptStatus::Refused,
+                PmDeliveryReceiptStatus::Verified,
+            ),
+        ] {
+            let path = dir.path().join(format!("{operation_id}.jsonl"));
+            let prepared = PmDeliveryReceipt {
+                operation_id: operation_id.to_string(),
+                recorded_at: "2026-08-11T00:00:00Z".to_string(),
+                status: PmDeliveryReceiptStatus::Prepared,
+                principal_session_id: "pm-session".to_string(),
+                target_window_id: "tab::agent".to_string(),
+                target_session_id: "agent-session".to_string(),
+                body_sha256: pm_delivery_prompt_sha256("body"),
+                error_code: None,
+            };
+            prepare_pm_delivery_receipt(&path, &prepared).expect("prepare delivery");
+            finish_pm_delivery_receipt(
+                &path,
+                &prepared.operation_id,
+                &prepared.target_session_id,
+                &prepared.body_sha256,
+                existing,
+                Some("initial_terminal"),
+            )
+            .expect("record initial terminal");
+
+            let error = finish_pm_delivery_receipt(
+                &path,
+                &prepared.operation_id,
+                &prepared.target_session_id,
+                &prepared.body_sha256,
+                requested,
+                Some("conflicting_terminal"),
+            )
+            .expect_err("only exact verification may supersede ambiguity");
+
+            assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+            assert_eq!(
+                load_pm_delivery_receipts(&path)
+                    .expect("receipts")
+                    .iter()
+                    .map(|receipt| receipt.status)
+                    .collect::<Vec<_>>(),
+                vec![PmDeliveryReceiptStatus::Prepared, existing]
+            );
+        }
+    }
+
+    #[test]
+    fn wake_delivery_reservation_is_exact_idempotent_and_body_free() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("project-state/pm-loop.json");
+        let operation_id = "72fc3cd4-ad49-43e3-bf3d-d791357643a5";
+        let prompt = "scheduled supervision prompt";
+        let body_sha256 = pm_delivery_prompt_sha256(prompt);
+
+        assert!(prepare_pm_wake_delivery(
+            &path,
+            operation_id,
+            "tab::pm",
+            "pm-session",
+            &body_sha256,
+        )
+        .expect("prepare wake"));
+        assert!(prepare_pm_wake_delivery(
+            &path,
+            operation_id,
+            "tab::pm",
+            "pm-session",
+            &body_sha256,
+        )
+        .expect("idempotent prepare"));
+        assert!(!prepare_pm_wake_delivery(
+            &path,
+            "72fc3cd4-ad49-43e3-bf3d-d791357643a6",
+            "tab::pm",
+            "pm-session",
+            &body_sha256,
+        )
+        .expect("conflicting prepare"));
+        assert!(
+            !clear_pm_wake_delivery(&path, operation_id, "tab::foreign").expect("foreign clear")
+        );
+
+        let prepared = load_pm_loop_state(&path).expect("prepared state");
+        assert_eq!(
+            prepared.pending_delivery_operation_id.as_deref(),
+            Some(operation_id)
+        );
+        assert_eq!(
+            prepared.pending_delivery_window_id.as_deref(),
+            Some("tab::pm")
+        );
+        assert_eq!(
+            prepared.pending_delivery_session_id.as_deref(),
+            Some("pm-session")
+        );
+        assert_eq!(
+            prepared.pending_delivery_body_sha256.as_deref(),
+            Some(body_sha256.as_str())
+        );
+        let raw = fs::read_to_string(&path).expect("wake state text");
+        assert!(!raw.contains("prompt"));
+        assert!(!raw.contains(prompt));
+
+        assert!(clear_pm_wake_delivery(&path, operation_id, "tab::pm").expect("exact clear"));
+        let cleared = load_pm_loop_state(&path).expect("cleared state");
+        assert_eq!(cleared.pending_delivery_operation_id, None);
+        assert_eq!(cleared.pending_delivery_window_id, None);
+        assert_eq!(cleared.pending_delivery_session_id, None);
+        assert_eq!(cleared.pending_delivery_body_sha256, None);
+    }
+
+    #[test]
+    fn wake_delivery_reservation_rejects_same_identity_with_a_different_body_hash() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("project-state/pm-loop.json");
+        let operation_id = "72fc3cd4-ad49-43e3-bf3d-d791357643b4";
+        let original_hash = pm_delivery_prompt_sha256("original wake");
+        let conflicting_hash = pm_delivery_prompt_sha256("different wake");
+        assert!(prepare_pm_wake_delivery(
+            &path,
+            operation_id,
+            "tab::pm",
+            "pm-session",
+            &original_hash,
+        )
+        .expect("prepare original wake"));
+
+        assert!(!prepare_pm_wake_delivery(
+            &path,
+            operation_id,
+            "tab::pm",
+            "pm-session",
+            &conflicting_hash,
+        )
+        .expect("different digest conflicts with the durable identity"));
+        assert_eq!(
+            load_pm_loop_state(&path)
+                .expect("original reservation remains authoritative")
+                .pending_delivery_body_sha256
+                .as_deref(),
+            Some(original_hash.as_str())
+        );
+    }
+
+    #[test]
+    fn wake_delivery_reservation_requires_a_lowercase_sha256_digest() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("project-state/pm-loop.json");
+        let operation_id = "72fc3cd4-ad49-43e3-bf3d-d791357643b5";
+
+        for invalid in ["short", &"A".repeat(64)] {
+            let error =
+                prepare_pm_wake_delivery(&path, operation_id, "tab::pm", "pm-session", invalid)
+                    .expect_err("invalid digest must be rejected before persistence");
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        }
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn exact_pm_registration_lease_holds_the_stable_lock_and_rejects_rotation() {
+        let (_dir, path) = temp_prefs_path();
+        let exact = registration("pm-session-a");
+        try_register_pm(&path, exact.clone(), |_| false).expect("seed registration");
+        let before = fs::read(&path).expect("seeded bytes");
+
+        let leased = with_exact_pm_registration(&path, &exact, |registration| {
+            assert_eq!(registration, &exact);
+            let competing = fs::OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .truncate(false)
+                .open(path.with_extension("lock"))?;
+            let contention = competing
+                .try_lock_exclusive()
+                .expect_err("lease closure must run while pm.lock remains held");
+            assert_eq!(contention.kind(), io::ErrorKind::WouldBlock);
+            Ok("leased")
+        })
+        .expect("exact lease");
+        assert_eq!(leased, Some("leased"));
+
+        let mut rotated = exact.clone();
+        rotated.consecutive_crashes = 1;
+        let mut invoked = false;
+        let rejected = with_exact_pm_registration(&path, &rotated, |_| {
+            invoked = true;
+            Ok(())
+        })
+        .expect("stale lease probe");
+        assert_eq!(rejected, None);
+        assert!(!invoked, "stale full registration must be zero-mutation");
+        assert_eq!(fs::read(&path).expect("bytes after rejection"), before);
     }
 
     #[test]

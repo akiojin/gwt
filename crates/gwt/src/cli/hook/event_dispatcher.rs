@@ -120,9 +120,14 @@ fn handle_user_prompt_submit(
         action_obligation_stop_check::handle_user_prompt_submit(worktree_root, input);
     });
     // SPEC-3431 FR-012: user contact re-arms the PM's resident-loop budget.
-    run_value(event, "pm-loop-reset", || {
-        pm_loop_stop_check::handle_user_prompt_submit(worktree_root);
+    let rejects_protected_delivery = run_value(event, "pm-loop-reset", || {
+        pm_loop_stop_check::handle_user_prompt_submit_with_input(worktree_root, input)
     });
+    if rejects_protected_delivery {
+        return Ok(HookOutput::stop_block(
+            "Protected pane delivery refused: the submitted composer did not exactly match its reserved prompt. The pane remains quarantined until its runtime restarts; do not retry or forward the mixed prompt.",
+        ));
+    }
     let output = run_step(event, "board-reminder", || {
         board_reminder::handle_with_input(event, input)
     })?;
@@ -558,6 +563,44 @@ mod tests {
         );
         assert!(text.contains("create_goal"), "{text}");
         assert!(text.contains("discuss.goal_started"), "{text}");
+    }
+
+    #[test]
+    fn user_prompt_submit_blocks_a_mixed_protected_delivery_before_forwarding_it() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let worktree = tempfile::tempdir().unwrap();
+        init_git_repo(worktree.path());
+        let _home = ScopedEnvVar::set("HOME", worktree.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", worktree.path());
+        let _session_id = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+        let _runtime_path = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+        let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+        let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+        let _codex_thread_id = ScopedEnvVar::unset("CODEX_THREAD_ID");
+        let operation_id = "72fc3cd4-ad49-43e3-bf3d-d791357643a3";
+        let body = "protected delivery";
+        let marker = format!(
+            "[gwt-delivery:{operation_id}:{}]",
+            crate::pm_registry::pm_delivery_prompt_sha256(body)
+        );
+        let input = serde_json::json!({
+            "prompt": format!("unsent draft {body} {marker}")
+        })
+        .to_string();
+
+        let output = handle_with_input("UserPromptSubmit", &input, worktree.path(), None)
+            .expect("hook output");
+
+        let HookOutput::StopBlock { reason } = output else {
+            panic!("mixed protected delivery must be rejected before model forwarding");
+        };
+        assert!(
+            reason.contains("Protected pane delivery refused"),
+            "{reason}"
+        );
+        assert!(reason.contains("do not retry"), "{reason}");
     }
 
     #[test]

@@ -364,12 +364,11 @@ pub enum FrontendEvent {
         text: String,
     },
     /// SPEC-3431 FR-111 (T-206): PM-privileged message delivery into another
-    /// agent pane of the same project. Carries the PM's own session id so the
-    /// server re-verifies the live PM principal immediately before the
-    /// injection; the general self-only contract of
+    /// agent pane of the same project. The PM identity comes only from the
+    /// authenticated WebSocket grant; the general self-only contract of
     /// [`FrontendEvent::PaneSendInput`] is unchanged for every other caller.
     PmPaneSendInput {
-        pm_session_id: String,
+        operation_id: String,
         window_id: String,
         text: String,
     },
@@ -1652,6 +1651,18 @@ pub enum BackendEvent {
         window_id: Option<String>,
         error: Option<String>,
     },
+    /// Origin-connection-only terminal result for one canonical
+    /// `pm.message.send` operation. Unlike the generic pane reply, this event
+    /// is correlated to both the operation and its exact target.
+    PmMessageSendResult {
+        operation_id: String,
+        ok: bool,
+        window_id: Option<String>,
+        runtime: Option<String>,
+        submit_attempts: u8,
+        verified: bool,
+        error: Option<String>,
+    },
     /// Direct, origin-connection-only acceptance for an authenticated
     /// self-close. The internal close ticket never crosses the wire.
     PaneCloseAccepted {
@@ -2408,6 +2419,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
     BackendEventPolicy::new(
+        "pm_message_send_result",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
         "pane_close_accepted",
         BackendEventDeliveryClass::Error,
         BackendEventBackpressurePolicy::FailOpenError,
@@ -2850,6 +2866,7 @@ impl BackendEvent {
             BackendEvent::TerminalSnapshot { .. } => "terminal_snapshot",
             BackendEvent::TerminalStatus { .. } => "terminal_status",
             BackendEvent::PaneSendResult { .. } => "pane_send_result",
+            BackendEvent::PmMessageSendResult { .. } => "pm_message_send_result",
             BackendEvent::PaneCloseAccepted { .. } => "pane_close_accepted",
             BackendEvent::PmStatus { .. } => "pm_status",
             BackendEvent::IssueMonitorStatus { .. } => "issue_monitor_status",
@@ -3065,6 +3082,35 @@ mod tests {
         assert_eq!(event.event_kind(), "pane_send_result");
 
         let policy = backend_event_policy("pane_send_result").expect("pane_send_result policy");
+        assert_eq!(policy.delivery, BackendEventDeliveryClass::Snapshot);
+        assert_eq!(
+            policy.backpressure,
+            BackendEventBackpressurePolicy::ClientScopedSnapshot
+        );
+    }
+
+    #[test]
+    fn pm_message_send_result_has_client_scoped_terminal_policy() {
+        let event = BackendEvent::PmMessageSendResult {
+            operation_id: "72fc3cd4-ad49-43e3-bf3d-d791357643a3".to_string(),
+            ok: false,
+            window_id: Some("tab-1::agent-1".to_string()),
+            runtime: Some("codex".to_string()),
+            submit_attempts: 2,
+            verified: false,
+            error: Some("submit was not verified".to_string()),
+        };
+        let value = serde_json::to_value(&event).expect("serialize pm_message_send_result");
+        assert_eq!(value["kind"], "pm_message_send_result");
+        assert_eq!(
+            value["operation_id"],
+            "72fc3cd4-ad49-43e3-bf3d-d791357643a3"
+        );
+        assert_eq!(value["window_id"], "tab-1::agent-1");
+        assert_eq!(event.event_kind(), "pm_message_send_result");
+
+        let policy =
+            backend_event_policy("pm_message_send_result").expect("pm_message_send_result policy");
         assert_eq!(policy.delivery, BackendEventDeliveryClass::Snapshot);
         assert_eq!(
             policy.backpressure,

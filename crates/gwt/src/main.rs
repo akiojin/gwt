@@ -67,7 +67,7 @@ pub(crate) use app_runtime::{
 pub(crate) use app_runtime::{
     ActiveAgentSession, AgentFrontendDispatchOutcome, AgentLaunchResult, AppEventProxy, AppRuntime,
     BlockingTaskSpawner, ContinueWorkReadinessWatch, DispatchTarget, IssueLaunchWizardPrepared,
-    OutboundEvent, ProcessLaunch, ProjectOpenTarget, ProjectTabRuntime,
+    OutboundEvent, PmWakeDeliveryResult, ProcessLaunch, ProjectOpenTarget, ProjectTabRuntime,
     ScheduledIssueMonitorScanOutcome, WindowAddress,
 };
 pub(crate) use attachment_upload::{AttachmentUploadStore, UploadedAttachment};
@@ -88,8 +88,8 @@ pub(crate) use docker_launch::{
 use embedded_server::{broadcast_runtime_hook_event, health_handler, hook_forward_authorized};
 pub(crate) use embedded_server::{
     AgentCapabilityGrant, AgentCapabilityIssuer, AgentDurableAuthority, AgentFrontendRequest,
-    AgentSelfCloseCapabilityTicket, AgentSelfCloseDirectAcceptance, AgentSelfCloseResponder,
-    AgentSessionPrincipal,
+    AgentPmSendResponder, AgentSelfCloseCapabilityTicket, AgentSelfCloseDirectAcceptance,
+    AgentSelfCloseResponder, AgentSessionPrincipal,
 };
 use embedded_server::{ClientHub, EmbeddedServer};
 #[cfg(test)]
@@ -981,6 +981,7 @@ pub(crate) struct DockerBundleMounts {
 /// thread while parsing vt100 chunks. Reads are hot (every keystroke), writes
 /// are rare (pane create/destroy), so `RwLock` is the natural fit.
 type PtyWriterRegistry = Arc<RwLock<HashMap<String, Arc<PtyHandle>>>>;
+type PmSubmitReservationRegistry = Arc<Mutex<HashMap<String, String>>>;
 
 #[derive(Debug, Clone)]
 enum ImprovementActionOutcome {
@@ -1021,6 +1022,14 @@ enum UserEvent {
     ContinueWorkReadyTimeout {
         window_id: String,
         watch: ContinueWorkReadinessWatch,
+    },
+    /// Completion of one resident-PM wake submit worker. Signal fingerprint
+    /// and wake clock commit happen only after this reports exact hook-backed
+    /// verification.
+    PmWakeDeliveryComplete {
+        project_root: PathBuf,
+        operation_id: String,
+        result: PmWakeDeliveryResult,
     },
     /// SPEC #2920 Phase 4: the wry WebView drag/drop handler was the
     /// only producer of this variant. The browser UI now handles
@@ -2663,6 +2672,7 @@ mod tests {
             pending_pm_launches: HashMap::new(),
             pm_sessions: HashMap::new(),
             pm_wake_seen: HashMap::new(),
+            pending_pm_wake_deliveries: HashMap::new(),
             pending_startup_pm_tabs: Vec::new(),
             pending_auto_resume_sources: HashMap::new(),
             pending_startup_auto_resume_sessions: Vec::new(),
@@ -2696,6 +2706,7 @@ mod tests {
             issue_client_factory: crate::app_runtime::default_issue_client_factory(),
             pending_update: None,
             pty_writers: Arc::new(RwLock::new(HashMap::new())),
+            pm_submit_reservations: Arc::new(Mutex::new(HashMap::new())),
             attachment_uploads: AttachmentUploadStore::new(temp_root.join("attachment-uploads")),
             persist_dispatcher,
             file_tree_worktree_roots: HashMap::new(),
@@ -8137,6 +8148,17 @@ fn main() -> std::io::Result<()> {
             }
             Event::UserEvent(UserEvent::ContinueWorkReadyTimeout { window_id, watch }) => {
                 clients.dispatch(app.handle_continue_work_ready_timeout(&window_id, &watch));
+            }
+            Event::UserEvent(UserEvent::PmWakeDeliveryComplete {
+                project_root,
+                operation_id,
+                result,
+            }) => {
+                clients.dispatch(app.handle_pm_wake_delivery_complete(
+                    &project_root,
+                    &operation_id,
+                    result,
+                ));
             }
             Event::UserEvent(UserEvent::NativeFileDrop { .. }) => {
                 // SPEC #2920: the wry WebView drag/drop handler was the

@@ -3,7 +3,10 @@ use std::{
     net::{IpAddr, SocketAddr},
     num::NonZeroU16,
     path::{Path, PathBuf},
-    sync::{atomic::AtomicU64, Arc, Mutex, RwLock},
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc, Mutex, RwLock,
+    },
     time::{Duration, Instant},
 };
 
@@ -66,6 +69,10 @@ pub(super) const AGENT_AUTHORITY_UNAVAILABLE_CLOSE: ClientCloseFrame = ClientClo
 /// reaches the cap. SPEC-1942 US-14 follow-up review: previous unbounded Vec
 /// would grow without limit in long-running browser-server sessions.
 const ACCESS_LOG_RING_CAPACITY: usize = 1024;
+const AGENT_PM_SEND_ACCEPTANCE_DEADLINE: Duration = Duration::from_secs(5);
+const AGENT_PM_TERMINAL_SEND_DEADLINE: Duration = Duration::from_secs(1);
+const AGENT_PM_TARGET_REFUSAL: &str =
+    "pm.message.send refused: target is not an authorized live agent pane";
 
 /// One captured HTTP / WebSocket access event. Emitted both as
 /// `tracing::info!(target: "gwt_access", ...)` (or `debug!` for `/healthz`)
@@ -732,6 +739,25 @@ pub(crate) struct AgentCapabilityGrant {
     principal: AgentSessionPrincipal,
 }
 
+/// Point-in-time proof that one capability generation was current when a
+/// physical Host mutation began.
+///
+/// This lease deliberately owns no registry guard. Rotation and revocation
+/// therefore remain non-blocking while the already-authorized operation
+/// performs its single OS write. The private generation field keeps the lease
+/// opaque and non-forgeable outside this module, and the type is intentionally
+/// not `Clone` so callers cannot duplicate one authorization.
+#[must_use = "a capability mutation lease must remain owned through its physical write"]
+pub(crate) struct AgentCapabilityMutationLease {
+    _generation_token: String,
+}
+
+impl std::fmt::Debug for AgentCapabilityMutationLease {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("AgentCapabilityMutationLease(<redacted>)")
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AgentDurableAuthority {
     ObservationOnly,
@@ -771,6 +797,12 @@ pub(crate) enum AgentFrontendRequest {
     SendInput {
         text: String,
     },
+    PmSendInput {
+        operation_id: String,
+        window_id: String,
+        text: String,
+        responder: Option<AgentPmSendResponder>,
+    },
 }
 
 impl std::fmt::Debug for AgentFrontendRequest {
@@ -783,17 +815,40 @@ impl std::fmt::Debug for AgentFrontendRequest {
             Self::SendInput { .. } => {
                 formatter.write_str("AgentFrontendRequest::SendInput(<redacted>)")
             }
+            Self::PmSendInput { .. } => {
+                formatter.write_str("AgentFrontendRequest::PmSendInput(<redacted>)")
+            }
         }
     }
 }
 
 impl AgentFrontendRequest {
     pub(crate) fn mutates_host_state(&self) -> bool {
-        matches!(self, Self::CloseWindow { .. } | Self::SendInput { .. })
+        matches!(
+            self,
+            Self::CloseWindow { .. } | Self::SendInput { .. } | Self::PmSendInput { .. }
+        )
     }
 
     pub(crate) fn requires_producing_authority(&self) -> bool {
         matches!(self, Self::SendInput { .. })
+    }
+
+    pub(crate) fn send_pm_refusal(&self, error: impl Into<String>) -> bool {
+        let Self::PmSendInput {
+            window_id,
+            responder: Some(responder),
+            ..
+        } = self
+        else {
+            return false;
+        };
+        let _ = responder.send(BackendEvent::PaneSendResult {
+            ok: false,
+            window_id: Some(window_id.clone()),
+            error: Some(error.into()),
+        });
+        true
     }
 }
 
@@ -1079,6 +1134,62 @@ impl AgentSelfCloseCapabilityTicket {
 #[derive(Clone)]
 pub(crate) struct AgentSelfCloseResponder {
     sender: Arc<Mutex<Option<oneshot::Sender<AgentSelfCloseDirectAcceptance>>>>,
+}
+
+/// Origin-socket response channel for one accepted privileged PM send. The
+/// capability may rotate while the worker is between body and submit; this
+/// channel lets that terminal result bypass the stale-grant ClientHub fence
+/// without opening an ambient result stream.
+#[derive(Clone)]
+pub(crate) struct AgentPmSendResponder {
+    sender: Arc<Mutex<Option<oneshot::Sender<BackendEvent>>>>,
+    cancelled: Arc<AtomicBool>,
+    deadline: Instant,
+}
+
+impl std::fmt::Debug for AgentPmSendResponder {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("AgentPmSendResponder(<redacted>)")
+    }
+}
+
+impl AgentPmSendResponder {
+    pub(crate) fn channel() -> (Self, oneshot::Receiver<BackendEvent>) {
+        let (sender, receiver) = oneshot::channel();
+        (
+            Self {
+                sender: Arc::new(Mutex::new(Some(sender))),
+                cancelled: Arc::new(AtomicBool::new(false)),
+                deadline: Instant::now() + AGENT_PM_SEND_ACCEPTANCE_DEADLINE,
+            },
+            receiver,
+        )
+    }
+
+    pub(crate) fn mutation_is_current(&self) -> bool {
+        !self.cancelled.load(Ordering::Acquire) && Instant::now() < self.deadline
+    }
+
+    pub(crate) fn deadline(&self) -> Instant {
+        self.deadline
+    }
+
+    pub(crate) fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub(crate) fn send(&self, event: BackendEvent) -> Result<(), BackendEvent> {
+        let sender = self
+            .sender
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        let Some(sender) = sender else {
+            return Err(event);
+        };
+        sender.send(event)
+    }
 }
 
 impl std::fmt::Debug for AgentSelfCloseResponder {
@@ -1539,6 +1650,26 @@ impl AgentCapabilityRegistry {
         Some(dispatch())
     }
 
+    /// Linearize one physical mutation against the current in-process
+    /// capability generation without retaining the registry lock across the
+    /// mutation itself.
+    fn try_begin_current_grant_mutation(
+        &self,
+        grant: &AgentCapabilityGrant,
+    ) -> Option<AgentCapabilityMutationLease> {
+        let state = self
+            .inner
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !Self::grant_is_current_in_state(&state, grant) {
+            return None;
+        }
+
+        Some(AgentCapabilityMutationLease {
+            _generation_token: grant.token.clone(),
+        })
+    }
+
     fn grant_is_current(&self, grant: &AgentCapabilityGrant) -> bool {
         let state = self
             .inner
@@ -1770,6 +1901,13 @@ impl AgentCapabilityIssuer {
         dispatch: impl FnOnce() -> T,
     ) -> Option<T> {
         self.registry.with_current_grant(grant, dispatch)
+    }
+
+    pub(crate) fn try_begin_current_grant_mutation(
+        &self,
+        grant: &AgentCapabilityGrant,
+    ) -> Option<AgentCapabilityMutationLease> {
+        self.registry.try_begin_current_grant_mutation(grant)
     }
 
     pub(crate) fn begin_self_close_if_current(
@@ -2795,6 +2933,7 @@ fn workspace_update_error_response(
 struct AgentPaneSessionScope {
     grant: AgentCapabilityGrant,
     allowed_window_ids: HashSet<String>,
+    allowed_pm_window_ids: HashSet<String>,
 }
 
 impl AgentPaneSessionScope {
@@ -2802,10 +2941,11 @@ impl AgentPaneSessionScope {
         Self {
             grant,
             allowed_window_ids: HashSet::new(),
+            allowed_pm_window_ids: HashSet::new(),
         }
     }
 
-    fn filter_inbound(&self, event: FrontendEvent) -> Option<AgentFrontendRequest> {
+    fn filter_inbound(&mut self, event: FrontendEvent) -> Option<AgentFrontendRequest> {
         match event {
             FrontendEvent::FrontendReady => Some(AgentFrontendRequest::Ready),
             FrontendEvent::CloseWindow { id, request_id }
@@ -2825,6 +2965,26 @@ impl AgentPaneSessionScope {
             {
                 Some(AgentFrontendRequest::SendInput { text })
             }
+            FrontendEvent::PmPaneSendInput {
+                operation_id,
+                window_id,
+                text,
+            } if Uuid::parse_str(&operation_id)
+                .is_ok_and(|parsed| parsed.hyphenated().to_string() == operation_id)
+                && self.allowed_pm_window_ids.contains(&window_id) =>
+            {
+                // A canonical PM operation is always dispatched to the
+                // authenticated runtime gate. That gate owns the durable
+                // project/Session authority and returns one typed refusal;
+                // dropping an out-of-scope target here would leave the
+                // origin socket waiting until timeout with no audit result.
+                Some(AgentFrontendRequest::PmSendInput {
+                    operation_id,
+                    window_id,
+                    text,
+                    responder: None,
+                })
+            }
             _ => None,
         }
     }
@@ -2841,11 +3001,17 @@ impl AgentPaneSessionScope {
                 .and_then(serde_json::Value::as_str)
                 .is_some_and(|id| self.allowed_window_ids.contains(id))
                 .then_some(payload),
-            "pane_send_result" if self.grant.principal().authorizes_producing_mutation() => value
-                .get("window_id")
-                .and_then(serde_json::Value::as_str)
-                .is_none_or(|id| self.allowed_window_ids.contains(id))
-                .then_some(payload),
+            "pane_send_result" => {
+                let window_is_allowed = value
+                    .get("window_id")
+                    .and_then(serde_json::Value::as_str)
+                    .is_none_or(|id| self.allowed_window_ids.contains(id));
+                if self.grant.principal().authorizes_producing_mutation() && window_is_allowed {
+                    Some(payload)
+                } else {
+                    None
+                }
+            }
             _ => None,
         }
     }
@@ -2860,6 +3026,7 @@ impl AgentPaneSessionScope {
         tabs.retain(|tab| self.authorizes_tab(tab));
 
         self.allowed_window_ids.clear();
+        self.allowed_pm_window_ids.clear();
         for tab in tabs.iter() {
             let windows = tab
                 .get("workspace")
@@ -2870,6 +3037,9 @@ impl AgentPaneSessionScope {
             for window in windows {
                 if let Some(id) = window.get("id").and_then(serde_json::Value::as_str) {
                     self.allowed_window_ids.insert(id.to_string());
+                    if Self::is_live_pm_target(window) {
+                        self.allowed_pm_window_ids.insert(id.to_string());
+                    }
                 }
             }
         }
@@ -2897,6 +3067,24 @@ impl AgentPaneSessionScope {
             serde_json::Value::Array(Vec::new()),
         );
         Some(())
+    }
+
+    fn is_live_pm_target(window: &serde_json::Value) -> bool {
+        let supported_preset = matches!(
+            window.get("preset").and_then(serde_json::Value::as_str),
+            Some("agent" | "claude" | "codex")
+        );
+        let live_status = matches!(
+            window.get("status").and_then(serde_json::Value::as_str),
+            Some("running" | "idle" | "waiting")
+        );
+        let valid_session = window
+            .get("session_id")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|session_id| {
+                gwt_agent::validate_session_id_path_component(session_id).is_ok()
+            });
+        supported_preset && live_status && valid_session
     }
 
     fn authorizes_tab(&self, tab: &serde_json::Value) -> bool {
@@ -2927,6 +3115,10 @@ enum ScopedFrontendRequest {
         grant: AgentCapabilityGrant,
         request: AgentFrontendRequest,
     },
+    AgentPmRefusal {
+        operation_id: String,
+        window_id: String,
+    },
 }
 
 impl ClientSessionScope {
@@ -2943,10 +3135,25 @@ impl ClientSessionScope {
         }
     }
 
-    fn filter_inbound(&self, event: FrontendEvent) -> Option<ScopedFrontendRequest> {
+    fn filter_inbound(&mut self, event: FrontendEvent) -> Option<ScopedFrontendRequest> {
         match self {
             Self::Browser => Some(ScopedFrontendRequest::Browser(event)),
             Self::Agent(scope) => {
+                if let FrontendEvent::PmPaneSendInput {
+                    operation_id,
+                    window_id,
+                    ..
+                } = &event
+                {
+                    let canonical_operation_id = Uuid::parse_str(operation_id)
+                        .is_ok_and(|parsed| parsed.hyphenated().to_string() == *operation_id);
+                    if canonical_operation_id && !scope.allowed_pm_window_ids.contains(window_id) {
+                        return Some(ScopedFrontendRequest::AgentPmRefusal {
+                            operation_id: operation_id.clone(),
+                            window_id: window_id.clone(),
+                        });
+                    }
+                }
                 scope
                     .filter_inbound(event)
                     .map(|request| ScopedFrontendRequest::Agent {
@@ -3013,6 +3220,122 @@ async fn send_agent_self_close_acceptance<S>(
     // result. If this future is cancelled while awaiting the sink, Rust drops
     // the owned acceptance and runs the same finalizer.
     drop(acceptance);
+}
+
+async fn send_agent_pm_terminal_result<S>(
+    sender: &mut S,
+    event: BackendEvent,
+    deadline_after: Duration,
+) where
+    S: futures_util::Sink<Message> + Unpin,
+{
+    match serde_json::to_string(&event) {
+        Ok(payload) => {
+            let _ =
+                tokio::time::timeout(deadline_after, sender.send(Message::Text(payload.into())))
+                    .await;
+        }
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                "failed to serialize direct PM pane terminal result"
+            );
+        }
+    }
+}
+
+fn correlate_agent_pm_terminal_result(
+    operation_id: String,
+    requested_window_id: String,
+    event: BackendEvent,
+) -> BackendEvent {
+    match event {
+        BackendEvent::PmMessageSendResult {
+            operation_id: result_operation_id,
+            ok,
+            window_id,
+            runtime,
+            submit_attempts,
+            verified,
+            error,
+        } => {
+            let correlation_matches = result_operation_id == operation_id
+                && window_id
+                    .as_deref()
+                    .is_none_or(|window_id| window_id == requested_window_id);
+            if correlation_matches {
+                BackendEvent::PmMessageSendResult {
+                    operation_id,
+                    ok,
+                    window_id: Some(requested_window_id),
+                    runtime,
+                    submit_attempts,
+                    verified,
+                    error,
+                }
+            } else {
+                BackendEvent::PmMessageSendResult {
+                    operation_id,
+                    ok: false,
+                    window_id: Some(requested_window_id),
+                    runtime: None,
+                    submit_attempts: 0,
+                    verified: false,
+                    error: Some("PM delivery returned a mismatched terminal result".to_string()),
+                }
+            }
+        }
+        event => {
+            let (ok, verified, error) = match event {
+                BackendEvent::PaneSendResult {
+                    ok,
+                    window_id,
+                    error,
+                } if window_id
+                    .as_deref()
+                    .is_none_or(|window_id| window_id == requested_window_id) =>
+                {
+                    (ok, ok, error)
+                }
+                BackendEvent::PaneSendResult { .. } => (
+                    false,
+                    false,
+                    Some("PM delivery returned a mismatched target result".to_string()),
+                ),
+                _ => (
+                    false,
+                    false,
+                    Some("PM delivery returned an invalid terminal result".to_string()),
+                ),
+            };
+            BackendEvent::PmMessageSendResult {
+                operation_id,
+                ok,
+                window_id: Some(requested_window_id),
+                // The existing AppRuntime responder is intentionally unchanged in
+                // this transport-only hardening and exposes no runtime/attempt
+                // metadata. A verified non-empty PM delivery necessarily made at
+                // least one submit attempt; richer accounting can replace this
+                // compatibility bridge when the runtime result is made typed.
+                runtime: None,
+                submit_attempts: u8::from(ok),
+                verified,
+                error,
+            }
+        }
+    }
+}
+
+fn opaque_agent_pm_target_refusal(operation_id: String, window_id: String) -> BackendEvent {
+    BackendEvent::PmMessageSendResult {
+        operation_id,
+        ok: false,
+        window_id: Some(window_id),
+        runtime: None,
+        submit_attempts: 0,
+        verified: false,
+        error: Some(AGENT_PM_TARGET_REFUSAL.to_string()),
+    }
 }
 
 async fn send_agent_fence_close<S>(sender: &mut S, close_frame: ClientCloseFrame)
@@ -3109,6 +3432,21 @@ async fn client_session_with_scope(
                                             event,
                                         );
                                     }
+                                    Some(ScopedFrontendRequest::AgentPmRefusal {
+                                        operation_id,
+                                        window_id,
+                                    }) => {
+                                        send_agent_pm_terminal_result(
+                                            &mut sender,
+                                            opaque_agent_pm_target_refusal(
+                                                operation_id,
+                                                window_id,
+                                            ),
+                                            AGENT_PM_TERMINAL_SEND_DEADLINE,
+                                        )
+                                        .await;
+                                        break;
+                                    }
                                     Some(ScopedFrontendRequest::Agent {
                                         grant,
                                         mut request,
@@ -3164,6 +3502,7 @@ async fn client_session_with_scope(
                                                 }
                                             }
                                         }
+                                        let mut direct_pm_result = None;
                                         let direct_acceptance = match &mut request {
                                             AgentFrontendRequest::CloseWindow {
                                                 request_id: Some(_),
@@ -3174,6 +3513,23 @@ async fn client_session_with_scope(
                                                     AgentSelfCloseResponder::channel();
                                                 *responder = Some(direct_responder);
                                                 Some(acceptance)
+                                            }
+                                            AgentFrontendRequest::PmSendInput {
+                                                operation_id,
+                                                window_id,
+                                                responder,
+                                                ..
+                                            } => {
+                                                let (direct_responder, result) =
+                                                    AgentPmSendResponder::channel();
+                                                *responder = Some(direct_responder.clone());
+                                                direct_pm_result = Some((
+                                                    result,
+                                                    direct_responder,
+                                                    operation_id.clone(),
+                                                    window_id.clone(),
+                                                ));
+                                                None
                                             }
                                             _ => None,
                                         };
@@ -3196,6 +3552,81 @@ async fn client_session_with_scope(
                                             send_agent_fence_close(
                                                 &mut sender,
                                                 AGENT_STALE_BINDING_CLOSE,
+                                            )
+                                            .await;
+                                            break;
+                                        }
+                                        if let Some((
+                                            mut direct_pm_result,
+                                            cancellation,
+                                            operation_id,
+                                            window_id,
+                                        )) = direct_pm_result
+                                        {
+                                            // Once the current capability generation accepts a PM
+                                            // send, its terminal result belongs to this origin
+                                            // socket even if that capability rotates while the
+                                            // worker is between body and submit.
+                                            let deadline =
+                                                tokio::time::Instant::now()
+                                                    + AGENT_PM_SEND_ACCEPTANCE_DEADLINE;
+                                            let mut client_is_connected = true;
+                                            let mut acceptance_timed_out = false;
+                                            let result = loop {
+                                                tokio::select! {
+                                                    result = &mut direct_pm_result => {
+                                                        break result.ok();
+                                                    }
+                                                    incoming = receiver.next() => {
+                                                        match incoming {
+                                                            Some(Ok(Message::Close(_)))
+                                                            | Some(Err(_))
+                                                            | None => {
+                                                                client_is_connected = false;
+                                                                break None;
+                                                            }
+                                                            Some(Ok(_)) => {}
+                                                        }
+                                                    }
+                                                    _ = tokio::time::sleep_until(deadline) => {
+                                                        acceptance_timed_out = true;
+                                                        break None;
+                                                    }
+                                                }
+                                            };
+                                            let Some(result) = result else {
+                                                cancellation.cancel();
+                                                if client_is_connected {
+                                                    let error = if acceptance_timed_out {
+                                                        "PM delivery exceeded the server acceptance deadline"
+                                                    } else {
+                                                        "PM delivery responder closed before a terminal result"
+                                                    };
+                                                    send_agent_pm_terminal_result(
+                                                        &mut sender,
+                                                        correlate_agent_pm_terminal_result(
+                                                            operation_id,
+                                                            window_id,
+                                                            BackendEvent::PaneSendResult {
+                                                                ok: false,
+                                                                window_id: None,
+                                                                error: Some(error.to_string()),
+                                                            },
+                                                        ),
+                                                        AGENT_PM_TERMINAL_SEND_DEADLINE,
+                                                    )
+                                                    .await;
+                                                }
+                                                break;
+                                            };
+                                            send_agent_pm_terminal_result(
+                                                &mut sender,
+                                                correlate_agent_pm_terminal_result(
+                                                    operation_id,
+                                                    window_id,
+                                                    result,
+                                                ),
+                                                AGENT_PM_TERMINAL_SEND_DEADLINE,
                                             )
                                             .await;
                                             break;
@@ -3708,6 +4139,106 @@ mod tests {
     }
 
     #[test]
+    fn agent_capability_mutation_lease_does_not_block_rotation() {
+        let project = tempfile::tempdir().expect("project tempdir");
+        let issuer = AgentCapabilityIssuer::for_test(
+            "http://127.0.0.1:1/internal/hook-live",
+            "ws://127.0.0.1:1/ws",
+            "ws://127.0.0.1:2/internal/pane-ws",
+        );
+        let original = issuer
+            .issue(project.path(), "pm-session")
+            .expect("original capability");
+        let original_grant = issuer
+            .grant_for_test(&original.token)
+            .expect("original grant");
+        let lease = issuer
+            .try_begin_current_grant_mutation(&original_grant)
+            .expect("current generation lease");
+
+        let (result_sender, result_receiver) = std::sync::mpsc::channel();
+        let rotating_issuer = issuer.clone();
+        let project_path = project.path().to_path_buf();
+        let rotation = std::thread::spawn(move || {
+            let result = rotating_issuer.issue(&project_path, "pm-session");
+            result_sender
+                .send(result)
+                .expect("rotation result receiver");
+        });
+        let rotated = result_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("an acquired mutation lease must not block capability rotation")
+            .expect("rotated capability");
+        rotation.join().expect("rotation worker");
+
+        assert!(
+            issuer
+                .try_begin_current_grant_mutation(&original_grant)
+                .is_none(),
+            "rotation must reject a later lease for the stale generation"
+        );
+        let rotated_grant = issuer
+            .grant_for_test(&rotated.token)
+            .expect("rotated grant");
+        assert!(
+            issuer
+                .try_begin_current_grant_mutation(&rotated_grant)
+                .is_some(),
+            "the current generation remains eligible for a new mutation lease"
+        );
+
+        // The point-in-time lease remains owned by this already-authorized
+        // operation even though rotation has completed.
+        drop(lease);
+    }
+
+    #[test]
+    fn agent_capability_mutation_lease_does_not_block_revoke() {
+        let project = tempfile::tempdir().expect("project tempdir");
+        let issuer = AgentCapabilityIssuer::for_test(
+            "http://127.0.0.1:1/internal/hook-live",
+            "ws://127.0.0.1:1/ws",
+            "ws://127.0.0.1:2/internal/pane-ws",
+        );
+        let original = issuer
+            .issue(project.path(), "pm-session")
+            .expect("original capability");
+        let original_grant = issuer
+            .grant_for_test(&original.token)
+            .expect("original grant");
+        let lease = issuer
+            .try_begin_current_grant_mutation(&original_grant)
+            .expect("current generation lease");
+
+        let (result_sender, result_receiver) = std::sync::mpsc::channel();
+        let revoking_issuer = issuer.clone();
+        let token = original.token.clone();
+        let revocation = std::thread::spawn(move || {
+            result_sender
+                .send(revoking_issuer.revoke_token(&token))
+                .expect("revocation result receiver");
+        });
+        assert!(
+            result_receiver
+                .recv_timeout(Duration::from_secs(1))
+                .expect("an acquired mutation lease must not block capability revocation"),
+            "the current generation must be revoked"
+        );
+        revocation.join().expect("revocation worker");
+
+        assert!(
+            issuer
+                .try_begin_current_grant_mutation(&original_grant)
+                .is_none(),
+            "revocation must reject a later lease for the revoked generation"
+        );
+
+        // Revocation cannot retract the point-in-time lease already handed to
+        // the one physical mutation that owns it.
+        drop(lease);
+    }
+
+    #[test]
     fn agent_capability_registry_promotes_prepared_authority_without_rotating_bearer() {
         let project = tempfile::tempdir().expect("project tempdir");
         let registry = AgentCapabilityRegistry::default();
@@ -4171,7 +4702,20 @@ mod tests {
                     {
                         "id": "tab-owned",
                         "project_root": project.path(),
-                        "workspace": { "windows": [{ "id": "tab-owned::agent-1" }] }
+                        "workspace": { "windows": [
+                            {
+                                "id": "tab-owned::agent-1",
+                                "preset": "agent",
+                                "status": "running",
+                                "session_id": "target-session"
+                            },
+                            {
+                                "id": "tab-owned::shell-1",
+                                "preset": "shell",
+                                "status": "running",
+                                "session_id": "shell-session"
+                            }
+                        ] }
                     },
                     {
                         "id": "tab-foreign",
@@ -4254,6 +4798,42 @@ mod tests {
                 text: "hello".to_string(),
             })
             .is_none());
+        assert!(
+            matches!(
+                scope.filter_inbound(FrontendEvent::PmPaneSendInput {
+                    operation_id: "72fc3cd4-ad49-43e3-bf3d-d791357643a3".to_string(),
+                    window_id: "tab-owned::agent-1".to_string(),
+                    text: "supervise".to_string(),
+                }),
+                Some(super::AgentFrontendRequest::PmSendInput {
+                    window_id,
+                    text,
+                    ..
+                })
+                    if window_id == "tab-owned::agent-1" && text == "supervise"
+            ),
+            "the authenticated principal routes PM delivery without a payload Session claim"
+        );
+        assert!(
+            scope
+                .filter_inbound(FrontendEvent::PmPaneSendInput {
+                    operation_id: "72fc3cd4-ad49-43e3-bf3d-d791357643a3".to_string(),
+                    window_id: "tab-foreign::agent-2".to_string(),
+                    text: "must-not-cross-project".to_string(),
+                })
+                .is_none(),
+            "foreign targets must not reach the runtime target lookup"
+        );
+        assert!(
+            scope
+                .filter_inbound(FrontendEvent::PmPaneSendInput {
+                    operation_id: "72fc3cd4-ad49-43e3-bf3d-d791357643a3".to_string(),
+                    window_id: "tab-owned::shell-1".to_string(),
+                    text: "must-not-reach-shell".to_string(),
+                })
+                .is_none(),
+            "non-agent targets must not reach the runtime target lookup"
+        );
         assert!(scope
             .filter_inbound(FrontendEvent::TerminalInput {
                 id: "tab-owned::agent-1".to_string(),
@@ -4279,7 +4859,7 @@ mod tests {
             },
         )
         .expect("bound agent principal");
-        let bound_scope = super::AgentPaneSessionScope::new(super::AgentCapabilityGrant::new(
+        let mut bound_scope = super::AgentPaneSessionScope::new(super::AgentCapabilityGrant::new(
             "bound-capability".to_string(),
             bound_principal.clone(),
         ));
@@ -4571,7 +5151,12 @@ mod tests {
                         "tabs": [{
                             "id": "tab-owned",
                             "project_root": project.path(),
-                            "workspace": { "windows": [{ "id": window_id }] }
+                            "workspace": { "windows": [{
+                                "id": window_id,
+                                "preset": "agent",
+                                "status": "running",
+                                "session_id": "target-session"
+                            }] }
                         }]
                     }
                 })
@@ -4793,6 +5378,320 @@ mod tests {
                 .is_empty(),
             "a rotated correlated close must not enqueue AgentFrontend"
         );
+        server.shutdown();
+    }
+
+    #[test]
+    fn accepted_pm_send_returns_terminal_result_on_origin_socket_after_rotation() {
+        let runtime = Runtime::new().expect("tokio runtime");
+        let (proxy, events) = AppEventProxy::stub();
+        let clients = ClientHub::default();
+        let mut server = EmbeddedServer::start(
+            &runtime,
+            proxy,
+            clients.clone(),
+            Arc::new(RwLock::new(HashMap::new())),
+            AttachmentUploadStore::in_system_temp(),
+        )
+        .expect("embedded server");
+        let project = tempfile::tempdir().expect("project tempdir");
+        let issuer = server.agent_capability_issuer();
+        let original = issuer
+            .issue(project.path(), "pm-session")
+            .expect("PM capability");
+        let pane_url = issuer.agent_pane_websocket_url().to_string();
+        let window_id = "tab-owned::agent-1";
+
+        runtime.block_on(async {
+            let mut request = pane_url
+                .as_str()
+                .into_client_request()
+                .expect("agent pane WebSocket request");
+            request.headers_mut().insert(
+                AUTHORIZATION,
+                format!("Bearer {}", original.token)
+                    .parse()
+                    .expect("bearer header value"),
+            );
+            let (mut socket, _) = connect_async(request).await.expect("agent pane WebSocket");
+            let pane_queue = tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    let queue = clients
+                        .clients
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .values()
+                        .find(|registration| !registration.receives_broadcasts)
+                        .map(|registration| registration.queue.clone());
+                    if let Some(queue) = queue {
+                        break queue;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("pane client registration");
+            assert!(!pane_queue.enqueue(&PreparedOutbound {
+                payload: serde_json::json!({
+                    "kind": "workspace_state",
+                    "workspace": {
+                        "active_tab_id": "tab-owned",
+                        "recent_projects": [],
+                        "tabs": [{
+                            "id": "tab-owned",
+                            "project_root": project.path(),
+                            "workspace": { "windows": [{
+                                "id": window_id,
+                                "preset": "agent",
+                                "status": "running",
+                                "session_id": "target-session"
+                            }] }
+                        }]
+                    }
+                })
+                .to_string(),
+                kind: "workspace_state",
+                coalesce_key: None,
+                repair_pane_id: None,
+                class: QueueClass::IdempotentLatest,
+            }));
+            let _workspace = tokio::time::timeout(Duration::from_secs(1), socket.next())
+                .await
+                .expect("scoped workspace response")
+                .expect("workspace frame")
+                .expect("valid workspace frame");
+
+            socket
+                .send(WebSocketMessage::Text(
+                    serde_json::json!({
+                        "kind": "pm_pane_send_input",
+                        "operation_id": "72fc3cd4-ad49-43e3-bf3d-d791357643a3",
+                        "window_id": window_id,
+                        "text": "supervise now\r",
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .expect("send PM pane request");
+
+            let responder = tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    let dispatched = {
+                        let mut recorded = events
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        let position = recorded
+                            .iter()
+                            .position(|event| matches!(event, UserEvent::AgentFrontend { .. }));
+                        position.map(|position| recorded.remove(position))
+                    };
+                    if let Some(UserEvent::AgentFrontend {
+                        request:
+                            AgentFrontendRequest::PmSendInput {
+                                window_id: dispatched_window,
+                                responder: Some(responder),
+                                ..
+                            },
+                        ..
+                    }) = dispatched
+                    {
+                        assert_eq!(dispatched_window, window_id);
+                        break responder;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("PM send dispatch with direct responder");
+
+            issuer
+                .issue(project.path(), "pm-session")
+                .expect("rotate capability after acceptance");
+            tokio::time::sleep(Duration::from_millis(2_100)).await;
+            responder
+                .send(BackendEvent::PaneSendResult {
+                    ok: false,
+                    window_id: None,
+                    error: Some("capability changed before submit".to_string()),
+                })
+                .expect("origin socket is awaiting the terminal result");
+
+            let response = tokio::time::timeout(Duration::from_secs(1), socket.next())
+                .await
+                .expect("direct PM terminal result")
+                .expect("terminal result frame")
+                .expect("valid terminal result frame");
+            let WebSocketMessage::Text(response) = response else {
+                panic!("PM terminal result must be text");
+            };
+            let response: serde_json::Value =
+                serde_json::from_str(response.as_ref()).expect("terminal result JSON");
+            assert_eq!(response["kind"], "pm_message_send_result");
+            assert_eq!(
+                response["operation_id"],
+                "72fc3cd4-ad49-43e3-bf3d-d791357643a3"
+            );
+            assert_eq!(response["ok"], false);
+            assert_eq!(response["window_id"], window_id);
+            assert_eq!(response["verified"], false);
+            assert_eq!(response["error"], "capability changed before submit");
+            assert_eq!(
+                pane_queue.len(),
+                0,
+                "the accepted PM result must bypass ClientHub and its stale-grant filter"
+            );
+        });
+
+        server.shutdown();
+    }
+
+    #[test]
+    fn unauthorized_pm_targets_return_the_same_correlated_opaque_refusal() {
+        let runtime = Runtime::new().expect("tokio runtime");
+        let (proxy, events) = AppEventProxy::stub();
+        let clients = ClientHub::default();
+        let mut server = EmbeddedServer::start(
+            &runtime,
+            proxy,
+            clients.clone(),
+            Arc::new(RwLock::new(HashMap::new())),
+            AttachmentUploadStore::in_system_temp(),
+        )
+        .expect("embedded server");
+        let project = tempfile::tempdir().expect("project tempdir");
+        let issuer = server.agent_capability_issuer();
+        let target = issuer
+            .issue(project.path(), "pm-session")
+            .expect("PM capability");
+        let pane_url = issuer.agent_pane_websocket_url().to_string();
+        let operation_id = "72fc3cd4-ad49-43e3-bf3d-d791357643a3";
+
+        runtime.block_on(async {
+            let mut refusals = Vec::new();
+            for unauthorized_target in ["tab-foreign::agent-2", "tab-owned::shell-1"] {
+                let existing_client_ids = clients
+                    .clients
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let mut request = pane_url
+                    .as_str()
+                    .into_client_request()
+                    .expect("agent pane WebSocket request");
+                request.headers_mut().insert(
+                    AUTHORIZATION,
+                    format!("Bearer {}", target.token)
+                        .parse()
+                        .expect("bearer header value"),
+                );
+                let (mut socket, _) = connect_async(request).await.expect("agent pane WebSocket");
+                let pane_queue = tokio::time::timeout(Duration::from_secs(1), async {
+                    loop {
+                        let queue = clients
+                            .clients
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .iter()
+                            .find(|(client_id, registration)| {
+                                !existing_client_ids.contains(client_id)
+                                    && !registration.receives_broadcasts
+                            })
+                            .map(|(_, registration)| registration.queue.clone());
+                        if let Some(queue) = queue {
+                            break queue;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("pane client registration");
+                assert!(!pane_queue.enqueue(&PreparedOutbound {
+                    payload: serde_json::json!({
+                        "kind": "workspace_state",
+                        "workspace": {
+                            "active_tab_id": "tab-owned",
+                            "recent_projects": [],
+                            "tabs": [{
+                                "id": "tab-owned",
+                                "project_root": project.path(),
+                                "workspace": { "windows": [
+                                    {
+                                        "id": "tab-owned::agent-1",
+                                        "preset": "agent",
+                                        "status": "running",
+                                        "session_id": "target-session"
+                                    },
+                                    {
+                                        "id": "tab-owned::shell-1",
+                                        "preset": "shell",
+                                        "status": "running",
+                                        "session_id": "shell-session"
+                                    }
+                                ] }
+                            }]
+                        }
+                    })
+                    .to_string(),
+                    kind: "workspace_state",
+                    coalesce_key: None,
+                    repair_pane_id: None,
+                    class: QueueClass::IdempotentLatest,
+                }));
+                let _workspace = tokio::time::timeout(Duration::from_secs(1), socket.next())
+                    .await
+                    .expect("scoped workspace response")
+                    .expect("workspace frame")
+                    .expect("valid workspace frame");
+
+                socket
+                    .send(WebSocketMessage::Text(
+                        serde_json::json!({
+                            "kind": "pm_pane_send_input",
+                            "operation_id": operation_id,
+                            "window_id": unauthorized_target,
+                            "text": "must not dispatch\r",
+                        })
+                        .to_string()
+                        .into(),
+                    ))
+                    .await
+                    .expect("send unauthorized PM pane request");
+
+                let response = tokio::time::timeout(Duration::from_secs(1), socket.next())
+                    .await
+                    .expect("opaque PM refusal")
+                    .expect("terminal result frame")
+                    .expect("valid terminal result frame");
+                let WebSocketMessage::Text(response) = response else {
+                    panic!("PM terminal result must be text");
+                };
+                let response: serde_json::Value =
+                    serde_json::from_str(response.as_ref()).expect("terminal result JSON");
+                assert_eq!(response["kind"], "pm_message_send_result");
+                assert_eq!(response["operation_id"], operation_id);
+                assert_eq!(response["window_id"], unauthorized_target);
+                assert_eq!(response["ok"], false);
+                assert_eq!(response["verified"], false);
+                refusals.push(response["error"].clone());
+            }
+
+            assert_eq!(refusals[0], refusals[1]);
+            assert_eq!(
+                refusals[0],
+                "pm.message.send refused: target is not an authorized live agent pane"
+            );
+            assert!(
+                events
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .is_empty(),
+                "unauthorized targets must never reach AppRuntime"
+            );
+        });
+
         server.shutdown();
     }
 

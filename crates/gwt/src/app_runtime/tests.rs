@@ -70,8 +70,8 @@ use super::{
 };
 use crate::{
     combined_window_id, geometry_to_pty_size, same_worktree_path, AgentFrontendRequest,
-    AgentSelfCloseResponder, AgentSessionPrincipal, AttachmentUploadStore, PtyWriterRegistry,
-    UploadedAttachment,
+    AgentPmSendResponder, AgentSelfCloseResponder, AgentSessionPrincipal, AttachmentUploadStore,
+    PtyWriterRegistry, UploadedAttachment,
 };
 
 #[test]
@@ -3128,6 +3128,7 @@ fn sample_runtime_with_events(
         pending_pm_launches: HashMap::new(),
         pm_sessions: HashMap::new(),
         pm_wake_seen: HashMap::new(),
+        pending_pm_wake_deliveries: HashMap::new(),
         pending_startup_pm_tabs: Vec::new(),
         pending_launch_feedback_contexts: HashMap::new(),
         issue_monitor_launch_deliveries: HashMap::new(),
@@ -3169,6 +3170,7 @@ fn sample_runtime_with_events(
         issue_client_factory: super::default_issue_client_factory(),
         pending_update: None,
         pty_writers,
+        pm_submit_reservations: Arc::new(Mutex::new(HashMap::new())),
         attachment_uploads: AttachmentUploadStore::new(temp_root.join("attachment-uploads")),
         persist_dispatcher,
         file_tree_worktree_roots: HashMap::new(),
@@ -3377,6 +3379,54 @@ fn queued_agent_pane_request_rechecks_generation_before_runtime_dispatch() {
             .any(|event| matches!(&event.event, BackendEvent::WindowCanvasState { .. })),
         "the current observation grant must still receive its scoped snapshot"
     );
+}
+
+#[test]
+fn queued_pm_send_rotation_returns_a_terminal_origin_result() {
+    let temp = tempdir().expect("tempdir");
+    let project = temp.path().join("project");
+    fs::create_dir_all(&project).expect("project");
+    let (mut runtime, _) = sample_runtime_with_events(temp.path(), Vec::new(), None);
+    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
+        "http://127.0.0.1:43123/internal/hook-live",
+        "ws://127.0.0.1:43124/ws",
+        "ws://127.0.0.1:43123/internal/pane-ws",
+    );
+    runtime.agent_capability_issuer = Some(issuer.clone());
+    let original = issuer
+        .issue(&project, "pm-session")
+        .expect("original capability");
+    let queued_grant = issuer
+        .grant_for_test(&original.token)
+        .expect("queued authenticated grant");
+    issuer
+        .issue(&project, "pm-session")
+        .expect("rotate capability before tao dispatch");
+    let (responder, mut result) = AgentPmSendResponder::channel();
+
+    let outcome = runtime.handle_agent_frontend_event_if_current(
+        "pane-client".to_string(),
+        queued_grant,
+        AgentFrontendRequest::PmSendInput {
+            operation_id: "72fc3cd4-ad49-43e3-bf3d-d791357643a3".to_string(),
+            window_id: "tab-project::target".to_string(),
+            text: "supervise".to_string(),
+            responder: Some(responder),
+        },
+    );
+
+    assert!(matches!(
+        outcome,
+        super::AgentFrontendDispatchOutcome::Dispatched(events) if events.is_empty()
+    ));
+    assert!(matches!(
+        result.try_recv().expect("terminal origin result"),
+        BackendEvent::PaneSendResult {
+            ok: false,
+            error: Some(error),
+            ..
+        } if error.contains("capability changed")
+    ));
 }
 
 fn materialize_active_agent_pane_binding(
@@ -42923,6 +42973,19 @@ fn pm_crash_records_backoff_and_respawns() {
     runtime
         .active_agent_sessions
         .insert(window_id.clone(), active);
+    insert_test_pane_runtime(&mut runtime, &window_id);
+    let pm_pane = runtime
+        .runtimes
+        .get(&window_id)
+        .expect("PM runtime")
+        .pane
+        .clone();
+    runtime.register_pty_writer(&window_id, &pm_pane);
+    runtime
+        .pm_submit_reservations
+        .lock()
+        .expect("reservation registry")
+        .insert(window_id.clone(), "ambiguous-operation".to_string());
     let prefs_path = gwt::pm_registry::pm_prefs_path_for_repo_path(&repo);
     gwt::pm_registry::try_register_pm(
         &prefs_path,
@@ -42930,6 +42993,17 @@ fn pm_crash_records_backoff_and_respawns() {
         |_| false,
     )
     .expect("seed registration");
+    let loop_path = gwt::pm_registry::pm_loop_state_path_for_repo_path(&repo);
+    gwt::pm_registry::save_pm_loop_state(
+        &loop_path,
+        &gwt::pm_registry::PmLoopState {
+            pending_delivery_operation_id: Some("72fc3cd4-ad49-43e3-bf3d-d791357643a3".to_string()),
+            pending_delivery_window_id: Some(window_id.clone()),
+            pending_delivery_session_id: Some(session.id.clone()),
+            ..gwt::pm_registry::PmLoopState::default()
+        },
+    )
+    .expect("seed durable wake quarantine");
 
     runtime.handle_runtime_status(
         window_id.clone(),
@@ -42949,6 +43023,29 @@ fn pm_crash_records_backoff_and_respawns() {
         runtime.pending_pm_launches.len(),
         1,
         "immediate respawn resumes the PM conversation"
+    );
+    assert!(
+        !runtime
+            .pty_writers
+            .read()
+            .expect("PTY registry")
+            .contains_key(&window_id),
+        "a terminal runtime generation must not leave a stale PTY writer"
+    );
+    assert!(
+        !runtime
+            .pm_submit_reservations
+            .lock()
+            .expect("reservation registry")
+            .contains_key(&window_id),
+        "a crashed PM generation must clear its delivery quarantine before succession"
+    );
+    assert_eq!(
+        gwt::pm_registry::load_pm_loop_state(&loop_path)
+            .expect("cleared durable quarantine")
+            .pending_delivery_operation_id,
+        None,
+        "the PTY generation change must also clear its crash-surviving wake fence"
     );
 }
 
@@ -43449,6 +43546,16 @@ fn pm_wake_fixture(temp: &tempfile::TempDir) -> (PathBuf, AppRuntime, String) {
     runtime
         .active_agent_sessions
         .insert(other_window_id, other_session);
+    runtime
+        .tab_mut("tab-1")
+        .expect("fixture tab")
+        .workspace
+        .set_session_id("pm-window", Some("pm-session-live".to_string()));
+    runtime
+        .tab_mut("tab-1")
+        .expect("fixture tab")
+        .workspace
+        .set_session_id("other-window", Some("other-session".to_string()));
 
     let prefs_path = gwt::pm_registry::pm_prefs_path_for_repo_path(&repo);
     gwt::pm_registry::try_register_pm(
@@ -43472,6 +43579,8 @@ fn pm_wake_targets_only_the_registered_pm_pane_on_new_needs_human() {
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
+    let (proxy, recorded_events) = AppEventProxy::stub();
+    runtime.proxy = proxy;
 
     // Parked long ago: budget exhausted, last continuation stale.
     let loop_path = gwt::pm_registry::pm_loop_state_path_for_repo_path(&repo);
@@ -43516,13 +43625,97 @@ fn pm_wake_targets_only_the_registered_pm_pane_on_new_needs_human() {
         "the prompt must submit itself"
     );
 
-    let rearmed = gwt::pm_registry::load_pm_loop_state(&loop_path).expect("loop state");
+    let pending = gwt::pm_registry::load_pm_loop_state(&loop_path).expect("loop state");
     assert_eq!(
-        rearmed.consecutive_continuations, 0,
-        "a wake re-arms the parked loop budget"
+        pending.consecutive_continuations, 12,
+        "choosing a wake must not re-arm the budget before submit is verified"
+    );
+    assert_eq!(
+        pending.last_wake_at, None,
+        "choosing a wake must not stamp the wake clock before delivery"
+    );
+    assert!(
+        !runtime
+            .pm_wake_seen
+            .get(&repo)
+            .expect("baseline signal set")
+            .contains("needs_human:42"),
+        "the wake fingerprint remains unconsumed until delivery succeeds"
     );
 
-    // The same snapshot again is consumed: no second wake for old news.
+    let operation_id = decision
+        .prompt
+        .strip_suffix("\r")
+        .and_then(|prompt| prompt.rsplit_once("[gwt-delivery:").map(|(_, tail)| tail))
+        .and_then(|tail| tail.strip_suffix(']'))
+        .and_then(|tail| tail.split_once(':').map(|(operation_id, _)| operation_id))
+        .expect("canonical delivery marker");
+    runtime.handle_pm_wake_delivery_complete(
+        &repo,
+        operation_id,
+        super::PmWakeDeliveryResult::SubmitUnverified,
+    );
+    std::thread::sleep(Duration::from_millis(250));
+    assert!(
+        recorded_events.lock().expect("recorded events").is_empty(),
+        "failed semantic verification must park for the next supervision tick instead of starting an eager retry loop"
+    );
+    assert!(
+        !runtime
+            .pm_wake_seen
+            .get(&repo)
+            .expect("uncommitted signal set")
+            .contains("needs_human:42"),
+        "an unverified submit must not consume the wake fingerprint"
+    );
+    gwt::pm_registry::mutate_pm_loop_state(&loop_path, |state| {
+        state.last_delivery_operation_id = Some(operation_id.to_string());
+        state.last_delivery_submitted_at = Some("2026-08-08T01:01:00Z".to_string());
+    })
+    .expect("seed exact UserPromptSubmit acknowledgement");
+
+    assert!(runtime
+        .pm_wake_events(&repo, &now_with_escalation)
+        .is_empty());
+    wait_for_recorded_event("late wake acknowledgement", &recorded_events, |events| {
+        events.iter().any(|event| {
+            matches!(
+                event,
+                UserEvent::PmWakeDeliveryComplete {
+                    project_root,
+                    operation_id: completed_operation_id,
+                    result: super::PmWakeDeliveryResult::Verified,
+                } if project_root == &repo && completed_operation_id == operation_id
+            )
+        })
+    });
+    runtime.handle_pm_wake_delivery_complete(
+        &repo,
+        operation_id,
+        super::PmWakeDeliveryResult::Verified,
+    );
+    assert_eq!(
+        gwt::pm_registry::load_pm_loop_state(&loop_path)
+            .expect("verified loop state")
+            .last_wake_at
+            .as_deref(),
+        Some("2026-08-08T01:01:00Z"),
+        "only the exact UserPromptSubmit acknowledgement commits the wake clock"
+    );
+    assert!(
+        runtime
+            .pm_wake_seen
+            .get(&repo)
+            .expect("committed signal set")
+            .contains("needs_human:42"),
+        "only the verified completion consumes the wake fingerprint"
+    );
+    assert!(
+        !runtime.pending_pm_wake_deliveries.contains_key(&repo),
+        "verified completion clears the body reservation"
+    );
+
+    // The same snapshot is now durably accepted: no second wake for old news.
     assert!(
         runtime
             .pm_wake_decision_at(&repo, &now_with_escalation, "2026-08-08T02:00:00Z")
@@ -43824,17 +44017,260 @@ fn periodic_wake_rearms_a_quiet_pm_with_standing_work() {
     assert!(decision.prompt.contains("issue.monitor.status"));
     assert!(decision.prompt.ends_with('\r'));
 
-    let rearmed = gwt::pm_registry::load_pm_loop_state(&loop_path).expect("state");
-    assert_eq!(rearmed.consecutive_continuations, 0, "budget re-armed");
-    assert!(rearmed.last_wake_at.is_some(), "wake clock stamped");
+    let pending = gwt::pm_registry::load_pm_loop_state(&loop_path).expect("state");
+    assert_eq!(
+        pending.consecutive_continuations, 12,
+        "eligibility alone must not re-arm the budget"
+    );
+    assert_eq!(
+        pending.last_wake_at, None,
+        "the wake clock waits for exact submit verification"
+    );
 
-    // The wake clock suppresses an immediate repeat.
+    // The in-memory reservation suppresses an immediate repeat while the
+    // exact submit and durable clock commit are pending.
     assert!(
         runtime
             .pm_periodic_wake_decision_at(&repo, "2026-08-10T01:00:10Z")
             .is_none(),
         "one quiet window gets at most one injected prompt"
     );
+}
+
+#[test]
+fn periodic_wake_restart_quarantines_an_uncommitted_durable_delivery() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
+    let monitor_prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let mut monitor = gwt::IssueMonitorState::with_prefs(
+        gwt::IssueMonitorConfig::default(),
+        gwt::load_issue_monitor_prefs(&monitor_prefs_path).expect("prefs"),
+    );
+    gwt::scan_issue_monitor_candidates(
+        &mut monitor,
+        &[pm_wake_inbox_item(42, gwt::MonitorInboxState::Queued).issue],
+        "2026-08-10T00:00:00Z",
+    );
+    let loop_path = gwt::pm_registry::pm_loop_state_path_for_repo_path(&repo);
+    let operation_id = "72fc3cd4-ad49-43e3-bf3d-d791357643a3";
+    gwt::pm_registry::save_pm_loop_state(
+        &loop_path,
+        &gwt::pm_registry::PmLoopState {
+            consecutive_continuations: 12,
+            last_continued_at: Some("2026-08-10T00:00:00Z".to_string()),
+            pending_delivery_operation_id: Some(operation_id.to_string()),
+            pending_delivery_window_id: Some(pm_window_id),
+            pending_delivery_session_id: Some("pm-session-live".to_string()),
+            ..gwt::pm_registry::PmLoopState::default()
+        },
+    )
+    .expect("seed crash-surviving delivery reservation");
+
+    assert!(
+        runtime
+            .pm_periodic_wake_decision_for_monitor_at(
+                &repo,
+                &monitor,
+                "2026-08-10T01:00:00Z"
+            )
+            .is_none(),
+        "restart recovery must not append a second full wake body while the first delivery is ambiguous"
+    );
+    let persisted = gwt::pm_registry::load_pm_loop_state(&loop_path).expect("persisted fence");
+    assert_eq!(
+        persisted.pending_delivery_operation_id.as_deref(),
+        Some(operation_id)
+    );
+}
+
+#[test]
+fn periodic_wake_restart_commits_an_exact_ack_without_reinjecting_the_body() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
+    let monitor_prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let mut monitor = gwt::IssueMonitorState::with_prefs(
+        gwt::IssueMonitorConfig::default(),
+        gwt::load_issue_monitor_prefs(&monitor_prefs_path).expect("prefs"),
+    );
+    gwt::scan_issue_monitor_candidates(
+        &mut monitor,
+        &[pm_wake_inbox_item(42, gwt::MonitorInboxState::Queued).issue],
+        "2026-08-10T00:00:00Z",
+    );
+    let loop_path = gwt::pm_registry::pm_loop_state_path_for_repo_path(&repo);
+    let operation_id = "72fc3cd4-ad49-43e3-bf3d-d791357643a3";
+    gwt::pm_registry::save_pm_loop_state(
+        &loop_path,
+        &gwt::pm_registry::PmLoopState {
+            consecutive_continuations: 12,
+            last_continued_at: Some("2026-08-10T00:00:00Z".to_string()),
+            last_delivery_operation_id: Some(operation_id.to_string()),
+            last_delivery_submitted_at: Some("2026-08-10T00:59:59Z".to_string()),
+            pending_delivery_operation_id: Some(operation_id.to_string()),
+            pending_delivery_window_id: Some(pm_window_id),
+            pending_delivery_session_id: Some("pm-session-live".to_string()),
+            ..gwt::pm_registry::PmLoopState::default()
+        },
+    )
+    .expect("seed crash after exact acknowledgement");
+
+    assert!(runtime
+        .pm_periodic_wake_decision_for_monitor_at(&repo, &monitor, "2026-08-10T01:00:00Z")
+        .is_none());
+    let persisted = gwt::pm_registry::load_pm_loop_state(&loop_path).expect("reconciled state");
+    assert_eq!(persisted.pending_delivery_operation_id, None);
+    assert_eq!(
+        persisted.last_wake_at.as_deref(),
+        Some("2026-08-10T00:59:59Z")
+    );
+    assert_eq!(persisted.consecutive_continuations, 0);
+}
+
+#[test]
+fn fresh_runtime_first_pty_registration_clears_a_crash_surviving_wake_fence() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
+    let loop_path = gwt::pm_registry::pm_loop_state_path_for_repo_path(&repo);
+    gwt::pm_registry::save_pm_loop_state(
+        &loop_path,
+        &gwt::pm_registry::PmLoopState {
+            pending_delivery_operation_id: Some("72fc3cd4-ad49-43e3-bf3d-d791357643a3".to_string()),
+            pending_delivery_window_id: Some(pm_window_id.clone()),
+            pending_delivery_session_id: Some("pm-session-old".to_string()),
+            pending_delivery_body_sha256: Some(gwt::pm_registry::pm_delivery_prompt_sha256(
+                "old wake",
+            )),
+            ..gwt::pm_registry::PmLoopState::default()
+        },
+    )
+    .expect("seed old process fence");
+
+    insert_test_pane_runtime(&mut runtime, &pm_window_id);
+    let pane = runtime
+        .runtimes
+        .get(&pm_window_id)
+        .expect("fresh PM runtime")
+        .pane
+        .clone();
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    assert!(runtime
+        .pty_writers
+        .read()
+        .expect("fresh registry")
+        .is_empty());
+
+    runtime.register_pty_writer(&pm_window_id, &pane);
+
+    assert_eq!(
+        gwt::pm_registry::load_pm_loop_state(&loop_path)
+            .expect("tao has not touched durable state")
+            .pending_delivery_operation_id
+            .as_deref(),
+        Some("72fc3cd4-ad49-43e3-bf3d-d791357643a3"),
+        "PTY registration must return before cross-process wake reconciliation"
+    );
+    let task = tasks
+        .lock()
+        .expect("queued generation task")
+        .pop()
+        .expect("durable generation reconciliation task");
+    task();
+
+    let state = gwt::pm_registry::load_pm_loop_state(&loop_path).expect("reconciled fence");
+    assert_eq!(state.pending_delivery_operation_id, None);
+    assert_eq!(state.pending_delivery_body_sha256, None);
+}
+
+#[test]
+fn fresh_runtime_first_pty_registration_commits_a_verified_wake_before_clearing_its_fence() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
+    let operation_id = "72fc3cd4-ad49-43e3-bf3d-d791357643a4";
+    let body_sha256 = gwt::pm_registry::pm_delivery_prompt_sha256("verified old wake");
+    let loop_path = gwt::pm_registry::pm_loop_state_path_for_repo_path(&repo);
+    gwt::pm_registry::save_pm_loop_state(
+        &loop_path,
+        &gwt::pm_registry::PmLoopState {
+            consecutive_continuations: 12,
+            pending_delivery_operation_id: Some(operation_id.to_string()),
+            pending_delivery_window_id: Some(pm_window_id.clone()),
+            pending_delivery_session_id: Some("pm-session-live".to_string()),
+            pending_delivery_body_sha256: Some(body_sha256.clone()),
+            ..gwt::pm_registry::PmLoopState::default()
+        },
+    )
+    .expect("seed crash between durable receipt and wake-clock commit");
+    let receipt_path = gwt::pm_registry::pm_delivery_receipts_path_for_repo_path(&repo);
+    gwt::pm_registry::prepare_pm_delivery_receipt(
+        &receipt_path,
+        &gwt::pm_registry::PmDeliveryReceipt {
+            operation_id: operation_id.to_string(),
+            recorded_at: "2026-08-10T00:59:59Z".to_string(),
+            status: gwt::pm_registry::PmDeliveryReceiptStatus::Prepared,
+            principal_session_id: "pm-session-live".to_string(),
+            target_window_id: pm_window_id.clone(),
+            target_session_id: "pm-session-live".to_string(),
+            body_sha256: body_sha256.clone(),
+            error_code: None,
+        },
+    )
+    .expect("seed Prepared receipt");
+    gwt::pm_registry::finish_pm_delivery_receipt(
+        &receipt_path,
+        operation_id,
+        "pm-session-live",
+        &body_sha256,
+        gwt::pm_registry::PmDeliveryReceiptStatus::Verified,
+        None,
+    )
+    .expect("seed exact target acknowledgement");
+
+    insert_test_pane_runtime(&mut runtime, &pm_window_id);
+    let pane = runtime
+        .runtimes
+        .get(&pm_window_id)
+        .expect("fresh PM runtime")
+        .pane
+        .clone();
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    runtime.register_pty_writer(&pm_window_id, &pane);
+    let task = tasks
+        .lock()
+        .expect("queued generation task")
+        .pop()
+        .expect("durable generation reconciliation task");
+    task();
+
+    let state = gwt::pm_registry::load_pm_loop_state(&loop_path).expect("reconciled clock");
+    assert_eq!(state.pending_delivery_operation_id, None);
+    assert_eq!(
+        state.last_delivery_operation_id.as_deref(),
+        Some(operation_id)
+    );
+    assert!(state.last_wake_at.is_some());
+    assert_eq!(state.consecutive_continuations, 0);
 }
 
 #[test]
@@ -43846,6 +44282,16 @@ fn periodic_wake_uses_the_scheduled_snapshot_for_queue_only_work() {
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
+    insert_test_pane_runtime(&mut runtime, &pm_window_id);
+    let pm_pane = runtime
+        .runtimes
+        .get(&pm_window_id)
+        .expect("PM runtime")
+        .pane
+        .clone();
+    runtime.register_pty_writer(&pm_window_id, &pm_pane);
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
     let monitor_prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
     let mut monitor = gwt::IssueMonitorState::with_prefs(
         gwt::IssueMonitorConfig::default(),
@@ -43891,8 +44337,20 @@ fn periodic_wake_uses_the_scheduled_snapshot_for_queue_only_work() {
             .expect("completion wake state")
             .last_wake_at
             .as_deref(),
-        Some("2026-08-10T01:00:00Z"),
-        "completion injects one periodic wake for queue-only standing work"
+        None,
+        "queueing the periodic wake must not commit its clock before exact UserPromptSubmit"
+    );
+    assert!(
+        runtime.pending_pm_wake_deliveries.contains_key(&repo),
+        "the exact submit stays reserved while the queued worker is pending"
+    );
+    assert_eq!(
+        tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len(),
+        1,
+        "scheduled completion queues exactly one protected submit worker"
     );
     assert!(
         runtime
@@ -43911,7 +44369,17 @@ fn scheduled_completion_rearms_periodic_wake_for_needs_human_work() {
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-    let (repo, mut runtime, _pm_window_id) = pm_wake_fixture(&temp);
+    let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
+    insert_test_pane_runtime(&mut runtime, &pm_window_id);
+    let pm_pane = runtime
+        .runtimes
+        .get(&pm_window_id)
+        .expect("PM runtime")
+        .pane
+        .clone();
+    runtime.register_pty_writer(&pm_window_id, &pm_pane);
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
     let mut monitor = gwt::IssueMonitorState::with_prefs(
         gwt::IssueMonitorConfig::default(),
@@ -43957,7 +44425,16 @@ fn scheduled_completion_rearms_periodic_wake_for_needs_human_work() {
             .expect("completion wake state")
             .last_wake_at
             .as_deref(),
-        Some("2026-08-10T01:00:00Z")
+        None,
+        "NeedsHuman completion must wait for exact submit acknowledgement"
+    );
+    assert!(runtime.pending_pm_wake_deliveries.contains_key(&repo));
+    assert_eq!(
+        tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len(),
+        1
     );
 }
 
@@ -44391,7 +44868,15 @@ fn scheduled_scan_defer_still_rearms_periodic_wake_for_durable_standing_work() {
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-    let (repo, mut runtime, _pm_window_id) = pm_wake_fixture(&temp);
+    let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
+    insert_test_pane_runtime(&mut runtime, &pm_window_id);
+    let pm_pane = runtime
+        .runtimes
+        .get(&pm_window_id)
+        .expect("PM runtime")
+        .pane
+        .clone();
+    runtime.register_pty_writer(&pm_window_id, &pm_pane);
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
     let mut monitor = gwt::IssueMonitorState::with_prefs(
         gwt::IssueMonitorConfig {
@@ -44432,11 +44917,100 @@ fn scheduled_scan_defer_still_rearms_periodic_wake_for_durable_standing_work() {
     assert!(events.is_empty(), "defer adds no observer snapshot");
     assert_eq!(
         gwt::pm_registry::load_pm_loop_state(&loop_path)
-            .expect("rearmed loop")
+            .expect("pending loop")
             .last_wake_at
             .as_deref(),
-        Some("2026-08-10T01:00:00Z"),
-        "standing-work wake is independent of scan authority"
+        None,
+        "the scheduled path must not stamp the clock before UserPromptSubmit"
+    );
+    assert!(
+        runtime.pending_pm_wake_deliveries.contains_key(&repo),
+        "standing-work wake is independent of scan authority and remains reserved until verified"
+    );
+    assert!(
+        gwt::pm_registry::load_pm_loop_state(&loop_path)
+            .expect("durable pending wake")
+            .pending_delivery_operation_id
+            .is_some(),
+        "the reservation survives a process crash without persisting the prompt body"
+    );
+}
+
+#[test]
+fn scheduled_scan_reload_error_rearms_periodic_wake_from_the_worker_snapshot() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
+    insert_test_pane_runtime(&mut runtime, &pm_window_id);
+    let pm_pane = runtime
+        .runtimes
+        .get(&pm_window_id)
+        .expect("PM runtime")
+        .pane
+        .clone();
+    runtime.register_pty_writer(&pm_window_id, &pm_pane);
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let mut monitor = gwt::IssueMonitorState::with_prefs(
+        gwt::IssueMonitorConfig {
+            enabled: true,
+            max_active: 2,
+            ..gwt::IssueMonitorConfig::default()
+        },
+        gwt::load_issue_monitor_prefs(&prefs_path).expect("prefs"),
+    );
+    gwt::scan_issue_monitor_candidates(
+        &mut monitor,
+        &[pm_wake_inbox_item(42, gwt::MonitorInboxState::Queued).issue],
+        "2026-08-10T00:00:00Z",
+    );
+    monitor.complete_active_launch(42, "tab-1::other-window");
+    let loop_path = gwt::pm_registry::pm_loop_state_path_for_repo_path(&repo);
+    gwt::pm_registry::save_pm_loop_state(
+        &loop_path,
+        &gwt::pm_registry::PmLoopState {
+            consecutive_continuations: 12,
+            last_continued_at: Some("2026-08-10T00:00:00Z".to_string()),
+            ..gwt::pm_registry::PmLoopState::default()
+        },
+    )
+    .expect("quiet loop");
+    fs::write(&prefs_path, b"{").expect("corrupt prefs after worker completion");
+    runtime
+        .issue_monitor_scheduled_scans_in_flight
+        .insert(prefs_path.clone());
+
+    let events = runtime.issue_monitor_scheduled_scan_complete_events(
+        &repo,
+        &prefs_path,
+        "2026-08-10T01:00:00Z",
+        Ok(ScheduledIssueMonitorScanOutcome::Applied(Box::new(monitor))),
+    );
+
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::IssueMonitorToast { level, .. } if level == "error"
+    )));
+    assert!(runtime.pending_pm_wake_deliveries.contains_key(&repo));
+    assert_eq!(
+        tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len(),
+        1,
+        "a malformed disk snapshot must not discard the worker's standing-work wake"
+    );
+    assert_eq!(
+        gwt::pm_registry::load_pm_loop_state(&loop_path)
+            .expect("queued loop")
+            .last_wake_at,
+        None,
+        "the restored #3505 fallback must still wait for exact submit acknowledgement"
     );
 }
 
@@ -44605,8 +45179,23 @@ fn pm_pane_send_gate_refuses_everyone_but_the_live_registered_pm() {
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-    let (_repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
+    let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
     let target_window = "tab-1::other-window".to_string();
+    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
+        "http://127.0.0.1:43123/internal/hook-live",
+        "ws://127.0.0.1:43124/ws",
+        "ws://127.0.0.1:43123/internal/pane-ws",
+    );
+    let foreign_target = issuer
+        .issue(&repo, "other-session")
+        .expect("foreign capability");
+    let foreign_grant = issuer
+        .grant_for_test(&foreign_target.token)
+        .expect("foreign grant");
+    let pm_target = issuer
+        .issue(&repo, "pm-session-live")
+        .expect("PM capability");
+    let pm_grant = issuer.grant_for_test(&pm_target.token).expect("PM grant");
 
     let refusal_of = |events: &[OutboundEvent]| -> String {
         events
@@ -44624,11 +45213,14 @@ fn pm_pane_send_gate_refuses_everyone_but_the_live_registered_pm() {
 
     // A non-PM session is refused: the self-only world stays intact and the
     // privileged path does not open for it.
-    let events = runtime.pm_pane_send_input_events(
+    let events = runtime.authenticated_pm_pane_send_input_events(
+        &issuer,
         "client-1".to_string(),
-        "other-session",
+        foreign_grant,
+        "72fc3cd4-ad49-43e3-bf3d-d791357643a3",
         &target_window,
         "hello\r",
+        None,
     );
     assert!(
         refusal_of(&events).contains("not the registered PM"),
@@ -44636,22 +45228,28 @@ fn pm_pane_send_gate_refuses_everyone_but_the_live_registered_pm() {
     );
 
     // An unknown window is refused before any principal work.
-    let events = runtime.pm_pane_send_input_events(
+    let events = runtime.authenticated_pm_pane_send_input_events(
+        &issuer,
         "client-1".to_string(),
-        "pm-session-live",
+        pm_grant.clone(),
+        "72fc3cd4-ad49-43e3-bf3d-d791357643a4",
         "tab-9::ghost",
         "hello\r",
+        None,
     );
     assert!(refusal_of(&events).contains("unknown pane"));
 
     // The live registered PM passes the gate; with no PTY runtime in the
     // harness the write itself reports the missing runtime, which proves the
     // authorized injection path was reached (not a principal refusal).
-    let events = runtime.pm_pane_send_input_events(
+    let events = runtime.authenticated_pm_pane_send_input_events(
+        &issuer,
         "client-1".to_string(),
-        "pm-session-live",
+        pm_grant.clone(),
+        "72fc3cd4-ad49-43e3-bf3d-d791357643a5",
         &target_window,
         "hello\r",
+        None,
     );
     assert!(
         refusal_of(&events).contains("no live runtime"),
@@ -44660,14 +45258,735 @@ fn pm_pane_send_gate_refuses_everyone_but_the_live_registered_pm() {
 
     // A stale registration (PM pane gone) is refused at the liveness check.
     runtime.active_agent_sessions.remove(&pm_window_id);
-    let events = runtime.pm_pane_send_input_events(
+    let events = runtime.authenticated_pm_pane_send_input_events(
+        &issuer,
         "client-1".to_string(),
-        "pm-session-live",
+        pm_grant,
+        "72fc3cd4-ad49-43e3-bf3d-d791357643a6",
         &target_window,
         "hello\r",
+        None,
     );
     assert!(
         refusal_of(&events).contains("no live pane"),
         "a stale PM registration must not deliver"
     );
+}
+
+/// FR-111 target authority is narrower than project membership: privileged
+/// delivery must never turn a same-project Shell into a command-execution
+/// surface, and a stopped agent must not remain reachable through a stale PTY
+/// registry entry.
+#[test]
+fn pm_pane_send_refuses_shell_and_stopped_agent_targets() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, _pm_window_id) = pm_wake_fixture(&temp);
+    let target_window = "tab-1::other-window";
+    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
+        "http://127.0.0.1:43123/internal/hook-live",
+        "ws://127.0.0.1:43124/ws",
+        "ws://127.0.0.1:43123/internal/pane-ws",
+    );
+    let capability = issuer
+        .issue(&repo, "pm-session-live")
+        .expect("PM capability");
+    let grant = issuer.grant_for_test(&capability.token).expect("PM grant");
+    let refusal = |events: &[OutboundEvent]| {
+        events
+            .iter()
+            .find_map(|event| match &event.event {
+                BackendEvent::PaneSendResult {
+                    ok: false,
+                    error: Some(error),
+                    ..
+                } => Some(error.clone()),
+                _ => None,
+            })
+            .expect("typed refusal")
+    };
+
+    let mut persisted = runtime
+        .tab("tab-1")
+        .expect("fixture tab")
+        .workspace
+        .persistable_state();
+    persisted
+        .windows
+        .iter_mut()
+        .find(|window| window.id == "other-window")
+        .expect("target window")
+        .preset = WindowPreset::Shell;
+    runtime.tab_mut("tab-1").expect("fixture tab").workspace =
+        WindowCanvasState::from_persisted(persisted);
+
+    let shell = runtime.authenticated_pm_pane_send_input_events(
+        &issuer,
+        "client-shell".to_string(),
+        grant.clone(),
+        "72fc3cd4-ad49-43e3-bf3d-d791357643aa",
+        target_window,
+        "echo privileged\r",
+        None,
+    );
+    assert!(
+        refusal(&shell).contains("live agent pane"),
+        "a Shell target must be rejected before PTY lookup: {shell:?}"
+    );
+
+    let mut persisted = runtime
+        .tab("tab-1")
+        .expect("fixture tab")
+        .workspace
+        .persistable_state();
+    let target = persisted
+        .windows
+        .iter_mut()
+        .find(|window| window.id == "other-window")
+        .expect("target window");
+    target.preset = WindowPreset::Agent;
+    target.status = WindowProcessStatus::Stopped;
+    runtime.tab_mut("tab-1").expect("fixture tab").workspace =
+        WindowCanvasState::from_persisted(persisted);
+
+    let stopped = runtime.authenticated_pm_pane_send_input_events(
+        &issuer,
+        "client-stopped".to_string(),
+        grant,
+        "72fc3cd4-ad49-43e3-bf3d-d791357643ab",
+        target_window,
+        "resume privileged\r",
+        None,
+    );
+    assert!(
+        refusal(&stopped).contains("live agent pane"),
+        "a stopped agent target must be rejected before stale PTY lookup: {stopped:?}"
+    );
+}
+
+/// FR-111 hardening: capability authority is checked for every physical PTY
+/// mutation. Rotating the bearer after the body write but before the delayed
+/// submit must refuse the CR, report failure asynchronously, and never treat
+/// the stale delivery as complete.
+#[test]
+fn pm_pane_send_revalidates_capability_before_the_delayed_submit() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, _pm_window_id) = pm_wake_fixture(&temp);
+    let (proxy, recorded_events) = AppEventProxy::stub();
+    runtime.proxy = proxy;
+    let target_window = "tab-1::other-window".to_string();
+    insert_test_pane_runtime(&mut runtime, &target_window);
+    let target_pane = runtime
+        .runtimes
+        .get(&target_window)
+        .expect("target runtime")
+        .pane
+        .clone();
+    runtime.register_pty_writer(&target_window, &target_pane);
+
+    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
+        "http://127.0.0.1:43123/internal/hook-live",
+        "ws://127.0.0.1:43124/ws",
+        "ws://127.0.0.1:43123/internal/pane-ws",
+    );
+    let original = issuer
+        .issue(&repo, "pm-session-live")
+        .expect("PM capability");
+    let grant = issuer.grant_for_test(&original.token).expect("PM grant");
+    let rotating_issuer = issuer.clone();
+    let rotating_repo = repo.clone();
+    super::pm::set_pm_pane_after_body_hook_for_test(move || {
+        rotating_issuer
+            .issue(&rotating_repo, "pm-session-live")
+            .expect("rotate PM capability after body");
+    });
+
+    let immediate = runtime.authenticated_pm_pane_send_input_events(
+        &issuer,
+        "client-1".to_string(),
+        grant,
+        "72fc3cd4-ad49-43e3-bf3d-d791357643a7",
+        &target_window,
+        "supervise now\r",
+        None,
+    );
+    assert!(
+        immediate.is_empty(),
+        "an accepted delivery completes on the worker: {immediate:?}"
+    );
+    wait_for_recorded_event("stale PM submit refusal", &recorded_events, |events| {
+        events.iter().any(|event| {
+            matches!(
+                event,
+                UserEvent::Dispatch(dispatched)
+                    if dispatched.iter().any(|outbound| matches!(
+                        &outbound.event,
+                        BackendEvent::PaneSendResult {
+                            ok: false,
+                            window_id: None,
+                            error: Some(error),
+                        } if error.contains("capability changed")
+                    ))
+            )
+        })
+    });
+}
+
+/// A successful PTY write is not a delivery acknowledgement. The privileged
+/// operation is Verified only when the exact target agent's UserPromptSubmit
+/// hook records the correlated operation and body hash.
+#[test]
+fn pm_pane_send_does_not_report_success_without_exact_target_ack() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, _pm_window_id) = pm_wake_fixture(&temp);
+    let (proxy, recorded_events) = AppEventProxy::stub();
+    runtime.proxy = proxy;
+    let target_window = "tab-1::other-window".to_string();
+    insert_test_pane_runtime(&mut runtime, &target_window);
+    let target_pane = runtime
+        .runtimes
+        .get(&target_window)
+        .expect("target runtime")
+        .pane
+        .clone();
+    runtime.register_pty_writer(&target_window, &target_pane);
+    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
+        "http://127.0.0.1:43123/internal/hook-live",
+        "ws://127.0.0.1:43124/ws",
+        "ws://127.0.0.1:43123/internal/pane-ws",
+    );
+    let capability = issuer
+        .issue(&repo, "pm-session-live")
+        .expect("PM capability");
+    let grant = issuer.grant_for_test(&capability.token).expect("PM grant");
+
+    assert!(runtime
+        .authenticated_pm_pane_send_input_events(
+            &issuer,
+            "client-unverified".to_string(),
+            grant,
+            "72fc3cd4-ad49-43e3-bf3d-d791357643ac",
+            &target_window,
+            "verify this message\r",
+            None,
+        )
+        .is_empty());
+
+    wait_for_recorded_event("unverified PM submit result", &recorded_events, |events| {
+        events.iter().any(|event| {
+            matches!(
+                event,
+                UserEvent::Dispatch(dispatched)
+                    if dispatched.iter().any(|outbound| matches!(
+                        &outbound.event,
+                        BackendEvent::PaneSendResult {
+                            ok: false,
+                            window_id: None,
+                            error: Some(error),
+                        } if error.contains("not verified")
+                    ))
+            )
+        })
+    });
+}
+
+/// The server receipt is the write-ahead boundary. If Prepared cannot be
+/// durably committed, no prompt byte may reach the target PTY.
+#[test]
+fn pm_pane_send_receipt_failure_prevents_the_body_write() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, _pm_window_id) = pm_wake_fixture(&temp);
+    let (proxy, recorded_events) = AppEventProxy::stub();
+    runtime.proxy = proxy;
+    let target_window = "tab-1::other-window".to_string();
+    insert_test_pane_runtime(&mut runtime, &target_window);
+    let target_pane = runtime
+        .runtimes
+        .get(&target_window)
+        .expect("target runtime")
+        .pane
+        .clone();
+    runtime.register_pty_writer(&target_window, &target_pane);
+    let receipt_path = gwt::pm_registry::pm_delivery_receipts_path_for_repo_path(&repo);
+    fs::create_dir_all(&receipt_path).expect("make receipt path unwritable as a file");
+    let (body_tx, body_rx) = mpsc::sync_channel(1);
+    super::pm::set_pm_pane_after_body_hook_for_test(move || {
+        body_tx.send(()).expect("record unexpected body write");
+    });
+    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
+        "http://127.0.0.1:43123/internal/hook-live",
+        "ws://127.0.0.1:43124/ws",
+        "ws://127.0.0.1:43123/internal/pane-ws",
+    );
+    let capability = issuer
+        .issue(&repo, "pm-session-live")
+        .expect("PM capability");
+    let grant = issuer.grant_for_test(&capability.token).expect("PM grant");
+
+    assert!(runtime
+        .authenticated_pm_pane_send_input_events(
+            &issuer,
+            "client-audit".to_string(),
+            grant,
+            "72fc3cd4-ad49-43e3-bf3d-d791357643ad",
+            &target_window,
+            "must remain unstaged\r",
+            None,
+        )
+        .is_empty());
+
+    wait_for_recorded_event("receipt refusal", &recorded_events, |events| {
+        events.iter().any(|event| {
+            matches!(
+                event,
+                UserEvent::Dispatch(dispatched)
+                    if dispatched.iter().any(|outbound| matches!(
+                        &outbound.event,
+                        BackendEvent::PaneSendResult {
+                            ok: false,
+                            window_id: None,
+                            error: Some(error),
+                        } if error.contains("receipt")
+                    ))
+            )
+        })
+    });
+    assert!(
+        body_rx.recv_timeout(Duration::from_millis(100)).is_err(),
+        "the PTY body write must be downstream of the durable Prepared receipt"
+    );
+    super::pm::clear_pm_pane_after_body_hook_for_test();
+}
+
+/// A crash after the write-ahead receipt may have staged the body even when
+/// no terminal row was persisted. Replaying the same operation must close
+/// that open receipt as Ambiguous without writing the body again.
+#[test]
+fn pm_pane_send_replay_terminalizes_an_open_prepared_receipt_without_rewriting() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, _pm_window_id) = pm_wake_fixture(&temp);
+    let (proxy, _recorded_events) = AppEventProxy::stub();
+    runtime.proxy = proxy;
+    let target_window = "tab-1::other-window".to_string();
+    let operation_id = "72fc3cd4-ad49-43e3-bf3d-d791357643af";
+    insert_test_pane_runtime(&mut runtime, &target_window);
+    let target_pane = runtime
+        .runtimes
+        .get(&target_window)
+        .expect("target runtime")
+        .pane
+        .clone();
+    runtime.register_pty_writer(&target_window, &target_pane);
+    let receipt_path = gwt::pm_registry::pm_delivery_receipts_path_for_repo_path(&repo);
+    gwt::pm_registry::prepare_pm_delivery_receipt(
+        &receipt_path,
+        &gwt::pm_registry::PmDeliveryReceipt {
+            operation_id: operation_id.to_string(),
+            recorded_at: "2026-08-11T00:00:00Z".to_string(),
+            status: gwt::pm_registry::PmDeliveryReceiptStatus::Prepared,
+            principal_session_id: "pm-session-live".to_string(),
+            target_window_id: target_window.clone(),
+            target_session_id: "other-session".to_string(),
+            body_sha256: gwt::pm_registry::pm_delivery_prompt_sha256("must not be rewritten"),
+            error_code: None,
+        },
+    )
+    .expect("seed open Prepared receipt");
+    let (body_tx, body_rx) = mpsc::sync_channel(1);
+    super::pm::set_pm_pane_after_body_hook_for_test(move || {
+        body_tx.send(()).expect("record unexpected replay write");
+    });
+    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
+        "http://127.0.0.1:43123/internal/hook-live",
+        "ws://127.0.0.1:43124/ws",
+        "ws://127.0.0.1:43123/internal/pane-ws",
+    );
+    let capability = issuer
+        .issue(&repo, "pm-session-live")
+        .expect("PM capability");
+    let grant = issuer.grant_for_test(&capability.token).expect("PM grant");
+
+    let replay = runtime.authenticated_pm_pane_send_input_events(
+        &issuer,
+        "client-replay".to_string(),
+        grant,
+        operation_id,
+        &target_window,
+        "must not be rewritten\r",
+        None,
+    );
+    assert!(replay.iter().any(|outbound| matches!(
+        &outbound.event,
+        BackendEvent::PaneSendResult {
+            ok: false,
+            error: Some(error),
+            ..
+        } if error.contains("may already have staged")
+    )));
+    assert!(
+        body_rx.recv_timeout(Duration::from_millis(100)).is_err(),
+        "a replayed Prepared operation must never write the prompt body again"
+    );
+    assert_eq!(
+        gwt::pm_registry::load_pm_delivery_receipts(&receipt_path)
+            .expect("delivery receipts")
+            .iter()
+            .filter(|receipt| receipt.operation_id == operation_id)
+            .map(|receipt| receipt.status)
+            .collect::<Vec<_>>(),
+        vec![
+            gwt::pm_registry::PmDeliveryReceiptStatus::Prepared,
+            gwt::pm_registry::PmDeliveryReceiptStatus::Ambiguous,
+        ]
+    );
+    super::pm::clear_pm_pane_after_body_hook_for_test();
+}
+
+#[test]
+fn pm_pane_send_verified_replay_refuses_a_different_target_window() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, _pm_window_id) = pm_wake_fixture(&temp);
+    let operation_id = "72fc3cd4-ad49-43e3-bf3d-d791357643b0";
+    let body_sha256 = gwt::pm_registry::pm_delivery_prompt_sha256("exact target only");
+    let receipt_path = gwt::pm_registry::pm_delivery_receipts_path_for_repo_path(&repo);
+    gwt::pm_registry::prepare_pm_delivery_receipt(
+        &receipt_path,
+        &gwt::pm_registry::PmDeliveryReceipt {
+            operation_id: operation_id.to_string(),
+            recorded_at: "2026-08-11T00:00:00Z".to_string(),
+            status: gwt::pm_registry::PmDeliveryReceiptStatus::Prepared,
+            principal_session_id: "pm-session-live".to_string(),
+            target_window_id: "tab-1::pm-window".to_string(),
+            target_session_id: "pm-session-live".to_string(),
+            body_sha256: body_sha256.clone(),
+            error_code: None,
+        },
+    )
+    .expect("seed Prepared receipt");
+    gwt::pm_registry::finish_pm_delivery_receipt(
+        &receipt_path,
+        operation_id,
+        "pm-session-live",
+        &body_sha256,
+        gwt::pm_registry::PmDeliveryReceiptStatus::Verified,
+        None,
+    )
+    .expect("seed Verified receipt for pane A");
+    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
+        "http://127.0.0.1:43123/internal/hook-live",
+        "ws://127.0.0.1:43124/ws",
+        "ws://127.0.0.1:43123/internal/pane-ws",
+    );
+    let capability = issuer
+        .issue(&repo, "pm-session-live")
+        .expect("PM capability");
+    let grant = issuer.grant_for_test(&capability.token).expect("PM grant");
+
+    let replay = runtime.authenticated_pm_pane_send_input_events(
+        &issuer,
+        "client-replay-target".to_string(),
+        grant,
+        operation_id,
+        "tab-1::other-window",
+        "exact target only\r",
+        None,
+    );
+
+    assert!(replay.iter().any(|outbound| matches!(
+        &outbound.event,
+        BackendEvent::PaneSendResult {
+            ok: false,
+            error: Some(error),
+            ..
+        } if error.contains("identity conflicts")
+    )));
+}
+
+/// Durable replay touches a cross-process receipt lock and can repair an open
+/// terminal state, so production must do it on the blocking worker rather
+/// than the tao dispatcher. A late Verified replay also owns the right to
+/// release the exact operation's conservative pane quarantine.
+#[test]
+fn pm_pane_send_verified_replay_runs_off_tao_and_releases_its_reservation() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, _pm_window_id) = pm_wake_fixture(&temp);
+    let target_window = "tab-1::other-window".to_string();
+    let operation_id = "72fc3cd4-ad49-43e3-bf3d-d791357643b1";
+    let body_sha256 = gwt::pm_registry::pm_delivery_prompt_sha256("late verified body");
+    let receipt_path = gwt::pm_registry::pm_delivery_receipts_path_for_repo_path(&repo);
+    gwt::pm_registry::prepare_pm_delivery_receipt(
+        &receipt_path,
+        &gwt::pm_registry::PmDeliveryReceipt {
+            operation_id: operation_id.to_string(),
+            recorded_at: "2026-08-11T00:00:00Z".to_string(),
+            status: gwt::pm_registry::PmDeliveryReceiptStatus::Prepared,
+            principal_session_id: "pm-session-live".to_string(),
+            target_window_id: target_window.clone(),
+            target_session_id: "other-session".to_string(),
+            body_sha256: body_sha256.clone(),
+            error_code: None,
+        },
+    )
+    .expect("seed Prepared receipt");
+    gwt::pm_registry::finish_pm_delivery_receipt(
+        &receipt_path,
+        operation_id,
+        "other-session",
+        &body_sha256,
+        gwt::pm_registry::PmDeliveryReceiptStatus::Verified,
+        None,
+    )
+    .expect("seed late Verified receipt");
+    runtime
+        .pm_submit_reservations
+        .lock()
+        .expect("reservation registry")
+        .insert(target_window.clone(), operation_id.to_string());
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
+        "http://127.0.0.1:43123/internal/hook-live",
+        "ws://127.0.0.1:43124/ws",
+        "ws://127.0.0.1:43123/internal/pane-ws",
+    );
+    let capability = issuer
+        .issue(&repo, "pm-session-live")
+        .expect("PM capability");
+    let grant = issuer.grant_for_test(&capability.token).expect("PM grant");
+    let (responder, mut result) = AgentPmSendResponder::channel();
+
+    assert!(runtime
+        .authenticated_pm_pane_send_input_events(
+            &issuer,
+            "client-replay-worker".to_string(),
+            grant,
+            operation_id,
+            &target_window,
+            "late verified body\r",
+            Some(responder),
+        )
+        .is_empty());
+    assert!(
+        result.try_recv().is_err(),
+        "tao must return before durable receipt replay"
+    );
+    let task = tasks
+        .lock()
+        .expect("queued tasks")
+        .pop()
+        .expect("replay task");
+    task();
+    assert!(matches!(
+        result.try_recv().expect("terminal replay result"),
+        BackendEvent::PaneSendResult {
+            ok: true,
+            window_id: None,
+            error: None,
+        }
+    ));
+    assert!(
+        !runtime
+            .pm_submit_reservations
+            .lock()
+            .expect("reservation registry")
+            .contains_key(&target_window),
+        "Verified replay must release the exact late-ACK quarantine"
+    );
+}
+
+/// An exact target-hook acknowledgement is the only success signal. The
+/// worker must observe the correlated terminal receipt after CR submission
+/// and report Verified exactly once.
+#[test]
+fn pm_pane_send_reports_success_after_exact_target_ack() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, _pm_window_id) = pm_wake_fixture(&temp);
+    let (proxy, recorded_events) = AppEventProxy::stub();
+    runtime.proxy = proxy;
+    let target_window = "tab-1::other-window".to_string();
+    insert_test_pane_runtime(&mut runtime, &target_window);
+    let target_pane = runtime
+        .runtimes
+        .get(&target_window)
+        .expect("target runtime")
+        .pane
+        .clone();
+    runtime.register_pty_writer(&target_window, &target_pane);
+    let operation_id = "72fc3cd4-ad49-43e3-bf3d-d791357643ae";
+    let receipt_path = gwt::pm_registry::pm_delivery_receipts_path_for_repo_path(&repo);
+    let receipt_path_for_ack = receipt_path.clone();
+    super::pm::set_pm_pane_after_body_hook_for_test(move || {
+        let operation_id = operation_id.to_string();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(450));
+            gwt::pm_registry::finish_pm_delivery_receipt(
+                &receipt_path_for_ack,
+                &operation_id,
+                "other-session",
+                &gwt::pm_registry::pm_delivery_prompt_sha256("verify this exact body"),
+                gwt::pm_registry::PmDeliveryReceiptStatus::Verified,
+                None,
+            )
+            .expect("target hook acknowledgement");
+        });
+    });
+    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
+        "http://127.0.0.1:43123/internal/hook-live",
+        "ws://127.0.0.1:43124/ws",
+        "ws://127.0.0.1:43123/internal/pane-ws",
+    );
+    let capability = issuer
+        .issue(&repo, "pm-session-live")
+        .expect("PM capability");
+    let grant = issuer.grant_for_test(&capability.token).expect("PM grant");
+
+    assert!(runtime
+        .authenticated_pm_pane_send_input_events(
+            &issuer,
+            "client-verified".to_string(),
+            grant,
+            operation_id,
+            &target_window,
+            "verify this exact body\r",
+            None,
+        )
+        .is_empty());
+
+    wait_for_recorded_event("verified PM submit result", &recorded_events, |events| {
+        events.iter().any(|event| {
+            matches!(
+                event,
+                UserEvent::Dispatch(dispatched)
+                    if dispatched.iter().any(|outbound| matches!(
+                        &outbound.event,
+                        BackendEvent::PaneSendResult {
+                            ok: true,
+                            window_id: None,
+                            error: None,
+                        }
+                    ))
+            )
+        })
+    });
+    let receipts =
+        gwt::pm_registry::load_pm_delivery_receipts(&receipt_path).expect("delivery receipts");
+    assert_eq!(
+        receipts
+            .iter()
+            .filter(|receipt| receipt.operation_id == operation_id)
+            .map(|receipt| receipt.status)
+            .collect::<Vec<_>>(),
+        vec![
+            gwt::pm_registry::PmDeliveryReceiptStatus::Prepared,
+            gwt::pm_registry::PmDeliveryReceiptStatus::Verified,
+        ]
+    );
+}
+
+#[test]
+fn pm_pane_send_reserves_the_whole_body_to_submit_transaction() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, mut runtime, _pm_window_id) = pm_wake_fixture(&temp);
+    let target_window = "tab-1::other-window".to_string();
+    insert_test_pane_runtime(&mut runtime, &target_window);
+    let target_pane = runtime
+        .runtimes
+        .get(&target_window)
+        .expect("target runtime")
+        .pane
+        .clone();
+    runtime.register_pty_writer(&target_window, &target_pane);
+    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
+        "http://127.0.0.1:43123/internal/hook-live",
+        "ws://127.0.0.1:43124/ws",
+        "ws://127.0.0.1:43123/internal/pane-ws",
+    );
+    let capability = issuer
+        .issue(&repo, "pm-session-live")
+        .expect("PM capability");
+    let grant = issuer.grant_for_test(&capability.token).expect("PM grant");
+    let (body_written_tx, body_written_rx) = mpsc::sync_channel(1);
+    let (release_tx, release_rx) = mpsc::sync_channel(1);
+    super::pm::set_pm_pane_after_body_hook_for_test(move || {
+        body_written_tx.send(()).expect("report staged body");
+        release_rx.recv().expect("release delayed submit");
+    });
+
+    assert!(runtime
+        .authenticated_pm_pane_send_input_events(
+            &issuer,
+            "client-1".to_string(),
+            grant.clone(),
+            "72fc3cd4-ad49-43e3-bf3d-d791357643a8",
+            &target_window,
+            "first message\r",
+            None,
+        )
+        .is_empty());
+    body_written_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("first body reaches the transaction boundary");
+
+    let concurrent = runtime.authenticated_pm_pane_send_input_events(
+        &issuer,
+        "client-2".to_string(),
+        grant,
+        "72fc3cd4-ad49-43e3-bf3d-d791357643a9",
+        &target_window,
+        "second message\r",
+        None,
+    );
+    assert!(concurrent.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::PaneSendResult {
+            ok: false,
+            error: Some(error),
+            ..
+        } if error.contains("already has a privileged submit")
+    )));
+    release_tx.send(()).expect("finish first submit");
 }

@@ -33,6 +33,7 @@ pub(super) fn run<E: CliEnv>(
             let repo_path = project_root
                 .map(PathBuf::from)
                 .unwrap_or_else(|| env.repo_path().to_path_buf());
+            let repo_path = gwt_core::paths::resolve_main_worktree_root(&repo_path);
             let prefs_path = pm_registry::pm_prefs_path_for_repo_path(&repo_path);
             let prefs = pm_registry::load_pm_prefs(&prefs_path).map_err(|error| {
                 SpecOpsError::from(ApiError::Unexpected(format!(
@@ -65,5 +66,83 @@ pub(super) fn run<E: CliEnv>(
             out.push('\n');
             Ok(0)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gwt_core::test_support::ScopedEnvVar;
+
+    fn run_git(cwd: &std::path::Path, args: &[&str]) {
+        let output = gwt_core::process::hidden_command("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn pm_status_reads_the_main_worktree_registry_from_a_linked_worktree() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        let worktree = temp.path().join("worktree");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        run_git(&repo, &["init"]);
+        run_git(&repo, &["config", "user.email", "gwt@example.invalid"]);
+        run_git(&repo, &["config", "user.name", "gwt test"]);
+        std::fs::write(repo.join("seed"), "seed\n").expect("seed file");
+        run_git(&repo, &["add", "seed"]);
+        run_git(&repo, &["commit", "-m", "seed"]);
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                worktree.to_str().expect("utf8 worktree"),
+                "HEAD",
+            ],
+        );
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let prefs_path = pm_registry::pm_prefs_path_for_repo_path(&repo);
+        pm_registry::save_pm_prefs(
+            &prefs_path,
+            &pm_registry::PmPrefs {
+                registration: Some(pm_registry::PmRegistration {
+                    session_id: "pm-session".to_string(),
+                    agent_id: "codex".to_string(),
+                    worktree_path: worktree.to_string_lossy().into_owned(),
+                    created_at: None,
+                    consecutive_crashes: 0,
+                    next_not_before: None,
+                }),
+                ..pm_registry::PmPrefs::default()
+            },
+        )
+        .expect("seed main-worktree PM prefs");
+        let mut env = crate::cli::TestEnv::new(worktree);
+        let mut output = String::new();
+
+        let status = run(
+            &mut env,
+            PmCommand::Status { project_root: None },
+            &mut output,
+        )
+        .expect("pm.status from linked worktree");
+        let report: serde_json::Value = serde_json::from_str(&output).expect("status JSON");
+
+        assert_eq!(status, 0);
+        assert_eq!(report["registered"], true);
+        assert_eq!(report["registration"]["session_id"], "pm-session");
     }
 }

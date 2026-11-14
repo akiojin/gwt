@@ -1,10 +1,13 @@
 //! Cross-platform PTY handle: spawn, I/O, resize, kill.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     io::{Read, Write},
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, MutexGuard,
+    },
     time::{Duration, Instant},
 };
 
@@ -59,10 +62,26 @@ struct SpawnDiagnostic {
 /// Provides methods for I/O, resize, and process lifecycle management.
 /// Dropping a `PtyHandle` terminates the child and any descendants that were
 /// attached to its process group / Job Object.
+struct PtyInputState {
+    protected: bool,
+    queued: VecDeque<Vec<u8>>,
+}
+
+impl Default for PtyInputState {
+    fn default() -> Self {
+        Self {
+            protected: false,
+            queued: VecDeque::new(),
+        }
+    }
+}
+
 pub struct PtyHandle {
     master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     child: Arc<Mutex<Box<dyn portable_pty::Child + Send>>>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    input_state: Mutex<PtyInputState>,
+    generation_active: AtomicBool,
     // Wrapped so `kill` (which takes `&self`) can synchronously terminate the
     // group without waiting for `Drop`. Declared last so that when `Drop` runs
     // the direct child has already been signaled above.
@@ -142,18 +161,142 @@ impl PtyHandle {
             master: Arc::new(Mutex::new(pair.master)),
             child: Arc::new(Mutex::new(child)),
             writer: Arc::new(Mutex::new(writer)),
+            input_state: Mutex::new(PtyInputState::default()),
+            generation_active: AtomicBool::new(true),
             process_group: Mutex::new(process_group),
         })
     }
 
     /// Send bytes to the PTY stdin.
     pub fn write_input(&self, data: &[u8]) -> Result<(), TerminalError> {
-        let lock_started = Instant::now();
-        let mut writer = self.writer.lock().map_err(|e| TerminalError::PtyIoError {
-            details: format!("lock poisoned: {e}"),
-        })?;
-        let lock_wait_us = lock_started.elapsed().as_micros() as u64;
+        let mut state = self
+            .input_state
+            .lock()
+            .map_err(|error| TerminalError::PtyIoError {
+                details: format!("input state lock poisoned: {error}"),
+            })?;
+        if !self.generation_active.load(Ordering::Acquire) {
+            return Err(TerminalError::PtyIoError {
+                details: "PTY input generation is no longer active".to_string(),
+            });
+        }
+        if state.protected {
+            state.queued.push_back(data.to_vec());
+            return Ok(());
+        }
 
+        // Keep the short state guard until the ordinary writer is acquired.
+        // A protected transaction therefore either observes this write first,
+        // or marks `protected` first and makes us enqueue; it can never
+        // overtake us and leave the tao caller waiting through its settle/ACK.
+        let lock_started = Instant::now();
+        let mut writer = self
+            .writer
+            .lock()
+            .map_err(|error| TerminalError::PtyIoError {
+                details: format!("lock poisoned: {error}"),
+            })?;
+        let lock_wait_us = lock_started.elapsed().as_micros() as u64;
+        if !self.generation_active.load(Ordering::Acquire) {
+            return Err(TerminalError::PtyIoError {
+                details: "PTY input generation is no longer active".to_string(),
+            });
+        }
+        drop(state);
+        Self::write_with_locked_writer(&mut writer, data, lock_wait_us)
+    }
+
+    /// Hold the pane-wide input order across a multi-write provider submit.
+    /// Every ordinary key/write goes through [`Self::write_input`] and waits
+    /// behind this guard, so no browser or agent input can land between a
+    /// protected prompt body and its delayed submit byte.
+    pub fn begin_input_transaction(&self) -> Result<PtyInputTransaction<'_>, TerminalError> {
+        {
+            let mut state = self
+                .input_state
+                .lock()
+                .map_err(|error| TerminalError::PtyIoError {
+                    details: format!("input state lock poisoned: {error}"),
+                })?;
+            if !self.generation_active.load(Ordering::Acquire) {
+                return Err(TerminalError::PtyIoError {
+                    details: "PTY input generation is no longer active".to_string(),
+                });
+            }
+            if state.protected {
+                return Err(TerminalError::PtyIoError {
+                    details: "another protected PTY input transaction is active".to_string(),
+                });
+            }
+            state.protected = true;
+        }
+        let writer = match self.writer.lock() {
+            Ok(writer) => writer,
+            Err(error) => {
+                if let Ok(mut state) = self.input_state.lock() {
+                    state.protected = false;
+                }
+                return Err(TerminalError::PtyIoError {
+                    details: format!("lock poisoned: {error}"),
+                });
+            }
+        };
+        if !self.generation_active.load(Ordering::Acquire) {
+            if let Ok(mut state) = self.input_state.lock() {
+                state.protected = false;
+            }
+            return Err(TerminalError::PtyIoError {
+                details: "PTY input generation is no longer active".to_string(),
+            });
+        }
+        Ok(PtyInputTransaction {
+            handle: self,
+            writer,
+        })
+    }
+
+    /// Reserve the pane input stream across a delayed multi-write submit
+    /// without carrying a borrowed writer guard into the background task.
+    /// Ordinary input queues behind the reservation, and another protected
+    /// submit is refused until the owner is dropped.
+    pub fn reserve_input_transaction(
+        self: &Arc<Self>,
+    ) -> Result<PtyInputReservation, TerminalError> {
+        let mut state = self
+            .input_state
+            .lock()
+            .map_err(|error| TerminalError::PtyIoError {
+                details: format!("input state lock poisoned: {error}"),
+            })?;
+        if !self.generation_active.load(Ordering::Acquire) {
+            return Err(TerminalError::PtyIoError {
+                details: "PTY input generation is no longer active".to_string(),
+            });
+        }
+        if state.protected {
+            return Err(TerminalError::PtyIoError {
+                details: "another protected PTY input transaction is active".to_string(),
+            });
+        }
+        state.protected = true;
+        drop(state);
+        Ok(PtyInputReservation {
+            handle: Arc::clone(self),
+        })
+    }
+
+    pub fn invalidate_input_generation(&self) {
+        self.generation_active.store(false, Ordering::Release);
+        // Do not wait for an in-flight writer/state owner here. The atomic
+        // flag rejects every later physical write; the transaction drop path
+        // clears any queued bytes once its already-linearized write returns.
+    }
+
+    fn write_with_locked_writer(
+        writer: &mut Box<dyn Write + Send>,
+        data: &[u8],
+        lock_wait_us: u64,
+    ) -> Result<(), TerminalError> {
         let write_started = Instant::now();
         let write_result = writer.write_all(data);
         let write_us = write_started.elapsed().as_micros() as u64;
@@ -179,6 +322,30 @@ impl PtyHandle {
             details: e.to_string(),
         })?;
         Ok(())
+    }
+
+    fn release_protected_input(&self, writer: &mut Box<dyn Write + Send>) {
+        loop {
+            let queued = match self.input_state.lock() {
+                Ok(mut state)
+                    if self.generation_active.load(Ordering::Acquire)
+                        && !state.queued.is_empty() =>
+                {
+                    state.queued.drain(..).collect::<Vec<_>>()
+                }
+                Ok(mut state) => {
+                    state.queued.clear();
+                    state.protected = false;
+                    return;
+                }
+                Err(_) => return,
+            };
+            for bytes in queued {
+                if let Err(error) = Self::write_with_locked_writer(writer, &bytes, 0) {
+                    tracing::warn!(%error, "queued PTY input failed after protected submit");
+                }
+            }
+        }
     }
 
     /// Resize the PTY window.
@@ -312,6 +479,81 @@ impl PtyHandle {
         child.try_wait().map_err(|e| TerminalError::PtyIoError {
             details: e.to_string(),
         })
+    }
+}
+
+pub struct PtyInputTransaction<'a> {
+    handle: &'a PtyHandle,
+    writer: MutexGuard<'a, Box<dyn Write + Send>>,
+}
+
+pub struct PtyInputReservation {
+    handle: Arc<PtyHandle>,
+}
+
+impl PtyInputReservation {
+    pub fn write_input(&self, data: &[u8]) -> Result<(), TerminalError> {
+        let active = self.handle.generation_active.load(Ordering::Acquire);
+        if !active {
+            return Err(TerminalError::PtyIoError {
+                details: "PTY input generation is no longer active".to_string(),
+            });
+        }
+        let mut writer = self
+            .handle
+            .writer
+            .lock()
+            .map_err(|error| TerminalError::PtyIoError {
+                details: format!("lock poisoned: {error}"),
+            })?;
+        if !self.handle.generation_active.load(Ordering::Acquire) {
+            return Err(TerminalError::PtyIoError {
+                details: "PTY input generation is no longer active".to_string(),
+            });
+        }
+        PtyHandle::write_with_locked_writer(&mut writer, data, 0)
+    }
+
+    pub fn write_sequence(
+        &self,
+        body: &[u8],
+        submit: &[u8],
+        settle: Duration,
+    ) -> Result<(), TerminalError> {
+        if !body.is_empty() {
+            self.write_input(body)?;
+        }
+        std::thread::sleep(settle);
+        self.write_input(submit)
+    }
+}
+
+impl Drop for PtyInputReservation {
+    fn drop(&mut self) {
+        if let Ok(mut writer) = self.handle.writer.lock() {
+            self.handle.release_protected_input(&mut writer);
+        } else if let Ok(mut state) = self.handle.input_state.lock() {
+            state.queued.clear();
+            state.protected = false;
+        }
+    }
+}
+
+impl PtyInputTransaction<'_> {
+    pub fn write_input(&mut self, data: &[u8]) -> Result<(), TerminalError> {
+        let active = self.handle.generation_active.load(Ordering::Acquire);
+        if !active {
+            return Err(TerminalError::PtyIoError {
+                details: "PTY input generation is no longer active".to_string(),
+            });
+        }
+        PtyHandle::write_with_locked_writer(&mut self.writer, data, 0)
+    }
+}
+
+impl Drop for PtyInputTransaction<'_> {
+    fn drop(&mut self) {
+        self.handle.release_protected_input(&mut self.writer);
     }
 }
 
@@ -932,5 +1174,95 @@ mod tests {
             std::thread::sleep(Duration::from_millis(100));
         }
         assert!(exited, "Process should have completed");
+    }
+
+    #[test]
+    fn protected_input_transaction_queues_interleaving_input_until_submit_finishes() {
+        let _pty_guard = lock_pty_test();
+        let handle = PtyHandle::spawn(sleep_config("2")).expect("spawn sleeper");
+        let mut transaction = handle
+            .begin_input_transaction()
+            .expect("begin protected input");
+        transaction.write_input(b"protected body").expect("body");
+
+        handle
+            .write_input(b"user input")
+            .expect("interleaving input is queued, not dropped");
+        {
+            let state = handle.input_state.lock().expect("input state");
+            assert!(state.protected);
+            assert_eq!(state.queued.len(), 1);
+            assert_eq!(
+                state.queued.front().map(Vec::as_slice),
+                Some(b"user input".as_slice())
+            );
+        }
+
+        transaction.write_input(b"\r").expect("submit");
+        drop(transaction);
+        let state = handle.input_state.lock().expect("settled input state");
+        assert!(!state.protected);
+        assert!(state.queued.is_empty());
+    }
+
+    #[test]
+    fn generation_invalidation_fences_a_protected_transaction_before_its_next_write() {
+        let _pty_guard = lock_pty_test();
+        let handle = PtyHandle::spawn(sleep_config("2")).expect("spawn sleeper");
+        let mut transaction = handle
+            .begin_input_transaction()
+            .expect("begin protected input");
+        transaction.write_input(b"body").expect("body");
+
+        handle.invalidate_input_generation();
+
+        assert!(transaction.write_input(b"\r").is_err());
+        drop(transaction);
+        assert!(handle.write_input(b"late input").is_err());
+    }
+
+    #[test]
+    fn generation_invalidation_never_waits_for_the_input_state_mutex() {
+        let _pty_guard = lock_pty_test();
+        let handle = Arc::new(PtyHandle::spawn(sleep_config("2")).expect("spawn sleeper"));
+        let held = handle.input_state.lock().expect("hold input state");
+        let invalidating = Arc::clone(&handle);
+        let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            invalidating.invalidate_input_generation();
+            done_tx.send(()).expect("report invalidation");
+        });
+
+        done_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("generation revoke must not wait for an in-flight writer/state guard");
+        drop(held);
+        assert!(handle.write_input(b"late input").is_err());
+    }
+
+    #[test]
+    fn owned_input_reservation_serializes_a_delayed_submit_before_other_transactions() {
+        let _pty_guard = lock_pty_test();
+        let handle = Arc::new(PtyHandle::spawn(sleep_config("2")).expect("spawn sleeper"));
+        let reservation = Arc::clone(&handle)
+            .reserve_input_transaction()
+            .expect("reserve delayed submit");
+
+        assert!(
+            handle.begin_input_transaction().is_err(),
+            "a privileged submit cannot interleave after the ordinary body reservation"
+        );
+        handle
+            .write_input(b"queued input")
+            .expect("ordinary input queues behind the reservation");
+        reservation
+            .write_sequence(b"ordinary body", b"\r", Duration::ZERO)
+            .expect("complete delayed submit");
+        drop(reservation);
+
+        assert!(
+            handle.begin_input_transaction().is_ok(),
+            "the reservation releases only after body and submit complete"
+        );
     }
 }

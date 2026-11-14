@@ -38,13 +38,69 @@ const PANE_SUBMIT_SETTLE: Duration = Duration::from_millis(400);
 /// Split one pane payload into the body and its submit terminator. Input that
 /// carries no terminator is not a submit and is returned whole, so raw
 /// keystroke forwarding stays byte-exact.
-fn split_pane_submit(text: &str) -> (&str, Option<&str>) {
+pub(super) fn split_pane_submit(text: &str) -> (&str, Option<&str>) {
     for terminator in ["\r\n", "\r", "\n"] {
         if let Some(body) = text.strip_suffix(terminator) {
             return (body, Some(terminator));
         }
     }
     (text, None)
+}
+
+/// Result of a body-once, submit-until-verified delivery. Verification is an
+/// injected semantic acknowledgement (for PM wakeups, the exact
+/// UserPromptSubmit marker), not a PTY write acknowledgement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum VerifiedPaneSubmitOutcome {
+    Verified { submit_attempts: usize },
+    Unverified { submit_attempts: usize },
+}
+
+/// Drive a provider-aware submit without ever duplicating the prompt body.
+///
+/// The caller owns the execution context: production runs this on the
+/// blocking pool and injects an authority-checked PTY writer plus a durable
+/// semantic probe; tests inject deterministic closures. `settle` runs before
+/// every submit byte, preserving the separate-write contract introduced by
+/// PR #3512.
+pub(super) fn drive_verified_pane_submit(
+    text: &str,
+    max_submit_attempts: usize,
+    mut write: impl FnMut(&[u8]) -> Result<(), String>,
+    mut settle: impl FnMut(Duration),
+    mut is_verified: impl FnMut() -> Result<bool, String>,
+) -> Result<VerifiedPaneSubmitOutcome, String> {
+    let (body, submit) = split_pane_submit(text);
+    if !body.is_empty() {
+        write(body.as_bytes())?;
+    }
+    let Some(submit) = submit else {
+        return Ok(VerifiedPaneSubmitOutcome::Verified { submit_attempts: 0 });
+    };
+    if max_submit_attempts == 0 {
+        return Ok(VerifiedPaneSubmitOutcome::Unverified { submit_attempts: 0 });
+    }
+
+    for submit_attempts in 1..=max_submit_attempts {
+        if (body.is_empty() || submit_attempts > 1) && is_verified()? {
+            return Ok(VerifiedPaneSubmitOutcome::Verified {
+                submit_attempts: submit_attempts - 1,
+            });
+        }
+        settle(PANE_SUBMIT_SETTLE);
+        if (body.is_empty() || submit_attempts > 1) && is_verified()? {
+            return Ok(VerifiedPaneSubmitOutcome::Verified {
+                submit_attempts: submit_attempts - 1,
+            });
+        }
+        write(submit.as_bytes())?;
+        if is_verified()? {
+            return Ok(VerifiedPaneSubmitOutcome::Verified { submit_attempts });
+        }
+    }
+    Ok(VerifiedPaneSubmitOutcome::Unverified {
+        submit_attempts: max_submit_attempts,
+    })
 }
 
 /// Write one pane payload as the TUIs expect it: the body first, then the
@@ -56,30 +112,32 @@ pub(super) fn write_pane_input_then_submit(
     text: &str,
 ) -> Result<(), String> {
     let (body, submit) = split_pane_submit(text);
-    if !body.is_empty() {
-        pane.lock()
-            .map_err(|error| error.to_string())
-            .and_then(|pane| {
-                pane.write_input(body.as_bytes())
-                    .map_err(|error| error.to_string())
-            })?;
-    }
     let Some(submit) = submit else {
-        return Ok(());
+        return if body.is_empty() {
+            Ok(())
+        } else {
+            pane.lock()
+                .map_err(|error| error.to_string())
+                .and_then(|pane| {
+                    pane.write_input(body.as_bytes())
+                        .map_err(|error| error.to_string())
+                })
+        };
     };
+    let pty = pane.lock().map_err(|error| error.to_string())?.shared_pty();
+    let reservation = pty
+        .reserve_input_transaction()
+        .map_err(|error| error.to_string())?;
+    if !body.is_empty() {
+        reservation
+            .write_input(body.as_bytes())
+            .map_err(|error| error.to_string())?;
+    }
     let submit = submit.to_string();
-    let pane = Arc::clone(pane);
     thread::spawn(move || {
         thread::sleep(PANE_SUBMIT_SETTLE);
-        match pane.lock() {
-            Ok(pane) => {
-                if let Err(error) = pane.write_input(submit.as_bytes()) {
-                    tracing::warn!(%error, "pane submit byte could not be written");
-                }
-            }
-            Err(error) => {
-                tracing::warn!(%error, "pane submit byte skipped: pane lock poisoned");
-            }
+        if let Err(error) = reservation.write_input(submit.as_bytes()) {
+            tracing::warn!(%error, "pane submit byte could not be written");
         }
     });
     Ok(())
@@ -254,7 +312,7 @@ impl AppRuntime {
         }
     }
 
-    pub(crate) fn register_pty_writer(&self, id: &str, pane: &Arc<Mutex<Pane>>) {
+    pub(crate) fn register_pty_writer(&mut self, id: &str, pane: &Arc<Mutex<Pane>>) {
         let Ok(pane_guard) = pane.lock() else {
             tracing::warn!(
                 target: "gwt_input_trace",
@@ -266,6 +324,22 @@ impl AppRuntime {
         };
         let pty = pane_guard.shared_pty();
         drop(pane_guard);
+        let previous = self
+            .pty_writers
+            .read()
+            .ok()
+            .and_then(|guard| guard.get(id).cloned());
+        // A first registration after process restart is also a generation
+        // boundary. Any durable protected-delivery fence belongs to a PTY
+        // handle from the previous process and cannot be resumed safely.
+        let generation_changed = previous
+            .as_ref()
+            .is_none_or(|previous| !Arc::ptr_eq(previous, &pty));
+        if generation_changed {
+            if let Some(previous) = previous.as_ref() {
+                previous.invalidate_input_generation();
+            }
+        }
         match self.pty_writers.write() {
             Ok(mut guard) => {
                 guard.insert(id.to_string(), pty);
@@ -280,9 +354,20 @@ impl AppRuntime {
                 );
             }
         }
+        if generation_changed {
+            self.clear_pm_submit_state_for_pty_generation_change(id);
+        }
     }
 
-    pub(crate) fn deregister_pty_writer(&self, id: &str) {
+    pub(crate) fn deregister_pty_writer(&mut self, id: &str) {
+        if let Some(previous) = self
+            .pty_writers
+            .read()
+            .ok()
+            .and_then(|guard| guard.get(id).cloned())
+        {
+            previous.invalidate_input_generation();
+        }
         match self.pty_writers.write() {
             Ok(mut guard) => {
                 guard.remove(id);
@@ -297,6 +382,7 @@ impl AppRuntime {
                 );
             }
         }
+        self.clear_pm_submit_state_for_pty_generation_change(id);
     }
 
     pub(crate) fn stop_window_runtime(&mut self, window_id: &str) {
@@ -317,6 +403,15 @@ impl AppRuntime {
         window_id: &str,
         mark_session_stopped: bool,
     ) -> RuntimeStopThreads {
+        // Terminate the child before any capability/registration teardown can
+        // wait on an already-linearized PTY write. `kill` uses the independent
+        // child/process-group handles and unblocks a full PTY input buffer;
+        // the remaining authority cleanup can then complete deterministically.
+        if let Some(runtime) = self.runtimes.get(window_id) {
+            if let Ok(pane) = runtime.pane.lock() {
+                let _ = pane.kill();
+            }
+        }
         if mark_session_stopped {
             self.mark_agent_session_stopped(window_id);
         }
@@ -327,9 +422,6 @@ impl AppRuntime {
             status_thread: None,
         };
         if let Some(mut runtime) = self.runtimes.remove(window_id) {
-            if let Ok(pane) = runtime.pane.lock() {
-                let _ = pane.kill();
-            }
             threads.output_thread = runtime.output_thread.take();
             threads.status_thread = runtime.status_thread.take();
         }
@@ -543,7 +635,7 @@ impl AppRuntime {
 
 #[cfg(test)]
 mod submit_split_tests {
-    use super::split_pane_submit;
+    use super::{drive_verified_pane_submit, split_pane_submit, VerifiedPaneSubmitOutcome};
 
     /// SPEC-3431 FR-108c: the body and the submit byte must be separable, so
     /// the writer can put the carriage return in its own PTY write. A single
@@ -574,6 +666,97 @@ mod submit_split_tests {
     #[test]
     fn bare_terminator_has_an_empty_body() {
         assert_eq!(split_pane_submit("\r"), ("", Some("\r")));
+    }
+
+    /// SPEC-3431 FR-108c follow-up: a submit that was accepted by the PTY but
+    /// not observed by the provider is retried with the submit byte only. The
+    /// prompt body is never duplicated in the composer.
+    #[test]
+    fn unverified_submit_retries_only_the_carriage_return() {
+        let writes = std::cell::RefCell::new(Vec::new());
+
+        let outcome = drive_verified_pane_submit(
+            "wake body\r",
+            2,
+            |bytes| {
+                writes
+                    .borrow_mut()
+                    .push(String::from_utf8(bytes.to_vec()).expect("utf8 input"));
+                Ok(())
+            },
+            |_| {},
+            || Ok(writes.borrow().len() == 3),
+        )
+        .expect("second submit is verified");
+
+        assert_eq!(
+            *writes.borrow(),
+            ["wake body", "\r", "\r"],
+            "only the submit byte may be retried"
+        );
+        assert_eq!(
+            outcome,
+            VerifiedPaneSubmitOutcome::Verified { submit_attempts: 2 }
+        );
+    }
+
+    #[test]
+    fn delayed_ack_before_retry_suppresses_the_extra_carriage_return() {
+        let writes = std::cell::RefCell::new(Vec::new());
+        let acknowledged = std::cell::Cell::new(false);
+        let settles = std::cell::Cell::new(0_usize);
+
+        let outcome = drive_verified_pane_submit(
+            "wake body\r",
+            2,
+            |bytes| {
+                writes
+                    .borrow_mut()
+                    .push(String::from_utf8(bytes.to_vec()).expect("utf8 input"));
+                Ok(())
+            },
+            |_| {
+                let next = settles.get() + 1;
+                settles.set(next);
+                if next == 2 {
+                    acknowledged.set(true);
+                }
+            },
+            || Ok(acknowledged.get()),
+        )
+        .expect("delayed acknowledgement settles the original submit");
+
+        assert_eq!(*writes.borrow(), ["wake body", "\r"]);
+        assert_eq!(
+            outcome,
+            VerifiedPaneSubmitOutcome::Verified { submit_attempts: 1 }
+        );
+    }
+
+    #[test]
+    fn verification_unavailable_stops_before_an_extra_submit_byte() {
+        let writes = std::cell::RefCell::new(Vec::new());
+
+        let error = drive_verified_pane_submit(
+            "wake body\r",
+            2,
+            |bytes| {
+                writes.borrow_mut().push(bytes.to_vec());
+                Ok(())
+            },
+            |_| {},
+            || {
+                if writes.borrow().len() >= 2 {
+                    Err("ack store unavailable".to_string())
+                } else {
+                    Ok(false)
+                }
+            },
+        )
+        .expect_err("an unreadable acknowledgement store is not semantic absence");
+
+        assert_eq!(*writes.borrow(), [b"wake body".to_vec(), b"\r".to_vec()]);
+        assert!(error.contains("ack store unavailable"));
     }
 }
 

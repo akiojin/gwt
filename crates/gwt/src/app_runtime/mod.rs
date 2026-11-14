@@ -188,6 +188,7 @@ pub use launch::{
 };
 #[cfg(test)]
 use loaders::{load_log_entries_from_dir, skipped_lines_warning};
+pub(crate) use pm::PmWakeDeliveryResult;
 use profile::ProfileSaveRequest;
 #[cfg(test)]
 use project_tabs::parse_github_repository_search_results;
@@ -772,6 +773,11 @@ pub struct AppRuntime {
     /// path has already seen. The first snapshot is a baseline; only signals
     /// beyond it can wake a quiet PM, so one event wakes at most once.
     pub(crate) pm_wake_seen: HashMap<PathBuf, std::collections::BTreeSet<String>>,
+    /// Wake prompts whose body has been reserved but whose exact
+    /// UserPromptSubmit acknowledgement and durable clock commit are not both
+    /// complete yet. This suppresses duplicate bodies while allowing CR-only
+    /// retry after an unverified submit.
+    pub(crate) pending_pm_wake_deliveries: HashMap<PathBuf, pm::PendingPmWakeDelivery>,
     /// SPEC-3431 FR-002: tabs whose PM ensure was queued at bootstrap and
     /// runs once the frontend reports canvas bounds (same deferral rule as
     /// startup auto-resume — agent panes never spawn before the canvas is
@@ -875,6 +881,10 @@ pub struct AppRuntime {
     pub(crate) pending_update: Option<gwt_core::update::UpdateState>,
     /// Shared PTY writer registry published to the WebSocket fast-path.
     pub(crate) pty_writers: PtyWriterRegistry,
+    /// One body→submit transaction per pane. A wake reservation survives an
+    /// unverified CR so no other privileged delivery can append to the same
+    /// composer before the CR-only retry settles it.
+    pub(crate) pm_submit_reservations: PmSubmitReservationRegistry,
     /// Browser-uploaded attachment temp files waiting to be staged under the
     /// active worktree.
     pub(crate) attachment_uploads: AttachmentUploadStore,
@@ -1784,6 +1794,7 @@ impl AppRuntime {
             pending_pm_launches: HashMap::new(),
             pm_sessions: HashMap::new(),
             pm_wake_seen: HashMap::new(),
+            pending_pm_wake_deliveries: HashMap::new(),
             pending_startup_pm_tabs: Vec::new(),
             pending_launch_feedback_contexts: HashMap::new(),
             issue_monitor_launch_deliveries: HashMap::new(),
@@ -1825,6 +1836,7 @@ impl AppRuntime {
             issue_client_factory: default_issue_client_factory(),
             pending_update: None,
             pty_writers,
+            pm_submit_reservations: Arc::new(Mutex::new(HashMap::new())),
             attachment_uploads,
             persist_dispatcher,
             file_tree_worktree_roots: HashMap::new(),
@@ -4069,11 +4081,17 @@ impl AppRuntime {
             Ok(_) => return Vec::new(),
             Err(error) => {
                 tracing::error!(%error, "Issue Monitor scheduled completion could not reload prefs");
-                return vec![OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
+                let mut events = vec![OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
                     level: "error".to_string(),
                     message: format!("Issue Monitor scheduled completion failed: {error}"),
                     issue_number: None,
                 })];
+                events.extend(self.pm_periodic_wake_events_for_monitor_at(
+                    &project_root,
+                    &monitor,
+                    now,
+                ));
+                return events;
             }
         };
         // The worker carries the ephemeral live queue/inbox, while disk owns
@@ -4373,10 +4391,18 @@ impl AppRuntime {
                 self.pane_send_input_events(client_id, &session_id, &text)
             }
             FrontendEvent::PmPaneSendInput {
-                pm_session_id,
                 window_id,
-                text,
-            } => self.pm_pane_send_input_events(client_id, &pm_session_id, &window_id, &text),
+                ..
+            } => vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::PaneSendResult {
+                    ok: false,
+                    window_id: None,
+                    error: Some(format!(
+                        "pm pane send: browser transport cannot authorize pane {window_id}; use the authenticated agent pane endpoint"
+                    )),
+                },
+            )],
             FrontendEvent::PasteImage {
                 id,
                 data_base64,
@@ -5031,6 +5057,9 @@ impl AppRuntime {
         request: AgentFrontendRequest,
     ) -> AgentFrontendDispatchOutcome {
         let Some(issuer) = self.agent_capability_issuer.clone() else {
+            if request.send_pm_refusal("PM capability authority is unavailable") {
+                return AgentFrontendDispatchOutcome::Dispatched(Vec::new());
+            }
             return AgentFrontendDispatchOutcome::StaleCapability;
         };
         if !issuer.grant_is_current(&grant) {
@@ -5038,6 +5067,9 @@ impl AppRuntime {
                 target: "gwt_security",
                 "queued agent pane request rejected after capability rotation or revoke"
             );
+            if request.send_pm_refusal("PM capability changed before request acceptance") {
+                return AgentFrontendDispatchOutcome::Dispatched(Vec::new());
+            }
             return AgentFrontendDispatchOutcome::StaleCapability;
         }
         if request.requires_producing_authority()
@@ -5139,6 +5171,22 @@ impl AppRuntime {
                 );
                 AgentFrontendDispatchOutcome::Dispatched(Vec::new())
             }
+            AgentFrontendRequest::PmSendInput {
+                operation_id,
+                window_id,
+                text,
+                responder,
+            } => AgentFrontendDispatchOutcome::Dispatched(
+                self.authenticated_pm_pane_send_input_events(
+                    issuer,
+                    client_id,
+                    grant,
+                    &operation_id,
+                    &window_id,
+                    &text,
+                    responder,
+                ),
+            ),
             request => {
                 let principal = grant.principal().clone();
                 issuer
@@ -5211,6 +5259,16 @@ impl AppRuntime {
                 };
                 self.pane_send_input_to_window_events(client_id, &window_id, &text)
             }
+            AgentFrontendRequest::PmSendInput { window_id, .. } => vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::PaneSendResult {
+                    ok: false,
+                    window_id: None,
+                    error: Some(format!(
+                        "pm pane send: pane {window_id} bypassed generation-aware dispatch"
+                    )),
+                },
+            )],
         }
     }
 

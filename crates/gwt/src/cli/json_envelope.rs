@@ -462,7 +462,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             id: optional_string(params, "id")?,
             text: required_string(params, "text")?,
         }),
-        "pm.message.send" | "pm.pane.send" => CliCommand::Pane(PaneCommand::PmSend {
+        "pm.message.send" => CliCommand::Pane(PaneCommand::PmSend {
             id: required_string(params, "id")?,
             text: required_string(params, "text")?,
         }),
@@ -2015,6 +2015,13 @@ mod tests {
         assert!(matches!(
             err("pm.message.send", json!({"id": "tab-1::agent-1"})),
             CliParseError::MissingFlag("text")
+        ));
+        assert!(matches!(
+            err(
+                "pm.pane.send",
+                json!({"id": "tab-1::agent-1", "text": "hello"})
+            ),
+            CliParseError::UnknownSubcommand(operation) if operation == "pm.pane.send"
         ));
     }
 
