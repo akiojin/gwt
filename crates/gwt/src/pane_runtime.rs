@@ -5,7 +5,7 @@
 
 use std::{
     io::Read,
-    sync::{Arc, Mutex},
+    sync::{mpsc, Arc, Mutex},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
@@ -22,6 +22,8 @@ pub enum PaneRuntimeEvent {
         incarnation: u64,
         data: Vec<u8>,
         seq: u64,
+        /// Screen captured at `seq`, without a GUI-thread pane lock.
+        screen: String,
     },
     Status {
         id: String,
@@ -32,7 +34,24 @@ pub enum PaneRuntimeEvent {
     },
 }
 
-/// Parse PTY output and report each chunk with its snapshot stream position.
+const PTY_READ_BYTES: usize = 4096;
+const PTY_BATCH_BYTES: usize = 64 * 1024;
+const PTY_READ_QUEUE_CHUNKS: usize = PTY_BATCH_BYTES / PTY_READ_BYTES;
+
+/// Combine only queued, unparsed bytes. Never merge parsed events: a snapshot
+/// can fall between their stream positions (Issue #4095).
+fn next_output_batch(receiver: &mpsc::Receiver<Vec<u8>>) -> Option<Vec<u8>> {
+    let mut batch = receiver.recv().ok()?;
+    while batch.len() + PTY_READ_BYTES <= PTY_BATCH_BYTES {
+        let Ok(chunk) = receiver.try_recv() else {
+            break;
+        };
+        batch.extend_from_slice(&chunk);
+    }
+    Some(batch)
+}
+
+/// Parse bounded PTY batches and report each with its snapshot stream position.
 pub fn spawn_output_thread(
     id: String,
     incarnation: u64,
@@ -58,55 +77,63 @@ pub fn spawn_output_thread(
             }
         };
 
-        let mut reader = reader;
-        let mut buffer = [0u8; 4096];
-        loop {
-            match reader.read(&mut buffer) {
-                Ok(0) => break,
-                Ok(read) => {
-                    let chunk = buffer[..read].to_vec();
-                    let lock_started = Instant::now();
-                    let mut seq = 0;
-                    if let Ok(mut pane) = pane.lock() {
-                        let lock_wait_us = lock_started.elapsed().as_micros() as u64;
-                        let parse_started = Instant::now();
-                        pane.process_bytes(&chunk);
-                        seq = pane.output_seq();
-                        let parse_us = parse_started.elapsed().as_micros() as u64;
-                        // Log only when the contention window is large enough
-                        // to plausibly starve a concurrent `write_input`. The
-                        // threshold keeps the log volume bounded during
-                        // normal output bursts while still surfacing the
-                        // lock-hold windows that matter for drop triage.
-                        if lock_wait_us > 500 || parse_us > 500 {
-                            tracing::debug!(
-                                target: "gwt_input_trace",
-                                stage = "reader_pane_lock",
-                                window_id = %id,
-                                lock_wait_us,
-                                parse_us,
-                                "reader thread held pane mutex (output parsing)"
-                            );
-                        }
-                    }
-                    sink(PaneRuntimeEvent::Output {
-                        id: id.clone(),
-                        incarnation,
-                        data: chunk,
-                        seq,
-                    });
-                }
-                Err(error) => {
-                    sink(PaneRuntimeEvent::Status {
-                        id: id.clone(),
-                        incarnation,
-                        status: WindowProcessStatus::Error,
-                        detail: Some(error.to_string()),
-                        exit_confirmed: false,
-                    });
-                    return;
+        // The reader can get ahead while parsing/classifying a burst, but its
+        // queued bytes are bounded. Sparse output is delivered without a timer.
+        let (sender, receiver) = mpsc::sync_channel(PTY_READ_QUEUE_CHUNKS);
+        let reader = thread::spawn(move || -> std::io::Result<()> {
+            let mut reader = reader;
+            let mut buffer = [0u8; PTY_READ_BYTES];
+            loop {
+                let read = reader.read(&mut buffer)?;
+                if read == 0 || sender.send(buffer[..read].to_vec()).is_err() {
+                    return Ok(());
                 }
             }
+        });
+        while let Some(chunk) = next_output_batch(&receiver) {
+            let lock_started = Instant::now();
+            let mut seq = 0;
+            let mut screen = String::new();
+            if let Ok(mut pane) = pane.lock() {
+                let lock_wait_us = lock_started.elapsed().as_micros() as u64;
+                let parse_started = Instant::now();
+                pane.process_bytes(&chunk);
+                seq = pane.output_seq();
+                screen = pane.screen().contents();
+                let parse_us = parse_started.elapsed().as_micros() as u64;
+                if lock_wait_us > 500 || parse_us > 500 {
+                    tracing::debug!(
+                        target: "gwt_input_trace",
+                        stage = "reader_pane_lock",
+                        window_id = %id,
+                        lock_wait_us,
+                        parse_us,
+                        "reader thread held pane mutex (output parsing)"
+                    );
+                }
+            }
+            sink(PaneRuntimeEvent::Output {
+                id: id.clone(),
+                incarnation,
+                data: chunk,
+                seq,
+                screen,
+            });
+        }
+        let reader_error = match reader.join() {
+            Ok(Ok(())) => None,
+            Ok(Err(error)) => Some(error.to_string()),
+            Err(_) => Some("PTY reader thread panicked".to_string()),
+        };
+        if let Some(error) = reader_error {
+            sink(PaneRuntimeEvent::Status {
+                id,
+                incarnation,
+                status: WindowProcessStatus::Error,
+                detail: Some(error),
+                exit_confirmed: false,
+            });
+            return;
         }
 
         let status = pane
@@ -234,6 +261,23 @@ mod tests {
     use super::{spawn_output_thread, spawn_status_thread, PaneRuntimeEvent};
 
     #[test]
+    fn output_batches_preserve_bytes_and_leave_the_next_batch_queued() {
+        let (sender, receiver) = mpsc::channel();
+        let expected: Vec<u8> = (0..17).flat_map(|index| vec![index as u8; 4096]).collect();
+        for chunk in expected.chunks(4096) {
+            sender.send(chunk.to_vec()).unwrap();
+        }
+        drop(sender);
+
+        let first = super::next_output_batch(&receiver).expect("first batch");
+        let second = super::next_output_batch(&receiver).expect("remaining batch");
+        assert_eq!(first.len(), 64 * 1024);
+        assert_eq!(second.len(), 4096);
+        assert_eq!([first, second].concat(), expected);
+        assert!(super::next_output_batch(&receiver).is_none());
+    }
+
+    #[test]
     fn workers_deliver_output_and_confirmed_exit_without_a_gui() {
         let temp = tempfile::tempdir().unwrap();
         let (command, args) = if cfg!(windows) {
@@ -289,7 +333,9 @@ mod tests {
                     incarnation,
                     data,
                     seq,
+                    screen,
                 } => {
+                    assert!(!screen.is_empty());
                     identities.push((id, incarnation));
                     bytes.extend(data);
                     sequences.push(seq);

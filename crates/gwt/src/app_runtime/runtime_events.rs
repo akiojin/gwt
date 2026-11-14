@@ -26,6 +26,17 @@ pub(super) fn terminal_preview_text(contents: &str) -> String {
     lines[lines.len().saturating_sub(3)..].join("\n")
 }
 
+fn screen_tail_text(contents: &str, lines: usize, separator: &str) -> Option<String> {
+    let screen_lines: Vec<&str> = contents
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let start = screen_lines.len().saturating_sub(lines);
+    let tail = screen_lines[start..].join(separator);
+    (!tail.is_empty()).then_some(tail)
+}
+
 /// Issue #3274: how many trailing non-empty screen lines survive into the
 /// persistent window detail when an agent process errors out.
 const AGENT_ERROR_TAIL_LINES: usize = 3;
@@ -509,7 +520,14 @@ impl AppRuntime {
         id: String,
         data: Vec<u8>,
     ) -> Vec<OutboundEvent> {
-        self.handle_runtime_output_inner(id, data, true, None)
+        let screen = self.runtimes.get(&id).and_then(|runtime| {
+            runtime
+                .pane
+                .lock()
+                .ok()
+                .map(|pane| pane.screen().contents())
+        });
+        self.handle_runtime_output_inner(id, data, true, None, screen.as_deref())
     }
 
     /// `seq` is the pane stream position the reader thread observed right
@@ -521,11 +539,12 @@ impl AppRuntime {
         incarnation: u64,
         data: Vec<u8>,
         seq: u64,
+        screen: String,
     ) -> Vec<OutboundEvent> {
         if !self.runtime_incarnation_is_current(&id, incarnation) {
             return Vec::new();
         }
-        self.handle_runtime_output_inner(id, data, true, Some(seq))
+        self.handle_runtime_output_inner(id, data, true, Some(seq), Some(&screen))
     }
 
     pub(crate) fn handle_daemon_runtime_output(
@@ -542,7 +561,7 @@ impl AppRuntime {
         // Daemon publications describe another process; a local PTY
         // incarnation is neither
         // available nor authoritative for this path.
-        self.handle_runtime_output_inner(id, data, false, None)
+        self.handle_runtime_output_inner(id, data, false, None, None)
     }
 
     fn handle_runtime_output_inner(
@@ -551,6 +570,7 @@ impl AppRuntime {
         data: Vec<u8>,
         publish_to_daemon: bool,
         stream_seq: Option<u64>,
+        screen: Option<&str>,
     ) -> Vec<OutboundEvent> {
         let _project_scope = self.enter_window_log_scope(&id);
         let Some(address) = self.window_lookup.get(&id).cloned() else {
@@ -568,13 +588,7 @@ impl AppRuntime {
                 .insert(id.clone(), chrono::Utc::now());
         }
         let preview_text = if publish_to_daemon {
-            self.runtimes.get(&id).and_then(|runtime| {
-                runtime
-                    .pane
-                    .lock()
-                    .ok()
-                    .map(|pane| terminal_preview_text(&pane.screen().contents()))
-            })
+            screen.map(terminal_preview_text)
         } else {
             self.remote_terminal_previews.get(&id).cloned()
         };
@@ -605,8 +619,14 @@ impl AppRuntime {
             ));
         }
         if publish_to_daemon {
-            events.extend(self.observe_codex_directory_trust_prompt_from_screen(&output_id));
-            let prompt = self.current_screen_approval_prompt(&output_id);
+            events
+                .extend(self.observe_codex_directory_trust_prompt_from_screen(&output_id, screen));
+            let prompt = screen.and_then(|screen| {
+                gwt::window_state::approval_prompt_fingerprint(
+                    self.approval_prompt_provider(&output_id),
+                    screen,
+                )
+            });
             // Issue #4544 AC-3: the same fingerprint, read for a different
             // question. `observe_runtime_approval_prompt` asks "is this pane
             // waiting?"; this asks "was this pane ever allowed to wait?".
@@ -615,15 +635,19 @@ impl AppRuntime {
             // Issue #3616: the only place a still-running quota-blocked pane can
             // be recognized. Claude keeps its process alive and reports `idle`,
             // so no exit or status event ever arrives to classify.
-            events.extend(
-                self.observe_provider_quota_notice_from_screen(&output_id, chrono::Utc::now()),
-            );
+            events.extend(self.observe_provider_quota_notice(
+                &output_id,
+                screen,
+                chrono::Utc::now(),
+            ));
             // Issue #4584: the turn can also end on a transient provider
             // error, which leaves the process alive and the hook state on
             // whatever the turn was last doing. Nothing else fires, so this
             // read is the only thing standing between a stopped pane and
             // twenty minutes of reading as healthy.
-            events.extend(self.observe_provider_api_error_from_screen(&output_id));
+            let error_tail =
+                screen.and_then(|screen| screen_tail_text(screen, API_ERROR_TAIL_LINES, "\n"));
+            events.extend(self.observe_provider_api_error(&output_id, error_tail.as_deref()));
         }
         events
     }
@@ -631,11 +655,13 @@ impl AppRuntime {
     fn observe_codex_directory_trust_prompt_from_screen(
         &mut self,
         window_id: &str,
+        screen: Option<&str>,
     ) -> Vec<OutboundEvent> {
-        let Some((provider, screen)) = self.current_approval_screen(window_id) else {
+        let Some(screen) = screen else {
             return Vec::new();
         };
-        if gwt::window_state::directory_trust_prompt_fingerprint(provider, &screen).is_none() {
+        let provider = self.approval_prompt_provider(window_id);
+        if gwt::window_state::directory_trust_prompt_fingerprint(provider, screen).is_none() {
             return Vec::new();
         }
         let Some(project_root) = self.issue_monitor_project_root_for_window(window_id) else {
@@ -1420,14 +1446,7 @@ impl AppRuntime {
         let runtime = self.runtimes.get(id)?;
         let pane = runtime.pane.lock().ok()?;
         let contents = pane.screen().contents();
-        let screen_lines: Vec<&str> = contents
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .collect();
-        let start = screen_lines.len().saturating_sub(lines);
-        let tail = screen_lines[start..].join(separator);
-        (!tail.is_empty()).then_some(tail)
+        screen_tail_text(&contents, lines, separator)
     }
 
     /// Copy this window's PTY exit receipt onto its durable Session
@@ -1671,23 +1690,8 @@ impl AppRuntime {
         }
     }
 
-    /// Issue #4584: classify this pane's own live screen, the same way the
-    /// quota path does, so a test exercises the read a real pty feeds.
-    ///
-    /// A wider tail than the quota notice needs: the CLI writes its own "done"
-    /// line plus four lines of prompt furniture underneath the error, so an
-    /// eight-line window would only just reach it.
-    pub(crate) fn observe_provider_api_error_from_screen(
-        &mut self,
-        window_id: &str,
-    ) -> Vec<OutboundEvent> {
-        let screen = self.screen_tail(window_id, API_ERROR_TAIL_LINES, "\n");
-        self.observe_provider_api_error(window_id, screen.as_deref())
-    }
-
-    /// Issue #3616: classify this pane's own live screen. The production entry
-    /// point — the output path and the poller sweep both go through here, so a
-    /// test can exercise the same read a real pty feeds.
+    /// Issue #3616: re-check a quota candidate's live screen on a poller sweep,
+    /// even when it emits no further output.
     pub(crate) fn observe_provider_quota_notice_from_screen(
         &mut self,
         window_id: &str,

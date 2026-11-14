@@ -2645,6 +2645,63 @@ fn client_pane_snapshot_repair_replies_with_snapshots_for_known_panes_only() {
     }
 }
 
+// Issue #5379: a busy parser must not stop GUI delivery and classification.
+#[test]
+fn runtime_output_does_not_wait_for_the_pty_pane_mutex() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "codex-1",
+        WindowPreset::Codex,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "codex-1");
+    insert_test_pane_runtime(&mut runtime, &window_id);
+    let (incarnation, pane) = {
+        let worker = runtime.runtimes.get(&window_id).expect("runtime");
+        (worker.incarnation, Arc::clone(&worker.pane))
+    };
+    let (locked_sender, locked_receiver) = std::sync::mpsc::channel();
+    let (done_sender, done_receiver) = std::sync::mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        let _guard = pane.lock().expect("pane lock");
+        locked_sender.send(()).expect("announce lock");
+        // Observe completion before releasing the lock. The deadline only
+        // bounds a broken implementation; it does not order worker activity.
+        done_receiver.recv_timeout(Duration::from_secs(5)).is_ok()
+    });
+    locked_receiver.recv().expect("worker holds pane mutex");
+
+    let events = runtime.handle_runtime_output_event(
+        window_id.clone(),
+        incarnation,
+        b"worker screen".to_vec(),
+        17,
+        "Would you like to run the following command?\n\n\
+         cargo test\n\n\
+         > 1. Yes, proceed\n\
+           2. No, and tell Codex what to do differently\n\n\
+         Press enter to confirm or esc to cancel"
+            .to_string(),
+    );
+    let _ = done_sender.send(());
+    assert!(
+        holder.join().expect("lock holder"),
+        "GUI output waited for the PTY mutex"
+    );
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::TerminalOutput { id, .. } if id == &window_id
+    )));
+    assert!(runtime.window_approval_waiting.contains_key(&window_id));
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::TerminalPreview { text, .. } if text.contains("Press enter")
+    )));
+}
+
 // Issue #4095 AC-1 / AC-2: a snapshot serialized while the PTY reader is ahead
 // of the event loop already contains chunks whose `terminal_output` has not
 // been dispatched yet. Replaying those chunks after the snapshot re-applies
@@ -2707,9 +2764,13 @@ fn pane_snapshot_never_replays_spinner_redraw_chunks_it_already_contains() {
         }
         if !reader_ahead || index == 19 {
             for (data, seq) in undispatched.drain(..) {
-                for event in
-                    runtime.handle_runtime_output_event(window_id.clone(), incarnation, data, seq)
-                {
+                for event in runtime.handle_runtime_output_event(
+                    window_id.clone(),
+                    incarnation,
+                    data,
+                    seq,
+                    pane.lock().expect("pane lock").screen().contents(),
+                ) {
                     let prepared = prepare_outbound_event(&event);
                     repair_queue.enqueue(&prepared);
                     if resync_connected {

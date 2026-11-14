@@ -1837,6 +1837,7 @@ fn stale_runtime_events_cannot_mutate_same_session_window_successor() {
         predecessor_incarnation,
         b"late predecessor output".to_vec(),
         1,
+        "late predecessor screen".to_string(),
     );
     let status_events = runtime.handle_runtime_status_event(
         window_id.clone(),
