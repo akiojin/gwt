@@ -197,7 +197,11 @@ test.describe("Issue #3340 explicit STOP retention (isolated checkout)", () => {
   test.use({ viewport: { width: 1440, height: 1000 } });
   test("keeps the stopped transcript until app restart without restoring the agent", async ({ page }, info) => {
     test.setTimeout(240_000);
-    const fixture = await startExactRelaunchFixture(info);
+    const fixture = await startExactRelaunchFixture(info, {
+      async prepare({ env }) {
+        env.RUST_LOG = [env.RUST_LOG || "info", "gwt::shutdown=info"].join(",");
+      },
+    });
     const errors = capture(page);
     const theme = info.project.name.includes("light") ? "light" : "dark";
     await page.addInitScript(theme => {
@@ -400,17 +404,33 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
   test("restart evidence failure reaps the owned process", async ({}, testInfo) => {
     let starts = 0;
     const cleanups: { pid: number; exited: boolean }[] = [];
+    const diagnostics: any[] = [];
+    const guiLogs: string[] = [];
+    const ownerLogs: string[] = [];
     const fixture = await startExactRelaunchFixture({
       async attach(name, attachment) {
         if (name === "exact-relaunch-fixture" && ++starts === 2) throw new Error("fixture evidence failure");
         if (name === "fixture-process-cleanup") cleanups.push(JSON.parse(attachment.body!.toString()));
+        if (name === "fixture-restore-state") diagnostics.push(JSON.parse(attachment.body!.toString()));
+        if (name.startsWith("fixture-owner-")) ownerLogs.push(name);
+        if (/^fixture-gui-\d+-log$/.test(name)) guiLogs.push(name);
+        if (name === "fixture-gui-3-log") throw new Error("fixture log evidence failure");
         await testInfo.attach(name, attachment);
       },
-    } as TestInfo);
+    } as TestInfo, { restoreDiagnostics: true });
     try {
       await expect(fixture.restart()).rejects.toThrow("fixture evidence failure");
       expect(cleanups).toHaveLength(2);
       expect(cleanups.every(cleanup => cleanup.pid > 0 && cleanup.exited)).toBe(true);
+      expect(diagnostics.map(({ incarnation, phase }) => [incarnation, phase])).toEqual([
+        [1, "before-stop"], [1, "after-drain"], [2, "before-stop"], [2, "after-drain"],
+      ]);
+      expect(guiLogs).toEqual(["fixture-gui-1-log", "fixture-gui-2-log"]);
+      await fixture.start();
+      await expect(fixture.stop()).rejects.toThrow("fixture log evidence failure");
+      expect(ownerLogs.some(name => name.startsWith("fixture-owner-3-"))).toBe(true);
+      expect(cleanups).toHaveLength(3);
+      expect(cleanups.every(cleanup => cleanup.exited)).toBe(true);
     } finally {
       await fixture.stop();
     }
@@ -789,8 +809,10 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
     const purpose = "Review active work and coordinate delivery";
     const fixture = await startExactRelaunchFixture(info, {
       monitorPreferences: { max_active_agents: 4 },
+      restoreDiagnostics: true,
       async prepare({ home, bin, project, env }) {
-        env.RUST_LOG = [env.RUST_LOG || "info", "gwt::shutdown=info"].join(",");
+        env.RUST_LOG = [env.RUST_LOG || "info", "gwt::shutdown=info", "gwt.restore.admission=debug",
+          "gwt.launch.timing=info", "gwt::agent_launch=info", "gwt::app_runtime::pm=info"].join(",");
         const git = (...args: string[]) => execFileSync("git", args, { cwd: project, env, encoding: "utf8" });
         git("clone", "--bare", "--quiet", project, join(home, "origin.git"));
         git("remote", "add", "origin", join(home, "origin.git")); git("fetch", "--quiet", "origin");
@@ -1125,6 +1147,25 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
       } finally {
         await fixture.stop(true, () => page.goto("about:blank"));
       }
+    }
+    const restoreStates = info.attachments.filter(attachment => attachment.name === "fixture-restore-state")
+      .map(attachment => JSON.parse(attachment.body!.toString()));
+    expect(restoreStates.map(({ incarnation, phase }) => [incarnation, phase])).toEqual([
+      [1, "before-stop"], [1, "after-drain"], [2, "before-stop"], [2, "after-drain"],
+    ]);
+    for (const snapshot of restoreStates) {
+      expect(snapshot.cold_owner_drain).toBe(true);
+      expect(snapshot.pm).toMatchObject({ state: "present", auto_start: false });
+      const pm = snapshot.sessions.find((session: any) => session.id === snapshot.pm.registration.session_id);
+      expect(pm).toMatchObject({ state: "present", agent_type: "ClaudeCode" });
+      expect(pm.fields.id).toBe(JSON.stringify(pm.id));
+      expect(pm.fields.status).toBeTruthy();
+      expect(pm.fields.restore_window_on_startup).toMatch(/^(true|false)$/);
+    }
+    for (const incarnation of [1, 2]) {
+      expect(info.attachments.some(attachment => attachment.name === `fixture-gui-${incarnation}-log`)).toBe(true);
+      expect(info.attachments.some(attachment => attachment.name.startsWith(`fixture-owner-${incarnation}-`))).toBe(true);
+      expect(info.attachments.some(attachment => attachment.name.startsWith(`fixture-daemon-${incarnation}-`))).toBe(true);
     }
   });
 
