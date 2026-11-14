@@ -35,7 +35,7 @@ const KNOWN_FAMILIES: &[(&str, u64)] = &[
 
 /// Return the approximate context window size (in tokens) for a model name,
 /// or `None` when the model is unknown. Matching is case-insensitive and
-/// family-based (see [`KNOWN_FAMILIES`]) so versioned names such as
+/// family-based (see `KNOWN_FAMILIES`) so versioned names such as
 /// `claude-opus-4-7` or `gpt-6-astra` resolve to their family's window.
 pub fn context_limit(model: &str) -> Option<u64> {
     let m = model.to_ascii_lowercase();
