@@ -375,7 +375,9 @@ test.describe("Issue queue real backend launch", () => {
     expect(errors).toEqual([]);
   });
 
-  test("T20b saved checkpoint switches through the real Host and Issues", async ({ page }, info) => {
+  for (const inputAfterAck of [false, true]) test(inputAfterAck
+    ? "T94421 input after checkpoint ACK preserves the source without switching"
+    : "T20b saved checkpoint switches through the real Host and Issues", async ({ page }, info) => {
     test.skip(process.platform !== "linux" || process.env.GWT_PLAYWRIGHT_SWITCH_POSITIVE !== "1",
       "positive proof requires the isolated Linux root process namespace");
     const fixture = await startIssueQueueLaunchFixture(info, {
@@ -477,78 +479,140 @@ test.describe("Issue queue real backend launch", () => {
       expect(fixture.processAlive(source.pid)).toBe(true);
       expect(fixture.processAlive(idle.tree_child_pid)).toBe(true);
       expect(await fixture.launches()).toHaveLength(1);
-      await writeFile(join(fixture.home, `normal-n2-${waiting.operation}.json`), JSON.stringify({ operation: waiting.operation }));
-      await expect.poll(async () => (await fixture.launches()).length === 2
-        || (await fixture.actorEvents()).some((entry: any) => entry.stage === "normal_n2_hook_returned"
-          && entry.operation === waiting.operation && entry.pid === source.pid
-          && entry.gwt_session_id === source.gwt_session_id),
-      { timeout: Math.max(1, handoffDeadline - Date.now()), message: "genuine N2 hook returned or ordinary target already launched" }).toBe(true);
-      await expect.poll(async () => (await fixture.launches()).length,
-        { timeout: Math.max(1, handoffDeadline - Date.now()), message: "actual source checkpoint ACK, physical exit and ordinary target Issues launch" }).toBe(2);
-      const launches = await fixture.launches();
-      const target = launches[1];
-      const completionDeadline = Date.now() + 30_000;
-      const targetConfirmation = async () => {
-        const prefs = await preferences();
-        const assignment = prefs.agent_roster?.members.find((value: any) => value.agent_member_id === member.agent_member_id)?.assignment;
-        const confirmation = prefs.launch_confirmations?.[44];
-        const intent = prefs.agent_switch_intents[waiting.operation];
-        return {
-          assignment_matches: !!target.gwt_session_id && target.gwt_session_id !== source.gwt_session_id
-            && assignment?.issue_number === 44 && assignment.session_id === target.gwt_session_id,
-          confirmation_matches: !!confirmation?.window_id,
-          binding_matches: !!confirmation && prefs.launch_bindings?.[confirmation.window_id] === 44,
-          launched_matches: !!confirmation && (prefs.launched_issues || []).some((value: any) =>
-            value.issue_number === 44 && value.window_id === confirmation.window_id),
-          stage: intent?.stage, reason: intent?.reason,
+      if (inputAfterAck) {
+        const acknowledged = (await preferences()).agent_switch_intents[waiting.operation];
+        expect(acknowledged.stage).toBe("checkpoint_verified");
+        const checkpoint = fixture.savedSource(source.cwd);
+        const rawCount = (await fixture.actorEvents()).filter((entry: any) => entry.stage === "raw_successor").length;
+        await sendLiveGwtEvent(page, { kind: "terminal_input", id: projectedSource.id, data: "GWT_RAW_MONITOR_PROBE\r" });
+        await expect.poll(async () => (await fixture.actorEvents()).filter((entry: any) => entry.stage === "raw_successor").length,
+          { timeout: 60_000 }).toBe(rawCount + 1);
+        const events = await fixture.actorEvents();
+        const accepted = events.filter((entry: any) => entry.stage === "raw_accepted").at(-1);
+        const subsequentStop = events.filter((entry: any) => entry.stage === "raw_successor").at(-1);
+        expect(accepted).toMatchObject({ pid: source.pid, gwt_session_id: source.gwt_session_id, current_hook_event: null });
+        expect(subsequentStop).toMatchObject({ pid: source.pid, gwt_session_id: source.gwt_session_id,
+          current_hook_event: { event: "Stop", outcome: "normal" } });
+        expect(subsequentStop.current_hook_event.correlation_id).not.toBe(n1.current_hook_event.correlation_id);
+        await expect.poll(async () => (await preferences()).agent_switch_intents[waiting.operation],
+          { timeout: Math.max(1, handoffDeadline - Date.now()) }).toMatchObject({ stage: "failed",
+          reason: "New input invalidated the saved checkpoint. Current work is kept; request another switch." });
+        const assertSourceKept = async () => {
+          const prefs = await preferences();
+          const failed = prefs.agent_switch_intents[waiting.operation];
+          expect(failed).toMatchObject({ stage: "failed",
+            source: acknowledged.source, checkpoint: acknowledged.checkpoint });
+          expect(failed.runtime_exit_confirmed).not.toBe(true);
+          expect(prefs.monitor_runtime_stop_requests || []).toEqual([]);
+          expect(prefs.agent_roster.members.find((value: any) => value.agent_member_id === member.agent_member_id)
+            .assignment).toEqual(acknowledged.source.assignment);
+          expect(prefs.launched_claims[43]).toBe(acknowledged.source.claim_id);
+          expect(fixture.processAlive(source.pid)).toBe(true);
+          expect(fixture.processAlive(idle.tree_child_pid)).toBe(true);
+          expect(await fixture.launchIssues()).toEqual([43]);
+          expect(fixture.requests.filter(request => request.method === "POST"
+            && request.url === "/repos/fixture/queue/issues/44/comments")).toEqual([]);
+          expect(fixture.executionStatus(source.cwd).ecr_status).toBe("active");
+          const saved = fixture.savedSource(source.cwd);
+          expect(saved).toMatchObject({ branch: checkpoint.branch, head: checkpoint.head, remoteHead: checkpoint.remoteHead });
+          // A later normal Stop may append immutable Work history, but cannot change source files.
+          for (const line of saved.porcelain.split("\n").filter(Boolean))
+            expect(line).toMatch(/^\?\? \.gwt\/work\/events\/[0-9a-f]{2}\/[0-9a-f]{64}\.jsonl$/);
+          const work = (await fixture.workItems()).work_items.find((value: any) => value.id === acknowledged.checkpoint.work_id);
+          expect(work).toMatchObject({ owner: "Issue #43" });
+          expect(["idle", "active"]).toContain(work.status_category);
+          expect(work.events).toEqual(expect.arrayContaining([expect.objectContaining({
+            summary: `Saved source checkpoint ${waiting.operation}`, status_category: "idle",
+          })]));
+          expect(work.board_refs).toContain(acknowledged.checkpoint.board_entry_id);
         };
-      };
-      await expect.poll(targetConfirmation, { timeout: Math.max(1, completionDeadline - Date.now()),
-        message: "ordinary target assignment and launch confirmation before completion evaluation" })
-        .toMatchObject({ assignment_matches: true, confirmation_matches: true, binding_matches: true, launched_matches: true });
-      await info.attach("agent-switch-target-confirmation", {
-        body: JSON.stringify(await targetConfirmation()), contentType: "application/json",
-      });
-      await expect.poll(async () => Object.values((await preferences()).agent_switch_intents || {})
-        .map((intent: any) => intent.stage), { timeout: Math.max(1, completionDeadline - Date.now()) }).toEqual(["completed"]);
-      const saved = Object.values((await preferences()).agent_switch_intents)[0] as any;
-      expect(saved.runtime_exit_confirmed).toBe(true);
-      expect(saved.source.assignment.session_id).toBe(source.gwt_session_id);
-      expect(saved.request.member_id).toBe(member.agent_member_id);
-      expect(saved.request.target_issue_number).toBe(44);
-      const ack = await actor("checkpoint_acked");
-      expect(ack).toMatchObject({ operation: saved.request.operation_id, head: saved.checkpoint.verified_head,
-        work_id: saved.checkpoint.work_id, board_entry_id: saved.checkpoint.board_entry_id });
-      expect(await actor("checkpoint_idle")).toMatchObject({ operation: saved.request.operation_id, cwd: source.cwd });
-      expect((await preferences()).autonomous_mode).toBe(true);
-      expect(fixture.processAlive(source.pid)).toBe(false);
-      expect(fixture.processAlive(idle.tree_child_pid)).toBe(false);
-      expect(fixture.processAlive(target.pid)).toBe(true);
-      expect(target.gwt_session_id).not.toBe(source.gwt_session_id);
-      expect(target.provider_session_id).not.toBe(source.provider_session_id);
-      expect(await fixture.launchIssues()).toEqual([43, 44]);
-      await expect.poll(async () => field(await session(target.gwt_session_id!), "agent_session_id"),
-        { timeout: 45_000 }).toBe(target.provider_session_id);
-      const after = await session(target.gwt_session_id!);
-      expect(field(after, "agent_member_id")).toBe(member.agent_member_id);
-      expect(field(after, "agent_name")).toBe(field(before, "agent_name"));
-      expect(field(after, "agent_name")).toBe(member.name);
-      expect((await preferences()).agent_roster.members.find((value: any) => value.agent_member_id === member.agent_member_id)
-        .assignment.session_id).toBe(target.gwt_session_id);
-      expect(fixture.executionStatus(source.cwd).ecr_status).toBe("active");
-      const work = (await fixture.workItems()).work_items.find((value: any) => value.id === ack.work_id);
-      expect(work.status_category).toBe("idle");
-      expect(work.owner).toBe("Issue #43");
-      expect(work.board_refs).toContain(ack.board_entry_id);
-      const checkpoint = fixture.savedSource(source.cwd);
-      expect(checkpoint.head).toBe(ack.head);
-      expect(checkpoint.remoteHead).toBe(ack.head);
-      expect(checkpoint.porcelain).toBe("");
-      await expect(plans.locator(".roster-switch-status")).toContainText("Switch completed");
-      await info.attach(`agent-switch-completed-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
-      await info.attach("agent-switch-native-proof", { body: JSON.stringify({ source, target, idle,
-        checkpoint, operation: ack.operation, work_id: ack.work_id, board_entry_id: ack.board_entry_id }), contentType: "application/json" });
-      expect((await fixture.actorEvents()).filter((entry: any) => entry.stage === "actor_failed")).toEqual([]);
+        await assertSourceKept();
+        await writeFile(join(fixture.home, `normal-n2-${waiting.operation}.json`), JSON.stringify({ operation: waiting.operation }));
+        await expect.poll(async () => (await fixture.actorEvents()).some((entry: any) =>
+          entry.stage === "normal_n2_hook_returned" && entry.operation === waiting.operation
+            && entry.pid === source.pid && entry.gwt_session_id === source.gwt_session_id),
+        { timeout: Math.max(1, handoffDeadline - Date.now()) }).toBe(true);
+        await assertSourceKept();
+        await expect(plans.locator(".roster-switch-status")).toContainText("New input invalidated the saved checkpoint");
+        expect((await fixture.actorEvents()).filter((entry: any) => entry.stage === "actor_failed")).toEqual([]);
+        await info.attach("post-ack-input-preserved-source", { body: JSON.stringify({ acknowledged,
+          accepted, subsequentStop, failed: (await preferences()).agent_switch_intents[waiting.operation], checkpoint }),
+        contentType: "application/json" });
+        await info.attach(`post-ack-input-preserved-source-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
+      } else {
+        await writeFile(join(fixture.home, `normal-n2-${waiting.operation}.json`), JSON.stringify({ operation: waiting.operation }));
+        await expect.poll(async () => (await fixture.launches()).length === 2
+          || (await fixture.actorEvents()).some((entry: any) => entry.stage === "normal_n2_hook_returned"
+            && entry.operation === waiting.operation && entry.pid === source.pid
+            && entry.gwt_session_id === source.gwt_session_id),
+        { timeout: Math.max(1, handoffDeadline - Date.now()), message: "genuine N2 hook returned or ordinary target already launched" }).toBe(true);
+        await expect.poll(async () => (await fixture.launches()).length,
+          { timeout: Math.max(1, handoffDeadline - Date.now()), message: "actual source checkpoint ACK, physical exit and ordinary target Issues launch" }).toBe(2);
+        const launches = await fixture.launches();
+        const target = launches[1];
+        const completionDeadline = Date.now() + 30_000;
+        const targetConfirmation = async () => {
+          const prefs = await preferences();
+          const assignment = prefs.agent_roster?.members.find((value: any) => value.agent_member_id === member.agent_member_id)?.assignment;
+          const confirmation = prefs.launch_confirmations?.[44];
+          const intent = prefs.agent_switch_intents[waiting.operation];
+          return {
+            assignment_matches: !!target.gwt_session_id && target.gwt_session_id !== source.gwt_session_id
+              && assignment?.issue_number === 44 && assignment.session_id === target.gwt_session_id,
+            confirmation_matches: !!confirmation?.window_id,
+            binding_matches: !!confirmation && prefs.launch_bindings?.[confirmation.window_id] === 44,
+            launched_matches: !!confirmation && (prefs.launched_issues || []).some((value: any) =>
+              value.issue_number === 44 && value.window_id === confirmation.window_id),
+            stage: intent?.stage, reason: intent?.reason,
+          };
+        };
+        await expect.poll(targetConfirmation, { timeout: Math.max(1, completionDeadline - Date.now()),
+          message: "ordinary target assignment and launch confirmation before completion evaluation" })
+          .toMatchObject({ assignment_matches: true, confirmation_matches: true, binding_matches: true, launched_matches: true });
+        await info.attach("agent-switch-target-confirmation", {
+          body: JSON.stringify(await targetConfirmation()), contentType: "application/json",
+        });
+        await expect.poll(async () => Object.values((await preferences()).agent_switch_intents || {})
+          .map((intent: any) => intent.stage), { timeout: Math.max(1, completionDeadline - Date.now()) }).toEqual(["completed"]);
+        const saved = Object.values((await preferences()).agent_switch_intents)[0] as any;
+        expect(saved.runtime_exit_confirmed).toBe(true);
+        expect(saved.source.assignment.session_id).toBe(source.gwt_session_id);
+        expect(saved.request.member_id).toBe(member.agent_member_id);
+        expect(saved.request.target_issue_number).toBe(44);
+        const ack = await actor("checkpoint_acked");
+        expect(ack).toMatchObject({ operation: saved.request.operation_id, head: saved.checkpoint.verified_head,
+          work_id: saved.checkpoint.work_id, board_entry_id: saved.checkpoint.board_entry_id });
+        expect(await actor("checkpoint_idle")).toMatchObject({ operation: saved.request.operation_id, cwd: source.cwd });
+        expect((await preferences()).autonomous_mode).toBe(true);
+        expect(fixture.processAlive(source.pid)).toBe(false);
+        expect(fixture.processAlive(idle.tree_child_pid)).toBe(false);
+        expect(fixture.processAlive(target.pid)).toBe(true);
+        expect(target.gwt_session_id).not.toBe(source.gwt_session_id);
+        expect(target.provider_session_id).not.toBe(source.provider_session_id);
+        expect(await fixture.launchIssues()).toEqual([43, 44]);
+        await expect.poll(async () => field(await session(target.gwt_session_id!), "agent_session_id"),
+          { timeout: 45_000 }).toBe(target.provider_session_id);
+        const after = await session(target.gwt_session_id!);
+        expect(field(after, "agent_member_id")).toBe(member.agent_member_id);
+        expect(field(after, "agent_name")).toBe(field(before, "agent_name"));
+        expect(field(after, "agent_name")).toBe(member.name);
+        expect((await preferences()).agent_roster.members.find((value: any) => value.agent_member_id === member.agent_member_id)
+          .assignment.session_id).toBe(target.gwt_session_id);
+        expect(fixture.executionStatus(source.cwd).ecr_status).toBe("active");
+        const work = (await fixture.workItems()).work_items.find((value: any) => value.id === ack.work_id);
+        expect(work.status_category).toBe("idle");
+        expect(work.owner).toBe("Issue #43");
+        expect(work.board_refs).toContain(ack.board_entry_id);
+        const checkpoint = fixture.savedSource(source.cwd);
+        expect(checkpoint.head).toBe(ack.head);
+        expect(checkpoint.remoteHead).toBe(ack.head);
+        expect(checkpoint.porcelain).toBe("");
+        await expect(plans.locator(".roster-switch-status")).toContainText("Switch completed");
+        await info.attach(`agent-switch-completed-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
+        await info.attach("agent-switch-native-proof", { body: JSON.stringify({ source, target, idle,
+          checkpoint, operation: ack.operation, work_id: ack.work_id, board_entry_id: ack.board_entry_id }), contentType: "application/json" });
+        expect((await fixture.actorEvents()).filter((entry: any) => entry.stage === "actor_failed")).toEqual([]);
+      }
       expect(errors).toEqual([]);
     } finally {
       try {
