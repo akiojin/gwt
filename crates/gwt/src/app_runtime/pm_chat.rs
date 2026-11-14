@@ -22,7 +22,10 @@ pub(super) enum PmRequestTaskOperation {
         task_key: Option<String>,
     },
     Update(gwt::protocol::PmRequestTaskUpdateRequest),
-    Complete(gwt::protocol::PmRequestTaskCompleteRequest),
+    Complete {
+        request: gwt::protocol::PmRequestTaskCompleteRequest,
+        task_key: Option<String>,
+    },
 }
 
 fn task_error(code: &str, message: String, current_revision: Option<u64>) -> PmRequestTaskResult {
@@ -219,7 +222,11 @@ fn request_task_result(
             )?;
             return current_request_task_result(store, &task_id, receipt);
         }
-        PmRequestTaskOperation::Complete(request) => {
+        PmRequestTaskOperation::Complete {
+            mut request,
+            task_key,
+        } => {
+            request.task_id = resolve_request_task_id(store, request.task_id, task_key)?;
             let receipt = store.apply(
                 &Actor {
                     kind: ActorKind::User,

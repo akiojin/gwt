@@ -12378,13 +12378,14 @@ impl AppRuntime {
             FrontendEvent::CompletePmRequestTask {
                 id,
                 request_id,
+                task_key,
                 request,
             } => self.pm_request_task_events(
                 context,
                 client_id,
                 &id,
                 request_id,
-                pm_chat::PmRequestTaskOperation::Complete(request),
+                pm_chat::PmRequestTaskOperation::Complete { request, task_key },
             ),
             FrontendEvent::PaneName { .. } => Vec::new(),
             FrontendEvent::PaneSendInput {

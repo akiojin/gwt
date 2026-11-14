@@ -474,6 +474,7 @@ fn pm_request_task_browser_keyed_mutations_reject_ambiguous_selectors_and_preser
     for (kind, status) in [
         ("cancel_pm_request_task", "cancelled"),
         ("reopen_pm_request_task", "pending"),
+        ("complete_pm_request_task", "completed"),
     ] {
         let temp = tempdir().unwrap();
         let _home = ScopedGwtHome::set(temp.path().join(".gwt"));
@@ -500,9 +501,14 @@ fn pm_request_task_browser_keyed_mutations_reject_ambiguous_selectors_and_preser
             pm_request_task_browser_reply(runtime, &context, &tasks, &recorded, "browser-a", wire)
         };
         let key = format!("{:x}", sha2::Sha256::digest(b"synthetic-task"));
-        let cancel = serde_json::json!({"kind":kind, "id":"tab-1::agent-1", "request_id":1,
+        let mut cancel = serde_json::json!({"kind":kind, "id":"tab-1::agent-1", "request_id":1,
         "task_key":key, "request":{"operation_id":"key-cancel", "expected_revision":3,
         "reason":"Withdraw the saved request", "task_id":""}});
+        if kind == "complete_pm_request_task" {
+            cancel["request"]["condition_revision"] = serde_json::json!(1);
+            cancel["request"]["review_generation"] = serde_json::json!(1);
+            cancel["request"]["evidence"] = serde_json::json!(["synthetic:keyed-completion"]);
+        }
         for (key, task_id, code) in [
             ("", "", "invalid_request"),
             (key.as_str(), "synthetic-task", "invalid_request"),
@@ -534,6 +540,13 @@ fn pm_request_task_browser_keyed_mutations_reject_ambiguous_selectors_and_preser
         assert_eq!(applied["state"], "ready");
         assert_eq!(applied["task"]["status"], status);
         assert_eq!(applied["receipt"]["actor"]["id"], "browser:browser-a");
+        if kind == "complete_pm_request_task" {
+            assert_eq!(applied["receipt"]["action"], "complete");
+            assert_eq!(
+                applied["task"]["completion"]["evidence"],
+                cancel["request"]["evidence"]
+            );
+        }
         assert_eq!(invoke(&mut runtime, cancel.clone()), applied);
         assert_eq!(store.read().unwrap().unwrap().revision, 4);
         store
