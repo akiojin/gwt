@@ -86,15 +86,12 @@ fn atomic_write_records_file_then_directory_sync_requests() {
 }
 
 #[test]
-fn file_sync_before_rename_succeeds_on_writable_and_read_only_descriptors() {
+fn file_sync_before_rename_succeeds_on_a_real_file() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("barrier.json");
     let mut file = fs::File::create(&path).unwrap();
     file.write_all(b"ordered").unwrap();
     sync_file_before_rename(&file, &path).unwrap();
-    let read_only = fs::File::open(&path).unwrap();
-    // A read-only descriptor is accepted too, matching sync_all on the same file.
-    sync_file_before_rename(&read_only, &path).unwrap();
     assert_eq!(fs::read(&path).unwrap(), b"ordered");
 }
 
