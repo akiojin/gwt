@@ -1331,8 +1331,8 @@ The current task and the receipt's historical task state retain their own
 revisions. Missing or unreadable data returns a diagnostic and recovery read.
 Reading a receipt observes its recorded outcome; it does not acknowledge a new
 durable write.
-The Tasks detail supports cancellation and reopening completed tasks. Task
-editing and completion checkbox controls are still pending.
+The Tasks detail supports completion with new evidence, cancellation and reopening
+completed tasks. Task editing and list checkbox controls are still pending.
 
 For selected native intake, the registered PM reads
 `selector:{kind:"native_turns"}` through `pm.request_tasks.read`. The result gives
@@ -2237,13 +2237,18 @@ to 240. Counts and shortened text are explicit. Changes include only receipts
 with a saved change to that task, so this is not a complete operation history.
 **Reload details** refreshes it; changes or read failures retain confirmed detail
 with a stale warning. **Close details** returns focus to its task.
+To complete an unfinished task, enter a reason and new evidence of its original
+outcome, then choose **Mark complete**. A pending PM reassessment must finish first;
+all child tasks must also be completed. The saved conditions and review generation
+are checked again by the host. Evidence is not prefilled from past completions and
+is cleared when the conditions or review generation change.
 To cancel tracking, enter a reason in the selected detail and choose **Cancel task**.
 For a completed task, enter a reason and choose **Reopen task** to return it to
 pending tracking and request a fresh PM review. This does not restart its Issue.
 This records the browser user's reason and preserves the original request and past changes;
 it does not stop agents or change Issues or pull requests. The state changes only after
 the host confirms it. A conflict or unconfirmed response keeps the last confirmed detail;
-reconnect and use **Reload details** before another attempt. Task editing, completion controls, automatic intake, and history import
+reconnect and use **Reload details** before another attempt. Task editing, list checkboxes, automatic intake, and history import
 are not available in this preview. **Reports** and **Execution log** remain
 available from the same toolbar.
 

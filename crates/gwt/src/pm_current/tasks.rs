@@ -72,6 +72,9 @@ impl PmTaskBoundedText {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PmTaskDetail {
     pub status: TaskStatus,
+    pub condition_revision: u64,
+    pub review_generation: u64,
+    pub review_required: bool,
     pub original: Option<PmTaskBoundedText>,
     pub purpose: PmTaskBoundedText,
     pub completion_conditions: Vec<PmTaskBoundedText>,
@@ -128,6 +131,9 @@ pub fn task_detail(state: &Snapshot, selected_key: &str) -> Option<PmTaskDetail>
     }
     Some(PmTaskDetail {
         status: task.status,
+        condition_revision: task.condition_revision,
+        review_generation: task.review_generation,
+        review_required: task.review_required,
         original: state
             .sources
             .get(&task.source_id)
@@ -238,7 +244,7 @@ mod tests {
                 "completion_conditions":(0..21).map(|i| format!("{i}:{}", "条".repeat(1001))).collect::<Vec<_>>(),
                 "issue_numbers":[],"goal_ids":[],"assignee":null},
             "source_id":"private-source","parent_id":null,"status":"completed",
-            "condition_revision":1,"review_generation":1,"review_required":false,
+            "condition_revision":9,"review_generation":12,"review_required":true,
             "next_action":null,"wait_reason":null,
             "completion":{"condition_revision":1,"review_generation":1,
                 "evidence":(0..11).map(|i| format!("e{i}:{}", "証".repeat(1001))).collect::<Vec<_>>()}
@@ -285,6 +291,10 @@ mod tests {
         assert_eq!(detail.history[0].actor_id.total_chars, 241);
         assert_eq!(detail.history[0].reason.text, "由".repeat(1000));
         let serialized = serde_json::to_string(&detail).unwrap();
+        let metadata: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(metadata["condition_revision"], 9);
+        assert_eq!(metadata["review_generation"], 12);
+        assert_eq!(metadata["review_required"], true);
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&serialized).unwrap()["status"],
             "completed"

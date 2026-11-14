@@ -22,6 +22,7 @@ function fixture({ tasksDefault = false, onOpenTerminal } = {}) {
   const view = createPmChat({ document, root, sessionId: 'session', onOpenTerminal,
     onTaskCancel: reason => { const request = model.requestPmTaskCancel('pm', reason); if (request) sent.push(request); },
     onTaskReopen: reason => { const request = model.requestPmTaskReopen('pm', reason); if (request) sent.push(request); },
+    onTaskComplete: (reason, evidence) => { const request = model.requestPmTaskComplete('pm', reason, evidence); if (request) sent.push(request); },
     onDecisionsWaiting: decisions => waiting.push(decisions),
     onReviewAttention: items => reviews.push(items),
     onTaskDetail: key => { const request = model.requestPmTaskDetail('pm', key); if (request) sent.push(request); },
@@ -80,12 +81,92 @@ const trackedTask = (key, extra = {}) => ({ key, parent_key: null, title: `Task 
 
 const bounded = text => ({ text, total_chars: [...text].length });
 const selectedDetail = () => ({ status: 'pending', original: bounded('Exact <original>\nrequest'), purpose: bounded('Original purpose'),
+  condition_revision: 3, review_generation: 7, review_required: false,
   completion_conditions: [bounded('Verify <criterion>')], completion_condition_total: 2,
   evidence: [bounded('proof:<literal>')], evidence_total: 2, history_total: 2,
   history: [{ revision: 4, action: 'complete', actor_kind: 'pm', actor_id: bounded('PM reviewer'),
     at: '2026-11-13T00:00:00Z', reason: bounded('Verified <outcome>') }] });
 const detailReply = (request, extra = {}) => ({ kind: 'pm_request_task', id: 'pm', request_id: request.request_id,
   result: { state: 'detail', key: request.task_key, revision: 4, detail: selectedDetail(), ...extra } });
+
+test('Task Complete uses fresh review metadata and explicit evidence with shared receipt recovery', () => {
+  const { model, update } = fixture();
+  assert.equal(typeof model.requestPmTaskComplete, 'function');
+  update([], null, { request_tasks: taskOverview([trackedTask('one')]) });
+  const read = model.requestPmTaskDetail('pm', 'one');
+  assert.equal(model.requestPmTaskComplete('pm', 'Verified', 'new proof'), null);
+  model.applyPmWindowReceiveEvent(detailReply(read));
+  assert.equal(model.requestPmTaskComplete('pm', ' ', 'new proof'), null);
+  assert.equal(model.requestPmTaskComplete('pm', 'Verified', ' '), null, 'old evidence is not reused');
+  for (const metadata of [{ review_required: true }, { review_required: undefined }, { condition_revision: undefined },
+    { condition_revision: 0 }, { review_generation: 1.5 }, { review_generation: Number.MAX_SAFE_INTEGER + 1 }, { status: 'completed' }, { status: 'cancelled' }]) {
+    model.applyPmWindowReceiveEvent(detailReply(model.requestPmTaskDetail('pm', 'one'), { detail: { ...selectedDetail(), ...metadata } }));
+    assert.equal(model.requestPmTaskComplete('pm', 'Verified', 'new proof'), null);
+  }
+  model.applyPmWindowReceiveEvent(detailReply(model.requestPmTaskDetail('pm', 'one')));
+  const request = model.requestPmTaskComplete('pm', 'Verified the original outcome', 'New evidence\nwith literal detail');
+  assert.equal(request.kind, 'complete_pm_request_task');
+  assert.equal(request.task_key, 'one');
+  assert.deepEqual(request.request, { operation_id: request.request.operation_id, expected_revision: 4, task_id: '',
+    reason: 'Verified the original outcome', condition_revision: 3, review_generation: 7, evidence: ['New evidence\nwith literal detail'] });
+  assert.equal(model.requestPmTaskCancel('pm', 'Cancel instead'), null);
+  const reply = { kind: 'pm_request_task', id: 'pm', request_id: request.request_id,
+    result: { state: 'ready', receipt: { action: 'complete', operation_id: request.request.operation_id, revision: 5 } } };
+  model.applyPmWindowReceiveEvent({ ...reply, result: { ...reply.result, receipt: { ...reply.result.receipt, action: 'cancel' } } });
+  assert.equal(model.readPmWindowState().windows.pm.taskMutation.status, 'pending');
+  assert.equal(model.readPmWindowState().windows.pm.taskDetail.data.status, 'pending', 'no optimistic completion');
+  model.applyPmWindowReceiveEvent(reply);
+  assert.equal(model.readPmWindowState().windows.pm.taskMutation.status, 'recorded');
+  assert.equal(model.requestPmTaskComplete('pm', 'Old detail', 'new proof'), null);
+  model.applyPmWindowReceiveEvent(detailReply(model.requestPmTaskDetail('pm', 'one'), { revision: 5 }));
+  const retry = model.requestPmTaskComplete('pm', 'Verified again', 'fresh proof');
+  model.markPmTaskMutationUnavailable('pm', retry.request_id);
+  model.applyPmWindowReceiveEvent({ ...reply, request_id: retry.request_id,
+    result: { ...reply.result, receipt: { ...reply.result.receipt, operation_id: retry.request.operation_id, revision: 6 } } });
+  assert.equal(model.readPmWindowState().windows.pm.taskMutation.status, 'error');
+  assert.equal(model.requestPmTaskComplete('pm', 'Unconfirmed', 'proof'), null);
+  model.bindPmWindowState('pm', 'replacement');
+  assert.equal(model.readPmWindowState().windows.pm.taskMutation, null);
+});
+
+test('Task Complete requires labelled new evidence and keeps inputs on conflict and reassessment', () => {
+  const { model, update, root, sent } = fixture();
+  update([], null, { request_tasks: taskOverview([trackedTask('one')]) });
+  model.applyPmWindowReceiveEvent(detailReply(model.requestPmTaskDetail('pm', 'one')));
+  const complete = [...root.querySelectorAll('button')].find(node => node.textContent === 'Mark complete');
+  const evidence = root.querySelector('[aria-label="Evidence for completing this task"]');
+  assert.ok(complete);
+  assert.ok(evidence);
+  assert.equal(evidence.value, '', 'historical proof is not a new verification');
+  const reason = root.querySelector('[aria-label="Reason for this task change"]');
+  reason.value = 'The outcome is met';
+  reason.dispatchEvent(new root.ownerDocument.defaultView.Event('input'));
+  complete.click();
+  assert.equal(sent.length, 0);
+  evidence.value = 'I verified the original criterion';
+  evidence.dispatchEvent(new root.ownerDocument.defaultView.Event('input'));
+  root.querySelector('.pm-chat__draft').value = 'Keep this draft';
+  complete.click();
+  complete.click();
+  assert.equal(sent.length, 1);
+  assert.equal(evidence.readOnly, true);
+  model.applyPmWindowReceiveEvent({ kind: 'pm_request_task', id: 'pm', request_id: sent[0].request_id,
+    result: { state: 'error', code: 'conflict', message: 'The task changed. Reload details.' } });
+  assert.equal(reason.value, 'The outcome is met');
+  assert.equal(evidence.value, 'I verified the original criterion');
+  assert.equal(root.querySelector('.pm-chat__draft').value, 'Keep this draft');
+  assert.equal(complete.getAttribute('aria-disabled'), 'true');
+  model.applyPmWindowReceiveEvent(detailReply(model.requestPmTaskDetail('pm', 'one'), {
+    revision: 5, detail: { ...selectedDetail(), review_required: true } }));
+  assert.equal(complete.getAttribute('aria-disabled'), 'true');
+  assert.match(root.querySelector('.pm-chat__task-cancel-status').textContent, /PM reassessment required/);
+  model.applyPmWindowReceiveEvent(detailReply(model.requestPmTaskDetail('pm', 'one'), {
+    revision: 6, detail: { ...selectedDetail(), review_generation: 8 } }));
+  assert.equal(evidence.value, '', 'a new review requires new evidence input');
+  assert.equal(reason.value, 'The outcome is met');
+  model.bindPmWindowState('pm', 'replacement');
+  assert.equal(evidence.value, '');
+});
 
 test('Task Reopen requires fresh completed details and matches its own action receipt', () => {
   const { model, update } = fixture();

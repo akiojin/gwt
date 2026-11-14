@@ -26,6 +26,12 @@ function reportDisplayText(report) {
   return lines.join('\n');
 }
 
+function canCompleteTask(task) {
+  return ['pending', 'in_progress', 'waiting'].includes(task?.status) && task.review_required === false
+    && Number.isSafeInteger(task.condition_revision) && task.condition_revision > 0
+    && Number.isSafeInteger(task.review_generation) && task.review_generation > 0;
+}
+
 // Explicit PM reports and raw terminal packets share one immutable window version.
 // The terminal runtime retains responsibility for buffering and snapshot ordering.
 export function createPmWindowModel() {
@@ -246,21 +252,25 @@ export function createPmWindowModel() {
         error: 'The read was not confirmed. Reconnect, then reload details.' },
       revision: previous.revision + 1 } }, changedWindowId: windowId }));
   }
-  function requestPmTaskMutation(windowId, reason, action) {
+  function requestPmTaskMutation(windowId, reason, action, evidence = null) {
     const previous = model.read().windows[windowId], selected = previous?.taskDetail;
     const statuses = action === 'reopen' ? ['completed'] : ['pending', 'in_progress', 'waiting', 'completed'];
     if (!previous?.sessionId || previous.taskMutation?.status === 'pending' || selected?.status !== 'ready'
       || selected.stale || !statuses.includes(selected.data?.status)
       || selected.revision < (previous.requestTasks?.revision || 0) || !String(reason ?? '').trim()) return null;
+    if (action === 'complete' && (!canCompleteTask(selected.data) || !String(evidence ?? '').trim())) return null;
     const requestId = ++requestSequence, operationId = `task-${action}-${globalThis.crypto.randomUUID()}`;
     model.update(state => ({ ...state, windows: { ...state.windows, [windowId]: { ...previous,
       taskMutation: { action, key: selected.key, requestId, operationId, revision: selected.revision, status: 'pending', error: null },
       revision: previous.revision + 1 } }, changedWindowId: windowId }));
-    return { kind: action === 'reopen' ? 'reopen_pm_request_task' : 'cancel_pm_request_task', id: windowId, request_id: requestId, task_key: selected.key,
-      request: { operation_id: operationId, expected_revision: selected.revision, reason, task_id: '' } };
+    return { kind: `${action}_pm_request_task`, id: windowId, request_id: requestId, task_key: selected.key,
+      request: { operation_id: operationId, expected_revision: selected.revision, reason, task_id: '',
+        ...(action === 'complete' ? { condition_revision: selected.data.condition_revision,
+          review_generation: selected.data.review_generation, evidence: [evidence] } : {}) } };
   }
   function requestPmTaskCancel(windowId, reason) { return requestPmTaskMutation(windowId, reason, 'cancel'); }
   function requestPmTaskReopen(windowId, reason) { return requestPmTaskMutation(windowId, reason, 'reopen'); }
+  function requestPmTaskComplete(windowId, reason, evidence) { return requestPmTaskMutation(windowId, reason, 'complete', evidence); }
   function markPmTaskMutationUnavailable(windowId, requestId) {
     const previous = model.read().windows[windowId], mutation = previous?.taskMutation;
     if (mutation?.status !== 'pending' || mutation.requestId !== requestId) return;
@@ -278,11 +288,11 @@ export function createPmWindowModel() {
   }
   function readPmWindowState() { return model.read(); }
   function subscribePmWindowState(select, render) { return model.subscribe(select, render); }
-  return { requestPmReports, requestPmConversation, requestPmTaskDetail, markPmTaskDetailUnavailable, requestPmTaskCancel, requestPmTaskReopen, markPmTaskMutationUnavailable, requestPmChatSend, markPmChatSendUnavailable, expirePmChatSend, bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, readPmWindowState, subscribePmWindowState };
+  return { requestPmReports, requestPmConversation, requestPmTaskDetail, markPmTaskDetailUnavailable, requestPmTaskCancel, requestPmTaskReopen, requestPmTaskComplete, markPmTaskMutationUnavailable, requestPmChatSend, markPmChatSendUnavailable, expirePmChatSend, bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, readPmWindowState, subscribePmWindowState };
 }
 
 // Read-only report view. The caller owns polling and the unchanged terminal.
-export function createPmChat({ document, root, sessionId, onLogVisibility, onChatVisible = () => {}, onTaskDetail = () => {}, onTaskCancel = () => {}, onTaskReopen = () => {}, onSend = () => {}, onOpenTerminal = () => false,
+export function createPmChat({ document, root, sessionId, onLogVisibility, onChatVisible = () => {}, onTaskDetail = () => {}, onTaskCancel = () => {}, onTaskReopen = () => {}, onTaskComplete = () => {}, onSend = () => {}, onOpenTerminal = () => false,
   onViewNotification = () => {}, onDecisionsWaiting = () => {}, onReviewAttention = () => {},
   copyText = text => document.defaultView.navigator.clipboard.writeText(text) }) {
   let session = sessionId;
@@ -423,12 +433,23 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   mutationLabel.append(mutationReason);
   const cancelTask = element('button', '', 'Cancel task');
   const reopenTask = element('button', '', 'Reopen task');
-  cancelTask.type = reopenTask.type = 'button';
+  const completeTask = element('button', '', 'Mark complete');
+  cancelTask.type = reopenTask.type = completeTask.type = 'button';
+  const evidenceLabel = element('label', 'pm-chat__task-cancel-label', 'New evidence for completion');
+  const completionEvidence = element('textarea', 'pm-chat__task-cancel-reason');
+  completionEvidence.setAttribute('aria-label', 'Evidence for completing this task');
+  completionEvidence.maxLength = 1000;
+  completionEvidence.rows = 2;
+  evidenceLabel.append(completionEvidence);
   const mutationStatus = element('p', 'pm-chat__task-cancel-status');
   mutationStatus.setAttribute('aria-live', 'polite');
-  mutationControls.append(element('p', 'pm-chat__task-meta', 'Changes tracking only. Reopen requests a fresh PM review. These actions do not stop agents or change Issues or pull requests.'), mutationLabel, cancelTask, reopenTask);
+  mutationControls.append(element('p', 'pm-chat__task-meta', 'Changes tracking only. Complete requires new evidence of the original outcome. Reopen requests a fresh PM review. These actions do not stop agents or change Issues or pull requests.'), mutationLabel, evidenceLabel, completeTask, cancelTask, reopenTask);
   taskDetail.append(detailHeading, detailActions, detailNotice, mutationStatus, mutationControls, detailContent);
   mutationReason.addEventListener('input', () => renderTaskMutation(latestState));
+  completionEvidence.addEventListener('input', () => renderTaskMutation(latestState));
+  completeTask.addEventListener('click', () => {
+    if (!disposed && !completeTask.hidden && completeTask.getAttribute('aria-disabled') === 'false') onTaskComplete(mutationReason.value, completionEvidence.value);
+  });
   cancelTask.addEventListener('click', () => {
     if (!disposed && cancelTask.getAttribute('aria-disabled') === 'false') onTaskCancel(mutationReason.value);
   });
@@ -900,9 +921,9 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   }
   function renderTaskDetail(selected) {
     taskDetail.hidden = !selected;
-    if (!selected) { selectedDetailKey = null; detailData = null; mutationReason.value = ''; detailContent.replaceChildren(); return; }
+    if (!selected) { selectedDetailKey = null; detailData = null; mutationReason.value = ''; completionEvidence.value = ''; detailContent.replaceChildren(); return; }
     const changedKey = selected.key !== selectedDetailKey;
-    if (changedKey) mutationReason.value = '';
+    if (changedKey) { mutationReason.value = ''; completionEvidence.value = ''; }
     selectedDetailKey = selected.key;
     detailHeading.textContent = selected.title || 'Selected task details';
     // Retain keyboard focus while the read is pending.
@@ -911,6 +932,8 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
       selected.stale ? 'Showing the last confirmed detail (stale). Reload details after recovering the task store.' : '',
       selected.error || '', selected.data ? `Selected snapshot revision ${selected.revision}. Text below is a bounded preview.` : ''].filter(Boolean).join(' ');
     if (detailData !== selected.data) {
+      if (detailData && (detailData.condition_revision !== selected.data?.condition_revision
+        || detailData.review_generation !== selected.data?.review_generation)) completionEvidence.value = '';
       detailData = selected.data;
       const nodes = [];
       const text = value => value ? value.text + ([...value.text].length < value.total_chars
@@ -943,20 +966,27 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     const current = mutation?.key === selected?.key ? mutation : null;
     const actionable = ['pending', 'in_progress', 'waiting', 'completed'].includes(selected?.data?.status);
     const reopenable = selected?.data?.status === 'completed';
+    const unfinished = ['pending', 'in_progress', 'waiting'].includes(selected?.data?.status);
     if ((!actionable && mutationControls.contains(document.activeElement))
-      || (!reopenable && document.activeElement === reopenTask)) reloadDetail.focus();
+      || (!reopenable && document.activeElement === reopenTask)
+      || (!unfinished && (document.activeElement === completeTask || document.activeElement === completionEvidence))) reloadDetail.focus();
     mutationControls.hidden = !actionable;
     reopenTask.hidden = !reopenable;
+    completeTask.hidden = evidenceLabel.hidden = !unfinished;
     const disabled = selected?.status !== 'ready' || selected.stale || mutation?.status === 'pending' || !mutationReason.value.trim();
     cancelTask.setAttribute('aria-disabled', String(!actionable || disabled));
     reopenTask.setAttribute('aria-disabled', String(!reopenable || disabled));
+    completeTask.setAttribute('aria-disabled', String(disabled || !canCompleteTask(selected?.data) || !completionEvidence.value.trim()));
     mutationReason.readOnly = mutation?.status === 'pending';
+    completionEvidence.readOnly = mutation?.status === 'pending';
     mutationStatus.textContent = mutation?.status === 'pending'
-      ? (current ? (mutation.action === 'reopen' ? 'Reopening task…' : 'Saving cancellation…')
+      ? (current ? (mutation.action === 'complete' ? 'Saving completion…' : mutation.action === 'reopen' ? 'Reopening task…' : 'Saving cancellation…')
         : 'Another task change is awaiting confirmation. Reconnect and reload its details if confirmation does not arrive.')
-      : current?.status === 'recorded' ? (current.action === 'reopen' ? 'Reopen recorded. This action requests a fresh PM review.'
+      : current?.status === 'recorded' ? (current.action === 'complete' ? 'Completion recorded. Reload details to see the current state.'
+        : current.action === 'reopen' ? 'Reopen recorded. This action requests a fresh PM review.'
         : `Cancellation recorded.${selected?.data?.status === 'cancelled' && !selected.stale ? ' This task is cancelled.' : ' Reload details to see the current state.'}`)
       : current?.error || (selected?.data?.status === 'cancelled' ? 'This task is cancelled.' : '');
+    if (unfinished && selected.data.review_required) mutationStatus.textContent += ' PM reassessment required before completion.';
   }
   function renderChat(conversation) {
     const nextDigest = JSON.stringify(conversation);
