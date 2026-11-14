@@ -1010,7 +1010,9 @@ test.describe("Issue queue real backend launch", () => {
     expect(errors, "zero console/page errors including fixture cleanup").toEqual([]);
   });
 
-  test("T94415 ordinary provider exit admits the queued Issue without operator rescue", async ({ page }, info) => {
+  for (const stopBeforeExit of [false, true]) test(stopBeforeExit
+    ? "T94416 explicit Stop prevents admission after provider exit until Start"
+    : "T94415 ordinary provider exit admits the queued Issue without operator rescue", async ({ page }, info) => {
     const fixture = await startIssueQueueLaunchFixture(info, {
       additionalIssueNumbers: [44], autonomousMode: true, terminalConvergence: true,
       monitorPreferences: { max_active_agents: 1 },
@@ -1023,11 +1025,13 @@ test.describe("Issue queue real backend launch", () => {
     const nativeSession = async (id: string) => (await readFile(
       join(fixture.home, ".gwt", "sessions", `${id}.toml`), "utf8"))
       .match(/^agent_session_id\s*=\s*"([^"]*)"/m)?.[1];
-    const sourceActivity = (sessionId: string) => page.evaluate(sessionId =>
+    const activity = () => page.evaluate(() =>
       ((window as any).__gwtPlaywrightMessages ?? [])
         .map(({ payload }: any) => payload.kind === "local_agent_activity" ? payload.activity : payload.projection?.local_agent_activity)
         .filter((snapshot: any) => snapshot?.project_key === location.pathname.split("/")[2])
-        .at(-1)?.agents?.find((agent: any) => agent.session_id === sessionId), sessionId);
+        .at(-1));
+    const sourceActivity = async (sessionId: string) =>
+      (await activity())?.agents?.find((agent: any) => agent.session_id === sessionId);
     try {
       await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
       await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
@@ -1053,11 +1057,35 @@ test.describe("Issue queue real backend launch", () => {
       expect(() => process.kill(source.pid, 0)).not.toThrow();
       expect(await fixture.launchIssues(), "the occupied slot keeps the successor queued").toEqual([43]);
 
+      const controls = page.getByRole("group", { name: "Issues controls", exact: true });
+      if (stopBeforeExit) {
+        await controls.getByRole("button", { name: "Stop", exact: true }).click();
+        await expect.poll(preferences).toMatchObject({ enabled: false, autonomous_mode: true });
+        await expect(controls.getByRole("button", { name: "Start", exact: true })).toBeVisible();
+        expect(() => process.kill(source.pid, 0), "Stop preserves the running provider").not.toThrow();
+      }
+
       await sendLiveGwtEvent(page, { kind: "terminal_input", id: sourceWindow, data: "GWT_FIXTURE_EXIT\r" });
       // Every observation after exit is passive: no refresh, Switch, requeue or launch_now.
       await expect.poll(() => {
         try { process.kill(source.pid, 0); return false; } catch { return true; }
       }, { timeout: 60_000, message: "the exact source process exited and was reaped" }).toBe(true);
+      if (stopBeforeExit) {
+        // OFF clears Monitor bindings itself, so also require physical exit and live-census removal.
+        await expect.poll(async () => (await activity())?.agents, { timeout: 60_000 }).toEqual([]);
+        await expect(issues.locator('[data-metric="active"]')).toHaveText("Active 0 · 0 issues · PM 0");
+        await expect(issues.locator('[data-queue-column="queued"] [data-issue-number="44"]')).toBeVisible();
+        expect((await preferences()).enabled).toBe(false);
+        expect(await fixture.launchIssues(), "explicit Stop prevents successor launch").toEqual([43]);
+        const successorClaims = fixture.requests.filter(request => request.method === "POST"
+          && request.url === "/repos/fixture/queue/issues/44/comments");
+        expect(successorClaims, "explicit Stop prevents successor claim").toEqual([]);
+        await info.attach(`stopped-after-exit-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
+        await info.attach("stopped-after-exit", { body: JSON.stringify({ enabled: false,
+          source, launches: await fixture.launches(), successorClaims }), contentType: "application/json" });
+        await controls.getByRole("button", { name: "Start", exact: true }).click();
+        await expect.poll(preferences).toMatchObject({ enabled: true, autonomous_mode: true });
+      }
       await expect.poll(() => fixture.launchIssues(), { timeout: 90_000,
         message: "ordinary exit releases the sole slot and automatically admits Issue 44" }).toEqual([43, 44]);
       const target = (await fixture.launches())[1];

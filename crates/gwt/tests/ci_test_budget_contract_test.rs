@@ -42,13 +42,26 @@ fn macos_socket_targets_compile_before_the_execution_budget() {
     assert!(commands
         .lines()
         .any(|line| line.trim() == "cargo check -p gwt-core -p gwt"));
+    assert!(commands.lines().any(|line| line.trim()
+        == "CARGO_PROFILE_TEST_DEBUG=0 node scripts/ci-windows-tests.mjs build socket"));
+    assert!(steps[..execution].iter().any(|step| {
+        step["uses"] == "actions/setup-node@v6" && step["with"]["node-version"] == "24"
+    }));
+    let script = read("scripts/test-short-socket-fixtures.sh");
+    assert!(!script.lines().any(|line| line.starts_with("cargo ")));
     for command in [
-        "CARGO_PROFILE_TEST_DEBUG=0 cargo test -p gwt-core --lib --test test_hygiene_test --test daemon_socket_path_limit --no-run",
-        "CARGO_PROFILE_TEST_DEBUG=0 cargo test -p gwt --lib --test runtime_tests --no-run",
+        "gwt-core lib gwt_core test_support::tests::socket_",
+        "gwt-core test test_hygiene_test socket_",
+        "gwt-core test daemon_socket_path_limit",
+        "gwt lib gwt daemon -- --test-threads=1",
+        "gwt test runtime_tests daemon_project_root_test -- --test-threads=1",
     ] {
         assert!(
-            commands.lines().any(|line| line.trim() == command),
-            "prepare every socket fixture target before the execution budget: {command}"
+            script
+                .lines()
+                .any(|line| line
+                    == format!("node scripts/ci-windows-tests.mjs run-socket {command}")),
+            "reuse the prepared artifact with the same socket filter and threading: {command}"
         );
     }
     assert_eq!(steps[execution]["env"]["CARGO_PROFILE_TEST_DEBUG"], "0");
