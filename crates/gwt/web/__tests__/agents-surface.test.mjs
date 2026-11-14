@@ -10,6 +10,11 @@ import { createAgentRosterModel, createMemberTuningModel } from "../agent-activi
 
 const source = readFileSync(new URL("../agents-surface.js", import.meta.url), "utf8");
 const styles = readFileSync(new URL("../styles/works-agents.css", import.meta.url), "utf8");
+
+test("mobile Agents checkboxes override the shared form's last-child minimum", () => {
+  assert.match(styles, /@media \(max-width: 600px\)\s*\{[^}]*:root\[data-theme\] \.agents-surface input\.settings-checkbox\s*\{[^}]*min-width:\s*44px;[^}]*min-height:\s*44px;/);
+});
+
 const members = [
   { member_id: "m1", name: "One", enabled: true, assignment: { session_id: "s1" }, provider: "Codex", model: "GPT-6", created_at: "2026-10-20T00:00:00Z", issue_count: 3, landed_count: 2, active_seconds: 7200, tokens: 5000, history: [
     { session_id: "s0", name: "Recorded author", provider: "claude", model: "recorded-model", issue_number: 4000, title: "Earlier", result: "landed", started_at: "2026-10-20T00:00:00Z", ended_at: "2026-10-20T02:00:00Z" },

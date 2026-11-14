@@ -353,7 +353,9 @@
 /* SPEC 6476 T-005g: on a phone the Agents controls kept their 28-32px desktop
    size. Make every control a 44px tap target below 601px. */
 @media (max-width: 600px) {
-  .agents-surface :is(button, input, select, textarea) { min-width: 44px; min-height: 44px; }
+  /* Checkbox inputs also match the shared form's last-child min-width reset. */
+  .agents-surface :is(button, input, select, textarea),
+  :root[data-theme] .agents-surface input.settings-checkbox { min-width: 44px; min-height: 44px; }
   /* T-005wo: each Works row's Open terminal (28px) and member name link
      (24px) kept their desktop text-button size. The full header's name is a
      .work-member too and is meant to get the same target; it already sits in
