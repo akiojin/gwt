@@ -784,7 +784,7 @@ pub fn authenticated_pm_pane_send_input_events(
                     let owned_submit = bytes == b"\r" && (body_written || replay.is_some());
                     let written = reservation
                         .write_input_authorized(bytes, |commit| {
-                            let authorize = || {
+                            let authorize = |commit_mutation: bool| {
                                 if target_is_grok {
                                     if owned_submit {
                                         expected_pty.ensure_grok_prompt_submit_ready()?;
@@ -856,11 +856,16 @@ pub fn authenticated_pm_pane_send_input_events(
                                             .to_string(),
                                     });
                                 }
-                                if !issuer.commit_mutation_if_current(&grant, || {
-                                    worker_responder
-                                        .as_ref()
-                                        .is_none_or(AgentPmSendResponder::try_commit_mutation)
-                                }) {
+                                let current_grant = if commit_mutation {
+                                    issuer.commit_mutation_if_current(&grant, || {
+                                        worker_responder
+                                            .as_ref()
+                                            .is_none_or(AgentPmSendResponder::try_commit_mutation)
+                                    })
+                                } else {
+                                    issuer.grant_is_current(&grant)
+                                };
+                                if !current_grant {
                                     return Err(gwt_terminal::TerminalError::PtyIoError {
                                         details:
                                             "PM capability or origin changed before input mutation"
@@ -874,10 +879,15 @@ pub fn authenticated_pm_pane_send_input_events(
                                 .as_ref()
                                 .is_some_and(|registration| !registration.review_dispatch)
                             {
-                                authorize()?;
+                                authorize(false)?;
+                                #[cfg(any(test, feature = "test-gh-guard"))]
+                                super::agent_frontend::run_owner_agent_dispatch_test_hook(
+                                    &grant,
+                                    super::agent_frontend::OwnerAgentDispatchTestStage::BeforeMonitorPromptAcceptance,
+                                );
                             }
                             with_current_monitor_prompt_input(target_entry, None, || {
-                                authorize()?;
+                                authorize(true)?;
                                 let mut mark_attempted = || {
                                     if bytes != b"\r" {
                                         body_attempted = true;
