@@ -999,6 +999,8 @@ impl FinalizedAgentCapabilityLaunch<'_> {
             container_runtime,
         )?;
 
+        gwt::cli::execution_state::repair_generation_publication_for_launch(worktree, owner)
+            .map_err(|error| error.to_string())?;
         let mut current_binding =
             gwt::cli::execution_state::current_execution_binding(worktree, owner)
                 .map_err(|error| error.to_string())?;
@@ -5687,6 +5689,86 @@ mod agent_endpoint_env_tests {
                 .generation_id,
             "the successor must own a new generation, not the holder's"
         );
+    }
+
+    #[test]
+    fn fresh_launch_repairs_gc_removed_generation_publication_before_superseding() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home tempdir");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let mut launch = persisted_execution_launch(home.path());
+        let issuer = AgentCapabilityIssuer::for_test(
+            "http://127.0.0.1:45123/internal/hook-live",
+            "ws://127.0.0.1:46234/ws",
+            "ws://127.0.0.1:45123/internal/pane-ws",
+        );
+        let mut genesis_env = HashMap::new();
+        FinalizedAgentCapabilityLaunch {
+            issuer: Some(&issuer),
+            sessions_dir: &launch.sessions_dir,
+            session: &mut launch.session,
+            project_root: &launch.project,
+            worktree: &launch.project,
+            producing_owner: Some(launch.owner),
+            prepared_continuation: None,
+            rebound_continuation: None,
+            execution_entrypoint: "$gwt-execute #2359",
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            container_runtime: None,
+        }
+        .install(&mut genesis_env)
+        .expect("materialize the first producing generation");
+        let original_binding = launch
+            .session
+            .execution_binding
+            .clone()
+            .expect("holder binding");
+
+        std::fs::remove_file(gwt_agent::runtime_state_path(
+            &launch.sessions_dir,
+            &launch.session.id,
+        ))
+        .expect("clear the holder runtime sidecar");
+        let trusted_dir = gwt::cli::trusted_store::trusted_dir_for_worktree(&launch.project)
+            .expect("trusted worktree directory");
+        std::fs::remove_dir_all(&trusted_dir).expect("simulate trusted-store GC");
+
+        let mut relaunch = gwt_agent::Session::new(
+            &launch.project,
+            "work/issue-2359",
+            gwt_agent::AgentId::Codex,
+        );
+        relaunch.project_state_root = Some(launch.project.clone());
+        relaunch.linked_issue_number = Some(launch.owner.number);
+        relaunch.update_status(gwt_agent::AgentStatus::Running);
+        let mut env = HashMap::new();
+
+        FinalizedAgentCapabilityLaunch {
+            issuer: Some(&issuer),
+            sessions_dir: &launch.sessions_dir,
+            session: &mut relaunch,
+            project_root: &launch.project,
+            worktree: &launch.project,
+            producing_owner: Some(launch.owner),
+            prepared_continuation: None,
+            rebound_continuation: None,
+            execution_entrypoint: "$gwt-execute #2359",
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            container_runtime: None,
+        }
+        .install(&mut env)
+        .expect("fresh launch must repair publication before successor routing");
+
+        assert!(env.contains_key(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV));
+        let repaired_binding = relaunch.execution_binding.expect("successor binding");
+        assert_ne!(
+            repaired_binding.identity.generation_id,
+            original_binding.identity.generation_id,
+        );
+        assert!(trusted_dir.join("worktree-path.txt").exists());
     }
 
     /// Issue #3472: a `Completed` generation is already settled — its holder

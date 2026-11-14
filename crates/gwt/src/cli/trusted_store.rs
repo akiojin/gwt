@@ -237,7 +237,7 @@ const WORKTREE_MARKER_FILE: &str = "worktree-path.txt";
 /// accumulate forever.
 const GC_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
-fn stamp_worktree_marker(trusted_dir: &Path, worktree: &Path) {
+pub(crate) fn stamp_worktree_marker(trusted_dir: &Path, worktree: &Path) {
     let marker = trusted_dir.join(WORKTREE_MARKER_FILE);
     if marker.exists() {
         return;
