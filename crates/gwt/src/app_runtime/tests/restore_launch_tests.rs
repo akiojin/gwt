@@ -2259,4 +2259,40 @@ fn startup_auto_resume_drain_evaluates_admission_off_the_gui_thread() {
         "a policy-deferred Session is requeued for the next round trip"
     );
     assert!(runtime.pending_auto_resume_sources.is_empty());
+    assert!(
+        tasks.lock().unwrap().is_empty(),
+        "no retry without another ready event"
+    );
+
+    runtime.startup_auto_resume_ready_events();
+    drain_queued_blocking_tasks(&tasks);
+    let stale = take_startup_auto_resume_admission_prepared(&runtime).unwrap();
+    assert!(
+        !stale.sessions[0].1,
+        "the worker ran before a view was accepted"
+    );
+    runtime.seed_fixture_project_views();
+    runtime.startup_auto_resume_ready_events();
+    runtime.startup_auto_resume_ready_events();
+    assert!(
+        tasks.lock().unwrap().is_empty(),
+        "ready events coalesce while admission is in flight"
+    );
+    runtime.startup_auto_resume_admission_prepared_events(stale);
+    assert_eq!(
+        tasks.lock().unwrap().len(),
+        1,
+        "the newer ready event must recheck the deferred Session"
+    );
+    assert_eq!(
+        super::super::startup::startup_admission_evaluations(),
+        before + 2,
+        "the recheck stays off the GUI thread"
+    );
+    drain_queued_blocking_tasks(&tasks);
+    let current = take_startup_auto_resume_admission_prepared(&runtime).unwrap();
+    assert!(
+        current.sessions[0].1,
+        "the next worker sees the accepted view"
+    );
 }

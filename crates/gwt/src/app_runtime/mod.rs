@@ -2228,6 +2228,7 @@ pub struct AppRuntime {
     /// Issue #5379: a blocking worker holds the queued startup restores while
     /// it evaluates their Project admission off the GUI thread.
     pub(crate) startup_auto_resume_admission_in_flight: bool,
+    pub(crate) startup_auto_resume_ready_pending: bool,
     /// The startup restore drain phase, closed by the drain's tail.
     pub(crate) startup_restore_drain_phase: Option<gwt::perf::startup::PhaseTimer>,
     pub(crate) active_agent_sessions: HashMap<String, ActiveAgentSession>,
@@ -5237,6 +5238,7 @@ impl AppRuntime {
             restore_launch_windows: HashMap::new(),
             pending_startup_auto_resume_sessions: Vec::new(),
             startup_auto_resume_admission_in_flight: false,
+            startup_auto_resume_ready_pending: false,
             startup_restore_drain_phase: None,
             active_agent_sessions: HashMap::new(),
             issue_monitor_review_dispatch_windows: HashSet::new(),

@@ -1675,8 +1675,9 @@ impl AppRuntime {
         }
 
         if self.startup_auto_resume_admission_in_flight {
-            // A worker is still evaluating the queue; its verdict finishes
-            // this drain, including the one startup summary line.
+            // A newly accepted view can supersede the worker's policy facts.
+            // Retain one notification until its deferred Sessions are requeued.
+            self.startup_auto_resume_ready_pending = true;
             return events;
         }
         let pending = std::mem::take(&mut self.pending_startup_auto_resume_sessions);
@@ -1739,6 +1740,7 @@ impl AppRuntime {
         prepared: StartupAutoResumeAdmissionPrepared,
     ) -> Vec<OutboundEvent> {
         self.startup_auto_resume_admission_in_flight = false;
+        let ready_pending = std::mem::take(&mut self.startup_auto_resume_ready_pending);
         if self.agent_maintenance.busy {
             // Maintenance started while the worker ran; the deferred
             // surface-ready drain evaluates the queue again afterwards.
@@ -1747,7 +1749,11 @@ impl AppRuntime {
             self.agent_maintenance.deferred_startup_ready = true;
             return Vec::new();
         }
-        self.startup_auto_resume_admitted_events(prepared.sessions)
+        let mut events = self.startup_auto_resume_admitted_events(prepared.sessions);
+        if ready_pending && !self.pending_startup_auto_resume_sessions.is_empty() {
+            events.extend(self.startup_auto_resume_ready_events());
+        }
+        events
     }
 
     /// Spawn the admitted restores, requeue the policy-deferred ones, then run

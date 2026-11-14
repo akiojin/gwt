@@ -2070,6 +2070,7 @@ fn sample_runtime_with_events(
         restore_launch_windows: HashMap::new(),
         pending_startup_auto_resume_sessions: Vec::new(),
         startup_auto_resume_admission_in_flight: false,
+        startup_auto_resume_ready_pending: false,
         startup_restore_drain_phase: None,
         update_resume_tab_ids: HashSet::new(),
         update_drain_released_projects: Vec::new(),
