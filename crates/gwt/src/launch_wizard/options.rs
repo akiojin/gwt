@@ -1171,8 +1171,8 @@ pub(super) fn agent_has_npm_package(agent_id: &str) -> bool {
 }
 
 pub(super) fn agent_id_from_key(agent_id: &str) -> gwt_agent::AgentId {
-    gwt_agent::builtin_agent_descriptor_for_command(agent_id)
-        .map(|descriptor| descriptor.id.clone())
+    gwt_agent::resolve_agent_id(agent_id)
+        .filter(|resolved| resolved.builtin_descriptor().is_some())
         .unwrap_or_else(|| gwt_agent::AgentId::Custom(agent_id.to_string()))
 }
 
@@ -1766,12 +1766,21 @@ mod tests {
         assert!(!agent_has_npm_package("hermes"));
         assert!(!agent_has_npm_package("custom"));
         assert_eq!(agent_id_from_key("gh"), gwt_agent::AgentId::Copilot);
+        assert_eq!(agent_id_from_key("Codex"), gwt_agent::AgentId::Codex);
+        assert_eq!(
+            agent_id_from_key("ClaudeCode"),
+            gwt_agent::AgentId::ClaudeCode
+        );
         assert_eq!(agent_id_from_key("opencode"), gwt_agent::AgentId::OpenCode);
         assert_eq!(agent_id_from_key("openclaw"), gwt_agent::AgentId::OpenClaw);
         assert_eq!(agent_id_from_key("hermes"), gwt_agent::AgentId::Hermes);
         assert_eq!(
             agent_id_from_key("custom"),
             gwt_agent::AgentId::Custom("custom".to_string())
+        );
+        assert_eq!(
+            agent_id_from_key(" MyCustom "),
+            gwt_agent::AgentId::Custom(" MyCustom ".to_string())
         );
         assert_eq!(
             agent_description(&sample_agent_options()[0]),

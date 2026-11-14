@@ -203,18 +203,6 @@ pub(super) struct WorkspaceLaunchTransition<'a> {
     pub(super) now: chrono::DateTime<chrono::Utc>,
 }
 
-/// Canonical Work owner label for a trusted execution owner key.
-pub(super) fn workspace_owner_label(owner: gwt::cli::execution_state::ExecutionOwnerKey) -> String {
-    match owner.kind {
-        gwt::cli::execution_state::ExecutionOwnerKind::Spec => {
-            format!("SPEC-{}", owner.number)
-        }
-        gwt::cli::execution_state::ExecutionOwnerKind::Issue => {
-            format!("Issue #{}", owner.number)
-        }
-    }
-}
-
 impl WorkspaceLaunchProjectionKind {
     fn work_event_kind(self) -> gwt_core::workspace_projection::WorkEventKind {
         match self {
@@ -281,16 +269,20 @@ pub(super) fn apply_workspace_launch_transition(
 ) -> gwt_core::workspace_projection::WorkEvent {
     let owner = transition
         .canonical_owner
-        .map(workspace_owner_label)
+        .map(gwt::cli::execution_state::ExecutionOwnerKey::work_owner_label)
         .or_else(|| {
             transition
                 .resume_context
                 .and_then(|context| non_empty_workspace_text(context.owner.as_deref()))
         })
         .or_else(|| {
-            transition
-                .linked_issue_number
-                .map(|issue_number| format!("Issue #{issue_number}"))
+            transition.linked_issue_number.map(|number| {
+                gwt::cli::execution_state::ExecutionOwnerKey {
+                    kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+                    number,
+                }
+                .work_owner_label()
+            })
         });
     // #3065: drop dead agent entries before computing the running-agents
     // status text. Agent launch never prunes Shell Work.

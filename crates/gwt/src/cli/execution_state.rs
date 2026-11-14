@@ -549,6 +549,14 @@ pub struct ExecutionOwnerKey {
 }
 
 impl ExecutionOwnerKey {
+    /// Canonical identity persisted by Work writers and compared by recovery.
+    pub fn work_owner_label(self) -> String {
+        match self.kind {
+            ExecutionOwnerKind::Spec => format!("SPEC-{}", self.number),
+            ExecutionOwnerKind::Issue => format!("Issue #{}", self.number),
+        }
+    }
+
     fn storage_key(self) -> String {
         format!("owner-{}", self.number)
     }

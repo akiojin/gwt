@@ -19,6 +19,7 @@ use gwt_core::workspace_projection::{
 };
 use gwt_github::{ApiError, SpecOpsError};
 
+use crate::cli::execution_state::{ExecutionOwnerKey, ExecutionOwnerKind};
 use crate::cli::{CliEnv, CliParseError, WorkspaceCommand};
 
 pub fn parse(args: &[String]) -> Result<WorkspaceCommand, CliParseError> {
@@ -1147,9 +1148,7 @@ pub(super) fn run<E: CliEnv>(
                     }
                     let workspace_id = canonical_id
                         .unwrap_or_else(|| format!("workspace-{}", Utc::now().timestamp_millis()));
-                    let owner = spec
-                        .map(|number| format!("SPEC-{number}"))
-                        .or_else(|| issue.map(|number| format!("Issue #{number}")));
+                    let owner = owner_from_spec_or_issue(spec, issue);
                     let now = Utc::now();
                     let next_action = boundary
                         .as_deref()
@@ -2139,7 +2138,12 @@ fn workspace_ensure_agent_identity_matches(
         return false;
     }
     match durable {
-        gwt_agent::AgentId::Custom(expected) => stored == expected,
+        gwt_agent::AgentId::Custom(expected) => match gwt_agent::resolve_agent_id(expected) {
+            Some(builtin) if !matches!(builtin, gwt_agent::AgentId::Custom(_)) => {
+                gwt_agent::resolve_agent_id(stored).as_ref() == Some(&builtin)
+            }
+            _ => stored == expected,
+        },
         _ => gwt_agent::resolve_agent_id(stored).as_ref() == Some(durable),
     }
 }
@@ -2173,7 +2177,12 @@ fn workspace_ensure_can_upgrade_owner(stored: Option<&str>, durable: Option<&str
         return false;
     };
     stored == format!("{prefix}{stored_number}")
-        && durable == format!("SPEC-{durable_number}")
+        && durable
+            == ExecutionOwnerKey {
+                kind: ExecutionOwnerKind::Spec,
+                number: durable_number,
+            }
+            .work_owner_label()
         && stored_number == durable_number
 }
 
@@ -2783,8 +2792,17 @@ fn apply_session_bound_workspace_ensure_transition(
 }
 
 fn owner_from_spec_or_issue(spec: Option<u64>, issue: Option<u64>) -> Option<String> {
-    spec.map(|number| format!("SPEC-{number}"))
-        .or_else(|| issue.map(|number| format!("Issue #{number}")))
+    spec.map(|number| ExecutionOwnerKey {
+        kind: ExecutionOwnerKind::Spec,
+        number,
+    })
+    .or_else(|| {
+        issue.map(|number| ExecutionOwnerKey {
+            kind: ExecutionOwnerKind::Issue,
+            number,
+        })
+    })
+    .map(ExecutionOwnerKey::work_owner_label)
 }
 
 fn resolve_workspace_ensure_owner(
@@ -2802,15 +2820,20 @@ fn resolve_workspace_ensure_owner(
         return Ok(explicit);
     };
     if let Some(binding) = session.execution_binding.as_ref() {
-        let durable = match binding.owner_kind.as_str() {
-            "spec" => format!("SPEC-{}", binding.owner_number),
-            "issue" => format!("Issue #{}", binding.owner_number),
+        let kind = match binding.owner_kind.as_str() {
+            "spec" => ExecutionOwnerKind::Spec,
+            "issue" => ExecutionOwnerKind::Issue,
             _ => {
                 return Err(GwtError::Other(
                     "invalid durable Session owner kind".to_string(),
                 ))
             }
         };
+        let durable = ExecutionOwnerKey {
+            kind,
+            number: binding.owner_number,
+        }
+        .work_owner_label();
         if explicit.as_deref().is_some_and(|owner| owner != durable) {
             return Err(GwtError::Other(format!(
                 "workspace.ensure owner mismatch: durable={durable}, requested={}",
@@ -2828,7 +2851,7 @@ fn resolve_workspace_ensure_owner(
                 spec.or(issue).unwrap_or_default()
             )));
         }
-        return Ok(explicit.or_else(|| Some(format!("Issue #{number}"))));
+        return Ok(explicit.or_else(|| owner_from_spec_or_issue(None, Some(number))));
     }
     Ok(explicit)
 }
@@ -7366,6 +7389,9 @@ pub(crate) mod tests {
             (Some(""), Some("SPEC-3412")),
             (Some("Issue #03412"), Some("SPEC-3412")),
             (Some("Issue #3412 "), Some("SPEC-3412")),
+            (Some(" Issue #3412"), Some("SPEC-3412")),
+            (Some("Issue #3412"), Some(" SPEC-3412")),
+            (Some("Issue #3412"), Some("SPEC-3412 ")),
             (Some("Issue #3412"), Some("SPEC-03412")),
             (Some("Issue #3412"), Some("SPEC-9999")),
             (Some("SPEC-3412"), Some("Issue #3412")),
@@ -7391,6 +7417,7 @@ pub(crate) mod tests {
         for (stored, durable) in [
             (Some("SPEC #03412"), Some("SPEC-3412")),
             (Some("SPEC #3412 "), Some("SPEC-3412")),
+            (Some(" SPEC #3412"), Some("SPEC-3412")),
             (Some("SPEC#3412"), Some("SPEC-3412")),
             (Some("SPEC #3412"), Some("SPEC-9999")),
             (Some("SPEC #3412"), Some("Issue #3412")),
@@ -7402,6 +7429,36 @@ pub(crate) mod tests {
                 "unexpected owner upgrade: stored={stored:?}, durable={durable:?}"
             );
         }
+    }
+
+    #[test]
+    fn canonical_work_owner_producers_share_one_formatter() {
+        for source in [
+            include_str!("workspace.rs")
+                .split("#[cfg(test)]")
+                .next()
+                .unwrap(),
+            include_str!("../app_runtime/workspace.rs"),
+            include_str!("../app_runtime/wizard.rs"),
+        ] {
+            assert!(source.contains("work_owner_label"));
+            assert!(
+                !source.contains("format!(\"SPEC-"),
+                "Work owner producers must use the shared formatter"
+            );
+        }
+    }
+
+    #[test]
+    fn workspace_ensure_matches_builtin_resolvable_custom_identity() {
+        assert!(workspace_ensure_agent_identity_matches(
+            Some("Codex"),
+            &gwt_agent::AgentId::Custom("codex".to_string()),
+        ));
+        assert!(!workspace_ensure_agent_identity_matches(
+            Some("reviewbot"),
+            &gwt_agent::AgentId::Custom("ReviewBot".to_string()),
+        ));
     }
 
     #[test]
@@ -7455,6 +7512,15 @@ pub(crate) mod tests {
 
     #[test]
     fn workspace_ensure_canonicalizes_legacy_issue_owner_to_durable_spec_once() {
+        assert_legacy_owner_recovers_once("Issue #3412");
+    }
+
+    #[test]
+    fn workspace_ensure_canonicalizes_legacy_spec_owner_to_durable_spec_once() {
+        assert_legacy_owner_recovers_once("SPEC #3412");
+    }
+
+    fn assert_legacy_owner_recovers_once(legacy_owner: &str) {
         let _guard = env_guard();
         let gwt_home = tempfile::tempdir().expect("gwt home");
         let _home = ScopedHome::set(gwt_home.path());
@@ -7473,7 +7539,7 @@ pub(crate) mod tests {
             &project_root,
             &worktree,
             session_id,
-            Some("Issue #3412"),
+            Some(legacy_owner),
             "codex",
         );
         let before_events = load_tracked_work_events(&worktree);
@@ -7546,6 +7612,32 @@ pub(crate) mod tests {
             after_store,
             "owner canonicalization must be byte-idempotent across both tracked stores"
         );
+        let _session =
+            gwt_core::test_support::ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+        let mut env = TestEnv::new(worktree.clone());
+        for command in [
+            crate::cli::CliCommand::Workspace(WorkspaceCommand::Update {
+                title: None,
+                status: None,
+                status_text: None,
+                summary: Some("Recovered canonical Work owner".to_string()),
+                progress_summary: None,
+                next_action: None,
+                owner: None,
+                agent_session: Some(session_id.to_string()),
+                current_focus: None,
+                title_summary: None,
+            }),
+            crate::cli::CliCommand::Build(crate::cli::SkillStateAction::Start { spec: 3412 }),
+            crate::cli::CliCommand::Build(crate::cli::SkillStateAction::Phase {
+                spec: 3412,
+                label: "green".to_string(),
+            }),
+        ] {
+            let (code, output) = crate::cli::run_collect(&mut env, command)
+                .expect("recovered owner must authorize workspace.update and build");
+            assert_eq!(code, 0, "{output}");
+        }
     }
 
     #[test]
