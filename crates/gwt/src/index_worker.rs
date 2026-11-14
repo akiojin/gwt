@@ -406,6 +406,7 @@ pub struct WorktreeProbeOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(test)]
 struct GitWorktreeListEntry {
     path: PathBuf,
     branch: Option<String>,
@@ -887,22 +888,11 @@ fn collect_current_worktree_probe_inputs(
 /// Returned entries pair each worktree's canonicalized path with its branch
 /// label and pre-computed `worktree_hash`.
 pub fn list_worktree_probe_inputs(repo_root: &Path) -> Result<Vec<WorktreeProbeInput>, String> {
-    if gwt_core::operation_deadline::current().is_some() {
-        return list_worktree_probe_inputs_result(repo_root).map_err(|error| error.to_string());
-    }
-    // Issue #4398 AC-4: the logged wrapper records this listing in the gwt.log
-    // process summary; a raw hidden spawn left it out of every measurement.
-    let output =
-        gwt_core::process::run_git_logged(&["worktree", "list", "--porcelain"], Some(repo_root))
-            .map_err(|error| error.to_string())?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
-    }
-    parse_worktree_probe_inputs(&String::from_utf8_lossy(&output.stdout))
+    list_worktree_probe_inputs_result(repo_root).map_err(|error| error.to_string())
 }
 
 /// Probe inputs from an already-listed inventory, filtered like
-/// [`parse_worktree_probe_inputs`]: the inventory has already dropped
+/// [`list_worktree_probe_inputs`]: the inventory has already dropped
 /// prunable entries, and a checkout always has a `.git` entry while a bare
 /// repository has none.
 fn probe_inputs_from_inventory(
@@ -919,15 +909,33 @@ fn probe_inputs_from_inventory(
 }
 
 fn list_worktree_probe_inputs_result(repo_root: &Path) -> io::Result<Vec<WorktreeProbeInput>> {
-    let output = run_project_index_git_probe(repo_root, &["worktree", "list", "--porcelain"])?;
-    if !output.success() {
-        return Err(io::Error::other(output.stderr.trim().to_string()));
+    let mut inputs = Vec::new();
+    for entry in active_index_worktrees(repo_root)? {
+        push_worktree_probe_input(&mut inputs, entry.path, entry.branch)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     }
-
-    parse_worktree_probe_inputs(&output.stdout)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+    Ok(inputs)
 }
 
+fn active_index_worktrees(repo_root: &Path) -> io::Result<Vec<gwt_git::worktree::WorktreeInfo>> {
+    gwt_core::operation_deadline::ensure_remaining("git")?;
+    let worktrees = gwt_git::worktree::WorktreeManager::new(repo_root)
+        .list()
+        .map_err(|error| match error {
+            gwt_core::GwtError::Io(error) => error,
+            error => io::Error::other(error.to_string()),
+        })?;
+    Ok(worktrees
+        .into_iter()
+        .filter(|entry| !entry.prunable && entry.path.exists() && entry.path.join(".git").exists())
+        .map(|mut entry| {
+            entry.path = canonicalize_path(entry.path);
+            entry
+        })
+        .collect())
+}
+
+#[cfg(test)]
 fn parse_worktree_probe_inputs(stdout: &str) -> Result<Vec<WorktreeProbeInput>, String> {
     let mut inputs = Vec::new();
     for entry in parse_git_worktree_porcelain(stdout) {
@@ -940,6 +948,7 @@ fn parse_worktree_probe_inputs(stdout: &str) -> Result<Vec<WorktreeProbeInput>, 
     Ok(inputs)
 }
 
+#[cfg(test)]
 fn parse_git_worktree_paths(stdout: &str) -> Vec<PathBuf> {
     parse_git_worktree_porcelain(stdout)
         .into_iter()
@@ -948,10 +957,12 @@ fn parse_git_worktree_paths(stdout: &str) -> Vec<PathBuf> {
         .collect()
 }
 
+#[cfg(test)]
 fn git_worktree_entry_is_active(entry: &GitWorktreeListEntry) -> bool {
     !entry.bare && !entry.prunable && entry.path.exists()
 }
 
+#[cfg(test)]
 fn parse_git_worktree_porcelain(stdout: &str) -> Vec<GitWorktreeListEntry> {
     let mut entries = Vec::new();
     let mut current_path: Option<PathBuf> = None;
@@ -2543,13 +2554,11 @@ fn process_cwd_worktree_root_for_repo(repo_root: &Path) -> Option<PathBuf> {
 }
 
 fn list_git_worktree_paths(project_root: &Path) -> Result<Vec<PathBuf>, String> {
-    let output = run_project_index_git_probe(project_root, &["worktree", "list", "--porcelain"])
-        .map_err(|err| err.to_string())?;
-    if !output.success() {
-        return Err(output.stderr.trim().to_string());
-    }
-
-    let mut worktrees = parse_git_worktree_paths(&output.stdout);
+    let mut worktrees: Vec<_> = active_index_worktrees(project_root)
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .map(|entry| entry.path)
+        .collect();
 
     if worktrees.is_empty() {
         worktrees.push(canonicalize_path(project_root.to_path_buf()));
@@ -3198,11 +3207,26 @@ detached
     fn worktree_listing_for_status_is_a_logged_git_spawn() {
         // Issue #4398 AC-4: the listing reaches the gwt.log process summary
         // through the logged wrapper instead of an invisible hidden spawn.
+        // Issue #5377: all index enumeration paths share that one inventory.
         let temp = tempfile::tempdir().expect("tempdir");
         init_git_repo_with_origin(temp.path());
 
         let before = gwt_core::process::thread_git_spawn_count();
-        list_worktree_probe_inputs(temp.path()).expect("list worktrees");
+        let inputs = list_worktree_probe_inputs(temp.path()).expect("list worktrees");
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            Instant::now() + Duration::from_secs(10),
+        );
+        assert_eq!(
+            list_worktree_probe_inputs_result(temp.path()).expect("deadline-aware listing"),
+            inputs
+        );
+        assert_eq!(
+            list_git_worktree_paths(temp.path()).expect("list worktree paths"),
+            inputs
+                .into_iter()
+                .map(|input| input.path)
+                .collect::<Vec<_>>()
+        );
 
         assert_eq!(gwt_core::process::thread_git_spawn_count() - before, 1);
     }

@@ -242,6 +242,12 @@ impl WorktreeManager {
 
     /// List all worktrees for this repository.
     pub fn list(&self) -> Result<Vec<WorktreeInfo>> {
+        gwt_core::operation_deadline::ensure_remaining("git")
+            .map_err(|error| GwtError::Git(format!("worktree list: {error}")))?;
+        crate::worktree_inventory::list(&self.repo_path, || self.list_uncached())
+    }
+
+    fn list_uncached(&self) -> Result<Vec<WorktreeInfo>> {
         let started = std::time::Instant::now();
         let output = run_git_observing_operation_deadline(
             &["worktree", "list", "--porcelain"],
@@ -2158,6 +2164,9 @@ mod tests {
     fn worktree_listing_honors_the_active_operation_deadline() {
         let repository = tempfile::tempdir().expect("repository");
         init_git_repo(repository.path());
+        WorktreeManager::new(repository.path())
+            .list()
+            .expect("prime inventory");
         let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
             Instant::now() - Duration::from_millis(1),
         );
@@ -3904,6 +3913,122 @@ prunable gitdir file points to non-existent location
         let wts = mgr.list().unwrap();
         // At minimum the main worktree
         assert!(!wts.is_empty());
+    }
+
+    #[test]
+    fn inventory_reuses_listing_across_callers_and_ticks() {
+        let repo = tempfile::tempdir().unwrap();
+        init_git_repo(repo.path());
+        git_commit_allow_empty(repo.path(), "initial");
+
+        let before = gwt_core::process::thread_git_spawn_count();
+        let started = Instant::now();
+        // Twelve callers, sixty ticks: the unchanged repository must be
+        // listed once, regardless of the number of requests (Issue #5377).
+        for _ in 0..60 {
+            for _ in 0..12 {
+                assert_eq!(WorktreeManager::new(repo.path()).list().unwrap().len(), 1);
+            }
+        }
+        let spawns = gwt_core::process::thread_git_spawn_count() - before;
+        eprintln!(
+            "inventory measurement: requests=720 spawns={spawns} elapsed_ms={}",
+            started.elapsed().as_millis()
+        );
+        assert_eq!(spawns, 1);
+    }
+
+    #[test]
+    fn inventory_coalesces_concurrent_requests() {
+        let repo = tempfile::tempdir().unwrap();
+        init_git_repo(repo.path());
+        git_commit_allow_empty(repo.path(), "initial");
+        let barrier = std::sync::Barrier::new(12);
+        let spawns: usize = thread::scope(|scope| {
+            let handles: Vec<_> = (0..12)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        let before = gwt_core::process::thread_git_spawn_count();
+                        assert_eq!(WorktreeManager::new(repo.path()).list().unwrap().len(), 1);
+                        gwt_core::process::thread_git_spawn_count() - before
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap() as usize)
+                .sum()
+        });
+        assert_eq!(spawns, 1, "concurrent requests must share one Git run");
+    }
+
+    #[test]
+    fn inventory_observes_add_remove_and_linked_repository_identity_immediately() {
+        let repo = tempfile::tempdir().unwrap();
+        init_git_repo(repo.path());
+        git_commit_allow_empty(repo.path(), "initial");
+        let manager = WorktreeManager::new(repo.path());
+        assert_eq!(manager.list().unwrap().len(), 1);
+        let linked = repo.path().join("linked");
+        manager
+            .create_from_base("HEAD", "feature/inventory", &linked)
+            .unwrap();
+        assert_eq!(manager.list().unwrap().len(), 2, "next read after add");
+        assert_eq!(WorktreeManager::new(&linked).list().unwrap().len(), 2);
+        manager.remove(&linked).unwrap();
+        assert_eq!(manager.list().unwrap().len(), 1, "next read after remove");
+    }
+
+    #[test]
+    fn inventory_shares_linked_roots_and_keeps_repositories_separate() {
+        let repo = tempfile::tempdir().unwrap();
+        init_git_repo(repo.path());
+        git_commit_allow_empty(repo.path(), "initial");
+        let linked = repo.path().join("linked");
+        WorktreeManager::new(repo.path())
+            .create_from_base("HEAD", "feature/shared", &linked)
+            .unwrap();
+        let other = tempfile::tempdir().unwrap();
+        init_git_repo(other.path());
+        git_commit_allow_empty(other.path(), "other");
+
+        let before = gwt_core::process::thread_git_spawn_count();
+        assert_eq!(WorktreeManager::new(repo.path()).list().unwrap().len(), 2);
+        assert_eq!(WorktreeManager::new(&linked).list().unwrap().len(), 2);
+        assert_eq!(WorktreeManager::new(other.path()).list().unwrap().len(), 1);
+        assert_eq!(gwt_core::process::thread_git_spawn_count() - before, 2);
+    }
+
+    #[test]
+    fn inventory_refreshes_when_a_registered_git_file_disappears() {
+        let repo = tempfile::tempdir().unwrap();
+        init_git_repo(repo.path());
+        git_commit_allow_empty(repo.path(), "initial");
+        let linked = repo.path().join("linked");
+        let manager = WorktreeManager::new(repo.path());
+        manager.create_from_base("HEAD", "feature/prunable", &linked).unwrap();
+        assert!(!manager.list().unwrap().iter().find(|entry| entry.path == linked).unwrap().prunable);
+        std::fs::remove_file(linked.join(".git")).unwrap();
+        assert!(manager.list().unwrap().iter().find(|entry| entry.path == linked).unwrap().prunable,
+                "Git marks a worktree with a missing gitdir target as prunable");
+    }
+
+    /// Reproducible before/after measurement against an existing repository.
+    #[test]
+    #[ignore = "set GWT_INVENTORY_BENCH_REPO to the repository to measure"]
+    fn inventory_measurement_on_repository() {
+        let repo = std::env::var_os("GWT_INVENTORY_BENCH_REPO").expect("benchmark repository");
+        let before = gwt_core::process::thread_git_spawn_count();
+        let started = Instant::now();
+        let mut entries = 0;
+        for _ in 0..60 {
+            for _ in 0..12 {
+                entries = WorktreeManager::new(Path::new(&repo)).list().unwrap().len();
+            }
+        }
+        eprintln!("inventory repository measurement: entries={entries} requests=720 spawns={} elapsed_ms={}",
+            gwt_core::process::thread_git_spawn_count() - before, started.elapsed().as_millis());
     }
 
     fn git_add_remote(path: &Path, name: &str, remote: &Path) {
