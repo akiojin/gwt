@@ -1,0 +1,7 @@
+# Auto-generated docker-compose override for gwt bundle mounting
+version: '3.8'
+services:
+gwt:
+volumes:
+- "/Users/akiojin/.gwt/bin/gwt-linux:/usr/local/bin/gwt:ro"
+- "/Users/akiojin/.gwt/bin/gwtd-linux:/usr/local/bin/gwtd:ro"
