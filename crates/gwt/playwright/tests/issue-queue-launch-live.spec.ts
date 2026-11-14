@@ -502,7 +502,9 @@ test.describe("Issue queue real backend launch", () => {
       const waiting = await actor("awaiting_normal_n2");
       const beforePrompt = await actor("checkpoint_before_prompt");
       const activity = await actor("checkpoint_activity");
-      expect(beforePrompt.runtime_sha256, "neutral rebind and Requested preserve N1 bytes").toBe(n1.runtime_sha256);
+      expect(beforePrompt.current_hook_event, "explicit checkpoint acceptance invalidates N1 before the next provider hook").toBeNull();
+      expect(beforePrompt.runtime_sha256).not.toBe(n1.runtime_sha256);
+      expect(beforePrompt.runtime_without_current_sha256, "acceptance preserves all history, activity and native source fields").toBe(n1.runtime_without_current_sha256);
       expect(activity).toMatchObject({ pid: source.pid, gwt_session_id: source.gwt_session_id,
         runtime_status: "Running", current_hook_event: { event: "UserPromptSubmit", outcome: "normal" } });
       expect(activity.current_hook_event.correlation_id).not.toBe(n1.current_hook_event.correlation_id);

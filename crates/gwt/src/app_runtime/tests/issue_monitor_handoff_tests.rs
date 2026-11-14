@@ -3853,6 +3853,32 @@ fn app_runtime_answered_handoff_exact_resume_retains_autonomous_context() {
     close_test_owner_runtime(&mut fixture.runtime, &window_id);
 }
 
+fn assert_installed_resume_command(session: &gwt_agent::Session, installed_cli: &std::path::Path) {
+    // This fixture has no host-shell override: even on Windows, the Session
+    // retains the direct CLI path before the PTY wraps its .cmd entrypoint.
+    assert_eq!(
+        std::path::Path::new(&session.launch_command),
+        installed_cli,
+        "exact Resume must use the installed fixture CLI"
+    );
+}
+
+#[test]
+#[should_panic(expected = "exact Resume must use the installed fixture CLI")]
+fn installed_resume_command_rejects_cli_path_in_unrelated_arguments() {
+    let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let installed_cli = temp.path().join("codex.cmd");
+    let mut session = gwt_agent::Session::new(temp.path(), "develop", gwt_agent::AgentId::Codex);
+    session.launch_command = "unrelated-command".to_string();
+    session.launch_args = vec![format!(
+        "--description=do not run {}",
+        installed_cli.display()
+    )];
+
+    assert_installed_resume_command(&session, &installed_cli);
+}
+
 /// SPEC-1921 L1a: a saved version cannot select a package runner on exact Resume.
 /// An installed fixture CLI succeeds without a package-runner sandbox pin.
 #[test]
@@ -3904,15 +3930,7 @@ fn monitor_legacy_version_resumes_installed_without_pinned_package_runners() {
         gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
     );
     let session = pane.session.as_ref().unwrap();
-    let installed_cli = installed_cli.to_string_lossy();
-    assert!(
-        session.launch_command == installed_cli
-            || session
-                .launch_args
-                .iter()
-                .any(|arg| arg.contains(installed_cli.as_ref())),
-        "exact Resume must use the installed fixture CLI"
-    );
+    assert_installed_resume_command(session, &installed_cli);
     assert!(
         !session
             .launch_args

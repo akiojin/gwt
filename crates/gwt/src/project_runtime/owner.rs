@@ -3670,6 +3670,7 @@ impl OwnerState {
                                 &id,
                                 &entry,
                                 text.as_deref().expect("typed input"),
+                                None,
                             ),
                         };
                         let result = result
@@ -10252,6 +10253,13 @@ impl OwnerState {
                                 return Err(fail("capacity retry cancelled by newer activity"));
                             }
                             let authorized = crate::cli::execution_state::with_current_active_session_execution_identity_lease(&registration.sessions_dir, &identity, || {
+                                let entry = writers.read().map_err(|_| fail("PTY registry unavailable"))?
+                                    .get(&registration.window_id).cloned().ok_or_else(|| fail("the Monitor PTY was replaced"))?;
+                                if !Arc::ptr_eq(&entry.handle, &target.handle) || !entry.monitor_runtime.as_ref().is_some_and(|current| current.session_id == registration.session_id && current.incarnation == registration.incarnation && current.issue_number == registration.issue_number && current.worktree_path == registration.worktree_path && current.project_root == registration.project_root && !current.review_dispatch) {
+                                    return Err(fail("the Monitor PTY was replaced"));
+                                }
+                                let authorize = || {
+                                gwt_core::operation_deadline::ensure_remaining("capacity retry input").map_err(|error| fail(&error.to_string()))?;
                                 let prefs = crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(&registration.project_root)).map_err(|error| fail(&error.to_string()))?;
                                 if !prefs.enabled || !prefs.autonomous_mode || !issuer.active_token_is_current(&token, &binding) {
                                     return Err(fail("autonomous Monitor authority changed"));
@@ -10260,8 +10268,13 @@ impl OwnerState {
                                 if pm.settings.paused || pm.registration.as_ref().is_some_and(|pm| pm.session_id == registration.session_id) {
                                     return Err(fail("PM is paused or owns the target Session"));
                                 }
+                                Ok(())
+                                };
+                                authorize()?;
+                                super::agent_dispatch::with_current_monitor_prompt_input(&entry, Some(crate::monitor_duplicate_runtime::HeldMonitorPromptSession::Bound(&identity)), || {
+                                authorize()?;
                                 let current = writers.read().map_err(|_| fail("PTY registry unavailable"))?;
-                                if !current.get(&registration.window_id).is_some_and(|entry| Arc::ptr_eq(&entry.handle, &target.handle) && entry.monitor_runtime.as_ref().is_some_and(|current| current.session_id == registration.session_id && current.incarnation == registration.incarnation && current.issue_number == registration.issue_number && current.worktree_path == registration.worktree_path && current.project_root == registration.project_root && !current.review_dispatch)) {
+                                if !current.get(&registration.window_id).is_some_and(|current| Arc::ptr_eq(current, &entry)) {
                                     return Err(fail("the Monitor PTY was replaced"));
                                 }
                                 if body_attempted {
@@ -10274,6 +10287,7 @@ impl OwnerState {
                                         commit(&mut || body_attempted = true)
                                     })
                                 }
+                                })
                             }).map_err(|error| fail(&error.to_string()))?;
                             authorized.ok_or_else(|| fail("the producing execution is no longer Active"))?
                         }).map_err(|error| error.to_string()),

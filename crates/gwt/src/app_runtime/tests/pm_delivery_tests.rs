@@ -44,6 +44,20 @@ fn pm_delivery_owner_fixture_for_agent(
     agent_id: gwt_agent::AgentId,
     pm_role_target: bool,
 ) -> PmDeliveryFixture {
+    pm_delivery_owner_fixture_for_launch_route(
+        temp,
+        agent_id,
+        gwt_agent::LaunchRoute::Manual,
+        pm_role_target,
+    )
+}
+
+fn pm_delivery_owner_fixture_for_launch_route(
+    temp: &Path,
+    agent_id: gwt_agent::AgentId,
+    launch_route: gwt_agent::LaunchRoute,
+    pm_role_target: bool,
+) -> PmDeliveryFixture {
     use super::pane_control_tests::{
         control_launch_config, control_owner_agent, control_owner_launch, control_register_pm,
     };
@@ -96,6 +110,7 @@ fn pm_delivery_owner_fixture_for_agent(
         config.explicit_follow_up = true;
         config
     };
+    config.launch_route = launch_route;
     config.command = runner.display().to_string();
     let target = control_owner_launch(&owner, "target", config);
     owner_runtime_status_event(&owner, &target, "Working", "SessionStart");
@@ -325,6 +340,60 @@ fn transcript_overlay_reports_failed_pane_and_pm_ack_without_staging_body() {
         text: "recovered notification\r".into(),
     }))
     .expect("ordinary delivery recovers after the overlay closes");
+}
+
+/// Monitor readiness checks must not commit a still-cancellable PM delivery.
+#[test]
+fn authenticated_pm_send_cancel_before_monitor_fence_stays_uncommitted() {
+    use gwt::project_runtime::agent_frontend::{
+        set_owner_agent_dispatch_test_hook, OwnerAgentDispatchTestStage,
+    };
+
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let fixture = pm_delivery_owner_fixture_for_launch_route(
+        temp.path(),
+        gwt_agent::AgentId::Codex,
+        gwt_agent::LaunchRoute::Autonomous,
+        false,
+    );
+    let writer = fixture.target.writer.as_ref().expect("owner writer");
+    assert!(writer
+        .monitor_runtime
+        .as_ref()
+        .is_some_and(|registration| !registration.review_dispatch));
+    let (responder, result, cancellation) =
+        AgentPmSendResponder::channel_with_acceptance_window(Duration::from_secs(2));
+    let cancellation = Arc::new(cancellation);
+    let cancellation_result = Arc::new(Mutex::new(None));
+    let observed = Arc::clone(&cancellation_result);
+    let cancel = Arc::clone(&cancellation);
+    let _hook = set_owner_agent_dispatch_test_hook(
+        fixture.pm.grant.as_ref().expect("PM grant"),
+        OwnerAgentDispatchTestStage::BeforeMonitorPromptAcceptance,
+        move || {
+            *observed.lock().unwrap() = Some(cancel.cancel());
+        },
+    );
+    fixture.send(
+        "cancel-before-monitor-fence".into(),
+        &uuid::Uuid::new_v4().to_string(),
+        &fixture.target.id,
+        "must remain unsubmitted\r",
+        Some(responder),
+    );
+    let reply = result.blocking_recv().expect("terminal PM result");
+    assert_eq!(
+        *cancellation_result.lock().unwrap(),
+        Some(false),
+        "cancellation before Monitor acceptance must precede the input commit"
+    );
+    assert!(matches!(reply,
+        BackendEvent::PmMessageSendResult { status, .. } if status == "failed"));
+    assert!(writer.pm_delivery_replay.lock().unwrap().is_none());
 }
 
 /// SPEC-3431 FR-111 (T-206): the server-side PM principal gate for pane

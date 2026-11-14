@@ -16,6 +16,9 @@
 #[path = "windows_shell_observer.rs"]
 mod shell_observer;
 
+#[path = "support/installed_provider_fixture.rs"]
+mod installed_provider_fixture;
+
 use std::{
     io::Read,
     path::{Path, PathBuf},
@@ -1295,8 +1298,10 @@ fn install_fixture_provider(fixture: &WindowsNpmRegistryFixture, provider: Provi
     let installed_bin = prefix.join("node_modules").join(".bin");
     // This Windows fixture pins the spawnable .cmd installation entrypoint.
     // Remove npm's POSIX sibling so direct PATH lookup proves that exact path.
-    std::fs::remove_file(installed_bin.join(provider.agent_id().command()))
-        .expect("remove fixture POSIX shim");
+    installed_provider_fixture::remove_posix_shim(
+        &installed_bin.join(provider.agent_id().command()),
+    )
+    .expect("remove fixture POSIX shim");
     assert!(installed_bin
         .join(format!("{}.cmd", provider.agent_id().command()))
         .is_file());
