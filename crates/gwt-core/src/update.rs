@@ -3103,6 +3103,35 @@ mod tests {
         assert!(attach_args.contains(&"-mountpoint".to_string()));
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn installer_helper_persists_failure_reason() {
+        let _guard = DMG_MOUNT_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::ScopedGwtHome::set(temp.path());
+        let mock = MockProcessExecutor::new();
+        mock.push_program_response("kill", ProcessOutput::failed(1));
+        mock.push_program_response("hdiutil", ProcessOutput::failed(1));
+
+        let error = internal_run_installer_with_executor(
+            999_999,
+            &temp.path().join("GWT.app/Contents/MacOS/gwt"),
+            &temp.path().join("update.dmg"),
+            InstallerKind::MacDmg,
+            &temp.path().join("restart-args.json"),
+            &mock,
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "hdiutil attach exited with exit status: 1");
+        let log = fs::read_to_string(update_log_path()).expect("helper failure log");
+        let entry: serde_json::Value = serde_json::from_str(log.trim()).unwrap();
+        assert_eq!(entry["stage"], "installer_failed");
+        assert_eq!(entry["reason"], error);
+    }
+
     #[test]
     fn run_macos_dmg_installer_detaches_with_force_after_install_failure() {
         let _guard = DMG_MOUNT_MUTEX
