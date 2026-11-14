@@ -1,12 +1,14 @@
 //! Explicit, default-deny coordinator startup (Issue #6476).
 //!
-//! This library adapter has no CLI activation, registration, signaling or UI
-//! routes. The caller must keep the selected home, fixed private directories
+//! The only route is the Host-only registration WebSocket; there is no browser
+//! signaling, invite or UI route. The caller must keep the selected home, fixed private directories
 //! and TLS ancestors trusted and non-replaceable, and prevent in-place edits
 //! during loading and serving, as required by the existing storage adapters.
 
 use super::{
+    host_route::{self, HostState, SharedSessions, HOST_REGISTER_PATH},
     listener::{TlsListener, HANDSHAKE_TIMEOUT},
+    registration::CoordinatorSessions,
     storage::{CoordinatorStore, StoreError},
     ConfigError, CoordinatorConfig, CredentialError, TlsError,
 };
@@ -17,7 +19,13 @@ use axum::{
     response::{IntoResponse, Response},
     serve::Listener,
 };
-use std::{future::Future, net::SocketAddr, path::Path, sync::Arc};
+use std::{
+    future::Future,
+    net::SocketAddr,
+    path::Path,
+    sync::{Arc, Mutex},
+    time::Instant,
+};
 use tokio::net::TcpListener;
 
 /// Largest accepted request body: the mobile policy's maximum SDP size.
@@ -60,13 +68,13 @@ impl From<StoreError> for StartupError {
 
 pub struct CoordinatorServer {
     listener: TlsListener,
-    store: Arc<CoordinatorStore>,
+    sessions: SharedSessions,
     origin: Arc<str>,
 }
 
 /// Origin checks are additional constraints, never registration or device
 /// authorization. Missing Origin is allowed for non-browser clients and direct
-/// navigation; the fixed router still denies every route. Parser-level HTTP
+/// navigation; routes apply their own checks and unknown paths are 404. Parser-level HTTP
 /// errors are handled before this application middleware.
 async fn http_boundary(State(origin): State<Arc<str>>, request: Request, next: Next) -> Response {
     let mut origins = request.headers().get_all(header::ORIGIN).iter();
@@ -129,7 +137,7 @@ impl CoordinatorServer {
             .join(".gwt/mobile/coordinator")
             .canonicalize()
             .map_err(|_| StartupError::RegistryUnavailable)?;
-        let store = Arc::new(CoordinatorStore::open(&directory, wall)?);
+        let store = CoordinatorStore::open(&directory, wall)?;
         let tcp = TcpListener::bind(config.bind())
             .await
             .map_err(|_| StartupError::BindUnavailable)?;
@@ -137,7 +145,11 @@ impl CoordinatorServer {
             .map_err(|_| StartupError::BindUnavailable)?;
         Ok(Self {
             listener,
-            store,
+            sessions: Arc::new(Mutex::new(CoordinatorSessions::new(
+                store,
+                Instant::now(),
+                wall,
+            ))),
             origin: Arc::from(config.origin()),
         })
     }
@@ -148,12 +160,14 @@ impl CoordinatorServer {
             .map_err(|_| StartupError::BindUnavailable)
     }
 
-    /// Serve only a fixed 404 router behind Origin checks and security headers.
-    /// No local/agent router can be supplied.
+    /// Serve only the Host registration route behind Origin checks and security
+    /// headers; every other path is 404. No local/agent router can be supplied.
     /// Each connection service also retains the registry guard: axum's HTTP
     /// tasks can outlive a cancelled serving future and must still exclude a
     /// second writer until those connections close.
-    /// Graceful shutdown waits for accepted HTTP connections. A connection whose
+    /// Graceful shutdown waits for accepted HTTP connections, then signals every
+    /// Host registration socket and waits until each registration is logically
+    /// closed before returning. A connection whose
     /// reads and writes stall ends at the listener's idle deadline, and the
     /// listener caps how many connections exist at once. Pending TLS handshakes
     /// retain their existing deadline.
@@ -163,29 +177,48 @@ impl CoordinatorServer {
     ) -> Result<(), StartupError> {
         let Self {
             listener,
-            store,
+            sessions,
             origin,
         } = self;
+        let (stop, stopping) = tokio::sync::watch::channel(false);
+        let (alive, mut sockets) = tokio::sync::mpsc::channel::<()>(1);
+        let state = HostState {
+            sessions: Arc::clone(&sessions),
+            stopping,
+            alive,
+        };
         let router = with_http_boundary(
-            axum::Router::new().layer(axum::Extension(Arc::clone(&store))),
+            axum::Router::new()
+                .route(HOST_REGISTER_PATH, axum::routing::get(host_route::register))
+                .with_state(state),
             origin,
         );
+        let shutdown = async move {
+            shutdown.await;
+            let _ = stop.send(true);
+        };
         let result = axum::serve(listener, router)
             .with_graceful_shutdown(shutdown)
             .await
             .map_err(|_| StartupError::ServeUnavailable);
-        drop(store);
+        if result.is_ok() {
+            // Every sender is gone once the router and all Host sockets end.
+            while sockets.recv().await.is_some() {}
+        }
+        drop(sessions);
         result
     }
 }
 
 #[cfg(all(test, unix))]
 mod tests {
+    use super::super::host_route::{SharedSessions, HOST_REGISTER_PATH};
     use super::super::{
         storage::{CoordinatorStore, StoreError},
         ConfigError, CredentialError, TlsError,
     };
     use super::*;
+    use gwt_core::repo_hash::ProjectKey;
     use rustls::pki_types::ServerName;
     use serde_json::json;
     use std::{fs, net::TcpListener as StdListener, os::unix::fs::PermissionsExt, path::PathBuf};
@@ -195,6 +228,7 @@ mod tests {
         net::TcpStream,
         sync::oneshot,
     };
+    use uuid::Uuid;
 
     const WALL: u64 = 1_000;
 
@@ -267,6 +301,36 @@ mod tests {
                 .unwrap();
             assert_eq!(server.local_addr().unwrap(), expected);
             server
+        }
+
+        /// Issue a Host credential at trusted `wall` and return a bearer token.
+        fn issue_token(&self, wall: u64) -> String {
+            let mut store = CoordinatorStore::open(&self.directory, wall).unwrap();
+            let issued = store
+                .issue(
+                    "https://coordinator.example",
+                    Uuid::new_v4(),
+                    &[ProjectKey::parse(PROJECT).unwrap()],
+                    wall + 3_600,
+                    wall,
+                )
+                .unwrap();
+            drop(store);
+            let file: serde_json::Value =
+                serde_json::from_slice(&fs::read(&issued.path).unwrap()).unwrap();
+            let identity = issued.identity;
+            token(json!({
+                "schema_version": 1, "host_id": identity.host_id,
+                "credential_id": identity.credential_id, "generation": identity.generation,
+                "project": PROJECT, "host_epoch": Uuid::new_v4(), "secret": file["secret"],
+            }))
+        }
+
+        async fn start_at(&mut self, wall: u64) -> CoordinatorServer {
+            self.reservation.take();
+            CoordinatorServer::bind_from_home(&self.home, wall)
+                .await
+                .unwrap()
         }
 
         async fn connect(
@@ -579,5 +643,228 @@ mod tests {
                 0o600
             );
         }
+    }
+
+    const PROJECT: &str = "0123456789abcdef";
+
+    fn token(value: serde_json::Value) -> String {
+        use base64::Engine as _;
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(&value).unwrap())
+    }
+
+    fn real_wall() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    type HostSocket =
+        tokio_tungstenite::WebSocketStream<BufReader<tokio_rustls::client::TlsStream<TcpStream>>>;
+
+    async fn open_host(
+        fixture: &Fixture,
+        addr: SocketAddr,
+        headers: &[(&'static str, String)],
+    ) -> Result<HostSocket, u16> {
+        use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Error};
+        let mut request = format!("wss://coordinator.example{HOST_REGISTER_PATH}")
+            .into_client_request()
+            .unwrap();
+        for (name, value) in headers {
+            request.headers_mut().append(*name, value.parse().unwrap());
+        }
+        let tls = fixture.connect(addr).await;
+        match bounded(tokio_tungstenite::client_async(request, tls)).await {
+            Ok((socket, _)) => Ok(socket),
+            Err(Error::Http(response)) => Err(response.status().as_u16()),
+            Err(error) => panic!("{error}"),
+        }
+    }
+
+    fn live(sessions: &SharedSessions) -> usize {
+        sessions.lock().unwrap().live_registrations()
+    }
+
+    async fn wait_until_closed(sessions: &SharedSessions) {
+        bounded(async {
+            while live(sessions) != 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        })
+        .await;
+    }
+
+    async fn next_json(socket: &mut HostSocket) -> serde_json::Value {
+        use futures_util::StreamExt as _;
+        match bounded(socket.next()).await.unwrap().unwrap() {
+            tokio_tungstenite::tungstenite::Message::Text(text) => {
+                serde_json::from_str(&text).unwrap()
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn host_registration_rejects_browsers_and_bad_bearers_before_registering() {
+        let mut fixture = Fixture::new();
+        let wall = real_wall();
+        let valid = fixture.issue_token(wall);
+        let server = fixture.start_at(wall).await;
+        let addr = server.local_addr().unwrap();
+        let sessions = Arc::clone(&server.sessions);
+        let (shutdown, signal) = oneshot::channel();
+        let task = tokio::spawn(server.serve_until(async move {
+            let _ = signal.await;
+        }));
+        let decode = |token: &str| -> serde_json::Value {
+            use base64::Engine as _;
+            serde_json::from_slice(
+                &base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .decode(token)
+                    .unwrap(),
+            )
+            .unwrap()
+        };
+        let mut wrong_secret = decode(&valid);
+        wrong_secret["secret"] = json!("00".repeat(32));
+        let wrong_secret = token(wrong_secret);
+        let mut unknown = decode(&valid);
+        unknown["extra"] = json!(true);
+        let cases: Vec<(Vec<(&'static str, String)>, u16)> = vec![
+            (
+                vec![
+                    ("origin", "https://coordinator.example".into()),
+                    ("authorization", format!("Bearer {valid}")),
+                ],
+                403,
+            ),
+            (vec![], 401),
+            (vec![("authorization", format!("Basic {valid}"))], 401),
+            (vec![("authorization", "Bearer not-a-token".into())], 401),
+            (
+                vec![("authorization", format!("Bearer {wrong_secret}"))],
+                401,
+            ),
+            (
+                vec![("authorization", format!("Bearer {}", token(unknown)))],
+                401,
+            ),
+            (
+                vec![("authorization", format!("Bearer {}", "A".repeat(1_100)))],
+                401,
+            ),
+            (
+                vec![
+                    ("authorization", format!("Bearer {valid}")),
+                    ("authorization", format!("Bearer {valid}")),
+                ],
+                401,
+            ),
+        ];
+        for (headers, status) in cases {
+            assert_eq!(
+                open_host(&fixture, addr, &headers).await.err(),
+                Some(status)
+            );
+            assert_eq!(live(&sessions), 0);
+        }
+        shutdown.send(()).unwrap();
+        bounded(task).await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn host_registration_reports_its_generation_echoes_renewals_and_closes() {
+        use futures_util::{SinkExt as _, StreamExt as _};
+        use tokio_tungstenite::tungstenite::Message;
+        let mut fixture = Fixture::new();
+        let wall = real_wall();
+        let valid = fixture.issue_token(wall);
+        let server = fixture.start_at(wall).await;
+        let addr = server.local_addr().unwrap();
+        let sessions = Arc::clone(&server.sessions);
+        let (shutdown, signal) = oneshot::channel();
+        let task = tokio::spawn(server.serve_until(async move {
+            let _ = signal.await;
+        }));
+        let auth = [("authorization", format!("Bearer {valid}"))];
+
+        let mut socket = open_host(&fixture, addr, &auth).await.unwrap();
+        let registered = next_json(&mut socket).await;
+        assert_eq!(registered["type"], "registered");
+        let generation: Uuid = serde_json::from_value(registered["generation"].clone()).unwrap();
+        let ttl = registered["ttl_secs"].as_u64().unwrap();
+        assert!((1..=30).contains(&ttl), "{registered}");
+        assert_eq!(live(&sessions), 1);
+        let nonce = Uuid::new_v4();
+        bounded(socket.send(Message::text(
+            json!({"type":"renew","generation":generation,"nonce":nonce}).to_string(),
+        )))
+        .await
+        .unwrap();
+        let renewed = next_json(&mut socket).await;
+        assert_eq!(
+            (&renewed["type"], &renewed["generation"], &renewed["nonce"]),
+            (&json!("renewed"), &json!(generation), &json!(nonce))
+        );
+        assert!((1..=30).contains(&renewed["ttl_secs"].as_u64().unwrap()));
+        bounded(socket.send(Message::text(
+            json!({"type":"renew","generation":Uuid::new_v4(),"nonce":nonce}).to_string(),
+        )))
+        .await
+        .unwrap();
+        assert!(matches!(
+            bounded(socket.next()).await,
+            None | Some(Err(_)) | Some(Ok(Message::Close(_)))
+        ));
+        wait_until_closed(&sessions).await;
+
+        let mut socket = open_host(&fixture, addr, &auth).await.unwrap();
+        assert_eq!(next_json(&mut socket).await["type"], "registered");
+        assert_eq!(live(&sessions), 1);
+        bounded(socket.close(None)).await.unwrap();
+        wait_until_closed(&sessions).await;
+
+        let mut socket = open_host(&fixture, addr, &auth).await.unwrap();
+        assert_eq!(next_json(&mut socket).await["type"], "registered");
+        bounded(socket.send(Message::binary(vec![0u8; 4])))
+            .await
+            .unwrap();
+        wait_until_closed(&sessions).await;
+
+        shutdown.send(()).unwrap();
+        bounded(task).await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_closes_open_host_registrations_and_releases_the_registry() {
+        use futures_util::StreamExt as _;
+        let mut fixture = Fixture::new();
+        let wall = real_wall();
+        let valid = fixture.issue_token(wall);
+        let server = fixture.start_at(wall).await;
+        let addr = server.local_addr().unwrap();
+        let sessions = Arc::clone(&server.sessions);
+        let (shutdown, signal) = oneshot::channel();
+        let task = tokio::spawn(server.serve_until(async move {
+            let _ = signal.await;
+        }));
+        let mut socket = open_host(
+            &fixture,
+            addr,
+            &[("authorization", format!("Bearer {valid}"))],
+        )
+        .await
+        .unwrap();
+        assert_eq!(next_json(&mut socket).await["type"], "registered");
+        shutdown.send(()).unwrap();
+        bounded(task).await.unwrap().unwrap();
+        assert_eq!(live(&sessions), 0);
+        assert!(matches!(
+            bounded(socket.next()).await,
+            None | Some(Err(_)) | Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_)))
+        ));
+        drop(sessions);
+        drop(CoordinatorStore::open(&fixture.directory, real_wall()).unwrap());
     }
 }

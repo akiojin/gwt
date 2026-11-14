@@ -50,6 +50,13 @@ pub struct RegistrationHandle {
     generation: Uuid,
 }
 
+impl RegistrationHandle {
+    /// Non-secret correlation value the Host's lease matches replies against.
+    pub fn generation(&self) -> Uuid {
+        self.generation
+    }
+}
+
 struct Registration {
     identity: CredentialIdentity,
     secret: [u8; 32],
@@ -201,6 +208,18 @@ impl CoordinatorSessions {
             self.retire(index, now)?;
         }
         Ok(())
+    }
+
+    /// Read-only: the current coordinator lease deadline of a live handle. It
+    /// never extends or validates the lease; operations still re-verify.
+    pub fn lease_deadline(&self, handle: &RegistrationHandle) -> Option<Instant> {
+        self.index(handle)
+            .map(|index| self.registrations[index].deadline)
+    }
+
+    #[cfg(all(test, unix))]
+    pub(super) fn live_registrations(&self) -> usize {
+        self.registrations.len()
     }
 
     fn index(&self, handle: &RegistrationHandle) -> Option<usize> {
