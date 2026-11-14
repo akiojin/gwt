@@ -86,6 +86,34 @@ fn pty_start_gate_helper() {
 }
 
 #[test]
+fn durable_launch_recovery_exists_reports_invalid_input_for_nul_sessions_dir() {
+    let error = durable_launch_recovery_exists(Path::new("sessions\0dir"), "valid-session")
+        .expect_err("a NUL-containing recovery path must not be reported as absent");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+}
+
+#[test]
+fn launch_wizard_cache_refresh_excludes_session_when_recovery_probe_rejects_session_id() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+    let mut session = gwt_agent::Session::new(&repo, "work/issue-3730", gwt_agent::AgentId::Codex);
+    session.id = "../invalid-session".to_string();
+
+    runtime.apply_refreshed_launch_wizard_sessions(vec![session]);
+
+    assert!(
+        runtime
+            .launch_wizard_cache
+            .session_by_id("../invalid-session")
+            .is_none(),
+        "a recovery-probe error must fail closed at the cache boundary",
+    );
+}
+
+#[test]
 fn gwt_input_trace_markers_exclude_payload_lengths_and_raw_errors() {
     for (source_name, source) in [
         ("embedded_server.rs", include_str!("../embedded_server.rs")),
@@ -10564,10 +10592,10 @@ fn genesis_pty_spawn_failure_terminalizes_generation_and_allows_successor_retry(
             .exists(),
         "the exact failed genesis Session must be removed",
     );
-    assert!(!durable_launch_recovery_exists(
-        &runtime.sessions_dir,
-        session_id,
-    ));
+    assert!(
+        !durable_launch_recovery_exists(&runtime.sessions_dir, session_id,)
+            .expect("probe durable launch recovery")
+    );
     let work_items = gwt_core::workspace_projection::load_workspace_work_items(&repo)
         .expect("read WorkItems after failed genesis");
     assert!(
@@ -11416,10 +11444,10 @@ fn startup_genesis_receipt_imports_flat_authority_and_terminalizes_crash_window(
         ledger.current_effective_status(),
         Some(gwt::cli::execution_state::ExecutionControlStatus::Blocked),
     );
-    assert!(!durable_launch_recovery_exists(
-        &runtime.sessions_dir,
-        session_id,
-    ));
+    assert!(
+        !durable_launch_recovery_exists(&runtime.sessions_dir, session_id,)
+            .expect("probe durable launch recovery")
+    );
 }
 
 #[cfg(unix)]
@@ -11548,10 +11576,10 @@ fn startup_genesis_recovery_retains_dangling_session_entry_without_mutation() {
             .current_effective_status(),
         Some(gwt::cli::execution_state::ExecutionControlStatus::Blocked),
     );
-    assert!(!durable_launch_recovery_exists(
-        &runtime.sessions_dir,
-        session_id,
-    ));
+    assert!(
+        !durable_launch_recovery_exists(&runtime.sessions_dir, session_id,)
+            .expect("probe durable launch recovery")
+    );
 }
 
 #[test]
@@ -11635,10 +11663,10 @@ fn startup_repairs_ledger_first_genesis_terminalization_before_cleanup() {
         fs::read(&session_path).expect("read retained replacement Session"),
         replacement_before,
     );
-    assert!(durable_launch_recovery_exists(
-        &runtime.sessions_dir,
-        session_id,
-    ));
+    assert!(
+        durable_launch_recovery_exists(&runtime.sessions_dir, session_id,)
+            .expect("probe durable launch recovery")
+    );
     assert_optional_files_unchanged(&authority_before);
     assert_tracked_workspace_work_store_unchanged(&repo, &work_before);
     session
@@ -11676,10 +11704,10 @@ fn startup_repairs_ledger_first_genesis_terminalization_before_cleanup() {
         .sessions_dir
         .join(format!("{session_id}.toml"))
         .exists());
-    assert!(!durable_launch_recovery_exists(
-        &runtime.sessions_dir,
-        session_id,
-    ));
+    assert!(
+        !durable_launch_recovery_exists(&runtime.sessions_dir, session_id,)
+            .expect("probe durable launch recovery")
+    );
 }
 
 #[test]
@@ -17310,10 +17338,10 @@ fn fresh_execution_authenticated_session_start_activates_new_lifetime_and_preser
     assert!(!runtime
         .pending_fresh_execution_launches
         .contains_key(&window_id));
-    assert!(!durable_launch_recovery_exists(
-        &runtime.sessions_dir,
-        candidate_session_id,
-    ));
+    assert!(
+        !durable_launch_recovery_exists(&runtime.sessions_dir, candidate_session_id,)
+            .expect("probe durable launch recovery")
+    );
     assert!(
         issuer.active_token_is_current(&capability.token, &binding),
         "fresh capability was not promoted; events={events:?}; attempt={:?}; current={:?}",
@@ -17917,7 +17945,8 @@ fn assert_pending_fresh_execution_was_rolled_back(fixture: &PendingFreshExecutio
         !durable_launch_recovery_exists(
             &fixture.runtime.sessions_dir,
             &fixture.candidate_session_id,
-        ),
+        )
+        .expect("probe durable launch recovery"),
         "an exactly rolled-back launch must remove its durable recovery receipt",
     );
     assert!(!fixture
@@ -18021,7 +18050,8 @@ fn leave_fresh_execution_activated_before_projection_commit(
     assert!(durable_launch_recovery_exists(
         &fixture.runtime.sessions_dir,
         &fixture.candidate_session_id,
-    ));
+    )
+    .expect("probe durable launch recovery"));
 }
 
 /// SPEC #3200 FR-052: a fresh linked-owner launch is not producing until
@@ -18743,10 +18773,10 @@ fn manual_terminal_launch_persists_recovery_before_prepared_readiness() {
         .cloned()
         .expect("manual successor readiness nonce");
     assert!(!readiness_nonce.is_empty());
-    assert!(durable_launch_recovery_exists(
-        &sessions_dir,
-        &candidate_session_id,
-    ));
+    assert!(
+        durable_launch_recovery_exists(&sessions_dir, &candidate_session_id,)
+            .expect("probe durable launch recovery")
+    );
     let candidate =
         gwt_agent::Session::load(&sessions_dir.join(format!("{candidate_session_id}.toml")))
             .expect("persisted manual successor Session");
@@ -19194,10 +19224,10 @@ fn genesis_final_runtime_persistence_failure_terminalizes_generation() {
     assert!(!sessions_dir
         .join(format!("{retained_session_id}.toml"))
         .exists());
-    assert!(!durable_launch_recovery_exists(
-        &sessions_dir,
-        &retained_session_id,
-    ));
+    assert!(
+        !durable_launch_recovery_exists(&sessions_dir, &retained_session_id,)
+            .expect("probe durable launch recovery")
+    );
 }
 
 #[test]
@@ -19250,7 +19280,8 @@ fn fresh_execution_prevalidation_conflict_leaves_work_writable_and_retains_candi
     assert!(durable_launch_recovery_exists(
         &fixture.runtime.sessions_dir,
         &fixture.candidate_session_id,
-    ));
+    )
+    .expect("probe durable launch recovery"));
 
     let mut unrelated = gwt_core::workspace_projection::WorkEvent::new(
         gwt_core::workspace_projection::WorkEventKind::Start,
@@ -19325,7 +19356,8 @@ fn fresh_execution_launch_failure_retains_dangling_session_without_mutation() {
     assert!(!durable_launch_recovery_exists(
         &fixture.runtime.sessions_dir,
         &fixture.candidate_session_id,
-    ));
+    )
+    .expect("probe durable launch recovery"));
     assert_eq!(
         gwt::cli::execution_state::continuation_attempt_for_operation(
             &fixture.repo,
@@ -19591,7 +19623,8 @@ fn fresh_execution_response_loss_recovery_rejects_same_id_session_replacement() 
     assert!(durable_launch_recovery_exists(
         &fixture.runtime.sessions_dir,
         &fixture.candidate_session_id,
-    ));
+    )
+    .expect("probe durable launch recovery"));
 }
 
 #[test]
@@ -19610,7 +19643,8 @@ fn settled_fresh_execution_recovery_removes_only_receipt_without_republishing_au
     assert!(!durable_launch_recovery_exists(
         &fixture.runtime.sessions_dir,
         &fixture.candidate_session_id,
-    ));
+    )
+    .expect("probe durable launch recovery"));
     persist_durable_launch_recovery(
         &fixture.runtime.sessions_dir,
         DurableLaunchRecoveryKind::FreshSuccessor {
@@ -19683,7 +19717,8 @@ fn settled_fresh_execution_recovery_removes_only_receipt_without_republishing_au
     assert!(!durable_launch_recovery_exists(
         &fixture.runtime.sessions_dir,
         &fixture.candidate_session_id,
-    ));
+    )
+    .expect("probe durable launch recovery"));
     for ((path, expected), probe) in artifact_paths.iter().zip(&before).zip(probes) {
         assert_eq!(
             fs::read(path).expect("read reconciled authority artifact"),
@@ -19750,7 +19785,8 @@ fn historical_fresh_receipt_does_not_republish_over_a_different_current_owner() 
     assert!(!durable_launch_recovery_exists(
         &fixture.runtime.sessions_dir,
         &fixture.candidate_session_id,
-    ));
+    )
+    .expect("probe durable launch recovery"));
 }
 
 #[test]
@@ -19820,7 +19856,8 @@ fn historical_fresh_receipt_waits_for_a_foreign_owner_ledger_first_repair() {
     assert!(durable_launch_recovery_exists(
         &fixture.runtime.sessions_dir,
         &fixture.candidate_session_id,
-    ));
+    )
+    .expect("probe durable launch recovery"));
     for (path, expected) in artifacts.iter().zip(&blocked_authority) {
         assert_eq!(
             fs::read(path).expect("read partial foreign authority"),
@@ -19840,7 +19877,8 @@ fn historical_fresh_receipt_waits_for_a_foreign_owner_ledger_first_repair() {
     assert!(!durable_launch_recovery_exists(
         &fixture.runtime.sessions_dir,
         &fixture.candidate_session_id,
-    ));
+    )
+    .expect("probe durable launch recovery"));
     assert!(
         gwt::cli::execution_state::current_execution_binding(&fixture.repo, superseding_owner)
             .expect("read repaired foreign owner")
@@ -20006,10 +20044,10 @@ fn historical_genesis_receipt_does_not_terminalize_a_different_current_owner() {
 
     runtime.reconcile_durable_fresh_execution_launches();
 
-    assert!(durable_launch_recovery_exists(
-        &runtime.sessions_dir,
-        session_id
-    ));
+    assert!(
+        durable_launch_recovery_exists(&runtime.sessions_dir, session_id)
+            .expect("probe durable launch recovery")
+    );
     assert!(runtime
         .sessions_dir
         .join(format!("{session_id}.toml"))
@@ -20059,10 +20097,10 @@ fn historical_genesis_receipt_does_not_terminalize_a_different_current_owner() {
         .sessions_dir
         .join(format!("{session_id}.toml"))
         .exists());
-    assert!(!durable_launch_recovery_exists(
-        &runtime.sessions_dir,
-        session_id
-    ));
+    assert!(
+        !durable_launch_recovery_exists(&runtime.sessions_dir, session_id)
+            .expect("probe durable launch recovery")
+    );
     let projection = gwt_core::workspace_projection::load_workspace_projection(&repo)
         .expect("read Workspace after historical genesis cleanup")
         .expect("Workspace after historical genesis cleanup");
@@ -20153,7 +20191,8 @@ fn startup_repairs_activated_fresh_execution_without_process_local_pending_state
     assert!(!durable_launch_recovery_exists(
         &restarted.sessions_dir,
         &fixture.candidate_session_id,
-    ));
+    )
+    .expect("probe durable launch recovery"));
 }
 
 #[test]
@@ -20185,7 +20224,8 @@ fn startup_fresh_execution_recovery_rejects_same_id_session_replacement() {
     assert!(durable_launch_recovery_exists(
         &fixture.runtime.sessions_dir,
         &fixture.candidate_session_id,
-    ));
+    )
+    .expect("probe durable launch recovery"));
 }
 
 #[test]
@@ -20328,7 +20368,8 @@ fn durable_launch_recovery_clear_retries_directory_sync_after_unlink_response_lo
         !durable_launch_recovery_exists(
             &fixture.runtime.sessions_dir,
             &fixture.candidate_session_id
-        ),
+        )
+        .expect("probe durable launch recovery"),
         "the unlink completed before its durability acknowledgement was lost"
     );
     second.expect("NotFound retry must complete the pending directory sync barrier");
@@ -20397,10 +20438,10 @@ fn startup_does_not_commit_foreign_same_operation_for_stale_activated_session() 
 
     restarted.bootstrap();
 
-    assert!(durable_launch_recovery_exists(
-        &restarted.sessions_dir,
-        &fixture.candidate_session_id,
-    ));
+    assert!(
+        durable_launch_recovery_exists(&restarted.sessions_dir, &fixture.candidate_session_id,)
+            .expect("probe durable launch recovery")
+    );
 
     let mut unrelated = gwt_core::workspace_projection::WorkEvent::new(
         gwt_core::workspace_projection::WorkEventKind::Start,
@@ -20488,10 +20529,10 @@ fn startup_does_not_delete_aborted_session_when_project_state_root_is_foreign() 
         candidate_path.exists(),
         "a foreign Missing result must not delete the sole Session recovery record",
     );
-    assert!(durable_launch_recovery_exists(
-        &restarted.sessions_dir,
-        &fixture.candidate_session_id,
-    ));
+    assert!(
+        durable_launch_recovery_exists(&restarted.sessions_dir, &fixture.candidate_session_id,)
+            .expect("probe durable launch recovery")
+    );
     let mut unrelated = gwt_core::workspace_projection::WorkEvent::new(
         gwt_core::workspace_projection::WorkEventKind::Start,
         "work-after-foreign-aborted-recovery",
@@ -20566,7 +20607,8 @@ fn aborted_fresh_execution_cleanup_rejects_agent_substitution_without_mutation()
     assert!(durable_launch_recovery_exists(
         &fixture.runtime.sessions_dir,
         &fixture.candidate_session_id,
-    ));
+    )
+    .expect("probe durable launch recovery"));
 }
 
 #[test]
@@ -20617,10 +20659,10 @@ fn startup_aborted_cleanup_retains_same_binding_agent_with_replaced_branch() {
         candidate_path.exists(),
         "recovery must not delete a replacement Session using a binding read from that replacement",
     );
-    assert!(durable_launch_recovery_exists(
-        &restarted.sessions_dir,
-        &fixture.candidate_session_id,
-    ));
+    assert!(
+        durable_launch_recovery_exists(&restarted.sessions_dir, &fixture.candidate_session_id,)
+            .expect("probe durable launch recovery")
+    );
     assert_eq!(
         fs::read(&candidate_path).expect("read retained replacement Session"),
         replacement_before,
@@ -20725,7 +20767,8 @@ fn startup_fresh_missing_cleanup_rechecks_same_id_materialization_before_mutatio
     assert!(durable_launch_recovery_exists(
         &fixture.runtime.sessions_dir,
         &fixture.candidate_session_id,
-    ));
+    )
+    .expect("probe durable launch recovery"));
     assert_optional_files_unchanged(&authority_before);
     assert_tracked_workspace_work_store_unchanged(&fixture.repo, &work_before);
     assert_eq!(
@@ -20849,7 +20892,8 @@ fn startup_retains_bound_fresh_receipt_when_owner_ledger_is_missing() {
     assert!(durable_launch_recovery_exists(
         &fixture.runtime.sessions_dir,
         &fixture.candidate_session_id,
-    ));
+    )
+    .expect("probe durable launch recovery"));
 }
 
 #[test]
@@ -20930,10 +20974,10 @@ fn startup_clears_unbound_fresh_receipt_only_when_no_attempt_exists() {
 
     runtime.reconcile_durable_fresh_execution_launches();
 
-    assert!(!durable_launch_recovery_exists(
-        &runtime.sessions_dir,
-        "unbound-fresh-session",
-    ));
+    assert!(
+        !durable_launch_recovery_exists(&runtime.sessions_dir, "unbound-fresh-session",)
+            .expect("probe durable launch recovery")
+    );
 }
 
 #[test]
@@ -21010,10 +21054,10 @@ fn startup_retains_bound_genesis_receipt_when_all_execution_authority_is_missing
 
     runtime.reconcile_durable_fresh_execution_launches();
 
-    assert!(durable_launch_recovery_exists(
-        &runtime.sessions_dir,
-        session_id,
-    ));
+    assert!(
+        durable_launch_recovery_exists(&runtime.sessions_dir, session_id,)
+            .expect("probe durable launch recovery")
+    );
 }
 
 #[test]
@@ -21086,10 +21130,10 @@ fn startup_retains_bound_genesis_receipt_when_ledger_is_missing_but_flat_project
 
     runtime.reconcile_durable_fresh_execution_launches();
 
-    assert!(durable_launch_recovery_exists(
-        &runtime.sessions_dir,
-        session_id,
-    ));
+    assert!(
+        durable_launch_recovery_exists(&runtime.sessions_dir, session_id,)
+            .expect("probe durable launch recovery")
+    );
     assert!(
         !ledger_path.exists(),
         "bound recovery must not recreate the ledger"
@@ -21175,10 +21219,10 @@ fn startup_retains_blocked_genesis_receipt_after_full_binding_head_mismatch() {
 
     runtime.reconcile_durable_fresh_execution_launches();
 
-    assert!(durable_launch_recovery_exists(
-        &runtime.sessions_dir,
-        session_id,
-    ));
+    assert!(
+        durable_launch_recovery_exists(&runtime.sessions_dir, session_id,)
+            .expect("probe durable launch recovery")
+    );
     for (path, expected) in authority_paths.iter().zip(authority_before) {
         assert_eq!(
             fs::read(path).expect("read retained blocked authority artifact"),
@@ -21271,7 +21315,8 @@ fn startup_retries_aborted_fresh_execution_candidate_cleanup() {
     assert!(!durable_launch_recovery_exists(
         &restarted.sessions_dir,
         &fixture.candidate_session_id,
-    ));
+    )
+    .expect("probe durable launch recovery"));
     assert!(
         restarted
             .launch_wizard_cache
@@ -21336,10 +21381,10 @@ fn startup_retains_aborted_cleanup_after_io_failure_and_retries_successfully() {
         candidate_path.exists(),
         "cleanup I/O failure must retain the Session as durable retry evidence",
     );
-    assert!(durable_launch_recovery_exists(
-        &restarted.sessions_dir,
-        &fixture.candidate_session_id,
-    ));
+    assert!(
+        durable_launch_recovery_exists(&restarted.sessions_dir, &fixture.candidate_session_id,)
+            .expect("probe durable launch recovery")
+    );
     fs::remove_dir(&removal_blocker).expect("clear cleanup I/O blocker");
 
     restarted.reconcile_durable_fresh_execution_launches();
@@ -21351,7 +21396,8 @@ fn startup_retains_aborted_cleanup_after_io_failure_and_retries_successfully() {
     assert!(!durable_launch_recovery_exists(
         &restarted.sessions_dir,
         &fixture.candidate_session_id,
-    ));
+    )
+    .expect("probe durable launch recovery"));
     assert_eq!(
         gwt::cli::execution_state::current_execution_binding(&fixture.repo, fixture.owner)
             .expect("read preserved predecessor after retry"),

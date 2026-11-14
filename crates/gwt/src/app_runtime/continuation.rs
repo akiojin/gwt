@@ -1611,8 +1611,17 @@ pub(super) fn bind_durable_launch_recovery_session_identity(
     Ok(identity)
 }
 
-pub(super) fn durable_launch_recovery_exists(sessions_dir: &Path, session_id: &str) -> bool {
-    durable_launch_recovery_path(sessions_dir, session_id).is_ok_and(|path| path.exists())
+pub(super) fn durable_launch_recovery_exists(
+    sessions_dir: &Path,
+    session_id: &str,
+) -> std::io::Result<bool> {
+    let path = durable_launch_recovery_path(sessions_dir, session_id)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+    match std::fs::metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
 }
 
 fn durable_launch_recovery_records(

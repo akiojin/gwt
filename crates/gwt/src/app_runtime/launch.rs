@@ -52,6 +52,25 @@ use super::{
     WindowProcessStatus, WindowRuntime, WorkspaceResumeContext,
 };
 
+fn durable_launch_recovery_blocks_session_cache(sessions_dir: &Path, session_id: &str) -> bool {
+    match durable_launch_recovery_exists(sessions_dir, session_id) {
+        Ok(exists) => exists,
+        Err(error) => {
+            let path = sessions_dir
+                .join("execution-launch-recovery")
+                .join(format!("{session_id}.json"));
+            tracing::warn!(
+                error_kind = ?error.kind(),
+                path = %path.display(),
+                session_id,
+                error = %error,
+                "durable launch recovery probe failed; excluding Session from Launch Wizard cache"
+            );
+            true
+        }
+    }
+}
+
 #[cfg(test)]
 type FinalizedSessionPostSaveHook = Box<dyn FnOnce() -> std::io::Result<()> + 'static>;
 
@@ -1912,7 +1931,9 @@ impl LaunchWizardMemoryCache {
                 (path.extension().and_then(|ext| ext.to_str()) == Some("toml")).then_some(path)
             })
             .filter_map(|path| gwt_agent::Session::load_and_migrate(&path).ok())
-            .filter(|session| !durable_launch_recovery_exists(sessions_dir, &session.id))
+            .filter(|session| {
+                !durable_launch_recovery_blocks_session_cache(sessions_dir, &session.id)
+            })
             .collect()
     }
 
@@ -1981,7 +2002,9 @@ impl LaunchWizardMemoryCache {
     fn replace_sessions(&mut self, sessions: Vec<gwt_agent::Session>) {
         self.sessions = sessions
             .into_iter()
-            .filter(|session| !durable_launch_recovery_exists(&self.sessions_dir, &session.id))
+            .filter(|session| {
+                !durable_launch_recovery_blocks_session_cache(&self.sessions_dir, &session.id)
+            })
             .collect();
     }
 
@@ -2003,7 +2026,7 @@ impl LaunchWizardMemoryCache {
     }
 
     fn record_session(&mut self, session: gwt_agent::Session) {
-        if durable_launch_recovery_exists(&self.sessions_dir, &session.id) {
+        if durable_launch_recovery_blocks_session_cache(&self.sessions_dir, &session.id) {
             self.forget_session(&session.id);
             return;
         }
@@ -2473,9 +2496,8 @@ impl AppRuntime {
     /// the main thread ever performing the session-directory scan.
     pub(crate) fn apply_refreshed_launch_wizard_sessions(
         &mut self,
-        mut sessions: Vec<gwt_agent::Session>,
+        sessions: Vec<gwt_agent::Session>,
     ) {
-        sessions.retain(|session| !durable_launch_recovery_exists(&self.sessions_dir, &session.id));
         self.launch_wizard_cache.replace_sessions(sessions);
     }
 
@@ -5020,7 +5042,7 @@ impl AppRuntime {
         let path = self
             .sessions_dir
             .join(format!("{}.toml", session.session_id));
-        if durable_launch_recovery_exists(&self.sessions_dir, &session.session_id) {
+        if durable_launch_recovery_blocks_session_cache(&self.sessions_dir, &session.session_id) {
             self.launch_wizard_cache.forget_session(&session.session_id);
             return;
         }
@@ -6905,10 +6927,10 @@ mod agent_endpoint_env_tests {
             session_before,
             "the failed write must retain the pre-binding Session byte-identically",
         );
-        assert!(durable_launch_recovery_exists(
-            &launch.sessions_dir,
-            &launch.session.id,
-        ));
+        assert!(
+            durable_launch_recovery_exists(&launch.sessions_dir, &launch.session.id,)
+                .expect("probe durable launch recovery")
+        );
         assert!(
             gwt_core::workspace_projection::load_workspace_work_items(&launch.project)
                 .expect("read absent Work projection")
@@ -7070,7 +7092,8 @@ mod agent_endpoint_env_tests {
             !crate::app_runtime::continuation::durable_launch_recovery_exists(
                 &sessions_dir,
                 &genesis.session_id,
-            ),
+            )
+            .expect("probe durable launch recovery"),
             "the receipt may clear only after exact Session cleanup"
         );
     }

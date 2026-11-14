@@ -2757,23 +2757,31 @@ fn durable_session_binding_authorizes_current_generation(
     };
     let repo_hash =
         crate::index_worker::detect_repo_hash(&context.worktree).map(|value| value.to_string());
-    Ok(session.id == session_id
-        && session.worktree_path.exists()
-        && worktree_binding_hash(&session.worktree_path) == context.worktree_binding_hash
-        && session.repo_hash == repo_hash
-        && binding.schema_version == gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION
-        && binding.session_id == session_id
-        && Some(binding.repo_hash.as_str()) == repo_hash.as_deref()
-        && binding.owner_kind == context.owner.kind.as_str()
-        && binding.owner_number == context.owner.number
-        && session.linked_issue_number == Some(context.owner.number)
-        && binding.capability_generation > 0
-        && execution_binding_authorizes_lifecycle_descendant(
-            ledger,
-            current,
-            session_id,
-            &binding.identity,
-        ))
+    if session.id != session_id {
+        return Ok(false);
+    }
+    match fs::metadata(&session.worktree_path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    }
+    Ok(
+        worktree_binding_hash(&session.worktree_path) == context.worktree_binding_hash
+            && session.repo_hash == repo_hash
+            && binding.schema_version == gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION
+            && binding.session_id == session_id
+            && Some(binding.repo_hash.as_str()) == repo_hash.as_deref()
+            && binding.owner_kind == context.owner.kind.as_str()
+            && binding.owner_number == context.owner.number
+            && session.linked_issue_number == Some(context.owner.number)
+            && binding.capability_generation > 0
+            && execution_binding_authorizes_lifecycle_descendant(
+                ledger,
+                current,
+                session_id,
+                &binding.identity,
+            ),
+    )
 }
 
 /// Exact non-secret identity consumed by Session/verification projections.
@@ -15720,6 +15728,52 @@ mod tests {
             )
             .expect("post-block verification caller remains authorized"),
             Some(durable),
+        );
+    }
+
+    #[test]
+    fn generation_lifecycle_propagates_session_worktree_io_error_without_mutation() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_owner();
+        let session_id = "session-worktree-io-error";
+        let mut active = active_record(session_id);
+        active.owner_number = owner.number;
+        save(dir.path(), &active).unwrap();
+        ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+        let binding = current_execution_binding(dir.path(), owner)
+            .unwrap()
+            .unwrap();
+        persist_generation_session_binding(dir.path(), owner, session_id, binding);
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let session_path = sessions_dir.join(format!("{session_id}.toml"));
+        let mut session = gwt_agent::Session::load(&session_path).unwrap();
+        session.worktree_path = PathBuf::from("invalid\0worktree");
+        session.save(&sessions_dir).unwrap();
+        let session_before = fs::read(&session_path).unwrap();
+        let authority_before = generation_authority_bytes(dir.path(), owner);
+
+        let error = settle(dir.path(), session_id, ExecutionSettlement::Completed).expect_err(
+            "Session worktree I/O failure must propagate instead of becoming a mismatch",
+        );
+
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+        assert_eq!(
+            generation_authority_bytes(dir.path(), owner),
+            authority_before,
+            "Session worktree I/O failure must preserve generation authority bytes",
+        );
+        assert_eq!(
+            fs::read(&session_path).unwrap(),
+            session_before,
+            "Session worktree I/O failure must preserve exact Session bytes",
         );
     }
 
