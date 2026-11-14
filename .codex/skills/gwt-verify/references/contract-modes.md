@@ -36,10 +36,9 @@ Playwright recipe. Instead it executes the following four-part contract:
    suite paths from each runner's structured output and list them in the
    evidence bundle so the user can see **what was tested**, not just a pass /
    fail count.
-4. **User Verification Handoff** — only when the owner explicitly requests
-   human confirmation, after automated tests pass present a surface-specific
-   checklist plus a 4-step 導線 ("How to access": build → launch → navigate →
-   observe) and ask the user to confirm or reject. See
+4. **User Verification Handoff** — after automated tests pass, present a
+   surface-specific checklist plus a 4-step 導線 ("How to access": build →
+   launch → navigate → observe) and ask the user to confirm or reject. See
    [references/user-verification-guide.md](user-verification-guide.md).
 
 For every new or changed blocking gate, the verification evidence must also
@@ -63,17 +62,17 @@ the generic matrix in this skill. The matrix here is the fallback frame.
 | Mode | When to use | Scope |
 |---|---|---|
 | `--mode quick` (default) | TDD loop, narrow check during implementation | Only surfaces touched by uncommitted / working-tree changes; the narrowest representative command per runner (e.g. single-package test invocation). Skip heavy integration / E2E / visual unless the diff explicitly touches them. |
-| `--mode full` | gwt-build-spec Phase 3, standalone completion gate | Full matched matrix per changed surface, including integration / E2E / visual when a UI surface is in scope — by the diff, or by acceptance-aware escalation ([references/surface-taxonomy.md](surface-taxonomy.md)). A human handoff is required only on explicit owner request (see below). |
-| `--mode pre-pr` | gwt-manage-pr before PR create / update | Use the approved CI-backed local subset when the project supports it; otherwise use the `full` matrix. Keep acceptance tests, checks absent from required CI, and all existing automated visual gates plus explicitly requested human checks. |
+| `--mode full` | gwt-build-spec Phase 3, standalone completion gate | Full matched matrix per changed surface, including integration / E2E / visual when a UI surface is in scope — by the diff, or by acceptance-aware escalation ([references/surface-taxonomy.md](surface-taxonomy.md)). User Verification Handoff is required (see below). |
+| `--mode pre-pr` | gwt-manage-pr before PR create / update | Use the approved CI-backed local subset when the project supports it; otherwise use the `full` matrix. Keep acceptance tests, checks absent from required CI, and all existing visual / user-verification gates. |
 | `--headed` (flag) | Manual UI / design verification | When supplied alongside any mode that runs a browser-based test runner (Playwright / Cypress / Selenium / WinAppDriver / Unity Editor headed), launch the runner in headed mode so the user can watch. Default is headless to match CI. |
 
 Additional flag:
 
 - `--skip-user-check` — explicitly opt out of the User Verification Handoff
   phase for non-interactive runs (CI smoke, automated regression sweeps).
-  Human verification is optional by default; this flag records an explicit
-  non-interactive choice as `User Verification: skipped(--skip-user-check)`.
-  It does not override an owner's explicit request for a human check.
+  Default is **off**; `--mode full` and `--mode pre-pr` require user
+  verification unless this flag is set. The reason is recorded in the
+  evidence bundle as `User Verification: skipped(--skip-user-check)`.
 
 ## CI-backed pre-PR verification
 
@@ -121,7 +120,7 @@ durable Session at launch, which is the only party that knows.
 | Launch mode | Detection | User Verification Handoff |
 |---|---|---|
 | `autonomous` | `execution.status` reports `launch_route: autonomous` — an unattended gwt Issue Monitor launch | **Waived.** Nobody is watching the session. |
-| `interactive` | `launch_route: manual`, or absent | Optional; required only when the owner explicitly requests a human check. |
+| `interactive` | `launch_route: manual`, or absent | Unchanged: the handoff below runs as written. |
 
 `GWT_AUTONOMOUS_EXECUTION` is a **legacy** signal. Treat it as autonomous when
 it is set, but its absence proves nothing: it is written only when the project
@@ -131,9 +130,6 @@ who was never there (#3777, #3697, #4217). `launch_route` wins over the
 environment in every case.
 
 Record the detected mode on the evidence bundle's `Launch mode:` line.
-User Verification Result is optional in every launch mode. A missing, pending,
-or legacy deferred field alone does not establish an owner request. Preserve
-an actual rejection as a known blocker and repair its cause.
 
 In `autonomous` mode:
 
@@ -158,8 +154,7 @@ The legacy `deferred (autonomous execution)` value remains readable on
 existing autonomous PRs. Fresh passing verification permits Ready and the
 existing CI auto-merge path without rewriting that PR body or requiring human
 confirmation. This compatibility does not waive automated evidence or any
-other Ready Gate condition. A manual launch alone does not require human
-confirmation; only an explicit owner request does.
+other Ready Gate condition. Manual launch verification is unchanged.
 
 `pr.list` with `include: ["body"]` still exposes
 `deferred_user_verification`: both `n/a (autonomous)` and the legacy autonomous

@@ -30,9 +30,9 @@ Rules:
 
 ## PR Readiness
 
-<!-- GUIDE: Ready for review requires a releaseable slice, no known blockers, completed acceptance for this PR scope, and pre-PR verification evidence. Draft PRs are prohibited. Repair unmet gates before creating the PR. -->
+<!-- GUIDE: Choose exactly one State. Ready for review requires a releaseable slice, no known blockers, completed acceptance for this PR scope, and pre-PR verification evidence. Draft is allowed only for incomplete CI/shared review and must not claim release readiness. -->
 
-- State: Ready for review
+- State: Ready for review | Draft
 - Releaseable slice: {yes/no + reason}
 - Known blockers: {None or list}
 - Remaining acceptance: {None or list}
