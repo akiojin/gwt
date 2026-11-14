@@ -4,19 +4,29 @@ use std::{
     fmt, io,
     path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use gwt_core::{
     index::{
+        broker::{
+            RefreshBroker, RefreshClaim, RefreshIntent, RefreshReason, RefreshResourceClass,
+            RefreshScope, RefreshTarget, REFRESH_INTENT_PROTOCOL_VERSION,
+        },
+        manifest::{FileIndexV2Manifest, FileIndexV2ManifestEntry},
         paths::gwt_index_root,
-        runtime::{reconcile_repo, PythonRunnerSpawner, ReconcileOptions, RunnerSpawner},
+        runtime::{reconcile_repo, ReconcileOptions, RunnerSpawner},
+        view::{
+            BaseGenerationDescriptor, FileDocumentContract, FileIndexCompatibilityDescriptor,
+            OverlayGenerationDescriptor, WorktreeViewDescriptor, WorktreeViewHead,
+        },
     },
     index_coordinator::{IndexCoordinator, JobAdmission, JobOutcome, JobPriority, TargetKey},
     repo_hash::RepoHash,
     worktree_hash::compute_worktree_hash,
 };
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 const DISABLE_BACKGROUND_INDEX_ENV: &str = "GWT_DISABLE_BACKGROUND_INDEX";
 
@@ -140,19 +150,85 @@ pub fn bootstrap_project_index_for_path(project_root: &Path) -> Result<(), Strin
         );
         return Ok(());
     }
-    let runtime_started = Instant::now();
-    gwt_core::runtime::ensure_project_index_runtime().map_err(|err| err.to_string())?;
-    tracing::info!(
-        target: "gwt::index",
-        project_root = %project_root.display(),
-        elapsed_ms = runtime_started.elapsed().as_millis() as u64,
-        "project index runtime ensured for bootstrap"
-    );
-    let spawner = PythonRunnerSpawner {
-        python_executable: project_index_python_path(),
-        runner_script: gwt_core::runtime::project_index_runner_path(),
+    let broker = RefreshBroker::open_default().map_err(|error| error.to_string())?;
+    submit_base_refresh_intent(project_root, &broker)
+}
+
+fn refresh_intent_epoch() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64
+}
+
+fn submit_base_refresh_intent(project_root: &Path, broker: &RefreshBroker) -> Result<(), String> {
+    let Some(context) = project_index_git_context(project_root) else {
+        return Ok(());
     };
-    bootstrap_project_index_for_path_with(project_root, &gwt_index_root(), &spawner)
+    let Some(repo_hash) = detect_repo_hash(&context.repo_root) else {
+        return Ok(());
+    };
+    let desired_snapshot = gwt_git::resolve_canonical_root_tree(&context.repo_root)
+        .map_err(|error| error.to_string())?
+        .map(|snapshot| snapshot.root_tree_oid)
+        .unwrap_or_else(|| "unborn:no-canonical-root-tree".to_string());
+    broker
+        .submit(RefreshIntent {
+            protocol_version: REFRESH_INTENT_PROTOCOL_VERSION,
+            target: RefreshTarget::base(
+                repo_hash.as_str(),
+                [RefreshScope::Files, RefreshScope::FilesDocs],
+            ),
+            desired_epoch: refresh_intent_epoch(),
+            desired_snapshot,
+            priority: JobPriority::Background,
+            reason: RefreshReason::Startup,
+            resource_class: RefreshResourceClass::Embedding,
+        })
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+/// Register one worktree overlay target without loading the model or starting
+/// an index runner. Registration identity is deliberately not presented as a
+/// content snapshot; watcher/search intents replace it with live state later.
+pub fn register_project_index_overlay_for_path(project_root: &Path) -> Result<(), String> {
+    let broker = RefreshBroker::open_default().map_err(|error| error.to_string())?;
+    register_project_index_overlay_for_path_with_broker(project_root, &broker)
+}
+
+pub fn register_project_index_overlay_for_path_with_broker(
+    project_root: &Path,
+    broker: &RefreshBroker,
+) -> Result<(), String> {
+    let Some(context) = project_index_git_context(project_root) else {
+        return Ok(());
+    };
+    let Some(repo_hash) = detect_repo_hash(&context.repo_root) else {
+        return Ok(());
+    };
+    let worktree_root = context
+        .current_worktree_root
+        .unwrap_or_else(|| canonicalize_path(project_root.to_path_buf()));
+    let worktree_hash = compute_worktree_hash(&worktree_root)
+        .map_err(|error| format!("compute worktree hash: {error}"))?;
+    broker
+        .submit(RefreshIntent {
+            protocol_version: REFRESH_INTENT_PROTOCOL_VERSION,
+            target: RefreshTarget::overlay(
+                repo_hash.as_str(),
+                worktree_hash.as_str(),
+                [RefreshScope::Files, RefreshScope::FilesDocs],
+            ),
+            desired_epoch: refresh_intent_epoch(),
+            desired_snapshot: format!("registration:{}", worktree_hash.as_str()),
+            priority: JobPriority::Background,
+            reason: RefreshReason::Startup,
+            resource_class: RefreshResourceClass::Embedding,
+        })
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 /// Per-cell index rebuild scope used by the orchestrator, in-flight set, and
@@ -637,8 +713,7 @@ fn load_test_fixture_status() -> Option<ProjectIndexStatusView> {
 }
 
 /// Aggregate per-worktree status for a project root by listing every active
-/// worktree from `git worktree list --porcelain`, probing each via the
-/// runner, and combining the results with [`build_aggregated_status_view`].
+/// worktree and projecting the immutable metadata closure from disk.
 ///
 /// When `GWT_INDEX_TEST_FIXTURE` is set, the fixture JSON is loaded instead
 /// — this is the seam used by Playwright e2e (SPEC-1939 T-IDX-109/110).
@@ -655,9 +730,9 @@ pub fn aggregate_project_index_status_for_path(project_root: &Path) -> ProjectIn
     }
 }
 
-/// Probe only the current worktree. This is the startup path: it gives the
-/// project tab and auto-repair orchestrator enough health data without
-/// spawning one Python status process for every inactive worktree.
+/// Project only the current worktree. This is the startup path: it gives the
+/// project tab and auto-repair orchestrator health data without loading the
+/// model or starting a Python status process.
 pub fn aggregate_current_worktree_index_status_for_path(
     project_root: &Path,
 ) -> ProjectIndexStatusView {
@@ -774,92 +849,600 @@ fn aggregate_project_index_status_for_path_inner(
         );
     }
 
-    let runtime_started = Instant::now();
-    let report =
-        gwt_core::runtime::ensure_project_index_runtime().map_err(|err| err.to_string())?;
-    tracing::info!(
-        target: "gwt::index",
-        project_root = %project_root.display(),
-        elapsed_ms = runtime_started.elapsed().as_millis() as u64,
-        "project index runtime ensured for aggregated status"
-    );
-
     let coverage = selection.coverage;
-    // Phase 70 FR-393 / AS-13: one batch status process covers every
-    // selected worktree instead of one serial Python spawn per worktree.
-    let worktree_hashes: Vec<String> = selection
-        .inputs
-        .iter()
-        .map(|input| input.worktree_hash.clone())
-        .collect();
-    let batch = probe_worktrees_status_batch(&repo_root, &repo_hash, &worktree_hashes);
-    let mut probes: Vec<WorktreeProbeOutcome> = Vec::with_capacity(selection.inputs.len());
-    match batch {
-        Ok(payload) => {
-            let runtime = payload
-                .get("runtime")
-                .cloned()
-                .unwrap_or(serde_json::Value::Null);
-            let repo_status = payload
-                .get("status")
-                .cloned()
-                .unwrap_or_else(|| serde_json::json!({}));
-            let worktrees = payload
-                .get("worktrees")
-                .cloned()
-                .unwrap_or_else(|| serde_json::json!({}));
-            for input in selection.inputs {
-                let Some(worktree_obj) = worktrees
-                    .get(&input.worktree_hash)
-                    .and_then(serde_json::Value::as_object)
-                else {
-                    // PR #3301 review: a worktree the batch request asked for
-                    // but the response does not cover must degrade to an
-                    // error, never to a Ready view built from repo scopes.
-                    probes.push(WorktreeProbeOutcome {
-                        status_payload: Err(format!(
-                            "batch status response is missing worktree {}",
-                            input.worktree_hash
-                        )),
-                        input,
-                    });
-                    continue;
-                };
-                let mut status = repo_status.clone();
-                if let Some(status_obj) = status.as_object_mut() {
-                    for (key, value) in worktree_obj {
-                        status_obj.insert(key.clone(), value.clone());
-                    }
-                }
-                probes.push(WorktreeProbeOutcome {
-                    input,
-                    status_payload: Ok(serde_json::json!({
-                        "ok": true,
-                        "runtime": runtime.clone(),
-                        "status": status,
-                    })),
-                });
-            }
-        }
-        Err(error) => {
-            for input in selection.inputs {
-                probes.push(WorktreeProbeOutcome {
-                    input,
-                    status_payload: Err(error.clone()),
-                });
-            }
-        }
+    let index_root = gwt_index_root();
+    let repo_index_root = index_root.join(repo_hash.as_str());
+    let mut scopes = ProjectIndexScopes {
+        issues: Some(project_repo_scope_health(&repo_index_root, "issues")),
+        specs: Some(project_repo_scope_health(&repo_index_root, "specs")),
+        memory: Some(project_repo_scope_health(&repo_index_root, "memory")),
+        discussions: Some(project_repo_scope_health(&repo_index_root, "discussions")),
+        board: Some(project_repo_scope_health(&repo_index_root, "board")),
+        ..ProjectIndexScopes::default()
+    };
+    let mut worktrees = BTreeMap::new();
+    for input in selection.inputs {
+        worktrees.insert(
+            input.worktree_hash.clone(),
+            WorktreeMeta {
+                branch: input.branch,
+                path: input.path.display().to_string(),
+            },
+        );
+        let (files, files_docs) = project_file_scope_health(
+            &repo_index_root.join("file-index-v2"),
+            repo_hash.as_str(),
+            &input.worktree_hash,
+        );
+        scopes.files.insert(input.worktree_hash.clone(), files);
+        scopes.files_docs.insert(input.worktree_hash, files_docs);
     }
 
-    let mut view = build_aggregated_status_view(report.runner_hash.as_str(), &probes);
+    let unhealthy_count = count_unhealthy_scopes(&scopes);
+    let state = if unhealthy_count == 0 {
+        ProjectIndexStatusState::Ready
+    } else {
+        ProjectIndexStatusState::RepairRequired
+    };
+    let mut view = ProjectIndexStatusView {
+        state,
+        detail: if unhealthy_count == 0 {
+            "Index metadata ready".to_string()
+        } else {
+            format!("{unhealthy_count} index scope(s) require repair")
+        },
+        repair_started_at: None,
+        progress: None,
+        scopes,
+        worktrees,
+        coverage: Some(coverage.clone()),
+    };
     if coverage.truncated {
         view.detail = format!(
             "Partial status: probed {}/{} worktrees; {}",
             coverage.probed_worktrees, coverage.total_worktrees, view.detail
         );
     }
-    view.coverage = Some(coverage);
     Ok(view)
+}
+
+fn project_repo_scope_health(repo_index_root: &Path, scope: &str) -> ScopeHealthView {
+    let scope_root = repo_index_root.join(scope);
+    let meta = match std::fs::read(scope_root.join("meta.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .filter(serde_json::Value::is_object)
+    {
+        Some(meta) => meta,
+        None => return ScopeHealthView::unhealthy("metadata_missing_or_invalid"),
+    };
+    let direct_store = scope_root.join("chroma.sqlite3");
+    let generation_root = repo_index_root.join(format!("{scope}.gen"));
+    let active_path = generation_root.join("active.json");
+    let active = match std::fs::read(&active_path) {
+        Ok(bytes) => match serde_json::from_slice::<serde_json::Value>(&bytes) {
+            Ok(pointer) => Some(pointer),
+            Err(_) => return ScopeHealthView::unhealthy("active_pointer_invalid"),
+        },
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(_) => return ScopeHealthView::unhealthy("active_pointer_invalid"),
+    };
+    let (store_exists, pointer_count) = match active {
+        Some(pointer) => {
+            let Some(generation) = pointer
+                .get("generation")
+                .and_then(serde_json::Value::as_str)
+                .filter(|generation| safe_index_artifact_id(generation))
+            else {
+                return ScopeHealthView::unhealthy("active_pointer_invalid");
+            };
+            (
+                generation_root
+                    .join(generation)
+                    .join("chroma.sqlite3")
+                    .is_file(),
+                pointer
+                    .get("document_count")
+                    .and_then(serde_json::Value::as_u64),
+            )
+        }
+        None => (direct_store.is_file(), None),
+    };
+    if !store_exists {
+        return ScopeHealthView::unhealthy("collection_missing");
+    }
+    let document_count = pointer_count
+        .or_else(|| {
+            meta.get("document_count")
+                .and_then(serde_json::Value::as_u64)
+        })
+        .or_else(|| {
+            meta.get("source_document_count")
+                .and_then(serde_json::Value::as_u64)
+        })
+        .unwrap_or(0);
+    ScopeHealthView::ready(document_count)
+}
+
+fn project_file_scope_health(
+    v2_root: &Path,
+    repo_hash: &str,
+    worktree_hash: &str,
+) -> (ScopeHealthView, ScopeHealthView) {
+    match validate_file_index_view(v2_root, repo_hash, worktree_hash) {
+        Ok(view) => {
+            let files = *view.visible_counts.get("files").unwrap_or(&0) as u64;
+            let files_docs = *view.visible_counts.get("files-docs").unwrap_or(&0) as u64;
+            let mut files_health = ScopeHealthView::ready(files);
+            files_health.view_id = Some(view.view_id.clone());
+            let mut files_docs_health = ScopeHealthView::ready(files_docs);
+            files_docs_health.view_id = Some(view.view_id);
+            (files_health, files_docs_health)
+        }
+        Err(FileViewHealthError::Missing(reason)) => (
+            ScopeHealthView::unhealthy(reason),
+            ScopeHealthView::unhealthy(reason),
+        ),
+        Err(FileViewHealthError::HeadInvalid) => (
+            ScopeHealthView::unhealthy("view_head_invalid"),
+            ScopeHealthView::unhealthy("view_head_invalid"),
+        ),
+        Err(FileViewHealthError::ClosureInvalid) => (
+            ScopeHealthView::unhealthy("view_closure_invalid"),
+            ScopeHealthView::unhealthy("view_closure_invalid"),
+        ),
+    }
+}
+
+#[derive(Debug)]
+enum FileViewHealthError {
+    Missing(&'static str),
+    HeadInvalid,
+    ClosureInvalid,
+}
+
+fn validate_file_index_view(
+    v2_root: &Path,
+    repo_hash: &str,
+    worktree_hash: &str,
+) -> Result<WorktreeViewDescriptor, FileViewHealthError> {
+    let worktree_root = v2_root.join("worktrees").join(worktree_hash);
+    let head_path = worktree_root.join("head.json");
+    if !head_path.is_file() {
+        return Err(FileViewHealthError::Missing("view_head_missing"));
+    }
+    let head: WorktreeViewHead =
+        read_typed_json(&head_path).map_err(|_| FileViewHealthError::HeadInvalid)?;
+    let view: WorktreeViewDescriptor = read_typed_json(
+        &worktree_root
+            .join("views")
+            .join(&head.active_view_id)
+            .join("descriptor.json"),
+    )
+    .map_err(|_| FileViewHealthError::ClosureInvalid)?;
+    if view.view_id != head.active_view_id
+        || view.repo_hash != repo_hash
+        || view.worktree_hash != worktree_hash
+        || !current_file_index_compatibility(&view.compatibility)
+    {
+        return Err(FileViewHealthError::ClosureInvalid);
+    }
+
+    let base_root = v2_root.join("bases").join(&view.base_generation_id);
+    let overlay_root = worktree_root
+        .join("overlays")
+        .join(&view.overlay_generation_id);
+    let base: BaseGenerationDescriptor = read_typed_json(&base_root.join("descriptor.json"))
+        .map_err(|_| FileViewHealthError::ClosureInvalid)?;
+    let overlay: OverlayGenerationDescriptor =
+        read_typed_json(&overlay_root.join("descriptor.json"))
+            .map_err(|_| FileViewHealthError::ClosureInvalid)?;
+    if base.base_generation_id != view.base_generation_id
+        || base.repo_hash != repo_hash
+        || overlay.overlay_generation_id != view.overlay_generation_id
+        || overlay.repo_hash != repo_hash
+        || overlay.worktree_hash != worktree_hash
+        || overlay.base_generation_id != view.base_generation_id
+        || overlay.source_snapshot_id != view.source_snapshot_id
+        || !base
+            .compatibility
+            .is_semantically_compatible_with(&view.compatibility)
+        || !overlay
+            .compatibility
+            .is_semantically_compatible_with(&view.compatibility)
+        || !base_root.join("store/chroma.sqlite3").is_file()
+        || !overlay_root.join("store/chroma.sqlite3").is_file()
+    {
+        return Err(FileViewHealthError::ClosureInvalid);
+    }
+
+    let base_entries = read_generation_manifest(&base_root, &base.manifest_digest)?;
+    let overlay_entries = read_generation_manifest(&overlay_root, &overlay.manifest_digest)?;
+    if generation_id_for_base(&base, &base_entries)? != base.base_generation_id
+        || generation_id_for_overlay(&overlay, &overlay_entries)? != overlay.overlay_generation_id
+    {
+        return Err(FileViewHealthError::ClosureInvalid);
+    }
+    let base_counts = manifest_scope_counts(&base_entries.entries);
+    if base.document_counts.files != base_counts.0
+        || base.document_counts.files_docs != base_counts.1
+        || base.document_counts.total != base_counts.0.saturating_add(base_counts.1)
+    {
+        return Err(FileViewHealthError::ClosureInvalid);
+    }
+    let (visible_counts, source_snapshot_id) =
+        validate_visible_manifest(&base_entries.entries, &overlay_entries.entries, &overlay)?;
+    if view.visible_counts.get("files") != Some(&visible_counts.0)
+        || view.visible_counts.get("files-docs") != Some(&visible_counts.1)
+        || view.source_snapshot_id != source_snapshot_id
+    {
+        return Err(FileViewHealthError::ClosureInvalid);
+    }
+    Ok(view)
+}
+
+fn read_typed_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, String> {
+    let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
+    serde_json::from_slice(&bytes).map_err(|error| error.to_string())
+}
+
+fn read_generation_manifest(
+    generation_root: &Path,
+    expected_digest: &str,
+) -> Result<FileIndexV2Manifest, FileViewHealthError> {
+    const TOP_LEVEL_FIELDS: &[&str] = &["schema_version", "entries"];
+    const ENTRY_FIELDS: &[&str] = &[
+        "path",
+        "source_object",
+        "source_digest",
+        "payload_digest",
+        "metadata_digest",
+        "scope",
+        "cas_key",
+        "input_digest",
+        "vector_checksum",
+        "dimension",
+    ];
+    let bytes = std::fs::read(generation_root.join("manifest.json"))
+        .map_err(|_| FileViewHealthError::ClosureInvalid)?;
+    let raw: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|_| FileViewHealthError::ClosureInvalid)?;
+    let mut canonical_manifest = String::new();
+    write_stable_json(&mut canonical_manifest, &raw);
+    if bytes != canonical_manifest.as_bytes() {
+        return Err(FileViewHealthError::ClosureInvalid);
+    }
+    let raw_object = raw
+        .as_object()
+        .filter(|object| has_exact_json_fields(object, TOP_LEVEL_FIELDS))
+        .ok_or(FileViewHealthError::ClosureInvalid)?;
+    let raw_entries = raw_object
+        .get("entries")
+        .and_then(serde_json::Value::as_array)
+        .ok_or(FileViewHealthError::ClosureInvalid)?;
+    let manifest: FileIndexV2Manifest =
+        serde_json::from_slice(&bytes).map_err(|_| FileViewHealthError::ClosureInvalid)?;
+    if manifest.schema_version != 1 || manifest.entries.len() != raw_entries.len() {
+        return Err(FileViewHealthError::ClosureInvalid);
+    }
+    for (raw_entry, entry) in raw_entries.iter().zip(&manifest.entries) {
+        let exact_fields = raw_entry
+            .as_object()
+            .is_some_and(|object| has_exact_json_fields(object, ENTRY_FIELDS));
+        if !exact_fields || !valid_file_index_manifest_entry(entry) {
+            return Err(FileViewHealthError::ClosureInvalid);
+        }
+    }
+    if !manifest
+        .entries
+        .windows(2)
+        .all(|pair| pair[0].path < pair[1].path)
+    {
+        return Err(FileViewHealthError::ClosureInvalid);
+    }
+    let entries_value =
+        serde_json::to_value(&manifest.entries).map_err(|_| FileViewHealthError::ClosureInvalid)?;
+    if stable_json_sha256(&entries_value) != expected_digest {
+        return Err(FileViewHealthError::ClosureInvalid);
+    }
+    Ok(manifest)
+}
+
+fn has_exact_json_fields(
+    object: &serde_json::Map<String, serde_json::Value>,
+    expected: &[&str],
+) -> bool {
+    object.len() == expected.len() && expected.iter().all(|field| object.contains_key(*field))
+}
+
+fn valid_file_index_manifest_entry(entry: &FileIndexV2ManifestEntry) -> bool {
+    safe_file_index_logical_path(&entry.path)
+        && !entry.source_object.is_empty()
+        && matches!(entry.scope.as_str(), "files" | "files-docs")
+        && [
+            &entry.source_digest,
+            &entry.payload_digest,
+            &entry.metadata_digest,
+            &entry.cas_key,
+            &entry.input_digest,
+            &entry.vector_checksum,
+        ]
+        .into_iter()
+        .all(|value| is_lowercase_sha256(value))
+        && entry.dimension > 0
+}
+
+fn safe_file_index_logical_path(value: &str) -> bool {
+    !value.is_empty()
+        && !value.starts_with('/')
+        && !value.contains('\\')
+        && value.split('/').all(|part| {
+            !part.is_empty()
+                && part != "."
+                && part != ".."
+                && part
+                    .chars()
+                    .all(|character| character > '\u{1f}' && character != '\u{7f}')
+        })
+}
+
+fn is_lowercase_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn manifest_scope_counts(entries: &[FileIndexV2ManifestEntry]) -> (usize, usize) {
+    entries.iter().fold((0usize, 0usize), |mut counts, entry| {
+        if entry.scope == "files" {
+            counts.0 = counts.0.saturating_add(1);
+        } else {
+            counts.1 = counts.1.saturating_add(1);
+        }
+        counts
+    })
+}
+
+fn semantic_compatibility_value(
+    compatibility: &FileIndexCompatibilityDescriptor,
+) -> Result<serde_json::Value, FileViewHealthError> {
+    let mut value =
+        serde_json::to_value(compatibility).map_err(|_| FileViewHealthError::ClosureInvalid)?;
+    value
+        .as_object_mut()
+        .ok_or(FileViewHealthError::ClosureInvalid)?
+        .remove("runner_hash");
+    Ok(value)
+}
+
+fn manifest_record_keys(entries: &[FileIndexV2ManifestEntry]) -> serde_json::Value {
+    serde_json::Value::Array(
+        entries
+            .iter()
+            .map(|entry| serde_json::json!([entry.path.as_str(), entry.cas_key.as_str()]))
+            .collect(),
+    )
+}
+
+fn generation_id_for_base(
+    descriptor: &BaseGenerationDescriptor,
+    manifest: &FileIndexV2Manifest,
+) -> Result<String, FileViewHealthError> {
+    Ok(stable_json_sha256(&serde_json::json!({
+        "compatibility": semantic_compatibility_value(&descriptor.compatibility)?,
+        "records": manifest_record_keys(&manifest.entries),
+        "root_tree_oid": descriptor.root_tree_oid.as_deref(),
+    })))
+}
+
+fn generation_id_for_overlay(
+    descriptor: &OverlayGenerationDescriptor,
+    manifest: &FileIndexV2Manifest,
+) -> Result<String, FileViewHealthError> {
+    Ok(stable_json_sha256(&serde_json::json!({
+        "compatibility": semantic_compatibility_value(&descriptor.compatibility)?,
+        "records": manifest_record_keys(&manifest.entries),
+        "source_snapshot_id": descriptor.source_snapshot_id.as_str(),
+        "base_generation_id": descriptor.base_generation_id.as_str(),
+    })))
+}
+
+fn manifest_scope_paths(entries: &[FileIndexV2ManifestEntry], scope: &str) -> BTreeSet<String> {
+    entries
+        .iter()
+        .filter(|entry| entry.scope == scope)
+        .map(|entry| entry.path.clone())
+        .collect()
+}
+
+fn validate_visible_manifest(
+    base_entries: &[FileIndexV2ManifestEntry],
+    overlay_entries: &[FileIndexV2ManifestEntry],
+    overlay: &OverlayGenerationDescriptor,
+) -> Result<((usize, usize), String), FileViewHealthError> {
+    let base_files = manifest_scope_paths(base_entries, "files");
+    let base_files_docs = manifest_scope_paths(base_entries, "files-docs");
+    let overlay_files = manifest_scope_paths(overlay_entries, "files");
+    let overlay_files_docs = manifest_scope_paths(overlay_entries, "files-docs");
+    let base_all: BTreeSet<_> = base_files.union(&base_files_docs).cloned().collect();
+    let overlay_all: BTreeSet<_> = overlay_files.union(&overlay_files_docs).cloned().collect();
+    let tombstones: BTreeSet<_> = overlay.tombstones.iter().cloned().collect();
+    let changed_or_removed: BTreeSet<_> = overlay_all.union(&tombstones).cloned().collect();
+    let changed_base_files: BTreeSet<_> = base_files
+        .intersection(&changed_or_removed)
+        .cloned()
+        .collect();
+    let changed_base_files_docs: BTreeSet<_> = base_files_docs
+        .intersection(&changed_or_removed)
+        .cloned()
+        .collect();
+    let expected_files_shadow: BTreeSet<_> =
+        overlay_files.union(&changed_base_files).cloned().collect();
+    let expected_files_docs_shadow: BTreeSet<_> = overlay_files_docs
+        .union(&changed_base_files_docs)
+        .cloned()
+        .collect();
+    let files_shadow: BTreeSet<_> = overlay.files_shadow.iter().cloned().collect();
+    let files_docs_shadow: BTreeSet<_> = overlay.files_docs_shadow.iter().cloned().collect();
+    if !tombstones.is_disjoint(&overlay_all)
+        || !tombstones.is_subset(&base_all)
+        || files_shadow != expected_files_shadow
+        || files_docs_shadow != expected_files_docs_shadow
+    {
+        return Err(FileViewHealthError::ClosureInvalid);
+    }
+
+    let mut visible: BTreeMap<String, &FileIndexV2ManifestEntry> = BTreeMap::new();
+    for entry in base_entries {
+        let shadow = if entry.scope == "files" {
+            &files_shadow
+        } else {
+            &files_docs_shadow
+        };
+        if !shadow.contains(&entry.path) {
+            visible.insert(entry.path.clone(), entry);
+        }
+    }
+    for entry in overlay_entries {
+        if visible.insert(entry.path.clone(), entry).is_some() {
+            return Err(FileViewHealthError::ClosureInvalid);
+        }
+    }
+    let counts = visible
+        .values()
+        .fold((0usize, 0usize), |mut counts, entry| {
+            if entry.scope == "files" {
+                counts.0 = counts.0.saturating_add(1);
+            } else {
+                counts.1 = counts.1.saturating_add(1);
+            }
+            counts
+        });
+    let source_identity = serde_json::Value::Array(
+        visible
+            .values()
+            .map(|entry| {
+                serde_json::json!([
+                    entry.path.as_str(),
+                    entry.source_digest.as_str(),
+                    if entry.scope == "files" {
+                        "code"
+                    } else {
+                        "docs"
+                    },
+                    entry.payload_digest.as_str(),
+                    entry.metadata_digest.as_str(),
+                ])
+            })
+            .collect(),
+    );
+    Ok((counts, stable_json_sha256(&source_identity)))
+}
+
+fn current_file_index_compatibility(compatibility: &FileIndexCompatibilityDescriptor) -> bool {
+    static EXPECTED: OnceLock<FileIndexCompatibilityDescriptor> = OnceLock::new();
+    let expected = EXPECTED.get_or_init(|| {
+        let policy: serde_json::Value = serde_json::from_slice(include_bytes!(
+            "../../gwt-core/runtime/index_path_policy.json"
+        ))
+        .expect("bundled index_path_policy.json must be valid");
+        FileIndexCompatibilityDescriptor {
+            layout_version: 2,
+            index_schema_version: 1,
+            scope_set: vec!["files".to_string(), "files-docs".to_string()],
+            model_id: "intfloat/multilingual-e5-base".to_string(),
+            model_revision: "d128750597153bb5987e10b1c3493a34e5a4502a".to_string(),
+            dimension: 768,
+            normalization: "none".to_string(),
+            metric: "cosine".to_string(),
+            query_prefix: "query: ".to_string(),
+            passage_prefix: "passage: ".to_string(),
+            document_contract: FileDocumentContract {
+                payload_builder_version: 1,
+                decode: "utf-8-replace".to_string(),
+                content_limit: 2000,
+            },
+            path_policy_hash: stable_json_sha256(&policy),
+            writer_protocol: "file-index-v2".to_string(),
+            runner_hash: "provenance-ignored".to_string(),
+        }
+    });
+    compatibility.is_semantically_compatible_with(expected)
+}
+
+fn write_stable_json_string(output: &mut String, value: &str) {
+    output.push('"');
+    for character in value.chars() {
+        match character {
+            '"' => output.push_str("\\\""),
+            '\\' => output.push_str("\\\\"),
+            '\u{08}' => output.push_str("\\b"),
+            '\u{0c}' => output.push_str("\\f"),
+            '\n' => output.push_str("\\n"),
+            '\r' => output.push_str("\\r"),
+            '\t' => output.push_str("\\t"),
+            character if character <= '\u{1f}' || !character.is_ascii() => {
+                let codepoint = character as u32;
+                if codepoint <= 0xffff {
+                    output.push_str(&format!("\\u{codepoint:04x}"));
+                } else {
+                    let supplementary = codepoint - 0x1_0000;
+                    let high = 0xd800 + (supplementary >> 10);
+                    let low = 0xdc00 + (supplementary & 0x3ff);
+                    output.push_str(&format!("\\u{high:04x}\\u{low:04x}"));
+                }
+            }
+            character => output.push(character),
+        }
+    }
+    output.push('"');
+}
+
+fn write_stable_json(output: &mut String, value: &serde_json::Value) {
+    match value {
+        serde_json::Value::Null => output.push_str("null"),
+        serde_json::Value::Bool(value) => output.push_str(if *value { "true" } else { "false" }),
+        serde_json::Value::Number(value) => output.push_str(&value.to_string()),
+        serde_json::Value::String(value) => write_stable_json_string(output, value),
+        serde_json::Value::Array(values) => {
+            output.push('[');
+            for (index, value) in values.iter().enumerate() {
+                if index > 0 {
+                    output.push(',');
+                }
+                write_stable_json(output, value);
+            }
+            output.push(']');
+        }
+        serde_json::Value::Object(values) => {
+            output.push('{');
+            let mut entries = values.iter().collect::<Vec<_>>();
+            entries.sort_unstable_by(|left, right| left.0.cmp(right.0));
+            for (index, (key, value)) in entries.into_iter().enumerate() {
+                if index > 0 {
+                    output.push(',');
+                }
+                write_stable_json_string(output, key);
+                output.push(':');
+                write_stable_json(output, value);
+            }
+            output.push('}');
+        }
+    }
+}
+
+fn stable_json_sha256(value: &serde_json::Value) -> String {
+    let mut canonical = String::new();
+    write_stable_json(&mut canonical, value);
+    format!("{:x}", Sha256::digest(canonical.as_bytes()))
+}
+
+fn safe_index_artifact_id(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    matches!(bytes.next(), Some(first) if first.is_ascii_alphanumeric())
+        && value.len() <= 128
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
 fn collect_current_worktree_probe_inputs(
@@ -994,6 +1577,7 @@ fn push_worktree_probe_input(
     Ok(())
 }
 
+#[cfg(test)]
 fn current_status_runner_args(repo_hash: &str, worktree_hash: &str) -> Vec<OsString> {
     vec![
         gwt_core::runtime::project_index_runner_path().into_os_string(),
@@ -1008,6 +1592,7 @@ fn current_status_runner_args(repo_hash: &str, worktree_hash: &str) -> Vec<OsStr
     ]
 }
 
+#[cfg(test)]
 fn batch_status_runner_args(repo_hash: &str, worktree_hashes: &[String]) -> Vec<OsString> {
     vec![
         gwt_core::runtime::project_index_runner_path().into_os_string(),
@@ -1020,47 +1605,6 @@ fn batch_status_runner_args(repo_hash: &str, worktree_hashes: &[String]) -> Vec<
         OsString::from("--file-index-protocol"),
         OsString::from("v2"),
     ]
-}
-
-/// One batch status process for every selected worktree (FR-393 / AS-13).
-fn probe_worktrees_status_batch(
-    repo_root: &Path,
-    repo_hash: &RepoHash,
-    worktree_hashes: &[String],
-) -> Result<serde_json::Value, String> {
-    let runner_started = Instant::now();
-    let args = batch_status_runner_args(repo_hash.as_str(), worktree_hashes);
-    let output = gwt_core::process::hidden_command(project_index_python_path())
-        .args(&args)
-        .current_dir(repo_root)
-        .output()
-        .map_err(|err| format!("run project index status: {err}"))?;
-    if !output.status.success() {
-        // FR-393: a failed runner invocation invalidates the positive probe
-        // cache so the next ensure re-verifies the runtime.
-        gwt_core::runtime::invalidate_project_index_probe_cache();
-        tracing::warn!(
-            target: "gwt::index",
-            project_root = %repo_root.display(),
-            worktree_count = worktree_hashes.len(),
-            elapsed_ms = runner_started.elapsed().as_millis() as u64,
-            exit_status = %output.status,
-            "project index batch status runner failed"
-        );
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let detail = if stderr.is_empty() { stdout } else { stderr };
-        return Err(format!("runner exit {}: {detail}", output.status));
-    }
-    tracing::debug!(
-        target: "gwt::index",
-        project_root = %repo_root.display(),
-        worktree_count = worktree_hashes.len(),
-        elapsed_ms = runner_started.elapsed().as_millis() as u64,
-        "project index batch status runner completed"
-    );
-    serde_json::from_slice(&output.stdout)
-        .map_err(|err| format!("parse project index status: {err}"))
 }
 
 /// TTL cache for the aggregated status. Used to debounce repeated callers
@@ -1809,86 +2353,10 @@ where
 fn project_index_status_for_path_inner(
     project_root: &Path,
 ) -> Result<ProjectIndexStatusView, String> {
-    let Some(context) = project_index_git_context(project_root) else {
-        return Ok(ProjectIndexStatusView::new(
-            ProjectIndexStatusState::Skipped,
-            "No git worktree detected",
-        ));
-    };
-    let repo_root = context.repo_root;
-    let Some(repo_hash) = detect_repo_hash(&repo_root) else {
-        return Ok(ProjectIndexStatusView::new(
-            ProjectIndexStatusState::Skipped,
-            "No origin remote configured",
-        ));
-    };
-    let worktree_root = context
-        .current_worktree_root
-        .or_else(|| first_active_worktree_path(&repo_root))
-        .unwrap_or_else(|| repo_root.clone());
-    let worktree_hash = compute_worktree_hash(&worktree_root)
-        .map_err(|err| format!("compute worktree hash: {err}"))?;
-    let runtime_started = Instant::now();
-    let report =
-        gwt_core::runtime::ensure_project_index_runtime().map_err(|err| err.to_string())?;
-    tracing::info!(
-        target: "gwt::index",
-        project_root = %project_root.display(),
-        elapsed_ms = runtime_started.elapsed().as_millis() as u64,
-        "project index runtime ensured for status"
-    );
-    let runner_started = Instant::now();
-    let args = current_status_runner_args(repo_hash.as_str(), worktree_hash.as_str());
-    let output = gwt_core::process::hidden_command(project_index_python_path())
-        .args(&args)
-        .current_dir(&repo_root)
-        .output()
-        .map_err(|err| format!("run project index status: {err}"))?;
-    tracing::info!(
-        target: "gwt::index",
-        project_root = %repo_root.display(),
-        elapsed_ms = runner_started.elapsed().as_millis() as u64,
-        exit_status = %output.status,
-        "project index status runner completed"
-    );
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let detail = if stderr.is_empty() { stdout } else { stderr };
-        return Ok(ProjectIndexStatusView::new(
-            ProjectIndexStatusState::Error,
-            format!("runner exit {}: {detail}", output.status),
-        ));
-    }
-    let payload: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .map_err(|err| format!("parse project index status: {err}"))?;
-    let unhealthy = payload
-        .get("status")
-        .and_then(serde_json::Value::as_object)
-        .map(|status| {
-            status
-                .values()
-                .filter(|scope| {
-                    parse_scope_health(scope)
-                        .map(|view| scope_requires_repair(&view))
-                        .unwrap_or(true)
-                })
-                .count()
-        })
-        .unwrap_or(0);
-    if unhealthy == 0 {
-        Ok(ProjectIndexStatusView::new(
-            ProjectIndexStatusState::Ready,
-            format!("Runtime ready; asset {}", report.runner_hash),
-        ))
-    } else {
-        Ok(ProjectIndexStatusView::new(
-            ProjectIndexStatusState::RepairRequired,
-            format!("{unhealthy} index scope(s) require repair"),
-        ))
-    }
+    aggregate_project_index_status_for_path_inner(project_root, StatusProbeScope::CurrentWorktree)
 }
 
+#[cfg(test)]
 fn read_issue_index_source_fingerprint(index_root: &Path, repo_hash: &RepoHash) -> Option<String> {
     let meta_path = index_root
         .join(repo_hash.as_str())
@@ -1902,6 +2370,7 @@ fn read_issue_index_source_fingerprint(index_root: &Path, repo_hash: &RepoHash) 
         .map(ToOwned::to_owned)
 }
 
+#[cfg(test)]
 fn issue_index_needs_rebuild_for_cache(
     index_root: &Path,
     repo_hash: &RepoHash,
@@ -1919,50 +2388,24 @@ fn issue_index_needs_rebuild_for_cache(
     )
 }
 
-fn refresh_issue_cache_and_index_for_startup<S: RunnerSpawner + ?Sized>(
-    repo_root: &Path,
-    refresh_project_root: &Path,
-    index_root: &Path,
-    repo_hash: &RepoHash,
-    spawner: &S,
-) -> Result<(), String> {
-    let cache_root = crate::issue_cache::issue_cache_root_for_repo_hash(repo_hash);
-    match crate::issue_cache::sync_issue_cache_from_remote_if_stale_with_fingerprint(
-        refresh_project_root,
-        &cache_root,
-        crate::issue_cache::ISSUE_CACHE_TTL,
-    ) {
-        Ok(outcome) => {
-            tracing::info!(
-                target: "gwt::index",
-                project_root = %repo_root.display(),
-                cache_refreshed = outcome.refreshed,
-                source_changed = outcome.source_changed,
-                "project index issue cache refresh checked"
-            );
-        }
-        Err(error) => {
-            tracing::warn!(
-                target: "gwt::index",
-                project_root = %repo_root.display(),
-                error = %error,
-                "project index issue cache refresh failed; continuing with local cache/index"
-            );
-        }
-    }
-
-    if issue_index_needs_rebuild_for_cache(index_root, repo_hash, &cache_root)? {
-        spawner
-            .spawn_index_issues(repo_hash.as_str(), refresh_project_root, false)
-            .map_err(|err| format!("spawn issue index: {err}"))?;
-    }
-    Ok(())
-}
-
 pub fn bootstrap_project_index_for_path_with<S: RunnerSpawner + ?Sized>(
     project_root: &Path,
     index_root: &Path,
     spawner: &S,
+) -> Result<(), String> {
+    if test_fixture_status_path().is_some() {
+        return Ok(());
+    }
+    let broker = RefreshBroker::open(index_root.join("refresh-broker"), Duration::from_secs(30))
+        .map_err(|error| error.to_string())?;
+    bootstrap_project_index_for_path_with_broker(project_root, index_root, &broker, spawner)
+}
+
+pub fn bootstrap_project_index_for_path_with_broker<S: RunnerSpawner + ?Sized>(
+    project_root: &Path,
+    _index_root: &Path,
+    broker: &RefreshBroker,
+    _spawner: &S,
 ) -> Result<(), String> {
     if test_fixture_status_path().is_some() {
         tracing::info!(
@@ -1972,64 +2415,53 @@ pub fn bootstrap_project_index_for_path_with<S: RunnerSpawner + ?Sized>(
         );
         return Ok(());
     }
-    let bootstrap_started = Instant::now();
-    let Some(context) = project_index_git_context(project_root) else {
-        return Ok(());
-    };
-    let repo_root = context.repo_root;
-    let refresh_project_root =
-        default_project_index_worktree_root(project_root).unwrap_or_else(|| repo_root.clone());
-    let Some(repo_hash) = detect_repo_hash(&repo_root) else {
-        return Ok(());
-    };
+    submit_base_refresh_intent(project_root, broker)
+}
 
-    let worktree_list_started = Instant::now();
-    let active_worktrees =
-        list_git_worktree_paths(&repo_root).unwrap_or_else(|_| vec![repo_root.clone()]);
-    tracing::info!(
-        target: "gwt::index",
-        project_root = %repo_root.display(),
-        elapsed_ms = worktree_list_started.elapsed().as_millis() as u64,
-        worktree_count = active_worktrees.len(),
-        "project index active worktrees listed"
+/// Execute repository maintenance only after the durable Refresh Broker has
+/// transferred ownership through a live kernel-locked claim.
+pub fn execute_claimed_project_index_refresh_with<S: RunnerSpawner + ?Sized>(
+    claim: RefreshClaim,
+    project_root: &Path,
+    index_root: &Path,
+    _spawner: &S,
+) -> Result<(), String> {
+    let Some(context) = project_index_git_context(project_root) else {
+        return Err("claimed project index refresh has no git repository".to_string());
+    };
+    let Some(repo_hash) = detect_repo_hash(&context.repo_root) else {
+        return Err("claimed project index refresh has no origin remote".to_string());
+    };
+    let expected_target = RefreshTarget::base(
+        repo_hash.as_str(),
+        [RefreshScope::Files, RefreshScope::FilesDocs],
     );
-    let reconcile_started = Instant::now();
+    if &claim.intent().target != &expected_target {
+        return Err(format!(
+            "claimed project index refresh target mismatch: claim={:?}, expected={expected_target:?}",
+            claim.intent().target,
+        ));
+    }
+    let active_worktrees = list_git_worktree_paths(&context.repo_root)?;
+    let active_worktree_hashes = active_worktrees
+        .iter()
+        .map(|path| {
+            compute_worktree_hash(path)
+                .map(|hash| hash.to_string())
+                .map_err(|error| format!("compute active worktree hash: {error}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     reconcile_repo(&ReconcileOptions {
         index_root: index_root.to_path_buf(),
         repo_hash: repo_hash.clone(),
         active_worktree_paths: active_worktrees.clone(),
         legacy_worktree_dirs: active_worktrees,
     })
-    .map_err(|err| err.to_string())?;
-    tracing::info!(
-        target: "gwt::index",
-        project_root = %repo_root.display(),
-        elapsed_ms = reconcile_started.elapsed().as_millis() as u64,
-        "project index repository reconciled"
-    );
-
-    let refresh_started = Instant::now();
-    refresh_issue_cache_and_index_for_startup(
-        &repo_root,
-        &refresh_project_root,
-        index_root,
-        &repo_hash,
-        spawner,
-    )?;
-    tracing::info!(
-        target: "gwt::index",
-        project_root = %repo_root.display(),
-        elapsed_ms = refresh_started.elapsed().as_millis() as u64,
-        "project index issue source refresh checked"
-    );
-    tracing::info!(
-        target: "gwt::index",
-        project_root = %repo_root.display(),
-        elapsed_ms = bootstrap_started.elapsed().as_millis() as u64,
-        "project index bootstrap helper completed"
-    );
-
-    Ok(())
+    .map_err(|error| error.to_string())?;
+    claim
+        .prune_inactive_overlays(repo_hash.as_str(), &active_worktree_hashes)
+        .map_err(|error| error.to_string())?;
+    claim.complete().map_err(|error| error.to_string())
 }
 
 fn run_project_index_git_probe(

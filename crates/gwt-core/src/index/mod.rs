@@ -10,6 +10,7 @@
 //! (`crates/gwt-core/runtime/chroma_index_runner.py`); the Rust side
 //! coordinates job dispatch and on-disk metadata only.
 
+pub mod broker;
 pub mod manifest;
 pub mod path_policy;
 pub mod paths;
