@@ -30,7 +30,7 @@ Rules:
 
 ## PR Readiness
 
-<!-- GUIDE: Choose exactly one State. Ready for review requires a releaseable slice, no known blockers, completed acceptance for this PR scope, and pre-PR verification evidence. Draft is allowed only for incomplete CI/shared review and must not claim release readiness. -->
+<!-- GUIDE: Normal PR creation is Draft-first even for a releaseable slice. Change State to Ready for review only after CI is green, coderabbitai[bot] has submitted a review, all review threads are resolved, and pr.ready succeeds. The exact Release PR main <- develop is exempt. -->
 
 - State: Ready for review | Draft
 - Releaseable slice: {yes/no + reason}

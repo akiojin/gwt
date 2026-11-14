@@ -146,16 +146,19 @@ Ready for review only when all of the following are true:
 - `gwt-verify --mode pre-pr` returns `Overall: PASS`
 - `User Verification Result` is `confirmed`, `n/a`, or
   `skipped(<reason>)`
+- a submitted review from `coderabbitai[bot]` exists
+- all review threads are resolved, including outdated threads
 - every PR body checklist item is checked or explicitly marked N/A with
   a reason
 
 In gwt-managed execution worktrees the canonical operations enforce part of
-this mechanically (SPEC-3248 P8b): non-draft `pr.create` and `pr.ready`
-refuse when the session's Execution Control Record is terminally blocked, or
-active without a fresh all-passing Verification Run Record (written by JSON
-operation `verify.run`). Run the pre-PR matrix through `verify.run` so the
-evidence exists before the Ready handoff; Draft PR creation stays available
-mid-work.
+this mechanically (SPEC-3248 P8b): normal non-draft `pr.create` always refuses
+so delivery is Draft-first; the exact Release PR with base `main` and head
+`develop` is exempt. `pr.ready` refuses unless a submitted review from
+`coderabbitai[bot]` exists and all review threads, including outdated threads,
+are resolved. Execution authority and fresh all-passing Verification Run Record
+checks still apply. Run the pre-PR matrix through `verify.run` before the Draft
+PR handoff.
 
 `gwt-verify` is a project-agnostic Generic Verification Contract: it
 autodetects the host project's test runners (Cargo.toml / package.json /
@@ -166,9 +169,10 @@ executed, and hands off to the user with a 4-step 導線 + Check Items
 before finalizing the report. Project-local AGENTS.md / README testing
 instructions always take precedence over the generic matrix.
 
-Draft PR is the only allowed PR state for unfinished, partially
-verified, acceptance-incomplete, or blocker-bearing work. Draft PR is
-allowed for CI, shared visibility, and early review, but the PR body
+Draft PR is the mandatory creation state for every normal PR, including fully
+verified and releaseable work. The only creation exemption is the Release PR
+with base `main` and head `develop`. A Draft PR is used for CI, shared
+visibility, and CodeRabbit review, and the PR body
 must set `State: Draft`, list known blockers, list Remaining acceptance,
 and avoid any claim that the change is complete or a releaseable slice.
 Full `gwt-verify --mode pre-pr` is not required solely to create or
@@ -185,6 +189,8 @@ The Ready PR Gate **fails** when any of:
 - the PR body lists known blockers or Remaining acceptance for the PR
   scope
 - the PR is not a releaseable slice
+- no submitted `coderabbitai[bot]` review exists
+- any review thread remains unresolved, including an outdated thread
 
 On Ready PR Gate failure, do not push a Ready/non-draft update, do not
 create a Ready PR, and do not mark an existing Draft PR as Ready for
@@ -209,8 +215,18 @@ Create mode is entered from the Preflight 2×2 matrix when `N > 0`.
 2. **If open PR exists and is `CONFLICTING` / `DIRTY` / `BEHIND`** → enter Fix mode before any push-only path.
 3. **If the work fails the Ready PR Gate** → create/update only as Draft PR, or return NO ACTION if the user explicitly rejects Draft.
 4. **If open PR exists and merge state is clean** → push only, return existing PR URL, enter Fix mode. A Ready/non-draft PR still requires the Ready PR Gate.
-5. **If no open PR** → create new PR with `params.draft:true` unless the Ready PR Gate is satisfied.
+5. **If no open PR** → create a Draft PR with `params.draft:true`, even when verification and the pre-review gate items pass. Only the exact Release PR with base `main` and head `develop` may be created non-draft.
 6. **Branch sync:** If behind `origin/$base`, merge `origin/$base` first (never rebase). Push after merge.
+
+### Draft-first review delivery
+
+Every normal Create flow is Draft-first. After `pr.create` with
+`params.draft:true`, wait for CI and a submitted `coderabbitai[bot]` review,
+respond to every actionable finding, and resolve all review threads including
+outdated threads. Re-read `pr.checks`, `pr.reviews`, and `pr.review_threads`;
+only then call `pr.ready`. Repository automation may arm auto-merge after the
+Ready transition. Human approval is required only when the owning Issue says
+so; in that case keep the PR Draft until the approval arrives.
 
 ### PR Title Rules
 
@@ -238,7 +254,10 @@ Create mode is entered from the Preflight 2×2 matrix when `N > 0`.
   `params.title`, optional `params.body`, and optional `params.add_labels`
   (at least one of them is required).
 - Promote / demote: JSON operation `pr.ready` with `params.number` marks a
-  Draft PR Ready for review — only after the Ready PR Gate passes.
+  Draft PR Ready for review — only after CI is green, a submitted
+  `coderabbitai[bot]` review exists, all review threads are resolved, and the
+  rest of the Ready PR Gate passes. The repository may arm auto-merge after
+  this transition.
   `pr.draft` converts a Ready PR back to Draft.
 - Transport note: the current implementation may still call GitHub REST / `gh`
   internally, but agent-facing workflow should stay on gwtd JSON operations.
@@ -403,9 +422,12 @@ Same CI check fails 3 consecutive iterations --> report to user, ask continue/ab
 
 Detailed logic in `references/deliver-flow.md`.
 
-Deliver mode drives a verified, Ready PR all the way to a merged state: enable
-GitHub auto-merge, then run the existing Fix loop against every blocker (CI /
-reviews / threads / conflicts) and poll until `merged_at` is set. Deliver
+Deliver mode drives a verified PR through the Draft-first review lifecycle and
+all the way to a merged state: create or keep a Draft PR, wait for CI and the
+submitted `coderabbitai[bot]` review, resolve all review threads, call
+`pr.ready`, enable or observe GitHub auto-merge, then run the existing Fix loop
+against every blocker (CI / reviews / threads / conflicts) and poll until
+`merged_at` is set. Deliver
 **composes** Fix mode — it does not reimplement blocker resolution.
 
 ### Opt-in only (never auto-routed)
@@ -416,7 +438,8 @@ Auto-Detection matrix never selects Deliver on its own, because enabling
 auto-merge is an outward-facing, hard-to-reverse action — once armed, GitHub
 merges the PR the
 moment required checks go green. If no open PR exists, Deliver first falls back
-to Create (Ready PR Gate applies) and then drives the newly created PR.
+to Create, which always creates a Draft PR except for the exact Release
+exemption, and then drives the review lifecycle before `pr.ready`.
 
 ### Hard PR Gate (mandatory before enabling auto-merge)
 
@@ -429,6 +452,8 @@ last human checkpoint:
   `rejected(<reason>)`, or `skipped(<reason>)` — a skip is enough to *create* a
   PR but not to merge unattended)
 - the PR is a releaseable slice with no known blockers, and is not a Draft
+- a submitted review from `coderabbitai[bot]` exists
+- all review threads are resolved, including outdated threads
 
 If verification is `pending`, do **not** run `gh pr merge --auto`. Stop and
 route the failure for repair (back to the TDD loop, `gwt-verify`, or
@@ -451,8 +476,10 @@ does not override it.
 1. Preflight + Hard PR Gate (above). Resolve the PR with `pr.current` or the
    user-supplied number; read state with `pr.view` (`[MERGED]` bracket plus
    `mergeable:` / `merge_state:` / `ci:` / `review:` lines).
-2. Inspect with Fix `--mode all` and resolve **every** BLOCKING item through
-   the existing Fix Implementation / Comment Response flow — before arming.
+2. While the PR is Draft, wait for `coderabbitai[bot]`, inspect with Fix
+   `--mode all`, and resolve **every** BLOCKING item and all review threads
+   through the existing Fix Implementation / Comment Response flow. Once CI is
+   green and the Hard PR Gate passes, call `pr.ready` before arming auto-merge.
    Re-gate per the Core invariant on each code-changing push.
 3. Select a merge method allowed by the repository (`gh repo view --json
    ...,viewerDefaultMergeMethod`); never hardcode `--squash`.

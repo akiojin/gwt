@@ -48,8 +48,20 @@ fn review_threads_json(resolved_after_fail: bool) -> String {
     r#"{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[
 {"id":"thread-1","isResolved":__RESOLVED__,"isOutdated":false,"path":"src/lib.rs","line":10,"comments":{"nodes":[{"id":"comment-1","body":"done","createdAt":"2026-04-20T00:00:00Z","updatedAt":"2026-04-20T00:00:00Z","author":{"login":"reviewer"}}]}},
 {"id":"thread-2","isResolved":false,"isOutdated":false,"path":"src/main.rs","line":12,"comments":{"nodes":[{"id":"comment-2","body":"needs changes","createdAt":"2026-04-20T01:00:00Z","updatedAt":"2026-04-20T01:00:00Z","author":{"login":"reviewer"}}]}}
-]}}}}}"#
+],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}"#
         .replace("__RESOLVED__", resolved)
+}
+
+fn paginated_review_threads_json(after_cursor: bool) -> &'static str {
+    if after_cursor {
+        r#"{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[
+{"id":"thread-page-2","isResolved":true,"isOutdated":true,"path":"src/page-2.rs","line":20,"comments":{"nodes":[]}}
+],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}"#
+    } else {
+        r#"{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[
+{"id":"thread-page-1","isResolved":true,"isOutdated":false,"path":"src/page-1.rs","line":10,"comments":{"nodes":[]}}
+],"pageInfo":{"hasNextPage":true,"endCursor":"cursor-1"}}}}}}"#
+    }
 }
 
 fn main() -> ExitCode {
@@ -182,6 +194,14 @@ fn main() -> ExitCode {
                 return ExitCode::SUCCESS;
             }
             if joined.contains("reviewThreads") {
+                if mode == "review-threads-missing-shape" {
+                    println!("{{\"data\":{{\"repository\":{{\"pullRequest\":{{}}}}}}}}");
+                    return ExitCode::SUCCESS;
+                }
+                if mode == "review-threads-paginated" {
+                    println!("{}", paginated_review_threads_json(joined.contains("after=cursor-1")));
+                    return ExitCode::SUCCESS;
+                }
                 let resolved_after_fail = state_file
                     .as_deref()
                     .map(fs::metadata)

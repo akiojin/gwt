@@ -2299,38 +2299,41 @@ mod tests {
 
     #[test]
     fn terminal_settlement_replaces_work_update_reminders_at_every_boundary() {
-        for event in [
-            IntentBoundaryEvent::SessionStart,
-            IntentBoundaryEvent::UserPromptSubmit,
-            IntentBoundaryEvent::Stop,
-        ] {
-            let planned = plan_reminder(ReminderInputs {
-                event,
-                now: Utc::now(),
-                self_session_id: "session-terminal".to_string(),
-                display_name: "Codex".to_string(),
-                self_match_keys: vec![],
-                recent_entries: vec![],
-                reminders: RemindersState::default(),
-                has_recent_own_status: false,
-                language: "en".to_string(),
-                self_workspace_id: None,
-            });
-            let replaced = replace_with_terminal_settlement_reminder(planned.output, event, "en");
-            let text = match &replaced {
-                HookOutput::HookSpecificAdditionalContext { text, .. }
-                | HookOutput::SystemMessage(text) => text,
-                other => panic!("unexpected terminal reminder output: {other:?}"),
-            };
-            assert!(!text.contains("workspace.update"), "{event:?}: {text}");
-            assert!(!text.contains("progress_summary"), "{event:?}: {text}");
-            for required in ["commit", "push", "verification", "PR", "completion"] {
+        for language in ["en", "ja"] {
+            for event in [
+                IntentBoundaryEvent::SessionStart,
+                IntentBoundaryEvent::UserPromptSubmit,
+                IntentBoundaryEvent::Stop,
+            ] {
+                let planned = plan_reminder(ReminderInputs {
+                    event,
+                    now: Utc::now(),
+                    self_session_id: "session-terminal".to_string(),
+                    display_name: "Codex".to_string(),
+                    self_match_keys: vec![],
+                    recent_entries: vec![],
+                    reminders: RemindersState::default(),
+                    has_recent_own_status: false,
+                    language: language.to_string(),
+                    self_workspace_id: None,
+                });
+                let replaced =
+                    replace_with_terminal_settlement_reminder(planned.output, event, language);
+                let text = match &replaced {
+                    HookOutput::HookSpecificAdditionalContext { text, .. }
+                    | HookOutput::SystemMessage(text) => text,
+                    other => panic!("unexpected terminal reminder output: {other:?}"),
+                };
+                assert!(!text.contains("workspace.update"), "{event:?}: {text}");
+                assert!(!text.contains("progress_summary"), "{event:?}: {text}");
+                let sequence = "final Work update -> commit/push -> fresh verification -> pr.create(draft) -> CI/CodeRabbit -> resolve all review threads -> pr.ready -> auto-merge -> execution/build completion";
                 assert!(
-                    text.contains(required),
-                    "{event:?} missing {required}: {text}"
+                    text.contains(sequence),
+                    "{language}/{event:?} missing exact Draft-first sequence: {text}"
                 );
+                assert!(text.contains("Draft PR"), "{language}/{event:?}: {text}");
+                assert!(text.contains("chore(work):"), "{event:?}: {text}");
             }
-            assert!(text.contains("chore(work):"), "{event:?}: {text}");
         }
     }
 

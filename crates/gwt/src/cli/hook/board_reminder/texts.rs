@@ -229,13 +229,13 @@ pub(super) const STOP_REMINDER_SHORT_JA: &str = "Board Post Reminder (Stop): age
 
 pub(super) const TERMINAL_SETTLEMENT_REMINDER: &str = "# Board Post Reminder\n\
 \n\
-The Work lifecycle is in terminal delivery settlement. Keep coordination and blocker handoff on the Board, but do not append another tracked Work-state event. Finish in this order: final Work update -> commit/push -> fresh verification -> PR mutation -> execution/build completion. When the final event is the only bookkeeping change, use a scoped Conventional Commit with the exact `chore(work):` prefix.";
+The Work lifecycle is in terminal delivery settlement. Keep coordination and blocker handoff on the Board, but do not append another tracked Work-state event. Finish in this order: final Work update -> commit/push -> fresh verification -> pr.create(draft) -> CI/CodeRabbit -> resolve all review threads -> pr.ready -> auto-merge -> execution/build completion. Always create a Draft PR; resolve all review threads including outdated threads before `pr.ready`. When the final event is the only bookkeeping change, use a scoped Conventional Commit with the exact `chore(work):` prefix.";
 
 pub(super) const TERMINAL_SETTLEMENT_REMINDER_JA: &str = "# Board Post Reminder\n\
 \n\
-Work lifecycle は終端 delivery settlement 中です。coordination と blocker handoff は Board に残せますが、tracked Work-state event を追加しないでください。final Work update -> commit/push -> fresh verification -> PR mutation -> execution/build completion の順で完了します。final event だけが bookkeeping change の場合は、exact `chore(work):` prefix の scoped Conventional Commit を使用できます。";
+Work lifecycle は終端 delivery settlement 中です。coordination と blocker handoff は Board に残せますが、tracked Work-state event を追加しないでください。final Work update -> commit/push -> fresh verification -> pr.create(draft) -> CI/CodeRabbit -> resolve all review threads -> pr.ready -> auto-merge -> execution/build completion の順で完了します。必ず Draft PR を作成し、outdated を含む all review threads を解決してから `pr.ready` を呼びます。final event だけが bookkeeping change の場合は、exact `chore(work):` prefix の scoped Conventional Commit を使用できます。";
 
-pub(super) const TERMINAL_SETTLEMENT_STOP_REMINDER: &str = "Board Post Reminder (Stop): Work is in terminal delivery settlement. Do not ask the agent to append another tracked Work-state event. The remaining order is final Work update -> commit/push -> fresh verification -> PR mutation -> execution/build completion. A bookkeeping-only commit must use the exact `chore(work):` prefix.";
+pub(super) const TERMINAL_SETTLEMENT_STOP_REMINDER: &str = "Board Post Reminder (Stop): Work is in terminal delivery settlement. Do not ask the agent to append another tracked Work-state event. The remaining order is final Work update -> commit/push -> fresh verification -> pr.create(draft) -> CI/CodeRabbit -> resolve all review threads -> pr.ready -> auto-merge -> execution/build completion. Always create a Draft PR and resolve all review threads, including outdated threads, before `pr.ready`. A bookkeeping-only commit must use the exact `chore(work):` prefix.";
 
 /// SPEC-3431 FR-064: what the resident PM is told at an intent boundary.
 ///
@@ -261,7 +261,7 @@ pub(super) const PM_REMINDER_JA: &str = "# Project Manager\n\
 \n\
 毎周回、`issue.monitor.status` を取り直して照合し、動いている agent を確認します。";
 
-pub(super) const TERMINAL_SETTLEMENT_STOP_REMINDER_JA: &str = "Board Post Reminder (Stop): Work は終端 delivery settlement 中です。tracked Work-state event を追加するよう agent に要求しないでください。残りの順序は final Work update -> commit/push -> fresh verification -> PR mutation -> execution/build completion です。bookkeeping-only commit は exact `chore(work):` prefix を使用します。";
+pub(super) const TERMINAL_SETTLEMENT_STOP_REMINDER_JA: &str = "Board Post Reminder (Stop): Work は終端 delivery settlement 中です。tracked Work-state event を追加するよう agent に要求しないでください。残りの順序は final Work update -> commit/push -> fresh verification -> pr.create(draft) -> CI/CodeRabbit -> resolve all review threads -> pr.ready -> auto-merge -> execution/build completion です。必ず Draft PR を作成し、outdated を含む all review threads を解決してから `pr.ready` を呼びます。bookkeeping-only commit は exact `chore(work):` prefix を使用します。";
 
 pub(super) const MEMORY_UPDATE_REMINDER: &str = "# Memory Reminder\n\
 \n\

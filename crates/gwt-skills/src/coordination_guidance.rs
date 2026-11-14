@@ -177,7 +177,7 @@ Board body to convey what the Work is.
 ### Terminal Work delivery
 
 Make the final Work update before terminal operations, then converge in this
-exact order: `final Work update -> commit/push -> fresh verification -> PR mutation -> execution/build completion`. After the final Work update or a
+exact order: `final Work update -> commit/push -> fresh verification -> pr.create(draft) -> CI/CodeRabbit -> resolve all review threads -> pr.ready -> auto-merge -> execution/build completion`. The PR mutation phase always creates a Draft PR, waits for CodeRabbit, resolves all review threads including outdated threads, and only then calls `pr.ready`; repository automation may arm auto-merge after that transition. After the final Work update or a
 terminal lifecycle transition, do not issue another `workspace.update`; keep
 blocker/recovery coordination on the Board or in a Draft PR comment instead.
 Set `params.status:"done"` on that explicit final update; its successful event
@@ -420,8 +420,8 @@ Work detail は purpose と status を別レイヤーで表示します — purp
 ### Terminal Work delivery
 
 terminal operation の前に final Work update を行い、以後は exact
-`final Work update -> commit/push -> fresh verification -> PR mutation -> execution/build completion`
-の順で収束します。final Work update または terminal lifecycle transition
+`final Work update -> commit/push -> fresh verification -> pr.create(draft) -> CI/CodeRabbit -> resolve all review threads -> pr.ready -> auto-merge -> execution/build completion`
+の順で収束します。PR mutation phase では必ず Draft PR を作成し、CodeRabbit を待ち、outdated を含む all review threads を解決してから `pr.ready` を呼びます。その transition 後に repository automation が auto-merge を arm できます。final Work update または terminal lifecycle transition
 の後は、別の `workspace.update` を実行しません。blocker / recovery coordination
 は Board または Draft PR comment に残します。
 explicit final update では `params.status:"done"` を設定します。event append
@@ -604,7 +604,7 @@ mod tests {
             "fixing bug",
             "purpose = work scope",
             "purpose and status as distinct fields",
-            "final Work update -> commit/push -> fresh verification -> PR",
+            "final Work update -> commit/push -> fresh verification -> pr.create(draft)",
             "do not issue another `workspace.update`",
             "`params.status:\"done\"`",
             "exact `chore(work):` prefix",
@@ -713,7 +713,7 @@ mod tests {
     #[test]
     fn terminal_delivery_guidance_keeps_english_japanese_and_generated_outputs_in_sync() {
         for phrase in [
-            "final Work update -> commit/push -> fresh verification -> PR mutation -> execution/build completion",
+            "final Work update -> commit/push -> fresh verification -> pr.create(draft) -> CI/CodeRabbit -> resolve all review threads -> pr.ready -> auto-merge -> execution/build completion",
             "`chore(work):`",
             ".gwt/work/events/<digest-prefix>/*.jsonl",
             "git add -f -- .gwt/work/events/<digest-prefix>/<digest>.jsonl",
@@ -721,6 +721,27 @@ mod tests {
         ] {
             assert!(SKILL_BODY_EN.contains(phrase), "English guidance: {phrase}");
             assert!(SKILL_BODY_JA.contains(phrase), "Japanese guidance: {phrase}");
+            assert!(
+                render_skill_md().contains(phrase),
+                "generated guidance: {phrase}"
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_delivery_guidance_names_the_draft_first_review_sequence() {
+        for phrase in [
+            "Draft PR",
+            "CodeRabbit",
+            "all review threads",
+            "pr.ready",
+            "auto-merge",
+        ] {
+            assert!(SKILL_BODY_EN.contains(phrase), "English guidance: {phrase}");
+            assert!(
+                SKILL_BODY_JA.contains(phrase),
+                "Japanese guidance: {phrase}"
+            );
             assert!(
                 render_skill_md().contains(phrase),
                 "generated guidance: {phrase}"

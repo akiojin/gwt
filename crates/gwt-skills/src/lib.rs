@@ -2492,6 +2492,104 @@ mod tests {
     }
 
     #[test]
+    fn pr_skills_document_draft_first_coderabbit_ready_delivery() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for (relative, marker) in [
+            (
+                ".claude/skills/gwt-manage-pr/SKILL.md",
+                "### Draft-first review delivery",
+            ),
+            (
+                ".codex/skills/gwt-manage-pr/SKILL.md",
+                "### Draft-first review delivery",
+            ),
+            (
+                ".claude/skills/gwt-manage-pr/references/create-flow.md",
+                "## Step 12: Draft-first review delivery",
+            ),
+            (
+                ".codex/skills/gwt-manage-pr/references/create-flow.md",
+                "## Step 12: Draft-first review delivery",
+            ),
+            (
+                ".claude/skills/gwt-manage-pr/references/deliver-flow.md",
+                "# PR Deliver Flow",
+            ),
+            (
+                ".codex/skills/gwt-manage-pr/references/deliver-flow.md",
+                "# PR Deliver Flow",
+            ),
+            (
+                ".claude/skills/gwt-execute/SKILL.md",
+                "Normal PR delivery is Draft-first",
+            ),
+            (
+                ".codex/skills/gwt-execute/SKILL.md",
+                "Normal PR delivery is Draft-first",
+            ),
+        ] {
+            let content = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            for required in [
+                "Draft-first",
+                "coderabbitai[bot]",
+                "all review threads",
+                "pr.ready",
+                "auto-merge",
+            ] {
+                assert!(
+                    content.contains(required),
+                    "{relative} must document Draft-first review delivery: {required}"
+                );
+            }
+            let flow = &content[content
+                .find(marker)
+                .unwrap_or_else(|| panic!("{relative} missing flow marker: {marker}"))..];
+            let mut previous = 0;
+            for step in [
+                "Draft-first",
+                "coderabbitai[bot]",
+                "all review threads",
+                "pr.ready",
+                "auto-merge",
+            ] {
+                let index = flow
+                    .find(step)
+                    .unwrap_or_else(|| panic!("{relative} flow missing step: {step}"));
+                assert!(
+                    index >= previous,
+                    "{relative} flow must keep Draft -> review -> ready -> merge order at {step}"
+                );
+                previous = index;
+            }
+        }
+
+        for relative in [
+            ".claude/skills/gwt-manage-pr/SKILL.md",
+            ".codex/skills/gwt-manage-pr/SKILL.md",
+            ".claude/skills/gwt-manage-pr/references/create-flow.md",
+            ".codex/skills/gwt-manage-pr/references/create-flow.md",
+        ] {
+            let content = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            assert!(
+                content.contains("base `main` and head `develop`"),
+                "{relative} must document the exact Release exemption"
+            );
+            for forbidden in [
+                "unless the Ready PR Gate is satisfied",
+                "Create produced as Ready",
+                "\"draft\":false",
+            ] {
+                assert!(
+                    !content.contains(forbidden),
+                    "{relative} retains obsolete Ready-create guidance: {forbidden}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn build_spec_does_not_treat_draft_pr_as_completion() {
         let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         for relative in [

@@ -81,9 +81,18 @@ evidence (SPEC-3248 P8b): run the verification matrix through JSON operation
 `verify.plan` first, then through `verify.run` with `params.commands:[...]` so
 gwtd itself executes and records it. `execution.complete`, the execution
 settlement inside `build.complete`,
-non-draft `pr.create`, and `pr.ready` refuse when the latest record is
+normal non-draft `pr.create`, completion, and `pr.ready` refuse when the latest record is
 missing, failing, stale (worktree changed after the run), from another
 session, or for another owner. Draft PRs stay available mid-work.
+
+Normal PR delivery is Draft-first: create with `params.draft:true` even when
+verification passes. The only exemption is the Release PR with base `main` and
+head `develop`. After creation, wait for CI and a submitted review from
+`coderabbitai[bot]`, address every finding, and resolve all review threads
+including outdated threads. Re-read `pr.checks`, `pr.reviews`, and
+`pr.review_threads`; after CI is green and the unresolved count is zero, call
+`pr.ready`. Repository automation may then arm auto-merge. Human approval is
+required only when the owning Issue explicitly requires it.
 
 When resuming or recovering another session's execution (crash, closed
 window), take over the record explicitly with JSON operation
@@ -156,7 +165,9 @@ verification handoff and a `User Verification Result`.
 
 PR work goes through `gwt-manage-pr`. Do not create or update a Ready PR until
 pre-PR verification passes and the `User Verification Result` is `confirmed` or
-`n/a`.
+`n/a`. Always hand off a normal PR as Draft-first, complete the
+`coderabbitai[bot]` and all review threads phase, then use `pr.ready` before
+execution/build completion and auto-merge settlement.
 
 ## Legacy aliases
 

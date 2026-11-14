@@ -116,6 +116,13 @@ pub(super) fn run<E: CliEnv>(
     cmd: PrCommand,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
+    if non_draft_create_requires_draft(&cmd) {
+        out.push_str(
+            "PR create refused: normal delivery is Draft-first. Retry JSON operation pr.create with params.draft:true; wait for CI and a submitted CodeRabbit review, resolve every review thread, then use pr.ready. The only non-draft creation exemption is a Release PR with params.base:\"main\" and params.head:\"develop\".\n",
+        );
+        return Ok(2);
+    }
+
     // SPEC-3248 P8b (T-112/FR-037/AS-33): Ready handoffs — a non-draft PR
     // creation or `pr.ready` — require the current session's execution to be
     // settled or backed by fresh verification evidence. A terminally blocked
@@ -270,11 +277,34 @@ pub(super) fn run<E: CliEnv>(
             // sync workspace PR metadata (that path is reserved for current/create
             // where the PR is provably the workspace's own). Draft↔Ready also does
             // not change pr.state (OPEN→OPEN), so there is no metadata to refresh.
-            let pr = dispatch_pr_mutation(mutation_binding.as_ref(), || env.mark_pr_ready(number))
+            let reviews = env
+                .fetch_pr_reviews(number)
                 .map_err(super::io_as_api_error)?;
-            out.push_str(&format!("marked pull request #{number} ready for review\n"));
-            render_pr(out, &pr);
-            0
+            if !reviews.iter().any(is_submitted_coderabbit_review) {
+                out.push_str(&format!(
+                    "PR Ready refused for #{number}: no submitted CodeRabbit review was found. Keep the PR Draft, inspect JSON operation pr.reviews, and retry pr.ready after CodeRabbit has posted its review.\n"
+                ));
+                2
+            } else {
+                let threads = env
+                    .fetch_pr_review_threads(number)
+                    .map_err(super::io_as_api_error)?;
+                let unresolved = threads.iter().filter(|thread| !thread.is_resolved).count();
+                if unresolved > 0 {
+                    out.push_str(&format!(
+                        "PR Ready refused for #{number}: {unresolved} unresolved review thread(s) remain, including outdated threads. Inspect JSON operation pr.review_threads and use pr.review_threads.reply_and_resolve before retrying pr.ready.\n"
+                    ));
+                    2
+                } else {
+                    let pr = dispatch_pr_mutation(mutation_binding.as_ref(), || {
+                        env.mark_pr_ready(number)
+                    })
+                    .map_err(super::io_as_api_error)?;
+                    out.push_str(&format!("marked pull request #{number} ready for review\n"));
+                    render_pr(out, &pr);
+                    0
+                }
+            }
         }
         PrCommand::Draft { number } => {
             let pr = env
@@ -355,6 +385,23 @@ pub(super) fn run<E: CliEnv>(
         }
     }
     Ok(code)
+}
+
+fn non_draft_create_requires_draft(cmd: &PrCommand) -> bool {
+    match cmd {
+        PrCommand::Create {
+            base, head, draft, ..
+        }
+        | PrCommand::CreateBody {
+            base, head, draft, ..
+        } => !*draft && !(base == "main" && head.as_deref() == Some("develop")),
+        _ => false,
+    }
+}
+
+fn is_submitted_coderabbit_review(review: &PrReview) -> bool {
+    review.author.eq_ignore_ascii_case("coderabbitai[bot]")
+        && !review.submitted_at.trim().is_empty()
 }
 
 fn sync_workspace_pr_metadata<E: CliEnv>(env: &E, pr: &PrStatus, requested_head: Option<&str>) {
@@ -666,6 +713,186 @@ mod tests {
         }
     }
 
+    fn submitted_coderabbit_review() -> PrReview {
+        PrReview {
+            id: "review-coderabbit".to_string(),
+            state: "COMMENTED".to_string(),
+            body: "Automated review completed.".to_string(),
+            submitted_at: "2026-08-19T00:00:00Z".to_string(),
+            author: "coderabbitai[bot]".to_string(),
+        }
+    }
+
+    fn seeded_review_thread(id: &str, is_resolved: bool, is_outdated: bool) -> PrReviewThread {
+        PrReviewThread {
+            id: id.to_string(),
+            is_resolved,
+            is_outdated,
+            path: "src/lib.rs".to_string(),
+            line: Some(12),
+            comments: Vec::new(),
+        }
+    }
+
+    fn unmanaged_pr_env() -> (tempfile::TempDir, crate::cli::TestEnv) {
+        let repo = tempfile::tempdir().expect("PR policy repository");
+        let mut env = crate::cli::TestEnv::new(repo.path().to_path_buf());
+        env.seed_pr(7, seeded_pr());
+        env.seed_created_pr(seeded_pr());
+        (repo, env)
+    }
+
+    #[test]
+    fn pr_create_refuses_non_draft_with_draft_first_recovery_guidance() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _session = gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+        let (_repo, mut env) = unmanaged_pr_env();
+        let mut out = String::new();
+
+        let code = run(
+            &mut env,
+            PrCommand::CreateBody {
+                base: s("develop"),
+                head: Some(s("work/issue-3686")),
+                title: s("ready bypass"),
+                body: s("body"),
+                labels: vec![],
+                draft: false,
+            },
+            &mut out,
+        )
+        .expect("run non-draft create policy");
+
+        assert_eq!(code, 2, "non-Release Ready create must refuse: {out}");
+        assert!(
+            out.contains("params.draft:true"),
+            "missing Draft recovery: {out}"
+        );
+        assert!(out.contains("CodeRabbit"), "missing review recovery: {out}");
+        assert!(env.pr_create_call_log.is_empty(), "refusal reached GitHub");
+    }
+
+    #[test]
+    fn pr_create_allows_exact_non_draft_release_pr() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _session = gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+        let (_repo, mut env) = unmanaged_pr_env();
+        let mut out = String::new();
+
+        let code = run(
+            &mut env,
+            PrCommand::CreateBody {
+                base: s("main"),
+                head: Some(s("develop")),
+                title: s("Release v9.84.0"),
+                body: s("body"),
+                labels: vec![],
+                draft: false,
+            },
+            &mut out,
+        )
+        .expect("run exact Release create policy");
+
+        assert_eq!(code, 0, "Release create must preserve existing flow: {out}");
+        assert_eq!(env.pr_create_call_log.len(), 1);
+        assert!(!env.pr_create_call_log[0].draft);
+    }
+
+    #[test]
+    fn pr_ready_refuses_without_submitted_coderabbit_review() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _session = gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+        let (_repo, mut env) = unmanaged_pr_env();
+        env.seed_pr_reviews(
+            7,
+            vec![PrReview {
+                id: "review-human".to_string(),
+                state: "APPROVED".to_string(),
+                body: "Looks good.".to_string(),
+                submitted_at: "2026-08-19T00:00:00Z".to_string(),
+                author: "reviewer".to_string(),
+            }],
+        );
+        env.seed_pr_review_threads(7, vec![seeded_review_thread("thread-1", true, false)]);
+        let mut out = String::new();
+
+        let code = run(&mut env, PrCommand::Ready { number: 7 }, &mut out)
+            .expect("run missing CodeRabbit policy");
+
+        assert_eq!(code, 2, "missing CodeRabbit review must refuse: {out}");
+        assert!(out.contains("CodeRabbit"), "missing blocker detail: {out}");
+        assert!(
+            out.contains("pr.reviews"),
+            "missing recovery operation: {out}"
+        );
+        assert!(env.pr_ready_call_log.is_empty(), "refusal reached GitHub");
+    }
+
+    #[test]
+    fn pr_ready_refuses_any_unresolved_thread_including_outdated() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _session = gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+        let (_repo, mut env) = unmanaged_pr_env();
+        env.seed_pr_reviews(7, vec![submitted_coderabbit_review()]);
+        env.seed_pr_review_threads(
+            7,
+            vec![
+                seeded_review_thread("thread-resolved", true, false),
+                seeded_review_thread("thread-outdated", false, true),
+            ],
+        );
+        let mut out = String::new();
+
+        let code = run(&mut env, PrCommand::Ready { number: 7 }, &mut out)
+            .expect("run unresolved-thread policy");
+
+        assert_eq!(code, 2, "unresolved thread must refuse: {out}");
+        assert!(out.contains("1 unresolved"), "missing blocker count: {out}");
+        assert!(
+            out.contains("pr.review_threads"),
+            "missing readback recovery: {out}"
+        );
+        assert!(
+            out.contains("pr.review_threads.reply_and_resolve"),
+            "missing resolution recovery: {out}"
+        );
+        assert!(env.pr_ready_call_log.is_empty(), "refusal reached GitHub");
+    }
+
+    #[test]
+    fn pr_ready_reads_reviews_and_all_threads_before_exactly_one_transport() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _session = gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+        let (_repo, mut env) = unmanaged_pr_env();
+        env.seed_pr_reviews(7, vec![submitted_coderabbit_review()]);
+        env.seed_pr_review_threads(
+            7,
+            vec![
+                seeded_review_thread("thread-1", true, false),
+                seeded_review_thread("thread-2", true, true),
+            ],
+        );
+        let mut out = String::new();
+
+        let code = run(&mut env, PrCommand::Ready { number: 7 }, &mut out)
+            .expect("run converged review policy");
+
+        assert_eq!(code, 0, "converged review state must pass: {out}");
+        assert_eq!(env.pr_reviews_call_log, vec![7]);
+        assert_eq!(env.pr_review_threads_call_log, vec![7]);
+        assert_eq!(env.pr_ready_call_log, vec![7]);
+    }
+
     fn persist_pr_generation_session(
         worktree: &std::path::Path,
         session_id: &str,
@@ -744,9 +971,9 @@ mod tests {
         env.seed_created_pr(seeded_pr());
         let mutations = [
             PrCommand::CreateBody {
-                base: s("develop"),
-                head: None,
-                title: s("ready"),
+                base: s("main"),
+                head: Some(s("develop")),
+                title: s("release"),
                 body: s("body"),
                 labels: vec![],
                 draft: false,
@@ -874,6 +1101,8 @@ mod tests {
         let mut env = crate::cli::TestEnv::new(worktree.path().to_path_buf());
         env.seed_pr(7, seeded_pr());
         env.seed_created_pr(seeded_pr());
+        env.seed_pr_reviews(7, vec![submitted_coderabbit_review()]);
+        env.seed_pr_review_threads(7, vec![seeded_review_thread("thread-1", true, false)]);
 
         let mut out = String::new();
         assert_eq!(
@@ -938,9 +1167,9 @@ mod tests {
             run(
                 &mut env,
                 PrCommand::CreateBody {
-                    base: s("develop"),
-                    head: None,
-                    title: s("ready"),
+                    base: s("main"),
+                    head: Some(s("develop")),
+                    title: s("release"),
                     body: s("body"),
                     labels: vec![],
                     draft: false,
@@ -992,15 +1221,17 @@ mod tests {
         let mut env = crate::cli::TestEnv::new(worktree.path().to_path_buf());
         env.seed_pr(7, seeded_pr());
         env.seed_created_pr(seeded_pr());
+        env.seed_pr_reviews(7, vec![submitted_coderabbit_review()]);
+        env.seed_pr_review_threads(7, vec![seeded_review_thread("thread-1", true, false)]);
 
         let mut out = String::new();
         assert_eq!(
             run(
                 &mut env,
                 PrCommand::CreateBody {
-                    base: s("develop"),
-                    head: None,
-                    title: s("completed handoff"),
+                    base: s("main"),
+                    head: Some(s("develop")),
+                    title: s("release handoff"),
                     body: s("body"),
                     labels: vec![],
                     draft: false,
@@ -1154,9 +1385,9 @@ mod tests {
             run(
                 &mut env,
                 PrCommand::CreateBody {
-                    base: s("develop"),
-                    head: None,
-                    title: s("completed settled handoff"),
+                    base: s("main"),
+                    head: Some(s("develop")),
+                    title: s("release settled handoff"),
                     body: s("body"),
                     labels: vec![],
                     draft: false,
@@ -1247,15 +1478,17 @@ mod tests {
         );
         env.seed_pr(7, seeded_pr());
         env.seed_created_pr(seeded_pr());
+        env.seed_pr_reviews(7, vec![submitted_coderabbit_review()]);
+        env.seed_pr_review_threads(7, vec![seeded_review_thread("thread-1", true, false)]);
 
         // Comment was already outside `is_pr_mutation`; keep it in this
         // matrix because FR-020 defines receipt independence for the whole
         // create/edit/ready/comment family.
         let commands = [
             PrCommand::CreateBody {
-                base: s("develop"),
-                head: None,
-                title: s("ready without receipt"),
+                base: s("main"),
+                head: Some(s("develop")),
+                title: s("release without receipt"),
                 body: s("body"),
                 labels: vec![],
                 draft: false,
@@ -1371,15 +1604,18 @@ mod tests {
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
         env.seed_pr(7, seeded_pr());
         env.seed_created_pr(seeded_pr());
+        env.seed_pr_reviews(7, vec![submitted_coderabbit_review()]);
+        env.seed_pr_review_threads(7, vec![seeded_review_thread("thread-1", true, false)]);
 
-        // Active execution without evidence: non-draft create and Ready refuse.
+        // Active execution without evidence: exempt non-draft Release create
+        // and Ready still refuse at the execution handoff gate.
         let mut out = String::new();
         let code = run(
             &mut env,
             PrCommand::CreateBody {
-                base: s("develop"),
-                head: None,
-                title: s("t"),
+                base: s("main"),
+                head: Some(s("develop")),
+                title: s("release"),
                 body: s("b"),
                 labels: vec![],
                 draft: false,
@@ -1522,6 +1758,8 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
         env.seed_pr(7, seeded_pr());
+        env.seed_pr_reviews(7, vec![submitted_coderabbit_review()]);
+        env.seed_pr_review_threads(7, vec![seeded_review_thread("thread-1", true, false)]);
 
         let mut out = String::new();
         let code = run(&mut env, PrCommand::Ready { number: 7 }, &mut out).expect("run pr ready");
@@ -1654,7 +1892,7 @@ mod tests {
                 title: "Other branch PR".to_string(),
                 file: "body.md".to_string(),
                 labels: vec![],
-                draft: false,
+                draft: true,
             },
             &mut out,
         )
@@ -1896,6 +2134,36 @@ mod tests {
                 crate::cli::actions::fetch_actions_job_log_via_gh("akiojin", "gwt", repo_path, 91)
                     .expect("job log");
             assert_eq!(job_log, "job log 91");
+        });
+    }
+
+    #[test]
+    fn review_threads_fetches_every_graphql_page() {
+        with_fake_gh("review-threads-paginated", |_repo_path| {
+            let threads = fetch_pr_review_threads_via_gh("akiojin", "gwt", 12)
+                .expect("all review thread pages");
+
+            assert_eq!(
+                threads
+                    .iter()
+                    .map(|thread| thread.id.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["thread-page-1", "thread-page-2"]
+            );
+        });
+    }
+
+    #[test]
+    fn review_threads_fails_closed_when_graphql_shape_is_missing() {
+        with_fake_gh("review-threads-missing-shape", |_repo_path| {
+            let error = fetch_pr_review_threads_via_gh("akiojin", "gwt", 12)
+                .expect_err("missing reviewThreads shape must not look empty");
+
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+            assert!(
+                error.to_string().contains("reviewThreads"),
+                "unexpected error: {error}"
+            );
         });
     }
 

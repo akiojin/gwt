@@ -51,21 +51,17 @@
 
 ## Step 6: Decide PR readiness before pushing
 
-- Apply the Ready PR Gate from the main skill before any push or PR write
-  that would create/update a Ready for review PR.
-- If the change is not a releaseable slice, has known blockers, has
-  Remaining acceptance, or lacks `gwt-verify --mode pre-pr` PASS evidence,
-  the PR state must be Draft.
-- If the user requested Ready for review but the gate fails, do not create
-  or update a Ready/non-draft PR. Create/update only as Draft if the user
-  accepts that state; otherwise return NO ACTION.
+- Normal PR delivery is Draft-first. Create every normal PR with
+  `params.draft:true`, even when verification already passes.
+- The only non-draft creation exemption is the exact Release PR with base
+  `main` and head `develop`.
+- Apply the Ready PR Gate only after CI, CodeRabbit, and review-thread handling
+  have converged; it controls `pr.ready`, not normal PR creation.
 
 ## Step 7: Ensure the head branch is pushed
 
-- If creating/updating a Ready for review PR, push only after the Ready PR
-  Gate passes.
-- If creating/updating a Draft PR, push with the draft intent recorded in
-  the PR body and include the exact verification already run.
+- Push the normal PR with its Draft-first intent recorded in the PR body and
+  include the exact verification already run.
 - If no upstream: `git push -u origin <head>`
 - Otherwise: `git push`
 
@@ -90,7 +86,7 @@
 | Summary | **YES** | 1-3 bullet points. Include both the what and the why. |
 | Changes | **YES** | Enumerate changes by file or module. |
 | Testing | **YES** | List commands or exact manual test steps. |
-| PR Readiness | **YES** | State Ready for review or Draft. Include releaseable slice, Known blockers, and Remaining acceptance. |
+| PR Readiness | **YES** | Initial state is Draft for normal PRs. Include releaseable slice, Known blockers, and Remaining acceptance; update after `pr.ready`. |
 | Closing Issues | **YES** | `Closes #N` or `None`. |
 | Related Issues / Links | **YES** | Reference-only. `#N` or URL or `None`. |
 | Checklist | **YES** | Review every item; mark checked or N/A with reason. |
@@ -106,7 +102,7 @@
 2. Each Summary bullet must be a single sentence. No vague wording.
 3. Changes must reference specific file or module names.
 4. Testing must be reproducible. No vague "tested."
-5. PR Readiness must be Ready for review only when the Ready PR Gate passed; otherwise it must be Draft with explicit blockers.
+5. PR Readiness must be Draft at normal creation. It may become Ready for review only after the Draft-first review flow and Ready PR Gate pass.
 6. Add a reason comment to every unchecked checklist item.
 7. Closing Issues: `Closes #N` or `None` only. Bare `#N` without keyword is forbidden.
 8. If `#N` in Related Issues should auto-close, it must also appear in Closing Issues as `Closes #N`.
@@ -115,8 +111,8 @@
 
 - Canonical path:
   - Create: JSON operation `pr.create` with `params.base`, optional `params.head`, `params.title`, `params.body`, optional `params.labels`, and `params.draft`.
-    - Set `params.draft:false` only after the Ready PR Gate passes.
-    - Set `params.draft:true` when the PR Readiness state is Draft.
+    - Set `params.draft:true` for every normal PR.
+    - Set `params.draft:false` only for the exact Release PR with base `main` and head `develop`.
   - Update: JSON operation `pr.edit` with `params.number`, optional `params.title`, optional `params.body`, and optional `params.add_labels`.
 - Transport note: the current implementation may still use GitHub REST / `gh` internally, but agent-facing workflow should stay on gwtd JSON operations.
 
@@ -124,11 +120,20 @@
 
 - Read the URL from `pr.create` / `pr.edit` output, or use JSON operation `pr.view`.
 
-## Step 12: Post-PR CI/merge check (automatic)
+## Step 12: Draft-first review delivery (automatic)
 
-- After PR creation or push, enter fix mode to inspect CI status, merge state, and review feedback.
-- If all CI checks are still pending, poll (30s interval) until complete.
-- If conflicts, review issues, or CI failures are detected, proceed with fix workflow.
+- After Draft PR creation or push, enter fix mode to inspect CI status, merge
+  state, and review feedback.
+- Poll until CI finishes and a submitted review from `coderabbitai[bot]`
+  exists. Inspect `pr.reviews` and `pr.review_threads` on each meaningful
+  transition.
+- Address every finding and resolve all review threads, including outdated
+  threads, with the response-and-resolve flow.
+- Re-read `pr.checks`, `pr.reviews`, and `pr.review_threads`. When CI is green,
+  the CodeRabbit review exists, and the unresolved count is zero, call
+  `pr.ready`; repository automation may then arm auto-merge.
+- Require a human approval only when the owning Issue explicitly says so. Keep
+  the PR Draft while that approval is pending.
 
 ## Command Snippet
 
@@ -214,15 +219,9 @@ case "$action" in
   create)
     git push -u origin "$head"
     body_json="$(jq -Rs . < /tmp/pr-body.md)"
-    if grep -q 'State: Draft' /tmp/pr-body.md; then
-      "$GWT_BIN" <<JSON
+    "$GWT_BIN" <<JSON
 {"schema_version":1,"operation":"pr.create","params":{"base":"$base","head":"$head","title":"...","body":$body_json,"draft":true}}
 JSON
-    else
-      "$GWT_BIN" <<JSON
-{"schema_version":1,"operation":"pr.create","params":{"base":"$base","head":"$head","title":"...","body":$body_json,"draft":false}}
-JSON
-    fi
     ;;
   fix)
     printf '%s\n' "$pr_summary"

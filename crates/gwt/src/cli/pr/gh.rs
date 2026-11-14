@@ -559,10 +559,10 @@ pub fn fetch_pr_review_threads_via_gh(
     number: u64,
 ) -> io::Result<Vec<PrReviewThread>> {
     let query = r#"
-query($owner: String!, $repo: String!, $number: Int!) {
+query($owner: String!, $repo: String!, $number: Int!, $after: String) {
   repository(owner: $owner, name: $repo) {
     pullRequest(number: $number) {
-      reviewThreads(first: 100) {
+      reviewThreads(first: 100, after: $after) {
         nodes {
           id
           isResolved
@@ -579,105 +579,166 @@ query($owner: String!, $repo: String!, $number: Int!) {
             }
           }
         }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
       }
     }
   }
 }
 "#;
-    let output = run_gh(
-        "gh api graphql reviewThreads",
-        [
-            "api",
-            "graphql",
-            "-f",
-            &format!("query={query}"),
-            "-f",
-            &format!("owner={owner}"),
-            "-f",
-            &format!("repo={repo}"),
-            "-F",
-            &format!("number={number}"),
-        ],
-    )?;
-    if !output.success() {
-        return Err(io::Error::other(format!(
-            "gh api graphql: {}",
-            output.stderr.trim()
-        )));
+    let mut cursor = None;
+    let mut threads = Vec::new();
+    for _ in 0..100 {
+        let mut args = vec![
+            "api".to_string(),
+            "graphql".to_string(),
+            "-f".to_string(),
+            format!("query={query}"),
+            "-f".to_string(),
+            format!("owner={owner}"),
+            "-f".to_string(),
+            format!("repo={repo}"),
+            "-F".to_string(),
+            format!("number={number}"),
+        ];
+        if let Some(cursor) = cursor.as_deref() {
+            args.extend(["-f".to_string(), format!("after={cursor}")]);
+        }
+        let output = run_gh("gh api graphql reviewThreads", args)?;
+        if !output.success() {
+            return Err(io::Error::other(format!(
+                "gh api graphql: {}",
+                output.stderr.trim()
+            )));
+        }
+
+        let value: serde_json::Value = serde_json::from_str(&output.stdout)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
+        let review_threads = value
+            .pointer("/data/repository/pullRequest/reviewThreads")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "gh api graphql: missing reviewThreads object",
+                )
+            })?;
+        let nodes = review_threads
+            .get("nodes")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "gh api graphql: missing reviewThreads.nodes array",
+                )
+            })?;
+
+        threads.extend(nodes.iter().cloned().map(|node| {
+            PrReviewThread {
+                id: node
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                is_resolved: node
+                    .get("isResolved")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
+                is_outdated: node
+                    .get("isOutdated")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
+                path: node
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                line: node.get("line").and_then(serde_json::Value::as_u64),
+                comments: node
+                    .get("comments")
+                    .and_then(|v| v.get("nodes"))
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|comment| PrReviewThreadComment {
+                        id: comment
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
+                        body: comment
+                            .get("body")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
+                        created_at: comment
+                            .get("createdAt")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
+                        updated_at: comment
+                            .get("updatedAt")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
+                        author: comment
+                            .get("author")
+                            .and_then(|v| v.get("login"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
+                    })
+                    .collect(),
+            }
+        }));
+
+        let page_info = review_threads
+            .get("pageInfo")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "gh api graphql: missing reviewThreads.pageInfo object",
+                )
+            })?;
+        let has_next_page = page_info
+            .get("hasNextPage")
+            .and_then(serde_json::Value::as_bool)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "gh api graphql: missing reviewThreads.pageInfo.hasNextPage boolean",
+                )
+            })?;
+        if !has_next_page {
+            return Ok(threads);
+        }
+        let next_cursor = page_info
+            .get("endCursor")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "gh api graphql: reviewThreads has a next page without endCursor",
+                )
+            })?;
+        if cursor.as_deref() == Some(next_cursor) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "gh api graphql: reviewThreads cursor did not advance",
+            ));
+        }
+        cursor = Some(next_cursor.to_string());
     }
 
-    let value: serde_json::Value = serde_json::from_str(&output.stdout)
-        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
-    let nodes = value
-        .get("data")
-        .and_then(|v| v.get("repository"))
-        .and_then(|v| v.get("pullRequest"))
-        .and_then(|v| v.get("reviewThreads"))
-        .and_then(|v| v.get("nodes"))
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-
-    Ok(nodes
-        .into_iter()
-        .map(|node| PrReviewThread {
-            id: node
-                .get("id")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string(),
-            is_resolved: node
-                .get("isResolved")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false),
-            is_outdated: node
-                .get("isOutdated")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false),
-            path: node
-                .get("path")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string(),
-            line: node.get("line").and_then(serde_json::Value::as_u64),
-            comments: node
-                .get("comments")
-                .and_then(|v| v.get("nodes"))
-                .and_then(|v| v.as_array())
-                .cloned()
-                .unwrap_or_default()
-                .into_iter()
-                .map(|comment| PrReviewThreadComment {
-                    id: comment
-                        .get("id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string(),
-                    body: comment
-                        .get("body")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string(),
-                    created_at: comment
-                        .get("createdAt")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string(),
-                    updated_at: comment
-                        .get("updatedAt")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string(),
-                    author: comment
-                        .get("author")
-                        .and_then(|v| v.get("login"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string(),
-                })
-                .collect(),
-        })
-        .collect())
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "gh api graphql: reviewThreads exceeded 100 pages",
+    ))
 }
 
 pub fn reply_and_resolve_pr_review_threads_via_gh(

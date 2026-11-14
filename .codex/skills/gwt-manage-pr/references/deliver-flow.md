@@ -1,6 +1,9 @@
 # PR Deliver Flow (drive-to-merge, detailed)
 
-Deliver mode drives a verified, Ready PR all the way to a merged state. It
+Deliver mode drives a verified PR through the Draft-first review lifecycle and
+all the way to a merged state. A normal PR starts Draft, waits for a submitted
+review from `coderabbitai[bot]`, resolves all review threads including outdated
+threads, then calls `pr.ready` before auto-merge. It
 **composes** the Fix flow (`references/fix-flow.md`) for blocker resolution and
 adds three things on top: auto-merge enablement, a merged-state watch loop
 modeled on the `/release` post-merge monitor, and a hard gate that refuses to
@@ -36,10 +39,10 @@ it on every drive iteration.
   the PR to merged.
 - Deliver is **never auto-routed**. The Mode Auto-Detection 2x2 matrix must not
   select Deliver on its own.
-- If no open PR exists for the current branch, fall back to Create mode first
-  (Ready PR Gate applies). If Create can only produce a **Draft** (the Ready PR
-  Gate is not satisfied), **stop with NO ACTION** — do not enter the drive loop
-  on a Draft. Only drive a PR that Create produced as Ready.
+- If no open PR exists for the current branch, fall back to Create mode first.
+  Create always produces a **Draft** for normal work; continue the drive loop
+  by waiting for CI and `coderabbitai[bot]`, addressing all review threads, and
+  calling `pr.ready` only after the Ready PR Gate passes.
 
 ## Step 1: Hard PR Gate (mandatory before enabling auto-merge)
 
@@ -54,6 +57,8 @@ last human checkpoint:
 - The PR is a releaseable slice with no known blockers in its scope.
 - The PR is **not** a Draft (auto-merge cannot be armed on a Draft PR, and a
   Draft is by definition unfinished).
+- A submitted review from `coderabbitai[bot]` exists.
+- All review threads are resolved, including outdated threads.
 
 Refuse to arm auto-merge when any of these hold:
 

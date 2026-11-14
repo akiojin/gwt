@@ -928,6 +928,46 @@ fn dispatch_json_envelope_pr_create_uses_body_param() {
 }
 
 #[test]
+fn dispatch_json_envelope_pr_create_refusal_is_machine_readable() {
+    let _env_lock = crate::env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _session = gwt_core::test_support::ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut env = TestEnv::new(temp.path().to_path_buf());
+    env.seed_created_pr(sample_pr_status());
+    env.stdin = r#"{
+        "schema_version": 1,
+        "operation": "pr.create",
+        "params": {
+            "base": "develop",
+            "head": "work/json-envelope",
+            "title": "Ready bypass",
+            "body": "body",
+            "draft": false
+        }
+    }"#
+    .to_string();
+
+    let code = dispatch(&mut env, &["gwtd".to_string()]);
+
+    assert_eq!(code, 2);
+    assert!(env.pr_create_call_log.is_empty());
+    let stdout = String::from_utf8(env.stdout.clone()).expect("stdout utf8");
+    let payload: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("policy refusal envelope JSON");
+    assert_eq!(payload["ok"], serde_json::json!(false));
+    assert_eq!(payload["operation"], serde_json::json!("pr.create"));
+    assert_eq!(payload["exit_code"], serde_json::json!(2));
+    assert!(
+        payload["output"].as_str().is_some_and(
+            |output| output.contains("params.draft:true") && output.contains("CodeRabbit")
+        ),
+        "missing machine-actionable recovery: {payload}"
+    );
+}
+
+#[test]
 fn default_cli_env_routes_gh_backed_methods_and_internal_dispatch() {
     with_fake_gh(|repo_path| {
         let cache_root = repo_path.join(".cache");
