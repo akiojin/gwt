@@ -19,9 +19,9 @@ on:
 # Issue #5059: workflow-level cancellation happens before any Git comparison,
 # so it cannot distinguish a product push from base-only synchronization. Give
 # each run its own group, then bound each workload to one running/one pending
-# job per PR below. A proven product push replaces running jobs (#4119); a
-# base sync replaces only pending jobs and lets running work finish.
-# Workloads preserve running work for unknown history.
+# job per PR below. A proven product push replaces running jobs (#4119), as
+# does a metadata-only push whose active predecessors have the same source.
+# A changed base tree or unknown history preserves running work (#5059).
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-${{ github.run_id }}
   cancel-in-progress: true
@@ -44,6 +44,7 @@ jobs:
     # rest of the run, which put the long ones at the queue's tail.
     outputs:
       base_only: ${{ steps.relation.outputs.base_only }}
+      cancel_running: ${{ steps.relation.outputs.cancel_running }}
       docs_only: ${{ steps.classify.outputs.docs_only }}
       # SPEC #4551 T-055: the cargo test targets the PR touched, as
       # `<crate>|test|<name>` / `<crate>|lib|` tokens, so the flake job repeats
@@ -163,7 +164,7 @@ jobs:
         shard: [1, 2, 3, 4, 5, 6]
     concurrency:
       group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-${{ matrix.shard }}-test
-      cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
+      cancel-in-progress: ${{ needs.source-sync.outputs.cancel_running == 'true' }}
     runs-on: ubuntu-latest
     # Issue #4055 / #4191: the step budgets below are the operative limits;
     # this cap only bounds the job as a whole and must cover their sum
@@ -316,7 +317,7 @@ jobs:
     needs: source-sync
     concurrency:
       group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-test-linux-infrastructure
-      cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
+      cancel-in-progress: ${{ needs.source-sync.outputs.cancel_running == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -383,7 +384,7 @@ jobs:
     name: Test (Rust)
     concurrency:
       group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-test-rust-required
-      cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
+      cancel-in-progress: ${{ needs.source-sync.outputs.cancel_running == 'true' }}
     runs-on: ubuntu-latest
     needs: [test, test-linux-infrastructure, source-sync]
     if: ${{ !cancelled() }}
@@ -423,7 +424,7 @@ jobs:
     name: Flake detection (changed test targets)
     concurrency:
       group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-flake-detection
-      cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
+      cancel-in-progress: ${{ needs.source-sync.outputs.cancel_running == 'true' }}
     needs: source-sync
     if: ${{ !cancelled() && needs.source-sync.outputs.docs_only != 'true' && needs.source-sync.outputs.flake_targets != '' }}
     runs-on: ubuntu-latest
@@ -497,7 +498,7 @@ jobs:
     needs: source-sync
     concurrency:
       group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-test-python-runner
-      cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
+      cancel-in-progress: ${{ needs.source-sync.outputs.cancel_running == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -523,7 +524,7 @@ jobs:
     needs: source-sync
     concurrency:
       group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-test-index-e2e
-      cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
+      cancel-in-progress: ${{ needs.source-sync.outputs.cancel_running == 'true' }}
     runs-on: ubuntu-latest
     if: ${{ github.event.pull_request.draft == false }}
     steps:
@@ -594,7 +595,7 @@ jobs:
     needs: source-sync
     concurrency:
       group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-test-windows-core-build
-      cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
+      cancel-in-progress: ${{ needs.source-sync.outputs.cancel_running == 'true' }}
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
@@ -648,7 +649,7 @@ jobs:
     needs: [source-sync, test-windows-core-build]
     concurrency:
       group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-${{ matrix.run }}-test-windows-core-stability
-      cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
+      cancel-in-progress: ${{ needs.source-sync.outputs.cancel_running == 'true' }}
     runs-on: windows-latest
     timeout-minutes: 60
     strategy:
@@ -692,7 +693,7 @@ jobs:
     needs: [source-sync, test-windows-core-build]
     concurrency:
       group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-test-windows-index-stability
-      cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
+      cancel-in-progress: ${{ needs.source-sync.outputs.cancel_running == 'true' }}
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
@@ -734,7 +735,7 @@ jobs:
     name: Test (Windows regressions)
     concurrency:
       group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-test-windows-rust
-      cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
+      cancel-in-progress: ${{ needs.source-sync.outputs.cancel_running == 'true' }}
     needs: source-sync
     if: ${{ !cancelled() }}
     runs-on: windows-latest
@@ -898,7 +899,7 @@ jobs:
     name: Test (Windows library regressions)
     concurrency:
       group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-test-windows-rust-lib
-      cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
+      cancel-in-progress: ${{ needs.source-sync.outputs.cancel_running == 'true' }}
     needs: source-sync
     if: ${{ !cancelled() }}
     runs-on: windows-latest
@@ -1031,7 +1032,7 @@ jobs:
     name: Windows warm prompt latency
     concurrency:
       group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-test-windows-warm
-      cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
+      cancel-in-progress: ${{ needs.source-sync.outputs.cancel_running == 'true' }}
     needs: source-sync
     if: ${{ !cancelled() }}
     runs-on: windows-latest
@@ -1072,7 +1073,7 @@ jobs:
     name: Test (Rust, Windows)
     concurrency:
       group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-test-windows-required
-      cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
+      cancel-in-progress: ${{ needs.source-sync.outputs.cancel_running == 'true' }}
     needs: [test-windows-core-stability, test-windows-index-stability, test-windows-rust, test-windows-rust-lib, test-windows-warm, source-sync]
     if: ${{ always() }}
     runs-on: ubuntu-latest
@@ -1097,7 +1098,7 @@ jobs:
     name: Test (Windows agent launch)
     concurrency:
       group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-test-windows-agent-launch-e2e
-      cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
+      cancel-in-progress: ${{ needs.source-sync.outputs.cancel_running == 'true' }}
     needs: source-sync
     if: ${{ !cancelled() && needs.source-sync.outputs.docs_only != 'true' }}
     runs-on: windows-latest
@@ -1197,7 +1198,7 @@ jobs:
     name: Test (Frontend + WebView E2E)
     concurrency:
       group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-test-frontend
-      cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
+      cancel-in-progress: ${{ needs.source-sync.outputs.cancel_running == 'true' }}
     needs: source-sync
     if: ${{ !cancelled() && needs.source-sync.outputs.docs_only != 'true' }}
     runs-on: ubuntu-latest
@@ -1251,7 +1252,7 @@ jobs:
     if: ${{ github.event_name == 'push' && failure() }}
     concurrency:
       group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-report-post-merge-failure
-      cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
+      cancel-in-progress: ${{ needs.source-sync.outputs.cancel_running == 'true' }}
     permissions:
       issues: write
     uses: ./.github/workflows/post-merge-ci.yml

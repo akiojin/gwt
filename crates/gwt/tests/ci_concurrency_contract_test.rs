@@ -522,8 +522,8 @@ fn pull_request_workflows_cancel_the_superseded_run_of_the_same_pr() {
                     assert!(needs(body).iter().any(|need| need == "source-sync"));
                     assert_eq!(
                         policy.get("cancel-in-progress").and_then(Value::as_str),
-                        Some("${{ needs.source-sync.outputs.base_only == 'false' }}"),
-                        "{id}: actual pushes cancel running work; proven base sync and unknown history preserve it"
+                        Some("${{ needs.source-sync.outputs.cancel_running == 'true' }}"),
+                        "{id}: cancel proven product pushes or duplicate source; preserve changed base trees and unknown history"
                     );
                 }
             }
@@ -580,12 +580,16 @@ fn the_test_workflow_has_one_gate_job_that_classifies_changed_files() {
         Some("read"),
         "{TEST_WORKFLOW}: the classifier reads the pull request's files"
     );
-    for output in ["base_only", "docs_only", "flake_targets"] {
+    for output in ["base_only", "cancel_running", "docs_only", "flake_targets"] {
         assert!(
             gate["outputs"].get(output).is_some(),
             "{TEST_WORKFLOW}: `{CHANGES_JOB}` must publish `{output}`"
         );
     }
+    assert_eq!(
+        gate["outputs"]["cancel_running"].as_str(),
+        Some("${{ steps.relation.outputs.cancel_running }}")
+    );
     let steps = gate["steps"].as_sequence().unwrap();
     let relation = steps
         .iter()

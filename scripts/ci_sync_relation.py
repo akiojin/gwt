@@ -54,6 +54,7 @@ def classify(repo, before, head, base):
     result = {
         "before": before, "head": head, "base": base,
         "classification": "unprovable", "base_only": None,
+        "same_source": False, "cancel_running": False,
         "product_commits": [], "product_files": [],
         "reuse_evidence": False,
         "reuse_reason": "Paired evidence measures the full tested source tree; "
@@ -65,14 +66,14 @@ def classify(repo, before, head, base):
                                f"{result[key]}^{{commit}}")
         before, head, base = (result[key] for key in ("before", "head", "base"))
         if before == head:
-            result.update(classification="matched", base_only=True)
+            result.update(classification="matched", base_only=True, same_source=True)
             return result
         ancestry = subprocess.run(
             ["git", "merge-base", "--is-ancestor", before, head], cwd=repo,
             capture_output=True,
         )
         if ancestry.returncode == 1:
-            result.update(classification="divergent_or_behind", base_only=False)
+            result.update(classification="divergent_or_behind", base_only=False, cancel_running=True)
             return result
         ancestry.check_returncode()
         files = set()
@@ -104,6 +105,8 @@ def classify(repo, before, head, base):
         result.update(
             classification="unverified_product" if files else "bookkeeping_or_base_sync",
             base_only=not files,
+            same_source=not product_paths(repo, before, head),
+            cancel_running=bool(files),
         )
     except (subprocess.CalledProcessError, RuntimeError) as error:
         diagnostic = getattr(error, "stderr", None)
@@ -130,7 +133,7 @@ def event_relation(repo, event):
     # use their own commit range and have separate concurrency groups.
     result = classify(repo, head, head, base)
     if result["classification"] == "matched":
-        result.update(classification="initial", base_only=False)
+        result.update(classification="initial", base_only=False, cancel_running=True)
     return result
 
 
@@ -192,14 +195,18 @@ def cancellation_decision(repo, event, runs, current_run_id):
     product = [proof for proof in proofs if proof["base_only"] is False]
     if product:
         result["event_classification"] = result["classification"]
-        result.update(classification="unverified_product", base_only=False)
+        result.update(classification="unverified_product", base_only=False, cancel_running=True)
         for key in ("product_commits", "product_files"):
             result[key] = sorted(set(result[key]).union(
                 *(set(proof[key]) for proof in product)
             ))
     elif result["base_only"] is True and any(proof["base_only"] is None for proof in proofs):
-        result.update(classification="unprovable", base_only=None,
+        result.update(classification="unprovable", base_only=None, cancel_running=False,
                       diagnostic="Cannot compare the source of an active predecessor")
+    elif current and result["base_only"] is True and result["same_source"] and proofs:
+        # A Work-only push still needs fresh checks, but running the same
+        # product tree twice wastes slots. Keep genuinely different base trees.
+        result["cancel_running"] = all(proof["same_source"] for proof in proofs)
     return result
 
 
@@ -209,6 +216,7 @@ def cancellation_audit(repo, runs, base):
     report = {
         "attribution": "inferred_from_successor_source_relation",
         "base_sync_successor_cancelled_runs": 0,
+        "metadata_successor_cancelled_runs": 0,
         "product_change_successor_cancelled_runs": 0,
         "unknown_cancelled_runs": 0,
         "runs": [],
@@ -245,7 +253,9 @@ def cancellation_audit(repo, runs, base):
                 proof = classify(repo, run["head_sha"], head, comparison_base)
                 comparison["source_relation"] = proof
                 if proof["base_only"] is True and proof["before"] != proof["head"]:
-                    comparison["attribution"] = "base_sync_successor"
+                    comparison["attribution"] = (
+                        "metadata_successor" if proof["same_source"] else "base_sync_successor"
+                    )
                 elif proof["base_only"] is False:
                     comparison["attribution"] = "product_change_successor"
             except (subprocess.CalledProcessError, RuntimeError) as error:
@@ -258,6 +268,7 @@ def cancellation_audit(repo, runs, base):
             else:
                 row["diagnostic"] = "Overlapping successors have mixed or unknown source relations"
         key = {"base_sync_successor": "base_sync_successor_cancelled_runs",
+               "metadata_successor": "metadata_successor_cancelled_runs",
                "product_change_successor": "product_change_successor_cancelled_runs",
                "unknown": "unknown_cancelled_runs"}[row["attribution"]]
         report[key] += 1
@@ -323,14 +334,16 @@ def main():
         result = classify(args.repo, args.before, args.head, args.base)
     print(json.dumps(result, sort_keys=True))
     value = {True: "true", False: "false", None: "unknown"}[result["base_only"]]
+    cancel = str(result["cancel_running"]).lower()
     if output := os.environ.get("GITHUB_OUTPUT"):
         with open(output, "a") as stream:
             stream.write(f"base_only={value}\n")
+            stream.write(f"cancel_running={cancel}\n")
     if summary := os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(summary, "a") as stream:
             stream.write("## CI synchronization (#5059)\n\n")
             stream.write(f"Classification: `{result['classification']}`; "
-                         f"cancel running jobs: `{value == 'false'}`.\n\n")
+                         f"cancel running jobs: `{result['cancel_running']}`.\n\n")
             stream.write(f"Paired evidence reuse: no. {result['reuse_reason']}\n\n")
             stream.write(f"```json\n{json.dumps(result, indent=2)}\n```\n")
 
