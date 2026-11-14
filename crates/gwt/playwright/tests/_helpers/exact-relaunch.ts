@@ -103,13 +103,15 @@ export type ExactRelaunchInvocation = {
   at: string;
 };
 
-/** Real checkout/backend/PTY; only the provider executable is a recorder.
+/** Real checkout/backend/PTY; the provider executable is a recorder. The optional
+ * resource fixture fixes hardware inputs while retaining the native Session census.
  * Never fabricates durable gwt Sessions, execution ledgers, or Work records.
  * The optional source actor uses the provider's ordinary authenticated commands.
  * Each invocation owns a fresh HOME, retained as evidence after cleanup.
  */
 export type ExactRelaunchSetup = {
   page?: Page;
+  fixedMachineCapacity?: boolean;
   exitNotice?: string;
   freshNativeIds?: boolean;
   terminalConvergence?: boolean;
@@ -522,6 +524,55 @@ readline.createInterface({input:process.stdin}).on('line', line => {
   await setup.beforeStart?.({ home, project, env, preferences });
 
   let child: ChildProcess | undefined;
+  let capacityChild: ChildProcess | undefined;
+  async function startCapacityFixture() {
+    if (!setup.fixedMachineCapacity || capacityChild) return;
+    const executable = join(root, `target/debug/examples/exact_relaunch_capacity${suffix}`);
+    await access(executable);
+    const current = spawn(executable, [project], {
+      cwd: project, env, windowsHide: true, stdio: ["pipe", "pipe", "pipe"],
+    });
+    capacityChild = current;
+    const log = createWriteStream(join(home, "capacity-fixture.log"), { flags: "a" });
+    current.stdout?.pipe(log, { end: false });
+    current.stderr?.pipe(log, { end: false });
+    current.on("close", () => log.end());
+    let failure: Error | undefined, output = "";
+    current.on("error", error => { failure = error; });
+    current.stdout?.on("data", chunk => { output += chunk.toString(); });
+    const deadline = Date.now() + 30_000;
+    while (!output.includes("GWT_CAPACITY_FIXTURE_READY\n")) {
+      if (failure) throw failure;
+      if (current.exitCode !== null || current.signalCode !== null || Date.now() >= deadline)
+        throw new Error("Fixed hardware capacity fixture did not become ready; see capacity-fixture.log");
+      await delay(100);
+    }
+    await testInfo.attach("fixture-capacity-source", { body: JSON.stringify({
+      pid: current.pid, source: "fixed hardware inputs with native Session/process census",
+      performance_cores: 6, gui_cpu_millicores: 1000, machine_budget: 5, snapshot_ttl_secs: 30,
+      snapshot: join(state, "machine-state/agent-capacity.json"),
+    }), contentType: "application/json" });
+  }
+  async function stopCapacityFixture() {
+    const current = capacityChild;
+    if (!current) return;
+    if (!current.pid) { capacityChild = undefined; return; }
+    if (current.exitCode === null && current.signalCode === null) current.stdin?.end();
+    const deadline = Date.now() + 8_000;
+    while (current.exitCode === null && current.signalCode === null && Date.now() < deadline) await delay(100);
+    const forced = current.exitCode === null && current.signalCode === null;
+    if (forced) {
+      current.kill("SIGKILL");
+      const killDeadline = Date.now() + 8_000;
+      while (current.exitCode === null && current.signalCode === null && Date.now() < killDeadline) await delay(100);
+    }
+    await testInfo.attach("fixture-capacity-cleanup", { body: JSON.stringify({
+      pid: current.pid, exit_code: current.exitCode, signal: current.signalCode, forced,
+    }), contentType: "application/json" });
+    if (current.exitCode !== null || current.signalCode !== null) capacityChild = undefined;
+    if (forced || current.exitCode !== 0 || current.signalCode !== null)
+      throw new Error("Fixed hardware capacity fixture did not exit normally after stdin EOF");
+  }
   let coldCleanupFailed = false, protectGuiOwner = false;
   let incarnation = 0;
   let url = "";
@@ -655,6 +706,15 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     if (signalFree && timedOut) throw new Error("Fixture signal-free GUI shutdown timed out");
   }
   async function stop(afterGuiStop?: () => Promise<void>, options: ShutdownOptions = {}) {
+    let failure: unknown;
+    try { await stopGuiAndProviders(afterGuiStop, options); } catch (error) { failure = error; }
+    try { await stopCapacityFixture(); } catch (error) {
+      if (failure) throw new AggregateError([failure, error], "Fixture cleanup failed");
+      throw error;
+    }
+    if (failure) throw failure;
+  }
+  async function stopGuiAndProviders(afterGuiStop?: () => Promise<void>, options: ShutdownOptions = {}) {
     let browserError: Error | undefined;
     let afterGuiStopError: Error | undefined;
     const guiErrors: unknown[] = [];
@@ -1070,6 +1130,7 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     const logFile = join(home, `gwt-${incarnation}.log`);
     const stream = createWriteStream(logFile);
     try {
+      await startCapacityFixture();
       child = spawn(gwt, ["--no-tray", "--no-open"], {
         cwd: project, env: { ...env, GWT_BROWSER_URL_FILE: urlFile }, windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
       });
@@ -1101,6 +1162,7 @@ readline.createInterface({input:process.stdin}).on('line', line => {
       }
       throw new Error(`Fresh gwt readiness timed out; see ${logFile}`);
     } catch (error) {
+      if (!child?.pid) stream.end();
       await stop();
       throw error;
     }

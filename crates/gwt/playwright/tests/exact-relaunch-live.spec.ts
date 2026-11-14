@@ -1389,6 +1389,7 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
     let finalOwner: { pid: number; birth: number } | undefined;
     const fixture = await startExactRelaunchFixture(info, {
       page,
+      fixedMachineCapacity: process.platform === "win32" || process.env.GWT_PLAYWRIGHT_FIXED_CAPACITY === "1",
       monitorPreferences: { max_active_agents: 4 },
       async prepare({ home, bin, project, env }) {
         env.RUST_LOG = [env.RUST_LOG || "info", "gwt::shutdown=info"].join(",");
