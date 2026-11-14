@@ -15456,12 +15456,13 @@ impl AppRuntime {
                     self.pending_runtime_outputs.remove(&id);
                     events.push(snapshot);
                 }
-                events.extend(self.apply_owner_status_projection(&id, status, detail));
+                let status_events = self.apply_owner_status_projection(&id, status, detail);
                 if explicit_stop {
-                    // Status alone cannot update the catalog's snapshot
-                    // eligibility after this pane leaves the live census.
+                    // Retain the transcript before the status projection's
+                    // empty census can remove its live Works entry.
                     events.push(self.workspace_state_broadcast(context));
                 }
+                events.extend(status_events);
                 events
             }
             OwnerEvent::LaunchProgress {

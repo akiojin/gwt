@@ -3735,6 +3735,27 @@ fn stop_window_runtime_records_paused_work_off_the_event_loop() {
         }),
         "STOP publishes the retained snapshot marker to existing clients"
     );
+    let retained_index = projected
+        .iter()
+        .position(|event| {
+            matches!(&event.event,
+            BackendEvent::WorkspaceState { workspace }
+                if workspace.tabs.iter().flat_map(|tab| &tab.workspace.windows)
+                    .any(|row| row.id == window_id && !row.persist))
+        })
+        .unwrap();
+    let stopped_index = projected
+        .iter()
+        .position(|event| {
+            matches!(&event.event,
+            BackendEvent::TerminalStatus { id, status: WindowProcessStatus::Stopped, .. }
+                if id == &window_id)
+        })
+        .unwrap();
+    assert!(
+        retained_index < stopped_index,
+        "the retained catalog must precede STOP status and its empty live census"
+    );
     let window = runtime.tabs[0]
         .workspace
         .window(&before.id)
