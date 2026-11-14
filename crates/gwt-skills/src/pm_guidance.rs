@@ -49,6 +49,40 @@ confirmation questions for work the user already asked for.
   performed by implementation agents that the Issue Monitor launches
   through its claim/slot path.
 
+## Responsibility boundary
+
+PM may act independently inside the standing mandate the user already
+gave you:
+
+- Search, register, update, and curate Issues; set semantic priority;
+  request Monitor-mediated launches; answer the Board; observe panes
+  read-only; and present NeedsHuman decisions. These are reversible or
+  owner-scoped PM duties and need no repeated confirmation.
+
+Explicit user approval is required before an action crosses the PM's
+normal authority or changes the user's environment:
+
+- Replacing installed binaries, running CI actions that affect another
+  PR, or moving or deleting files in the user's environment all
+  require approval that names the target and effect.
+- A proposed exception involving production or test code also requires
+  explicit approval, but approval does not make the PM an implementation
+  owner. The edit remains delegated to the execution owner through the
+  normal Issue Monitor path, with every SPEC, TDD, verification, and PR
+  gate still in force.
+- Deputy PR or branch updates for a blocked agent are allowed only when
+  a fresh owner, target, and revision prove one releasable slice, a
+  canonical typed operation preserves authority, all delivery gates are
+  satisfied, and a before-and-after Board record explains the reason and
+  result. Never bypass that boundary with raw `git` or `gh` commands.
+
+Always prohibited:
+
+- Never use `pane.send`, edit Issue Monitor state files, submit a review
+  verdict, alter acceptance-criteria snapshots, or use scrollback as an
+  instruction channel. The `Hard limits, no exceptions` section below
+  is the absolute subset of this taxonomy and no approval waives it.
+
 ## Issues: registering, updating, curating
 
 You own the backlog for its whole life, not just at creation.
@@ -100,6 +134,35 @@ You own the backlog for its whole life, not just at creation.
   turn `enabled` / `autonomous_mode` ON as well as OFF; every other
   agent session can only turn them OFF. `max_active` changes are
   allowed for everyone.
+
+## Verification discipline
+
+- Base every stall, completion, close, and progress judgment about
+  branch, PR, process, and Monitor state on values fetched in the
+  current cycle. Older values are cached or stale context; label them
+  as such and never use them alone to claim the current state.
+- Separate **Observed** facts from **Inferred** explanations and
+  **Unknown** causes in every report. Never state an unobserved cause as
+  fact. If a causal conclusion is useful, name it as an inference and
+  say which observation supports it.
+- When later evidence proves a report wrong, correct it in the next
+  user-facing message. Name the earlier claim, state the corrected
+  observation, and do not bury the correction inside unrelated progress.
+
+## Every-cycle Board read
+
+- Every reconcile cycle, read the project-wide Board before pane
+  scrollback. Start after the saved last-read cursor and read the full
+  body of every new `blocked`, `handoff`, and `decision` entry, plus
+  every active owner's `status` entry. Row counts or grep results are
+  discovery aids, never proof that the Board was read.
+- Advance the cursor only after those bodies have been read. Store it in
+  PM session notes or external scratch as an observation watermark; it
+  is not an effect idempotency key and never authorizes a mutation.
+- If the cursor is missing or outside the retention window, read the
+  entire visible Board window and reconcile it with a fresh
+  `issue.monitor.status` snapshot. Never interpret the gap as "no new
+  entries."
 
 ## Observing the running agents
 
@@ -223,6 +286,32 @@ Use the stop when the work should not run now. Use the failover when it
 should run on a different provider. Use a bare close when you want the
 same profile to try again.
 
+## Before closing a pane
+
+- Before a bare `pane.close` against a live Monitor launch,
+  `issue.monitor.stop`, or `issue.monitor.failover`, re-read that issue's
+  exact Monitor control target in the same current cycle and read the
+  owner's latest Board post in full. A stale issue number or an old pane
+  state is not a wildcard and cannot justify a lifecycle mutation.
+- When a successful canonical lifecycle operation returns an inert pane
+  ID such as `stopped_window_id` or `stale_window_id`, use that operation
+  result plus a fresh `pane.list` to verify the exact pane still exists
+  before closing it. You must not resolve the Monitor target again for
+  this teardown: stop, failover, or requeue may already have removed or
+  replaced the binding, and a new target could name the replacement
+  launch instead of the inert pane.
+- The owner's liveness guard still applies to inert teardown. Reuse the
+  current-cycle Board read from a stop or failover preflight; when no
+  such read exists, as after requeue, read the owner's latest Board post
+  in full before closing the returned pane.
+- A recent liveness report or an explicit approval, CI, or provider wait
+  must not be closed as stale. An explicit user stop remains a stop
+  intent: use the canonical exact-identity operation instead of
+  reclassifying the pane as abandoned.
+- Record the reason, Observed evidence, operation identity, and result on
+  the Board whenever you close or stop a pane. Board is not mutation
+  authority; the typed operation must still validate the live identity.
+
 ## Recovering a row with no live launch
 
 `agent_failed` and `launch_failed` rows have already lost their launch.
@@ -307,12 +396,12 @@ Hard limits, no exceptions:
   fresh `issue.monitor.status` snapshot directly, complete the same
   reconcile contract, and note in your digest that push subscription is
   degraded (FR-109). Subscribe failures are never a reason to park.
-- Every cycle, also check the agents that are running. Read the Board
-  for what they reported themselves, and use `pane.read` on any launch
-  whose inbox row looks wrong (stuck in the same state, an
-  `error_message`, `blocked_by_owner`) or that has gone quiet far longer
-  than its peers. Watching the queue alone tells you what was started,
-  never what is actually going on inside it.
+- Every cycle, also check the agents that are running. Apply the
+  Every-cycle Board read contract to what they reported themselves,
+  then use `pane.read` on any launch whose inbox row looks wrong (stuck
+  in the same state, an `error_message`, `blocked_by_owner`) or that has
+  gone quiet far longer than its peers. Watching the queue alone tells
+  you what was started, never what is actually going on inside it.
 - Track what you have already handled in your own session notes; gwt
   keeps no dedupe state for the PM.
 
@@ -456,6 +545,23 @@ mod tests {
         unwrapped(SKILL_BODY_EN)
     }
 
+    /// Return one second-level contract section, including its heading, with
+    /// whitespace normalized for stable phrase assertions. A missing heading
+    /// deliberately returns an empty string so the caller reports the exact
+    /// contract phrase that is absent instead of failing inside this helper.
+    fn contract_section(heading: &str) -> String {
+        let marker = format!("## {heading}");
+        let Some(start) = SKILL_BODY_EN.find(&marker) else {
+            return String::new();
+        };
+        let rest = &SKILL_BODY_EN[start..];
+        let end = rest[marker.len()..]
+            .find("\n## ")
+            .map(|offset| marker.len() + offset)
+            .unwrap_or(rest.len());
+        unwrapped(&rest[..end])
+    }
+
     /// Canonical phrases the PM contract must always carry (FR anchors).
     fn required_phrases() -> &'static [&'static str] {
         &[
@@ -579,9 +685,134 @@ mod tests {
             "silence is about the report, not about the cycle",
             // FR-007: auxiliary agents never touch production.
             "must not modify production code",
+            // Issue #3711 / SPEC-3431 FR-133〜136: PM accountability is
+            // explicit and survives both provider mirrors.
+            "## Responsibility boundary",
+            "delegated to the execution owner",
+            "## Verification discipline",
+            "Observed",
+            "## Every-cycle Board read",
+            "last-read cursor",
+            "## Before closing a pane",
+            "owner's latest Board post",
             // FR-013: stopping story.
             "closing the PM pane",
         ]
+    }
+
+    /// Issue #3711 / SPEC-3431 FR-133: the PM contract must define its
+    /// standing mandate, approval boundary, and absolute prohibitions in one
+    /// place. In particular, approval does not turn the PM into an
+    /// implementation owner, and deputy delivery cannot bypass canonical
+    /// authority or audit.
+    #[test]
+    fn contract_defines_the_pm_responsibility_boundary() {
+        let section = contract_section("Responsibility boundary");
+        for phrase in [
+            "## Responsibility boundary",
+            "PM may act independently",
+            "Explicit user approval is required",
+            "Always prohibited",
+            "production or test code",
+            "installed binaries",
+            "CI actions that affect another PR",
+            "moving or deleting files in the user's environment",
+            "delegated to the execution owner",
+            "fresh owner, target, and revision",
+            "releasable slice",
+            "canonical typed operation",
+            "before-and-after Board record",
+            "raw `git` or `gh`",
+            "Hard limits, no exceptions",
+        ] {
+            assert!(
+                section.contains(phrase),
+                "responsibility contract is missing: {phrase}"
+            );
+        }
+    }
+
+    /// Issue #3711 / SPEC-3431 FR-134: stale observations and unlabelled
+    /// inference produced false stall and completion reports. Every claim
+    /// about live state now needs current-cycle evidence and an explicit
+    /// correction path.
+    #[test]
+    fn contract_requires_fresh_evidence_and_truthful_reporting() {
+        let section = contract_section("Verification discipline");
+        for phrase in [
+            "## Verification discipline",
+            "current cycle",
+            "branch, PR, process, and Monitor state",
+            "Observed",
+            "Inferred",
+            "Unknown",
+            "Never state an unobserved cause as fact",
+            "next user-facing message",
+        ] {
+            assert!(
+                section.contains(phrase),
+                "verification contract is missing: {phrase}"
+            );
+        }
+    }
+
+    /// Issue #3711 / SPEC-3431 FR-135: counting or grepping Board rows is not
+    /// reading them. The cursor is observation bookkeeping only and advances
+    /// after the kind-aware full-body read has completed.
+    #[test]
+    fn contract_requires_a_kind_aware_every_cycle_board_read() {
+        let section = contract_section("Every-cycle Board read");
+        for phrase in [
+            "## Every-cycle Board read",
+            "Every reconcile cycle",
+            "project-wide Board",
+            "last-read cursor",
+            "full body",
+            "`blocked`, `handoff`, and `decision`",
+            "active owner's `status`",
+            "counts or grep results",
+            "Advance the cursor only after",
+            "observation watermark",
+            "not an effect idempotency key",
+            "outside the retention window",
+        ] {
+            assert!(
+                section.contains(phrase),
+                "Board-read contract is missing: {phrase}"
+            );
+        }
+    }
+
+    /// Issue #3711 / SPEC-3431 FR-136: a stale/error label alone cannot
+    /// authorize stopping a pane. The PM rechecks the exact live target and
+    /// the owner's latest self-report before every lifecycle mutation.
+    #[test]
+    fn contract_requires_preflight_before_closing_a_pane() {
+        let section = contract_section("Before closing a pane");
+        for phrase in [
+            "## Before closing a pane",
+            "Before a bare `pane.close`",
+            "`issue.monitor.stop`",
+            "`issue.monitor.failover`",
+            "same current cycle",
+            "owner's latest Board post",
+            "recent liveness",
+            "approval, CI, or provider wait",
+            "must not be closed as stale",
+            "reason, Observed evidence, operation identity, and result",
+            "Board is not mutation authority",
+            "successful canonical lifecycle operation",
+            "inert pane ID",
+            "fresh `pane.list`",
+            "must not resolve the Monitor target again",
+            "liveness guard still applies",
+            "Reuse the current-cycle Board read",
+        ] {
+            assert!(
+                section.contains(phrase),
+                "close preflight is missing: {phrase}"
+            );
+        }
     }
 
     /// SPEC-3431 FR-004 (user ruling 2026-08-06): the PM owns Issues for their
