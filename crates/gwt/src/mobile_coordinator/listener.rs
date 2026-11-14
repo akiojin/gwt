@@ -34,8 +34,9 @@ use tokio_rustls::{server::TlsStream, TlsAcceptor};
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_CONNECTIONS: usize = 64;
 /// Reads and writes that make no progress for this long close the connection.
-/// A future long-lived route (for example a WebSocket) must keep traffic
-/// flowing within this deadline.
+/// hyper keeps a read pending while a handler runs, so a handler slower than
+/// this deadline also loses its connection. A future long-lived or slow route
+/// (for example a WebSocket) must keep traffic flowing within this deadline.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct TlsListener {
