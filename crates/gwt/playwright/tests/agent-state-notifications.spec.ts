@@ -246,8 +246,12 @@ test.describe("Notification center touch targets", () => {
           expect(control.left, `${control.name} is on screen at ${width}px`).toBeGreaterThanOrEqual(0);
           expect(control.right, `${control.name} is on screen at ${width}px`).toBeLessThanOrEqual(width);
         }
-        expect(await drawer.evaluate(node => node.scrollWidth - node.clientWidth),
-          `the drawer must not scroll sideways at ${width}px`).toBeLessThanOrEqual(0);
+        for (const target of [drawer, drawer.locator(".notification-center__body")]) {
+          expect(await target.evaluate(node => node.scrollWidth - node.clientWidth),
+            `the drawer must not scroll sideways at ${width}px`).toBeLessThanOrEqual(0);
+        }
+        expect(await drawer.locator(".notification-center__details > summary")
+          .evaluate(node => getComputedStyle(node).display), "Details keeps its disclosure marker").toBe("list-item");
       }).toPass({ timeout: 5_000 });
       await page.screenshot({ path: testInfo.outputPath(`notifications-${width}.png`) });
     }

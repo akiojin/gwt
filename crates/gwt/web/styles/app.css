@@ -4116,10 +4116,9 @@ body {
     min-height: 44px;
   }
 
+  /* Keep the list-item display so the disclosure marker stays visible. */
   .notification-center__details > summary {
-    display: flex;
-    align-items: center;
-    min-height: 44px;
+    line-height: 44px;
   }
 }
 
