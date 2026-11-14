@@ -4,6 +4,41 @@ use std::{collections::HashMap, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+/// Cross-platform scheduling class applied to an agent process tree.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentProcessPriority {
+    Normal,
+    #[default]
+    BelowNormal,
+    Idle,
+}
+
+/// Resource limits applied to agent process trees.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AgentResourceConfig {
+    /// Apply scheduling, CPU, and cargo limits to agent launches.
+    pub enabled: bool,
+    /// Scheduling class inherited by agent descendants.
+    pub priority: AgentProcessPriority,
+    /// Windows Job Object CPU hard cap. `None` derives from `max_active`.
+    pub cpu_limit_percent: Option<u8>,
+    /// Cargo parallelism. `None` derives from logical cores and `max_active`.
+    pub cargo_build_jobs: Option<usize>,
+}
+
+impl Default for AgentResourceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            priority: AgentProcessPriority::BelowNormal,
+            cpu_limit_percent: None,
+            cargo_build_jobs: None,
+        }
+    }
+}
+
 /// Agent runtime configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -17,6 +52,8 @@ pub struct AgentConfig {
     /// Optional override for pre-registering trust of gwt-generated Codex hooks.
     /// `None` and `Some(true)` enable trust; `Some(false)` is the opt-out.
     pub codex_trust_managed_hooks: Option<bool>,
+    /// Scheduling and CPU policy for agent process trees.
+    pub resources: AgentResourceConfig,
 }
 
 #[cfg(test)]
@@ -43,6 +80,7 @@ mod tests {
             agent_paths: paths,
             auto_install_deps: true,
             codex_trust_managed_hooks: Some(true),
+            resources: AgentResourceConfig::default(),
         };
         let toml_str = toml::to_string_pretty(&c).unwrap();
         let loaded: AgentConfig = toml::from_str(&toml_str).unwrap();
@@ -62,5 +100,36 @@ mod tests {
 
         let enabled: AgentConfig = toml::from_str("codex_trust_managed_hooks = true").unwrap();
         assert_eq!(enabled.codex_trust_managed_hooks, Some(true));
+    }
+
+    #[test]
+    fn resource_policy_defaults_enabled_and_roundtrips_explicit_values() {
+        let default_config = AgentConfig::default();
+        assert!(default_config.resources.enabled);
+        assert_eq!(
+            default_config.resources.priority,
+            AgentProcessPriority::BelowNormal
+        );
+        assert_eq!(default_config.resources.cpu_limit_percent, None);
+        assert_eq!(default_config.resources.cargo_build_jobs, None);
+
+        let configured: AgentConfig = toml::from_str(
+            r#"
+[resources]
+enabled = true
+priority = "idle"
+cpu_limit_percent = 40
+cargo_build_jobs = 3
+"#,
+        )
+        .expect("explicit resource policy parses");
+        assert_eq!(configured.resources.priority, AgentProcessPriority::Idle);
+        assert_eq!(configured.resources.cpu_limit_percent, Some(40));
+        assert_eq!(configured.resources.cargo_build_jobs, Some(3));
+
+        let serialized = toml::to_string_pretty(&configured).expect("serialize resource policy");
+        let roundtrip: AgentConfig =
+            toml::from_str(&serialized).expect("roundtrip resource policy");
+        assert_eq!(roundtrip.resources, configured.resources);
     }
 }

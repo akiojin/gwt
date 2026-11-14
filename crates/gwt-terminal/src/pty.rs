@@ -36,6 +36,23 @@ mod windows_spawn;
 
 use process_group::ProcessGroup;
 
+/// Cross-platform scheduling class applied to a process and inherited by its
+/// descendants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessPriority {
+    Normal,
+    BelowNormal,
+    Idle,
+}
+
+/// Operating-system controls applied while a PTY target is held behind its
+/// trusted start gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProcessResourcePolicy {
+    pub priority: ProcessPriority,
+    pub cpu_limit_percent: Option<u8>,
+}
+
 /// Configuration for spawning a PTY process.
 pub struct SpawnConfig {
     /// Command to execute.
@@ -59,6 +76,10 @@ const START_GATE_NONCE_ENV: &str = "GWT_INTERNAL_PTY_GATE_NONCE";
 const START_GATE_TARGET_ENV: &str = "GWT_INTERNAL_PTY_GATE_TARGET";
 const START_GATE_HELLO: u8 = 1;
 const START_GATE_RELEASE: u8 = 2;
+const START_GATE_TARGET_READY: u8 = 3;
+const START_GATE_TARGET_FAILED: u8 = 4;
+const START_GATE_RESULT_TIMEOUT: Duration = Duration::from_secs(10);
+const START_GATE_ERROR_MAX_BYTES: usize = 16 * 1024;
 /// `CSI 1 ; 1 R` — the reply Windows ConPTY waits for before it lets a console
 /// client finish attaching.
 #[cfg(windows)]
@@ -92,7 +113,61 @@ impl PendingPty {
                 details: format!("release PTY start gate: {error}"),
             });
         }
-        drop(gate);
+        gate.set_nonblocking(false)
+            .and_then(|()| gate.set_read_timeout(Some(START_GATE_RESULT_TIMEOUT)))
+            .map_err(|error| TerminalError::PtyIoError {
+                details: format!("wait for released PTY target: {error}"),
+            })?;
+        let mut result = [0_u8; 1];
+        match gate.read_exact(&mut result) {
+            Ok(()) if result[0] == START_GATE_TARGET_READY => {}
+            Ok(()) if result[0] == START_GATE_TARGET_FAILED => {
+                let mut encoded_len = [0_u8; 4];
+                if let Err(error) = gate.read_exact(&mut encoded_len) {
+                    let _ = self.abort_inner();
+                    return Err(TerminalError::PtyIoError {
+                        details: format!("read released PTY target failure: {error}"),
+                    });
+                }
+                let len = u32::from_be_bytes(encoded_len) as usize;
+                if len > START_GATE_ERROR_MAX_BYTES {
+                    let _ = self.abort_inner();
+                    return Err(TerminalError::PtyIoError {
+                        details: format!(
+                            "released PTY target failure exceeded {START_GATE_ERROR_MAX_BYTES} bytes"
+                        ),
+                    });
+                }
+                let mut encoded_error = vec![0_u8; len];
+                if let Err(error) = gate.read_exact(&mut encoded_error) {
+                    let _ = self.abort_inner();
+                    return Err(TerminalError::PtyIoError {
+                        details: format!("read released PTY target failure: {error}"),
+                    });
+                }
+                let _ = self.abort_inner();
+                return Err(TerminalError::PtyCreationFailed {
+                    reason: String::from_utf8_lossy(&encoded_error).into_owned(),
+                });
+            }
+            Ok(()) => {
+                let _ = self.abort_inner();
+                return Err(TerminalError::PtyIoError {
+                    details: "invalid released PTY target result".to_string(),
+                });
+            }
+            #[cfg(unix)]
+            Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
+                // A successful Unix exec closes the gate's close-on-exec
+                // socket. An exec failure is reported explicitly above.
+            }
+            Err(error) => {
+                let _ = self.abort_inner();
+                return Err(TerminalError::PtyIoError {
+                    details: format!("wait for released PTY target: {error}"),
+                });
+            }
+        }
         Ok(self.handle.take().expect("pending PTY owns its handle"))
     }
 
@@ -225,11 +300,38 @@ impl PtyHandle {
         gate_args_prefix: Vec<String>,
         nonce: impl Into<String>,
     ) -> Result<PendingPty, TerminalError> {
+        Self::spawn_pending_inner(config, gate_program, gate_args_prefix, nonce.into(), None)
+    }
+
+    /// Spawn a gated PTY and apply the resource policy before the target is
+    /// released. A policy failure aborts the helper and never runs the target.
+    pub fn spawn_pending_with_resource_policy(
+        config: SpawnConfig,
+        gate_program: PathBuf,
+        gate_args_prefix: Vec<String>,
+        nonce: impl Into<String>,
+        resource_policy: ProcessResourcePolicy,
+    ) -> Result<PendingPty, TerminalError> {
+        Self::spawn_pending_inner(
+            config,
+            gate_program,
+            gate_args_prefix,
+            nonce.into(),
+            Some(resource_policy),
+        )
+    }
+
+    fn spawn_pending_inner(
+        config: SpawnConfig,
+        gate_program: PathBuf,
+        gate_args_prefix: Vec<String>,
+        nonce: String,
+        resource_policy: Option<ProcessResourcePolicy>,
+    ) -> Result<PendingPty, TerminalError> {
         let config =
             normalize_spawn_config(config).map_err(|reason| TerminalError::PtyCreationFailed {
                 reason: reason.to_string(),
             })?;
-        let nonce = nonce.into();
         if nonce.is_empty() {
             return Err(TerminalError::PtyCreationFailed {
                 reason: "PTY start-gate nonce must not be empty".to_string(),
@@ -270,7 +372,7 @@ impl PtyHandle {
             .env
             .insert(START_GATE_TARGET_ENV.to_string(), target);
 
-        let handle = Self::spawn(gate_config)?;
+        let handle = Self::spawn_inner(gate_config, SpawnTestFailure::None, None)?;
         // Windows ConPTY parks a freshly attached console client inside its
         // startup handshake until the terminal answers the cursor-position
         // query the pseudoconsole emitted on creation. A gated launch only
@@ -323,6 +425,18 @@ impl PtyHandle {
                             format!("finalize handshake: {error}"),
                         )
                     })?;
+                    if let Some(policy) = resource_policy {
+                        if let Err(reason) = handle
+                            .as_ref()
+                            .expect("pending handle")
+                            .apply_resource_policy(policy)
+                        {
+                            return Err(pending_spawn_error(
+                                handle.take().expect("pending handle"),
+                                format!("apply PTY resource policy: {reason}"),
+                            ));
+                        }
+                    }
                     return Ok(PendingPty {
                         handle,
                         gate: Some(gate),
@@ -746,6 +860,16 @@ impl PtyHandle {
         self.child.lock().ok().and_then(|c| c.process_id())
     }
 
+    fn apply_resource_policy(&self, policy: ProcessResourcePolicy) -> Result<(), String> {
+        let pid = self
+            .process_id()
+            .ok_or_else(|| "PTY child has no process id".to_string())?;
+        self.process_group
+            .lock()
+            .map_err(|error| format!("process group lock poisoned: {error}"))?
+            .apply_resource_policy(pid, policy)
+    }
+
     /// Returns a reader for the PTY output.
     ///
     /// The reader can be used in a separate thread/task to read output asynchronously.
@@ -852,8 +976,6 @@ pub fn run_start_gate_from_env() -> Result<i32, TerminalError> {
             })
         }
     }
-    drop(gate);
-
     let mut target = Command::new(command);
     target.args(args);
     for key in [
@@ -869,28 +991,38 @@ pub fn run_start_gate_from_env() -> Result<i32, TerminalError> {
         use std::os::unix::process::CommandExt as _;
 
         let error = target.exec();
-        Err(TerminalError::PtyCreationFailed {
-            reason: format!("execute released PTY target: {error}"),
-        })
+        let reason = format!("execute released PTY target: {error}");
+        let _ = write_start_gate_failure(&mut gate, &reason);
+        Err(TerminalError::PtyCreationFailed { reason })
     }
-    #[cfg(windows)]
+    #[cfg(not(unix))]
     {
-        let status = target
-            .status()
-            .map_err(|error| TerminalError::PtyCreationFailed {
-                reason: format!("execute released PTY target: {error}"),
+        let mut child = target.spawn().map_err(|error| {
+            let reason = format!("execute released PTY target: {error}");
+            let _ = write_start_gate_failure(&mut gate, &reason);
+            TerminalError::PtyCreationFailed { reason }
+        })?;
+        gate.write_all(&[START_GATE_TARGET_READY])
+            .and_then(|()| gate.flush())
+            .map_err(|error| TerminalError::PtyIoError {
+                details: format!("confirm released PTY target: {error}"),
             })?;
+        drop(gate);
+        let status = child.wait().map_err(|error| TerminalError::PtyIoError {
+            details: format!("wait for released PTY target: {error}"),
+        })?;
         Ok(status.code().unwrap_or(1))
     }
-    #[cfg(not(any(unix, windows)))]
-    {
-        let status = target
-            .status()
-            .map_err(|error| TerminalError::PtyCreationFailed {
-                reason: format!("execute released PTY target: {error}"),
-            })?;
-        Ok(status.code().unwrap_or(1))
-    }
+}
+
+fn write_start_gate_failure(gate: &mut TcpStream, reason: &str) -> std::io::Result<()> {
+    let encoded = reason.as_bytes();
+    let encoded = &encoded[..encoded.len().min(START_GATE_ERROR_MAX_BYTES)];
+    let len = u32::try_from(encoded.len()).expect("start-gate error is capped below u32::MAX");
+    gate.write_all(&[START_GATE_TARGET_FAILED])?;
+    gate.write_all(&len.to_be_bytes())?;
+    gate.write_all(encoded)?;
+    gate.flush()
 }
 
 impl PtyInputState {

@@ -265,7 +265,12 @@ hook は同期的な `gwt hook ...` dispatch にフォールバックし、複�
   と Board 投稿本文の出力言語を `Auto / English / 日本語` から選択できます
   (Auto は OS locale を参照し、`C` / `POSIX` や未設定時は English にフォール
   バック)。設定はグローバルで `~/.gwt/config.toml` の `[ai].language` に保存
-  されます。UI 文言は引き続き英語固定です (SPEC-1933 NFR-005)。
+  されます。UI 文言は引き続き英語固定です (SPEC-1933 NFR-005)。同じタブの
+  **Protect GUI from agent workloads** は既定で有効です。新しく起動する agent
+  process tree を below-normal priority にし、Windows では Job Object の CPU cap、
+  Cargo では Issue Monitor の `max_active` で割った並列数を適用します。CPU と
+  Cargo の欄を空にすると自動予算、値を入れると明示設定になり、
+  `[agent.resources]` に保存されます。変更は次回の agent 起動から反映されます。
 - `PR` — pull-request workflow surface。詳細な一覧機能は cache-backed PR source の整備に依存します
 
 `Agent` は coding agent セッション用の実プロセスウィンドウです。`Board` は

@@ -69,11 +69,12 @@ use super::{
     save_start_work_workspace_projection, save_workspace_launch_projection,
     set_scheduled_scan_after_lease_before_commit_test_hook, ActiveAgentSession,
     AgentKanbanLaunchTarget, AgentLaunchCompletion, AgentLaunchResult, AgentLaunchRuntimeContext,
-    AppEventProxy, AppRuntime, ApprovalPromptLatch, AttachmentProgressPhase, BlockingTaskSpawner,
-    CachedContinueWorkOutcome, ContinueWorkReadinessWatch, DispatchTarget,
-    IssueMonitorProfileSaveContext, KnowledgeLoadRequest, KnowledgeRefreshTask,
-    KnowledgeSearchRequest, LaunchFeedbackContext, LaunchPaneDisposition, LaunchWizardMemoryCache,
-    LaunchWizardSession, LocalIssueMonitorEffectOutcome, OutboundEvent, PendingContinueWork,
+    AgentResourcePolicyState, AppEventProxy, AppRuntime, ApprovalPromptLatch,
+    AttachmentProgressPhase, BlockingTaskSpawner, CachedContinueWorkOutcome,
+    ContinueWorkReadinessWatch, DispatchTarget, IssueMonitorProfileSaveContext,
+    KnowledgeLoadRequest, KnowledgeRefreshTask, KnowledgeSearchRequest, LaunchFeedbackContext,
+    LaunchPaneDisposition, LaunchWizardMemoryCache, LaunchWizardSession,
+    LocalIssueMonitorEffectOutcome, OutboundEvent, PendingContinueWork,
     PendingContinueWorkExecution, PendingFreshExecutionLaunch, ProcessLaunch, ProjectTabRuntime,
     ReadinessDeadlineDecision, ReadinessPaneEvidence, ScheduledIssueMonitorScanOutcome, UserEvent,
     WindowRuntime, WorkspaceLaunchProjectionKind, WorkspaceResumeContext,
@@ -261,6 +262,7 @@ fn process_launch_debug_redacts_agent_capability_and_session_identity() {
         remove_env: Vec::new(),
         cwd: None,
         pending_tool_runtime_migration: None,
+        agent_resource_policy: AgentResourcePolicyState::NotAgent,
     };
 
     let debug = format!("{launch:?}");
@@ -7281,6 +7283,7 @@ fn agent_launch_success_dispatches_launch_complete_before_project_index_status()
             remove_env: Vec::new(),
             cwd: Some(temp.path().to_path_buf()),
             pending_tool_runtime_migration: None,
+            agent_resource_policy: AgentResourcePolicyState::NotAgent,
         },
         "session-1".to_string(),
         "feature/test".to_string(),
@@ -12576,6 +12579,7 @@ fn genesis_pty_spawn_failure_terminalizes_generation_and_allows_successor_retry(
                 remove_env: Vec::new(),
                 cwd: Some(repo.clone()),
                 pending_tool_runtime_migration: None,
+                agent_resource_policy: AgentResourcePolicyState::NotAgent,
             },
             session_id.to_string(),
             "work/issue-2359".to_string(),
@@ -12756,6 +12760,7 @@ fn genesis_receipt_cleanup_failure_discards_published_work_and_active_owner() {
                 remove_env: Vec::new(),
                 cwd: Some(repo.clone()),
                 pending_tool_runtime_migration: None,
+                agent_resource_policy: AgentResourcePolicyState::NotAgent,
             },
             session_id.to_string(),
             "work/issue-2359".to_string(),
@@ -14740,6 +14745,80 @@ fn continue_work_ready_timeout_starts_only_after_pty_handoff() {
     assert!(
         last_ready_timeout > pty_handoff,
         "Continue work readiness timeout must be armed after successful PTY handoff"
+    );
+}
+
+#[test]
+fn agent_resource_policy_gates_both_launch_paths_while_shells_stay_direct() {
+    let source = include_str!("launch.rs");
+    let direct_start = source
+        .find("pub(crate) fn spawn_process_window_with_console_kind(")
+        .expect("direct process spawn path");
+    let bound_start = source[direct_start..]
+        .find("fn spawn_bound_process_window_with_console_kind(")
+        .map(|offset| direct_start + offset)
+        .expect("bound process spawn path");
+    let direct = &source[direct_start..bound_start];
+    assert!(direct.contains("match launch.agent_resource_policy.clone()"));
+    assert!(direct.contains("AgentResourcePolicyState::Deferred"));
+    assert!(direct.contains("prepare_agent_resource_policy_for_env("));
+    assert!(direct.contains("AgentResourcePolicyState::Prepared(policy)"));
+    assert!(direct.contains("AgentResourcePolicyState::NotAgent => None"));
+    assert!(direct.contains("new_pending_with_spawn_config_and_resource_policy"));
+    assert!(
+        direct.contains("Pane::new_with_spawn_config"),
+        "non-agent shells and disabled resource policies must retain direct spawn"
+    );
+
+    let bound = &source[bound_start..];
+    assert!(bound.contains("match launch.agent_resource_policy.clone()"));
+    assert!(bound.contains("AgentResourcePolicyState::Deferred"));
+    assert!(bound.contains("prepare_agent_resource_policy_for_env("));
+    assert!(bound.contains("AgentResourcePolicyState::Prepared(policy)"));
+    assert!(bound.contains("AgentResourcePolicyState::NotAgent => None"));
+    assert!(bound.contains("new_pending_with_spawn_config_and_resource_policy"));
+    assert!(
+        bound.contains("Pane::new_pending_with_spawn_config("),
+        "resource opt-out must preserve the existing authenticated start gate"
+    );
+}
+
+#[test]
+fn docker_agent_cargo_budget_is_prepared_before_exec_environment_materialization() {
+    let source = include_str!("launch.rs");
+    let worker_start = source
+        .find("fn spawn_agent_window_async_with_claim(")
+        .expect("agent launch worker");
+    let worker = &source[worker_start..];
+    let prepare = worker
+        .find("prepare_agent_resource_policy_for_env(")
+        .expect("agent resource policy preparation in launch worker");
+    let finalize = worker
+        .find("finalize_docker_agent_launch_config_with_runtime(")
+        .expect("Docker exec environment materialization");
+    assert!(
+        prepare < finalize,
+        "CARGO_BUILD_JOBS must enter config.env_vars before Docker -e arguments are materialized"
+    );
+    assert!(
+        worker.contains("AgentResourcePolicyState::Prepared(resource_policy)"),
+        "the policy snapshot prepared before Docker finalization must be reused at PTY spawn"
+    );
+}
+
+#[test]
+fn shell_launch_classification_cannot_enable_agent_resource_policy() {
+    let source = include_str!("../launch_runtime.rs");
+    let builder_start = source
+        .find("pub fn build_shell_process_launch(")
+        .expect("Shell process launch builder");
+    let builder = &source[builder_start..];
+    let shell_returns = builder
+        .matches("AgentResourcePolicyState::NotAgent")
+        .count();
+    assert_eq!(
+        shell_returns, 2,
+        "both Host and Docker Shell launch results must explicitly opt out of agent policy"
     );
 }
 
@@ -24278,6 +24357,7 @@ fn fresh_execution_launch_completion_recovers_prepared_receipt_and_defers_projec
                 remove_env: Vec::new(),
                 cwd: Some(fixture.repo.clone()),
                 pending_tool_runtime_migration: None,
+                agent_resource_policy: AgentResourcePolicyState::NotAgent,
             },
             fixture.candidate_session_id.clone(),
             "work/issue-2359".to_string(),
@@ -25072,6 +25152,7 @@ fn app_runtime_issue_monitor_launch_complete_marks_issue_launched_and_keeps_acti
                 remove_env: Vec::new(),
                 cwd: Some(repo.clone()),
                 pending_tool_runtime_migration: None,
+                agent_resource_policy: AgentResourcePolicyState::NotAgent,
             },
             "session-issue-42".to_string(),
             "work/issue-42".to_string(),
@@ -25211,6 +25292,7 @@ fn app_runtime_closing_issue_monitor_window_returns_issue_to_pending() {
                 remove_env: Vec::new(),
                 cwd: Some(repo.clone()),
                 pending_tool_runtime_migration: None,
+                agent_resource_policy: AgentResourcePolicyState::NotAgent,
             },
             "session-issue-42".to_string(),
             "work/issue-42".to_string(),
@@ -25712,6 +25794,7 @@ fn app_runtime_start_work_launch_completion_registers_unassigned_agent() {
                 remove_env: Vec::new(),
                 cwd: Some(worktree.clone()),
                 pending_tool_runtime_migration: None,
+                agent_resource_policy: AgentResourcePolicyState::NotAgent,
             },
             "session-1".to_string(),
             "work/20260504-1234".to_string(),
@@ -25803,6 +25886,7 @@ fn app_runtime_non_work_launch_registers_unassigned_agent() {
                 remove_env: Vec::new(),
                 cwd: Some(repo.clone()),
                 pending_tool_runtime_migration: None,
+                agent_resource_policy: AgentResourcePolicyState::NotAgent,
             },
             "session-develop".to_string(),
             "develop".to_string(),
@@ -25905,6 +25989,7 @@ fn app_runtime_linked_launch_projection_failure_is_visible_and_stops_session() {
                 remove_env: Vec::new(),
                 cwd: Some(worktree.clone()),
                 pending_tool_runtime_migration: None,
+                agent_resource_policy: AgentResourcePolicyState::NotAgent,
             },
             "session-projection-failure".to_string(),
             "work/issue-3412".to_string(),
@@ -26018,6 +26103,7 @@ fn app_runtime_workspace_resume_launch_completion_carries_context_to_projection(
                 remove_env: Vec::new(),
                 cwd: Some(worktree.clone()),
                 pending_tool_runtime_migration: None,
+                agent_resource_policy: AgentResourcePolicyState::NotAgent,
             },
             "session-1".to_string(),
             "work/20260507-0001".to_string(),
@@ -26115,6 +26201,7 @@ fn app_runtime_unlinked_resume_launch_completion_records_work_projection() {
                 remove_env: Vec::new(),
                 cwd: Some(worktree.clone()),
                 pending_tool_runtime_migration: None,
+                agent_resource_policy: AgentResourcePolicyState::NotAgent,
             },
             "session-unlinked-resume".to_string(),
             "work/issue-2359".to_string(),
@@ -26222,6 +26309,7 @@ fn automatic_resume_with_stale_execution_binding_completes_without_genesis_authe
                 remove_env: Vec::new(),
                 cwd: Some(worktree.clone()),
                 pending_tool_runtime_migration: None,
+                agent_resource_policy: AgentResourcePolicyState::NotAgent,
             },
             "session-stale-binding".to_string(),
             "work/stale-binding".to_string(),
@@ -26455,6 +26543,7 @@ fn app_runtime_issue_launch_completion_records_issue_owned_start_work_event() {
                 remove_env: Vec::new(),
                 cwd: Some(worktree.clone()),
                 pending_tool_runtime_migration: None,
+                agent_resource_policy: AgentResourcePolicyState::NotAgent,
             },
             "session-issue-3096".to_string(),
             "work/issue-3096".to_string(),
@@ -26551,6 +26640,7 @@ fn app_runtime_start_work_launch_completion_registers_multiple_unassigned_agents
             remove_env: Vec::new(),
             cwd: Some(cwd),
             pending_tool_runtime_migration: None,
+            agent_resource_policy: AgentResourcePolicyState::NotAgent,
         }
     };
 
@@ -29251,6 +29341,7 @@ fn bound_runtime_launch_completion(
             remove_env: Vec::new(),
             cwd: Some(repo.to_path_buf()),
             pending_tool_runtime_migration: None,
+            agent_resource_policy: AgentResourcePolicyState::NotAgent,
         },
         session_id.to_string(),
         "feature/demo".to_string(),

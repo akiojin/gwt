@@ -918,6 +918,18 @@ pub enum FrontendEvent {
         /// `None` leaves the persisted value unchanged.
         #[serde(default)]
         board_provider: Option<String>,
+        #[serde(default)]
+        agent_resource_enabled: Option<bool>,
+        #[serde(default)]
+        agent_resource_priority: Option<String>,
+        #[serde(default)]
+        agent_cpu_limit_percent: Option<u8>,
+        #[serde(default)]
+        agent_cpu_limit_automatic: Option<bool>,
+        #[serde(default)]
+        agent_cargo_build_jobs: Option<usize>,
+        #[serde(default)]
+        agent_cargo_build_jobs_automatic: Option<bool>,
     },
     /// SPEC #2920 Phase 11: Settings > System opened. Backend replies with
     /// the current OS autostart registration state for this user.
@@ -2216,6 +2228,12 @@ pub enum BackendEvent {
         /// SPEC-2959: current Board provider (`local` / `slack` / `teams`).
         #[serde(skip_serializing_if = "Option::is_none")]
         board_provider: Option<String>,
+        agent_resource_enabled: bool,
+        agent_resource_priority: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        agent_cpu_limit_percent: Option<u8>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        agent_cargo_build_jobs: Option<usize>,
     },
     /// SPEC-2963: remote Board provider sign-in state, the editable provider
     /// configuration (non-secret), and an optional status message. The settings
@@ -2279,6 +2297,12 @@ pub enum BackendEvent {
         /// SPEC-2959: persisted Board provider echoed back for reconciliation.
         #[serde(skip_serializing_if = "Option::is_none")]
         board_provider: Option<String>,
+        agent_resource_enabled: bool,
+        agent_resource_priority: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        agent_cpu_limit_percent: Option<u8>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        agent_cargo_build_jobs: Option<usize>,
     },
     /// SPEC-1933 US-4: error reply for [`FrontendEvent::GetSystemSettings`]
     /// or [`FrontendEvent::UpdateSystemSettings`]. `message` is
@@ -5032,6 +5056,48 @@ mod tests {
             }
             other => panic!("unexpected variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn system_settings_resource_policy_wire_contract() {
+        let payload = r#"{"kind":"update_system_settings","language":"en","agent_resource_enabled":true,"agent_resource_priority":"idle","agent_cpu_limit_percent":40,"agent_cpu_limit_automatic":false,"agent_cargo_build_jobs":3,"agent_cargo_build_jobs_automatic":false}"#;
+        let event: FrontendEvent =
+            serde_json::from_str(payload).expect("deserialize resource settings update");
+        match event {
+            FrontendEvent::UpdateSystemSettings {
+                agent_resource_enabled,
+                agent_resource_priority,
+                agent_cpu_limit_percent,
+                agent_cpu_limit_automatic,
+                agent_cargo_build_jobs,
+                agent_cargo_build_jobs_automatic,
+                ..
+            } => {
+                assert_eq!(agent_resource_enabled, Some(true));
+                assert_eq!(agent_resource_priority.as_deref(), Some("idle"));
+                assert_eq!(agent_cpu_limit_percent, Some(40));
+                assert_eq!(agent_cpu_limit_automatic, Some(false));
+                assert_eq!(agent_cargo_build_jobs, Some(3));
+                assert_eq!(agent_cargo_build_jobs_automatic, Some(false));
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+
+        let value = serde_json::to_value(BackendEvent::SystemSettingsUpdated {
+            language: "en".to_string(),
+            codex_trust_managed_hooks: Some(true),
+            board_provider: Some("local".to_string()),
+            agent_resource_enabled: true,
+            agent_resource_priority: "idle".to_string(),
+            agent_cpu_limit_percent: Some(40),
+            agent_cargo_build_jobs: Some(3),
+        })
+        .expect("serialize resource settings snapshot");
+        assert_eq!(value["kind"], "system_settings_updated");
+        assert_eq!(value["agent_resource_enabled"], true);
+        assert_eq!(value["agent_resource_priority"], "idle");
+        assert_eq!(value["agent_cpu_limit_percent"], 40);
+        assert_eq!(value["agent_cargo_build_jobs"], 3);
     }
 
     #[test]

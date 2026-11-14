@@ -280,6 +280,12 @@ Common windows include:
   the OS locale and falls back to English when the locale is `C` / `POSIX`
   or unavailable. The setting is global and persisted under `[ai].language`
   in `~/.gwt/config.toml`. UI labels stay English (see SPEC-1933 NFR-005).
+  **Protect GUI from agent workloads** is enabled by default in the same tab:
+  new agent process trees run below normal priority, Windows launches receive
+  a Job Object CPU cap, and Cargo parallelism is divided by the Issue Monitor
+  `max_active` value. Leave the CPU and Cargo fields blank for automatic
+  budgets, or set explicit values; changes apply to new launches and persist
+  under `[agent.resources]`.
 - `PR` — pull-request workflow surface; detailed list support depends on the
   cache-backed PR source as it lands
 

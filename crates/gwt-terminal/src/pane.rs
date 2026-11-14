@@ -230,6 +230,33 @@ impl Pane {
         })
     }
 
+    /// Create a gated pane and apply an operating-system resource policy
+    /// before the target process is allowed to run.
+    pub fn new_pending_with_spawn_config_and_resource_policy(
+        id: String,
+        config: SpawnConfig,
+        gate_program: PathBuf,
+        gate_args_prefix: Vec<String>,
+        nonce: impl Into<String>,
+        resource_policy: crate::pty::ProcessResourcePolicy,
+    ) -> Result<PendingPane, TerminalError> {
+        let rows = config.rows;
+        let cols = config.cols;
+        let pty = PtyHandle::spawn_pending_with_resource_policy(
+            config,
+            gate_program,
+            gate_args_prefix,
+            nonce,
+            resource_policy,
+        )?;
+        Ok(PendingPane {
+            id,
+            rows,
+            cols,
+            pty,
+        })
+    }
+
     /// Get the pane ID.
     pub fn id(&self) -> &str {
         &self.id

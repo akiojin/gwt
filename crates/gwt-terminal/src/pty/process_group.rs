@@ -9,6 +9,8 @@
 
 #[cfg(windows)]
 mod imp {
+    use super::super::{ProcessPriority, ProcessResourcePolicy};
+
     #[derive(Default)]
     pub struct ProcessGroup {
         job: Option<gwt_core::process_tree::WindowsJobObject>,
@@ -19,6 +21,25 @@ mod imp {
             gwt_core::process_tree::WindowsJobObject::attach_running(pid)
                 .map(|job| Self { job: Some(job) })
                 .map_err(|error| format!("Windows Job attach failed for child {pid}: {error}"))
+        }
+
+        pub fn apply_resource_policy(
+            &mut self,
+            pid: u32,
+            policy: ProcessResourcePolicy,
+        ) -> Result<(), String> {
+            let priority = match policy.priority {
+                ProcessPriority::Normal => gwt_core::process_tree::WindowsProcessPriority::Normal,
+                ProcessPriority::BelowNormal => {
+                    gwt_core::process_tree::WindowsProcessPriority::BelowNormal
+                }
+                ProcessPriority::Idle => gwt_core::process_tree::WindowsProcessPriority::Idle,
+            };
+            self.job
+                .as_ref()
+                .ok_or_else(|| "Windows Job is unavailable".to_string())?
+                .apply_running_policy(pid, priority, policy.cpu_limit_percent)
+                .map_err(|error| format!("Windows Job policy failed for child {pid}: {error}"))
         }
 
         /// Synchronously terminate every process in the group.
@@ -40,6 +61,7 @@ mod imp {
 
 #[cfg(unix)]
 mod imp {
+    use super::super::{ProcessPriority, ProcessResourcePolicy};
     use nix::{
         errno::Errno,
         sys::signal::{killpg, Signal},
@@ -60,6 +82,35 @@ mod imp {
             })
         }
 
+        pub fn apply_resource_policy(
+            &mut self,
+            pid: u32,
+            policy: ProcessResourcePolicy,
+        ) -> Result<(), String> {
+            let requested_nice = match policy.priority {
+                ProcessPriority::Normal => 0,
+                ProcessPriority::BelowNormal => 10,
+                ProcessPriority::Idle => 19,
+            };
+            let inherited_nice = process_nice(pid)?;
+            let nice = inherited_nice.max(requested_nice);
+            // SAFETY: the PID was returned by the successful PTY spawn and is
+            // blocked behind the trusted start gate handshake.
+            if unsafe { libc::setpriority(libc::PRIO_PROCESS, pid, nice) } != 0 {
+                return Err(format!(
+                    "setpriority({pid}, {nice}) failed: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            let observed = process_nice(pid)?;
+            if observed != nice {
+                return Err(format!(
+                    "setpriority({pid}, {nice}) did not stick: observed {observed}"
+                ));
+            }
+            Ok(())
+        }
+
         /// Signal every process in the group without waiting for reap.
         ///
         /// Idempotent: subsequent calls (including via `Drop`) become no-ops.
@@ -75,6 +126,22 @@ mod imp {
                 Err(error) => tracing::debug!(?pgid, %error, "killpg SIGKILL failed"),
             }
         }
+    }
+
+    fn process_nice(pid: u32) -> Result<i32, String> {
+        // `getpriority` may legitimately return -1, so errno must be cleared
+        // and inspected separately instead of treating -1 as an unconditional
+        // error sentinel.
+        Errno::clear();
+        let nice = unsafe { libc::getpriority(libc::PRIO_PROCESS, pid) };
+        let errno = Errno::last_raw();
+        if nice == -1 && errno != 0 {
+            return Err(format!(
+                "getpriority({pid}) failed: {}",
+                std::io::Error::from_raw_os_error(errno)
+            ));
+        }
+        Ok(nice)
     }
 
     impl Drop for ProcessGroup {

@@ -559,6 +559,7 @@ pub fn build_shell_process_launch(
             remove_env,
             cwd: Some(worktree),
             pending_tool_runtime_migration: None,
+            agent_resource_policy: AgentResourcePolicyState::NotAgent,
         });
     }
 
@@ -593,6 +594,7 @@ pub fn build_shell_process_launch(
         remove_env: Vec::new(),
         cwd: Some(worktree),
         pending_tool_runtime_migration: None,
+        agent_resource_policy: AgentResourcePolicyState::NotAgent,
     })
 }
 

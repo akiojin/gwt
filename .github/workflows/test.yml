@@ -113,6 +113,12 @@ jobs:
       - name: Run Windows PTY resolver adapter tests
         run: cargo test -p gwt-terminal --lib pty::windows_spawn::tests -- --test-threads=1
         timeout-minutes: 15
+      - name: Run Windows agent resource policy tests
+        shell: bash
+        run: |
+          cargo test -p gwt-core --lib windows_job_roundtrips_kill_on_close_and_cpu_hard_cap -- --test-threads=1
+          cargo test -p gwt-terminal --test pty_start_gate_test -- --test-threads=1
+        timeout-minutes: 15
       # Issue #3631: a GUI-subsystem PTY start gate is never attached to the
       # pane's pseudoconsole, so the released agent renders in an external
       # Windows Terminal window. Both guards are Windows-only and would be

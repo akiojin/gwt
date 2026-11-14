@@ -36,12 +36,12 @@ export function createSettingsSurface({
   indexStatusByProjectRoot,
 }) {
       // Issue #2698 PR 4 — same guard applied to the System Settings
-      // Output Language `<select>`. Backend echoes `system_settings`
+      // native controls. Backend echoes `system_settings`
       // and `system_settings_updated` events; if either arrives while
       // the user has the dropdown open, `renderSystemPanel()` does a
       // `while (panel.firstChild) panel.removeChild(panel.firstChild)`
       // pass that destroys the live `<select>` and breaks the user's
-      // commit. Delegated listeners scope to `select.settings-select`
+      // commit. Delegated listeners scope to Operator settings primitives
       // so the guard covers every Settings window without per-window
       // wiring.
       function applyAutostartStatus(event, statusMessage = "") {
@@ -74,6 +74,14 @@ export function createSettingsSurface({
             systemSettingsState.language = deferred.language || "auto";
             systemSettingsState.codexTrustManagedHooks =
               deferred.codex_trust_managed_hooks !== false;
+            systemSettingsState.agentResourceEnabled =
+              deferred.agent_resource_enabled !== false;
+            systemSettingsState.agentResourcePriority =
+              deferred.agent_resource_priority || "below_normal";
+            systemSettingsState.agentCpuLimitPercent =
+              deferred.agent_cpu_limit_percent ?? null;
+            systemSettingsState.agentCargoBuildJobs =
+              deferred.agent_cargo_build_jobs ?? null;
             systemSettingsState.boardProvider =
               deferred.board_provider || systemSettingsState.boardProvider || "local";
             systemSettingsState.loaded = true;
@@ -89,6 +97,14 @@ export function createSettingsSurface({
               || systemSettingsState.language;
             systemSettingsState.codexTrustManagedHooks =
               deferred.codex_trust_managed_hooks !== false;
+            systemSettingsState.agentResourceEnabled =
+              deferred.agent_resource_enabled !== false;
+            systemSettingsState.agentResourcePriority =
+              deferred.agent_resource_priority || "below_normal";
+            systemSettingsState.agentCpuLimitPercent =
+              deferred.agent_cpu_limit_percent ?? null;
+            systemSettingsState.agentCargoBuildJobs =
+              deferred.agent_cargo_build_jobs ?? null;
             systemSettingsState.boardProvider =
               deferred.board_provider || systemSettingsState.boardProvider || "local";
             systemSettingsState.statusMessage = "Saved system settings.";
@@ -135,6 +151,10 @@ export function createSettingsSurface({
       const systemSettingsState = {
         language: "auto",
         codexTrustManagedHooks: true,
+        agentResourceEnabled: true,
+        agentResourcePriority: "below_normal",
+        agentCpuLimitPercent: null,
+        agentCargoBuildJobs: null,
         // SPEC-2959/2963: selected Board backend (local/slack/teams).
         boardProvider: "local",
         // SPEC-2963: remote provider sign-in state + last sign-in message.
@@ -585,6 +605,110 @@ export function createSettingsSurface({
           "Enabled by default. Registers only generated gwt hook commands in Codex hook trust state.";
         trustSection.appendChild(trustHelp);
 
+        const resourceSection = createDiv("settings-section");
+        const resourceLabel = document.createElement("label");
+        resourceLabel.className = "settings-checkbox-label";
+        resourceLabel.setAttribute("for", "settings-system-agent-resources");
+
+        const resourceCheckbox = document.createElement("input");
+        resourceCheckbox.type = "checkbox";
+        resourceCheckbox.className = "settings-checkbox";
+        resourceCheckbox.id = "settings-system-agent-resources";
+        resourceCheckbox.checked = systemSettingsState.agentResourceEnabled !== false;
+        resourceCheckbox.addEventListener("change", (event) => {
+          systemSettingsState.agentResourceEnabled = event.target.checked === true;
+          saveAgentResourceSettings(panel);
+        });
+
+        const resourceText = document.createElement("span");
+        resourceText.textContent = "Protect GUI from agent workloads";
+        resourceLabel.appendChild(resourceCheckbox);
+        resourceLabel.appendChild(resourceText);
+        resourceSection.appendChild(resourceLabel);
+
+        const resourceHelp = document.createElement("p");
+        resourceHelp.className = "settings-help";
+        resourceHelp.textContent =
+          "Enabled by default. Applies lower priority, a Windows CPU cap, and cargo parallelism to new agent process trees.";
+        resourceSection.appendChild(resourceHelp);
+
+        const priorityLabel = document.createElement("label");
+        priorityLabel.className = "settings-label";
+        priorityLabel.setAttribute("for", "settings-system-agent-priority");
+        priorityLabel.textContent = "Agent process priority";
+        resourceSection.appendChild(priorityLabel);
+
+        const prioritySelect = document.createElement("select");
+        prioritySelect.className = "settings-select";
+        prioritySelect.id = "settings-system-agent-priority";
+        for (const optionSpec of [
+          { value: "normal", text: "Normal" },
+          { value: "below_normal", text: "Below normal" },
+          { value: "idle", text: "Idle" },
+        ]) {
+          const option = document.createElement("option");
+          option.value = optionSpec.value;
+          option.textContent = optionSpec.text;
+          prioritySelect.appendChild(option);
+        }
+        prioritySelect.value = systemSettingsState.agentResourcePriority || "below_normal";
+        prioritySelect.addEventListener("change", (event) => {
+          systemSettingsState.agentResourcePriority = event.target.value;
+          saveAgentResourceSettings(panel);
+        });
+        resourceSection.appendChild(prioritySelect);
+
+        const appendAutomaticNumber = ({ id, labelText, max, stateKey }) => {
+          const field = createDiv("settings-field");
+          const fieldLabel = document.createElement("label");
+          fieldLabel.className = "settings-label";
+          fieldLabel.setAttribute("for", id);
+          fieldLabel.textContent = labelText;
+          field.appendChild(fieldLabel);
+
+          const input = document.createElement("input");
+          input.type = "number";
+          input.className = "settings-input";
+          input.id = id;
+          input.min = "1";
+          input.step = "1";
+          if (max) input.max = String(max);
+          input.placeholder = "Auto";
+          input.value = systemSettingsState[stateKey] ?? "";
+          input.addEventListener("change", (event) => {
+            const raw = event.target.value.trim();
+            const value = raw === "" ? null : Number(raw);
+            if (
+              value !== null
+              && (!Number.isInteger(value) || value < 1 || (max && value > max))
+            ) {
+              systemSettingsState.statusMessage = max
+                ? `Enter a value from 1 to ${max}, or leave blank for Auto.`
+                : "Enter a value of at least 1, or leave blank for Auto.";
+              systemSettingsState.statusKind = "error";
+              renderSystemPanelStatus(panel);
+              return;
+            }
+            systemSettingsState[stateKey] = value;
+            saveAgentResourceSettings(panel);
+          });
+          field.appendChild(input);
+          resourceSection.appendChild(field);
+        };
+
+        appendAutomaticNumber({
+          id: "settings-system-agent-cpu-limit",
+          labelText: "Agent CPU limit (Windows, %)",
+          max: 100,
+          stateKey: "agentCpuLimitPercent",
+        });
+        appendAutomaticNumber({
+          id: "settings-system-agent-cargo-jobs",
+          labelText: "Cargo build jobs per agent",
+          max: null,
+          stateKey: "agentCargoBuildJobs",
+        });
+
         // SPEC-2959/2963: Board provider selector. `local` keeps the Board
         // offline; `slack` / `teams` are network-backed and selectable. Picking
         // a remote provider reveals its config form (client id / channel /
@@ -947,6 +1071,7 @@ export function createSettingsSurface({
 
         panel.appendChild(section);
         panel.appendChild(trustSection);
+        panel.appendChild(resourceSection);
         panel.appendChild(boardSection);
         panel.appendChild(autostartSection);
         renderSystemPanelStatus(panel);
@@ -963,6 +1088,24 @@ export function createSettingsSurface({
         } else {
           delete status.dataset.kind;
         }
+      }
+
+      function saveAgentResourceSettings(panel) {
+        systemSettingsState.statusMessage = "Saving…";
+        systemSettingsState.statusKind = "info";
+        renderSystemPanelStatus(panel);
+        send({
+          kind: "update_system_settings",
+          language: systemSettingsState.language || "auto",
+          agent_resource_enabled: systemSettingsState.agentResourceEnabled !== false,
+          agent_resource_priority:
+            systemSettingsState.agentResourcePriority || "below_normal",
+          agent_cpu_limit_percent: systemSettingsState.agentCpuLimitPercent,
+          agent_cpu_limit_automatic: systemSettingsState.agentCpuLimitPercent === null,
+          agent_cargo_build_jobs: systemSettingsState.agentCargoBuildJobs,
+          agent_cargo_build_jobs_automatic:
+            systemSettingsState.agentCargoBuildJobs === null,
+        });
       }
 
       function renderSystemPanelInAllSettingsWindows() {

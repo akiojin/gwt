@@ -74,9 +74,9 @@ pub(crate) use app_runtime::{
     build_frontend_sync_events, KnowledgeLoadRequest, LaunchWizardSession,
 };
 pub(crate) use app_runtime::{
-    ActiveAgentSession, AgentFrontendDispatchOutcome, AgentLaunchResult, AppEventProxy, AppRuntime,
-    BlockingTaskSpawner, ContinueWorkReadinessWatch, DispatchTarget, IssueLaunchWizardPrepared,
-    OutboundEvent, ProcessLaunch, ProjectOpenTarget, ProjectTabRuntime,
+    ActiveAgentSession, AgentFrontendDispatchOutcome, AgentLaunchResult, AgentResourcePolicyState,
+    AppEventProxy, AppRuntime, BlockingTaskSpawner, ContinueWorkReadinessWatch, DispatchTarget,
+    IssueLaunchWizardPrepared, OutboundEvent, ProcessLaunch, ProjectOpenTarget, ProjectTabRuntime,
     ScheduledIssueMonitorScanOutcome, WindowAddress, WindowCloseMonitorResult,
 };
 pub(crate) use attachment_upload::{AttachmentUploadStore, UploadedAttachment};
@@ -1639,9 +1639,10 @@ mod tests {
         hook_forward_authorized, install_launch_gwt_bin_env_with_lookup, knowledge_kind_for_preset,
         logging_dir_for_startup_path, resolve_project_target, should_auto_close_agent_window,
         should_auto_start_restored_window, ActiveAgentSession, AgentFrontendDispatchOutcome,
-        AppEventProxy, AppRuntime, AttachmentUploadStore, BlockingTaskSpawner, ClientHub,
-        DispatchTarget, KnowledgeLoadRequest, LaunchWizardMemoryCache, LaunchWizardSession,
-        OutboundEvent, ProcessLaunch, ProjectTabRuntime, UserEvent, WindowAddress,
+        AgentResourcePolicyState, AppEventProxy, AppRuntime, AttachmentUploadStore,
+        BlockingTaskSpawner, ClientHub, DispatchTarget, KnowledgeLoadRequest,
+        LaunchWizardMemoryCache, LaunchWizardSession, OutboundEvent, ProcessLaunch,
+        ProjectTabRuntime, UserEvent, WindowAddress,
     };
 
     fn canvas_bounds() -> WindowGeometry {
@@ -4520,6 +4521,7 @@ mod tests {
                     remove_env: Vec::new(),
                     cwd: None,
                     pending_tool_runtime_migration: None,
+                    agent_resource_policy: AgentResourcePolicyState::NotAgent,
                 },
                 "session-3".to_string(),
                 "feature/demo".to_string(),
@@ -4554,6 +4556,7 @@ mod tests {
                 remove_env: Vec::new(),
                 cwd: None,
                 pending_tool_runtime_migration: None,
+                agent_resource_policy: AgentResourcePolicyState::NotAgent,
             }),
         );
         assert!(matches!(
@@ -5638,6 +5641,7 @@ mod tests {
                     remove_env: Vec::new(),
                     cwd: None,
                     pending_tool_runtime_migration: None,
+                    agent_resource_policy: AgentResourcePolicyState::NotAgent,
                 },
                 "session-1".to_string(),
                 "feature/demo".to_string(),
@@ -5681,6 +5685,7 @@ mod tests {
                     remove_env: Vec::new(),
                     cwd: None,
                     pending_tool_runtime_migration: None,
+                    agent_resource_policy: AgentResourcePolicyState::NotAgent,
                 },
                 "session-2".to_string(),
                 "feature/demo".to_string(),
@@ -5715,6 +5720,7 @@ mod tests {
                 remove_env: Vec::new(),
                 cwd: None,
                 pending_tool_runtime_migration: None,
+                agent_resource_policy: AgentResourcePolicyState::NotAgent,
             }),
         );
         assert!(matches!(
@@ -5737,6 +5743,7 @@ mod tests {
                 remove_env: Vec::new(),
                 cwd: None,
                 pending_tool_runtime_migration: None,
+                agent_resource_policy: AgentResourcePolicyState::NotAgent,
             }),
         );
         assert!(matches!(

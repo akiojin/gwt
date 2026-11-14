@@ -18,12 +18,17 @@ mod windows_job {
             Foundation::{CloseHandle, HANDLE},
             System::{
                 JobObjects::{
-                    AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
-                    QueryInformationJobObject, SetInformationJobObject,
-                    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+                    AssignProcessToJobObject, CreateJobObjectW, JobObjectCpuRateControlInformation,
+                    JobObjectExtendedLimitInformation, QueryInformationJobObject,
+                    SetInformationJobObject, JOBOBJECT_CPU_RATE_CONTROL_INFORMATION,
+                    JOBOBJECT_CPU_RATE_CONTROL_INFORMATION_0, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+                    JOB_OBJECT_CPU_RATE_CONTROL_ENABLE, JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP,
+                    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
                 },
                 Threading::{
-                    OpenProcess, PROCESS_SET_QUOTA, PROCESS_SUSPEND_RESUME, PROCESS_TERMINATE,
+                    OpenProcess, SetPriorityClass, BELOW_NORMAL_PRIORITY_CLASS,
+                    IDLE_PRIORITY_CLASS, NORMAL_PRIORITY_CLASS, PROCESS_SET_INFORMATION,
+                    PROCESS_SET_QUOTA, PROCESS_SUSPEND_RESUME, PROCESS_TERMINATE,
                 },
             },
         },
@@ -41,6 +46,7 @@ mod windows_job {
 
     #[derive(Debug)]
     pub enum WindowsJobError {
+        InvalidCpuRate(u8),
         Operation {
             operation: &'static str,
             source: WindowsError,
@@ -50,6 +56,9 @@ mod windows_job {
     impl std::fmt::Display for WindowsJobError {
         fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             match self {
+                Self::InvalidCpuRate(percent) => {
+                    write!(formatter, "invalid Job CPU rate {percent}%")
+                }
                 Self::Operation { operation, .. } => write!(formatter, "{operation} failed"),
             }
         }
@@ -58,9 +67,17 @@ mod windows_job {
     impl std::error::Error for WindowsJobError {
         fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
             match self {
+                Self::InvalidCpuRate(_) => None,
                 Self::Operation { source, .. } => Some(source),
             }
         }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum WindowsProcessPriority {
+        Normal,
+        BelowNormal,
+        Idle,
     }
 
     struct ScopedHandle(HANDLE);
@@ -132,6 +149,21 @@ mod windows_job {
             let mut job = Self::new()?;
             job.assign_process(process_id)?;
             Ok(job)
+        }
+
+        /// Apply scheduling and CPU controls to a gate helper that is already
+        /// owned by this Job. The caller keeps the real target blocked until
+        /// this method succeeds.
+        pub fn apply_running_policy(
+            &self,
+            process_id: u32,
+            priority: WindowsProcessPriority,
+            cpu_limit_percent: Option<u8>,
+        ) -> Result<(), WindowsJobError> {
+            if let Some(percent) = cpu_limit_percent {
+                self.set_cpu_rate_limit(percent)?;
+            }
+            set_process_priority(process_id, priority)
         }
 
         /// Assign a newly-created suspended process, then resume its sole
@@ -224,6 +256,32 @@ mod windows_job {
             unsafe { AssignProcessToJobObject(job, process.0) }
                 .map_err(|source| operation_error("AssignProcessToJobObject", source))
         }
+
+        fn set_cpu_rate_limit(&self, percent: u8) -> Result<(), WindowsJobError> {
+            if !(1..=100).contains(&percent) {
+                return Err(WindowsJobError::InvalidCpuRate(percent));
+            }
+            let job = self.handle.expect("live Windows Job handle");
+            let info = JOBOBJECT_CPU_RATE_CONTROL_INFORMATION {
+                ControlFlags: JOB_OBJECT_CPU_RATE_CONTROL_ENABLE
+                    | JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP,
+                Anonymous: JOBOBJECT_CPU_RATE_CONTROL_INFORMATION_0 {
+                    CpuRate: u32::from(percent) * 100,
+                },
+            };
+            let info_size = std::mem::size_of::<JOBOBJECT_CPU_RATE_CONTROL_INFORMATION>() as u32;
+            // SAFETY: `info` is the exact structure required by the CPU rate
+            // information class and remains live for the duration of the call.
+            unsafe {
+                SetInformationJobObject(
+                    job,
+                    JobObjectCpuRateControlInformation,
+                    &info as *const _ as _,
+                    info_size,
+                )
+            }
+            .map_err(|source| operation_error("SetInformationJobObject(CpuRate)", source))
+        }
     }
 
     impl Drop for WindowsJobObject {
@@ -258,13 +316,80 @@ mod windows_job {
         Ok(())
     }
 
+    fn set_process_priority(
+        process_id: u32,
+        priority: WindowsProcessPriority,
+    ) -> Result<(), WindowsJobError> {
+        let process = unsafe { OpenProcess(PROCESS_SET_INFORMATION, false, process_id) }
+            .map(ScopedHandle)
+            .map_err(|source| operation_error("OpenProcess(priority)", source))?;
+        let priority_class = match priority {
+            WindowsProcessPriority::Normal => NORMAL_PRIORITY_CLASS,
+            WindowsProcessPriority::BelowNormal => BELOW_NORMAL_PRIORITY_CLASS,
+            WindowsProcessPriority::Idle => IDLE_PRIORITY_CLASS,
+        };
+        // SAFETY: the handle is live and opened with PROCESS_SET_INFORMATION.
+        unsafe { SetPriorityClass(process.0, priority_class) }
+            .map_err(|source| operation_error("SetPriorityClass", source))
+    }
+
     fn operation_error(operation: &'static str, source: WindowsError) -> WindowsJobError {
         WindowsJobError::Operation { operation, source }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn windows_job_roundtrips_kill_on_close_and_cpu_hard_cap() {
+            let job = WindowsJobObject::new().expect("create test Job");
+            job.set_cpu_rate_limit(33).expect("set test CPU hard cap");
+            let handle = job.handle.expect("live test Job handle");
+
+            let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+            unsafe {
+                QueryInformationJobObject(
+                    Some(handle),
+                    JobObjectExtendedLimitInformation,
+                    &mut limits as *mut _ as _,
+                    std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                    None,
+                )
+            }
+            .expect("query Job extended limits");
+            assert!(
+                limits
+                    .BasicLimitInformation
+                    .LimitFlags
+                    .contains(JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE),
+                "resource policy must retain kill-on-close ownership"
+            );
+
+            let mut cpu = JOBOBJECT_CPU_RATE_CONTROL_INFORMATION::default();
+            unsafe {
+                QueryInformationJobObject(
+                    Some(handle),
+                    JobObjectCpuRateControlInformation,
+                    &mut cpu as *mut _ as _,
+                    std::mem::size_of::<JOBOBJECT_CPU_RATE_CONTROL_INFORMATION>() as u32,
+                    None,
+                )
+            }
+            .expect("query Job CPU hard cap");
+            assert!(cpu
+                .ControlFlags
+                .contains(JOB_OBJECT_CPU_RATE_CONTROL_ENABLE));
+            assert!(cpu
+                .ControlFlags
+                .contains(JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP));
+            assert_eq!(unsafe { cpu.Anonymous.CpuRate }, 3_300);
+        }
     }
 }
 
 #[cfg(windows)]
-pub use windows_job::{WindowsJobError, WindowsJobObject};
+pub use windows_job::{WindowsJobError, WindowsJobObject, WindowsProcessPriority};
 
 #[cfg(test)]
 mod tests {
@@ -332,6 +457,38 @@ mod tests {
         assert!(release.contains("SetInformationJobObject"));
         assert!(
             release.find("CloseHandle(job)").unwrap() < release.find("self.handle = None").unwrap()
+        );
+    }
+
+    #[test]
+    fn windows_job_agent_policy_contract_uses_hard_cap_and_lower_priority() {
+        let source = include_str!("process_tree.rs");
+        assert!(source.contains("JobObjectCpuRateControlInformation"));
+        assert!(source.contains("JOB_OBJECT_CPU_RATE_CONTROL_ENABLE"));
+        assert!(source.contains("JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP"));
+        assert!(source.contains("CpuRate: u32::from(percent) * 100"));
+        assert!(source.contains("BELOW_NORMAL_PRIORITY_CLASS"));
+        assert!(source.contains("SetPriorityClass"));
+
+        let attach = source
+            .split("pub fn attach_running(process_id")
+            .nth(1)
+            .and_then(|tail| tail.split("/// Apply scheduling").next())
+            .expect("plain Job attachment path");
+        assert!(attach.contains("assign_process(process_id)"));
+        assert!(
+            !attach.contains("set_cpu_rate_limit") && !attach.contains("set_process_priority"),
+            "plain and resource-disabled PTYs must retain their inherited priority"
+        );
+
+        let apply = source
+            .split("pub fn apply_running_policy")
+            .nth(1)
+            .and_then(|tail| tail.split("/// Assign a newly-created").next())
+            .expect("gated agent policy path");
+        assert!(
+            apply.find("set_cpu_rate_limit").unwrap() < apply.find("set_process_priority").unwrap(),
+            "the gated Job CPU cap must be configured before its scheduling class"
         );
     }
 }

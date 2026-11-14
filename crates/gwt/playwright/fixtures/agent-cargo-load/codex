@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+
+benchmark_dir="${GWT_AGENT_RESOURCE_BENCHMARK_DIR:?missing benchmark directory}"
+marker="$benchmark_dir/started-$$"
+target_dir="$benchmark_dir/target-$$"
+observed_nice="$(ps -o ni= -p $$ | tr -d ' ')"
+
+printf 'cargo_build_jobs=%s\nnice=%s\n' "${CARGO_BUILD_JOBS:-}" "$observed_nice" >"$marker"
+exec cargo build -p gwt --bin gwtd --target-dir "$target_dir"

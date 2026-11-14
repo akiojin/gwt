@@ -16,7 +16,7 @@
 
 use std::path::Path;
 
-use gwt_config::{BoardProviderKind, Settings};
+use gwt_config::{AgentProcessPriority, AgentResourceConfig, BoardProviderKind, Settings};
 
 use crate::protocol::BackendEvent;
 
@@ -28,6 +28,8 @@ pub enum SystemSettingsError {
     InvalidLanguage(String),
     #[error("invalid board provider `{0}`: expected `local`, `slack`, or `teams`")]
     InvalidBoardProvider(String),
+    #[error("invalid agent resource setting: {0}")]
+    InvalidAgentResource(String),
     #[error("config storage error: {0}")]
     Storage(String),
 }
@@ -44,6 +46,17 @@ pub struct SystemSettingsSnapshot {
     pub language: String,
     pub codex_trust_managed_hooks: Option<bool>,
     pub board_provider: String,
+    pub agent_resources: AgentResourceConfig,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AgentResourceSettingsUpdate {
+    pub enabled: Option<bool>,
+    pub priority: Option<String>,
+    pub cpu_limit_percent: Option<u8>,
+    pub cpu_limit_automatic: Option<bool>,
+    pub cargo_build_jobs: Option<usize>,
+    pub cargo_build_jobs_automatic: Option<bool>,
 }
 
 /// Validate that `value` is one of [`ALLOWED_BOARD_PROVIDERS`] (case-insensitive,
@@ -92,6 +105,7 @@ pub fn read_settings(path: &Path) -> Result<SystemSettingsSnapshot, SystemSettin
             .unwrap_or_else(|| "auto".to_string()),
         codex_trust_managed_hooks: Some(codex_trust_managed_hooks_enabled(&settings)),
         board_provider: settings.board.provider.as_str().to_string(),
+        agent_resources: settings.agent.resources,
     })
 }
 
@@ -99,7 +113,14 @@ pub fn read_settings(path: &Path) -> Result<SystemSettingsSnapshot, SystemSettin
 /// canonical value that was written so the dispatch layer can echo it
 /// back to the frontend.
 pub fn write_language(path: &Path, language: &str) -> Result<String, SystemSettingsError> {
-    Ok(write_settings(path, language, None, None)?.language)
+    Ok(write_settings(
+        path,
+        language,
+        None,
+        None,
+        AgentResourceSettingsUpdate::default(),
+    )?
+    .language)
 }
 
 pub fn write_settings(
@@ -107,11 +128,19 @@ pub fn write_settings(
     language: &str,
     codex_trust_managed_hooks: Option<bool>,
     board_provider: Option<&str>,
+    agent_resources: AgentResourceSettingsUpdate,
 ) -> Result<SystemSettingsSnapshot, SystemSettingsError> {
     let canonical = validate_language(language)?;
     // Validate the provider (if supplied) before touching disk so an invalid
     // value never half-writes config.
     let provider = board_provider.map(validate_board_provider).transpose()?;
+    let resource_priority = agent_resources
+        .priority
+        .as_deref()
+        .map(validate_agent_priority)
+        .transpose()?;
+    let cpu_limit_percent = validate_optional_cpu_limit(&agent_resources)?;
+    let cargo_build_jobs = validate_optional_cargo_jobs(&agent_resources)?;
     let mut settings = if path.exists() {
         Settings::load_from_path(path)
             .map_err(|err| SystemSettingsError::Storage(err.to_string()))?
@@ -128,6 +157,18 @@ pub fn write_settings(
         // selection fresh from config on each call, so the persisted value
         // takes effect immediately (FR-008).
     }
+    if let Some(enabled) = agent_resources.enabled {
+        settings.agent.resources.enabled = enabled;
+    }
+    if let Some(priority) = resource_priority {
+        settings.agent.resources.priority = priority;
+    }
+    if let Some(value) = cpu_limit_percent {
+        settings.agent.resources.cpu_limit_percent = value;
+    }
+    if let Some(value) = cargo_build_jobs {
+        settings.agent.resources.cargo_build_jobs = value;
+    }
     settings
         .save(path)
         .map_err(|err| SystemSettingsError::Storage(err.to_string()))?;
@@ -135,7 +176,59 @@ pub fn write_settings(
         language: canonical,
         codex_trust_managed_hooks: Some(codex_trust_managed_hooks_enabled(&settings)),
         board_provider: settings.board.provider.as_str().to_string(),
+        agent_resources: settings.agent.resources,
     })
+}
+
+fn validate_agent_priority(value: &str) -> Result<AgentProcessPriority, SystemSettingsError> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "normal" => Ok(AgentProcessPriority::Normal),
+        "below_normal" => Ok(AgentProcessPriority::BelowNormal),
+        "idle" => Ok(AgentProcessPriority::Idle),
+        _ => Err(SystemSettingsError::InvalidAgentResource(format!(
+            "priority `{value}` must be normal, below_normal, or idle"
+        ))),
+    }
+}
+
+fn priority_name(priority: AgentProcessPriority) -> &'static str {
+    match priority {
+        AgentProcessPriority::Normal => "normal",
+        AgentProcessPriority::BelowNormal => "below_normal",
+        AgentProcessPriority::Idle => "idle",
+    }
+}
+
+fn validate_optional_cpu_limit(
+    update: &AgentResourceSettingsUpdate,
+) -> Result<Option<Option<u8>>, SystemSettingsError> {
+    match (update.cpu_limit_automatic, update.cpu_limit_percent) {
+        (Some(true), _) => Ok(Some(None)),
+        (Some(false), None) => Err(SystemSettingsError::InvalidAgentResource(
+            "CPU limit requires a percentage from 1 to 100".to_string(),
+        )),
+        (_, Some(value @ 1..=100)) => Ok(Some(Some(value))),
+        (_, Some(value)) => Err(SystemSettingsError::InvalidAgentResource(format!(
+            "CPU limit `{value}` must be from 1 to 100"
+        ))),
+        (None, None) => Ok(None),
+    }
+}
+
+fn validate_optional_cargo_jobs(
+    update: &AgentResourceSettingsUpdate,
+) -> Result<Option<Option<usize>>, SystemSettingsError> {
+    match (update.cargo_build_jobs_automatic, update.cargo_build_jobs) {
+        (Some(true), _) => Ok(Some(None)),
+        (Some(false), None) => Err(SystemSettingsError::InvalidAgentResource(
+            "cargo build jobs requires a value of at least 1".to_string(),
+        )),
+        (_, Some(0)) => Err(SystemSettingsError::InvalidAgentResource(
+            "cargo build jobs must be at least 1".to_string(),
+        )),
+        (_, Some(value)) => Ok(Some(Some(value))),
+        (None, None) => Ok(None),
+    }
 }
 
 fn codex_trust_managed_hooks_enabled(settings: &Settings) -> bool {
@@ -358,6 +451,10 @@ pub fn get_event(path: &Path) -> BackendEvent {
             language: snapshot.language,
             codex_trust_managed_hooks: snapshot.codex_trust_managed_hooks,
             board_provider: Some(snapshot.board_provider),
+            agent_resource_enabled: snapshot.agent_resources.enabled,
+            agent_resource_priority: priority_name(snapshot.agent_resources.priority).to_string(),
+            agent_cpu_limit_percent: snapshot.agent_resources.cpu_limit_percent,
+            agent_cargo_build_jobs: snapshot.agent_resources.cargo_build_jobs,
         },
         Err(err) => BackendEvent::SystemSettingsError {
             message: err.to_string(),
@@ -371,17 +468,23 @@ pub fn update_event(
     language: String,
     codex_trust_managed_hooks: Option<bool>,
     board_provider: Option<String>,
+    agent_resources: AgentResourceSettingsUpdate,
 ) -> BackendEvent {
     match write_settings(
         path,
         &language,
         codex_trust_managed_hooks,
         board_provider.as_deref(),
+        agent_resources,
     ) {
         Ok(snapshot) => BackendEvent::SystemSettingsUpdated {
             language: snapshot.language,
             codex_trust_managed_hooks: snapshot.codex_trust_managed_hooks,
             board_provider: Some(snapshot.board_provider),
+            agent_resource_enabled: snapshot.agent_resources.enabled,
+            agent_resource_priority: priority_name(snapshot.agent_resources.priority).to_string(),
+            agent_cpu_limit_percent: snapshot.agent_resources.cpu_limit_percent,
+            agent_cargo_build_jobs: snapshot.agent_resources.cargo_build_jobs,
         },
         Err(err) => BackendEvent::SystemSettingsError {
             message: err.to_string(),
@@ -467,7 +570,14 @@ mod tests {
             "missing config should render System Settings as enabled by default"
         );
 
-        let snapshot = write_settings(&path, "en", Some(false), None).unwrap();
+        let snapshot = write_settings(
+            &path,
+            "en",
+            Some(false),
+            None,
+            AgentResourceSettingsUpdate::default(),
+        )
+        .unwrap();
         assert_eq!(snapshot.language, "en");
         assert_eq!(snapshot.codex_trust_managed_hooks, Some(false));
 
@@ -479,7 +589,13 @@ mod tests {
     fn update_event_returns_updated_on_success() {
         let tmp = tempdir().unwrap();
         let path = tmp.path().join("config.toml");
-        let event = update_event(&path, "ja".to_string(), Some(true), None);
+        let event = update_event(
+            &path,
+            "ja".to_string(),
+            Some(true),
+            None,
+            AgentResourceSettingsUpdate::default(),
+        );
         match event {
             BackendEvent::SystemSettingsUpdated {
                 language,
@@ -497,7 +613,13 @@ mod tests {
     fn update_event_returns_error_for_invalid_language() {
         let tmp = tempdir().unwrap();
         let path = tmp.path().join("config.toml");
-        let event = update_event(&path, "zh".to_string(), None, None);
+        let event = update_event(
+            &path,
+            "zh".to_string(),
+            None,
+            None,
+            AgentResourceSettingsUpdate::default(),
+        );
         match event {
             BackendEvent::SystemSettingsError { message } => {
                 assert!(message.contains("invalid language"));
@@ -526,6 +648,150 @@ mod tests {
     }
 
     #[test]
+    fn resource_settings_update_validates_roundtrips_and_preserves_omitted_fields() {
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        let update = AgentResourceSettingsUpdate {
+            enabled: Some(true),
+            priority: Some("idle".to_string()),
+            cpu_limit_percent: Some(40),
+            cpu_limit_automatic: Some(false),
+            cargo_build_jobs: Some(3),
+            cargo_build_jobs_automatic: Some(false),
+        };
+
+        let event = update_event(&path, "en".to_string(), None, None, update);
+        match event {
+            BackendEvent::SystemSettingsUpdated {
+                agent_resource_enabled,
+                agent_resource_priority,
+                agent_cpu_limit_percent,
+                agent_cargo_build_jobs,
+                ..
+            } => {
+                assert!(agent_resource_enabled);
+                assert_eq!(agent_resource_priority, "idle");
+                assert_eq!(agent_cpu_limit_percent, Some(40));
+                assert_eq!(agent_cargo_build_jobs, Some(3));
+            }
+            other => panic!("expected SystemSettingsUpdated, got {other:?}"),
+        }
+
+        let preserved = update_event(
+            &path,
+            "ja".to_string(),
+            None,
+            None,
+            AgentResourceSettingsUpdate::default(),
+        );
+        match preserved {
+            BackendEvent::SystemSettingsUpdated {
+                agent_resource_priority,
+                agent_cpu_limit_percent,
+                agent_cargo_build_jobs,
+                ..
+            } => {
+                assert_eq!(agent_resource_priority, "idle");
+                assert_eq!(agent_cpu_limit_percent, Some(40));
+                assert_eq!(agent_cargo_build_jobs, Some(3));
+            }
+            other => panic!("expected SystemSettingsUpdated, got {other:?}"),
+        }
+
+        let invalid = update_event(
+            &path,
+            "en".to_string(),
+            None,
+            None,
+            AgentResourceSettingsUpdate {
+                cpu_limit_percent: Some(101),
+                ..Default::default()
+            },
+        );
+        match invalid {
+            BackendEvent::SystemSettingsError { message } => {
+                assert!(message.contains("CPU limit"), "{message}");
+            }
+            other => panic!("expected SystemSettingsError, got {other:?}"),
+        }
+        assert_eq!(
+            read_settings(&path)
+                .unwrap()
+                .agent_resources
+                .cpu_limit_percent,
+            Some(40),
+            "invalid update must not mutate the persisted policy"
+        );
+
+        let boundary = update_event(
+            &path,
+            "en".to_string(),
+            None,
+            None,
+            AgentResourceSettingsUpdate {
+                cpu_limit_percent: Some(100),
+                cpu_limit_automatic: Some(false),
+                cargo_build_jobs: Some(1),
+                cargo_build_jobs_automatic: Some(false),
+                ..Default::default()
+            },
+        );
+        match boundary {
+            BackendEvent::SystemSettingsUpdated {
+                agent_cpu_limit_percent,
+                agent_cargo_build_jobs,
+                ..
+            } => {
+                assert_eq!(agent_cpu_limit_percent, Some(100));
+                assert_eq!(agent_cargo_build_jobs, Some(1));
+            }
+            other => panic!("expected boundary settings update, got {other:?}"),
+        }
+
+        let automatic = update_event(
+            &path,
+            "en".to_string(),
+            None,
+            None,
+            AgentResourceSettingsUpdate {
+                cpu_limit_automatic: Some(true),
+                cargo_build_jobs_automatic: Some(true),
+                ..Default::default()
+            },
+        );
+        match automatic {
+            BackendEvent::SystemSettingsUpdated {
+                agent_cpu_limit_percent,
+                agent_cargo_build_jobs,
+                ..
+            } => {
+                assert_eq!(agent_cpu_limit_percent, None);
+                assert_eq!(agent_cargo_build_jobs, None);
+            }
+            other => panic!("expected automatic settings update, got {other:?}"),
+        }
+
+        for invalid_update in [
+            AgentResourceSettingsUpdate {
+                cpu_limit_percent: Some(0),
+                ..Default::default()
+            },
+            AgentResourceSettingsUpdate {
+                cargo_build_jobs: Some(0),
+                ..Default::default()
+            },
+        ] {
+            assert!(matches!(
+                update_event(&path, "en".to_string(), None, None, invalid_update),
+                BackendEvent::SystemSettingsError { .. }
+            ));
+        }
+        let reloaded = read_settings(&path).unwrap().agent_resources;
+        assert_eq!(reloaded.cpu_limit_percent, None);
+        assert_eq!(reloaded.cargo_build_jobs, None);
+    }
+
+    #[test]
     fn board_provider_defaults_to_local_and_roundtrips() {
         let tmp = tempdir().unwrap();
         let path = tmp.path().join("config.toml");
@@ -534,12 +800,26 @@ mod tests {
         assert_eq!(read_settings(&path).unwrap().board_provider, "local");
 
         // Persist slack and read it back; language is unchanged.
-        let snapshot = write_settings(&path, "auto", None, Some("slack")).unwrap();
+        let snapshot = write_settings(
+            &path,
+            "auto",
+            None,
+            Some("slack"),
+            AgentResourceSettingsUpdate::default(),
+        )
+        .unwrap();
         assert_eq!(snapshot.board_provider, "slack");
         assert_eq!(read_settings(&path).unwrap().board_provider, "slack");
 
         // None leaves the persisted provider unchanged.
-        let snapshot = write_settings(&path, "en", None, None).unwrap();
+        let snapshot = write_settings(
+            &path,
+            "en",
+            None,
+            None,
+            AgentResourceSettingsUpdate::default(),
+        )
+        .unwrap();
         assert_eq!(snapshot.board_provider, "slack");
     }
 
@@ -555,7 +835,13 @@ mod tests {
     fn update_event_persists_board_provider() {
         let tmp = tempdir().unwrap();
         let path = tmp.path().join("config.toml");
-        let event = update_event(&path, "auto".to_string(), None, Some("teams".to_string()));
+        let event = update_event(
+            &path,
+            "auto".to_string(),
+            None,
+            Some("teams".to_string()),
+            AgentResourceSettingsUpdate::default(),
+        );
         match event {
             BackendEvent::SystemSettingsUpdated { board_provider, .. } => {
                 assert_eq!(board_provider.as_deref(), Some("teams"))

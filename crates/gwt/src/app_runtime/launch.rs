@@ -65,6 +65,57 @@ thread_local! {
 }
 
 #[cfg(test)]
+mod agent_resource_policy_tests {
+    use super::*;
+
+    #[test]
+    fn automatic_agent_budget_uses_cores_and_max_active_with_explicit_env_precedence() {
+        let configured = gwt_config::AgentResourceConfig::default();
+        let resolved = resolve_agent_resource_policy(&configured, 18, 3)
+            .expect("valid policy")
+            .expect("default-enabled policy resolves");
+        assert_eq!(resolved.cpu_limit_percent, 33);
+        assert_eq!(resolved.cargo_build_jobs, 6);
+        assert_eq!(
+            resolved.priority,
+            gwt_terminal::pty::ProcessPriority::BelowNormal
+        );
+
+        let mut env = HashMap::new();
+        apply_agent_cargo_jobs(&mut env, resolved.cargo_build_jobs);
+        assert_eq!(env.get("CARGO_BUILD_JOBS").map(String::as_str), Some("6"));
+
+        env.insert("CARGO_BUILD_JOBS".to_string(), "2".to_string());
+        apply_agent_cargo_jobs(&mut env, resolved.cargo_build_jobs);
+        assert_eq!(
+            env.get("CARGO_BUILD_JOBS").map(String::as_str),
+            Some("2"),
+            "an explicit launch environment must win over the automatic value"
+        );
+
+        let disabled = gwt_config::AgentResourceConfig {
+            enabled: false,
+            ..Default::default()
+        };
+        assert!(resolve_agent_resource_policy(&disabled, 18, 3)
+            .expect("disabled policy is valid")
+            .is_none());
+
+        let minimum = resolve_agent_resource_policy(&configured, 1, 9)
+            .expect("valid minimum policy")
+            .expect("enabled minimum policy");
+        assert_eq!(minimum.cpu_limit_percent, 11);
+        assert_eq!(minimum.cargo_build_jobs, 1);
+
+        let invalid = gwt_config::AgentResourceConfig {
+            cpu_limit_percent: Some(101),
+            ..Default::default()
+        };
+        assert!(resolve_agent_resource_policy(&invalid, 18, 3).is_err());
+    }
+}
+
+#[cfg(test)]
 fn set_finalized_session_post_save_hook_for_test(hook: FinalizedSessionPostSaveHook) {
     FINALIZED_SESSION_POST_SAVE_HOOK.with(|slot| *slot.borrow_mut() = Some(hook));
 }
@@ -109,6 +160,115 @@ pub struct ProcessLaunch {
     pub(crate) remove_env: Vec<String>,
     pub(crate) cwd: Option<PathBuf>,
     pub(crate) pending_tool_runtime_migration: Option<PendingToolRuntimeMigration>,
+    pub(crate) agent_resource_policy: AgentResourcePolicyState,
+}
+
+#[derive(Clone)]
+pub(crate) enum AgentResourcePolicyState {
+    NotAgent,
+    Deferred,
+    Prepared(Option<gwt_terminal::pty::ProcessResourcePolicy>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ResolvedAgentResourcePolicy {
+    priority: gwt_terminal::pty::ProcessPriority,
+    cpu_limit_percent: u8,
+    cargo_build_jobs: usize,
+}
+
+fn resolve_agent_resource_policy(
+    configured: &gwt_config::AgentResourceConfig,
+    logical_cores: usize,
+    max_active: usize,
+) -> Result<Option<ResolvedAgentResourcePolicy>, String> {
+    if !configured.enabled {
+        return Ok(None);
+    }
+
+    let max_active = max_active.max(1);
+    let cpu_limit_percent = configured
+        .cpu_limit_percent
+        .unwrap_or_else(|| (100 / max_active).max(1) as u8);
+    if !(1..=100).contains(&cpu_limit_percent) {
+        return Err(format!(
+            "agent CPU limit must be between 1 and 100, got {cpu_limit_percent}"
+        ));
+    }
+
+    let cargo_build_jobs = configured
+        .cargo_build_jobs
+        .unwrap_or_else(|| logical_cores.max(1).saturating_div(max_active).max(1));
+    if cargo_build_jobs == 0 {
+        return Err("agent cargo build jobs must be at least 1".to_string());
+    }
+
+    let priority = match configured.priority {
+        gwt_config::AgentProcessPriority::Normal => gwt_terminal::pty::ProcessPriority::Normal,
+        gwt_config::AgentProcessPriority::BelowNormal => {
+            gwt_terminal::pty::ProcessPriority::BelowNormal
+        }
+        gwt_config::AgentProcessPriority::Idle => gwt_terminal::pty::ProcessPriority::Idle,
+    };
+    Ok(Some(ResolvedAgentResourcePolicy {
+        priority,
+        cpu_limit_percent,
+        cargo_build_jobs,
+    }))
+}
+
+fn apply_agent_cargo_jobs(env: &mut HashMap<String, String>, cargo_build_jobs: usize) {
+    env.entry("CARGO_BUILD_JOBS".to_string())
+        .or_insert_with(|| cargo_build_jobs.to_string());
+}
+
+fn prepare_agent_resource_policy_for_env(
+    env: &mut HashMap<String, String>,
+    cwd: Option<&Path>,
+) -> Result<Option<gwt_terminal::pty::ProcessResourcePolicy>, String> {
+    let settings = gwt_config::Settings::load()
+        .map_err(|error| format!("load agent resource settings: {error}"))?;
+    let max_active = cwd.map_or(1, |project_root| {
+        let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
+        match gwt::load_issue_monitor_prefs(&prefs_path) {
+            Ok(prefs) => prefs.max_active_agents.max(1),
+            Err(error) => {
+                tracing::warn!(
+                    path = %prefs_path.display(),
+                    error = %error,
+                    "agent resource budget fell back to max_active=1"
+                );
+                1
+            }
+        }
+    });
+    let logical_cores = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1);
+    let Some(resolved) =
+        resolve_agent_resource_policy(&settings.agent.resources, logical_cores, max_active)?
+    else {
+        return Ok(None);
+    };
+    apply_agent_cargo_jobs(env, resolved.cargo_build_jobs);
+    Ok(Some(gwt_terminal::pty::ProcessResourcePolicy {
+        priority: resolved.priority,
+        cpu_limit_percent: Some(resolved.cpu_limit_percent),
+    }))
+}
+
+fn pty_start_gate_command() -> Result<(PathBuf, Vec<String>), String> {
+    let gate_program = bound_pty_gate_program()
+        .map_err(|error| format!("resolve PTY start-gate program: {error}"))?;
+    #[cfg(not(test))]
+    let gate_args = vec![gwt::pty_start_gate::PTY_START_GATE_ARG.to_string()];
+    #[cfg(test)]
+    let gate_args = vec![
+        "app_runtime::tests::pty_start_gate_helper".to_string(),
+        "--exact".to_string(),
+        "--nocapture".to_string(),
+    ];
+    Ok((gate_program, gate_args))
 }
 
 #[derive(Debug, Clone)]
@@ -3574,6 +3734,11 @@ impl AppRuntime {
                 remove_env,
                 cwd: Some(project_root),
                 pending_tool_runtime_migration: None,
+                agent_resource_policy: if is_agent_preset {
+                    AgentResourcePolicyState::Deferred
+                } else {
+                    AgentResourcePolicyState::NotAgent
+                },
             },
             console_kind,
         ) {
@@ -3601,22 +3766,40 @@ impl AppRuntime {
         &mut self,
         id: &str,
         geometry: WindowGeometry,
-        launch: ProcessLaunch,
+        mut launch: ProcessLaunch,
         console_kind: Option<gwt_core::process_console::ProcessKind>,
     ) -> Result<(), String> {
         let (cols, rows) = geometry_to_pty_size(&geometry);
-        let pane = Pane::new_with_spawn_config(
-            id.to_string(),
-            gwt_terminal::pty::SpawnConfig {
-                command: launch.command,
-                args: launch.args,
-                cols,
-                rows,
-                env: launch.env,
-                remove_env: launch.remove_env,
-                cwd: launch.cwd,
-            },
-        )
+        let resource_policy = match launch.agent_resource_policy.clone() {
+            AgentResourcePolicyState::NotAgent => None,
+            AgentResourcePolicyState::Deferred => {
+                prepare_agent_resource_policy_for_env(&mut launch.env, launch.cwd.as_deref())?
+            }
+            AgentResourcePolicyState::Prepared(policy) => policy,
+        };
+        let spawn_config = gwt_terminal::pty::SpawnConfig {
+            command: launch.command,
+            args: launch.args,
+            cols,
+            rows,
+            env: launch.env,
+            remove_env: launch.remove_env,
+            cwd: launch.cwd,
+        };
+        let pane = if let Some(resource_policy) = resource_policy {
+            let (gate_program, gate_args) = pty_start_gate_command()?;
+            Pane::new_pending_with_spawn_config_and_resource_policy(
+                id.to_string(),
+                spawn_config,
+                gate_program,
+                gate_args,
+                uuid::Uuid::new_v4().to_string(),
+                resource_policy,
+            )
+            .and_then(|pending| pending.release())
+        } else {
+            Pane::new_with_spawn_config(id.to_string(), spawn_config)
+        }
         .map_err(|error| error.to_string())?;
         let incarnation = next_window_runtime_incarnation();
         self.install_process_window(id, incarnation, pane, console_kind);
@@ -3627,37 +3810,47 @@ impl AppRuntime {
         &mut self,
         id: &str,
         geometry: WindowGeometry,
-        launch: ProcessLaunch,
+        mut launch: ProcessLaunch,
         console_kind: Option<gwt_core::process_console::ProcessKind>,
         expected: &gwt_agent::SessionExecutionIdentity,
         handshake_cleanup: &mut ActiveLaunchHandshakeCleanup,
     ) -> Result<(), String> {
         let (cols, rows) = geometry_to_pty_size(&geometry);
-        let gate_program = bound_pty_gate_program()
-            .map_err(|error| format!("resolve PTY start-gate program: {error}"))?;
-        #[cfg(not(test))]
-        let gate_args = vec![gwt::pty_start_gate::PTY_START_GATE_ARG.to_string()];
-        #[cfg(test)]
-        let gate_args = vec![
-            "app_runtime::tests::pty_start_gate_helper".to_string(),
-            "--exact".to_string(),
-            "--nocapture".to_string(),
-        ];
-        let pending = Pane::new_pending_with_spawn_config(
-            id.to_string(),
-            gwt_terminal::pty::SpawnConfig {
-                command: launch.command,
-                args: launch.args,
-                cols,
-                rows,
-                env: launch.env,
-                remove_env: launch.remove_env,
-                cwd: launch.cwd,
-            },
-            gate_program,
-            gate_args,
-            uuid::Uuid::new_v4().to_string(),
-        )
+        let resource_policy = match launch.agent_resource_policy.clone() {
+            AgentResourcePolicyState::NotAgent => None,
+            AgentResourcePolicyState::Deferred => {
+                prepare_agent_resource_policy_for_env(&mut launch.env, launch.cwd.as_deref())?
+            }
+            AgentResourcePolicyState::Prepared(policy) => policy,
+        };
+        let spawn_config = gwt_terminal::pty::SpawnConfig {
+            command: launch.command,
+            args: launch.args,
+            cols,
+            rows,
+            env: launch.env,
+            remove_env: launch.remove_env,
+            cwd: launch.cwd,
+        };
+        let (gate_program, gate_args) = pty_start_gate_command()?;
+        let pending = if let Some(resource_policy) = resource_policy {
+            Pane::new_pending_with_spawn_config_and_resource_policy(
+                id.to_string(),
+                spawn_config,
+                gate_program,
+                gate_args,
+                uuid::Uuid::new_v4().to_string(),
+                resource_policy,
+            )
+        } else {
+            Pane::new_pending_with_spawn_config(
+                id.to_string(),
+                spawn_config,
+                gate_program,
+                gate_args,
+                uuid::Uuid::new_v4().to_string(),
+            )
+        }
         .map_err(|error| error.to_string())?;
         let child_pid = pending.process_id().ok_or_else(|| {
             "bound launch gate identity was unavailable before runtime proof publication"
@@ -4512,6 +4705,8 @@ impl AppRuntime {
                 .env_vars
                 .entry("COLORTERM".to_string())
                 .or_insert_with(|| "truecolor".to_string());
+            let resource_policy =
+                prepare_agent_resource_policy_for_env(&mut config.env_vars, Some(&worktree_path))?;
             let docker_runtime_worktree = finalize_docker_agent_launch_config_with_runtime(
                 Path::new(&project_root),
                 &mut config,
@@ -4661,6 +4856,7 @@ impl AppRuntime {
                 remove_env: config.remove_env.clone(),
                 cwd: config.working_dir.clone(),
                 pending_tool_runtime_migration,
+                agent_resource_policy: AgentResourcePolicyState::Prepared(resource_policy),
             };
             Ok((
                 process_launch,
@@ -5354,6 +5550,7 @@ mod docker_session_persistence_tests {
             remove_env: config.remove_env,
             cwd: config.working_dir,
             pending_tool_runtime_migration: None,
+            agent_resource_policy: AgentResourcePolicyState::NotAgent,
         };
         assert_eq!(process_launch.command, runtime.binary());
         let workdir_index = process_launch

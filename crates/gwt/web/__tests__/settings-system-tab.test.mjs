@@ -205,6 +205,60 @@ test("renderSystemPanel exposes Codex managed hook trust opt-in", () => {
   );
 });
 
+test("System tab exposes and reconciles agent resource isolation settings", () => {
+  assert.match(
+    settingsSource,
+    /agentResourceEnabled:\s*true/,
+    "resource isolation must default on",
+  );
+  assert.match(settingsSource, /agentResourcePriority:\s*"below_normal"/);
+  for (const id of [
+    "settings-system-agent-resources",
+    "settings-system-agent-priority",
+    "settings-system-agent-cpu-limit",
+    "settings-system-agent-cargo-jobs",
+  ]) {
+    assert.match(settingsSource, new RegExp(id), `missing resource control ${id}`);
+  }
+  for (const field of [
+    "agent_resource_enabled",
+    "agent_resource_priority",
+    "agent_cpu_limit_percent",
+    "agent_cpu_limit_automatic",
+    "agent_cargo_build_jobs",
+    "agent_cargo_build_jobs_automatic",
+  ]) {
+    assert.match(
+      settingsSource,
+      new RegExp(`${field}:`),
+      `resource update payload must include ${field}`,
+    );
+  }
+  for (const field of [
+    "event.agent_resource_enabled",
+    "event.agent_resource_priority",
+    "event.agent_cpu_limit_percent",
+    "event.agent_cargo_build_jobs",
+  ]) {
+    assert.match(
+      appSource,
+      new RegExp(field.replaceAll(".", "\\.")),
+      `backend reconciliation must consume ${field}`,
+    );
+  }
+  assert.match(
+    settingsSource,
+    /className\s*=\s*"settings-input"/,
+    "numeric controls must reuse the existing Operator settings input primitive",
+  );
+  assert.match(settingsSource, /input\.step\s*=\s*"1"/);
+  assert.match(
+    settingsSource,
+    /const\s+value\s*=\s*raw\s*===\s*""\s*\?\s*null\s*:\s*Number\(raw\)/,
+    "numeric settings must reject fractional values instead of truncating them",
+  );
+});
+
 test("System tab Board provider select offers Local/Slack/Teams as selectable (SPEC-2963)", () => {
   // SPEC-2963 Phase 5: slack/teams are now real, selectable options (sign-in
   // gated rather than disabled "coming soon").

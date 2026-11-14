@@ -6191,6 +6191,10 @@
                 language: event.language,
                 codex_trust_managed_hooks: event.codex_trust_managed_hooks,
                 board_provider: event.board_provider,
+                agent_resource_enabled: event.agent_resource_enabled,
+                agent_resource_priority: event.agent_resource_priority,
+                agent_cpu_limit_percent: event.agent_cpu_limit_percent,
+                agent_cargo_build_jobs: event.agent_cargo_build_jobs,
               })
             ) {
               break;
@@ -6198,6 +6202,14 @@
             systemSettingsState.language = event.language || "auto";
             systemSettingsState.codexTrustManagedHooks =
               event.codex_trust_managed_hooks !== false;
+            systemSettingsState.agentResourceEnabled =
+              event.agent_resource_enabled !== false;
+            systemSettingsState.agentResourcePriority =
+              event.agent_resource_priority || "below_normal";
+            systemSettingsState.agentCpuLimitPercent =
+              event.agent_cpu_limit_percent ?? null;
+            systemSettingsState.agentCargoBuildJobs =
+              event.agent_cargo_build_jobs ?? null;
             systemSettingsState.boardProvider =
               event.board_provider || systemSettingsState.boardProvider || "local";
             systemSettingsState.loaded = true;
@@ -6217,6 +6229,10 @@
                 language: event.language,
                 codex_trust_managed_hooks: event.codex_trust_managed_hooks,
                 board_provider: event.board_provider,
+                agent_resource_enabled: event.agent_resource_enabled,
+                agent_resource_priority: event.agent_resource_priority,
+                agent_cpu_limit_percent: event.agent_cpu_limit_percent,
+                agent_cargo_build_jobs: event.agent_cargo_build_jobs,
               })
             ) {
               break;
@@ -6224,6 +6240,14 @@
             systemSettingsState.language = event.language || systemSettingsState.language;
             systemSettingsState.codexTrustManagedHooks =
               event.codex_trust_managed_hooks !== false;
+            systemSettingsState.agentResourceEnabled =
+              event.agent_resource_enabled !== false;
+            systemSettingsState.agentResourcePriority =
+              event.agent_resource_priority || "below_normal";
+            systemSettingsState.agentCpuLimitPercent =
+              event.agent_cpu_limit_percent ?? null;
+            systemSettingsState.agentCargoBuildJobs =
+              event.agent_cargo_build_jobs ?? null;
             systemSettingsState.boardProvider =
               event.board_provider || systemSettingsState.boardProvider || "local";
             systemSettingsState.statusMessage = "Saved system settings.";
@@ -6829,19 +6853,43 @@
       // Cancel/Back/Submit + the wizardBody/wizardModal interaction-guard
       // wiring) moved into the launch wizard surface.
       installWizardChrome();
-      // Issue #2698 PR 4 — apply the same interaction-guard pattern
-      // to the System Settings Output Language `<select>`. Settings
-      // windows can stack and reflow, so we delegate from the
-      // document root and filter by the unique `settings-select`
-      // class. Listeners use the bubble phase to stay consistent
-      // with the wizard wiring above.
+      // Issue #2698 PR 4 / SPEC-1921 Phase 86 — protect native System
+      // Settings controls from backend-echo re-renders while they are open or
+      // being edited. Settings windows can stack and reflow, so listeners are
+      // delegated from the document root.
+      function isSystemSettingsInteractionTarget(target) {
+        return Boolean(
+          target
+          && (
+            (
+              target.tagName === "SELECT"
+              && target.classList.contains("settings-select")
+            )
+            || (
+              target.tagName === "INPUT"
+              && (
+                target.classList.contains("settings-input")
+                || target.classList.contains("settings-checkbox")
+              )
+            )
+          )
+        );
+      }
+      function shouldReleaseSystemSettingsInteraction(event) {
+        return Boolean(
+          isSystemSettingsInteractionTarget(event?.target)
+          && !isSystemSettingsInteractionTarget(event?.relatedTarget)
+        );
+      }
       document.addEventListener("pointerdown", (event) => {
         const target = event.target;
-        if (
-          target
-          && target.tagName === "SELECT"
-          && target.classList.contains("settings-select")
-        ) {
+        if (isSystemSettingsInteractionTarget(target)) {
+          systemSettingsInteractionGuard.activate();
+        }
+      });
+      document.addEventListener("focusin", (event) => {
+        const target = event.target;
+        if (isSystemSettingsInteractionTarget(target)) {
           systemSettingsInteractionGuard.activate();
         }
       });
@@ -6849,19 +6897,25 @@
         const target = event.target;
         if (
           target
-          && target.tagName === "SELECT"
-          && target.classList.contains("settings-select")
+          && (
+            (
+              target.tagName === "SELECT"
+              && target.classList.contains("settings-select")
+            )
+            || (
+              target.tagName === "INPUT"
+              && target.classList.contains("settings-checkbox")
+            )
+          )
         ) {
           systemSettingsInteractionGuard.release();
         }
       });
       document.addEventListener("focusout", (event) => {
-        const target = event.target;
-        if (
-          target
-          && target.tagName === "SELECT"
-          && target.classList.contains("settings-select")
-        ) {
+        // `pointerdown` on the next protected control precedes focusout from
+        // the old one. Keep the guard active across that transition so a
+        // deferred backend echo cannot replace the next click/Tab target.
+        if (shouldReleaseSystemSettingsInteraction(event)) {
           systemSettingsInteractionGuard.release();
         }
       });

@@ -228,7 +228,8 @@ use launch::{
     maybe_register_codex_managed_hook_trust_for_launch,
 };
 pub(crate) use launch::{
-    continue_work_readiness_decision, LaunchPaneDisposition, ReadinessDeadlineDecision,
+    continue_work_readiness_decision, AgentResourcePolicyState, LaunchPaneDisposition,
+    ReadinessDeadlineDecision,
 };
 // Production callers only ever pass this through from
 // `AppRuntime::readiness_pane_evidence`, so the name itself is needed by the
@@ -6450,11 +6451,25 @@ impl AppRuntime {
                 language,
                 codex_trust_managed_hooks,
                 board_provider,
+                agent_resource_enabled,
+                agent_resource_priority,
+                agent_cpu_limit_percent,
+                agent_cpu_limit_automatic,
+                agent_cargo_build_jobs,
+                agent_cargo_build_jobs_automatic,
             } => self.system_settings_update_events(
                 client_id,
                 language,
                 codex_trust_managed_hooks,
                 board_provider,
+                gwt::system_settings::AgentResourceSettingsUpdate {
+                    enabled: agent_resource_enabled,
+                    priority: agent_resource_priority,
+                    cpu_limit_percent: agent_cpu_limit_percent,
+                    cpu_limit_automatic: agent_cpu_limit_automatic,
+                    cargo_build_jobs: agent_cargo_build_jobs,
+                    cargo_build_jobs_automatic: agent_cargo_build_jobs_automatic,
+                },
             ),
             FrontendEvent::GetAutostartStatus => self.autostart_status_events(client_id),
             FrontendEvent::UpdateAutostart { enabled } => {
