@@ -18,7 +18,6 @@ import {
   acquireLiveGwtBackendLock,
   clearLiveLaunchWizard,
   gotoLiveGwt,
-  openLiveLaunchWizardForBranch,
   openLiveGwtProject,
   sendLiveGwtEvent,
 } from "./_helpers/live-gwt";
@@ -30,11 +29,13 @@ test.describe.serial("Launch Wizard setting controls (live backend)", () => {
   test.setTimeout(120_000);
 
   let releaseBackendLock: (() => Promise<void>) | undefined;
-  let cleanupLaunchFixture: (() => Promise<void>) | undefined;
+  let browserErrors: string[] = [];
   let pmEditorRequests: any[] = [];
 
   test.beforeEach(async ({ page }, testInfo) => {
-    cleanupLaunchFixture = undefined;
+    browserErrors = [];
+    page.on("pageerror", error => browserErrors.push(error.message));
+    page.on("console", message => { if (message.type() === "error") browserErrors.push(message.text()); });
     releaseBackendLock = await acquireLiveGwtBackendLock(BASE, testInfo);
     pmEditorRequests = [];
     page.on("websocket", socket => socket.on("framesent", ({ payload }) => {
@@ -51,24 +52,19 @@ test.describe.serial("Launch Wizard setting controls (live backend)", () => {
 
   test.afterEach(async ({ page }) => {
     if (!releaseBackendLock) return;
-    const cleanup = cleanupLaunchFixture;
-    cleanupLaunchFixture = undefined;
     try {
-      try {
-        await clearLiveLaunchWizard(page);
-      } finally {
-        await cleanup?.();
-      }
+      await clearLiveLaunchWizard(page);
     } finally {
       await releaseBackendLock();
       releaseBackendLock = undefined;
     }
+    expect(browserErrors, "console and page errors").toEqual([]);
   });
 
   test("Target is a segmented radiogroup that toggles agent settings", async ({
     page,
   }) => {
-    cleanupLaunchFixture = (await openLiveLaunchWizardForBranch(page)).cleanup;
+    await openLaunchWizardForBranch(page);
     const wizard = page.locator("#wizard-modal");
     await expect(wizard).toBeVisible();
     await enterLaunchSettings(page);
@@ -98,14 +94,14 @@ test.describe.serial("Launch Wizard setting controls (live backend)", () => {
       if (message.type() === "error") consoleErrors.push(message.text());
     });
 
-    cleanupLaunchFixture = (await openLiveLaunchWizardForBranch(page)).cleanup;
+    await openLaunchWizardForBranch(page);
     const wizard = page.locator("#wizard-modal");
     await enterLaunchSettings(page);
 
     const agentField = wizard.getByLabel("Agent", { exact: true });
     const tag = await agentField.evaluate((node) => node.tagName.toLowerCase());
-    // Issue #4660: the real backend catalog retires Gemini while preserving
-    // the other built-ins, regardless of the count-adaptive control layout.
+    // The real backend lists detected agents only (SPEC-1921) and retires
+    // Gemini (Issue #4660), regardless of the count-adaptive control layout.
     const agentOptions = agentField.locator(
       tag === "select" ? "option" : ".launch-segmented__option",
     );
@@ -115,7 +111,7 @@ test.describe.serial("Launch Wizard setting controls (live backend)", () => {
       ),
     );
     expect(agentIds).not.toContain("gemini");
-    expect(agentIds).toEqual(expect.arrayContaining(["claude", "codex", "grok", "agy"]));
+    expect(agentIds).toEqual(expect.arrayContaining(["claude", "codex", "grok"]));
     if (tag === "select") {
       await expect(agentField.locator('option[value="grok"]')).toHaveText(
         "Grok Build",
@@ -339,7 +335,7 @@ test.describe.serial("Launch Wizard setting controls (live backend)", () => {
       if (message.type() === "error") consoleErrors.push(message.text());
     });
 
-    cleanupLaunchFixture = (await openLiveLaunchWizardForBranch(page)).cleanup;
+    await openLaunchWizardForBranch(page);
     const wizard = page.locator("#wizard-modal");
     await enterLaunchSettings(page);
     await selectWizardAgent(page, "claude");
@@ -390,7 +386,7 @@ test.describe.serial("Launch Wizard setting controls (live backend)", () => {
   test("Reasoning renders as a slider with a separate Auto toggle", async ({
     page,
   }) => {
-    cleanupLaunchFixture = (await openLiveLaunchWizardForBranch(page)).cleanup;
+    await openLaunchWizardForBranch(page);
     const wizard = page.locator("#wizard-modal");
     await expect(wizard).toBeVisible();
     await enterLaunchSettings(page);
@@ -488,17 +484,20 @@ async function selectWizardAgent(page: Page, agentId: string): Promise<void> {
   await blurActiveElement(page);
 }
 
+async function openLaunchWizardForBranch(page: Page): Promise<void> {
+  await sendLiveGwtEvent(page, {
+    kind: "open_active_work_launch_wizard",
+    branch_name: process.env.GWT_PLAYWRIGHT_BRANCH_NAME ?? "develop",
+  });
+}
+
 async function enterLaunchSettings(page: Page): Promise<void> {
   const wizard = page.locator("#wizard-modal");
   const target = wizard.getByRole("radiogroup", { name: "Target" });
   if (await target.isVisible().catch(() => false)) {
     return;
   }
-  await sendLiveGwtEvent(page, {
-    kind: "launch_wizard_action",
-    action: { kind: "set_launch_path", path: "manual_setup" },
-    bounds: null,
-  });
+  await wizard.getByRole("button", { name: /^Configure and start/ }).click();
   await expect(target).toBeVisible({ timeout: 10_000 });
 }
 
