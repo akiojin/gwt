@@ -8,7 +8,33 @@
 
 use std::{num::NonZeroU16, path::Path};
 
-use gwt_config::{ConfigError, Settings};
+use gwt_config::{ConfigError, PerfConfig, Settings};
+
+#[test]
+fn perf_settings_public_api_roundtrips_overrides() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    let mut perf = PerfConfig {
+        enabled: false,
+        retention_days: 21,
+        self_budget_cpu_percent: 0.75,
+        ..PerfConfig::default()
+    };
+    perf.budget_overrides
+        .insert("ui_response_ms".to_string(), 120);
+    let settings = Settings {
+        perf,
+        ..Settings::default()
+    };
+
+    settings.save(&path).expect("save perf settings");
+    let loaded = Settings::load_from_path(&path).expect("load perf settings");
+
+    assert!(!loaded.perf.enabled);
+    assert_eq!(loaded.perf.retention_days, 21);
+    assert_eq!(loaded.perf.self_budget_cpu_percent, 0.75);
+    assert_eq!(loaded.perf.budget_overrides["ui_response_ms"], 120);
+}
 
 #[test]
 fn save_then_load_from_path_roundtrips_mutated_fields() {

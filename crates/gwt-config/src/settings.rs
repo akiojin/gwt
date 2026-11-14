@@ -1,6 +1,7 @@
 //! Top-level application settings backed by `~/.gwt/config.toml`.
 
 use std::{
+    collections::BTreeMap,
     ffi::OsString,
     num::NonZeroU16,
     path::{Path, PathBuf},
@@ -41,6 +42,31 @@ pub struct ServerConfig {
     /// Last successfully bound implicit port. Zero normalizes to absent.
     #[serde(default, deserialize_with = "deserialize_optional_nonzero_port")]
     pub embedded_port: Option<NonZeroU16>,
+}
+
+/// Continuous performance measurement settings persisted under `[perf]`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PerfConfig {
+    /// Enable continuous performance measurement. This is the global kill switch.
+    pub enabled: bool,
+    /// Number of days to retain daily performance logs. Zero disables cleanup.
+    pub retention_days: u32,
+    /// Maximum CPU percentage that performance measurement may consume.
+    pub self_budget_cpu_percent: f32,
+    /// Budget values that override the code-defined defaults by key.
+    pub budget_overrides: BTreeMap<String, u64>,
+}
+
+impl Default for PerfConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            retention_days: 30,
+            self_budget_cpu_percent: 1.0,
+            budget_overrides: BTreeMap::new(),
+        }
+    }
 }
 
 fn resolve_config_home_dir(
@@ -106,6 +132,8 @@ pub struct Settings {
     pub usage: UsageConfig,
     /// Embedded browser server configuration (SPEC-3287).
     pub server: ServerConfig,
+    /// Continuous performance measurement configuration (SPEC-3700).
+    pub perf: PerfConfig,
 }
 
 impl Default for Settings {
@@ -127,6 +155,7 @@ impl Default for Settings {
             board: BoardConfig::default(),
             usage: UsageConfig::default(),
             server: ServerConfig::default(),
+            perf: PerfConfig::default(),
         }
     }
 }
@@ -273,6 +302,66 @@ mod tests {
         assert!(s.protected_branches.contains(&"main".to_string()));
         assert!(!s.debug);
         assert!(!s.profiling);
+    }
+
+    #[test]
+    fn perf_config_defaults_enable_collection_with_expected_limits() {
+        let perf = Settings::default().perf;
+
+        assert!(perf.enabled);
+        assert_eq!(perf.retention_days, 30);
+        assert_eq!(perf.self_budget_cpu_percent, 1.0);
+        assert!(perf.budget_overrides.is_empty());
+    }
+
+    #[test]
+    fn perf_config_toml_overrides_all_fields() {
+        let settings: Settings = toml::from_str(
+            r#"
+[perf]
+enabled = false
+retention_days = 14
+self_budget_cpu_percent = 0.5
+
+[perf.budget_overrides]
+ui_response_ms = 125
+render_frame_ms = 20
+gwtd_read_p95_ms = 150
+gwtd_mutation_p95_ms = 700
+"#,
+        )
+        .expect("perf settings should deserialize");
+
+        assert!(!settings.perf.enabled);
+        assert_eq!(settings.perf.retention_days, 14);
+        assert_eq!(settings.perf.self_budget_cpu_percent, 0.5);
+        assert_eq!(settings.perf.budget_overrides["ui_response_ms"], 125);
+        assert_eq!(settings.perf.budget_overrides["render_frame_ms"], 20);
+        assert_eq!(settings.perf.budget_overrides["gwtd_read_p95_ms"], 150);
+        assert_eq!(settings.perf.budget_overrides["gwtd_mutation_p95_ms"], 700);
+    }
+
+    #[test]
+    fn perf_config_missing_section_uses_defaults() {
+        let settings: Settings =
+            toml::from_str("default_base_branch = \"develop\"\ndebug = true\n")
+                .expect("legacy settings should deserialize");
+
+        assert!(settings.perf.enabled);
+        assert_eq!(settings.perf.retention_days, 30);
+        assert_eq!(settings.perf.self_budget_cpu_percent, 1.0);
+        assert!(settings.perf.budget_overrides.is_empty());
+    }
+
+    #[test]
+    fn perf_config_partial_section_fills_defaults() {
+        let settings: Settings = toml::from_str("[perf]\nenabled = false\n")
+            .expect("partial perf settings should deserialize");
+
+        assert!(!settings.perf.enabled);
+        assert_eq!(settings.perf.retention_days, 30);
+        assert_eq!(settings.perf.self_budget_cpu_percent, 1.0);
+        assert!(settings.perf.budget_overrides.is_empty());
     }
 
     #[test]
