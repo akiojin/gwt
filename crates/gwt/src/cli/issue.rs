@@ -49,6 +49,16 @@ pub(crate) fn guard_autonomous_acceptance_block(
     )))
 }
 
+/// Whether an Issue body is section-managed: it carries the `gwt-spec` header
+/// that `issue.spec.edit` writes, so its sections must not be replaced by a
+/// whole-body edit. SPEC #3836 FR-004 makes this reachable without the
+/// `gwt-spec` label, on a plain Issue that was given sections.
+pub(crate) fn body_is_section_managed(body: &str) -> bool {
+    regex::Regex::new(r"<!--\s*gwt-spec\s+id=\S+\s+version=\d+\s*-->")
+        .expect("valid header regex")
+        .is_match(body)
+}
+
 pub(super) fn parse(args: &[String]) -> Result<IssueCommand, CliParseError> {
     let mut it = args.iter().peekable();
     match it.next().map(String::as_str) {
@@ -2120,17 +2130,23 @@ fn run_issue_edit<E: CliEnv>(
     }
     let issue = IssueNumber(number);
     let current = load_or_refresh_issue(env, issue, true)?.snapshot;
+    // SPEC #3836 FR-004: a plain Issue that has been given sections carries the
+    // `<!-- gwt-spec ... -->` header without the label, so the label alone no
+    // longer identifies a section-managed body. Refuse on either signal — a
+    // whole-body edit would silently drop the section markers and orphan every
+    // comment-resident section the index still references.
     if body.is_some()
-        && current
+        && (current
             .labels
             .iter()
             .any(|label| label.eq_ignore_ascii_case("gwt-spec"))
+            || body_is_section_managed(&current.body))
     {
         return Ok(write_issue_edit_refusal(
             out,
             number,
             &format!(
-                "issue #{number} carries the gwt-spec label and its body is section-managed;                  use issue.spec.edit per section instead of issue.edit (title and labels                  remain editable here)"
+                "issue #{number} has a section-managed body (gwt-spec label or header);                  use issue.spec.edit per section instead of issue.edit (title and labels                  remain editable here)"
             ),
         ));
     }

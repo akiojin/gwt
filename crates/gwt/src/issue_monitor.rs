@@ -1796,6 +1796,11 @@ pub struct IssueMonitorLaunchPlan {
     pub branch_name: String,
     pub linked_issue_kind: LinkedIssueKind,
     pub prompt: String,
+    /// SPEC #3836 FR-001: whether this launch designs or implements. Carried on
+    /// the plan so the launcher can restrict a design session's tools and
+    /// account for its retries separately.
+    #[serde(default)]
+    pub phase: ExecutionPhase,
 }
 
 /// Provider-wide launch admission hold projected to both agent and GUI
@@ -2868,6 +2873,7 @@ pub fn autonomous_eligibility(
     criteria: &crate::issue_monitor_gate::AcceptanceCriteria,
     protection: &gwt_git::branch_protection::BranchProtectionStatus,
     is_needs_human: bool,
+    phase: ExecutionPhase,
 ) -> EligibilityDecision {
     // Stage 1 — two-stage opt-in. Either negative falls back to the existing
     // human-gated #3165 behavior, NOT to needs-human.
@@ -2883,7 +2889,13 @@ pub fn autonomous_eligibility(
     // Stage 2 — readiness preconditions. Opt-in is satisfied, but the Issue or
     // the repository is not ready for an unattended run: name the cause and
     // re-check on the next scan (Issue #3944 AC-4).
-    if !criteria.machine_checkable {
+    // SPEC #3836 FR-001: the design phase exists precisely to write the block
+    // that is missing here. Holding it at `not_ready` for the absence of its
+    // own output is the deadlock this SPEC removes, so the criteria
+    // precondition applies to the implementation phase only. A design session
+    // produces no PR, and the merge gate still re-checks the criteria against
+    // the launch snapshot, so nothing merges on this relaxation.
+    if !criteria.machine_checkable && phase == ExecutionPhase::Implement {
         // Issue #3930 AC-2: name the element that is actually missing. A
         // `not_ready` row is re-evaluated on every scan, so fixing the body is
         // the whole remedy.
@@ -2987,9 +2999,19 @@ pub struct AutonomousIssueRecord {
     /// Launch / window id binding the CURRENT attempt. `None` between attempts.
     #[serde(default)]
     pub active_launch_id: Option<String>,
-    /// Failed/started attempts so far (the persisted attempt counter).
+    /// Failed/started **implementation** attempts so far (the persisted attempt
+    /// counter). SPEC #3836 FR-007 keeps design attempts out of this number so
+    /// a hard design problem cannot spend the implementation retry budget.
     #[serde(default)]
     pub attempts: u32,
+    /// SPEC #3836 FR-007 / AC-10: failed/started **design** attempts, counted
+    /// against the same cap but on their own ledger.
+    #[serde(default)]
+    pub design_attempts: u32,
+    /// SPEC #3836 FR-001: the phase the current (or most recent) launch runs.
+    /// Decides which counter an attempt lands on.
+    #[serde(default)]
+    pub execution_phase: ExecutionPhase,
     /// Acceptance-criteria snapshot captured at launch; compared at gate time.
     #[serde(default)]
     pub acceptance_snapshot: Option<crate::issue_monitor_gate::AcceptanceSnapshot>,
@@ -3206,6 +3228,8 @@ impl AutonomousIssueRecord {
             phase: AutonomousPhase::Idle,
             active_launch_id: None,
             attempts: 0,
+            design_attempts: 0,
+            execution_phase: ExecutionPhase::Implement,
             acceptance_snapshot: None,
             retry_not_before: None,
             retry_hold_reason: None,
@@ -3241,21 +3265,228 @@ pub fn issue_monitor_linked_issue_kind(issue: &IssueMonitorIssue) -> LinkedIssue
     }
 }
 
+/// SPEC #3836 FR-001: which phase an unattended launch runs for an Issue.
+///
+/// The two phases share the whole launch machinery — claim, slot, worktree,
+/// generation — and differ only in the prompt they carry and in what the
+/// session is allowed to produce. That is deliberate: launch authority and slot
+/// accounting are the most failure-prone part of the Monitor, and a second
+/// launch path would double that surface.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionPhase {
+    /// Fill `spec` / `plan` / `tasks` to SDD depth. No production code.
+    Design,
+    /// The ordinary build / test / verify loop.
+    #[default]
+    Implement,
+}
+
+impl ExecutionPhase {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Design => "design",
+            Self::Implement => "implement",
+        }
+    }
+}
+
+/// Labels that mark an Issue as feature work, whichever vocabulary the author
+/// reached for. Matched case-insensitively against the whole label.
+const DESIGN_REQUIRED_LABELS: &[&str] = &["feat", "feature", "enhancement", "gwt-spec"];
+
+/// Labels that mark an Issue as a defect. A fix only earns a design phase when
+/// it is *large* — see [`is_large_fix`].
+const FIX_LABELS: &[&str] = &["bug", "fix", "defect", "regression"];
+
+/// Conventional-commit type prefixes, read off the Issue title (`feat(x): ...`).
+fn title_type(title: &str) -> Option<&str> {
+    let head = title.split(':').next()?;
+    let head = head.split('(').next()?.trim();
+    let head = head.strip_suffix('!').unwrap_or(head);
+    (!head.is_empty() && head.chars().all(|c| c.is_ascii_alphabetic())).then_some(head)
+}
+
+/// Headings under which an author frames a decision rather than a defect —
+/// the machine-checkable proxy for "the body describes design alternatives".
+/// Matched against the heading text only, so prose that merely uses the word
+/// does not qualify.
+const DESIGN_CHOICE_HEADINGS: &[&str] = &[
+    "提案",
+    "方針",
+    "修正方針",
+    "設計方針",
+    "実装方針",
+    "設計",
+    "proposal",
+    "approach",
+    "alternatives",
+    "options",
+    "design",
+];
+
+/// Whether the body frames a design choice under one of its headings.
+fn has_design_choice_heading(body: &str) -> bool {
+    body.lines().any(|line| {
+        let trimmed = line.trim_start();
+        if !trimmed.starts_with('#') {
+            return false;
+        }
+        let text = trimmed.trim_start_matches('#').trim();
+        // `## 修正方針（案）` and `## Approach (draft)` must both match, so
+        // compare against the heading's leading token, not the whole line.
+        let head = text
+            .split(['(', '（', '/', '—', '-'])
+            .next()
+            .unwrap_or(text)
+            .trim()
+            .to_ascii_lowercase();
+        DESIGN_CHOICE_HEADINGS.iter().any(|h| head == *h)
+    })
+}
+
+/// SPEC #3836 FR-002: is this defect large enough to deserve a design phase?
+///
+/// Large means any one of: the author framed a design choice under a heading,
+/// there are four or more acceptance criteria, or the body cites an existing
+/// SPEC. A typo or a one-line fix satisfies none of them, so it keeps today's
+/// straight-to-implementation path (AC-3).
+fn is_large_fix(body: &str) -> bool {
+    if has_design_choice_heading(body) {
+        return true;
+    }
+    if crate::issue_monitor_gate::classify_acceptance_criteria(body)
+        .ids
+        .len()
+        >= 4
+    {
+        return true;
+    }
+    let lower = body.to_ascii_lowercase();
+    lower.contains("spec-") || lower.contains("gwt-spec") || lower.contains("spec #")
+}
+
+/// SPEC #3836 FR-002: does this Issue need a design phase before implementation?
+///
+/// Pure, and deliberately owned by the Monitor rather than left to the launched
+/// agent's judgment: the same Issue must route the same way on every scan.
+pub fn requires_design_phase(labels: &[String], title: &str, body: &str) -> bool {
+    let has = |set: &[&str]| {
+        labels
+            .iter()
+            .any(|label| set.iter().any(|want| label.eq_ignore_ascii_case(want)))
+    };
+    let title_type = title_type(title).map(str::to_ascii_lowercase);
+    let title_is = |set: &[&str]| {
+        title_type
+            .as_deref()
+            .is_some_and(|t| set.iter().any(|want| t == *want))
+    };
+    if has(DESIGN_REQUIRED_LABELS) || title_is(&["feat", "feature"]) {
+        return true;
+    }
+    if has(FIX_LABELS) || title_is(&["fix", "refactor"]) {
+        return is_large_fix(body);
+    }
+    // docs / chore / style / test and anything unclassified keep today's path.
+    false
+}
+
+/// SPEC #3836 FR-006: the completion gate for a design phase, and equally the
+/// precondition for starting an implementation phase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DesignGate {
+    /// `spec` / `plan` / `tasks` are all present and non-empty.
+    pub artifacts_present: bool,
+    /// At least one `- [ ] AC-N:` criterion is machine-checkable.
+    pub acceptance_criteria: bool,
+}
+
+impl DesignGate {
+    pub fn satisfied(self) -> bool {
+        self.artifacts_present && self.acceptance_criteria
+    }
+
+    /// What is still missing, for the notice that explains a design retry.
+    pub fn missing(self) -> Vec<&'static str> {
+        let mut missing = Vec::new();
+        if !self.artifacts_present {
+            missing.push("spec/plan/tasks");
+        }
+        if !self.acceptance_criteria {
+            missing.push("machine-checkable acceptance criteria");
+        }
+        missing
+    }
+}
+
+/// Evaluate [`DesignGate`] from the facts a candidate already carries: section
+/// readiness (`plan` + `tasks` non-empty, computed by the cache loader) and the
+/// acceptance classifier over the same body the autonomous gate reads.
+pub fn evaluate_design_gate(issue: &IssueMonitorIssue) -> DesignGate {
+    DesignGate {
+        artifacts_present: issue.readiness.is_launch_ready(),
+        acceptance_criteria: crate::issue_monitor_gate::classify_acceptance_criteria(
+            issue.body.as_deref().unwrap_or(""),
+        )
+        .machine_checkable,
+    }
+}
+
+/// SPEC #3836 FR-001 / AC-1 / AC-9: the phase this Issue launches in.
+///
+/// An Issue that already clears the design gate goes straight to implementation
+/// — including every Issue that never needed a design phase at all. Otherwise a
+/// design-required Issue runs the design phase first, and everything else keeps
+/// its existing behavior.
+pub fn decide_execution_phase(issue: &IssueMonitorIssue) -> ExecutionPhase {
+    if evaluate_design_gate(issue).satisfied() {
+        return ExecutionPhase::Implement;
+    }
+    if requires_design_phase(
+        &issue.labels,
+        &issue.title,
+        issue.body.as_deref().unwrap_or(""),
+    ) {
+        ExecutionPhase::Design
+    } else {
+        ExecutionPhase::Implement
+    }
+}
+
 pub fn issue_monitor_launch_prompt(kind: LinkedIssueKind, number: u64) -> String {
-    match kind {
-        LinkedIssueKind::Spec => format!("$gwt-execute #{number}"),
-        LinkedIssueKind::Issue => format!(
-            "$gwt-execute #{number}\n\nBefore changing code, evaluate every remaining acceptance criterion. If all criteria are already satisfied, close Issue #{number} and finish without creating another implementation PR. Otherwise, implement only the remaining criteria."
+    issue_monitor_phase_launch_prompt(kind, number, ExecutionPhase::Implement)
+}
+
+/// The prompt for one phase of one Issue. The design phase deliberately points
+/// at `gwt-discussion` / `gwt-plan-spec` rather than replacing them: SPEC #3836
+/// automates *when* those skills run, not what they do.
+pub fn issue_monitor_phase_launch_prompt(
+    kind: LinkedIssueKind,
+    number: u64,
+    phase: ExecutionPhase,
+) -> String {
+    match phase {
+        ExecutionPhase::Design => format!(
+            "$gwt-discussion #{number}\n\nThis is the DESIGN phase for Issue #{number}. Do not write, edit, or delete production code, and do not open a PR — the session is restricted to it and edits will be refused.\n\nFinish by filling all three sections through `issue.spec.edit`:\n- `spec`: background, user scenarios, functional requirements (FR-NNN), and an acceptance block of `- [ ] AC-N:` items under `## 受け入れ基準` (that block must live in `spec`, never in `tasks`),\n- `plan`: the chosen approach and why it beats the alternatives,\n- `tasks`: the ordered task list.\n\nUse `gwt-plan-spec` for `plan` / `tasks`. The phase completes only when all three sections are non-empty and at least one `AC-N` criterion is machine-checkable; the implementation phase launches separately afterwards."
         ),
+        ExecutionPhase::Implement => match kind {
+            LinkedIssueKind::Spec => format!("$gwt-execute #{number}"),
+            LinkedIssueKind::Issue => format!(
+                "$gwt-execute #{number}\n\nBefore changing code, evaluate every remaining acceptance criterion. If all criteria are already satisfied, close Issue #{number} and finish without creating another implementation PR. Otherwise, implement only the remaining criteria."
+            ),
+        },
     }
 }
 
 pub fn issue_monitor_launch_plan(issue: &IssueMonitorIssue) -> IssueMonitorLaunchPlan {
     let linked_issue_kind = issue_monitor_linked_issue_kind(issue);
+    let phase = decide_execution_phase(issue);
     IssueMonitorLaunchPlan {
         branch_name: knowledge_launch_target_branch_name(linked_issue_kind, issue.number),
         linked_issue_kind,
-        prompt: issue_monitor_launch_prompt(linked_issue_kind, issue.number),
+        prompt: issue_monitor_phase_launch_prompt(linked_issue_kind, issue.number, phase),
+        phase,
     }
 }
 
@@ -5264,7 +5495,9 @@ impl IssueMonitorState {
             .or_insert_with(|| AutonomousIssueRecord::new(issue_number))
     }
 
-    /// SPEC #3200 T-016 / FR-026: failed/started attempts recorded for an issue.
+    /// SPEC #3200 T-016 / FR-026: failed/started **implementation** attempts
+    /// recorded for an issue. SPEC #3836 FR-007: design attempts are counted
+    /// separately by [`Self::design_attempt_count`].
     pub fn attempt_count(&self, issue_number: u64) -> u32 {
         self.autonomous_records
             .get(&issue_number)
@@ -5272,12 +5505,44 @@ impl IssueMonitorState {
             .unwrap_or(0)
     }
 
-    /// SPEC #3200 T-016 / FR-026: increment the per-issue attempt counter,
-    /// returning the new count. Drives max-attempts escalation to `NeedsHuman`.
+    /// SPEC #3836 FR-007 / AC-10: failed/started design attempts for an issue.
+    pub fn design_attempt_count(&self, issue_number: u64) -> u32 {
+        self.autonomous_records
+            .get(&issue_number)
+            .map(|record| record.design_attempts)
+            .unwrap_or(0)
+    }
+
+    /// SPEC #3836 FR-001: bind the phase the next attempt runs in, so a failure
+    /// lands on the right ledger.
+    pub fn set_execution_phase(&mut self, issue_number: u64, phase: ExecutionPhase) {
+        self.autonomous_record_mut(issue_number).execution_phase = phase;
+    }
+
+    /// The phase bound to this issue's current (or most recent) launch.
+    pub fn execution_phase(&self, issue_number: u64) -> ExecutionPhase {
+        self.autonomous_records
+            .get(&issue_number)
+            .map(|record| record.execution_phase)
+            .unwrap_or_default()
+    }
+
+    /// SPEC #3200 T-016 / FR-026: increment the per-issue attempt counter for
+    /// the phase the current launch runs in, returning the new count. Drives
+    /// max-attempts escalation. SPEC #3836 FR-007: a design failure never
+    /// spends implementation budget, and vice versa.
     pub fn record_attempt(&mut self, issue_number: u64) -> u32 {
         let record = self.autonomous_record_mut(issue_number);
-        record.attempts = record.attempts.saturating_add(1);
-        record.attempts
+        match record.execution_phase {
+            ExecutionPhase::Design => {
+                record.design_attempts = record.design_attempts.saturating_add(1);
+                record.design_attempts
+            }
+            ExecutionPhase::Implement => {
+                record.attempts = record.attempts.saturating_add(1);
+                record.attempts
+            }
+        }
     }
 
     /// SPEC #3200 T-022: set the lifecycle phase of an issue's current attempt.
@@ -8219,15 +8484,21 @@ impl IssueMonitorState {
             .autonomous_record(number)
             .map(|record| record.phase == AutonomousPhase::NeedsHuman)
             .unwrap_or(false);
+        // SPEC #3836 AC-1 / AC-9: an Issue that has not cleared the design gate
+        // launches into the design phase first, and only reaches implementation
+        // once `spec` / `plan` / `tasks` and one `AC-N` criterion exist.
+        let phase = decide_execution_phase(issue);
         let decision = autonomous_eligibility(
             self.autonomous_mode,
             issue_has_auto_merge_label(issue),
             &criteria,
             branch_protection,
             is_needs_human,
+            phase,
         );
         match &decision {
             EligibilityDecision::Eligible => {
+                self.set_execution_phase(number, phase);
                 self.capture_acceptance_snapshot(number, criteria.snapshot());
                 self.set_autonomous_phase(number, AutonomousPhase::Implementing);
                 // The launch consumes the scheduled retry, so the backoff marker

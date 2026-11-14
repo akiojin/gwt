@@ -156,9 +156,11 @@ impl<C: IssueClient> SpecOps<C> {
             .unwrap_or(SectionLocation::Body);
 
         // Start from the latest full body text and patch it in place. Keep
-        // the original for rollback after a readback mismatch.
+        // the original for rollback after a readback mismatch. A plain Issue
+        // has no header / index yet, so give it the minimal scaffolding the
+        // rest of this function (and the readback) needs (SPEC #3836 FR-004).
         let original_body = entry.snapshot.body.clone();
-        let mut issue_body = entry.snapshot.body;
+        let mut issue_body = ensure_spec_scaffold(&entry.snapshot.body, number);
         let mut new_sections_index = spec_body.sections_index.clone();
 
         let prev_ids: Vec<u64> = match &prev_location {
@@ -457,6 +459,37 @@ fn strip_body_section(body: &str, name: &SectionName) -> String {
     out.push_str(body[..begin_idx].trim_end_matches(['\n', ' ']));
     out.push('\n');
     out.push_str(body[end_idx..].trim_start_matches('\n'));
+    out
+}
+
+/// SPEC #3836 FR-004: give a plain Issue the minimal `gwt-spec` scaffolding a
+/// section write needs, so `spec` / `plan` / `tasks` can be written to and read
+/// back from an Issue that was never registered as a SPEC.
+///
+/// Only the two machine-readable comment blocks are prepended; the Issue's
+/// existing prose is preserved verbatim below them, because that prose is the
+/// human-agreed content of a plain Issue and section writes must never silently
+/// replace it.
+///
+/// A body that already carries the header is returned untouched, so the
+/// behavior of every existing `gwt-spec` Issue is unchanged (AC-6). The empty
+/// index block is enough: `rewrite_index_map` fills it in on the same write.
+fn ensure_spec_scaffold(body: &str, number: IssueNumber) -> String {
+    let header_re = regex::Regex::new(r"<!--\s*gwt-spec\s+id=\S+\s+version=\d+\s*-->")
+        .expect("valid header regex");
+    if header_re.is_match(body) {
+        return body.to_string();
+    }
+    let index_re = regex::Regex::new(r"(?s)<!--\s*sections:.*?-->").expect("valid index regex");
+    let mut out = format!("<!-- gwt-spec id={} version=1 -->\n", number.0);
+    if !index_re.is_match(body) {
+        out.push_str("<!-- sections:\n-->\n");
+    }
+    let prose = body.trim_start_matches('\n');
+    if !prose.trim().is_empty() {
+        out.push('\n');
+        out.push_str(prose);
+    }
     out
 }
 

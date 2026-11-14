@@ -545,10 +545,23 @@ where
             .iter()
             .any(|label| label.eq_ignore_ascii_case("gwt-spec"));
         if !is_spec {
-            candidates.push(issue_monitor_candidate(
-                issue,
-                IssueMonitorReadiness::NotApplicable,
-            ));
+            // SPEC #3836 FR-004: a plain Issue can now carry `spec` / `plan` /
+            // `tasks`, and the design gate has to be able to observe them —
+            // otherwise a plain feat Issue would design forever, never reaching
+            // implementation. Read the cache only: a plain Issue never spends
+            // one of this scan's scarce targeted refreshes, and an Issue with
+            // no sections keeps `NotApplicable` exactly as before.
+            let mut issue = issue;
+            let readiness = cache
+                .load_entry(IssueNumber(issue.number))
+                .filter(|entry| !entry.spec_body.sections.is_empty())
+                .map(|entry| {
+                    let body = issue.body.as_deref().unwrap_or(&entry.snapshot.body);
+                    issue.body = Some(acceptance_source_text(body, &entry));
+                    spec_cache_entry_readiness(&entry)
+                })
+                .unwrap_or(IssueMonitorReadiness::NotApplicable);
+            candidates.push(issue_monitor_candidate(issue, readiness));
             continue;
         }
 

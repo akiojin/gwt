@@ -504,3 +504,100 @@ fn red_96_spec_3248_scale_roundtrip() {
     let got = ops.read_section(IssueNumber(1), &n("tasks")).unwrap();
     assert_eq!(got, content);
 }
+
+/// The Issue's current remote body, as the fake transport holds it.
+fn fetch_body(client: &FakeIssueClient, number: u64) -> String {
+    match client.fetch(IssueNumber(number), None).unwrap() {
+        gwt_github::client::FetchResult::Updated(snapshot) => snapshot.body,
+        gwt_github::client::FetchResult::NotModified => panic!("expected a fresh snapshot"),
+    }
+}
+
+/// Seed a plain Issue: no `gwt-spec` header, no sections index, no label —
+/// just the prose a human wrote.
+fn seed_plain_issue(
+    client: &FakeIssueClient,
+    cache: &Cache,
+    number: u64,
+    body: &str,
+) -> IssueSnapshot {
+    let snapshot = IssueSnapshot {
+        number: IssueNumber(number),
+        title: format!("fix: plain issue {number}"),
+        body: body.to_string(),
+        labels: vec!["bug".to_string()],
+        state: IssueState::Open,
+        updated_at: UpdatedAt::new(format!("seed-{number}")),
+        comments: Vec::new(),
+    };
+    client.seed(snapshot.clone());
+    cache.write_snapshot(&snapshot).unwrap();
+    snapshot
+}
+
+/// SPEC #3836 AC-5: `spec` / `plan` / `tasks` can be written to a plain Issue
+/// that has no `gwt-spec` header, and every one of them reads back byte-for-byte.
+/// Before this, the write reached `rewrite_index_map`, which only ever
+/// *replaced* an existing `<!-- sections: -->` block, so the body kept no index,
+/// the readback found no section, and the write failed with `ReadbackMismatch`.
+#[test]
+fn spec_3836_plain_issue_accepts_and_returns_all_three_sections() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    let client = FakeIssueClient::new();
+    let prose = "## 問題\n\nContinue work が起動前に落ちる。\n\n## 受け入れ基準\n\n- [ ] AC-1: 落ちない\n";
+    seed_plain_issue(&client, &cache, 7, prose);
+
+    let ops = SpecOps::new(client, cache);
+    let written = [
+        ("spec", "## 背景\n\nplain issue に書いた spec。"),
+        ("plan", "## 方針\n\n最小の変更で直す。"),
+        ("tasks", "- [ ] T-001 RED を書く\n- [ ] T-002 GREEN にする"),
+    ];
+    for (name, content) in written {
+        ops.write_section(IssueNumber(7), &n(name), content)
+            .unwrap_or_else(|e| panic!("write {name} on a plain issue: {e:?}"));
+    }
+    for (name, content) in written {
+        assert_eq!(
+            ops.read_section(IssueNumber(7), &n(name)).unwrap(),
+            content,
+            "section `{name}` must round-trip on a plain Issue"
+        );
+    }
+
+    // The human-written prose is preserved verbatim: a section write adds
+    // machine-readable scaffolding, it never replaces the Issue's content.
+    let body = fetch_body(ops.client(), 7);
+    assert!(body.contains(prose.trim_end()), "prose lost: {body}");
+    assert!(body.contains("<!-- gwt-spec id=7 version=1 -->"), "{body}");
+}
+
+/// SPEC #3836 AC-6: an existing `gwt-spec` Issue is unaffected — the scaffolding
+/// is only added when the header is absent, so the header, the index, and every
+/// untouched section keep their exact bytes across a section write.
+#[test]
+fn spec_3836_existing_gwt_spec_issue_write_is_unchanged() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    let client = FakeIssueClient::new();
+    seed_spec(&client, &cache, 1, "spec v1", "- [ ] T-001");
+
+    let ops = SpecOps::new(client, cache);
+    ops.write_section(IssueNumber(1), &n("spec"), "spec v2")
+        .unwrap();
+
+    assert_eq!(ops.read_section(IssueNumber(1), &n("spec")).unwrap(), "spec v2");
+    assert_eq!(
+        ops.read_section(IssueNumber(1), &n("tasks")).unwrap(),
+        "- [ ] T-001",
+        "an untouched section must not move"
+    );
+    let body = fetch_body(ops.client(), 1);
+    assert_eq!(
+        body.matches("<!-- gwt-spec id=").count(),
+        1,
+        "the scaffolding must not duplicate an existing header: {body}"
+    );
+    assert!(body.contains("<!-- gwt-spec id=42 version=1 -->"), "{body}");
+}

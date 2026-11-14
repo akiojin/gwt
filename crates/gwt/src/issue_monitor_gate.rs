@@ -22,6 +22,15 @@ pub enum AcceptanceDefect {
         /// The heading as written (without the leading `#`s).
         heading: String,
     },
+    /// SPEC #3836 AC-12: the only acceptance block sits inside the `tasks`
+    /// artifact region of a gwt-spec Issue. Criteria there are not the SPEC's
+    /// acceptance contract, so they are deliberately not counted — but saying
+    /// "no heading found" would send the author hunting for a block that is
+    /// right in front of them.
+    MisplacedInTasks {
+        /// The heading as written (without the leading `#`s).
+        heading: String,
+    },
 }
 
 /// Outcome of the deterministic pre-launch acceptance-criteria classification.
@@ -68,6 +77,12 @@ impl AcceptanceCriteria {
                 "acceptance criteria heading `## {heading}` found but no `- [ ]` checklist items \
                  under it; write each criterion as `- [ ] AC-1: ...` (a `- [ ]` line without \
                  the `AC-N:` prefix is accepted and numbered by position)"
+            ),
+            AcceptanceDefect::MisplacedInTasks { heading } => format!(
+                "acceptance criteria heading `## {heading}` is inside the `tasks` section; the \
+                 acceptance block must live in the `spec` section (the `tasks` section holds \
+                 only the ordered task list). Move the `- [ ] AC-N:` items into `spec` with \
+                 `issue.spec.edit`"
             ),
         })
     }
@@ -134,6 +149,25 @@ fn heading_text(line: &str) -> Option<(String, String)> {
     Some((written.to_ascii_lowercase(), written.to_string()))
 }
 
+/// The gwt-spec artifact region a marker line opens or closes: the section
+/// name plus whether this is the `BEGIN` side. `None` for a non-marker line.
+///
+/// Only the section name matters here — the `part=N/M` suffix a multipart
+/// writer appends is irrelevant to which region the following lines belong to.
+fn artifact_marker(line: &str) -> Option<(String, bool)> {
+    let trimmed = line.trim();
+    let inner = trimmed.strip_prefix("<!--")?.strip_suffix("-->")?.trim();
+    let rest = inner.strip_prefix("artifact:")?;
+    let mut parts = rest.split_whitespace();
+    let name = parts.next()?;
+    let is_begin = match parts.next()? {
+        "BEGIN" => true,
+        "END" => false,
+        _ => return None,
+    };
+    Some((name.to_string(), is_begin))
+}
+
 /// Split an item's text into its explicit `AC-<id>` (when the item starts with
 /// a well-formed `AC-<id>:` token) and the remaining criterion text.
 fn split_explicit_id(rest: &str) -> (Option<String>, &str) {
@@ -166,16 +200,37 @@ fn split_explicit_id(rest: &str) -> (Option<String>, &str) {
 pub fn classify_acceptance_criteria(issue_body: &str) -> AcceptanceCriteria {
     let mut in_block = false;
     let mut heading_found: Option<String> = None;
+    // SPEC #3836 AC-12: the heading of an acceptance block that was written
+    // into the `tasks` region, kept only to explain an otherwise-empty result.
+    let mut misplaced_heading: Option<String> = None;
+    let mut region: Option<String> = None;
     // (explicit id, checked, criterion text) for every checklist / explicit-id
     // item. `checked` is Issue #3917 AC-2 completion evidence.
     let mut items: Vec<(Option<String>, bool, String)> = Vec::new();
 
     for line in issue_body.lines() {
+        // A gwt-spec section boundary (`<!-- artifact:NAME BEGIN/END -->`)
+        // closes the block: a `tasks` section that follows without a markdown
+        // heading must not contribute positional criteria. It also tracks
+        // which region the following lines belong to (SPEC #3836 AC-12).
+        if let Some((name, is_begin)) = artifact_marker(line) {
+            region = is_begin.then_some(name);
+            in_block = false;
+            continue;
+        }
         if let Some((heading, written)) = heading_text(line) {
             // Entering the block iff this heading matches; any other heading
             // closes a previously open block.
             in_block = ACCEPTANCE_HEADINGS.iter().any(|h| heading == *h);
-            if in_block && heading_found.is_none() {
+            if in_block && region.as_deref() == Some("tasks") {
+                // SPEC #3836 AC-12: criteria written into `tasks` are not the
+                // acceptance contract. Skip them, but remember the heading so
+                // the rejection reason can name the real mistake.
+                in_block = false;
+                if misplaced_heading.is_none() {
+                    misplaced_heading = Some(written);
+                }
+            } else if in_block && heading_found.is_none() {
                 heading_found = Some(written);
             }
             continue;
@@ -184,13 +239,6 @@ pub fn classify_acceptance_criteria(issue_body: &str) -> AcceptanceCriteria {
             continue;
         }
         let item = line.trim_start();
-        // A gwt-spec section boundary (`<!-- artifact:NAME BEGIN/END -->`)
-        // closes the block too: a `tasks` section that follows without a
-        // markdown heading must not contribute positional criteria.
-        if item.starts_with("<!--") && item.contains("artifact:") {
-            in_block = false;
-            continue;
-        }
         // Checklist item: `- [ ] AC-..:` or `- [x] AC-..:` (and `*` bullets).
         let after_bullet = item
             .strip_prefix("- ")
@@ -240,6 +288,10 @@ pub fn classify_acceptance_criteria(issue_body: &str) -> AcceptanceCriteria {
     let ids: Vec<String> = accepted.into_iter().map(|(id, _, _)| id).collect();
     let defect = if !ids.is_empty() {
         None
+    } else if let Some(heading) = misplaced_heading {
+        // The misplaced block is the more actionable diagnosis: it names a
+        // block the author can see, rather than one they must invent.
+        Some(AcceptanceDefect::MisplacedInTasks { heading })
     } else if let Some(heading) = heading_found {
         Some(AcceptanceDefect::NoChecklistItems { heading })
     } else {
@@ -253,6 +305,142 @@ pub fn classify_acceptance_criteria(issue_body: &str) -> AcceptanceCriteria {
         unchecked,
         defect,
     }
+}
+
+/// Where an acceptance checklist item's criterion text starts, and whether it
+/// already carries an explicit `AC-<id>:`.
+enum ItemShape {
+    /// Already identified — never rewritten (SPEC #3836 AC-8). Carries the
+    /// numeric part of the id when it is a plain `AC-<n>`, so the numbering
+    /// pass can avoid re-using it.
+    Identified(Option<u32>),
+    /// A checklist item with no explicit id; `usize` is the byte offset in the
+    /// line where `AC-<n>: ` must be inserted.
+    Unidentified(usize),
+}
+
+/// Classify one line of an acceptance block. `None` for prose, blank lines, and
+/// bullets that are neither a checkbox nor an explicit `AC-<id>:` item — the
+/// same shapes [`classify_acceptance_criteria`] treats as non-criteria.
+fn acceptance_item_shape(line: &str) -> Option<ItemShape> {
+    let indent = line.len() - line.trim_start().len();
+    let trimmed = &line[indent..];
+    let bullet = trimmed
+        .strip_prefix("- ")
+        .or_else(|| trimmed.strip_prefix("* "))?;
+    let after_bullet_offset = indent + 2 + (bullet.len() - bullet.trim_start().len());
+    let after_bullet = bullet.trim_start();
+    let checkbox = after_bullet
+        .strip_prefix("[ ]")
+        .or_else(|| after_bullet.strip_prefix("[x]"))
+        .or_else(|| after_bullet.strip_prefix("[X]"));
+    let (text_offset, text) = match checkbox {
+        Some(rest) => (
+            after_bullet_offset + 3 + (rest.len() - rest.trim_start().len()),
+            rest.trim_start(),
+        ),
+        None => (after_bullet_offset, after_bullet),
+    };
+    let (explicit_id, _) = split_explicit_id(text);
+    match (explicit_id, checkbox.is_some()) {
+        (Some(id), _) => Some(ItemShape::Identified(
+            id.strip_prefix("AC-").and_then(|n| n.parse::<u32>().ok()),
+        )),
+        // A bullet without a checkbox and without an id is prose.
+        (None, false) => None,
+        (None, true) => Some(ItemShape::Unidentified(text_offset)),
+    }
+}
+
+/// SPEC #3836 FR-005: give every acceptance-criteria checklist item an explicit
+/// `AC-<n>:` prefix, so criterion ids stay stable across later edits instead of
+/// shifting with position.
+///
+/// The rewrite is deliberately minimal, because the input is an Issue body a
+/// human agreed to:
+///
+/// - No line is added, removed, reordered, or re-wrapped — only an `AC-<n>: `
+///   token is inserted after the checkbox of an item that lacks one (AC-7).
+/// - An item that already carries an explicit `AC-<id>:` is byte-identical in
+///   the output, so ids other Issues already cite never move (AC-8).
+/// - Text outside a recognized acceptance block — including a block inside the
+///   `tasks` region — is byte-identical, line endings included.
+///
+/// Numbers are assigned as the smallest positive integers not already used by
+/// an explicit id in the same block, so a partially-numbered block gains ids
+/// without colliding. A block with no explicit ids therefore yields exactly the
+/// positional ids [`classify_acceptance_criteria`] would have inferred.
+pub fn normalize_acceptance_criteria(issue_body: &str) -> String {
+    // Chunks keep their own terminator so CRLF bodies survive untouched.
+    let chunks: Vec<&str> = issue_body.split_inclusive('\n').collect();
+
+    // Pass 1: assign each line to an acceptance block (valid ones only) and
+    // classify its shape. Mirrors the classifier's region/heading walk.
+    let mut block_of: Vec<Option<usize>> = vec![None; chunks.len()];
+    let mut shapes: Vec<Option<ItemShape>> = Vec::with_capacity(chunks.len());
+    let mut region: Option<String> = None;
+    let mut current: Option<usize> = None;
+    let mut blocks = 0usize;
+    for (index, chunk) in chunks.iter().enumerate() {
+        let line = chunk.trim_end_matches('\n').trim_end_matches('\r');
+        if let Some((name, is_begin)) = artifact_marker(line) {
+            region = is_begin.then_some(name);
+            current = None;
+            shapes.push(None);
+            continue;
+        }
+        if let Some((heading, _)) = heading_text(line) {
+            let matches = ACCEPTANCE_HEADINGS.iter().any(|h| heading == *h);
+            current = if matches && region.as_deref() != Some("tasks") {
+                blocks += 1;
+                Some(blocks - 1)
+            } else {
+                None
+            };
+            shapes.push(None);
+            continue;
+        }
+        let shape = current.and_then(|_| acceptance_item_shape(line));
+        if shape.is_some() {
+            block_of[index] = current;
+        }
+        shapes.push(shape);
+    }
+
+    // Pass 2: per block, reserve the explicit ids, then hand the unidentified
+    // items the smallest numbers left over.
+    let mut used: Vec<std::collections::BTreeSet<u32>> = vec![Default::default(); blocks];
+    for (index, shape) in shapes.iter().enumerate() {
+        if let (Some(block), Some(ItemShape::Identified(Some(number)))) = (block_of[index], shape) {
+            used[block].insert(*number);
+        }
+    }
+    let mut next: Vec<u32> = vec![1; blocks];
+    let mut assigned: Vec<Option<u32>> = vec![None; chunks.len()];
+    for (index, shape) in shapes.iter().enumerate() {
+        let (Some(block), Some(ItemShape::Unidentified(_))) = (block_of[index], shape) else {
+            continue;
+        };
+        while used[block].contains(&next[block]) {
+            next[block] += 1;
+        }
+        assigned[index] = Some(next[block]);
+        used[block].insert(next[block]);
+    }
+
+    // Pass 3: rebuild, splicing the prefix into the untouched original bytes.
+    let mut out = String::with_capacity(issue_body.len());
+    for (index, chunk) in chunks.iter().enumerate() {
+        match (assigned[index], shapes[index].as_ref()) {
+            (Some(number), Some(ItemShape::Unidentified(offset))) => {
+                out.push_str(&chunk[..*offset]);
+                out.push_str(&format!("AC-{number}: "));
+                out.push_str(&chunk[*offset..]);
+            }
+            _ => out.push_str(chunk),
+        }
+    }
+    out
 }
 
 /// CI outcome for the reviewed SHA, as seen by the strong gate. Only a real,
@@ -540,6 +728,172 @@ mod tests {
         assert!(c.machine_checkable);
         assert_eq!(c.ids, vec!["AC-1", "AC-2"]);
         assert!(c.visual_surface, "(visual) tag marks a visual surface");
+    }
+
+    /// The four Issues SPEC #3836 names for its real-data check (AC-11), as
+    /// their `## 受け入れ基準` blocks were actually stored on 2026-09-06.
+    /// Every item already carries an explicit `AC-N:`, so normalization must
+    /// be a no-op here — which is exactly the guarantee AC-11 asks for: the
+    /// agreed wording cannot be lost by running the normalizer over them.
+    fn real_acceptance_blocks() -> Vec<(u64, &'static str)> {
+        vec![
+            (
+                3514,
+                "## 受け入れ基準\n\n\
+                 - [ ] AC-1: `test_spawn_with_cwd` が DSR/OSC 等の制御応答のみを読んだ場合に再 read して cwd 出力を待つ（deadline 付き）、または制御シーケンスを除去してから検証する\n\
+                 - [ ] AC-2: `cargo test -p gwt-terminal --lib` を反復実行（例: 20 回）しても当該テストが安定して PASS する\n\
+                 - [ ] AC-3: 同型の read-timing 依存が同ファイル内の他テストにないかを確認し、あれば同修正を適用する\n",
+            ),
+            (
+                3515,
+                "## 受け入れ基準\n\n\
+                 - [ ] AC-1: `actions.rerun` が run_id / job_id 指定で失敗 run・job を再実行できる\n\
+                 - [ ] AC-2: 他 repo の run_id を渡した場合は拒否される\n\
+                 - [ ] AC-3: `gwtd --help actions` に操作が記載される\n\
+                 - [ ] AC-4: 単体テスト（パラメータ検証・拒否経路）が追加される\n",
+            ),
+            (
+                3516,
+                "## 受け入れ基準\n\n\
+                 - [ ] AC-1: bump 済み & Release PR 不在 & tag 不在の状態を検知できる\n\
+                 - [ ] AC-2: 検知から Release PR 作成（または通知）までが自動で行われる\n\
+                 - [ ] AC-3: 冪等性: 再実行しても重複 PR・重複通知を作らない\n\
+                 - [ ] AC-4: 単体テスト（検知条件・冪等経路）が追加される\n",
+            ),
+            (
+                3489,
+                "## 受け入れ基準\n\n\
+                 - [ ] AC-1: `linked_issue_number` が `None` の永続 Session を seed に Continue work を起動したとき、PTY 起動前に失敗しない\n\
+                 - [ ] AC-2: `linked_issue_number` が別 owner を指す永続 Session を seed にした場合も、`target.owner` に再解決されて起動する\n\
+                 - [ ] AC-3: 上記 2 ケースを RED から入る回帰テストが `crates/gwt/src/app_runtime/` のテストに追加されている\n\
+                 - [ ] AC-4: owner 不一致が構造的に起こり得る残余ケースでは、pane に出る文言が内部エラー文字列ではなく次アクション付きの診断になっている\n\
+                 - [ ] AC-5: `cargo test -p gwt-core -p gwt --all-features` / `cargo clippy --all-targets --all-features -- -D warnings` が PASS\n",
+            ),
+        ]
+    }
+
+    /// SPEC #3836 AC-7: unprefixed checklist items gain `AC-N:` ids, and the
+    /// ids match the ones the classifier infers by position — normalizing
+    /// freezes the ids rather than changing them.
+    #[test]
+    fn normalize_adds_positional_ids_to_unprefixed_items() {
+        let body = "## Acceptance Criteria\n- [ ] the API returns 200\n- [x] the list is sorted\n";
+        let out = normalize_acceptance_criteria(body);
+        assert_eq!(
+            out,
+            "## Acceptance Criteria\n- [ ] AC-1: the API returns 200\n- [x] AC-2: the list is sorted\n"
+        );
+        assert_eq!(
+            classify_acceptance_criteria(&out).ids,
+            classify_acceptance_criteria(body).ids,
+            "normalization must freeze the inferred ids, not renumber them"
+        );
+    }
+
+    /// SPEC #3836 AC-8: items that already carry an explicit id are returned
+    /// byte-identical, so an `AC-2` another Issue cites keeps pointing at the
+    /// same criterion.
+    #[test]
+    fn normalize_leaves_explicit_ids_byte_identical() {
+        for (number, block) in real_acceptance_blocks() {
+            assert_eq!(
+                normalize_acceptance_criteria(block),
+                block,
+                "#{number}: an already-numbered block must survive untouched"
+            );
+        }
+        // Idempotence: normalizing a normalized body changes nothing further.
+        let once = normalize_acceptance_criteria("## 受け入れ基準\n- [ ] first\n- [ ] second\n");
+        assert_eq!(normalize_acceptance_criteria(&once), once);
+    }
+
+    /// SPEC #3836 AC-7 (property): no checklist line is dropped, no line is
+    /// added, and every byte outside the block — CRLF endings included — is
+    /// preserved.
+    #[test]
+    fn normalize_preserves_line_counts_and_surrounding_text() {
+        let body = "# Title\r\n\r\n## 背景\r\n- [ ] not a criterion (outside the block)\r\n\r\n\
+                    ## 受け入れ基準\r\n- [ ] one\r\n  - [x] two indented\r\n- prose bullet\r\n\r\n\
+                    ## Notes\r\n- [ ] also outside\r\n";
+        let out = normalize_acceptance_criteria(body);
+
+        let checkboxes = |text: &str| {
+            text.lines()
+                .filter(|line| {
+                    let t = line.trim_start();
+                    t.starts_with("- [ ]") || t.starts_with("- [x]")
+                })
+                .count()
+        };
+        assert_eq!(checkboxes(&out), checkboxes(body), "no item may be lost");
+        assert_eq!(out.lines().count(), body.lines().count());
+        assert!(out.contains("\r\n"), "CRLF endings must survive");
+        assert!(
+            out.contains("## 背景\r\n- [ ] not a criterion (outside the block)"),
+            "text outside the block must be byte-identical: {out:?}"
+        );
+        assert!(
+            out.contains("## Notes\r\n- [ ] also outside\r\n"),
+            "a later non-acceptance heading closes the block: {out:?}"
+        );
+        assert!(out.contains("- [ ] AC-1: one"), "{out:?}");
+        assert!(out.contains("  - [x] AC-2: two indented"), "{out:?}");
+        assert!(out.contains("- prose bullet"), "prose is not a criterion");
+    }
+
+    /// A partially-numbered block gains ids for the unnumbered items without
+    /// stealing a number an explicit id already claimed.
+    #[test]
+    fn normalize_avoids_colliding_with_existing_ids() {
+        let body = "## Acceptance Criteria\n- [ ] AC-1: kept\n- [ ] gains an id\n- [ ] AC-3: kept\n- [ ] gains another\n";
+        let out = normalize_acceptance_criteria(body);
+        assert_eq!(
+            out,
+            "## Acceptance Criteria\n- [ ] AC-1: kept\n- [ ] AC-2: gains an id\n- [ ] AC-3: kept\n- [ ] AC-4: gains another\n"
+        );
+    }
+
+    /// SPEC #3836 AC-12: an acceptance block written into the `tasks` artifact
+    /// region is not the SPEC's acceptance contract. It contributes no
+    /// criteria, is left untouched by the normalizer, and the rejection reason
+    /// names the misplacement instead of claiming no heading exists.
+    #[test]
+    fn acceptance_block_inside_tasks_region_is_reported_as_misplaced() {
+        let body = "<!-- gwt-spec id=3835 version=1 -->\n\
+                    <!-- sections:\nspec=body\ntasks=body\n-->\n\n\
+                    <!-- artifact:spec BEGIN -->\n## 背景\n\n設計だけ。\n<!-- artifact:spec END -->\n\n\
+                    <!-- artifact:tasks BEGIN -->\n## 受け入れ基準\n\n- [ ] AC-1: 実装が動く\n<!-- artifact:tasks END -->\n";
+        let c = classify_acceptance_criteria(body);
+        assert!(
+            !c.machine_checkable,
+            "criteria in the tasks region are not the acceptance contract"
+        );
+        assert_eq!(
+            c.defect,
+            Some(AcceptanceDefect::MisplacedInTasks {
+                heading: "受け入れ基準".to_string()
+            })
+        );
+        let reason = c.rejection_reason().expect("a defect has a reason");
+        assert!(reason.contains("`tasks` section"), "{reason}");
+        assert!(reason.contains("`spec` section"), "{reason}");
+        assert_eq!(
+            normalize_acceptance_criteria(body),
+            body,
+            "the normalizer must not renumber a misplaced block either"
+        );
+    }
+
+    /// A well-formed `spec` block still wins when a stray acceptance heading
+    /// also appears under `tasks`: the misplaced one is ignored, not fatal.
+    #[test]
+    fn spec_region_criteria_win_over_a_stray_tasks_heading() {
+        let body = "<!-- artifact:spec BEGIN -->\n## 受け入れ基準\n- [ ] AC-1: real\n<!-- artifact:spec END -->\n\
+                    <!-- artifact:tasks BEGIN -->\n## 受け入れ基準\n- [ ] AC-9: stray\n<!-- artifact:tasks END -->\n";
+        let c = classify_acceptance_criteria(body);
+        assert!(c.machine_checkable);
+        assert_eq!(c.ids, vec!["AC-1"]);
+        assert_eq!(c.defect, None);
     }
 
     #[test]
