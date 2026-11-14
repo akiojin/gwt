@@ -350,11 +350,18 @@ jobs:
           shared-key: linux-workspace
         continue-on-error: true
       - name: Build infrastructure regression artifacts
-        run: cargo test -p gwt --all-features --lib --test cli_contracts --no-run
+        # The timeout fixture has its own temporary target and spends most of
+        # its time parked. Join both results before the guarded artifact tests.
+        run: |
+          cargo test -p gwt --all-features --lib --test cli_contracts --no-run &
+          build_pid=$!
+          timeout_status=0
+          node scripts/test-nextest-timeout.mjs || timeout_status=$?
+          build_status=0
+          wait "$build_pid" || build_status=$?
+          if [ "$build_status" -ne 0 ]; then exit "$build_status"; fi
+          exit "$timeout_status"
         timeout-minutes: 25
-      - name: Verify per-test timeout and suite continuation
-        run: node scripts/test-nextest-timeout.mjs
-        timeout-minutes: 5
       # Issue #4317: the script arms the guarded artifact itself and drives
       # refusal -> `cargo build -p gwt --bin gwtd` -> successful GitHub read,
       # which is the recovery verify.run now appends to its own matrix.
