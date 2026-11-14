@@ -1074,6 +1074,12 @@ fn windows_agent_launch_e2e_builds_once_and_runs_installed_providers() {
     let agent_job = &doc["jobs"]["test-windows-agent-launch-e2e"];
     assert!(agent_job["env"]["CARGO_PROFILE_DEV_DEBUG"].is_null());
     let steps = agent_job["steps"].as_sequence().unwrap();
+    assert!(
+        steps.iter().all(|step| !step["run"]
+            .as_str()
+            .is_some_and(|run| run.contains("cargo build"))),
+        "the integration build emits gwt and gwtd; a separate build repeats their dependency graph"
+    );
     let cargo_steps: Vec<_> = steps
         .iter()
         .filter(|step| {
