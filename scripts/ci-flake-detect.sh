@@ -90,6 +90,7 @@ select_changed_tests() {
 import os
 import pathlib
 import re
+import shlex
 import subprocess
 import sys
 
@@ -105,9 +106,31 @@ changed = subprocess.check_output(
     ["git", "diff", "--name-only", "--no-renames", "-z", f"{base}...{head}"],
     text=True,
 ).split("\0")
-tests = sorted({line.removesuffix(": test") for line in
-                pathlib.Path(listing).read_text().splitlines()
+listing_text = pathlib.Path(listing).read_text()
+tests = sorted({line.removesuffix(": test") for line in listing_text.splitlines()
                 if line.endswith(": test")})
+
+
+def compiled_library_sources():
+    # Cargo identifies this exact libtest executable. Its matching rustc
+    # dep-info proves source ownership without a hand-maintained bin list.
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", listing_text)
+    headers = re.findall(r"^\s*Running unittests (.+) \((.+)\)$", plain, re.MULTILINE)
+    if len(headers) != 1:
+        return None
+    source, executable = headers[0]
+    try:
+        rule = pathlib.Path(executable).with_suffix(".d").read_text().splitlines()[0]
+        # Unusual make quoting must fall back, never silently drop a source.
+        if any(char in rule for char in "\"'$") or rule.endswith("\\"):
+            return None
+        paths = {pathlib.Path(name).resolve() for name in shlex.split(rule.split(": ", 1)[1])}
+        root = pathlib.Path("crates", crate, source).resolve()
+        return paths if root in paths else None
+    except (OSError, ValueError, IndexError):
+        return None
+
+
 if kind == "test":
     selected = tests
     if crate == "gwt":
@@ -144,9 +167,13 @@ if kind == "test":
             selected = [test for test in tests if test.partition("::")[0] in modules]
 elif kind == "lib":
     functions = set()
+    compiled_sources = compiled_library_sources()
     for name in changed:
         path = pathlib.Path(name)
         if name.startswith(f"crates/{crate}/src/") and path.suffix == ".rs":
+            if compiled_sources is not None and path.is_file() and path.resolve() not in compiled_sources:
+                print(f"{entry}: {name} is not compiled into this library", file=sys.stderr)
+                continue
             file_functions = set(re.findall(r"\bfn\s+(?:r#)?([A-Za-z_]\w*)\s*\(",
                                             path.read_text())) if path.is_file() else set()
             if not any(test.rsplit("::", 1)[-1] in file_functions for test in tests):

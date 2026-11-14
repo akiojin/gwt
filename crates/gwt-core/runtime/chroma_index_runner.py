@@ -2733,12 +2733,24 @@ def _git_command(root: Path, args: Sequence[str], input_bytes: Optional[bytes] =
 def _canonical_git_tree(root: Path) -> Optional[Dict[str, Optional[str]]]:
     """Pin the first available canonical local ref without fetching."""
     boundary_fields = []
+    head_tree_oid = None
     try:
         boundary_probe = _git_command(
-            root, ["rev-parse", "--is-inside-work-tree", "--show-toplevel", "--show-prefix"]
+            root, ["rev-parse", "--is-inside-work-tree", "--show-toplevel", "--show-prefix",
+                   "--verify", "--quiet", "HEAD^{tree}"]
         )
-        if boundary_probe.returncode == 0 and isinstance(boundary_probe.stdout, bytes):
+        if boundary_probe.returncode in (0, 1) and isinstance(boundary_probe.stdout, bytes):
             boundary_fields = boundary_probe.stdout.split(b"\n")
+            if boundary_probe.returncode == 0:
+                if len(boundary_fields) == 5 and boundary_fields[-1] == b"":
+                    candidate = boundary_fields[3].lower()
+                    if len(candidate) in (40, 64) and all(char in b"0123456789abcdef" for char in candidate):
+                        head_tree_oid = candidate.decode("ascii")
+                        del boundary_fields[3]
+                    else:
+                        boundary_fields = []
+                else:
+                    boundary_fields = []
     except RuntimeError:
         # Keep the original boundary/error classification on probe failure.
         pass
@@ -2746,6 +2758,7 @@ def _canonical_git_tree(root: Path) -> Optional[Dict[str, Optional[str]]]:
             and boundary_fields[0] in (b"true", b"false")):
         root_output, prefix_bytes = boundary_fields[1:3]
     else:
+        head_tree_oid = None
         repository_probe = _git_command(root, ["rev-parse", "--is-inside-work-tree"])
         if repository_probe.returncode != 0:
             if (root / ".git").exists():
@@ -2799,6 +2812,9 @@ def _canonical_git_tree(root: Path) -> Optional[Dict[str, Optional[str]]]:
     for reference, exists in candidate_presence:
         if not exists:
             continue
+        if reference == "HEAD" and head_tree_oid is not None:
+            return {"reference": reference, "root_tree_oid": head_tree_oid,
+                    "tree_prefix": tree_prefix}
         expression = f"{reference}^{{tree}}"
         completed = _git_command(root, ["rev-parse", "--verify", "--quiet", expression])
         if completed.returncode != 0:
@@ -3667,16 +3683,19 @@ def _prune_file_record_pool(v2_root: Path) -> int:
             for pool in pools_root.iterdir():
                 if not pool.is_dir() or pool.is_symlink() or not _is_sha256(pool.name):
                     continue
-                for scope, collection_name in (
-                    ("files", V2_FILES_CODE_COLLECTION), ("files-docs", V2_FILES_DOCS_COLLECTION)
-                ):
-                    client, collection = _open_file_index_v2_collection(pool / "store", collection_name)
-                    try:
+                opened = []
+                try:
+                    for scope, collection_name in (
+                        ("files", V2_FILES_CODE_COLLECTION), ("files-docs", V2_FILES_DOCS_COLLECTION)
+                    ):
+                        client, collection = _open_file_index_v2_collection(pool / "store", collection_name)
+                        opened.append(client)
                         retained = marks.get(pool.name, {}).get(scope, set())
                         removed = _prune_unreferenced_record_block(collection, retained)
                         if removed:
                             return removed
-                    finally:
+                finally:
+                    for client in opened:
                         _close_chroma_client(client)
     except Exception:
         # Cleanup cannot invalidate a completed refresh. Contention, malformed
@@ -3812,11 +3831,6 @@ def _staged_artifact_vectors_are_verified(
     )
     opened: Dict[str, tuple[Any, Any]] = {}
     try:
-        for bucket, collection_name in (
-            ("code", V2_FILES_CODE_COLLECTION),
-            ("docs", V2_FILES_DOCS_COLLECTION),
-        ):
-            opened[bucket] = _open_file_index_v2_collection(store, collection_name)
         for start in range(0, len(records), FILE_INDEX_V2_VECTOR_BATCH):
             stop = start + FILE_INDEX_V2_VECTOR_BATCH
             indexes = range(start, min(stop, len(records)))
@@ -3839,6 +3853,9 @@ def _staged_artifact_vectors_are_verified(
                     if vector is None:
                         return False
                     expected_vectors.append(vector)
+                if bucket not in opened:
+                    collection_name = V2_FILES_CODE_COLLECTION if bucket == "code" else V2_FILES_DOCS_COLLECTION
+                    opened[bucket] = _open_file_index_v2_collection(store, collection_name)
                 collection = opened[bucket][1]
                 stored = collection.get(
                     ids=[_file_record_id(manifest_entries[index]) if pooled else records[index]["path"] for index in selected],

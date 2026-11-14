@@ -1006,7 +1006,7 @@ Issueのcloseやcancelだけでは数えません。エージェントによる�
 後からPRが失敗すると着地率は楽観的になります。この指標にPRのマージは不要です。
 
 `issue.monitor.status` の `event_history` には、最新100件の Monitor 通知を古い順に保持します。
-各項目は `id`、RFC3339形式の `recorded_at`、`issue_number`、通知種別の `level`
+各項目は `id`、RFC3339形式の `recorded_at`、同時刻の通知順を保つ `sequence`、`issue_number`、通知種別の `level`
 （`info`/`warn`/`error`/`done`）、`message` を持ちます。試行ごとの失敗・再試行・人間への確認要求・
 マージ・slot解放などの通知は、GUIでの通知消費後や再起動後も読めます。
 上限を超えると最古の項目から削除します。`last_error` などの最新エラー表示とは独立した履歴です。
@@ -1212,7 +1212,7 @@ operation で確認することも有効で、Task 差分が空の receipt を�
 同じ Update や Complete を再実行しても元の receipt は変わらず、現在の Task は
 後続の変更や再開を反映する場合があります。
 生 ID を使う Reopen と Cancel は引き続き receipt の適用時点の Task 状態を返します。
-Reopen と Cancel は、選択 Task の projection から得た `task_key` をトップレベルに
+Reopen・Cancel・Complete は、選択 Task の projection から得た `task_key` をトップレベルに
 指定し、`request.task_id` を空にする方法でも呼び出せます。空・不明・混在した selector
 は拒否します。この方法では現在の保存済み Task と revision に元の receipt を添えて
 返すため、再実行時に古い receipt の Task 状態を現在状態として扱いません。再開時の

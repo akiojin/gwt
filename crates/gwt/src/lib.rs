@@ -70,6 +70,7 @@ pub mod native_notifications;
 #[doc(hidden)]
 pub mod perf;
 pub mod persistence;
+pub mod pm_activity;
 pub mod pm_conversation;
 pub mod pm_current;
 pub mod pm_planning;

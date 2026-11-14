@@ -4840,10 +4840,10 @@ fn app_runtime_monitor_launch_preflight_refuses_unauthenticated_provider() {
         ),
     )
     .unwrap();
-    // The fixture writes rollouts but no auth.json: this CODEX_HOME is a
-    // definitively unauthenticated Codex CLI for the real probe.
+    // Missing auth.json may mean keyring credentials (Issue #3695). An
+    // explicit credential-free file gives the real probe a definitive refusal.
     let codex_home = PathBuf::from(std::env::var_os("CODEX_HOME").expect("CODEX_HOME is isolated"));
-    assert!(!codex_home.join("auth.json").exists());
+    fs::write(codex_home.join("auth.json"), "{}").expect("write credential-free auth");
     let owner = start_monitor_relaunch_owner(&mut fixture, false);
     let (_, unrelated_member_id) = gwt::try_mutate_issue_monitor_prefs(
         &gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root),
