@@ -1181,6 +1181,59 @@ fn windows_agent_launch_e2e_builds_once_and_runs_installed_providers() {
         })
         .collect();
     assert_eq!(cargo_steps.len(), 3);
+    let preparation = cargo_steps[0];
+    assert_eq!(preparation["shell"], "bash");
+    assert_eq!(preparation["timeout-minutes"], 30);
+    assert_eq!(
+        job.matches("install-playwright-browsers.sh browsers")
+            .count(),
+        1
+    );
+    // Execute the workflow body: both commands must overlap and be joined,
+    // including when either fails. The FIFO avoids scheduling-time assertions.
+    #[cfg(unix)]
+    {
+        let prepare = preparation["run"].as_str().unwrap();
+        let probe = r#"
+mkfifo "$PROBE_DIR/ready" "$PROBE_DIR/release"
+exec 3<>"$PROBE_DIR/ready"
+exec 4<>"$PROBE_DIR/release"
+bash() {
+    test "$*" = 'scripts/install-playwright-browsers.sh browsers' || return 98
+    printf 'ready\n' >&3
+    read -r -t 5 -u 4 || return 97
+    touch "$PROBE_DIR/browser-finished"
+    return "$BROWSER_EXIT"
+}
+cargo() {
+    test "$*" = 'test -p gwt --test windows_agent_launch_e2e --no-run' || return 98
+    read -r -t 5 -u 3 || return 97
+    printf 'release\n' >&4
+    touch "$PROBE_DIR/build-finished"
+    return "$BUILD_EXIT"
+}
+"#;
+        for (build_exit, browser_exit, expected) in
+            [(0, 0, 0), (17, 0, 17), (0, 19, 19), (17, 19, 17)]
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let result = gwt_core::process::resolved_command(
+                gwt_core::process::ProcessPlanRequest::new("bash"),
+            )
+            .unwrap()
+            .args(["-e", "-o", "pipefail", "-c"])
+            .arg(format!("{probe}\n{prepare}"))
+            .env("PROBE_DIR", dir.path())
+            .env("BUILD_EXIT", build_exit.to_string())
+            .env("BROWSER_EXIT", browser_exit.to_string())
+            .output()
+            .unwrap();
+            assert_eq!(result.status.code(), Some(expected), "{result:?}");
+            for marker in ["build-finished", "browser-finished"] {
+                assert!(dir.path().join(marker).exists(), "{marker}");
+            }
+        }
+    }
     assert!(cargo_steps
         .iter()
         .all(|step| step["env"]["CARGO_PROFILE_DEV_DEBUG"].as_str() == Some("0")));

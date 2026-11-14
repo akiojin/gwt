@@ -1132,7 +1132,18 @@ jobs:
         # Test inherits dev; keep assertions/features while omitting CI line tables.
         env:
           CARGO_PROFILE_DEV_DEBUG: "0"
-        run: cargo test -p gwt --test windows_agent_launch_e2e --no-run
+        # Browser download and Cargo use separate caches. Join both before tests.
+        # The installer keeps its bounded retries within this preparation cap.
+        shell: bash
+        run: |
+          bash scripts/install-playwright-browsers.sh browsers &
+          browser_pid=$!
+          build_status=0
+          cargo test -p gwt --test windows_agent_launch_e2e --no-run || build_status=$?
+          browser_status=0
+          wait "$browser_pid" || browser_status=$?
+          if [ "$build_status" -ne 0 ]; then exit "$build_status"; fi
+          exit "$browser_status"
         timeout-minutes: 30
       # Issue #4644 AC-5: the non-ignored contract tests in this cfg(windows)
       # target (e.g. the Hub bootstrap reply classifier) are compiled nowhere
@@ -1173,10 +1184,6 @@ jobs:
           done
           exit "$status"
         timeout-minutes: 60
-      - name: Install pinned Chromium for Windows cold restart
-        shell: bash
-        run: bash scripts/install-playwright-browsers.sh browsers
-        timeout-minutes: 20
       - name: Verify Windows Works cold restart in both themes
         shell: bash
         env:
