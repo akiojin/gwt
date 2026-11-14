@@ -1034,7 +1034,8 @@ fn nightly_auto_feedback_auth_probe_is_read_only_and_token_scoped() {
 
 /// Issue #4134 AC-2: four matrix shards each paid a 279s cold build to run
 /// 137s of tests. The installed-only job still builds once, runs both
-/// providers, and attributes a failure to its provider.
+/// providers, and attributes a failure to its provider. Operational binaries
+/// are restored after the tests, whose feature graph enables test-only guards.
 #[test]
 fn windows_agent_launch_e2e_builds_once_and_runs_installed_providers() {
     use serde_yaml::Value;
@@ -1074,11 +1075,19 @@ fn windows_agent_launch_e2e_builds_once_and_runs_installed_providers() {
     let agent_job = &doc["jobs"]["test-windows-agent-launch-e2e"];
     assert!(agent_job["env"]["CARGO_PROFILE_DEV_DEBUG"].is_null());
     let steps = agent_job["steps"].as_sequence().unwrap();
+    let last_test = steps
+        .iter()
+        .rposition(|step| {
+            step["run"]
+                .as_str()
+                .is_some_and(|run| run.contains("cargo test"))
+        })
+        .unwrap();
     assert!(
-        steps.iter().all(|step| !step["run"]
+        steps[..=last_test].iter().all(|step| !step["run"]
             .as_str()
             .is_some_and(|run| run.contains("cargo build"))),
-        "the integration build emits gwt and gwtd; a separate build repeats their dependency graph"
+        "share the integration build before tests; restore operational binaries only after tests"
     );
     let cargo_steps: Vec<_> = steps
         .iter()
