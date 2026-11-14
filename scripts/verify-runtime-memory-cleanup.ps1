@@ -16,6 +16,20 @@ $parseErrors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile(
   (Join-Path $PSScriptRoot 'verify-runtime-memory-budget.ps1'), [ref]$tokens, [ref]$parseErrors)
 if ($parseErrors.Count) { throw 'Fixture parse failed.' }
+$preflightFunction = @($ast.FindAll({ param($node)
+  $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+    $node.Name -eq 'Assert-ManagedBrowserPreflight'
+}, $true))
+if ($preflightFunction.Count -ne 1) { throw 'Expected the managed-browser preflight guard.' }
+Invoke-Expression $preflightFunction[0].Extent.Text
+$doctor = @{preflight=@{schema_version=1;result='proceed';context='current';
+  normal_completion='normal';convergence='converged';reasons=@();diagnostics=@()}}
+Assert-ManagedBrowserPreflight $doctor
+$doctor.preflight.context = 'absent'
+$refused = $false
+try { Assert-ManagedBrowserPreflight $doctor } catch { $refused = $true }
+if (-not $refused) { throw 'Managed-browser preflight accepted an absent caller context.' }
+Write-Output 'PASS: managed-browser preflight requires the current authenticated context.'
 $blocks = @($ast.FindAll({ param($node)
   $node -is [Management.Automation.Language.TryStatementAst] -and $node.Finally -and
     $node.Finally.Extent.Text.Contains('shutdown.json')

@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, interactive-widget=resizes-content" />
     <title>gwt — Operator</title>
     <link rel="icon" href="data:," />
     <!-- SPEC-2356: theme bootstrap. Runs synchronously before paint to avoid FOUC. -->
@@ -301,8 +301,8 @@
             <span class="op-status-strip__value" id="op-strip-idle" aria-label="Idle agents">0</span>
           </div>
           <div class="op-status-strip__cell op-status-strip__cell--waiting">
-            <span class="op-status-strip__label">WAITING</span>
-            <span class="op-status-strip__value" id="op-strip-waiting" aria-label="Agents waiting for input">0</span>
+            <span class="op-status-strip__label">BLOCK</span>
+            <span class="op-status-strip__value" id="op-strip-waiting" aria-label="Agents that need you, including stopped and errored agents">0</span>
           </div>
           <div class="op-status-strip__cell op-status-strip__cell--error">
             <span class="op-status-strip__label">ERROR</span>
@@ -317,14 +317,14 @@
             class="op-status-strip__cell op-status-strip__cell--issue-monitor"
             id="op-strip-issue-monitor"
             data-state="disabled"
-            aria-label="Open Monitor: Off"
-            title="Open Monitor | Issue Monitor: Off"
+            aria-label="Open Issues: Off"
+            title="Open Issues | Issues: Off"
           >
-            <span class="op-status-strip__label">MONITOR</span>
+            <span class="op-status-strip__label">ISSUES</span>
             <span
               class="op-status-strip__value"
               id="op-strip-issue-monitor-value"
-              aria-label="Issue Monitor status"
+              aria-label="Issues status"
             >Off</span>
           </button>
           <div

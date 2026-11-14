@@ -1,7 +1,8 @@
 import { isContainedPlacement } from "./agent-kanban-surface.js";
 import { bindControlExplanations, setControlExplanation } from "./control-explanations.js";
 import { createUiStateStore } from "./ui-state-store.js";
-import { renderUiContent } from "./ui-content.js";
+import { renderUiContent, createRepositoryLabelChip } from "./ui-content.js";
+import { monitorDiagnostic } from "./agent-completion-notifications.js";
 // SPEC-3064 Phase 3 (E6d) — Knowledge Bridge (Work Item Kanban)
 // window surface extracted from app.js. Owns the per-window knowledge
 // bridge state map (cache-backed entries, semantic search coalescing,
@@ -173,6 +174,7 @@ function reconcileKnowledgeList(host, entries, options) {
 
 const MONITOR_STATE_VIEWS = Object.freeze({
   queued: Object.freeze({ label: "Queued", tone: "idle" }),
+  awaiting_measurement: Object.freeze({ label: "Awaiting measurement", tone: "idle" }),
   not_ready: Object.freeze({ label: "Not ready", tone: "needs-input" }),
   source_excluded: Object.freeze({ label: "Needs triage", tone: "needs-input" }),
   launching: Object.freeze({ label: "Launching", tone: "active" }),
@@ -307,7 +309,7 @@ const ISSUE_ROW_LAUNCH_NOW_STATES = new Set(["queued", "launch_failed", "agent_f
 // queue *without* starting an agent had no control at all and meant hand-editing
 // issue-monitor.json. Offered only where such a hold exists, so the button never
 // promises a change that cannot happen.
-const ISSUE_ROW_REQUEUE_STATES = new Set(["launch_failed", "agent_failed"]);
+const ISSUE_ROW_REQUEUE_STATES = new Set(["launch_failed", "agent_failed", "awaiting_measurement"]);
 const ISSUE_ROW_WORK_LANE_VIEWS = Object.freeze({
   closed: Object.freeze({ label: "Done", tone: "done" }),
   remote: Object.freeze({ label: "Remote", tone: "remote" }),
@@ -362,7 +364,7 @@ export function issueQueueColumn(entry, work = null, localLive = false) {
   if (issueStopReason(entry) !== null) return "backlog";
   // Reservations, window status and historical Work activity are not child
   // liveness evidence. Keep their existing action/authority rules separate.
-  if (["needs_human", "blocked_by_claim", "launch_failed", "agent_failed"].includes(entry.monitor_state)) return "backlog";
+  if (["needs_human", "awaiting_measurement", "blocked_by_claim", "launch_failed", "agent_failed"].includes(entry.monitor_state)) return "backlog";
   if (work?.status_category === "blocked") return "backlog";
   return isIssueInTerminalQueue(entry) ? "queued" : "backlog";
 }
@@ -424,8 +426,12 @@ function issueRowSecondaryItems({ entry, work, attention, primary, localLive = n
     attention?.lane === "needs_attention" ? String(attention.reason || "").trim() : "";
   const cleanupPending = (issueEntryStateKey(entry) === "closed" || ["merged", "released"].includes(entry?.monitor_state)) &&
     issueQueueColumn(entry, work, localLive) === "active";
+  const canonicalHuman = entry?.monitor_state === "needs_human" && Object.hasOwn(entry, "human_attention");
+  const steeringReason = entry?.steering_attention?.reason
+    ? entry?.readiness_diagnosis || failureReason || exclusion || entry.steering_attention.reason : "";
   const reason = cleanupPending ? "Session cleanup pending"
-    : stopReason ?? (entry?.readiness_diagnosis || failureReason || exclusion || attentionReason);
+    : stopReason ?? (canonicalHuman ? entry.human_attention?.reason || ""
+      : steeringReason || entry?.review_attention?.reason || entry?.readiness_diagnosis || failureReason || exclusion || attentionReason);
   if (reason) {
     items.push({ kind: "reason", key: "reason", label: reason });
   }
@@ -487,6 +493,8 @@ function issueRowActionOrder({ entry, work, attention, inlineWindow, surfaceWind
       return {
         order: ["launch-now", "configure-issue", "queue-remove", "move-up", "move-down", ...workActions],
       };
+    case "awaiting_measurement":
+      return { order: ["requeue-issue", "configure-issue", ...workActions] };
     case "launch_failed":
     case "agent_failed":
       return {
@@ -590,7 +598,7 @@ export function issueRowStateModel({
 }
 
 // SPEC #3885 Phase 5 (T-035 / FR-023): the detail pane's AC progress. Only the
-// `- [ ] AC-N:` checklist lines count — the same shape the Issue Monitor's
+// `- [ ] AC-N:` checklist lines count — the same shape Issues'
 // readiness gate reads — so the gauge never disagrees with "Missing AC".
 const ISSUE_ACCEPTANCE_LINE = /^\s*[-*]\s+\[([ xX])\]\s+(AC-\d+):\s*(.*)$/;
 
@@ -792,6 +800,7 @@ export function renderIssueWindowHeader(doc, model, onAction = () => {}) {
 
 export function createKnowledgeKanbanSurface({
   send,
+  currentProjectRoot = () => undefined,
   // Semantic search must never use the reconnect queue. This dependency
   // performs one atomic OPEN check + socket.send and reports whether the
   // frame was written; a false result is owned by the retry lifecycle.
@@ -834,7 +843,7 @@ export function createKnowledgeKanbanSurface({
   continueWork,
   openWorkspaceResumePicker,
   openWorkspaceCleanup,
-  // SPEC #3206 FR-017: surface errors (Issue Monitor last_error, Issue window
+  // SPEC #3206 FR-017: surface errors (Issues last_error, Issue window
   // load/search failures) are reported to the notification center as error
   // rows; the bell + drawer are the single place diagnostic text is read.
   // Issue #5284 retains only linked state badges in the Issue window. Pure
@@ -1018,12 +1027,13 @@ export function createKnowledgeKanbanSurface({
       function issueStateExplanation(primary, entry) {
         if (["agent:error", "monitor:agent_failed"].includes(primary.key)) {
           const cause = String(entry?.error_message || "").trim();
-          return `The agent session reported an error. ${cause || "No error details were reported by the agent or Issue Monitor."}`;
+          return `The agent session reported an error. ${cause || "No error details were reported by the agent or Issues."}`;
         }
         const legacyReason = legacyMonitorExclusionReason(entry);
         if (primary.key === "monitor:source_excluded" && legacyReason) return legacyReason;
         const meanings = {
           "monitor:queued": "This issue is queued for the monitor to launch when capacity is available.",
+          "monitor:awaiting_measurement": "Only measurement evidence remains after the merged work. Update the acceptance criteria when observations finish, or return the issue to the queue if implementation work remains.",
           "monitor:not_ready": "This issue does not yet meet the monitor's launch requirements, such as a usable plan and tasks.",
           "monitor:source_excluded": "This issue requires source trust triage before automatic launches.",
           "monitor:launching": "The monitor is starting an agent for this issue.",
@@ -1054,17 +1064,50 @@ export function createKnowledgeKanbanSurface({
         return meanings[primary.key] || `Reported issue state: ${primary.label}.`;
       }
       // FR-017 bookkeeping: report each occurrence once (issue_monitor_status
-      // is re-broadcast constantly, so only a CHANGED text is a new event) and
+      // is re-broadcast constantly; only a new diagnosis or failed scan counts) and
       // remember which of the two sources changed last for the summary line.
-      const ISSUE_MONITOR_ERROR_KEY = "issue-monitor:last_error";
+      const repositoryLabelsModel = createUiStateStore({}, { scheduleFrame });
+      let repositoryLabelCatalogs = new Map();
+      function applyRepositoryLabels(event) {
+        if (!event.loaded) return;
+        repositoryLabelsModel.update(state => {
+          const key = event.project_root;
+          if (JSON.stringify(state[key]) === JSON.stringify(event.labels)) return state;
+          return { ...state, [key]: event.labels || [] };
+        });
+      }
+      repositoryLabelsModel.subscribeFrame(state => state, catalogs => {
+        repositoryLabelCatalogs = new Map(Object.entries(catalogs).map(([root, labels]) =>
+          [root, new Map(labels.map(label => [label.name, label.color]))]));
+        renderAllKnowledgeBridgeWindows();
+      });
+      function renderIssueLabels(entry) {
+        const labels = createNode("div", "issue-card-labels");
+        const names = entry.labels || [];
+        for (const name of names.slice(0, 3)) {
+          labels.appendChild(createRepositoryLabelChip(document, name, repositoryLabelCatalogs.get(String(currentProjectRoot()))?.get(name)));
+        }
+        if (names.length > 3) {
+          const overflow = createNode("span", "issue-card-label-overflow", `+${names.length - 3}`);
+          overflow.title = names.slice(3).join(", ");
+          labels.appendChild(overflow);
+        }
+        return labels;
+      }
+      let ISSUE_MONITOR_ERROR_KEY = "issue-monitor:last_error";
       let reportedIssueMonitorError = "";
       let issueMonitorErrorSequence = 0;
       let surfaceErrorSequence = 0;
 
       function issueMonitorErrorText() {
-        return typeof issueMonitorModel.read().status?.last_error === "string"
-          ? issueMonitorModel.read().status.last_error.trim()
-          : "";
+        return currentMonitorDiagnostic()?.message || "";
+      }
+
+      function currentMonitorDiagnostic() {
+        const status = issueMonitorModel.read().status;
+        return monitorDiagnostic({ message: status?.last_error,
+          kind: status?.last_error_source,
+          stage: status?.last_error_source === "scan_failure" ? status.last_scan_error?.phase : undefined });
       }
 
       // Issue #3628 (AC-5) / SPEC #3885 FR-022: the fleet outage used to be a
@@ -1083,7 +1126,7 @@ export function createKnowledgeKanbanSurface({
         if (blackout === reportedIssueMonitorBlackout) return;
         reportedIssueMonitorBlackout = blackout;
         if (blackout) {
-          reportSurfaceError({ key: ISSUE_MONITOR_BLACKOUT_KEY, title: "Issue Monitor", message: blackout });
+          reportSurfaceError({ key: ISSUE_MONITOR_BLACKOUT_KEY, title: "Issues", message: blackout });
         } else {
           resolveSurfaceError(ISSUE_MONITOR_BLACKOUT_KEY);
         }
@@ -1092,13 +1135,22 @@ export function createKnowledgeKanbanSurface({
       function syncIssueMonitorErrorReport() {
         syncIssueMonitorBlackoutReport();
         syncIssueMonitorCapacityReport();
-        const lastError = issueMonitorErrorText();
-        if (lastError === reportedIssueMonitorError) return;
-        reportedIssueMonitorError = lastError;
-        if (lastError) {
+        const diagnostic = currentMonitorDiagnostic();
+        const status = issueMonitorModel.read().status;
+        const occurrence = diagnostic ? JSON.stringify([diagnostic.key, diagnostic.message,
+          !diagnostic.stalled && status.last_error_source === "scan_failure"
+            ? status.last_scan_error?.recorded_at || status.last_scan_at : ""]) : "";
+        if (occurrence === reportedIssueMonitorError) return;
+        const previousKey = reportedIssueMonitorError && ISSUE_MONITOR_ERROR_KEY;
+        reportedIssueMonitorError = occurrence;
+        if (diagnostic) {
+          if (previousKey && previousKey !== diagnostic.key) resolveSurfaceError(previousKey);
+          ISSUE_MONITOR_ERROR_KEY = diagnostic.key;
           surfaceErrorSequence += 1;
           issueMonitorErrorSequence = surfaceErrorSequence;
-          reportSurfaceError({ key: ISSUE_MONITOR_ERROR_KEY, title: "Issue Monitor", message: lastError });
+          const notice = { key: ISSUE_MONITOR_ERROR_KEY, title: "Issues", message: diagnostic.message };
+          if (diagnostic.stalled) reportSurfaceNotice({ ...notice, level: "error" });
+          else reportSurfaceError(notice);
         } else {
           resolveSurfaceError(ISSUE_MONITOR_ERROR_KEY);
         }
@@ -1135,7 +1187,19 @@ export function createKnowledgeKanbanSurface({
           ]).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))));
       }
       let issueWorkAssociationKey = workAssociationKey(getActiveWorkProjection?.());
-      const issueMonitorModel = createUiStateStore({ inboxByIssue: {}, status: {
+      function issueMonitorCounts(status = {}) {
+        const count = value => Number.isInteger(value) && value >= 0 ? value : 0;
+        return { queue: count(status.queue_len), active: count(status.active_count),
+          maxActive: count(status.max_active_agents ?? 1) };
+      }
+
+      const issueMonitorModel = createUiStateStore({ inboxByIssue: {}, counts: issueMonitorCounts(),
+        humanAttention: { count: null, summary: "", byIssue: {} },
+        steeringAttention: { count: null, summary: "", byIssue: {} },
+        reviewAttention: { count: null, summary: "", byIssue: {} },
+        pmDecisionAttention: { count: null, summary: "", byWindow: {} },
+        prReviewAttention: { count: null, summary: "", byIssue: {}, byWindow: {} },
+        decisionAttention: { count: null, summary: "" }, status: {
         enabled: false,
         state: "disabled",
         queue_len: 0,
@@ -1233,6 +1297,7 @@ export function createKnowledgeKanbanSurface({
       // #5321: current backend failures remain red; history stays in the bell.
       function issueMonitorPillView(state) {
         const status = issueMonitorModel.read().status;
+        const counts = issueMonitorModel.read().counts;
         if (state === "disabled") return { label: "Stopped", tone: "idle" };
         if (state === "github_budget_hold") return { label: "Limited · GitHub", tone: "idle" };
         if (state === "error") return { label: "⚠ Error", tone: "blocked" };
@@ -1240,10 +1305,10 @@ export function createKnowledgeKanbanSurface({
           return { label: "Waiting · Hold", tone: "idle" };
         }
         if (status.agent_blackout) return { label: "⚠ Error", tone: "blocked" };
-        if (Number(status.active_count) >= Number(status.max_active_agents) && Number(status.queue_len) > 0) {
+        if (counts.active >= counts.maxActive && counts.queue > 0) {
           return { label: "Waiting · Full", tone: "idle" };
         }
-        if (!Number(status.active_count) && !Number(status.queue_len)) {
+        if (!counts.active && !counts.queue) {
           return { label: "Waiting · Empty", tone: "idle" };
         }
         return { label: "Running", tone: "active" };
@@ -1291,7 +1356,7 @@ export function createKnowledgeKanbanSurface({
         }
         if (attention) lines.push("Verification may not finish. Timing-dependent test failures may block unrelated PRs.");
         return {
-          key: ISSUE_MONITOR_CAPACITY_KEY, title: "Issue Monitor capacity",
+          key: ISSUE_MONITOR_CAPACITY_KEY, title: "Issues capacity",
           level: manual || (incomplete && autoRetained) || !attention ? "info" : "warn", message,
           details: lines.filter(Boolean).join("\n"), attention,
           badge: incomplete ? "Capacity pending · Details"
@@ -1337,10 +1402,8 @@ export function createKnowledgeKanbanSurface({
       function renderIssueMonitorControls(element, windowId) {
         const bar = element?.querySelector(".knowledge-monitor-bar");
         if (!bar) return;
-        const maxActive = Math.max(
-          0,
-          Number.parseInt(String(issueMonitorModel.read().status.max_active_agents ?? 1), 10) || 0,
-        );
+        const counts = issueMonitorModel.read().counts;
+        const maxActive = counts.maxActive;
         renderIssueMonitorCapacity(bar);
         const quotaHold = normalizedIssueMonitorQuotaHold(issueMonitorModel.read().status);
         const state = effectiveIssueMonitorState(issueMonitorModel.read().status, quotaHold);
@@ -1364,20 +1427,21 @@ export function createKnowledgeKanbanSurface({
             errorKey ? "Details in notifications" : state === "quota_hold"
               ? `Provider ${quotaHold.provider} | Reset ${quotaHold.reset_at}` : "",
             issueMonitorGitHubBudgetText(issueMonitorModel.read().status),
+            issueMonitorModel.read().decisionAttention.summary,
           ].filter(Boolean).join(" | ");
 
-          explainIssueControl(pill, `Issue Monitor status: ${view.label}. ${pill.title || "The monitor checks the launch queue for eligible issues."}`);
+          explainIssueControl(pill, `Issues status: ${view.label}. ${pill.title || "The monitor checks the launch queue for eligible issues."}`);
         }
         const active = bar.querySelector('[data-metric="active"]');
         if (active) {
           const activity = agentActivityModel?.read();
           active.textContent = activity?.count == null ? "Active —"
             : `Active ${activity.count} · ${activity.issueCount} ${activity.issueCount === 1 ? "issue" : "issues"} · PM ${activity.pmCount}`;
-          explainIssueControl(active, `Live agents on this terminal, including PM. ${activity?.count == null ? "Runtime observation pending." : `Observed ${activity.snapshot.observed_at}.`} Monitor agent capacity: ${issueMonitorModel.read().status.active_count || 0}/${maxActive}.`);
+          explainIssueControl(active, `Live agents on this terminal, including PM. ${activity?.count == null ? "Runtime observation pending." : `Observed ${activity.snapshot.observed_at}.`} Issues agent capacity: ${counts.active}/${maxActive}.`);
         }
         const queue = bar.querySelector('[data-metric="queue"]');
         if (queue) {
-          queue.textContent = `Queue ${issueMonitorModel.read().status.queue_len || 0}`;
+          queue.textContent = `Queue ${counts.queue}`;
           queue.title = issueMonitorModel.read().status.total_candidates
             ? `Total ${issueMonitorModel.read().status.total_candidates}`
             : "";
@@ -1392,7 +1456,7 @@ export function createKnowledgeKanbanSurface({
             : "Agent not started: no saved Agent settings. Save Agent settings, then select Start.";
         }
         const capacity = bar.querySelector('[data-metric="capacity"]');
-        if (capacity) capacity.textContent = `${status.active_count || 0} of ${maxActive}`;
+        if (capacity) capacity.textContent = `${counts.active} of ${maxActive}`;
         const backlog = bar.querySelector('[data-metric="backlog"]');
         if (backlog) backlog.textContent = String(status.unqueued_open_count ?? "—");
         const scan = bar.querySelector('[data-metric="last-scan"]');
@@ -1454,35 +1518,142 @@ export function createKnowledgeKanbanSurface({
           const stateWord = toggle.querySelector(".knowledge-monitor-switch__state");
           if (stateWord) stateWord.textContent = enabled ? "On" : "Off";
         }
+        const refillGuidance = element.querySelector('[data-role="monitor-refill-guidance"]');
+        if (refillGuidance) refillGuidance.hidden = !issueMonitorModel.read().status.terminal_queue_auto_refill
+          || Boolean(issueMonitorModel.read().status.enabled);
 
       }
 
+      // SPEC #5016 AC-HS1/HS2: the one place that combines the components.
+      // An Issue in several components counts once; views read only this value.
+      // PM decisions belong to a PM window, not an Issue, so they add to the
+      // Issue union instead of joining it.
+      function withDecisionAttention(model) {
+        const issueParts = [model.humanAttention, model.reviewAttention, model.steeringAttention,
+          model.prReviewAttention]
+          .filter(part => part?.count != null);
+        const decisions = model.pmDecisionAttention?.count != null ? model.pmDecisionAttention : null;
+        const parts = decisions ? [...issueParts, decisions] : issueParts;
+        if (!parts.length) return { ...model, decisionAttention: { count: null, summary: "" } };
+        const count = new Set(issueParts.flatMap(part => Object.keys(part.byIssue || {}))).size
+          + (decisions?.count ?? 0);
+        return { ...model, decisionAttention: { count,
+          summary: [`Awaiting attention ${count}`, ...parts.map(part => part.summary)].join(" | ") } };
+      }
+
+      // SPEC #5016 HSK: pm-chat publishes the unanswered decisions of one PM
+      // window from its single derivation; `null` (not loaded, or closed)
+      // removes that window from the count.
+      function applyPmDecisions(windowId, decisions) {
+        issueMonitorModel.update(model => {
+          const byWindow = { ...model.pmDecisionAttention.byWindow };
+          if (Array.isArray(decisions?.ids)) byWindow[windowId] = [...decisions.ids];
+          else delete byWindow[windowId];
+          const windows = Object.values(byWindow);
+          const count = windows.length ? windows.reduce((sum, ids) => sum + ids.length, 0) : null;
+          return withDecisionAttention({ ...model, pmDecisionAttention: { count, byWindow,
+            summary: count == null ? "" : `PM decisions ${count}` } });
+        });
+      }
+
+      // SPEC #5016 HSV: a PM window publishes the unresolved reviews its
+      // current facts observed; `null` (not loaded, or closed) removes it.
+      // A PR without an Issue is its own entry in the Issue union.
+      function applyPmReviewAttention(windowId, items) {
+        issueMonitorModel.update(model => {
+          const byWindow = { ...model.prReviewAttention.byWindow };
+          if (Array.isArray(items)) byWindow[windowId] = items.map(item => ({ ...item }));
+          else delete byWindow[windowId];
+          const windows = Object.values(byWindow);
+          const byIssue = {};
+          for (const item of windows.flat()) {
+            const numbers = Array.isArray(item.issue_numbers) ? item.issue_numbers : [];
+            const keys = numbers.length ? numbers.map(String) : [`pr-${item.pr_number}`];
+            for (const key of keys) byIssue[key] ??= { reason: String(item.reason || "").trim() || "Review unresolved" };
+          }
+          const count = windows.length ? Object.keys(byIssue).length : null;
+          return withDecisionAttention({ ...model, prReviewAttention: { count, byIssue, byWindow,
+            summary: count == null ? "" : `Unresolved reviews ${count}` } });
+        });
+      }
+
+      function withMonitorAttention(model) {
+        return withDecisionAttention(withMonitorHolds(model));
+      }
+
+      function withMonitorHolds(model) {
+        const records = model.status.autonomous_issues;
+        if (!Array.isArray(records) || model.humanAttention.count === null) return model;
+        // Dispatch holds include automatic capacity/retry waits, not just
+        // human decisions. Join the two current snapshots once for every view.
+        const current = Object.fromEntries(records.filter(record => Number.isFinite(record?.issue_number))
+          .map(record => [record.issue_number, record]));
+        const byIssue = Object.fromEntries(Object.values(current).filter(record => {
+          const live = model.inboxByIssue[record.issue_number];
+          return live && issueEntryStateKey(live.issue) === "open"
+            && !["needs_human", "merged", "released", "awaiting_measurement", "launch_failed", "agent_failed"].includes(live.state)
+            && !record.needs_human && ["implementing", "reviewing"].includes(record.phase)
+            && record.review_dispatch_hold;
+        }).map(record => [record.issue_number, {
+          reason: String(record.review_dispatch_hold.reason || "").trim() || "Review dispatch pending",
+        }]));
+        const count = Object.keys(byIssue).length;
+        // Steering can concern exhausted failed attempts as well as live
+        // launches. Its renewal count is not the number of waiting Issues.
+        const steeringByIssue = Object.fromEntries(Object.values(current).filter(record => {
+          const live = model.inboxByIssue[record.issue_number];
+          return live && issueEntryStateKey(live.issue) === "open"
+            && !["needs_human", "merged", "released", "awaiting_measurement"].includes(live.state)
+            && !record.needs_human && ["idle", "implementing", "reviewing", "delivering"].includes(record.phase)
+            && record.steering;
+        }).map(record => [record.issue_number, {
+          reason: String(record.steering.reason || "").trim() || "PM steering requested",
+        }]));
+        const steeringCount = Object.keys(steeringByIssue).length;
+        return { ...model, reviewAttention: { count, summary: `Review holds ${count}`, byIssue },
+          steeringAttention: { count: steeringCount, summary: `PM steering ${steeringCount}`, byIssue: steeringByIssue } };
+      }
+
       function applyIssueMonitorStatus(nextStatus) {
-        issueMonitorModel.update(model => ({ ...model, status: {
-          ...model.status,
-          ...(nextStatus || {}),
-          max_active_agents_override: nextStatus?.max_active_agents_override ?? null,
-          agent_roster_capacity: nextStatus?.agent_roster_capacity ?? null,
-          agent_capacity: nextStatus?.agent_capacity ?? null,
-          quota_hold: normalizedIssueMonitorQuotaHold(nextStatus),
-          github_budget: nextStatus?.github_budget ?? null,
-          // Issue #4366 AC-6b: omitted once the hold clears, so it must not
-          // survive from the previous status the way merged fields do.
-          effective_launch_profile: nextStatus?.effective_launch_profile ?? null,
-          // Empty facts are omitted on the wire; never retain an older snapshot.
-          tier_facts: Array.isArray(nextStatus?.tier_facts) ? nextStatus.tier_facts : [],
-          tier_config_token: nextStatus?.tier_config_token ?? null,
-          // Issue #3628: omitted (skip_serializing_if) once the fleet recovers.
-          agent_blackout: nextStatus?.agent_blackout ?? null,
-          update_drain: nextStatus?.update_drain ?? null,
-        }}));
+        issueMonitorModel.update(model => {
+          const status = {
+            ...model.status,
+            ...(nextStatus || {}),
+            max_active_agents_override: nextStatus?.max_active_agents_override ?? null,
+            agent_roster_capacity: nextStatus?.agent_roster_capacity ?? null,
+            agent_capacity: nextStatus?.agent_capacity ?? null,
+            quota_hold: normalizedIssueMonitorQuotaHold(nextStatus),
+            github_budget: nextStatus?.github_budget ?? null,
+            // Issue #4366 AC-6b: omitted once the hold clears, so it must not
+            // survive from the previous status the way merged fields do.
+            effective_launch_profile: nextStatus?.effective_launch_profile ?? null,
+            // Empty facts are omitted on the wire; never retain an older snapshot.
+            tier_facts: Array.isArray(nextStatus?.tier_facts) ? nextStatus.tier_facts : [],
+            tier_config_token: nextStatus?.tier_config_token ?? null,
+            // Issue #3628: omitted (skip_serializing_if) once the fleet recovers.
+            agent_blackout: nextStatus?.agent_blackout ?? null,
+            update_drain: nextStatus?.update_drain ?? null,
+            autonomous_issues: Array.isArray(nextStatus?.autonomous_issues) ? nextStatus.autonomous_issues : [],
+          };
+          return withMonitorAttention({ ...model, status, counts: issueMonitorCounts(status) });
+        });
       }
 
       function applyIssueMonitorInbox(items) {
         const inboxByIssue = Object.fromEntries((Array.isArray(items) ? items : [])
           .filter(item => Number.isFinite(item?.issue?.number))
           .map(item => [item.issue.number, item]));
-        issueMonitorModel.update(model => ({ ...model, inboxByIssue }));
+        // SPEC #5016 AC-HS1/HS2: derive once from the complete, deduplicated
+        // inbox. A deliberate stop is Held, not a pending human decision.
+        const byIssue = Object.fromEntries(Object.values(inboxByIssue)
+          .filter(item => item.state === "needs_human" && issueEntryStateKey(item.issue) === "open"
+            && issueStopReason({ monitor_state: item.state, error_message: item.error_message }) === null)
+          .map(item => [item.issue.number, {
+            reason: String(item.error_message || "").trim() || "Human decision required",
+          }]));
+        const count = Object.keys(byIssue).length;
+        issueMonitorModel.update(model => withMonitorAttention({ ...model, inboxByIssue,
+          humanAttention: { count, summary: `Needs human ${count}`, byIssue } }));
       }
 
       function applyIssueMonitorQueueResult(event) {
@@ -1648,7 +1819,7 @@ export function createKnowledgeKanbanSurface({
           if (!openSurfaceNotice(key)) {
             const message = key === ISSUE_MONITOR_BLACKOUT_KEY
               ? issueMonitorModel.read().status.agent_blackout : issueMonitorErrorText();
-            reportSurfaceError({ key, title: "Issue Monitor", message });
+            reportSurfaceError({ key, title: "Issues", message });
             openSurfaceNotice(key);
           }
         });
@@ -3342,7 +3513,7 @@ export function createKnowledgeKanbanSurface({
         const entries = new Map((Array.isArray(state.entries) ? state.entries : [])
           .map(entry => [entry.number, entry]));
         // The inbox is already a complete row source. A separate knowledge
-        // load supplies details, but may still be pending when Monitor data
+        // load supplies details, but may still be pending when Issues data
         // arrives at startup. Keep semantic search's result set authoritative.
         if (!state.query.trim()) {
           for (const live of Object.values(issueMonitorModel.read().inboxByIssue)) {
@@ -3360,7 +3531,17 @@ export function createKnowledgeKanbanSurface({
 
       function queueProjectedEntry(entry) {
         const live = issueMonitorModel.read().inboxByIssue[entry.number];
-        if (live) entry = { ...entry, state: live.issue.state ?? entry.state, monitor_state: live.state,
+        // Cache-only rows retain their Work attention until the live inbox
+        // arrives; a cached descriptor is never an authoritative observation.
+        entry = { ...entry };
+        delete entry.human_attention;
+        delete entry.review_attention;
+        delete entry.steering_attention;
+        if (live) entry = { ...entry, review_attention:
+          issueMonitorModel.read().reviewAttention.byIssue[entry.number] ?? null, human_attention:
+          issueMonitorModel.read().humanAttention.byIssue[entry.number] ?? null,
+          steering_attention: issueMonitorModel.read().steeringAttention.byIssue[entry.number] ?? null,
+          state: live.issue.state ?? entry.state, monitor_state: live.state,
           exclusion_reason: live.exclusion_reason ?? null, blocked_by_owner: live.blocked_by_owner ?? null };
         const diagnosis = live?.error_message;
         entry = { ...entry, error_message: typeof diagnosis === "string" ? diagnosis : null,
@@ -3469,7 +3650,7 @@ export function createKnowledgeKanbanSurface({
             version: entry => {
               const work = issueWorkRowForEntry(getActiveWorkProjection?.(), entry);
               const faces = issueRowFaces(windowId, entry, work);
-              return JSON.stringify([{ ...entry, queue_position: entry.queue_position ?? null, monitor_state: entry.monitor_state ?? null }, work, faces, faces.inlineWindow ? issueAgentElapsedLabel(faces.inlineWindow) : null,
+              return JSON.stringify([(entry.labels || []).map(name => repositoryLabelCatalogs.get(String(currentProjectRoot()))?.get(name)), { ...entry, queue_position: entry.queue_position ?? null, monitor_state: entry.monitor_state ?? null }, work, faces, faces.inlineWindow ? issueAgentElapsedLabel(faces.inlineWindow) : null,
                 work ? workAttentionFor?.(work) : null,
                 issueTierChips(entry.number), queuePositions.has(entry.number) ? [queuePositions.get(entry.number), queued.length] : null,
                 agentActivityModel?.read().byIssue[entry.number],
@@ -3541,10 +3722,18 @@ export function createKnowledgeKanbanSurface({
             },
           });
           let empty = column.querySelector(".knowledge-empty");
-          if (!items.length && !empty) {
-            empty = createNode("div", "knowledge-empty", phase === "queued"
-              ? "Nothing will launch until an issue is queued. Move cards from Backlog, or turn on Auto-refill above." : `No ${phase} items`);
-            column.appendChild(empty);
+          if (!items.length) {
+            if (!empty) {
+              empty = createNode("div", "knowledge-empty");
+              column.appendChild(empty);
+            }
+            const refill = issueMonitorModel.read().status.terminal_queue_auto_refill;
+            const stopped = !issueMonitorModel.read().status.enabled;
+            empty.textContent = phase === "queued"
+              ? (refill && stopped ? "Start the Issues to begin Auto-refill."
+                : refill ? "Auto-refill adds eligible Backlog issues on the next Issues scan."
+                  : "Nothing will launch until an issue is queued. Move cards from Backlog, or turn on Auto-refill above.")
+              : `No ${phase} items`;
           } else if (items.length) empty?.remove();
           if (column.parentNode) continue;
           const refuses = phase === "active" || phase === "done";
@@ -3770,6 +3959,8 @@ export function createKnowledgeKanbanSurface({
           createNode("div", "kanban-card-title", entry.title),
         );
 
+        const labelChips = renderIssueLabels(entry);
+        if (labelChips.childElementCount) card.appendChild(labelChips);
         const meta = createNode("div", "kanban-card-meta");
         if (isPlain) {
           meta.appendChild(
@@ -4409,6 +4600,14 @@ export function createKnowledgeKanbanSurface({
         pill.dataset.stateKey = row.primary.key;
         explainIssueControl(pill, issueStateExplanation(row.primary, entry), `detail-state-${number}`);
         status.appendChild(pill);
+        if (entry.human_attention || entry.review_attention || entry.steering_attention) {
+          const reason = row.secondary.find(item => item.key === "reason");
+          if (reason) {
+            const node = createNode("span", "knowledge-row-secondary-item", reason.label);
+            node.dataset.key = "reason";
+            status.appendChild(node);
+          }
+        }
         if (work?.pr_number) {
           const prState = String(work.pr_state || "").trim();
           const pr = createNode(
@@ -5012,10 +5211,7 @@ export function createKnowledgeKanbanSurface({
         const titleWrap = createNode("div", "");
         titleWrap.appendChild(createNode("div", "knowledge-row-number", `#${entry.number}`));
         titleWrap.appendChild(createNode("div", "knowledge-row-title", entry.title || `Issue #${entry.number}`));
-        const labels = createNode("div", "issue-card-labels");
-        for (const label of entry.labels || []) {
-          labels.appendChild(createNode("span", "issue-card-label", label === "gwt-spec" ? "spec" : label));
-        }
+        const labels = renderIssueLabels(entry);
         if (Number.isFinite(entry.queue_position) && entry.queued_by) {
           const source = createNode("span", "issue-card-provenance",
             entry.queued_by === "operator" ? "You" : entry.queued_by === "auto-refill" ? "Auto" : entry.queued_by);
@@ -5266,7 +5462,7 @@ export function createKnowledgeKanbanSurface({
           const body = column.querySelector("[data-role='body']");
           if (body) reconcileKnowledgeList(body, items, {
             scrollRoot: body, virtualize: visibleEntries.length > 200,
-            version: entry => JSON.stringify([entry, state.pendingPhaseUpdates?.has(entry.number)]),
+            version: entry => JSON.stringify([(entry.labels || []).map(name => repositoryLabelCatalogs.get(String(currentProjectRoot()))?.get(name)), entry, state.pendingPhaseUpdates?.has(entry.number)]),
             update: (card, entry) => {
               card.classList.toggle("is-selected", state.selectedNumber === entry.number);
               if (state.selectedNumber === entry.number) {
@@ -5308,6 +5504,7 @@ export function createKnowledgeKanbanSurface({
       function mountKnowledgeWindow(windowData, body) {
           const knowledgeKind = knowledgeKindForPreset(windowData.preset);
           if (knowledgeKind !== "issue" && knowledgeKind !== "spec") return;
+          send({ kind: "get_repository_labels", refresh: false });
           // SPEC-2017 — Knowledge Bridge surface is a 6-column Kanban Board:
           // Backlog / Draft / Planning / Implementation / Review / Done.
           // The columns are hard-coded so the source carries every
@@ -5392,15 +5589,15 @@ export function createKnowledgeKanbanSurface({
             body.innerHTML = `
               <div class="knowledge-root issue-bridge-root">
                 <section class="knowledge-monitor-bar" aria-label="Issues summary">
-                  <div class="knowledge-monitor-status" role="group" aria-label="Monitor status">
-                    <div class="issue-monitor-stat"><span class="issue-monitor-stat-label">Monitor</span><span class="knowledge-row-badge knowledge-monitor-pill" data-tone="idle" aria-live="polite" aria-disabled="true">Stopped</span></div>
+                  <div class="knowledge-monitor-status" role="group" aria-label="Issues status">
+                    <div class="issue-monitor-stat"><span class="issue-monitor-stat-label">Issues</span><span class="knowledge-row-badge knowledge-monitor-pill" data-tone="idle" aria-live="polite" aria-disabled="true">Stopped</span></div>
                     <div class="issue-monitor-stat"><span class="issue-monitor-stat-label">Agent slots</span><span class="issue-monitor-stat-value"><span class="knowledge-monitor-metric" data-metric="capacity">0 of 1</span><span class="knowledge-monitor-metric issue-monitor-census" data-metric="active">Active —</span></span></div>
                     <div class="issue-monitor-stat"><span class="issue-monitor-stat-label">Queued</span><span class="knowledge-monitor-metric" data-metric="queue">Queue 0</span></div>
                     <div class="issue-monitor-stat"><span class="issue-monitor-stat-label">Backlog</span><span class="knowledge-monitor-metric" data-metric="backlog">—</span></div>
-                    <div class="issue-monitor-stat"><span class="issue-monitor-stat-label">Verification slots</span><span class="knowledge-monitor-metric" data-metric="verification" title="The Monitor does not report host verification capacity.">Not reported</span></div>
+                    <div class="issue-monitor-stat"><span class="issue-monitor-stat-label">Verification slots</span><span class="knowledge-monitor-metric" data-metric="verification" title="The Issues does not report host verification capacity.">Not reported</span></div>
                     <div class="issue-monitor-stat"><span class="issue-monitor-stat-label">Last scan</span><span class="knowledge-monitor-metric" data-metric="last-scan">Not yet</span></div>
                   </div>
-                  <div class="knowledge-monitor-controls" role="group" aria-label="Monitor controls">
+                  <div class="knowledge-monitor-controls" role="group" aria-label="Issues controls">
                     <button type="button" class="knowledge-monitor-switch" role="switch" aria-checked="false" aria-label="Auto-refill" data-action="monitor-auto-refill" data-enabled="false">
                       <span class="knowledge-monitor-switch__label">Auto-refill</span>
                       <span class="knowledge-monitor-switch__track" aria-hidden="true"><span class="knowledge-monitor-switch__knob"></span></span>
@@ -5415,9 +5612,10 @@ export function createKnowledgeKanbanSurface({
                     <button type="button" class="wizard-button is-compact" data-action="monitor-limit-auto" aria-label="Set Agent limit to Auto" disabled>Auto</button>
                     <button type="button" class="wizard-button is-compact" data-action="monitor-settings" aria-label="Issues settings">⚙ Issues settings</button>
                     <button type="button" class="wizard-button is-compact primary" data-action="monitor-toggle">Start</button>
-                    <button type="button" class="wizard-button is-compact" data-action="monitor-diagnostics" aria-haspopup="dialog" hidden>Monitor details</button>
+                    <button type="button" class="wizard-button is-compact" data-action="monitor-diagnostics" aria-haspopup="dialog" hidden>Issues details</button>
                     <button type="button" class="knowledge-row-badge knowledge-notification-badge knowledge-monitor-capacity-badge" aria-haspopup="dialog" hidden></button>
                   </div>
+                  <p class="issue-queue-rule" data-role="monitor-refill-guidance" role="status" hidden>Start the Issues to begin Auto-refill.</p>
                 </section>
                 <div class="workspace-toolbar kanban-toolbar is-stacked">
                   <div class="workspace-toolbar-main">
@@ -5503,7 +5701,7 @@ export function createKnowledgeKanbanSurface({
           if (knowledgeKind === "issue") {
             bindIssueControlExplanations(windowData.id, body.querySelector(".issue-bridge-root"));
             for (const [selector, text] of [
-              ['[data-action="monitor-auto-refill"]', "Automatically add eligible Backlog issues to the queue up to the refill limit. Change the limit in Issues settings; 0 disables refill."],
+              ['[data-action="monitor-auto-refill"]', "Automatically add eligible Backlog issues to the queue up to the refill limit. Change the limit in Issues settings; turning on with 0 uses 3. Start the Issues to begin Auto-refill."],
               ['[data-action="monitor-autonomous"]', "Allow eligible issues to run without waiting for human approval."],
               ['[data-action="monitor-toggle"]', "Start or pause monitoring for queued issues."],
               ['[data-issue-view="list"]', "Show issues by their execution queue state with a read-only output preview."],
@@ -6087,7 +6285,10 @@ export function createKnowledgeKanbanSurface({
         applyKnowledgeReceiveEvent,
         applyKnowledgeCacheRevision,
         applyIssueMonitorStatus,
+        applyRepositoryLabels,
         applyIssueMonitorInbox,
+        applyPmDecisions,
+        applyPmReviewAttention,
         applyIssueMonitorQueueResult,
         scheduleIssueMonitorProjectionRefresh,
         handleKnowledgeTransportChange,

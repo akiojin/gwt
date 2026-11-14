@@ -502,7 +502,7 @@ fn resumed_output_releases_the_api_error_hold() {
     );
 }
 
-/// AC-1/AC-2 end to end: the canvas snapshot is what the Issue Monitor joins
+/// AC-1/AC-2 end to end: the canvas snapshot is what Issues joins
 /// into its status rows, so the state and the reason have to survive the trip
 /// out of the runtime, not just exist inside it.
 #[test]
@@ -780,6 +780,7 @@ fn a_corroborated_quota_notice_holds_immediately() {
         account_label: None,
         plan: None,
         extra_usage: None,
+        credits: None,
         windows: vec![gwt_core::usage::UsageWindow::new(
             gwt_core::usage::WindowKind::Weekly,
             100.0,
@@ -894,6 +895,7 @@ fn a_different_providers_exhaustion_does_not_corroborate_this_pane() {
         account_label: None,
         plan: None,
         extra_usage: None,
+        credits: None,
         windows: Vec::new(),
         limit_reached: true,
         state: gwt_core::usage::UsageState::Ok,
@@ -2364,10 +2366,7 @@ fn app_runtime_bootstrap_auto_resumes_clean_waiting_input_session() {
     }
 
     runtime.bootstrap();
-    runtime.handle_frontend_event(
-        "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {},
-    );
+    handle_startup_auto_resume_ready(&mut runtime, "client-1");
 
     assert_eq!(
         runtime.tabs.len(),
@@ -2440,10 +2439,7 @@ fn app_runtime_bootstrap_resumes_session_in_linked_worktree_of_workspace_home_ta
         .expect("save resumable session");
 
     runtime.bootstrap();
-    runtime.handle_frontend_event(
-        "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {},
-    );
+    handle_startup_auto_resume_ready(&mut runtime, "client-1");
 
     let agent_windows = runtime
         .tab("tab-home")
@@ -2542,10 +2538,7 @@ fn app_runtime_bootstrap_resumes_unclosed_window_despite_stopped_status() {
         .expect("save stopped session");
 
     runtime.bootstrap();
-    runtime.handle_frontend_event(
-        "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {},
-    );
+    handle_startup_auto_resume_ready(&mut runtime, "client-1");
 
     let agent_windows = runtime
         .tab("tab-unclosed")
@@ -2631,10 +2624,7 @@ fn app_runtime_bootstrap_does_not_resume_an_unclosed_window_past_the_freshness_b
         .expect("save stale stopped session");
 
     runtime.bootstrap();
-    runtime.handle_frontend_event(
-        "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {},
-    );
+    handle_startup_auto_resume_ready(&mut runtime, "client-1");
 
     assert!(
         runtime.pending_auto_resume_sources.is_empty(),
@@ -2762,10 +2752,7 @@ fn app_runtime_bootstrap_queues_startup_auto_resume_until_surface_ready() {
     assert!(!runtime.issue_monitor_materializer_ready());
     assert!(runtime.issue_monitor_launch_preparations.is_empty());
 
-    runtime.handle_frontend_event(
-        "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {},
-    );
+    handle_startup_auto_resume_ready(&mut runtime, "client-1");
 
     let agent_windows = runtime.tabs[0]
         .workspace
@@ -3709,7 +3696,7 @@ fn bootstrap_lists_the_worktrees_once_on_the_startup_path() {
 
 /// Issue #4378 AC-2: bootstrap no longer runs the generation reaper on the
 /// startup path. It runs on the blocking worker and reports back with an
-/// event. Issue Monitor launch deliveries that arrive first wait for that
+/// event. Issues launch deliveries that arrive first wait for that
 /// event, so a launch never races a generation the reaper is about to reap.
 /// Issue #4804 AC-7: canvas-ready first must still wait for the reaper.
 #[test]

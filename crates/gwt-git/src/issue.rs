@@ -579,7 +579,7 @@ mod tests {
         );
     }
 
-    /// SPEC #4093 AC-3: the Issue Monitor's candidate list is a REST read
+    /// SPEC #4093 AC-3: Issues' candidate list is a REST read
     /// (`gh api repos/{owner}/{repo}/issues`), never `gh issue list` (GraphQL),
     /// and one read spends at most the page budget.
     #[test]

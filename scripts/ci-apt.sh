@@ -91,6 +91,8 @@
 #   GWT_APT_DPKG             dpkg binary (default: dpkg)
 #   GWT_APT_DPKG_QUERY       dpkg-query binary (default: dpkg-query)
 #   GWT_APT_LOCK_PROBE       test-only command; exit 0 means the lock is held
+#   GWT_APT_FALLBACK_MIRRORS space-separated CI fallback Ubuntu archive URLs
+#                            (default: http://azure.archive.ubuntu.com/ubuntu)
 
 set -euo pipefail
 
@@ -126,6 +128,22 @@ GTK_PACKAGES=(
 DEADLINE_EXHAUSTED=199
 LOCK_CONTENTION=198
 APT_UNAVAILABLE=197
+MIRROR_UNREACHABLE=196
+
+# Issue #7081: an `apt-get update` whose InRelease fetches all fail on DNS still
+# exits 0, so the outage used to surface one step later as "Unable to locate
+# package" and burn every attempt in seconds. The CI sources point at the
+# primary below (sanitize_ci_sources); the fallbacks are tried in order when it
+# cannot be reached, the cached archives after that, and only then is the
+# remaining budget spent on exponential backoff.
+PRIMARY_MIRROR="https://archive.ubuntu.com/ubuntu"
+SECURITY_MIRROR="https://security.ubuntu.com/ubuntu"
+read -r -a FALLBACK_MIRRORS <<<"${GWT_APT_FALLBACK_MIRRORS:-http://azure.archive.ubuntu.com/ubuntu}"
+MIRRORS=("${PRIMARY_MIRROR}" "${FALLBACK_MIRRORS[@]}")
+MIRROR_INDEX=0
+BACKOFF_STEP=0
+CACHE_REPLAY_TRIED=0
+MIRROR_OUTAGE_REASON=""
 
 LAST_REASON="unknown"
 LAST_ATTEMPT_BUDGET="${ATTEMPT_TIMEOUT}"
@@ -230,13 +248,43 @@ CONF
 # the per-connection timeout, then lose all three install attempts. Cold caches
 # must bypass that route too: use Ubuntu's direct HTTPS archives in CI, keeping
 # the suites, components and signing keys from the runner image.
-sanitize_ci_sources() {
-  # An injected apt binary is a test fixture and must not edit host sources.
-  [[ ( "${GITHUB_ACTIONS:-}" == "true" && -z "${GWT_APT_GET:-}" ) || -n "${GWT_APT_ETC_DIR:-}" ]] || return 0
+# An injected apt binary is a test fixture and must not edit host sources.
+sources_are_managed() {
+  [[ ( "${GITHUB_ACTIONS:-}" == "true" && -z "${GWT_APT_GET:-}" ) || -n "${GWT_APT_ETC_DIR:-}" ]]
+}
+
+source_files() {
   local apt_dir="${GWT_APT_ETC_DIR:-/etc/apt}"
-  local source filtered
+  local source
   for source in "${apt_dir}/sources.list" "${apt_dir}/sources.list.d/"*.list "${apt_dir}/sources.list.d/"*.sources; do
-    [[ -f "${source}" ]] || continue
+    if [[ -f "${source}" ]]; then
+      printf '%s\n' "${source}"
+    fi
+  done
+}
+
+# Issue #7081 AC-4: point every Ubuntu archive and security entry at one
+# mirror. Like the HTTPS rewrite, this only ever touches CI sources.
+switch_mirror() {
+  local target="$1"
+  local expressions=() url source
+  for url in "${MIRRORS[@]}" "${SECURITY_MIRROR}"; do
+    expressions+=(-e "s|${url//./[.]}|${target}|g")
+  done
+  while IFS= read -r source; do
+    if [[ -w "${source}" ]]; then
+      sed -i "${expressions[@]}" "${source}"
+    else
+      run_as_root sed -i "${expressions[@]}" "${source}"
+    fi
+  done < <(source_files)
+  log "mirror-switch to=${target}"
+}
+
+sanitize_ci_sources() {
+  sources_are_managed || return 0
+  local source filtered
+  while IFS= read -r source; do
     filtered="$(mktemp)"
     if ! grep -qi 'packages\.microsoft\.com' "${source}"; then
       cat "${source}" >"${filtered}"
@@ -270,7 +318,7 @@ sanitize_ci_sources() {
       run_as_root tee "${source}" <"${filtered}" >/dev/null
     fi
     rm -f "${filtered}"
-  done
+  done < <(source_files)
 }
 
 lock_is_held() {
@@ -526,6 +574,58 @@ recover_interrupted_install() {
   return "${status}"
 }
 
+# Issue #7081 AC-1: the failed InRelease fetch is in the update output, not in
+# its exit status. Only Ubuntu hosts count, so a dead third-party source on a
+# developer machine is not mistaken for a mirror outage.
+mirror_unreachable() {
+  grep -aqE "(Could not resolve|Temporary failure resolving|Could not connect to|Cannot initiate the connection to|Failed to connect to) '?[A-Za-z0-9.-]*ubuntu[.]com" "${ATTEMPT_LOG}"
+}
+
+# Issue #7081 AC-5: the newest archive per package from the restored cache.
+# The install runs with --no-download, so an incomplete cache fails closed.
+select_cache_archives() {
+  OFFLINE_ARCHIVES=()
+  [[ -n "${CACHE_DIR}" && "${MODE}" == gtk-deps ]] || return 1
+  local archive
+  while IFS= read -r archive; do
+    OFFLINE_ARCHIVES+=("${CACHE_DIR}/${archive}")
+  done < <(find "${CACHE_DIR}" -maxdepth 1 -type f -name '*_*.deb' -printf '%f\n' |
+    sort -t_ -k1,1 -k2,2V | awk -F_ '{ last[$1] = $0 } END { for (p in last) print last[p] }' | sort)
+  ((${#OFFLINE_ARCHIVES[@]} > 0))
+}
+
+# After an unreachable mirror: try the next mirror, then the cache, then wait
+# with exponential backoff. Returns 1 once the budget cannot cover the wait.
+handle_unreachable_mirror() {
+  if sources_are_managed && [[ "${GITHUB_ACTIONS:-}" == "true" ]] &&
+    ((MIRROR_INDEX + 1 < ${#MIRRORS[@]})); then
+    MIRROR_INDEX=$((MIRROR_INDEX + 1))
+    switch_mirror "${MIRRORS[MIRROR_INDEX]}"
+    return 0
+  fi
+  if ((CACHE_REPLAY_TRIED == 0)) && select_cache_archives; then
+    CACHE_REPLAY_TRIED=1
+    CACHE_STATE=offline
+    log "cache-replay archives=${#OFFLINE_ARCHIVES[@]} reason=every mirror unreachable"
+    return 0
+  fi
+  local base="${RETRY_DELAY}"
+  ((base > 0)) || base=1
+  local delay=$((base << BACKOFF_STEP))
+  if (($(remaining_seconds) <= delay)); then
+    LAST_REASON="${MIRROR_OUTAGE_REASON}"
+    return 1
+  fi
+  BACKOFF_STEP=$((BACKOFF_STEP + 1))
+  log "phase=${MODE} status=mirror-unreachable backoff=${delay}s remaining=$(remaining_seconds)s"
+  sleep "${delay}"
+  if ((MIRROR_INDEX != 0)); then
+    MIRROR_INDEX=0
+    switch_mirror "${MIRRORS[0]}"
+  fi
+  return 0
+}
+
 # One attempt at whatever this invocation was asked to do. `gtk-deps` refreshes
 # the index and installs in the same attempt on purpose: a retry that reused a
 # half-fetched index would install from stale metadata.
@@ -543,11 +643,18 @@ run_once() {
       fi
       return "${status}"
     fi
-    run_apt_get update || return $?
+    run_apt_get update || status=$?
+    if mirror_unreachable; then
+      return "${MIRROR_UNREACHABLE}"
+    fi
+    ((status == 0)) || return "${status}"
     run_apt_get install -y "${PACKAGES[@]}" || return $?
     return 0
   fi
   run_apt_get "${ARGS[@]}" || status=$?
+  if [[ " ${ARGS[*]} " == *" update "* ]] && mirror_unreachable; then
+    status="${MIRROR_UNREACHABLE}"
+  fi
   return "${status}"
 }
 
@@ -580,9 +687,21 @@ run_with_retries() {
     if ((status == LOCK_CONTENTION || status == APT_UNAVAILABLE || status == DEADLINE_EXHAUSTED || status == 126 || status == 127)) ||
       { ((status == 100)) && grep -aqE '^E: (dpkg was interrupted|Could not get lock |Could not open lock file |Unable to acquire the dpkg frontend lock|Unable to lock directory )' "${ATTEMPT_LOG}"; }; then
       LAST_REASON="apt state refusal (attempt not consumed): $(describe_failure "${status}")"
+      if ((status == DEADLINE_EXHAUSTED)) && [[ -n "${MIRROR_OUTAGE_REASON}" ]]; then
+        LAST_REASON="${MIRROR_OUTAGE_REASON}"
+      fi
       log "phase=${MODE} attempt=${attempt}/${ATTEMPTS} status=refused exit=${status} reason=${LAST_REASON}"
       summarize_attempt
       break
+    fi
+    # Issue #7081: an outage does not consume an attempt; the budget bounds it.
+    if ((status == MIRROR_UNREACHABLE)); then
+      MIRROR_OUTAGE_REASON="mirror unreachable (external cause / ミラー到達不能（外部要因）): ${MIRRORS[*]} could not be reached within the ${TOTAL_DEADLINE}s budget"
+      LAST_REASON="${MIRROR_OUTAGE_REASON}"
+      log "phase=${MODE} attempt=${attempt}/${ATTEMPTS} status=mirror-unreachable mirror=${MIRRORS[MIRROR_INDEX]}"
+      summarize_attempt
+      handle_unreachable_mirror || break
+      continue
     fi
     ATTEMPTS_USED="${attempt}"
     if ((status == 0)); then

@@ -9,6 +9,7 @@
 import { chmod, readdir, readFile, writeFile } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { expect, test, type Page, type TestInfo } from "@playwright/test";
 import { startExactRelaunchFixture, writeFixtureNodeCommand, type ExactRelaunchInvocation } from "./_helpers/exact-relaunch";
 import { gotoLiveGwt, sendLiveGwtEvent } from "./_helpers/live-gwt";
@@ -20,6 +21,7 @@ type RosterMember = { agent_member_id: string; agent_id: string; name: string; e
   saved_manual_revision?: string | null;
   history: { session_id: string; name: string | null; provider: string | null; model: string | null }[] };
 type AgentRoster = { project_key: string; revision: number; capacity: number; members: RosterMember[]; error: string | null };
+const WINDOWS_WORKS_CASE = "Works shows the real PM and four implementation children after reload";
 
 async function rosterAfter(page: Page, after: number, previousRevision = -1): Promise<AgentRoster> {
   return page.waitForFunction(({ after, previousRevision }) => {
@@ -137,17 +139,267 @@ async function attachScreenshot(page: Page, testInfo: TestInfo, name: string) {
   await testInfo.attach(name, { path, contentType: "image/png" });
 }
 
+test.describe("Issue #6767 final quota output (isolated checkout)", () => {
+  test.skip(process.env.GWT_PLAYWRIGHT_EXACT_RELAUNCH !== "1", "requires checkout binaries");
+  test.use({ viewport: { width: 1440, height: 1000 } });
+  test("retains Waiting and the native conversation after exit 0, then allows explicit close", async ({ page }, info) => {
+    test.setTimeout(240_000);
+    const fixture = await startExactRelaunchFixture(info, {
+      exitNotice: "\n■ You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage\n"
+        + "  to purchase more credits or try again at Aug 22nd, 2026 12:46 PM.\n",
+    });
+    const errors = capture(page);
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+    try {
+      await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      await launchCodex(page, fixture.branch);
+      await expect.poll(async () => (await fixture.launches()).length, { timeout: 60_000 }).toBe(1);
+      const launch = (await fixture.launches())[0];
+      const sessionId = launch.gwt_session_id!;
+      const pane = await liveCodexWindow(page, sessionId);
+      await expect.poll(async () => tomlString(await sessionRecord(fixture.home, sessionId), "agent_session_id"),
+        { timeout: 60_000 }).toBe(launch.provider_session_id);
+      await page.locator('.op-rail__surface[data-surface="works"]').click();
+      await page.locator(`.work-row[data-window-id="${pane.id}"] .work-open`).click();
+      await expect(page.locator(".xterm-screen:visible")).toBeVisible();
+      await page.evaluate(() => document.fonts.ready);
+      await sendLiveGwtEvent(page, { kind: "terminal_input", id: pane.id, data: "GWT_FIXTURE_PING\r" });
+      await expect.poll(async () => (await page.locator(".xterm-screen:visible").innerText())
+        .split("GWT_FAKE_PROVIDER_READY").length, { timeout: 30_000 }).toBeGreaterThanOrEqual(3);
+      await sendLiveGwtEvent(page, { kind: "terminal_input", id: pane.id, data: "GWT_FIXTURE_EXIT\r" });
+      await expect.poll(async () => (await codexWindows(page)).find(entry => entry.id === pane.id),
+        { timeout: 60_000 }).toMatchObject({ session_id: sessionId, status: "waiting" });
+      await expect.poll(async () => await sessionRecord(fixture.home, sessionId),
+        { timeout: 60_000 }).toMatch(/^last_exit_code\s*=\s*0/m);
+      expect(tomlString(await sessionRecord(fixture.home, sessionId), "agent_session_id"))
+        .toBe(launch.provider_session_id);
+      // The retained terminal still renders the refusal after its native PTY
+      // has exited; no synthetic WebSocket state supplies this result.
+      await expect(page.locator(".xterm-screen:visible")).toContainText("usage limit");
+      await attachScreenshot(page, info, `quota-waiting-${theme}`);
+      await sendLiveGwtEvent(page, { kind: "close_window", id: pane.id });
+      await expect.poll(async () => (await codexWindows(page)).some(entry => entry.id === pane.id),
+        { timeout: 30_000 }).toBe(false);
+      expect(errors, "console/page errors across quota retention and explicit close").toEqual([]);
+    } catch (error) {
+      await attachScreenshot(page, info, `quota-failure-${theme}`);
+      throw error;
+    } finally {
+      await fixture.stop();
+    }
+  });
+});
+
+test.describe("Issue #3340 explicit STOP retention (isolated checkout)", () => {
+  test.skip(process.env.GWT_PLAYWRIGHT_EXACT_RELAUNCH !== "1", "requires checkout binaries");
+  test.use({ viewport: { width: 1440, height: 1000 } });
+  test("keeps the stopped transcript until app restart without restoring the agent", async ({ page }, info) => {
+    test.setTimeout(240_000);
+    const fixture = await startExactRelaunchFixture(info);
+    const errors = capture(page);
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    await page.addInitScript(theme => {
+      if (/^https?:$/.test(location.protocol)) localStorage.setItem("gwt:ui:theme", theme);
+    }, theme);
+    try {
+      await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      await launchCodex(page, fixture.branch);
+      await expect.poll(async () => (await fixture.launches()).length, { timeout: 60_000 }).toBe(1);
+      const launch = (await fixture.launches())[0];
+      const sessionId = launch.gwt_session_id!;
+      const pane = await liveCodexWindow(page, sessionId);
+      await page.locator('.op-rail__surface[data-surface="works"]').click();
+      await page.locator(`.work-row[data-window-id="${pane.id}"] .work-open`).click();
+      const transcript = page.locator(".xterm-screen:visible");
+      await expect(transcript).toBeVisible();
+      await sendLiveGwtEvent(page, { kind: "terminal_input", id: pane.id, data: "GWT_FIXTURE_PING\r" });
+      await expect.poll(async () => (await transcript.innerText()).split("GWT_FAKE_PROVIDER_READY").length,
+        { timeout: 30_000 }).toBeGreaterThanOrEqual(3);
+      await expect(page.locator(".toast-alerts__item").filter({ hasText: "Resize failed" })).toHaveCount(0);
+
+      await sendLiveGwtEvent(page, { kind: "stop_window", id: pane.id });
+      await expect.poll(async () => (await codexWindows(page)).find(entry => entry.id === pane.id),
+        { timeout: 60_000 }).toMatchObject({ session_id: sessionId, status: "stopped" });
+      await expect(transcript).toContainText(`GWT_FAKE_PROVIDER_READY ${launch.provider_session_id}`);
+      await expect(page.locator(".toast-alerts__item").filter({ hasText: "Resize failed" })).toHaveCount(0);
+      await expect(page.locator(".works-full-meta")).toContainText("Stopped");
+      await expect.poll(() => sessionRecord(fixture.home, sessionId), { timeout: 30_000 })
+        .toMatch(/^restore_window_on_startup\s*=\s*false/m);
+      expect(tomlString(await sessionRecord(fixture.home, sessionId), "status")).toBe("Stopped");
+      await attachScreenshot(page, info, `stopped-transcript-${theme}`);
+
+      // Repeated STOP is harmless and cannot remove the retained window.
+      await sendLiveGwtEvent(page, { kind: "stop_window", id: pane.id });
+      await expect(transcript).toContainText("GWT_FAKE_PROVIDER_READY");
+      await page.goto("about:blank");
+      await fixture.restart({ coldOwnerDrain: true });
+      await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      // An absent initial snapshot must not look like an empty restored workspace.
+      await expect.poll(() => page.evaluate(() => {
+        const messages = (window as any).__gwtPlaywrightMessages ?? [];
+        const project = location.pathname.split("/")[2];
+        const state = messages.findLast((entry: any) => entry.payload.kind === "workspace_state");
+        const activity = messages.map(({ payload }: any) => payload.kind === "local_agent_activity"
+          ? payload.activity : payload.projection?.local_agent_activity)
+          .findLast((snapshot: any) => snapshot?.project_key === project && snapshot.host_id);
+        return state?.payload.workspace.tabs?.some((tab: any) => tab.project_key === project)
+          && activity?.agents?.length === 0;
+      }), { timeout: 60_000, message: "cold owner hydrated the workspace and live census" }).toBe(true);
+      await expect.poll(() => codexWindows(page)).toEqual([]);
+      expect(await fixture.launches()).toHaveLength(1);
+      expect(await sessionRecord(fixture.home, sessionId)).not.toBe("");
+      await page.locator('.op-rail__surface[data-surface="works"]').click();
+      await attachScreenshot(page, info, `stopped-not-restored-${theme}`);
+      expect(errors, "console/page errors across STOP retention and cold restart").toEqual([]);
+    } finally {
+      await fixture.stop();
+    }
+  });
+  test("explicit Close removes a previously stopped agent", async ({ page }, info) => {
+    test.setTimeout(180_000);
+    const fixture = await startExactRelaunchFixture(info);
+    const errors = capture(page);
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    await page.addInitScript(theme => {
+      if (/^https?:$/.test(location.protocol)) localStorage.setItem("gwt:ui:theme", theme);
+    }, theme);
+    try {
+      await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      await launchCodex(page, fixture.branch);
+      await expect.poll(async () => (await fixture.launches()).length, { timeout: 60_000 }).toBe(1);
+      const sessionId = (await fixture.launches())[0].gwt_session_id!;
+      const pane = await liveCodexWindow(page, sessionId);
+      await sendLiveGwtEvent(page, { kind: "stop_window", id: pane.id });
+      await expect.poll(async () => (await codexWindows(page)).find(entry => entry.id === pane.id),
+        { timeout: 60_000 }).toMatchObject({ status: "stopped" });
+      await sendLiveGwtEvent(page, { kind: "close_window", id: pane.id });
+      await expect.poll(async () => (await codexWindows(page)).some(entry => entry.id === pane.id)).toBe(false);
+      await attachScreenshot(page, info, `stopped-closed-${theme}`);
+      expect(errors, "console/page errors across STOP then Close").toEqual([]);
+    } finally {
+      await fixture.stop();
+    }
+  });
+});
+
 test.describe("Exact relaunch continuity (isolated checkout)", () => {
   // The fixture spawns this checkout's target/debug/gwt, which the embedded
   // CI Playwright job does not build.
   test.skip(process.env.GWT_PLAYWRIGHT_EXACT_RELAUNCH !== "1",
     "GWT_PLAYWRIGHT_EXACT_RELAUNCH=1 is not set; checkout relaunch E2E skipped");
-  test.skip(process.platform === "win32", "the argv recorder fixture requires POSIX executables");
+  test.beforeEach(({}, info) => {
+    test.skip(process.platform === "win32" && info.title !== WINDOWS_WORKS_CASE,
+      "only the Works cold-restart case has Windows acceptance coverage");
+  });
   test.setTimeout(420_000);
+
+  test("Issue #6946: explicit Quit drains the GUI, managed daemon and live provider", async ({ page }, info) => {
+    const fixture = await startExactRelaunchFixture(info);
+    const errors = capture(page);
+    const alive = (pid: number) => {
+      try { process.kill(pid, 0); return true; } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
+        throw error;
+      }
+    };
+    let cleanupDaemon: (() => Promise<void>) | undefined;
+    let failed = false;
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    await page.addInitScript(theme => {
+      if (location.protocol === "http:") localStorage.setItem("gwt:ui:theme", theme);
+    }, theme);
+    try {
+      await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      await launchCodex(page, fixture.branch);
+      await expect.poll(async () => (await fixture.launches()).length, { timeout: 60_000 }).toBe(1);
+      const launch = (await fixture.launches())[0];
+      await liveCodexWindow(page, launch.gwt_session_id!);
+      const key = new URL(page.url()).pathname.split("/")[2];
+      const directory = join(fixture.home, ".gwt/projects", key, "runtime/daemon");
+      const endpoints = await Promise.all((await readdir(directory)).filter(name => name.endsWith(".json"))
+        .map(async name => JSON.parse(await readFile(join(directory, name), "utf8"))));
+      const endpoint = endpoints.find(endpoint => endpoint.scope?.repo_hash === key && endpoint.project_transport_url);
+      expect(endpoint, "fixture's exact managed daemon").toBeTruthy();
+      const ownerHealth = () => fetch(`${endpoint.project_transport_url}/private/project/command`, {
+        method: "POST", headers: { Authorization: `Bearer ${endpoint.auth_token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ project_key: key, command: { type: "health" } }), signal: AbortSignal.timeout(5_000),
+      }).then(response => response.json());
+      const health = await ownerHealth();
+      expect(health).toMatchObject({ pid: endpoint.pid, startup_intent: "gui_managed", draining: false });
+      expect(health.gui_presence_count).toBeGreaterThanOrEqual(1);
+      cleanupDaemon = async () => {
+        if (!alive(endpoint.pid)) return;
+        let current;
+        try { current = await ownerHealth(); } catch (error) {
+          if (!alive(endpoint.pid)) return;
+          throw error;
+        }
+        expect(current, "cleanup may signal only this fixture's captured owner").toMatchObject({
+          pid: endpoint.pid, project_key: key, startup_intent: "gui_managed",
+          host_instance_id: health.host_instance_id, host_started_at: health.host_started_at,
+        });
+        try { process.kill(endpoint.pid, "SIGTERM"); } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+        }
+        await expect.poll(() => alive(endpoint.pid), { timeout: 45_000 }).toBe(false);
+      };
+      await page.locator("#close-project-button").click();
+      const dialog = page.getByRole("dialog", { name: "Close Project?" });
+      await expect(dialog).toBeVisible();
+      await dialog.getByRole("button", { name: "Continue", exact: true }).click();
+      await expect(page.locator("[data-hub]")).toBeVisible({ timeout: 30_000 });
+      // Closing a Project view retains the native GUI subscriber. Kill only
+      // this fixture's GUI to exercise disconnect without the explicit Quit path.
+      await page.goto("about:blank");
+      const disconnectedGui = fixture.ownedPid!;
+      process.kill(disconnectedGui, "SIGKILL");
+      await expect.poll(() => alive(disconnectedGui), { timeout: 15_000 }).toBe(false);
+      await expect.poll(async () => (await ownerHealth()).gui_presence_count, { timeout: 30_000 }).toBe(0);
+      // Exceed the owner's 15-second reconnect grace: unfinished Continue work
+      // must survive ordinary disconnect before explicit Quit is exercised.
+      await delay(16_000);
+      expect(await ownerHealth()).toMatchObject({ pid: endpoint.pid, draining: false, gui_presence_count: 0 });
+      expect(alive(endpoint.pid)).toBe(true);
+      expect(alive(launch.pid)).toBe(true);
+      // restart() also cleans providers; start() replaces only the dead GUI.
+      await gotoLiveGwt(page, await fixture.start(), { enableTestBridge: true });
+      await liveCodexWindow(page, launch.gwt_session_id!);
+      expect((await fixture.launches()).map(entry => entry.pid)).toEqual([launch.pid]);
+      await expect.poll(async () => (await ownerHealth()).gui_presence_count).toBeGreaterThanOrEqual(1);
+      await attachScreenshot(page, info, `quit-live-provider-${theme}`);
+      expect(errors, "console/page errors before shutdown").toEqual([]);
+      const pids = [fixture.ownedPid!, endpoint.pid, launch.pid];
+      // Close the browser before intentional server shutdown so reconnect errors
+      // cannot be confused with frontend failures. SIGTERM uses the QuitApp path.
+      await page.close();
+      process.kill(pids[0], "SIGTERM");
+      for (const pid of pids) {
+        await expect.poll(() => alive(pid),
+          { timeout: 20_000, message: `Quit must reap owned PID ${pid}` }).toBe(false);
+      }
+      await info.attach("quit-processes", { body: JSON.stringify({ pids, exited: true }), contentType: "application/json" });
+    } catch (error) {
+      failed = true;
+      throw error;
+    } finally {
+      try {
+        try { await fixture.stop(); } finally { await cleanupDaemon?.(); }
+      } catch (error) {
+        await info.attach("quit-cleanup-failure", { body: String(error), contentType: "text/plain" });
+        if (!failed) throw error;
+      }
+    }
+  });
 
   test("restart evidence failure reaps the owned process", async ({}, testInfo) => {
     let starts = 0;
-    const cleanups: { pid: number; ps_status: number }[] = [];
+    const cleanups: { pid: number; exited: boolean }[] = [];
     const fixture = await startExactRelaunchFixture({
       async attach(name, attachment) {
         if (name === "exact-relaunch-fixture" && ++starts === 2) throw new Error("fixture evidence failure");
@@ -158,7 +410,7 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
     try {
       await expect(fixture.restart()).rejects.toThrow("fixture evidence failure");
       expect(cleanups).toHaveLength(2);
-      expect(cleanups.every(cleanup => cleanup.pid > 0 && cleanup.ps_status === 1)).toBe(true);
+      expect(cleanups.every(cleanup => cleanup.pid > 0 && cleanup.exited)).toBe(true);
     } finally {
       await fixture.stop();
     }
@@ -532,12 +784,13 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
     }
   });
 
-  test("Works shows the real PM and four implementation children after reload", async ({ page }, info) => {
+  test(WINDOWS_WORKS_CASE, async ({ page }, info) => {
     test.setTimeout(420_000);
     const purpose = "Review active work and coordinate delivery";
     const fixture = await startExactRelaunchFixture(info, {
       monitorPreferences: { max_active_agents: 4 },
       async prepare({ home, bin, project, env }) {
+        env.RUST_LOG = [env.RUST_LOG || "info", "gwt::shutdown=info"].join(",");
         const git = (...args: string[]) => execFileSync("git", args, { cwd: project, env, encoding: "utf8" });
         git("clone", "--bare", "--quiet", project, join(home, "origin.git"));
         git("remote", "add", "origin", join(home, "origin.git")); git("fetch", "--quiet", "origin");
@@ -545,27 +798,88 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
         const codexScript = join(bin, process.platform === "win32" ? "codex.cjs" : "codex");
         const claudeScript = join(bin, process.platform === "win32" ? "claude.cjs" : "claude");
         let provider = await readFile(codexScript, "utf8");
+        provider = provider.replace("const at = new Date().toISOString();", `
+process.env.GWT_HOOK_PROFILE_PATH = path.join(process.env.HOME, 'hook-' + process.env.GWT_SESSION_ID + '.jsonl');
+const at = new Date().toISOString();`);
         provider = provider.replace(/const native = resumed \|\| requested \|\| [^;]+;/,
           "const native = resumed || requested || require('node:crypto').randomUUID();");
         provider = provider.replace("  if (line.trim() === 'GWT_FIXTURE_EXIT')", `
-  if (['GWT_FIXTURE_BEGIN', 'GWT_FIXTURE_IDLE', 'GWT_FIXTURE_PM_BEGIN'].includes(line.trim())) {
+  if (['GWT_FIXTURE_BEGIN', 'GWT_FIXTURE_BEGIN_MISSED', 'GWT_FIXTURE_IDLE', 'GWT_FIXTURE_PM_BEGIN'].includes(line.trim())) {
     const event = line.trim() === 'GWT_FIXTURE_IDLE' ? 'Stop' : 'UserPromptSubmit';
-    const hook = require('node:child_process').spawnSync(process.env.GWT_BIN_PATH,
-      ['hook', 'event', event], {cwd:process.cwd(),env:process.env,encoding:'utf8',timeout:30000,
-        input:JSON.stringify({session_id:native,hook_event_name:event,cwd:process.cwd()})});
-    if (hook.status !== 0) { console.log('WORKS_HOOK_FAILED'); return; }
-    if (line.trim() === 'GWT_FIXTURE_PM_BEGIN') {
-      const result = require('node:child_process').spawnSync(process.env.GWT_BIN_PATH, [], {
-        cwd:process.cwd(),env:process.env,encoding:'utf8',timeout:30000,
-        input:JSON.stringify({schema_version:1,operation:'pm.status.set',params:{
-          items:[{kind:'working',text:${JSON.stringify(purpose)},started_at:new Date().toISOString()}],
-          next_trigger:'Agent update'}})});
-      if (result.status !== 0 || !JSON.parse(result.stdout).ok) { console.log('WORKS_STATUS_FAILED'); return; }
+    const missed = line.trim() === 'GWT_FIXTURE_BEGIN_MISSED';
+    const receipt = (stage, extra = {}) => fs.appendFileSync(
+      path.join(process.env.HOME,'works-hook-receipts.jsonl'),JSON.stringify({
+        session:process.env.GWT_SESSION_ID,command:line.trim(),stage,...extra})+'\\n');
+    let phase = 'native-hook';
+    try {
+      const runtimePath = process.env.GWT_SESSION_RUNTIME_PATH;
+      const journalPath = path.join(path.dirname(path.dirname(path.dirname(runtimePath))),
+        'hook-live',path.basename(path.dirname(runtimePath)),path.basename(runtimePath));
+      const completedBefore = JSON.parse(fs.readFileSync(runtimePath,'utf8')).last_completed_hook_event_at;
+      const payload = JSON.stringify({session_id:native,hook_event_name:event,cwd:process.cwd()});
+      const invoke = (args, env = process.env, input = payload) => require('node:child_process').spawnSync(
+        process.env.GWT_BIN_PATH,args,{cwd:process.cwd(),env,encoding:'utf8',timeout:30000,input});
+      const hook = invoke(['hook','event',event],missed
+        ? {...process.env,GWT_HOOK_FORWARD_TOKEN:'works-fixture-rejected-token'} : process.env);
+      const output = hook.stdout.trim() ? JSON.parse(hook.stdout) : {};
+      if (hook.error || hook.status !== 0 || output.decision === 'block'
+        || output.hookSpecificOutput?.decision === 'block' || output.continue === false)
+        throw new Error('managed hook rejected');
+      phase = 'native-completion';
+      const nativeRuntime = JSON.parse(fs.readFileSync(runtimePath,'utf8'));
+      if (nativeRuntime.status !== (event === 'Stop' ? 'Idle' : 'Running') || nativeRuntime.source_event !== event
+        || !nativeRuntime.last_completed_hook_event_at || nativeRuntime.last_completed_hook_event_at === completedBefore
+        || nativeRuntime.last_completed_hook_outcome !== 'normal') throw new Error('native event did not complete normally');
+      if (missed) {
+        phase = 'pending-proof';
+        const journal = JSON.parse(fs.readFileSync(journalPath,'utf8'));
+        if (!journal.health.pending_runtime_state || journal.health.consecutive_failures < 1
+          || journal.pending?.gwt_session_id !== process.env.GWT_SESSION_ID
+          || journal.pending?.source_event !== event || journal.pending?.status !== 'Running')
+          throw new Error('missing real pending Running event');
+        receipt('pending');
+      }
+      // Report the real Read above through the public provider hook. It
+      // coalesces to the latest Running and invokes the normal Forward path;
+      // it does not promise delivery of the earlier prompt event itself.
+      let completionBefore = completedBefore;
+      if (event === 'UserPromptSubmit') {
+        phase = 'provider-follow-up';
+        const followUp = invoke(['hook','event','PostToolUse'],process.env,JSON.stringify({
+          session_id:native,hook_event_name:'PostToolUse',cwd:process.cwd(),
+          tool_name:'Read',tool_input:{file_path:runtimePath}}));
+        if (followUp.error || followUp.status !== 0) throw new Error('provider follow-up failed');
+        completionBefore = nativeRuntime.last_completed_hook_event_at;
+      }
+      phase = 'ack-state';
+      const runtime = JSON.parse(fs.readFileSync(runtimePath,'utf8'));
+      const journal = JSON.parse(fs.readFileSync(journalPath,'utf8'));
+      if (runtime.status !== (event === 'Stop' ? 'Idle' : 'Running')
+        || runtime.source_event !== (event === 'Stop' ? 'Stop' : 'PostToolUse')
+        || !runtime.last_completed_hook_event_at || runtime.last_completed_hook_event_at === completionBefore
+        || runtime.last_completed_hook_outcome !== 'normal' || journal.pending !== null
+        || journal.health.pending_runtime_state !== false || journal.health.consecutive_failures !== 0
+        || !journal.health.last_success_at) throw new Error('runtime or delivery ACK missing');
+      if (line.trim() === 'GWT_FIXTURE_PM_BEGIN') {
+        phase = 'pm-status';
+        const result = require('node:child_process').spawnSync(process.env.GWT_BIN_PATH, [], {
+          cwd:process.cwd(),env:process.env,encoding:'utf8',timeout:30000,
+          input:JSON.stringify({schema_version:1,operation:'pm.status.set',params:{
+            items:[{kind:'working',text:${JSON.stringify(purpose)},started_at:new Date().toISOString()}],
+            next_trigger:'Agent update'}})});
+        if (result.error || result.status !== 0 || !JSON.parse(result.stdout).ok) throw new Error('PM status failed');
+      }
+      receipt('ack');
+      console.log('WORKS_STATE ' + event);
+    } catch {
+      receipt('failed',{phase});
+      console.log('WORKS_HOOK_FAILED ' + phase);
     }
-    console.log('WORKS_STATE ' + event); return;
+    return;
   }
   if (line.trim() === 'GWT_FIXTURE_EXIT')`);
         let claude = provider.replace("codex-cli 0.116.0", "2.1.0 (Claude Code)")
+          .replace("const hookProvider = 'codex';", "const hookProvider = 'claude';")
           .replace("'.codex', 'hooks.json'", "'.claude', 'settings.local.json'")
           .replace("const resumed = resumeAt < 0 ? null :", "const resumed = option('--resume') || (resumeAt < 0 ? null :")
           .replace(" ?? null);\nconst requested", " ?? null));\nconst requested");
@@ -618,7 +932,19 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
     });
     const windows = async () => workspace?.tabs.flatMap((tab: any) => tab.workspace.windows)
       .filter((window: any) => window.session_id) ?? [];
-    const input = (id: string, command: string) => sendLiveGwtEvent(page, { kind: "terminal_input", id, data: command + "\r" });
+    const receipts = async () => (await readFile(join(fixture.home, "works-hook-receipts.jsonl"), "utf8")
+      .catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return ""; throw error; }))
+      .split("\n").slice(0, -1).filter(Boolean).map(line => JSON.parse(line));
+    const input = async (id: string, command: string) => {
+      const session = (await windows()).find((window: any) => window.id === id)?.session_id;
+      const matches = (receipt: any) => receipt.session === session && receipt.command === command && receipt.stage !== "pending";
+      const before = (await receipts()).filter(matches).length;
+      await sendLiveGwtEvent(page, { kind: "terminal_input", id, data: command + "\r" });
+      await expect.poll(async () => (await receipts()).filter(matches).length,
+        { timeout: 60_000, message: "the native hook and ordinary provider follow-up finish before UI assertions" }).toBe(before + 1);
+      const receipt = (await receipts()).filter(matches).at(-1);
+      expect(receipt.stage, `native hook/provider follow-up failed at ${receipt.phase}`).toBe("ack");
+    };
     const assertAggregates = async () => {
       await expect.poll(() => usage?.filter((session: any) => session.state.kind === "ok"
         && session.telemetry?.quality === "measured").length, { timeout: 45_000 }).toBe(5);
@@ -671,7 +997,8 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
       const pmName = pm.agent_name;
       expect(typeof pmName === "string" && pmName.trim().length > 0).toBe(true);
       await expect.poll(async () => (await fixture.launches()).length).toBe(5);
-      for (const worker of live.filter((window: any) => !window.is_pm)) await input(worker.id, "GWT_FIXTURE_BEGIN");
+      for (const [index, worker] of live.filter((window: any) => !window.is_pm).entries())
+        await input(worker.id, index === 0 ? "GWT_FIXTURE_BEGIN_MISSED" : "GWT_FIXTURE_BEGIN");
       await input(pm.id, "GWT_FIXTURE_PM_BEGIN");
       await page.locator('.op-rail__surface[data-surface="works"]').click();
       await expect(rows).toHaveCount(5, { timeout: 60_000 });
@@ -691,7 +1018,9 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
       await assertAggregates();
       await expect.poll(async () => Number(await first.locator("svg").getAttribute("data-known-count"))).toBeGreaterThan(0);
       await expect.poll(() => first.locator("svg circle").evaluateAll(nodes => nodes.some(node => Number(node.getAttribute("cy")) < 53))).toBe(true);
-      const pmWorktree = tomlString(await sessionRecord(fixture.home, pm.session_id), "worktree_path");
+      const registration = JSON.parse(await readFile(join(fixture.preferences, "pm.json"), "utf8")).registration;
+      expect(registration.session_id).toBe(pm.session_id);
+      const pmWorktree = registration.worktree_path;
       expect(pmWorktree).toBeTruthy();
       const pmBranch = execFileSync("git", ["-C", pmWorktree!, "branch", "--show-current"], { encoding: "utf8" }).trim();
       await expect(first.locator('[data-stat="branch"]')).toHaveText(pmBranch);
@@ -715,9 +1044,14 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
       await expect(rows.first()).toHaveAttribute("data-state", "running");
       await expect(main.locator(".works-active")).toHaveText("Active 5");
       await assertAggregates();
-      // Prevent the old document from reconnecting before the fresh navigation.
-      await page.goto("about:blank");
-      const restarted = await fixture.restart({ coldOwnerDrain: true }); workspace = null; usage = null; activity = null;
+      // Capture the owner before ending the last browser document's lifetime.
+      const restarted = await fixture.restart({ coldOwnerDrain: true,
+        disconnectBrowser: () => page.goto("about:blank") }); workspace = null; usage = null; activity = null;
+      const shutdown = info.attachments.find(attachment => attachment.name === "fixture-cold-gui-shutdown");
+      expect(shutdown, "cold restart must prove signal-free normal GUI shutdown").toBeDefined();
+      expect(JSON.parse(shutdown!.body!.toString())).toMatchObject({
+        exit_code: 0, signal: null, shutdown_requested: true, cleanup_completed: true, backstop: false,
+      });
       await gotoLiveGwt(page, restarted, { enableTestBridge: true, suppressProjectSurfaces: true });
       await page.locator('.op-rail__surface[data-surface="works"]').click();
       await expect(rows).toHaveCount(5, { timeout: 90_000 });
@@ -780,7 +1114,17 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
     } finally {
       try {
         await info.attach("works-source-state", { body: JSON.stringify({ workspace, activity, usage, activityObservations }), contentType: "application/json" });
-      } finally { await fixture.stop(); }
+        const profiles = (await readdir(fixture.home)).filter(name => /^hook-[0-9a-f-]+\.jsonl$/.test(name));
+        for (const name of profiles) {
+          await info.attach(name, { body: await readFile(join(fixture.home, name)), contentType: "application/x-ndjson" });
+        }
+        expect(profiles.length, "retain per-Session hook timings before runner cleanup").toBeGreaterThanOrEqual(5);
+        for (const session of new Set((await fixture.launches()).map(launch => launch.gwt_session_id))) {
+          expect(profiles, `retain hook timings for launched Session ${session}`).toContain(`hook-${session}.jsonl`);
+        }
+      } finally {
+        await fixture.stop(true, () => page.goto("about:blank"));
+      }
     }
   });
 

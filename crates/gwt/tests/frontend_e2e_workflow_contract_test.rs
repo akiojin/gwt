@@ -142,17 +142,26 @@ fn frontend_uses_image_browsers_without_a_bootstrap_or_browser_cache() {
 fn the_frontend_job_runs_the_embedded_e2e_suite() {
     assert!(
         frontend_step("Run WebView E2E (embedded Playwright specs)")
-            .contains("run-visual-tests.sh"),
-        "the frontend job must retain the embedded Playwright specs"
+            .contains("bash scripts/run-visual-tests.sh --workers=2"),
+        "the frontend job must retain all embedded Playwright specs with two workers"
     );
 }
 
-/// Test execution keeps its own deadline after browser bootstrap is removed.
+/// The serial two-theme suite measured 14.7 minutes before image/bootstrap
+/// overhead. Keep a finite deadline with headroom for the full suite and retries.
 #[test]
 fn the_embedded_e2e_step_is_time_bounded() {
+    let minutes = frontend_step("Run WebView E2E (embedded Playwright specs)")
+        .lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix("timeout-minutes:")
+                .and_then(|value| value.trim().parse::<u64>().ok())
+        })
+        .expect("the embedded Playwright step must declare its own finite timeout");
     assert!(
-        frontend_step("Run WebView E2E (embedded Playwright specs)").contains("timeout-minutes:"),
-        "the embedded Playwright step must declare its own timeout"
+        minutes >= 25,
+        "the full serial Playwright suite needs at least 25 minutes including setup and retry headroom; got {minutes}"
     );
 }
 

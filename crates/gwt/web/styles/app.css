@@ -1963,7 +1963,7 @@ body {
   color: var(--color-text-strong);
 }
 
-/* SPEC #3885 Phase 5 (T-032..T-035): the Issue window's Monitor band, the
+/* SPEC #3885 Phase 5 (T-032..T-035): the Issue window's Issues band, the
    "+ New" popover body and the detail pane. Operator tokens and the shared
    `.modal-*` primitive only. */
 .knowledge-monitor-bar {
@@ -3459,6 +3459,16 @@ body {
   box-shadow: 0 -18px 40px color-mix(in oklab, var(--color-canvas) 8%, transparent);
 }
 
+/* SPEC 6476 T-005b2: on a phone the Board header filters were 19px tall and
+   the composer controls 32-36px. Make them 44px tap targets below 601px; the
+   timeline links keep their reading size. */
+@media (max-width: 600px) {
+  .board-root .workspace-toolbar { flex-direction: column; align-items: stretch; }
+  .board-root .workspace-toolbar-actions { flex-wrap: wrap; }
+  .board-root .workspace-toolbar-actions button,
+  .board-composer-bar :is(button, input, select, textarea) { min-width: 44px; min-height: 44px; }
+}
+
 .board-status {
   font-family: var(--font-mono);
   font-size: var(--type-xs);
@@ -3827,6 +3837,16 @@ body {
 }
 .toast-alerts__dismiss:hover {
   color: var(--color-text-strong);
+}
+/* SPEC #6476 T-005c: a 20px dismiss is too small to tap on a phone. The
+   negative block margins extend the 44px target into the item's top padding
+   and keep the title row at its original 20px, so the message stays close. */
+@media (max-width: 600px) {
+  .toast-alerts__dismiss {
+    min-width: 44px;
+    min-height: 44px;
+    margin-block: calc(-1 * var(--space-2)) calc(var(--space-5) + var(--space-2) - 44px);
+  }
 }
 @keyframes toast-alerts-in {
   from {
@@ -4304,6 +4324,18 @@ body {
   line-height: 1.5;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+/* SPEC #6476 T-005lg: on a phone the Logs refresh was 24px and the filters
+   32px tall, and the two columns left the detail pane a sliver. Make them 44px
+   tap targets and stack the timeline above the detail below 601px; a short
+   screen scrolls the surface instead of collapsing either pane. */
+@media (max-width: 600px) {
+  .logs-root { overflow-y: auto; }
+  .logs-root .workspace-toolbar-actions button,
+  .logs-filter-field :is(select, input) { min-width: 44px; min-height: 44px; }
+  .logs-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(120px, 1fr) minmax(120px, 1fr); }
+  .logs-timeline { border-right: 0; border-bottom: 1px solid var(--color-border); }
 }
 
 .branch-list-root {
@@ -5719,7 +5751,7 @@ body {
   color: var(--color-text-strong);
 }
 
-/* Issue 4911 — the Issue Monitor settings form repeats the Agent Settings
+/* Issue 4911 — Issues settings form repeats the Agent Settings
    block once per launch candidate; the open set carries the form.
    (No `#` before the number: the token audits scan this block for hex colors.) */
 .launch-agent-sets {
@@ -6473,6 +6505,27 @@ body.route-body {
 .issue-bridge-root .knowledge-heading { display: none; }
 .issue-bridge-root .knowledge-search { width: 100%; }
 
+/* SPEC #6476: keep phone tabs tappable and toolbar rows clear of each other. */
+@media (max-width: 600px) {
+  .issue-bridge-root .knowledge-state-filter button,
+  .issue-bridge-root .knowledge-monitor-controls :is(button, input),
+  .issue-bridge-root .knowledge-search,
+  .issue-bridge-root .workspace-toolbar-actions button,
+  .issue-bridge-root .issue-queue-select,
+  .issue-bridge-root .knowledge-row-select,
+  .issue-bridge-root .knowledge-row-actions button,
+  .issue-bridge-root .knowledge-row-menu-item { min-height: 44px; }
+  .issue-bridge-root .knowledge-row-select { align-content: center; }
+  .issue-bridge-root .knowledge-row-menu > summary {
+    display: grid;
+    place-items: center;
+    min-width: 44px;
+    min-height: 44px;
+  }
+  .issue-bridge-root .workspace-toolbar-main { flex-basis: 100%; grid-template-columns: minmax(0, 1fr) max-content; }
+  .issue-bridge-root .issue-filter-hint { grid-column: 1 / -1; }
+}
+
 .issue-bridge-root[data-preview-hidden="true"] .issue-list-shell { grid-template-columns: minmax(0, 1fr); }
 .issue-bridge-root[data-preview-hidden="true"] .knowledge-detail-pane { display: none; }
 /* Issue #5321: compact summary and selection preview. */
@@ -6596,7 +6649,8 @@ body.route-body {
   font-size: var(--type-xs);
 }
 .project-owner-health[data-state="healthy"] { color: var(--color-state-active); }
-.project-owner-health[data-state="degraded"] { color: var(--color-state-blocked); }
+.project-owner-health[data-state="degraded"],
+.project-owner-health[data-state="wedged"] { color: var(--color-state-blocked); }
 
 .gwt-hub__orphan {
   display: flex;
@@ -6608,3 +6662,12 @@ body.route-body {
   color: var(--color-text-muted);
   font-size: var(--type-sm);
 }
+
+/* GitHub label color is validated external metadata; layout uses Operator tokens. */
+.issue-card-labels { min-width: 0; flex-wrap: nowrap; overflow: hidden; align-items: center; }
+.issue-card-label { min-width: 0; max-width: 12ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 0 1 auto; border-color: var(--github-label-color, var(--color-border)); background: color-mix(in srgb, var(--github-label-color, var(--color-surface)) 18%, var(--color-surface)); color: var(--color-text); }
+.issue-card-label-overflow { flex: none; font-size: var(--type-xs); color: var(--color-text-muted); }
+.issue-card-provenance { flex: none; }
+.settings-label-options { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-bottom: var(--space-2); max-height: 18rem; overflow-y: auto; }
+.settings-label-option { display: flex; align-items: center; gap: var(--space-1); max-width: 100%; }
+.settings-label-option .issue-card-label { max-width: 30ch; }

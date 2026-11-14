@@ -247,7 +247,7 @@ test("FR-019: PM クリックはローカルの camera-focus 経路を使う", (
 
 test("FR-019: 死んだ server-driven center 契約は残さない", () => {
   // center オプションが残っている限り 4 つ目の誤用が生まれる。実際、
-  // PM 以外に Runtime Health と Issue Monitor の Focus も同じ理由で
+  // PM 以外に Runtime Health と Issues の Focus も同じ理由で
   // 効いていなかった。
   assert.doesNotMatch(
     appJs,

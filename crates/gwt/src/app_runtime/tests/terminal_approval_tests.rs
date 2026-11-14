@@ -514,6 +514,9 @@ fn app_runtime_native_conpty_pushes_running_waiting_idle_and_process_exit() {
         )));
         // test-hygiene: allow-wall-clock-deadline Issue #3809 requires each runtime hook state push within one second.
         assert!(started.elapsed() <= Duration::from_secs(1));
+        // The hook was consumed through its own subscription above. Do not
+        // replay older statuses while observing output after the next input.
+        receiver = owner.subscribe();
         if expected == WindowProcessStatus::Running {
             probe
                 .pty
@@ -970,18 +973,20 @@ fn app_runtime_browser_hook_event_strips_continue_work_readiness_nonce() {
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     let mut event = runtime_hook_coordination_event("session-1");
     event.continuation_readiness_nonce = Some("private-ready-nonce".to_string());
+    event.native_prompt_id = Some("private-native-turn".into());
 
     let events = runtime.handle_runtime_hook_event(event);
 
     assert!(events.iter().any(|event| matches!(
         &event.event,
         BackendEvent::RuntimeHookEvent { event }
-            if event.continuation_readiness_nonce.is_none()
+            if event.continuation_readiness_nonce.is_none() && event.native_prompt_id.is_none()
     )));
     let encoded =
         serde_json::to_string(&events.iter().map(|event| &event.event).collect::<Vec<_>>())
             .expect("serialize browser events");
     assert!(!encoded.contains("private-ready-nonce"));
+    assert!(!encoded.contains("private-native-turn"));
 }
 
 pub(super) fn runtime_state_hook_fixture(temp: &Path) -> (AppRuntime, String) {
@@ -1157,6 +1162,16 @@ fn app_runtime_approval_wait_overlay_enters_once_and_restores_hook_state() {
     assert_eq!(
         runtime.window_status(&window_id),
         Some(WindowProcessStatus::Running)
+    );
+
+    runtime
+        .window_pty_statuses
+        .insert(window_id.clone(), WindowProcessStatus::Interrupted);
+    runtime.handle_runtime_approval_wait_state(&window_id, true);
+    assert_eq!(
+        runtime.window_status(&window_id),
+        Some(WindowProcessStatus::Interrupted),
+        "an old approval overlay must not hide an interrupted process"
     );
 }
 
@@ -1991,7 +2006,7 @@ fn app_runtime_pane_send_marks_resolution_before_delayed_submit() {
     let fingerprint = pane.policy.approval.unwrap().active_fingerprint;
 
     let queued =
-        runtime.pane_send_input_to_window_events("client-1".to_string(), &window_id, "1\r");
+        runtime.pane_send_input_to_window_events("client-1".to_string(), &window_id, "1\r", None);
     assert!(queued.is_empty());
     // The owner marks the exact prompt before dispatching the physical worker;
     // its typed ACK proves that the delayed submit also completed successfully.
@@ -2046,7 +2061,7 @@ fn app_runtime_failed_input_paths_do_not_mark_approval_resolution() {
 
     let terminal_events = runtime.terminal_input_events(&window_id, "1\r");
     let mut pane_events =
-        runtime.pane_send_input_to_window_events("client-1".to_string(), &window_id, "1\r");
+        runtime.pane_send_input_to_window_events("client-1".to_string(), &window_id, "1\r", None);
 
     assert!(terminal_events.is_empty());
     assert!(
@@ -2090,7 +2105,7 @@ fn app_runtime_failed_input_paths_do_not_mark_approval_resolution() {
         .store(false, std::sync::atomic::Ordering::Release);
     assert!(runtime.terminal_input_events(&window_id, "1\r").is_empty());
     assert!(runtime
-        .pane_send_input_to_window_events("client-1".to_string(), &window_id, "1\r")
+        .pane_send_input_to_window_events("client-1".to_string(), &window_id, "1\r", None)
         .is_empty());
     let expired_events = drain_browser_owner_input(&mut runtime);
     let expired = owner_fixture_block_on(owner.probe(&before.id, before.incarnation)).unwrap();
@@ -2860,51 +2875,8 @@ fn natural_process_exit_keeps_terminal_status_available_to_restart_guard() {
     state.project_owner_identity = owner.client().identity().cloned();
     let (spawner, tasks) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = spawner;
-    #[cfg(windows)]
-    owner_fixture_block_on(async {
-        use gwt::project_runtime::events::{OwnerCommand, OwnerEvent};
-        // This plain Shell has no frontend terminal to answer ConPTY's
-        // startup query. Use the actual query to order the normal response.
-        let mut output = Vec::new();
-        // test-hygiene: allow-wall-clock-deadline Bounds the real terminal handshake; raw CPR and READY establish ordering.
-        tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
-            loop {
-                match source.recv().await.expect("actual Shell startup event") {
-                    OwnerEvent::Output {
-                        id,
-                        incarnation,
-                        data,
-                        ..
-                    } if id == before.id && incarnation == before.incarnation => {
-                        output.extend(data);
-                        if output.windows(4).any(|bytes| bytes == b"\x1b[6n") {
-                            break;
-                        }
-                    }
-                    OwnerEvent::Status {
-                        id,
-                        incarnation,
-                        exit_confirmed: true,
-                        detail,
-                        ..
-                    } if id == before.id && incarnation == before.incarnation => {
-                        panic!("actual Shell exited before its terminal handshake: {detail:?}");
-                    }
-                    _ => {}
-                }
-            }
-        })
-        .await
-        .expect("actual Shell cursor-position query");
-        owner
-            .command(OwnerCommand::Input {
-                id: before.id.clone(),
-                incarnation: before.incarnation,
-                data: b"\x1b[1;1R".to_vec(),
-            })
-            .await
-            .expect("normal terminal cursor-position response");
-    });
+    // The physical owner answers and consumes ConPTY cursor queries. READY is
+    // the public startup boundary on every platform, including Windows.
     owner_fixture_block_on(async {
         // test-hygiene: allow-wall-clock-deadline The real READY marker orders input after Shell startup; elapsed time only bounds an OS/IPC hang.
         tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {

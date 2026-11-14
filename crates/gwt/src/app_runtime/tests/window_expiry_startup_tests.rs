@@ -1,5 +1,52 @@
 use super::*;
 
+#[test]
+fn issue_7015_synchronous_restore_refusal_retires_starting_placeholder() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_with_initial_commit(&repo);
+    let mut tab = restore_fixture_tab("tab-1", &repo, &[("agent-1".into(), "source".into())]);
+    let mut saved = tab.workspace.persisted().clone();
+    let mut shell = sample_window("shell-1", WindowPreset::Shell, WindowProcessStatus::Running);
+    shell.agent_id = None;
+    shell.session_id = Some("source".into());
+    saved.windows.insert(0, shell);
+    tab.workspace = WindowRegistry::from_persisted(saved);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime.rebuild_window_lookup();
+    runtime.set_window_status("tab-1", "agent-1", WindowProcessStatus::Starting);
+    save_restore_fixture_session(&runtime.sessions_dir, "source", &repo, Some("native"), None);
+    let session = gwt_agent::Session::load(&runtime.sessions_dir.join("source.toml")).unwrap();
+    runtime.blocking_tasks = BlockingTaskSpawner::failing("worker unavailable");
+    let events = runtime.spawn_prepared_restored_agent_session(
+        "tab-1",
+        session,
+        None,
+        super::super::startup::RestoreOrigin::Automatic,
+    );
+    assert_eq!(
+        runtime.window_status("tab-1::shell-1"),
+        Some(WindowProcessStatus::Running),
+        "a non-agent row sharing the source session is not the restore target"
+    );
+    assert_eq!(
+        runtime.window_status("tab-1::agent-1"),
+        Some(WindowProcessStatus::Error)
+    );
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::TerminalStatus {
+            status: WindowProcessStatus::Error,
+            ..
+        }
+    )));
+    assert!(runtime.pending_auto_resume_sources.is_empty());
+    assert!(runtime.restore_launch_windows.is_empty());
+    assert!(runtime.pending_launch_completions.is_empty());
+}
+
 /// Issue #3923 AC-2: a hold records what it was formed from — the matched
 /// screen text and the poller reading — so a false hold can be diagnosed
 /// instead of guessed at.
@@ -271,7 +318,7 @@ fn closed_completed_idle_pane_releases_capacity_with_bookkeeping_warning() {
 fn completed_restore_reaches_exact_close(bookkeeping_warning: bool) {
     use crate::app_runtime::terminal_convergence::{
         observe_terminal_windows_in_background, RestoreAdmission, TerminalCloseEligibility,
-        TerminalCloseReason, TerminalWindowSnapshot,
+        TerminalCloseReason,
     };
     use gwt::cli::{
         execution_state as execution,
@@ -360,14 +407,12 @@ fn completed_restore_reaches_exact_close(bookkeeping_warning: bool) {
     state.project_owner_identity = Some(identity.clone());
     let idle = owner_runtime_status_event(&owner, &physical, "Idle", "Stop");
     runtime.handle_project_owner_event(&context, 1, &identity, idle);
-    if bookkeeping_warning {
-        // The authenticated owner hook above updates its live projection;
-        // the provider's CLI hook also persists that Stop in Session metadata.
-        physical.with_agent_environment(|| {
-            gwt::daemon_runtime::handle_runtime_state("Stop", "{}")
-                .expect("actual provider Stop metadata");
-        });
-    }
+    // The authenticated owner hook above updates its live projection;
+    // the provider's CLI hook also persists that Stop in Session metadata.
+    physical.with_agent_environment(|| {
+        gwt::daemon_runtime::handle_runtime_state("Stop", "{}")
+            .expect("actual provider Stop metadata");
+    });
     let session_path = runtime.sessions_dir.join(format!("{session_id}.toml"));
     let session = gwt_agent::Session::load(&session_path).expect("load actual bound holder");
     assert!(session.restore_window_on_startup);
@@ -495,7 +540,7 @@ fn completed_restore_reaches_exact_close(bookkeeping_warning: bool) {
     } else {
         vec![gwt::IssueMonitorLaunchedIssue {
             issue_number: 42,
-            window_id: window_id.clone(),
+            window_id: owner_id.clone(),
         }]
     };
     prefs.closure_records = if bookkeeping_warning {
@@ -560,7 +605,7 @@ fn completed_restore_reaches_exact_close(bookkeeping_warning: bool) {
         TerminalCloseReason::SettledExecution
     };
     assert_eq!(
-        runtime.restore_work_terminality(&session, &repo, Some(&window_id)),
+        runtime.restore_work_terminality(&session, &repo, Some(&owner_id)),
         RestoreAdmission::RefuseTerminal(reason)
     );
     let generation = runtime
@@ -571,17 +616,18 @@ fn completed_restore_reaches_exact_close(bookkeeping_warning: bool) {
         .copied()
         .expect("actual GUI window generation");
     let mut observations = Vec::new();
+    assert_ne!(
+        window_id, owner_id,
+        "the GUI alias differs from its owner pane"
+    );
+    let snapshots = runtime.terminal_window_snapshots();
+    assert_eq!(snapshots.len(), 1);
+    assert_eq!(snapshots[0].window_id, window_id);
+    assert_eq!(snapshots[0].lifecycle_generation, Some(generation));
     let settlement_trace = capture_tracing_events(|| {
         observations = observe_terminal_windows_in_background(
             &runtime.sessions_dir,
-            vec![TerminalWindowSnapshot {
-                window_id: window_id.clone(),
-                session_id: session_id.to_string(),
-                project_root: repo.clone(),
-                worktree_path: repo.clone(),
-                window_status: WindowProcessStatus::Idle,
-                lifecycle_generation: Some(generation),
-            }],
+            snapshots,
             Duration::from_secs(5),
         );
     });
@@ -591,7 +637,7 @@ fn completed_restore_reaches_exact_close(bookkeeping_warning: bool) {
         "terminal settlement trace: {settlement_trace:?}"
     );
     assert_eq!(
-        runtime.restore_work_terminality(&session, &repo, Some(&window_id)),
+        runtime.restore_work_terminality(&session, &repo, Some(&owner_id)),
         RestoreAdmission::RefuseTerminal(reason)
     );
     assert!(gwt::load_issue_monitor_prefs(&prefs_path)
@@ -819,6 +865,7 @@ fn terminal_convergence_observer_settles_monitor_owned_delivery_before_eligibili
 
     let snapshot = |window_id: &str, session_id: &str| TerminalWindowSnapshot {
         window_id: window_id.to_string(),
+        monitor_window_id: window_id.to_string(),
         session_id: session_id.to_string(),
         project_root: repo.clone(),
         worktree_path: repo.clone(),
@@ -967,10 +1014,7 @@ fn app_runtime_startup_auto_resume_refuses_closed_issue_window_and_disables_rest
         "the real startup worker releases its gate"
     );
     runtime.handle_startup_generation_reaper_completed();
-    runtime.handle_frontend_event(
-        "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {},
-    );
+    handle_startup_auto_resume_ready(&mut runtime, "client-1");
     let pending_ids = runtime
         .pending_launch_completions
         .keys()
@@ -1509,13 +1553,10 @@ fn bootstrap_settles_update_resume_marker_and_bypasses_auto_resume_freshness() {
     assert_eq!(
         runtime.update_drain_released_projects,
         vec![marker.projects[0].hash.clone()],
-        "the drained project is released for the Issue Monitor (#4037 seam)"
+        "the drained project is released for Issues (#4037 seam)"
     );
 
-    let events = runtime.handle_frontend_event(
-        "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {},
-    );
+    let events = handle_startup_auto_resume_ready(&mut runtime, "client-1");
     let toasts = update_resume_toasts(&events);
     assert_eq!(toasts.len(), 1, "exactly one resume notice: {toasts:?}");
     assert_eq!(toasts[0].0, "info");
@@ -1551,10 +1592,7 @@ fn bootstrap_settles_update_resume_marker_and_bypasses_auto_resume_freshness() {
     restarted.bootstrap();
     assert!(restarted.update_drain_released_projects.is_empty());
     assert!(!update_drain_is_raised(&worktree));
-    let events = restarted.handle_frontend_event(
-        "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {},
-    );
+    let events = handle_startup_auto_resume_ready(&mut restarted, "client-1");
     assert!(
         update_resume_toasts(&events).is_empty(),
         "no marker means no update notice"
@@ -1603,13 +1641,10 @@ fn bootstrap_records_failed_update_resume_when_version_mismatches() {
     assert_eq!(
         runtime.update_drain_released_projects,
         vec![marker.projects[0].hash.clone()],
-        "the Issue Monitor must not stay drained after a failed apply"
+        "Issues must not stay drained after a failed apply"
     );
 
-    let events = runtime.handle_frontend_event(
-        "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {},
-    );
+    let events = handle_startup_auto_resume_ready(&mut runtime, "client-1");
     let toasts = update_resume_toasts(&events);
     assert_eq!(toasts.len(), 1, "exactly one failure notice: {toasts:?}");
     assert_eq!(toasts[0].0, "error");
@@ -1813,7 +1848,7 @@ fn startup_restore_refuses_landed_worktree_before_launch() {
     runtime.blocking_tasks = spawner;
     let logs = capture_tracing_events(|| {
         runtime.queue_startup_auto_resume_sessions(&HashSet::new());
-        runtime.startup_auto_resume_ready_events();
+        drain_startup_auto_resume(&mut runtime);
         drain_queued_blocking_tasks(&tasks);
         let completion = take_remote_owner_launch_completion(match &runtime.proxy {
             AppEventProxy::Stub(events) => events,
@@ -1939,7 +1974,7 @@ fn startup_restore_removes_empty_unlinked_landed_windows_but_keeps_diagnostics()
     runtime.blocking_tasks = spawner;
 
     runtime.queue_startup_auto_resume_sessions(&HashSet::new());
-    runtime.startup_auto_resume_ready_events();
+    drain_startup_auto_resume(&mut runtime);
     let events = drain_owner_launch_fixtures(&mut runtime, &tasks);
     let actual = owner_fixture_block_on(
         owner.command(gwt::project_runtime::events::OwnerCommand::ListPanes),
@@ -2140,7 +2175,7 @@ fn startup_restore_queues_only_one_session_per_worktree() {
     // start a second process for that worktree.
     runtime.restore_open_project_windows("tab-duplicate");
     assert!(runtime.pending_auto_resume_sources.is_empty());
-    runtime.startup_auto_resume_ready_events();
+    drain_startup_auto_resume(&mut runtime);
     drain_queued_blocking_tasks(&tasks);
     let mut installed = 0;
     let mut refused = 0;

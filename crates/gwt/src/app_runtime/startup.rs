@@ -92,6 +92,52 @@ fn log_restore_drain_breakdown(resumed_sessions: usize, resume_ms: u64, pm_ensur
 }
 const STARTUP_AUTO_RESUME_STALE_AFTER_SECS: i64 = 24 * 60 * 60;
 
+#[cfg(test)]
+thread_local! {
+    /// Issue #5379: Project admission reads the policy, the Work items and the
+    /// Session lineage from disk. Counted per thread so a test can prove the
+    /// GUI thread never evaluates it.
+    static STARTUP_ADMISSION_EVALUATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn startup_admission_evaluations() -> usize {
+    STARTUP_ADMISSION_EVALUATIONS.with(|count| count.get())
+}
+
+/// Project admission for one queued startup restore. File I/O only.
+fn startup_auto_resume_admitted(project_root: &Path, session: &gwt_agent::Session) -> bool {
+    #[cfg(test)]
+    STARTUP_ADMISSION_EVALUATIONS.with(|count| count.set(count.get() + 1));
+    gwt::project_execution_policy::admission(
+        project_root,
+        &gwt::project_execution_policy::session_lineage(project_root, session),
+    )
+    .is_ok()
+}
+
+/// Issue #5379: admission verdicts for the queued startup restores, computed
+/// on the blocking worker. A Session whose tab closed meanwhile stays queued,
+/// exactly as a policy-deferred one does.
+#[derive(Debug, Clone)]
+pub(crate) struct StartupAutoResumeAdmissionPrepared {
+    pub(crate) sessions: Vec<(PendingStartupAutoResumeSession, bool)>,
+}
+
+fn evaluate_startup_auto_resume_admission(
+    candidates: Vec<(PendingStartupAutoResumeSession, Option<PathBuf>)>,
+) -> Vec<(PendingStartupAutoResumeSession, bool)> {
+    candidates
+        .into_iter()
+        .map(|(pending, project_root)| {
+            let admitted = project_root
+                .as_deref()
+                .is_some_and(|root| startup_auto_resume_admitted(root, &pending.session));
+            (pending, admitted)
+        })
+        .collect()
+}
+
 /// Issue #4143 (AC-3): who asked for a restore.
 ///
 /// An automatic restore spawns a window nobody is looking at, so a failure
@@ -141,7 +187,7 @@ pub(super) enum RestoreRefusal {
     TabNotRestorable,
     /// The linked Work is canonically terminal.
     TerminalWork(TerminalCloseReason),
-    /// Issue #4441 (AC-3): the Issue Monitor is holding this row (an operator
+    /// Issue #4441 (AC-3): Issues is holding this row (an operator
     /// stop, a launch failure, or a `needs_human` park). Unlike a terminal
     /// Work this is reversible, so the placeholder is kept.
     MonitorHold(&'static str),
@@ -908,12 +954,32 @@ impl AppRuntime {
         self.queue_startup_auto_resume_sessions(&planned_orphan_intake_paths);
         // SPEC-2359 W-37 / Issue #3735: restore selection is the protection
         // producer, so it completes before the reaper snapshots it. Issue
-        // #4378 AC-2: the reaper runs on the blocking worker; Issue Monitor
+        // #4378 AC-2: the reaper runs on the blocking worker; Issues
         // launch deliveries wait for its completion event instead of the
         // startup path waiting for the reaper.
         self.spawn_startup_generation_reaper(&startup_worktrees);
         spawn_startup_orphan_intake_prune(orphan_intake_prune_plans);
 
+        gwt::perf::startup::set_restored_window_count(
+            self.pending_startup_auto_resume_sessions.len()
+                + self
+                    .tabs
+                    .iter()
+                    .flat_map(|tab| tab.workspace.persisted().windows.iter())
+                    .filter(|window| should_auto_start_restored_window(window))
+                    .count(),
+        );
+        // SPEC-3431 FR-002: tabs already open at launch get their resident PM
+        // pane once the frontend surfaces are ready (the same startup deferral
+        // rule that keeps Agent PTYs behind surface initialization).
+        // Projects opened later get it from `open_project_path_events`.
+        self.pending_startup_pm_tabs = self.tabs.iter().map(|tab| tab.id.clone()).collect();
+        let _ = self.persist();
+    }
+
+    /// Start prepared process restores after the GUI owns its daemon subscribers.
+    /// Continue resumes here without waiting for a browser surface-ready event.
+    pub(crate) fn resume_bootstrapped_runtimes(&mut self) {
         let windows = self
             .tabs
             .iter()
@@ -927,13 +993,6 @@ impl AppRuntime {
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
-        gwt::perf::startup::set_restored_window_count(
-            self.pending_startup_auto_resume_sessions.len()
-                + windows
-                    .iter()
-                    .filter(|(_, window)| should_auto_start_restored_window(window))
-                    .count(),
-        );
         for (tab_id, window) in windows {
             if !should_auto_start_restored_window(&window) {
                 continue;
@@ -954,12 +1013,6 @@ impl AppRuntime {
                 }
             }
         }
-        // SPEC-3431 FR-002: tabs already open at launch get their resident PM
-        // pane once the frontend surfaces are ready (the same startup deferral
-        // rule that keeps Agent PTYs behind surface initialization).
-        // Projects opened later get it from `open_project_path_events`.
-        self.pending_startup_pm_tabs = self.tabs.iter().map(|tab| tab.id.clone()).collect();
-        let _ = self.persist();
         if self.tabs.iter().any(|tab| {
             gwt_core::project_execution_policy::load(&tab.project_root)
                 .ok()
@@ -1284,7 +1337,7 @@ impl AppRuntime {
 
     /// Issue #4378 AC-2: run the startup reaper on the blocking worker. The
     /// restore protection set is snapshotted here, so the worker judges exactly
-    /// the sessions this startup is about to restore. Issue Monitor launch
+    /// the sessions this startup is about to restore. Issues launch
     /// deliveries wait for both its result and surface-ready restore registration.
     pub(super) fn spawn_startup_generation_reaper(&mut self, startup_worktrees: &[PathBuf]) {
         let (protected_exact_sessions, protected_unknown_session_ids) =
@@ -1346,7 +1399,7 @@ impl AppRuntime {
 /// prefilter; the execution-state coordinator then re-proves the complete
 /// Session/runtime identity under its leases.
 ///
-/// Issue #3934: this is a free function so the Issue Monitor scan can run the
+/// Issue #3934: this is a free function so Issues scan can run the
 /// same recovery on its own worker thread. A holder that dies mid-execution
 /// used to hold its owner's generation until the next GUI restart, which in
 /// practice meant forever: the queue kept refusing the owner and the only
@@ -1597,8 +1650,14 @@ impl AppRuntime {
             return Vec::new();
         }
         gwt::perf::startup::mark(gwt::perf::startup::StartupPhase::SurfaceReady);
-        let _phase =
-            gwt::perf::startup::PhaseTimer::start(gwt::perf::startup::StartupPhase::RestoreDrain);
+        // The restore drain phase closes in the drain's tail: startup
+        // terminal tracking stops at that boundary, and the admitted restores
+        // now spawn after the worker's verdict returns.
+        if self.startup_restore_drain_phase.is_none() {
+            self.startup_restore_drain_phase = Some(gwt::perf::startup::PhaseTimer::start(
+                gwt::perf::startup::StartupPhase::RestoreDrain,
+            ));
+        }
         // Issue #4038 (AC-4 / AC-5): the notification center is a frontend
         // sink, so the bootstrap-time settle is recorded here, on the first
         // surface-ready round trip, where a client is guaranteed to listen.
@@ -1615,11 +1674,93 @@ impl AppRuntime {
             }
         }
 
+        if self.startup_auto_resume_admission_in_flight {
+            // A worker is still evaluating the queue; its verdict finishes
+            // this drain, including the one startup summary line.
+            return events;
+        }
+        let pending = std::mem::take(&mut self.pending_startup_auto_resume_sessions);
+        if pending.is_empty() {
+            events.extend(self.startup_auto_resume_admitted_events(Vec::new()));
+            return events;
+        }
+        // Issue #5379: Project admission reads the policy, the Work items and
+        // the Session lineage from disk for every queued Session, and a
+        // policy-deferred Session is re-evaluated on every surface-ready round
+        // trip. Evaluate on the blocking worker; only the verdicts return.
+        let candidates = pending
+            .into_iter()
+            .map(|pending| {
+                let project_root = self
+                    .tab(&pending.tab_id)
+                    .map(|tab| tab.project_root.clone());
+                (pending, project_root)
+            })
+            .collect::<Vec<_>>();
+        let candidates = std::sync::Arc::new(std::sync::Mutex::new(Some(candidates)));
+        let worker_candidates = std::sync::Arc::clone(&candidates);
+        let proxy = self.proxy.clone();
+        self.startup_auto_resume_admission_in_flight = true;
+        if let Err(error) = self.blocking_tasks.try_spawn(move || {
+            let Some(candidates) = worker_candidates
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+            else {
+                return;
+            };
+            proxy.send(crate::UserEvent::StartupAutoResumeAdmissionPrepared(
+                Box::new(StartupAutoResumeAdmissionPrepared {
+                    sessions: evaluate_startup_auto_resume_admission(candidates),
+                }),
+            ));
+        }) {
+            tracing::warn!(
+                %error,
+                "startup auto-resume admission worker unavailable; evaluating inline"
+            );
+            let candidates = candidates
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+                .unwrap_or_default();
+            events.extend(self.startup_auto_resume_admission_prepared_events(
+                StartupAutoResumeAdmissionPrepared {
+                    sessions: evaluate_startup_auto_resume_admission(candidates),
+                },
+            ));
+        }
+        events
+    }
+
+    /// Blocking-worker verdicts for the queued startup restores.
+    pub(crate) fn startup_auto_resume_admission_prepared_events(
+        &mut self,
+        prepared: StartupAutoResumeAdmissionPrepared,
+    ) -> Vec<OutboundEvent> {
+        self.startup_auto_resume_admission_in_flight = false;
+        if self.agent_maintenance.busy {
+            // Maintenance started while the worker ran; the deferred
+            // surface-ready drain evaluates the queue again afterwards.
+            self.pending_startup_auto_resume_sessions
+                .extend(prepared.sessions.into_iter().map(|(pending, _)| pending));
+            self.agent_maintenance.deferred_startup_ready = true;
+            return Vec::new();
+        }
+        self.startup_auto_resume_admitted_events(prepared.sessions)
+    }
+
+    /// Spawn the admitted restores, requeue the policy-deferred ones, then run
+    /// the PM ensure and Issues tails that must follow the restores.
+    fn startup_auto_resume_admitted_events(
+        &mut self,
+        pending: Vec<(PendingStartupAutoResumeSession, bool)>,
+    ) -> Vec<OutboundEvent> {
+        let mut events = Vec::new();
         let resume_started = Instant::now();
         let resume_phase = gwt::perf::startup::PhaseTimer::start(
             gwt::perf::startup::StartupPhase::RestoreDrainResume,
         );
-        let pending = std::mem::take(&mut self.pending_startup_auto_resume_sessions);
         let total = pending.len();
         // Issue #4143 (AC-4): exactly one summary line per startup. Only the
         // drain that follows a queued sweep has something to report; a later
@@ -1640,17 +1781,8 @@ impl AppRuntime {
             waiting_for_policy: false,
         });
         let previous_windows: HashSet<_> = self.restore_launch_windows.keys().cloned().collect();
-        for pending_session in pending {
-            if self.tab(&pending_session.tab_id).is_none_or(|tab| {
-                gwt::project_execution_policy::admission(
-                    &tab.project_root,
-                    &gwt::project_execution_policy::session_lineage(
-                        &tab.project_root,
-                        &pending_session.session,
-                    ),
-                )
-                .is_err()
-            }) {
+        for (pending_session, admitted) in pending {
+            if !admitted {
                 self.pending_startup_auto_resume_sessions
                     .push(pending_session);
                 continue;
@@ -1706,6 +1838,7 @@ impl AppRuntime {
         // Issue #4375 AC-4: the drain's internals, not just its total.
         log_restore_drain_breakdown(total, resume_ms, pm_ensure_ms);
         events.extend(self.drain_startup_issue_monitor_launches());
+        drop(self.startup_restore_drain_phase.take());
         events
     }
 
@@ -1851,6 +1984,11 @@ impl AppRuntime {
             Ok(events) => events,
             Err(error) => {
                 self.pending_auto_resume_sources.remove(&window_id);
+                self.record_restore_window_outcome(
+                    &window_id,
+                    Err(RestoreRefusal::LaunchNotStarted),
+                );
+                self.restore_launch_windows.remove(&window_id);
                 self.restore_launch_error_events(tab_id, &session, origin, error)
             }
         }
@@ -1870,11 +2008,8 @@ impl AppRuntime {
                 .windows
                 .iter()
                 .find(|window| {
-                    window.session_id.as_deref() == Some(session.id.as_str())
-                        && matches!(
-                            window.status,
-                            WindowProcessStatus::Stopped | WindowProcessStatus::Error
-                        )
+                    crate::runtime_support::window_is_agent_pane(window)
+                        && window.session_id.as_deref() == Some(session.id.as_str())
                 })
                 .map(|window| window.id.clone())
         });
@@ -2153,7 +2288,7 @@ impl AppRuntime {
     }
 
     /// Issue #4038 (AC-3): the projects to record in the resume marker when an
-    /// update apply begins. `update_drain` reports whether the Issue Monitor
+    /// update apply begins. `update_drain` reports whether Issues
     /// of that project holds new launches (#4037), read from the disk-owned
     /// prefs so the settling bootstrap releases exactly the holds that were
     /// raised.
@@ -2177,7 +2312,7 @@ impl AppRuntime {
 
     /// Issue #4038 (AC-4 / AC-5): clear the `update_drain` hold (#4037) of
     /// every marker project that raised one, through the same disk-owned
-    /// prefs transaction the monitor controls use, so the Issue Monitor
+    /// prefs transaction the monitor controls use, so Issues
     /// admits launches again whether or not the update actually applied.
     /// Returns the hashes whose hold was released.
     fn release_update_drain_holds(
@@ -2360,7 +2495,13 @@ impl AppRuntime {
     }
 
     fn load_recovery_session(sessions_dir: &Path, session_id: &str) -> Option<gwt_agent::Session> {
-        if gwt::session_launch::durable_launch_recovery_exists(sessions_dir, session_id) {
+        if gwt::session_launch::durable_launch_recovery_exists(sessions_dir, session_id)
+            .unwrap_or_else(|error| {
+                tracing::warn!(%session_id, error_kind = ?error.kind(), %error,
+                "excluding restored Session with unreadable launch recovery receipt");
+                true
+            })
+        {
             return None;
         }
         gwt_agent::session_ledger::load_session_candidate(sessions_dir, session_id)

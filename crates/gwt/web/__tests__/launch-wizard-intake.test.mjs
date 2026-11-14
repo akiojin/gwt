@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
+import vm from "node:vm";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const surface = readFileSync(resolve(here, "../launch-wizard-surface.js"), "utf8");
@@ -65,4 +66,47 @@ test("app shell wires the advisory sender and routes the result event", () => {
   assert.match(appJs, /kind:\s*"request_work_advisory"/);
   assert.match(appJs, /case "work_advisory_result":/);
   assert.match(appJs, /applyWorkAdvisoryResultEvent\(event\)/);
+});
+
+test("advisory reconnect recovers a lost read without duplicating queued or unfinished debounce work", () => {
+  const timers = new Map(), requests = [];
+  let timerId = 0;
+  const context = vm.createContext({
+    launchWizard: { show_branch_controls: false }, wizardPromptDraft: "  shared state  ",
+    wizardAdvisoryRequestSeq: 0, wizardAdvisoryLatestRequestId: 0,
+    wizardAdvisoryTimer: 0, wizardAdvisoryLoading: false, wizardAdvisoryResults: [],
+    requestWorkAdvisory: request => requests.push(request), renderWorkAdvisoryPanel() {},
+    setTimeout: callback => { timers.set(++timerId, callback); return timerId; },
+    clearTimeout: id => timers.delete(id),
+  });
+  for (const name of ["isStartWorkLaunch", "scheduleWorkAdvisory", "applyWorkAdvisoryResultEvent", "resyncWorkAdvisory"]) {
+    const start = surface.indexOf(`      function ${name}(`);
+    const end = surface.indexOf("\n      }", start) + 8;
+    vm.runInContext(start < 0 ? `function ${name}() {}` : surface.slice(start, end), context);
+  }
+  const flush = () => {
+    const callbacks = [...timers.values()]; timers.clear(); callbacks.forEach(callback => callback());
+  };
+  context.scheduleWorkAdvisory(); flush();
+  assert.equal(requests.length, 1);
+  context.resyncWorkAdvisory([]); flush();
+  assert.equal(requests.length, 2, "a lost sent reply gets one replacement read");
+  assert.equal(requests[1].query, "shared state");
+  assert.equal(context.wizardPromptDraft, "  shared state  ");
+  context.applyWorkAdvisoryResultEvent({ request_id: requests[0].request_id, results: [] });
+  assert.equal(context.wizardAdvisoryLoading, true, "the old reply cannot settle recovery");
+  context.applyWorkAdvisoryResultEvent({ request_id: requests[1].request_id, results: [] });
+  context.resyncWorkAdvisory([]); flush();
+  assert.equal(requests.length, 2, "settled reads stay settled");
+  context.scheduleWorkAdvisory();
+  context.resyncWorkAdvisory([]);
+  assert.equal(timers.size, 1, "an existing debounce keeps its owner");
+  flush();
+  context.resyncWorkAdvisory([requests.at(-1).request_id]); flush();
+  assert.equal(requests.length, 3, "the read flushed from the queue is already in flight");
+  context.resyncWorkAdvisory([]);
+  context.launchWizard = null;
+  flush();
+  context.resyncWorkAdvisory([]); flush();
+  assert.equal(requests.length, 3, "closing before the retry debounce prevents its send");
 });

@@ -8,7 +8,7 @@ use gwt_core::{
     workspace_projection::{
         load_workspace_projection, load_workspace_projection_from_path,
         load_workspace_work_items_from_path, mutate_existing_workspace_projection,
-        update_workspace_projection_with_journal_for_resolved_work_target,
+        update_workspace_projection_with_journal_for_resolved_work_target_with_provenance,
         SessionBoundWorkspaceMutationTarget, SessionBoundWorkspaceTerminalTarget,
         TrackedWorkEventPolicy, WorkEvent, WorkspaceAgentSummary, WorkspaceProjectionUpdate,
         WorkspaceStatusCategory,
@@ -17,6 +17,8 @@ use gwt_core::{
 use serde::{Deserialize, Serialize};
 
 pub const AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION: u32 = 1;
+pub const AGENT_WORKSPACE_REOPEN_SCHEMA_VERSION: u32 = 1;
+pub const AGENT_WORKSPACE_CLOSE_PROOF_REPAIR_SCHEMA_VERSION: u32 = 1;
 pub const AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION: u32 = 1;
 pub const AGENT_BUILD_ABORT_TERMINALIZATION_SCHEMA_VERSION: u32 = 1;
 pub const AGENT_WORK_MATERIALIZATION_PROBE_SCHEMA_VERSION: u32 = 1;
@@ -293,11 +295,13 @@ pub struct AgentWorkspaceUpdateIntent {
     pub title_summary: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentWorkspaceUpdateRequest {
     pub schema_version: u32,
     pub claimed_session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_provider_session_id: Option<String>,
     pub observation: AgentRuntimeObservation,
     pub intent: AgentWorkspaceUpdateIntent,
 }
@@ -317,20 +321,24 @@ pub enum AgentWorkTerminalKind {
     Discarded,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentWorkTerminalizationRequest {
     pub schema_version: u32,
     pub claimed_session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_provider_session_id: Option<String>,
     pub observation: AgentRuntimeObservation,
     pub terminal_kind: AgentWorkTerminalKind,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentBuildAbortTerminalizationRequest {
     pub schema_version: u32,
     pub claimed_session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_provider_session_id: Option<String>,
     pub owner_number: u64,
     pub reason: String,
     pub observation: AgentRuntimeObservation,
@@ -374,6 +382,8 @@ pub struct AgentWorkMaterializationProbeReceipt {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentWorkspaceUpdateErrorCode {
+    PrimaryActorRequired,
+    TerminalWork,
     InvalidRequest,
     RelaunchRequired,
     ExecutionBindingMismatch,
@@ -400,6 +410,8 @@ pub struct AgentWorkspaceUpdateError {
     /// name an operation that does not exist.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recovery_operations: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<Box<gwt_core::workspace_projection::WorkTerminalDiagnosis>>,
 }
 
 impl AgentWorkspaceUpdateError {
@@ -413,6 +425,7 @@ impl AgentWorkspaceUpdateError {
             message,
             diagnostic_reason: None,
             mismatched_fields: Vec::new(),
+            details: None,
         }
     }
 }
@@ -424,6 +437,710 @@ impl std::fmt::Display for AgentWorkspaceUpdateError {
 }
 
 impl std::error::Error for AgentWorkspaceUpdateError {}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentWorkspaceReopenRequest {
+    pub schema_version: u32,
+    pub claimed_session_id: String,
+    pub observation: AgentRuntimeObservation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_provider_session_id: Option<String>,
+    pub reason: String,
+    pub observed_done_event_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentWorkspaceReopenReceipt {
+    pub schema_version: u32,
+    pub work_id: String,
+    pub reopen_event_id: String,
+    pub already_applied: bool,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentWorkspaceCloseProofRepairRequest {
+    pub schema_version: u32,
+    pub claimed_session_id: String,
+    pub observation: AgentRuntimeObservation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_provider_session_id: Option<String>,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentWorkspaceCloseProofRepairReceipt {
+    pub schema_version: u32,
+    pub work_id: String,
+    pub already_applied: bool,
+}
+
+// Provider-native identifiers are transient credentials, never diagnostic data.
+macro_rules! redacted_primary_request_debug {
+    ($($request:ty),+ $(,)?) => { $(
+        impl std::fmt::Debug for $request {
+            fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.debug_struct(stringify!($request))
+                    .field("schema_version", &self.schema_version)
+                    .finish_non_exhaustive()
+            }
+        }
+    )+ };
+}
+redacted_primary_request_debug!(
+    AgentWorkspaceUpdateRequest,
+    AgentWorkTerminalizationRequest,
+    AgentBuildAbortTerminalizationRequest,
+    AgentWorkspaceReopenRequest,
+    AgentWorkspaceCloseProofRepairRequest
+);
+
+pub(crate) fn validate_primary_provider_session(
+    session_id: &str,
+    claim: Option<&str>,
+) -> std::result::Result<Session, AgentWorkspaceUpdateError> {
+    let session = load_session_for_mutation(session_id).map_err(|_| primary_actor_error())?;
+    if session.id != session_id
+        || (primary_provider_guard_applies(&session)
+            && !claim.is_some_and(|claim| {
+                !claim.trim().is_empty() && session.exact_resume_session_id() == Some(claim)
+            }))
+    {
+        return Err(primary_actor_error());
+    }
+    Ok(session)
+}
+
+pub(crate) fn primary_provider_guard_applies(session: &Session) -> bool {
+    session.agent_id == gwt_agent::AgentId::Codex && session.exact_resume_session_id().is_some()
+}
+
+fn primary_actor_error() -> AgentWorkspaceUpdateError {
+    AgentWorkspaceUpdateError::new(
+        AgentWorkspaceUpdateErrorCode::PrimaryActorRequired,
+        "terminal Work mutation requires the current primary agent's provider evidence",
+    )
+}
+
+pub(crate) fn validate_primary_terminal_authority(
+    root: &Path,
+    session_id: &str,
+    claim: Option<&str>,
+) -> std::result::Result<SessionExecutionBinding, AgentWorkspaceUpdateError> {
+    let session = validate_primary_provider_session(session_id, claim)?;
+    if !primary_provider_guard_applies(&session) {
+        return Err(primary_actor_error());
+    }
+    let binding = session
+        .execution_binding
+        .as_ref()
+        .ok_or_else(primary_actor_error)?;
+    validate_current_execution_binding_authority(root, session_id, binding)
+}
+
+fn terminal_provenance(
+    session: &Session,
+    operation: &str,
+) -> gwt_core::workspace_projection::WorkTerminalProvenance {
+    gwt_core::workspace_projection::WorkTerminalProvenance {
+        source_operation: operation.to_string(),
+        authority_class: if primary_provider_guard_applies(session) {
+            gwt_core::workspace_projection::WorkAuthorityClass::PrimaryAgent
+        } else {
+            gwt_core::workspace_projection::WorkAuthorityClass::TrustedHost
+        },
+        execution_generation: session
+            .execution_binding
+            .as_ref()
+            .map(|binding| binding.identity.generation_id.clone()),
+    }
+}
+
+fn terminal_work_error(
+    item: &gwt_core::workspace_projection::WorkItem,
+    recoverable: bool,
+) -> AgentWorkspaceUpdateError {
+    let mut details = item.terminal_diagnosis();
+    if let Some(details) = details.as_mut() {
+        details.recoverable &= recoverable;
+        if !details.recoverable {
+            details.recovery_operation = None;
+        }
+    }
+    let mut error = AgentWorkspaceUpdateError::new(
+        AgentWorkspaceUpdateErrorCode::TerminalWork,
+        "the assigned Work is terminal; inspect its terminal event before recovery",
+    );
+    error.recovery_operations = details
+        .as_ref()
+        .and_then(|details| details.recovery_operation.clone())
+        .into_iter()
+        .collect();
+    error.details = details.map(Box::new);
+    error
+}
+
+pub(crate) fn diagnose_terminal_work_for_session(
+    root: &Path,
+    session_id: &str,
+    claim: Option<&str>,
+) -> std::result::Result<Option<AgentWorkspaceUpdateError>, AgentWorkspaceUpdateError> {
+    let session = load_session_for_mutation(session_id).map_err(classify_target_error)?;
+    let observation = observe_agent_runtime(&session.worktree_path)?;
+    let target = resolve_authenticated_session_terminal_target(root, session_id, &observation)?;
+    let work_id = resolve_terminal_capable_work_id(&target)?;
+    let path =
+        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&target.project_state_root);
+    let items = load_workspace_work_items_from_path(&path).map_err(classify_target_error)?;
+    let item = items
+        .as_ref()
+        .and_then(|items| items.work_items.iter().find(|item| item.id == work_id));
+    Ok(item.filter(|item| item.is_terminal()).map(|item| {
+        terminal_work_error(
+            item,
+            validate_primary_terminal_authority(root, session_id, claim).is_ok(),
+        )
+    }))
+}
+
+fn resolve_terminal_capable_work_id(
+    target: &SessionBoundWorkspaceTerminalTarget,
+) -> std::result::Result<String, AgentWorkspaceUpdateError> {
+    resolve_unique_existing_work_id(
+        &target.project_state_root,
+        &target.work_event_root,
+        &target.session_id,
+        &target.branch_identity,
+        &target.worktree_identity,
+        SessionWorkAuthorityExpectation {
+            owner: target.owner.as_deref(),
+            agent_id: &target.agent_id,
+            require_single_session_assignment: true,
+            allow_terminal: true,
+            require_exclusive_container: true,
+        },
+    )
+    .map_err(classify_target_error)
+}
+
+struct CloseProofRepairAuthority {
+    target: gwt_core::workspace_projection::SessionBoundWorkspaceTerminalTarget,
+    work_id: String,
+    assignment: gwt_core::workspace_projection::WorkspaceAgentSummary,
+    retained_done: bool,
+}
+
+fn close_proof_repair_authority(
+    root: &Path,
+    session_id: &str,
+    observation: &AgentRuntimeObservation,
+) -> std::result::Result<CloseProofRepairAuthority, AgentWorkspaceUpdateError> {
+    let target = resolve_authenticated_session_terminal_target(root, session_id, observation)?;
+    let work_id = resolve_terminal_capable_work_id(&target)?;
+    let works = load_workspace_work_items_from_path(
+        &gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&target.project_state_root),
+    )
+    .map_err(classify_target_error)?
+    .ok_or_else(|| execution_binding_error("close_proof_work_missing"))?;
+    let item = works
+        .work_items
+        .iter()
+        .find(|item| item.id == work_id)
+        .ok_or_else(|| execution_binding_error("close_proof_work_missing"))?;
+    if item.discarded
+        || !matches!(
+            item.status_category,
+            WorkspaceStatusCategory::Active | WorkspaceStatusCategory::Done
+        )
+    {
+        return Err(AgentWorkspaceUpdateError::new(
+            AgentWorkspaceUpdateErrorCode::TransactionConflict,
+            "close proof repair requires the exact canonical Active or Done Work; Discarded Work cannot be repaired",
+        ));
+    }
+    let current = load_workspace_projection_from_path(
+        &gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&target.project_state_root),
+    )
+    .map_err(classify_target_error)?
+    .ok_or_else(|| execution_binding_error("close_proof_current_missing"))?;
+    let assignment = current
+        .latest_agent_for_session(session_id)
+        .cloned()
+        .ok_or_else(|| execution_binding_error("close_proof_assignment_missing"))?;
+    Ok(CloseProofRepairAuthority {
+        target,
+        work_id,
+        assignment,
+        retained_done: item
+            .current_terminal_event()
+            .is_some_and(|event| event.kind == gwt_core::workspace_projection::WorkEventKind::Done),
+    })
+}
+
+fn close_proof_gap(error: &GwtError) -> bool {
+    let message = error.to_string();
+    message.contains("close projection proof")
+        || message.contains("unprojected machine-local close event")
+}
+
+// Legacy close events can omit typed authority fields, but known foreign
+// provenance must never gain proof from a current producer's recovery request.
+fn validate_repair_close_actor(
+    event: &WorkEvent,
+    authority: &CloseProofRepairAuthority,
+    binding: &SessionExecutionBinding,
+) -> Result<()> {
+    if event.agent_session_id.as_deref() != Some(authority.target.session_id.as_str())
+        || event
+            .agent_id
+            .as_deref()
+            .is_some_and(|id| id != authority.target.agent_id)
+        || event
+            .execution_generation
+            .as_deref()
+            .is_some_and(|id| id != binding.identity.generation_id)
+        || event
+            .owner
+            .as_deref()
+            .is_some_and(|owner| Some(owner) != authority.target.owner.as_deref())
+    {
+        return Err(mutation_error(
+            "close proof repair refused foreign terminal provenance",
+        ));
+    }
+    Ok(())
+}
+
+fn require_durable_repair_done(
+    authority: &CloseProofRepairAuthority,
+    binding: &SessionExecutionBinding,
+) -> Result<()> {
+    let path = gwt_core::paths::gwt_workspace_work_events_closed_path_for_repo_path(
+        &authority.target.project_state_root,
+    );
+    let events = gwt_core::workspace_projection::read_machine_local_workspace_work_events_from_path_read_only(&path)?;
+    let event = events
+        .iter()
+        .filter(|event| {
+            event.work_item_id == authority.work_id
+                && event.kind == gwt_core::workspace_projection::WorkEventKind::Done
+        })
+        .max_by(|a, b| (a.updated_at, &a.id).cmp(&(b.updated_at, &b.id)))
+        .ok_or_else(|| {
+            mutation_error("close proof repair requires an existing durable producer Done")
+        })?;
+    validate_repair_close_actor(event, authority, binding)
+}
+
+/// Read-only eligibility shared with execution.status. Complete acceptance is
+/// checked during replay; a stale Active projection needs its own durable Done.
+pub(crate) fn close_proof_repair_needed_for_session(
+    root: &Path,
+    session_id: &str,
+    claim: Option<&str>,
+) -> std::result::Result<bool, AgentWorkspaceUpdateError> {
+    let binding = validate_primary_terminal_authority(root, session_id, claim)?;
+    let session = load_session_for_mutation(session_id).map_err(classify_target_error)?;
+    let observation = observe_agent_runtime(&session.worktree_path)?;
+    let authority = close_proof_repair_authority(root, session_id, &observation)?;
+    if authority.retained_done {
+        match gwt_core::workspace_projection::with_exact_workspace_done_read_only(
+            &authority.target,
+            &authority.work_id,
+            || (),
+        ) {
+            Ok(()) => return Ok(false),
+            Err(error) if close_proof_gap(&error) => {}
+            Err(error) => return Err(classify_target_error(error)),
+        }
+    }
+    require_durable_repair_done(&authority, &binding).map_err(classify_target_error)?;
+    Ok(true)
+}
+
+pub fn apply_authenticated_workspace_close_proof_repair(
+    root: &Path,
+    session_id: &str,
+    request: AgentWorkspaceCloseProofRepairRequest,
+) -> std::result::Result<AgentWorkspaceCloseProofRepairReceipt, AgentWorkspaceUpdateError> {
+    let binding = validate_primary_terminal_authority(
+        root,
+        session_id,
+        request.primary_provider_session_id.as_deref(),
+    )?;
+    crate::cli::execution_state::with_current_active_execution_binding_lease(
+        &gwt_core::paths::gwt_sessions_dir(),
+        &binding,
+        || {
+            apply_bound_authenticated_workspace_close_proof_repair(
+                root, session_id, &binding, request,
+            )
+        },
+    )
+    .map_err(|_| execution_binding_error("close_proof_authority_lease_unavailable"))?
+    .ok_or_else(|| execution_binding_error("close_proof_authority_changed"))?
+}
+
+pub fn apply_bound_authenticated_workspace_close_proof_repair(
+    root: &Path,
+    session_id: &str,
+    binding: &SessionExecutionBinding,
+    request: AgentWorkspaceCloseProofRepairRequest,
+) -> std::result::Result<AgentWorkspaceCloseProofRepairReceipt, AgentWorkspaceUpdateError> {
+    if request.schema_version != AGENT_WORKSPACE_CLOSE_PROOF_REPAIR_SCHEMA_VERSION
+        || request.claimed_session_id != session_id
+        || request.reason.trim().is_empty()
+        || request.reason.len() > 4096
+        || request.reason.chars().any(char::is_control)
+    {
+        return Err(AgentWorkspaceUpdateError::new(
+            AgentWorkspaceUpdateErrorCode::InvalidRequest,
+            "workspace.repair_close_proof requires the current Session and a non-empty plain reason",
+        ));
+    }
+    let current = validate_primary_terminal_authority(
+        root,
+        session_id,
+        request.primary_provider_session_id.as_deref(),
+    )?;
+    if current != *binding {
+        return Err(execution_binding_error("close_proof_binding_mismatch"));
+    }
+    let authority = close_proof_repair_authority(root, session_id, &request.observation)?;
+    let expected = || SessionWorkAuthorityExpectation {
+        owner: authority.target.owner.as_deref(),
+        agent_id: &authority.target.agent_id,
+        require_single_session_assignment: true,
+        allow_terminal: true,
+        require_exclusive_container: true,
+    };
+    let validate_exact = |candidate: &gwt_core::workspace_projection::WorkItemsProjection,
+                          require_done: bool| {
+        let current_path = gwt_core::paths::gwt_workspace_projection_path_for_repo_path(
+            &authority.target.project_state_root,
+        );
+        let projection = load_workspace_projection_from_path(&current_path)?
+            .ok_or_else(|| mutation_error("close proof repair lost Current assignment"))?;
+        let agent = validate_work_session_assignment(&projection, session_id, &expected())?;
+        if !same_work_session_assignment(agent, &authority.assignment) {
+            return Err(mutation_error(
+                "close proof repair Current assignment changed",
+            ));
+        }
+        let resolved = resolve_existing_work_from_items(
+            candidate,
+            agent,
+            &authority.target.work_event_root,
+            session_id,
+            &authority.target.branch_identity,
+            &authority.target.worktree_identity,
+            expected(),
+        )?;
+        if resolved.work_id != authority.work_id
+            || (require_done && !resolved.done)
+            || resolved.discarded
+        {
+            return Err(mutation_error(
+                "close proof replay changed the exact Work authority",
+            ));
+        }
+        Ok(())
+    };
+    let validate = |candidate: &gwt_core::workspace_projection::WorkItemsProjection| {
+        validate_exact(candidate, true)?;
+        let item = candidate
+            .work_items
+            .iter()
+            .find(|item| item.id == authority.work_id)
+            .ok_or_else(|| mutation_error("close proof replay lost target"))?;
+        let event = item
+            .current_terminal_event()
+            .filter(|event| event.kind == gwt_core::workspace_projection::WorkEventKind::Done)
+            .ok_or_else(|| {
+                mutation_error("close proof replay requires an attributable current Done")
+            })?;
+        validate_repair_close_actor(event, &authority, binding)?;
+        Ok(())
+    };
+    let rejection = std::cell::RefCell::new(None);
+    let revalidate = || {
+        let check = || {
+            let refreshed = validate_primary_terminal_authority(
+                root,
+                session_id,
+                request.primary_provider_session_id.as_deref(),
+            )?;
+            if refreshed != *binding {
+                return Err(execution_binding_error("close_proof_binding_changed"));
+            }
+            let target = resolve_authenticated_session_terminal_target(
+                root,
+                session_id,
+                &request.observation,
+            )?;
+            if target != authority.target
+                || resolve_terminal_capable_work_id(&target)? != authority.work_id
+            {
+                return Err(execution_binding_error("close_proof_target_changed"));
+            }
+            let works = load_workspace_work_items_from_path(
+                &gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(
+                    &target.project_state_root,
+                ),
+            )
+            .map_err(classify_target_error)?
+            .ok_or_else(|| execution_binding_error("close_proof_work_missing"))?;
+            validate_exact(&works, false).map_err(classify_target_error)
+        };
+        check().map_err(|error| {
+            rejection.replace(Some(error));
+            mutation_error("close proof repair authority changed before publication")
+        })
+    };
+    let confirmation = authority.retained_done.then(|| {
+        gwt_core::workspace_projection::with_exact_workspace_done_read_only(
+            &authority.target,
+            &authority.work_id,
+            revalidate,
+        )
+    });
+    match confirmation {
+        Some(Ok(Ok(()))) => {
+            return Ok(AgentWorkspaceCloseProofRepairReceipt {
+                schema_version: AGENT_WORKSPACE_CLOSE_PROOF_REPAIR_SCHEMA_VERSION,
+                work_id: authority.work_id,
+                already_applied: true,
+            });
+        }
+        Some(Ok(Err(error))) => {
+            return Err(rejection
+                .into_inner()
+                .unwrap_or_else(|| classify_target_error(error)));
+        }
+        Some(Err(error)) if close_proof_gap(&error) => {}
+        Some(Err(error)) => return Err(classify_target_error(error)),
+        None => {}
+    }
+    require_durable_repair_done(&authority, binding).map_err(classify_target_error)?;
+    let works_path = gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(
+        &authority.target.project_state_root,
+    );
+    let state_path = works_path.with_file_name("work-events-intake.json");
+    let result = crate::project_work_events::repair_project_work_events_paths(
+        &authority.target.work_event_root,
+        &works_path,
+        &state_path,
+        &authority.work_id,
+        &validate,
+        &revalidate,
+    );
+    if let Err(error) = result {
+        return Err(rejection.into_inner().unwrap_or_else(|| {
+            let mut error = classify_target_error(error);
+            error.recovery_operations = vec!["workspace.repair_close_proof".into()];
+            error
+        }));
+    }
+    gwt_core::workspace_projection::with_exact_workspace_done_read_only(
+        &authority.target,
+        &authority.work_id,
+        revalidate,
+    )
+    .map_err(classify_target_error)?
+    .map_err(|error| {
+        rejection
+            .into_inner()
+            .unwrap_or_else(|| classify_target_error(error))
+    })?;
+    Ok(AgentWorkspaceCloseProofRepairReceipt {
+        schema_version: AGENT_WORKSPACE_CLOSE_PROOF_REPAIR_SCHEMA_VERSION,
+        work_id: authority.work_id,
+        already_applied: false,
+    })
+}
+
+pub fn apply_authenticated_workspace_reopen(
+    root: &Path,
+    session_id: &str,
+    request: AgentWorkspaceReopenRequest,
+) -> std::result::Result<AgentWorkspaceReopenReceipt, AgentWorkspaceUpdateError> {
+    let binding = validate_primary_terminal_authority(
+        root,
+        session_id,
+        request.primary_provider_session_id.as_deref(),
+    )?;
+    crate::cli::execution_state::with_current_active_execution_binding_lease(
+        &gwt_core::paths::gwt_sessions_dir(),
+        &binding,
+        || apply_bound_authenticated_workspace_reopen(root, session_id, &binding, request),
+    )
+    .map_err(|_| execution_binding_error("reopen_authority_lease_unavailable"))?
+    .ok_or_else(|| execution_binding_error("reopen_authority_changed"))?
+}
+
+pub fn apply_bound_authenticated_workspace_reopen(
+    root: &Path,
+    session_id: &str,
+    binding: &SessionExecutionBinding,
+    request: AgentWorkspaceReopenRequest,
+) -> std::result::Result<AgentWorkspaceReopenReceipt, AgentWorkspaceUpdateError> {
+    use gwt_core::workspace_projection::{
+        transact_workspace_state_for_work_event_root_with_preflight, WorkEvent, WorkEventKind,
+        WorkRecoveryLink, WorkspaceStatusCategory,
+    };
+    if request.schema_version != AGENT_WORKSPACE_REOPEN_SCHEMA_VERSION
+        || request.claimed_session_id != session_id
+        || request.reason.trim().is_empty()
+        || request.reason.trim() != request.reason
+        || request.reason.len() > 4096
+        || request.reason.chars().any(char::is_control)
+        || request.observed_done_event_id.trim().is_empty()
+    {
+        return Err(AgentWorkspaceUpdateError::new(
+            AgentWorkspaceUpdateErrorCode::InvalidRequest,
+            "workspace.reopen requires a reason and the observed Done event id",
+        ));
+    }
+    let authority = validate_primary_terminal_authority(
+        root,
+        session_id,
+        request.primary_provider_session_id.as_deref(),
+    )?;
+    if authority != *binding {
+        return Err(execution_binding_error("reopen_binding_mismatch"));
+    }
+    let target =
+        resolve_authenticated_session_terminal_target(root, session_id, &request.observation)?;
+    let work_id = resolve_terminal_capable_work_id(&target)?;
+    let mut rejection = None;
+    let retry_event = |item: &gwt_core::workspace_projection::WorkItem| {
+        item.events
+            .iter()
+            .find(|event| {
+                event.kind == WorkEventKind::Resume
+                    && event.agent_session_id.as_deref() == Some(session_id)
+                    && event.execution_generation.as_deref()
+                        == Some(binding.identity.generation_id.as_str())
+                    && event.recovery.as_ref().is_some_and(|link| {
+                        link.terminal_event_id == request.observed_done_event_id
+                            && link.reason == request.reason
+                    })
+            })
+            .map(|event| event.id.clone())
+    };
+    let result = transact_workspace_state_for_work_event_root_with_preflight(
+        &target.project_state_root,
+        &target.work_event_root,
+        |_, items, _| {
+            let check = || -> std::result::Result<(), AgentWorkspaceUpdateError> {
+                let current = validate_primary_terminal_authority(
+                    root,
+                    session_id,
+                    request.primary_provider_session_id.as_deref(),
+                )?;
+                if current != *binding {
+                    return Err(execution_binding_error("reopen_binding_changed"));
+                }
+                let refreshed = resolve_authenticated_session_terminal_target(
+                    root,
+                    session_id,
+                    &request.observation,
+                )?;
+                if refreshed != target || resolve_terminal_capable_work_id(&refreshed)? != work_id {
+                    return Err(execution_binding_error("reopen_work_changed"));
+                }
+                let item = items
+                    .work_items
+                    .iter()
+                    .find(|item| item.id == work_id)
+                    .ok_or_else(|| execution_binding_error("reopen_work_missing"))?;
+                if item.discarded {
+                    return Err(terminal_work_error(item, false));
+                }
+                if item.is_incomplete() && retry_event(item).is_some() {
+                    return Ok(());
+                }
+                let done = item.current_terminal_event();
+                if item.status_category != WorkspaceStatusCategory::Done
+                    || !done.is_some_and(|event| {
+                        event.kind == WorkEventKind::Done
+                            && event.id == request.observed_done_event_id
+                    })
+                {
+                    return Err(AgentWorkspaceUpdateError::new(
+                        AgentWorkspaceUpdateErrorCode::TransactionConflict,
+                        "the observed Done event is no longer the current terminal event",
+                    ));
+                }
+                Ok(())
+            };
+            check().map_err(|error| {
+                rejection = Some(error);
+                GwtError::Other("workspace.reopen authority or terminal event changed".to_string())
+            })
+        },
+        |projection, items, _| {
+            let item = items
+                .work_items
+                .iter()
+                .find(|item| item.id == work_id)
+                .ok_or_else(|| GwtError::Other("workspace.reopen Work disappeared".to_string()))?;
+            if let Some(reopen_event_id) = item.is_incomplete().then(|| retry_event(item)).flatten()
+            {
+                return Ok((
+                    AgentWorkspaceReopenReceipt {
+                        schema_version: AGENT_WORKSPACE_REOPEN_SCHEMA_VERSION,
+                        work_id: work_id.clone(),
+                        reopen_event_id,
+                        already_applied: true,
+                    },
+                    Vec::new(),
+                ));
+            }
+            let mut event = WorkEvent::new(WorkEventKind::Resume, &work_id, Utc::now());
+            event.agent_session_id = Some(session_id.to_string());
+            event.agent_id = Some(target.agent_id.clone());
+            event.status_category = Some(WorkspaceStatusCategory::Active);
+            event.source_operation = Some("workspace.reopen".to_string());
+            event.authority_class =
+                Some(gwt_core::workspace_projection::WorkAuthorityClass::PrimaryAgent);
+            event.execution_generation = Some(binding.identity.generation_id.clone());
+            event.recovery = Some(WorkRecoveryLink {
+                terminal_event_id: request.observed_done_event_id.clone(),
+                reason: request.reason.clone(),
+            });
+            if projection.id == work_id {
+                projection.status_category = WorkspaceStatusCategory::Active;
+                projection.updated_at = event.updated_at;
+            }
+            for agent in projection
+                .agents
+                .iter_mut()
+                .filter(|agent| agent.session_id == session_id)
+            {
+                agent.affiliation_status =
+                    gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Assigned;
+                agent.workspace_id = Some(work_id.clone());
+                agent.status_category = WorkspaceStatusCategory::Active;
+                agent.updated_at = event.updated_at;
+            }
+            Ok((
+                AgentWorkspaceReopenReceipt {
+                    schema_version: AGENT_WORKSPACE_REOPEN_SCHEMA_VERSION,
+                    work_id: work_id.clone(),
+                    reopen_event_id: event.id.clone(),
+                    already_applied: false,
+                },
+                vec![event],
+            ))
+        },
+    );
+    result
+        .map_err(|error| rejection.unwrap_or_else(|| classify_workspace_transaction_error(&error)))
+}
 
 pub fn probe_authenticated_execution_binding(
     authenticated_project_root: &Path,
@@ -2173,12 +2890,30 @@ where
     }
 
     let observation = request.observation.clone();
+    let terminal_session = if is_done {
+        Some(validate_primary_provider_session(
+            authenticated_session_id,
+            request.primary_provider_session_id.as_deref(),
+        )?)
+    } else {
+        None
+    };
     let target = resolve_authenticated_session_work_mutation_target(
         authenticated_project_root,
         authenticated_session_id,
         &observation,
         authenticated_work_id.is_some(),
-    )?;
+    )
+    .map_err(|error| {
+        diagnose_terminal_work_for_session(
+            authenticated_project_root,
+            authenticated_session_id,
+            request.primary_provider_session_id.as_deref(),
+        )
+        .ok()
+        .flatten()
+        .unwrap_or(error)
+    })?;
     if authenticated_work_id.is_some_and(|work_id| work_id != target.work_id) {
         return Err(AgentWorkspaceUpdateError::new(
             AgentWorkspaceUpdateErrorCode::IdentityConflict,
@@ -2232,6 +2967,8 @@ where
         tracked_event_policy,
         opens_work_settlement,
         requests_done: is_done,
+        primary_provider_session_id: request.primary_provider_session_id.as_deref(),
+        terminal_session: terminal_session.as_ref(),
     };
     let persisted = if !opens_work_settlement {
         persist_authenticated_workspace_update(&transaction, update, None)?
@@ -2298,6 +3035,8 @@ struct AuthenticatedWorkspaceUpdateTransaction<'a> {
     tracked_event_policy: TrackedWorkEventPolicy,
     opens_work_settlement: bool,
     requests_done: bool,
+    primary_provider_session_id: Option<&'a str>,
+    terminal_session: Option<&'a Session>,
 }
 
 struct PersistedAuthenticatedWorkspaceUpdate {
@@ -2315,10 +3054,11 @@ fn persist_authenticated_workspace_update(
     let operation_receipt_failed = std::cell::Cell::new(false);
     let target_was_current = std::cell::Cell::new(false);
     let mut work_event_id = None;
-    let journal_entry = update_workspace_projection_with_journal_for_resolved_work_target(
+    let journal_entry = update_workspace_projection_with_journal_for_resolved_work_target_with_provenance(
         &persistence_target,
         update,
         transaction.tracked_event_policy,
+        transaction.terminal_session.map(|session| terminal_provenance(session, "workspace.update")),
         |projection, _| {
             target_was_current.set(projection.id == transaction.target.work_id);
             if let Some(operation) = transaction.operation {
@@ -2326,6 +3066,23 @@ fn persist_authenticated_workspace_update(
                     operation_receipt_failed.set(true);
                     GwtError::Other(error.to_string())
                 })?;
+            }
+            if transaction.requests_done {
+                let current = validate_primary_provider_session(
+                    transaction.authenticated_session_id,
+                    transaction.primary_provider_session_id,
+                )
+                .map_err(|error| {
+                    revalidation_error_code = Some(error.code);
+                    GwtError::Other("primary Work authority changed before commit".to_string())
+                })?;
+                if transaction.terminal_session.is_none_or(|expected| {
+                    current.execution_binding != expected.execution_binding
+                        || current.agent_id != expected.agent_id
+                        || current.agent_session_id != expected.agent_session_id
+                }) {
+                    return Err(GwtError::Other("primary Work generation changed before commit".to_string()));
+                }
             }
             if let Some(binding) = transaction.authenticated_binding {
                 validate_projection_execution_binding_authority(
@@ -2405,6 +3162,12 @@ fn persist_authenticated_workspace_update(
         },
     )
     .map_err(|error| {
+        if revalidation_error_code == Some(AgentWorkspaceUpdateErrorCode::WorkspaceEnsureRequired) {
+            if let Ok(Some(terminal)) = diagnose_terminal_work_for_session(
+                transaction.authenticated_project_root, transaction.authenticated_session_id,
+                transaction.primary_provider_session_id,
+            ) { return terminal; }
+        }
         if settlement_prepare_failed {
             AgentWorkspaceUpdateError::new(
                 AgentWorkspaceUpdateErrorCode::Internal,
@@ -2576,6 +3339,7 @@ pub fn apply_bound_authenticated_blocked_build_abort_terminalization(
     let terminal_request = AgentWorkTerminalizationRequest {
         schema_version: AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION,
         claimed_session_id: request.claimed_session_id,
+        primary_provider_session_id: request.primary_provider_session_id,
         observation: request.observation,
         terminal_kind: AgentWorkTerminalKind::Discarded,
     };
@@ -2716,6 +3480,10 @@ fn apply_authenticated_work_terminalization_with_binding(
         authenticated_session_id,
         &request.observation,
     )?;
+    let primary = validate_primary_provider_session(
+        authenticated_session_id,
+        request.primary_provider_session_id.as_deref(),
+    )?;
     after_resolve(&target);
     let close_kind = match request.terminal_kind {
         AgentWorkTerminalKind::Done => gwt_core::workspace_projection::WorkCloseKind::Done,
@@ -2724,11 +3492,20 @@ fn apply_authenticated_work_terminalization_with_binding(
         }
     };
     let terminal_kind = request.terminal_kind;
+    let provider_claim = request.primary_provider_session_id;
     let observation = request.observation;
     let mut revalidation_error_code = None;
     let revalidate =
         |_: &gwt_core::workspace_projection::WorkspaceProjection,
          _: &gwt_core::workspace_projection::WorkItemsProjection| {
+            let current = validate_primary_provider_session(
+                authenticated_session_id,
+                provider_claim.as_deref(),
+            )
+            .map_err(|error| {
+                revalidation_error_code = Some(error.code);
+                GwtError::Other("primary Work authority changed before commit".to_string())
+            })?;
             if let Some(binding) = authenticated_binding {
                 validate_bound_work_terminalization_authority(
                     authenticated_project_root,
@@ -2743,6 +3520,12 @@ fn apply_authenticated_work_terminalization_with_binding(
                         "authenticated execution binding revalidation failed".to_string(),
                     )
                 })?;
+            }
+            if current.execution_binding != primary.execution_binding
+                || current.agent_id != primary.agent_id
+                || current.agent_session_id != primary.agent_session_id
+            {
+                return Err(GwtError::Other("primary binding changed".to_string()));
             }
             let refreshed = resolve_authenticated_session_terminal_target(
                 authenticated_project_root,
@@ -2766,18 +3549,32 @@ fn apply_authenticated_work_terminalization_with_binding(
             Ok(())
         };
     let outcome = match exact_work {
-        Some((expected_work_id, policy)) => gwt_core::workspace_projection::emit_workspace_terminal_event_for_exact_resolved_work_target(
+        Some((expected_work_id, policy)) => gwt_core::workspace_projection::emit_workspace_terminal_event_for_exact_resolved_work_target_with_provenance(
             &target,
             expected_work_id,
             close_kind,
             policy,
             Utc::now(),
+            terminal_provenance(&primary, match authority {
+                BoundWorkTerminalizationAuthority::BlockedBuildAbort => "build.abort",
+                BoundWorkTerminalizationAuthority::Active => match terminal_kind {
+                        AgentWorkTerminalKind::Done => "build.complete",
+                        AgentWorkTerminalKind::Discarded => "build.abort",
+                    },
+            }),
             revalidate,
         ),
-        None => gwt_core::workspace_projection::emit_workspace_terminal_event_for_resolved_work_target(
+        None => gwt_core::workspace_projection::emit_workspace_terminal_event_for_resolved_work_target_with_provenance(
             &target,
             close_kind,
             Utc::now(),
+            terminal_provenance(&primary, match authority {
+                BoundWorkTerminalizationAuthority::BlockedBuildAbort => "build.abort",
+                BoundWorkTerminalizationAuthority::Active => match terminal_kind {
+                        AgentWorkTerminalKind::Done => "build.complete",
+                        AgentWorkTerminalKind::Discarded => "build.abort",
+                    },
+            }),
             revalidate,
         ),
     }
@@ -3061,6 +3858,9 @@ fn execution_binding_error(reason: &'static str) -> AgentWorkspaceUpdateError {
 
 fn workspace_revalidation_error(code: AgentWorkspaceUpdateErrorCode) -> AgentWorkspaceUpdateError {
     match code {
+        AgentWorkspaceUpdateErrorCode::PrimaryActorRequired => primary_actor_error(),
+        AgentWorkspaceUpdateErrorCode::TerminalWork => AgentWorkspaceUpdateError::new(code,
+            "the assigned Work became terminal before commit"),
         AgentWorkspaceUpdateErrorCode::RelaunchRequired => relaunch_required_error(),
         AgentWorkspaceUpdateErrorCode::ExecutionBindingMismatch => {
             execution_binding_error("workspace_revalidation_binding_mismatch")
@@ -4788,6 +5588,39 @@ fn resolve_unique_existing_work(
         .ok_or_else(|| {
             workspace_ensure_error(session_id, "canonical Session assignment is missing")
         })?;
+    let agent = validate_work_session_assignment(&projection, session_id, &expected)?;
+    let work_items_path =
+        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(work_items_root);
+    let work_items = load_workspace_work_items_from_path(&work_items_path)
+        .map_err(|error| {
+            workspace_ensure_error(
+                session_id,
+                &format!("assigned WorkItems projection cannot be read: {error}"),
+            )
+        })?
+        .ok_or_else(|| {
+            workspace_ensure_error(session_id, "assigned WorkItems projection is missing")
+        })?;
+    let resolved = resolve_existing_work_from_items(
+        &work_items,
+        agent,
+        work_event_root,
+        session_id,
+        branch_identity,
+        worktree_identity,
+        expected,
+    );
+    if probe_span && resolved.is_ok() {
+        tracing::info!(target: "gwt.work_materialization_probe", stage = "work_lookup_complete");
+    }
+    resolved
+}
+
+fn validate_work_session_assignment<'a>(
+    projection: &'a gwt_core::workspace_projection::WorkspaceProjection,
+    session_id: &str,
+    expected: &SessionWorkAuthorityExpectation<'_>,
+) -> Result<&'a gwt_core::workspace_projection::WorkspaceAgentSummary> {
     let session_assignments = projection
         .agents
         .iter()
@@ -4805,16 +5638,7 @@ fn resolve_unique_existing_work(
             workspace_ensure_error(session_id, "canonical Session assignment is missing")
         })?;
     for candidate in session_assignments {
-        let same_authority = candidate.agent_id == agent.agent_id
-            && candidate.affiliation_status == agent.affiliation_status
-            && candidate.workspace_id == agent.workspace_id
-            && candidate.branch.as_deref().map(canonical_branch_identity)
-                == agent.branch.as_deref().map(canonical_branch_identity)
-            && candidate
-                .worktree_path
-                .as_deref()
-                .map(normalize_mutation_path)
-                == agent.worktree_path.as_deref().map(normalize_mutation_path);
+        let same_authority = same_work_session_assignment(candidate, agent);
         if !same_authority {
             return Err(workspace_ensure_error(
                 session_id,
@@ -4834,18 +5658,31 @@ fn resolve_unique_existing_work(
             "canonical Session agent identity does not match the durable Session",
         ));
     }
-    let work_items_path =
-        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(work_items_root);
-    let work_items = load_workspace_work_items_from_path(&work_items_path)
-        .map_err(|error| {
-            workspace_ensure_error(
-                session_id,
-                &format!("assigned WorkItems projection cannot be read: {error}"),
-            )
-        })?
-        .ok_or_else(|| {
-            workspace_ensure_error(session_id, "assigned WorkItems projection is missing")
-        })?;
+    Ok(agent)
+}
+
+fn same_work_session_assignment(
+    left: &gwt_core::workspace_projection::WorkspaceAgentSummary,
+    right: &gwt_core::workspace_projection::WorkspaceAgentSummary,
+) -> bool {
+    left.agent_id == right.agent_id
+        && left.affiliation_status == right.affiliation_status
+        && left.workspace_id == right.workspace_id
+        && left.branch.as_deref().map(canonical_branch_identity)
+            == right.branch.as_deref().map(canonical_branch_identity)
+        && left.worktree_path.as_deref().map(normalize_mutation_path)
+            == right.worktree_path.as_deref().map(normalize_mutation_path)
+}
+
+fn resolve_existing_work_from_items(
+    work_items: &gwt_core::workspace_projection::WorkItemsProjection,
+    agent: &gwt_core::workspace_projection::WorkspaceAgentSummary,
+    work_event_root: &Path,
+    session_id: &str,
+    branch_identity: &str,
+    worktree_identity: &Path,
+    expected: SessionWorkAuthorityExpectation<'_>,
+) -> Result<ResolvedExistingWorkAuthority> {
     let work_id = if agent.is_assigned() {
         agent
             .workspace_id
@@ -5015,9 +5852,6 @@ fn resolve_unique_existing_work(
                 WORK_PRUNE_REMEDY,
             ));
         }
-    }
-    if probe_span {
-        tracing::info!(target: "gwt.work_materialization_probe", stage = "work_lookup_complete");
     }
     Ok(ResolvedExistingWorkAuthority {
         work_id,
@@ -5363,6 +6197,7 @@ mod tests {
                 AgentWorkTerminalizationRequest {
                     schema_version: AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION,
                     claimed_session_id: session.id.clone(),
+                    primary_provider_session_id: session.agent_session_id.clone(),
                     observation: observe_agent_runtime(repo).unwrap(),
                     terminal_kind: AgentWorkTerminalKind::Done,
                 },
@@ -6253,6 +7088,7 @@ mod tests {
             let request = AgentWorkspaceUpdateRequest {
                 schema_version: AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
                 claimed_session_id: fixture.session.id.clone(),
+                primary_provider_session_id: None,
                 observation: observe_agent_runtime(&fixture.pm_worktree)
                     .expect("detached runtime observation"),
                 intent: AgentWorkspaceUpdateIntent {
@@ -6303,6 +7139,7 @@ mod tests {
                 let request = AgentWorkspaceUpdateRequest {
                     schema_version: AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
                     claimed_session_id: fixture.session.id.clone(),
+                    primary_provider_session_id: None,
                     observation: observe_agent_runtime(&fixture.pm_worktree)
                         .expect("detached runtime observation"),
                     intent: AgentWorkspaceUpdateIntent {
@@ -6597,6 +7434,7 @@ mod tests {
         AgentWorkspaceUpdateRequest {
             schema_version: AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
             claimed_session_id: session.id.clone(),
+            primary_provider_session_id: session.agent_session_id.clone(),
             observation: observe_agent_runtime(&session.worktree_path)
                 .expect("runtime observation"),
             intent: AgentWorkspaceUpdateIntent {
@@ -6607,10 +7445,570 @@ mod tests {
         }
     }
 
+    #[test]
+    fn terminal_workspace_update_requires_provider_primary_evidence() {
+        with_strict_target_fixture(|repo, session| {
+            let (mut session, binding) = bind_session_to_current_execution(repo, session);
+            session.agent_session_id = Some("private-primary-provider-thread".to_string());
+            save_session_fixture(&session);
+            seed_work_mutation_surfaces(repo, repo);
+            seed_unique_mutation_target(repo, repo, &session, "work-primary-fence");
+            let before = ExecutionBindingAuthoritySnapshot::capture(repo, repo, &session.id);
+            let mut request = bound_workspace_update_request(&session);
+            request.primary_provider_session_id = None;
+            request.intent.status_category =
+                Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Done);
+            let error =
+                apply_bound_authenticated_workspace_update(repo, &session.id, &binding, request)
+                    .expect_err(
+                        "a shared gwt Session and binding are not primary provider evidence",
+                    );
+            assert!(!error
+                .to_string()
+                .contains("private-primary-provider-thread"));
+            assert_eq!(
+                before,
+                ExecutionBindingAuthoritySnapshot::capture(repo, repo, &session.id)
+            );
+            let mut helper = bound_workspace_update_request(&session);
+            helper.primary_provider_session_id = None;
+            apply_bound_authenticated_workspace_update(repo, &session.id, &binding, helper)
+                .expect("same-session helpers retain ordinary nonterminal updates");
+            let works = gwt_core::workspace_projection::load_workspace_work_items(repo)
+                .unwrap()
+                .unwrap();
+            assert!(!works
+                .work_items
+                .iter()
+                .find(|work| work.id == "work-primary-fence")
+                .unwrap()
+                .is_terminal());
+        });
+    }
+
+    #[test]
+    fn terminal_actor_codex_primary_unbound_preserves_done() {
+        with_strict_target_fixture(|repo, session| {
+            let mut session = session.clone();
+            session.agent_session_id = Some("private-primary-codex".to_string());
+            save_session_fixture(&session);
+            seed_unique_mutation_target(repo, repo, &session, "work-unbound-codex-primary");
+            let receipt = apply_authenticated_work_terminalization(
+                repo,
+                &session.id,
+                bound_work_terminalization_request(&session),
+            )
+            .expect("known primary remains allowed without a generation binding");
+            assert_eq!(receipt.outcome, AgentWorkTerminalizationOutcome::Emitted);
+        });
+    }
+
+    #[test]
+    fn terminal_actor_foreign_codex_unbound_rejects_without_mutation() {
+        with_strict_target_fixture(|repo, session| {
+            let mut session = session.clone();
+            session.agent_session_id = Some("private-primary-codex".to_string());
+            save_session_fixture(&session);
+            seed_work_mutation_surfaces(repo, repo);
+            seed_unique_mutation_target(repo, repo, &session, "work-unbound-codex-foreign");
+            let before = WorkMutationSnapshot::capture(repo, repo);
+            let mut request = bound_workspace_update_request(&session);
+            request.intent.status_category =
+                Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Done);
+            request.primary_provider_session_id = Some("private-foreign-codex".to_string());
+            let error = apply_authenticated_workspace_update(repo, &session.id, request)
+                .expect_err("known foreign Codex cannot close Work");
+            assert_eq!(
+                error.code,
+                AgentWorkspaceUpdateErrorCode::PrimaryActorRequired
+            );
+            assert_eq!(before, WorkMutationSnapshot::capture(repo, repo));
+        });
+    }
+
+    #[test]
+    fn terminal_actor_codex_placeholder_is_unknown_identity() {
+        with_strict_target_fixture(|repo, session| {
+            let mut session = session.clone();
+            session.agent_session_id = Some("agent-session".into());
+            save_session_fixture(&session);
+            seed_unique_mutation_target(repo, repo, &session, "work-placeholder-codex");
+            let mut request = bound_work_terminalization_request(&session);
+            request.primary_provider_session_id = None;
+            let result = apply_authenticated_work_terminalization(repo, &session.id, request)
+                .expect("a placeholder does not establish native actor identity");
+            assert_eq!(result.outcome, AgentWorkTerminalizationOutcome::Emitted);
+        });
+    }
+
+    #[test]
+    fn terminal_actor_claude_missing_claim_preserves_done() {
+        with_strict_target_fixture(|repo, session| {
+            let mut session = session.clone();
+            session.agent_id = gwt_agent::AgentId::ClaudeCode;
+            session.agent_session_id = Some("private-claude-primary".to_string());
+            save_session_fixture(&session);
+            let work_id = "work-unbound-claude";
+            let mut agent = assigned_session_agent(&session, work_id, Utc::now());
+            agent.agent_id = session.agent_id.command().to_string();
+            agent.display_name = session.agent_id.display_name().to_string();
+            save_project_assignments(repo, vec![agent]);
+            save_mutation_work_items_with_tracked_events(
+                repo,
+                repo,
+                &mutation_work_items(repo, &session, work_id),
+            );
+            let mut request = bound_workspace_update_request(&session);
+            request.intent.status_category =
+                Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Done);
+            request.primary_provider_session_id = None;
+            apply_authenticated_workspace_update(repo, &session.id, request)
+                .expect("unsupported provider identity must preserve legacy terminal behavior");
+        });
+    }
+
+    #[test]
+    fn terminalization_requires_provider_primary_evidence() {
+        with_strict_target_fixture(|repo, session| {
+            let (mut session, binding) = bind_session_to_current_execution(repo, session);
+            session.agent_session_id = Some("private-primary-provider-thread".to_string());
+            save_session_fixture(&session);
+            seed_work_mutation_surfaces(repo, repo);
+            seed_unique_mutation_target(repo, repo, &session, "work-terminal-primary-fence");
+            let before = ExecutionBindingAuthoritySnapshot::capture(repo, repo, &session.id);
+            let mut request = bound_work_terminalization_request(&session);
+            request.primary_provider_session_id = None;
+            let error = apply_bound_authenticated_work_terminalization(
+                repo,
+                &session.id,
+                &binding,
+                request,
+            )
+            .expect_err("terminalization must reject missing provider evidence");
+            assert!(!error
+                .to_string()
+                .contains("private-primary-provider-thread"));
+            assert_eq!(
+                before,
+                ExecutionBindingAuthoritySnapshot::capture(repo, repo, &session.id)
+            );
+        });
+    }
+
+    #[test]
+    fn primary_close_proof_repair_preserves_authority_sources_and_response_loss_retry() {
+        with_strict_target_fixture(|repo, session| {
+            let (mut session, binding) = bind_session_to_current_execution(repo, session);
+            session.agent_session_id = Some("private-proof-repair-primary".into());
+            save_session_fixture(&session);
+            seed_work_mutation_surfaces(repo, repo);
+            seed_unique_mutation_target(repo, repo, &session, "work-primary-proof-repair");
+            apply_bound_authenticated_work_terminalization(
+                repo,
+                &session.id,
+                &binding,
+                bound_work_terminalization_request(&session),
+            )
+            .expect("primary closes the exact Work");
+            let works_path = gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(repo);
+            let proof_path = works_path.with_extension("close-proofs.json");
+            let closes_path =
+                gwt_core::paths::gwt_workspace_work_events_closed_path_for_repo_path(repo);
+            let mut items = load_workspace_work_items_from_path(&works_path)
+                .unwrap()
+                .unwrap();
+            let done_at = items.work_items[0].completed_at.unwrap();
+            let mut shared = items.work_items[0]
+                .events
+                .iter()
+                .filter(|event| event.kind != gwt_core::workspace_projection::WorkEventKind::Done)
+                .cloned()
+                .collect::<Vec<_>>();
+            for index in 0..=gwt_core::workspace_projection::MAX_INLINE_WORK_EVENTS {
+                let event = gwt_core::workspace_projection::WorkEvent::new(
+                    gwt_core::workspace_projection::WorkEventKind::Update,
+                    "work-primary-proof-repair",
+                    done_at + chrono::Duration::seconds(index as i64 + 1),
+                );
+                items.apply_event(event.clone());
+                shared.push(event);
+            }
+            save_mutation_work_items(repo, &items);
+            items = load_workspace_work_items_from_path(&works_path)
+                .unwrap()
+                .unwrap();
+            // Reproduce an older compactor: inline Done is gone, but its accepted
+            // sidecar proof still matches the persisted projection bytes.
+            items.work_items[0]
+                .events
+                .retain(|event| event.kind != gwt_core::workspace_projection::WorkEventKind::Done);
+            let legacy = serde_json::to_string_pretty(&items).unwrap();
+            let mut proofs: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&proof_path).unwrap()).unwrap();
+            proofs["snapshots"]
+                .as_array_mut()
+                .unwrap()
+                .last_mut()
+                .unwrap()["projection_hash"] =
+                gwt_core::work_events_intake::content_fingerprint(&legacy).into();
+            std::fs::write(&works_path, legacy).unwrap();
+            std::fs::write(&proof_path, serde_json::to_vec(&proofs).unwrap()).unwrap();
+            std::fs::write(
+                gwt_core::paths::gwt_repo_local_work_events_path(repo),
+                shared
+                    .iter()
+                    .map(|event| serde_json::to_string(event).unwrap() + "\n")
+                    .collect::<String>(),
+            )
+            .unwrap();
+            assert!(load_workspace_work_items_from_path(&works_path)
+                .unwrap()
+                .unwrap()
+                .work_items[0]
+                .current_terminal_event()
+                .is_none());
+            let target = resolve_authenticated_session_terminal_target(
+                repo,
+                &session.id,
+                &observe_agent_runtime(repo).unwrap(),
+            )
+            .unwrap();
+            gwt_core::workspace_projection::with_exact_workspace_done_read_only(
+                &target,
+                "work-primary-proof-repair",
+                || (),
+            )
+            .expect("the legacy close already has valid exact proof");
+            assert!(close_proof_repair_needed_for_session(
+                repo,
+                &session.id,
+                session.agent_session_id.as_deref(),
+            )
+            .expect("legacy terminal provenance also needs repair with valid proof"));
+            std::fs::remove_file(&proof_path).unwrap();
+            let close_before = std::fs::read(&closes_path).unwrap();
+            let request = AgentWorkspaceCloseProofRepairRequest {
+                schema_version: AGENT_WORKSPACE_CLOSE_PROOF_REPAIR_SCHEMA_VERSION,
+                claimed_session_id: session.id.clone(),
+                observation: observe_agent_runtime(repo).unwrap(),
+                primary_provider_session_id: session.agent_session_id.clone(),
+                reason: "restore accepted compacted close proof".into(),
+            };
+            assert!(close_proof_repair_needed_for_session(
+                repo,
+                &session.id,
+                session.agent_session_id.as_deref(),
+            )
+            .expect("current Active primary can discover proof repair"));
+            for foreign_generation in [false, true] {
+                let mut close: WorkEvent = serde_json::from_slice(&close_before).unwrap();
+                if foreign_generation {
+                    close.execution_generation = Some("stale-producer-generation".into());
+                } else {
+                    close.agent_session_id = Some("other-producer-session".into());
+                }
+                std::fs::write(&closes_path, serde_json::to_string(&close).unwrap() + "\n")
+                    .unwrap();
+                let refused = ExecutionBindingAuthoritySnapshot::capture(repo, repo, &session.id);
+                apply_authenticated_workspace_close_proof_repair(
+                    repo,
+                    &session.id,
+                    request.clone(),
+                )
+                .expect_err("known foreign terminal provenance cannot gain proof");
+                assert_eq!(
+                    refused,
+                    ExecutionBindingAuthoritySnapshot::capture(repo, repo, &session.id)
+                );
+                assert!(!proof_path.exists());
+            }
+            std::fs::write(&closes_path, &close_before).unwrap();
+            let before = ExecutionBindingAuthoritySnapshot::capture(repo, repo, &session.id);
+            let mut helper = request.clone();
+            helper.primary_provider_session_id = Some("private-proof-helper".into());
+            let error = apply_authenticated_workspace_close_proof_repair(repo, &session.id, helper)
+                .expect_err("a shared gwt Session is not the native primary");
+            assert_eq!(
+                error.code,
+                AgentWorkspaceUpdateErrorCode::PrimaryActorRequired
+            );
+            assert!(!format!("{error:?}").contains("private-proof-helper"));
+            let mut foreign_binding = binding.clone();
+            foreign_binding.identity.generation_id = "foreign-proof-generation".into();
+            assert_eq!(
+                apply_bound_authenticated_workspace_close_proof_repair(
+                    repo,
+                    &session.id,
+                    &foreign_binding,
+                    request.clone(),
+                )
+                .expect_err("repair cannot adopt a foreign generation")
+                .code,
+                AgentWorkspaceUpdateErrorCode::ExecutionBindingMismatch
+            );
+            assert_eq!(
+                before,
+                ExecutionBindingAuthoritySnapshot::capture(repo, repo, &session.id)
+            );
+            assert!(!proof_path.exists());
+            let receipt = apply_authenticated_workspace_close_proof_repair(
+                repo,
+                &session.id,
+                request.clone(),
+            )
+            .expect("complete replay restores proof for the current primary");
+            assert!(!receipt.already_applied);
+            assert_eq!(receipt.work_id, "work-primary-proof-repair");
+            assert!(!close_proof_repair_needed_for_session(
+                repo,
+                &session.id,
+                session.agent_session_id.as_deref(),
+            )
+            .unwrap());
+            let after = ExecutionBindingAuthoritySnapshot::capture(repo, repo, &session.id);
+            assert_eq!(before.session, after.session);
+            assert_eq!(
+                before.execution_control_mirror,
+                after.execution_control_mirror
+            );
+            assert_eq!(
+                before.generation_pointer_mirror,
+                after.generation_pointer_mirror
+            );
+            assert_eq!(before.trusted_files, after.trusted_files);
+            assert_eq!(before.work.current, after.work.current);
+            assert_eq!(before.work.journal, after.work.journal);
+            assert_eq!(before.work.tracked_events, after.work.tracked_events);
+            let proof_after = std::fs::read(&proof_path).unwrap();
+            assert!(
+                apply_authenticated_workspace_close_proof_repair(
+                    repo,
+                    &session.id,
+                    request.clone()
+                )
+                .expect("a lost-response retry confirms the same repaired proof")
+                .already_applied
+            );
+            assert_eq!(
+                after,
+                ExecutionBindingAuthoritySnapshot::capture(repo, repo, &session.id)
+            );
+            assert_eq!(std::fs::read(&proof_path).unwrap(), proof_after);
+            assert_eq!(std::fs::read(&closes_path).unwrap(), close_before);
+
+            let repaired = load_workspace_work_items_from_path(&works_path)
+                .unwrap()
+                .unwrap();
+            let mut discarded = repaired.clone();
+            discarded.work_items[0].status_category = WorkspaceStatusCategory::Active;
+            discarded.work_items[0].discarded = true;
+            discarded.work_items[0].discarded_at = Some(done_at);
+            save_mutation_work_items(repo, &discarded);
+            let refused = ExecutionBindingAuthoritySnapshot::capture(repo, repo, &session.id);
+            let discarded_proof = std::fs::read(&proof_path).unwrap();
+            apply_authenticated_workspace_close_proof_repair(repo, &session.id, request)
+                .expect_err("Discarded Work cannot be repaired into Done");
+            assert_eq!(
+                refused,
+                ExecutionBindingAuthoritySnapshot::capture(repo, repo, &session.id)
+            );
+            assert_eq!(std::fs::read(&proof_path).unwrap(), discarded_proof);
+            assert_eq!(std::fs::read(&closes_path).unwrap(), close_before);
+            save_mutation_work_items(repo, &repaired);
+            let close: WorkEvent = serde_json::from_slice(&close_before).unwrap();
+            apply_authenticated_workspace_reopen(
+                repo,
+                &session.id,
+                AgentWorkspaceReopenRequest {
+                    schema_version: AGENT_WORKSPACE_REOPEN_SCHEMA_VERSION,
+                    claimed_session_id: session.id.clone(),
+                    observation: observe_agent_runtime(repo).unwrap(),
+                    primary_provider_session_id: session.agent_session_id.clone(),
+                    observed_done_event_id: close.id,
+                    reason: "continue after repairing compacted terminal history".into(),
+                },
+            )
+            .expect("proof repair must make same-session active recovery reachable");
+            apply_bound_authenticated_workspace_update(
+                repo,
+                &session.id,
+                &binding,
+                bound_workspace_update_request(&session),
+            )
+            .expect("the recovered primary can update active Work");
+            assert_eq!(std::fs::read(&closes_path).unwrap(), close_before);
+        });
+    }
+
+    #[test]
+    fn primary_work_reopen_is_explicit_idempotent_and_preserves_execution() {
+        with_strict_target_fixture(|repo, session| {
+            let (mut session, binding) = bind_session_to_current_execution(repo, session);
+            session.agent_session_id = Some("private-reopen-primary-thread".to_string());
+            save_session_fixture(&session);
+            seed_work_mutation_surfaces(repo, repo);
+            seed_unique_mutation_target(repo, repo, &session, "work-primary-reopen");
+            let mut done = bound_workspace_update_request(&session);
+            done.intent.status_category = Some(WorkspaceStatusCategory::Done);
+            apply_bound_authenticated_workspace_update(repo, &session.id, &binding, done)
+                .expect("primary closes Work");
+            let diagnosis = diagnose_terminal_work_for_session(
+                repo,
+                &session.id,
+                session.agent_session_id.as_deref(),
+            )
+            .expect("diagnose")
+            .expect("terminal");
+            let details = diagnosis.details.expect("terminal details");
+            assert!(details.recoverable);
+            let error = apply_bound_authenticated_workspace_update(
+                repo,
+                &session.id,
+                &binding,
+                bound_workspace_update_request(&session),
+            )
+            .expect_err("ordinary updates cannot reopen Done");
+            assert_eq!(error.code, AgentWorkspaceUpdateErrorCode::TerminalWork);
+            let execution_before = crate::cli::execution_state::load(repo).expect("execution");
+            let request = AgentWorkspaceReopenRequest {
+                schema_version: AGENT_WORKSPACE_REOPEN_SCHEMA_VERSION,
+                claimed_session_id: session.id.clone(),
+                primary_provider_session_id: session.agent_session_id.clone(),
+                observation: observe_agent_runtime(repo).expect("observation"),
+                reason: "additional acceptance work remains".to_string(),
+                observed_done_event_id: details.event_id.expect("Done event"),
+            };
+            let mut foreign = request.clone();
+            foreign.primary_provider_session_id =
+                Some("private-foreign-provider-thread".to_string());
+            let before = ExecutionBindingAuthoritySnapshot::capture(repo, repo, &session.id);
+            let mut stale = request.clone();
+            stale.observed_done_event_id = "different-done-event".to_string();
+            assert_eq!(
+                apply_bound_authenticated_workspace_reopen(repo, &session.id, &binding, stale)
+                    .expect_err("Done observation is a compare-and-swap token")
+                    .code,
+                AgentWorkspaceUpdateErrorCode::TransactionConflict
+            );
+            let error =
+                apply_bound_authenticated_workspace_reopen(repo, &session.id, &binding, foreign)
+                    .expect_err("helper cannot reopen");
+            assert_eq!(
+                error.code,
+                AgentWorkspaceUpdateErrorCode::PrimaryActorRequired
+            );
+            assert!(!format!("{error:?}").contains("private-foreign-provider-thread"));
+            assert_eq!(
+                before,
+                ExecutionBindingAuthoritySnapshot::capture(repo, repo, &session.id)
+            );
+            let (first, contention) = std::thread::scope(|scope| {
+                let (acquired_tx, acquired_rx) = std::sync::mpsc::channel();
+                let (release_tx, release_rx) = std::sync::mpsc::channel();
+                let first_request = request.clone();
+                let session_id = &session.id;
+                let one = scope.spawn(move || {
+                    crate::cli::trusted_store::set_write_lease_acquired_hook(move || {
+                        acquired_tx.send(()).unwrap();
+                        let _ = release_rx.recv();
+                    });
+                    apply_authenticated_workspace_reopen(repo, session_id, first_request)
+                });
+                acquired_rx.recv().unwrap();
+                let contention =
+                    apply_authenticated_workspace_reopen(repo, &session.id, request.clone());
+                // Release and join before asserting; the bounded lease may refuse a peer.
+                release_tx.send(()).unwrap();
+                (one.join().unwrap(), contention)
+            });
+            let first = first.expect("first concurrent reopen");
+            let error = contention.expect_err("the held writer must refuse its contender");
+            assert_eq!(
+                error.code,
+                AgentWorkspaceUpdateErrorCode::ExecutionBindingMismatch
+            );
+            assert_eq!(
+                error.diagnostic_reason.as_deref(),
+                Some("reopen_authority_lease_unavailable")
+            );
+            let retry = apply_authenticated_workspace_reopen(repo, &session.id, request.clone())
+                .expect("retry after the concurrent writer settles");
+            assert!(!first.already_applied);
+            assert!(retry.already_applied);
+            assert_eq!(first.reopen_event_id, retry.reopen_event_id);
+            assert!(
+                apply_authenticated_workspace_reopen(repo, &session.id, request.clone())
+                    .expect("response-loss retry")
+                    .already_applied
+            );
+            assert_eq!(
+                serde_json::to_value(execution_before).unwrap(),
+                serde_json::to_value(crate::cli::execution_state::load(repo).unwrap()).unwrap()
+            );
+            assert!(diagnose_terminal_work_for_session(
+                repo,
+                &session.id,
+                session.agent_session_id.as_deref()
+            )
+            .expect("diagnose reopened")
+            .is_none());
+            apply_bound_authenticated_workspace_update(
+                repo,
+                &session.id,
+                &binding,
+                bound_workspace_update_request(&session),
+            )
+            .expect("reopen restores ordinary Work updates after Done unassigned the Session");
+            apply_bound_authenticated_work_terminalization(
+                repo,
+                &session.id,
+                &binding,
+                bound_work_terminalization_request(&session),
+            )
+            .expect("close a second time");
+            assert_eq!(
+                apply_authenticated_workspace_reopen(repo, &session.id, request.clone())
+                    .expect_err("an older successful recovery cannot bypass a newer Done")
+                    .code,
+                AgentWorkspaceUpdateErrorCode::TransactionConflict
+            );
+            let mut next_request = request;
+            next_request.observed_done_event_id = diagnose_terminal_work_for_session(
+                repo,
+                &session.id,
+                session.agent_session_id.as_deref(),
+            )
+            .unwrap()
+            .unwrap()
+            .details
+            .unwrap()
+            .event_id
+            .unwrap();
+            apply_authenticated_workspace_reopen(repo, &session.id, next_request)
+                .expect("recover current Done");
+            let mut discard = bound_work_terminalization_request(&session);
+            discard.terminal_kind = AgentWorkTerminalKind::Discarded;
+            apply_bound_authenticated_work_terminalization(repo, &session.id, &binding, discard)
+                .expect("primary discards reopened Work");
+            let details = diagnose_terminal_work_for_session(
+                repo,
+                &session.id,
+                session.agent_session_id.as_deref(),
+            )
+            .unwrap()
+            .unwrap()
+            .details
+            .unwrap();
+            assert!(!details.recoverable);
+            assert!(details.recovery_operation.is_none());
+        });
+    }
+
     fn bound_work_terminalization_request(session: &Session) -> AgentWorkTerminalizationRequest {
         AgentWorkTerminalizationRequest {
             schema_version: AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION,
             claimed_session_id: session.id.clone(),
+            primary_provider_session_id: session.agent_session_id.clone(),
             observation: observe_agent_runtime(&session.worktree_path)
                 .expect("runtime observation"),
             terminal_kind: AgentWorkTerminalKind::Done,
@@ -6640,6 +8038,7 @@ mod tests {
         AgentBuildAbortTerminalizationRequest {
             schema_version: AGENT_BUILD_ABORT_TERMINALIZATION_SCHEMA_VERSION,
             claimed_session_id: session.id.clone(),
+            primary_provider_session_id: session.agent_session_id.clone(),
             owner_number,
             reason: "canonical verification cannot proceed".to_string(),
             observation: observe_agent_runtime(&session.worktree_path)
@@ -10583,6 +11982,7 @@ mod tests {
                 AgentWorkspaceUpdateRequest {
                     schema_version: AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
                     claimed_session_id: session.id.clone(),
+                    primary_provider_session_id: None,
                     observation: observe_agent_runtime(repo).expect("runtime observation"),
                     intent: AgentWorkspaceUpdateIntent {
                         summary: Some("authenticated host mutation".to_string()),
@@ -10631,6 +12031,7 @@ mod tests {
                 AgentWorkspaceUpdateRequest {
                     schema_version: AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
                     claimed_session_id: session.id.clone(),
+                    primary_provider_session_id: None,
                     observation: observe_agent_runtime(repo).expect("runtime observation"),
                     intent: AgentWorkspaceUpdateIntent {
                         status_category: Some(
@@ -10672,6 +12073,7 @@ mod tests {
             let mut request = AgentWorkspaceUpdateRequest {
                 schema_version: AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
                 claimed_session_id: session.id.clone(),
+                primary_provider_session_id: session.agent_session_id.clone(),
                 observation: observe_agent_runtime(repo).unwrap(),
                 intent: AgentWorkspaceUpdateIntent {
                     summary: Some("one reserved operation".to_string()),
@@ -10713,7 +12115,9 @@ mod tests {
     #[test]
     fn workspace_operation_receipt_refuses_pending_or_changed_work_without_repair() {
         with_strict_target_fixture(|repo, session| {
-            let (session, binding) = bind_session_to_current_execution(repo, session);
+            let (mut session, binding) = bind_session_to_current_execution(repo, session);
+            session.agent_session_id = Some("private-receipt-primary-thread".to_string());
+            save_session_fixture(&session);
             seed_unique_mutation_target(repo, repo, &session, "work-receipt-proof");
             std::fs::write(
                 gwt_core::paths::gwt_workspace_journal_path_for_repo_path(repo),
@@ -10721,19 +12125,27 @@ mod tests {
             )
             .unwrap();
             let id = uuid::Uuid::new_v4().to_string();
+            let request = AgentWorkspaceUpdateRequest {
+                schema_version: AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
+                claimed_session_id: session.id.clone(),
+                primary_provider_session_id: session.agent_session_id.clone(),
+                observation: observe_agent_runtime(repo).unwrap(),
+                intent: AgentWorkspaceUpdateIntent {
+                    status_category: Some(WorkspaceStatusCategory::Done),
+                    summary: Some("saved update".to_string()),
+                    ..Default::default()
+                },
+            };
+            assert_eq!(
+                serde_json::to_value(&request).unwrap()["primary_provider_session_id"],
+                "private-receipt-primary-thread",
+                "transport must retain the terminal actor claim"
+            );
             apply_bound_authenticated_workspace_update_with_operation_id(
                 repo,
                 &session.id,
                 &binding,
-                AgentWorkspaceUpdateRequest {
-                    schema_version: AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
-                    claimed_session_id: session.id.clone(),
-                    observation: observe_agent_runtime(repo).unwrap(),
-                    intent: AgentWorkspaceUpdateIntent {
-                        summary: Some("saved update".to_string()),
-                        ..Default::default()
-                    },
-                },
+                request.clone(),
                 Some(&id),
             )
             .unwrap();
@@ -10745,6 +12157,35 @@ mod tests {
             };
             assert_eq!(inspect()["status"], "applied");
             let current = gwt_core::paths::gwt_workspace_projection_path_for_repo_path(repo);
+            let receipt_path = current
+                .with_file_name("workspace-update-receipts")
+                .join(format!("{id}.json"));
+            let original = std::fs::read(&receipt_path).unwrap();
+            assert!(
+                !String::from_utf8_lossy(&original).contains("primary_provider_session_id")
+                    && !String::from_utf8_lossy(&original)
+                        .contains("private-receipt-primary-thread"),
+                "durable receipt must not retain transient provider identity"
+            );
+            let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
+                .unwrap()
+                .unwrap();
+            let inspect_expected = |expected: &AgentWorkspaceUpdateRequest| {
+                serde_json::to_value(
+                    crate::workspace_update_receipt::inspect(
+                        repo,
+                        &session.id,
+                        &id,
+                        Some((expected, &identity)),
+                    )
+                    .unwrap(),
+                )
+                .unwrap()
+            };
+            assert_eq!(inspect_expected(&request)["status"], "applied");
+            let mut mismatched = request.clone();
+            mismatched.intent.summary = Some("not the published request".to_string());
+            assert_eq!(inspect_expected(&mismatched)["status"], "unconfirmed");
             let pending = current.with_file_name("pending-state-transaction.json");
             std::fs::write(&pending, b"{interrupted publication").unwrap();
             let before = WorkMutationSnapshot::capture(repo, repo);
@@ -10755,10 +12196,6 @@ mod tests {
                 b"{interrupted publication"
             );
             std::fs::remove_file(pending).unwrap();
-            let receipt_path = current
-                .with_file_name("workspace-update-receipts")
-                .join(format!("{id}.json"));
-            let original = std::fs::read(&receipt_path).unwrap();
             let mut altered: serde_json::Value = serde_json::from_slice(&original).unwrap();
             altered["operation"]["request"]["intent"]["summary"] =
                 serde_json::json!("not the saved event");
@@ -10769,6 +12206,14 @@ mod tests {
                 "request must match the exact source event"
             );
             assert_eq!(WorkMutationSnapshot::capture(repo, repo), before);
+            altered["operation"]["request"]["intent"]["summary"] =
+                serde_json::json!("saved update");
+            altered["operation"]["request"]["primary_provider_session_id"] =
+                serde_json::json!("private-receipt-primary-thread");
+            let legacy = serde_json::to_vec(&altered).unwrap();
+            std::fs::write(&receipt_path, &legacy).unwrap();
+            assert_eq!(inspect_expected(&request)["status"], "applied");
+            assert_eq!(std::fs::read(&receipt_path).unwrap(), legacy);
             std::fs::write(&receipt_path, original).unwrap();
             let mut projection = load_workspace_projection_from_path(&current)
                 .unwrap()
@@ -10837,6 +12282,7 @@ mod tests {
                 AgentWorkspaceUpdateRequest {
                     schema_version: AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
                     claimed_session_id: session.id.clone(),
+                    primary_provider_session_id: None,
                     observation: observe_agent_runtime(repo).expect("runtime observation"),
                     intent: AgentWorkspaceUpdateIntent {
                         status_category: Some(
@@ -10874,6 +12320,7 @@ mod tests {
                 AgentWorkspaceUpdateRequest {
                     schema_version: AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
                     claimed_session_id: session.id.clone(),
+                    primary_provider_session_id: None,
                     observation: observe_agent_runtime(repo).expect("runtime observation"),
                     intent: AgentWorkspaceUpdateIntent {
                         status_category: Some(
@@ -10944,6 +12391,7 @@ mod tests {
                 AgentWorkspaceUpdateRequest {
                     schema_version: AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
                     claimed_session_id: session.id.clone(),
+                    primary_provider_session_id: None,
                     observation: observe_agent_runtime(repo).expect("runtime observation"),
                     intent: AgentWorkspaceUpdateIntent {
                         status_category: Some(
@@ -10988,6 +12436,7 @@ mod tests {
             let request = || AgentWorkTerminalizationRequest {
                 schema_version: AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION,
                 claimed_session_id: session.id.clone(),
+                primary_provider_session_id: None,
                 observation: observation.clone(),
                 terminal_kind: AgentWorkTerminalKind::Done,
             };
@@ -11058,6 +12507,7 @@ mod tests {
             let request = || AgentWorkTerminalizationRequest {
                 schema_version: AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION,
                 claimed_session_id: session.id.clone(),
+                primary_provider_session_id: None,
                 observation: observe_agent_runtime(repo).expect("runtime observation"),
                 terminal_kind: AgentWorkTerminalKind::Done,
             };
@@ -11136,6 +12586,7 @@ mod tests {
             let request = AgentWorkTerminalizationRequest {
                 schema_version: AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION,
                 claimed_session_id: session.id.clone(),
+                primary_provider_session_id: None,
                 observation: observe_agent_runtime(repo).expect("runtime observation"),
                 terminal_kind: AgentWorkTerminalKind::Done,
             };
@@ -11253,6 +12704,7 @@ mod tests {
                 AgentWorkspaceUpdateRequest {
                     schema_version: AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
                     claimed_session_id: "foreign-session".to_string(),
+                    primary_provider_session_id: None,
                     observation: observe_agent_runtime(repo).expect("runtime observation"),
                     intent: AgentWorkspaceUpdateIntent {
                         summary: Some("must not persist".to_string()),

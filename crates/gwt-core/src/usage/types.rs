@@ -162,6 +162,15 @@ pub struct ExtraUsage {
     pub disabled_reason: Option<String>,
 }
 
+/// Optional Codex credits, expressed in the provider's reported units.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CodexCredits {
+    pub has_credits: bool,
+    #[serde(default)]
+    pub unlimited: bool,
+    pub balance: Option<f64>,
+}
+
 /// Account-level usage for one provider (shared pool).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderUsage {
@@ -175,6 +184,8 @@ pub struct ProviderUsage {
     pub windows: Vec<UsageWindow>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_usage: Option<ExtraUsage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credits: Option<CodexCredits>,
     pub limit_reached: bool,
     pub state: UsageState,
     pub fetched_at: Option<DateTime<Utc>>,
@@ -190,6 +201,7 @@ impl ProviderUsage {
             plan: None,
             windows: Vec::new(),
             extra_usage: None,
+            credits: None,
             limit_reached: false,
             state,
             fetched_at: None,
@@ -398,6 +410,25 @@ mod tests {
     }
 
     #[test]
+    fn codex_credits_survive_serde_and_old_snapshots_still_load() {
+        let mut account = serde_json::json!({
+            "provider":"codex", "plan":null, "windows":[],
+            "limit_reached":false, "state":{"kind":"ok"}, "fetched_at":null
+        });
+        let legacy: ProviderUsage = serde_json::from_value(account.clone()).unwrap();
+        assert!(serde_json::to_value(legacy)
+            .unwrap()
+            .get("credits")
+            .is_none());
+        let credits = serde_json::json!({
+            "has_credits":true, "unlimited":false, "balance":37669.9
+        });
+        account["credits"] = credits.clone();
+        let parsed: ProviderUsage = serde_json::from_value(account).unwrap();
+        assert_eq!(serde_json::to_value(parsed).unwrap()["credits"], credits);
+    }
+
+    #[test]
     fn snapshot_roundtrips() {
         let snap = UsageSnapshot {
             accounts: vec![ProviderUsage {
@@ -406,6 +437,7 @@ mod tests {
                 account_label: Some("codex@example.com".into()),
                 plan: Some("pro".into()),
                 extra_usage: None,
+                credits: None,
                 windows: vec![UsageWindow::new(WindowKind::FiveHour, 12.0, None)],
                 limit_reached: false,
                 state: UsageState::Ok,

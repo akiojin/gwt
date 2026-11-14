@@ -77,6 +77,18 @@ class IssueTtlTests(unittest.TestCase):
             self.assertEqual(meta.get("source_cache_revision"), revision)
             self.assertEqual(meta.get("issue_cache_fingerprint"), legacy_fingerprint)
 
+            # A canonical cache revision may advance without changing indexed
+            # payloads (for example, a SPEC task section). Acknowledge it with
+            # no record writes rather than leave the GUI stale until TTL expiry.
+            next_revision = str(uuid.uuid4())
+            (cache_root / "source-revision").write_text(next_revision, encoding="utf-8")
+            with mock.patch.dict(os.environ, {"HOME": tmp}, clear=False):
+                refreshed = runner.action_index_issues_v2(
+                    "abc1234567890def", tmp, db_root=db_root, respect_ttl=True, mode="incremental")
+            self.assertNotIn("skipped", refreshed)
+            self.assertEqual(refreshed["newly_embedded"], 0)
+            self.assertEqual(runner._read_issue_meta(meta_path.parent)["source_cache_revision"], next_revision)
+
     def test_build_does_not_stamp_records_with_a_revision_changed_during_read(self):
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HOME": tmp}):
             root = Path(tmp)
@@ -289,9 +301,9 @@ class IssueTtlTests(unittest.TestCase):
             result = runner.action_index_issues_v2(**args, respect_ttl=True)
             self.assertEqual(result.get("indexed"), 2, result)
             db = root / "index/abc1234567890def/issues"
-            client, collection = runner._open_chroma_collection(runner.resolve_active_store(db), "issues")
+            client, collection = runner._open_chroma_collection(runner._issue_record_pool(db), "issues")
             try:
-                collection.delete(ids=["1", "2"])
+                collection.delete(ids=list(runner._active_issue_members(db).values()))
             finally:
                 runner._close_chroma_client(client)
             recovered = runner.action_index_issues_v2(**args, respect_ttl=True)
@@ -334,18 +346,18 @@ class IssueTtlTests(unittest.TestCase):
             args = dict(repo_hash="abc1234567890def", project_root=tmp, db_root=root / "index")
             self.assertTrue(runner.action_index_issues_v2(**args)["ok"])
             self.assertTrue(runner.action_index_issues_v2(**args, mode="incremental")["ok"])
-            for actual in (0, 2):
-                with mock.patch.object(runner, "_safe_collection_count", return_value=actual):
-                    result = runner.action_index_issues_v2(**args, repair=True)
-                self.assertFalse(result["ok"], result)
-                self.assertEqual(result["error_code"], "COUNT_MISMATCH")
-                with mock.patch.object(runner, "_make_chroma_collection_repairing") as create:
-                    stopped = runner.action_index_issues_v2(**args)
-                self.assertEqual(stopped["error_code"], "REPAIR_STOPPED")
-                create.assert_not_called()
-                health = runner._issue_status_v2(args["repo_hash"], db_root=args["db_root"])
-                self.assertEqual(health["reason"], "repair_stopped")
-                self.assertEqual(health["mode"], "full")
+            with mock.patch.object(runner, "_verified_issue_members", return_value=set()):
+                result = runner.action_index_issues_v2(**args, repair=True)
+            self.assertFalse(result["ok"], result)
+            self.assertEqual(result["error_code"], "COUNT_MISMATCH")
+            self.assertEqual(result["repair"]["actual_document_count"], 0)
+            with mock.patch.object(runner, "_make_chroma_collection") as create:
+                stopped = runner.action_index_issues_v2(**args)
+            self.assertEqual(stopped["error_code"], "REPAIR_STOPPED")
+            create.assert_not_called()
+            health = runner._issue_status_v2(args["repo_hash"], db_root=args["db_root"])
+            self.assertEqual(health["reason"], "repair_stopped")
+            self.assertEqual(health["mode"], "full")
             self._write_cached_issue(root / ".gwt/cache/issues/abc1234567890def", 2, "Second", "body", [])
             health = runner._issue_status_v2(args["repo_hash"], db_root=args["db_root"])
             self.assertNotEqual(health["reason"], "repair_stopped")
@@ -363,9 +375,9 @@ class IssueTtlTests(unittest.TestCase):
 
             def publish_then_lose_records(*args, **kwargs):
                 result = publish(*args, **kwargs)
-                client, collection = runner._open_chroma_collection(runner.resolve_active_store(db), "issues")
+                client, collection = runner._open_chroma_collection(runner._issue_record_pool(db), "issues")
                 try:
-                    collection.delete(ids=["1"])
+                    collection.delete(ids=[runner._active_issue_members(db)["1"]])
                 finally:
                     runner._close_chroma_client(client)
                 return result
@@ -377,7 +389,7 @@ class IssueTtlTests(unittest.TestCase):
             health = runner._issue_status_v2(args["repo_hash"], db_root=args["db_root"])
             self.assertEqual(health["reason"], "repair_stopped")
             self.assertFalse(health["healthy"])
-            with mock.patch.object(runner, "_make_chroma_collection_repairing") as create:
+            with mock.patch.object(runner, "_make_chroma_collection") as create:
                 self.assertEqual(runner.action_index_issues_v2(**args)["error_code"], "REPAIR_STOPPED")
             create.assert_not_called()
             self._write_cached_issue(cache, 2, "Second", "body", [])
@@ -395,7 +407,7 @@ class IssueTtlTests(unittest.TestCase):
                     result = runner.action_index_issues_v2(**args)
                 self.assertFalse(result["ok"], result)
                 self.assertEqual(result["error_code"], "PUBLISH_FAILED")
-                with mock.patch.object(runner, "_make_chroma_collection_repairing") as create:
+                with mock.patch.object(runner, "_make_chroma_collection") as create:
                     self.assertEqual(runner.action_index_issues_v2(**args)["error_code"], "REPAIR_STOPPED")
                 create.assert_not_called()
 
@@ -465,7 +477,7 @@ class IssueTtlTests(unittest.TestCase):
             args = dict(repo_hash="abc1234567890def", project_root=tmp, db_root=root / "index")
             self.assertTrue(runner.action_index_issues_v2(**args)["ok"])
             self._write_cached_issue(cache, 1, "Pending", "body changed", [])
-            create = runner._make_chroma_collection_repairing
+            create = runner._make_chroma_collection
 
             def inspect_active_build(*create_args, **kwargs):
                 health = runner._issue_status_v2(args["repo_hash"], db_root=args["db_root"])
@@ -482,7 +494,7 @@ class IssueTtlTests(unittest.TestCase):
                 self.assertEqual(direct["issueResults"][0]["title"], "Published")
                 return create(*create_args, **kwargs)
 
-            with mock.patch.object(runner, "_make_chroma_collection_repairing", side_effect=inspect_active_build):
+            with mock.patch.object(runner, "_make_chroma_collection", side_effect=inspect_active_build):
                 self.assertTrue(runner.action_index_issues_v2(**args)["ok"])
 
     def test_build_started_after_recovery_probe_is_building(self):
@@ -534,7 +546,7 @@ class IssueTtlTests(unittest.TestCase):
             root = Path(tmp)
             self._write_cached_issue(root / ".gwt/cache/issues/abc1234567890def", 1, "First", "body", [])
             args = dict(repo_hash="abc1234567890def", project_root=tmp, db_root=root / "index")
-            with mock.patch.object(runner, "_make_chroma_collection_repairing", side_effect=KeyboardInterrupt):
+            with mock.patch.object(runner, "_make_chroma_collection", side_effect=KeyboardInterrupt):
                 with self.assertRaises(KeyboardInterrupt):
                     runner.action_index_issues_v2(**args)
             db = root / "index/abc1234567890def/issues"
@@ -559,13 +571,272 @@ class IssueTtlTests(unittest.TestCase):
             self.assertEqual(result.get("mode"), "incremental", result)
             self.assertEqual(result["newly_embedded"], 2)
             db = root / "index/abc1234567890def/issues"
-            client, collection = runner._open_chroma_collection(runner.resolve_active_store(db), "issues")
+            records = self._visible_issue_records(db)
+            self.assertEqual(set(records), {"1", "2", "4"})
+            self.assertEqual(records["2"], "Changed\nnew body")
+
+    def _store_records(self, store: Path, members=None) -> dict:
+        client, collection = runner._open_chroma_collection(store, "issues")
+        try:
+            got = collection.get(**({"ids": list(members.values())} if members is not None else {}))
+            logical = {value: key for key, value in members.items()} if members is not None else {}
+            return {logical.get(key, key): doc for key, doc in zip(got["ids"], got["documents"])}
+        finally:
+            runner._close_chroma_client(client)
+
+    def _visible_issue_records(self, db: Path) -> dict:
+        """The exact logical record set readers see, including legacy layers."""
+        members = runner._active_issue_members(db)
+        if members is not None:
+            return self._store_records(runner._issue_record_pool(db), members)
+        records = self._store_records(runner.resolve_active_store(db))
+        delta = runner._issue_delta_state(db)
+        if delta is not None:
+            for record_id in delta["shadowed"]:
+                records.pop(record_id, None)
+            records.update(self._store_records(delta["store"]))
+        return records
+
+    def test_incremental_refresh_reuses_records_across_successive_issue_changes(self):
+        """Issue #6979 AC-1: an Issue refresh never re-copies unchanged records."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HOME": tmp}):
+            root = Path(tmp)
+            cache = root / ".gwt/cache/issues/abc1234567890def"
+            for number in range(1, 41):
+                self._write_cached_issue(cache, number, f"Issue {number}", f"body {number}", [])
+            args = dict(repo_hash="abc1234567890def", project_root=tmp, db_root=root / "index")
+            self.assertEqual(runner.action_index_issues_v2(**args)["newly_embedded"], 40)
+            db = runner.resolve_db_path(args["repo_hash"], None, "issues", db_root=args["db_root"])
+            base_store = runner.resolve_active_store(db)
+            # Byte snapshots would be meaningless: Chroma replays its unsynced
+            # log tail into the HNSW files on every reader open.
+            base_members = runner._active_issue_members(db)
+            base_before = self._visible_issue_records(db)
+
+            self._write_cached_issue(cache, 2, "Changed", "new body", [])
+            import shutil
+            shutil.rmtree(cache / "3")
+            self._write_cached_issue(cache, 41, "Added", "added body", [])
+            copied = []
+            copy = runner._copy_unchanged_records
+            validations = []
+            verify_members = runner._verified_issue_members
+
+            def record_copy(*copy_args, **copy_kwargs):
+                count = copy(*copy_args, **copy_kwargs)
+                copied.append(count)
+                return count
+
+            def record_validation(collection, members):
+                validations.append(len(members))
+                return verify_members(collection, members)
+
+            with (mock.patch.object(runner, "_copy_unchanged_records", side_effect=record_copy),
+                  mock.patch.object(runner, "_verified_issue_members", side_effect=record_validation)):
+                result = runner.action_index_issues_v2(**args, mode="incremental")
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["mode"], "incremental", result)
+            self.assertEqual(result["indexed"], 40, result)
+            self.assertEqual(result["newly_embedded"], 2, result)
+            self.assertEqual(sum(copied), 0, "no unchanged record may be copied into the delta")
+            self.assertEqual(validations.count(40), 2,
+                             "only pre-health and fresh post-publication scan every payload")
+            self.assertLessEqual(sum(validations), 2 * 40 + 2 * 2, validations)
+
+            # The preceding snapshot retains exact membership, while the pool
+            # contains both versions. Physical count is not logical count.
+            self.assertNotEqual(runner.resolve_active_store(db), base_store)
+            self.assertEqual(self._store_records(runner._issue_record_pool(db), base_members), base_before)
+            self.assertEqual(len(self._store_records(runner._issue_record_pool(db))), 42)
+            previous_store = runner.resolve_active_store(db)
+            previous_members = runner._active_issue_members(db)
+
+            records = self._visible_issue_records(db)
+            self.assertEqual(len(records), 40)
+            self.assertNotIn("3", records)
+            self.assertEqual(records["2"], "Changed\nnew body")
+            health = runner._issue_status_v2(args["repo_hash"], db_root=args["db_root"])
+            self.assertTrue(health["healthy"], health)
+            self.assertEqual(health["document_count"], 40)
+            search = runner.action_search_multi_v2(
+                args["repo_hash"], None, tmp, "Changed new body", 40, ["issues"], db_root=args["db_root"])
+            titles = {item["number"]: item["title"] for item in search["issueResults"]}
+            self.assertEqual(len(titles), len(search["issueResults"]), search)
+            self.assertEqual(len(titles), 40, search)
+            self.assertNotIn(3, titles, search)
+            # Only the selected version is served.
+            self.assertEqual(titles[2], "Changed", search)
+
+            # A later refresh reuses all previous members and inserts only B.
+            self._write_cached_issue(cache, 5, "Changed again", "fifth body", [])
+            copied.clear()
+            validations.clear()
+            from chromadb.api.models.Collection import Collection
+            upsert = Collection.upsert
+            inserted = []
+
+            def record_upsert(collection, *upsert_args, **kwargs):
+                inserted.extend(kwargs["ids"])
+                return upsert(collection, *upsert_args, **kwargs)
+
+            with (mock.patch.object(runner, "_copy_unchanged_records", side_effect=record_copy),
+                  mock.patch.object(Collection, "upsert", autospec=True, side_effect=record_upsert),
+                  mock.patch.object(runner, "_verified_issue_members", side_effect=record_validation)):
+                result = runner.action_index_issues_v2(**args, mode="incremental")
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(sum(copied), 0, "earlier delta members must not be copied again")
+            self.assertEqual(result["newly_embedded"], 1, result)
+            self.assertEqual(validations.count(40), 2, validations)
+            self.assertLessEqual(sum(validations), 2 * 40 + 2, validations)
+            members = runner._active_issue_members(db)
+            self.assertEqual(inserted, [members["5"]])
+            self.assertTrue(previous_store.is_dir())
+            self.assertEqual(runner._read_issue_membership(previous_store), previous_members)
+            self.assertEqual(len(self._visible_issue_records(db)), 40)
+            self.assertTrue(runner._issue_status_v2(args["repo_hash"], db_root=args["db_root"])["healthy"])
+            inserted.clear()
+            validations.clear()
+            with (mock.patch.object(Collection, "upsert", autospec=True, side_effect=record_upsert),
+                  mock.patch.object(runner, "_verified_issue_members", side_effect=record_validation)):
+                unchanged = runner.action_index_issues_v2(**args, mode="incremental")
+            self.assertTrue(unchanged["ok"], unchanged)
+            self.assertEqual(inserted, [])
+            self.assertEqual(unchanged["newly_embedded"], 0)
+            self.assertEqual(validations.count(40), 2, validations)
+            self.assertEqual(sum(validations), 2 * 40, validations)
+
+    def test_many_issue_changes_reuse_unchanged_members_without_compaction(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HOME": tmp}):
+            root = Path(tmp)
+            cache = root / ".gwt/cache/issues/abc1234567890def"
+            for number in range(1, 11):
+                self._write_cached_issue(cache, number, f"Issue {number}", "body", [])
+            args = dict(repo_hash="abc1234567890def", project_root=tmp, db_root=root / "index")
+            self.assertTrue(runner.action_index_issues_v2(**args)["ok"])
+            db = runner.resolve_db_path(args["repo_hash"], None, "issues", db_root=args["db_root"])
+            base_store = runner.resolve_active_store(db)
+            for number in (1, 2, 3):
+                self._write_cached_issue(cache, number, f"Changed {number}", "new", [])
+            result = runner.action_index_issues_v2(**args, mode="incremental")
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["newly_embedded"], 3, result)
+            self.assertNotEqual(runner.resolve_active_store(db), base_store)
+            self.assertIsNone(runner._issue_delta_state(db))
+            records = self._visible_issue_records(db)
+            self.assertEqual(len(records), 10)
+            self.assertEqual(records["1"], "Changed 1\nnew")
+            self.assertTrue(runner._issue_status_v2(args["repo_hash"], db_root=args["db_root"])["healthy"])
+
+    def test_issue_pool_missing_member_is_not_masked_by_old_records_or_count(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HOME": tmp}):
+            root = Path(tmp)
+            cache = root / ".gwt/cache/issues/abc1234567890def"
+            self._write_cached_issue(cache, 1, "Before", "body", [])
+            self._write_cached_issue(cache, 2, "Unchanged", "body", [])
+            args = dict(repo_hash="abc1234567890def", project_root=tmp, db_root=root / "index")
+            self.assertTrue(runner.action_index_issues_v2(**args)["ok"])
+            self._write_cached_issue(cache, 1, "After", "changed", [])
+            self.assertTrue(runner.action_index_issues_v2(**args, mode="incremental")["ok"])
+            db = runner.resolve_db_path(args["repo_hash"], None, "issues", args["db_root"])
+            client, collection = runner._open_chroma_collection(runner._issue_record_pool(db), "issues")
             try:
-                records = collection.get()
-                self.assertEqual(set(records["ids"]), {"1", "2", "4"})
-                self.assertIn("Changed\nnew body", records["documents"])
+                collection.delete(ids=[runner._active_issue_members(db)["1"]])
+                self.assertEqual(collection.count(), 2, "physical count still matches logical count")
             finally:
                 runner._close_chroma_client(client)
+            self.assertFalse(runner._issue_status_v2(args["repo_hash"], args["db_root"])["healthy"])
+            with self.assertRaisesRegex(ValueError, "missing Issue generation member"):
+                runner._query_active_layers(db, "issues", "Before", 10)
+            repaired = runner.action_index_issues_v2(**args, repair=True)
+            self.assertTrue(repaired["ok"], repaired)
+            self.assertEqual(repaired["newly_embedded"], 1)
+            self.assertEqual(self._visible_issue_records(db)["1"], "After\nchanged")
+            client, collection = runner._open_chroma_collection(runner._issue_record_pool(db), "issues")
+            try:
+                collection.update(ids=[runner._active_issue_members(db)["1"]], documents=["CORRUPTED PAYLOAD"])
+            finally:
+                runner._close_chroma_client(client)
+            self.assertFalse(runner._issue_status_v2(args["repo_hash"], args["db_root"])["healthy"])
+            repaired = runner.action_index_issues_v2(**args, repair=True)
+            self.assertTrue(repaired["ok"], repaired)
+            self.assertEqual(repaired["newly_embedded"], 1)
+            self.assertEqual(self._visible_issue_records(db)["1"], "After\nchanged")
+
+    def test_issue_pool_gc_retains_exact_members_and_stops_on_unknown_contract(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HOME": tmp}):
+            root = Path(tmp)
+            cache = root / ".gwt/cache/issues/abc1234567890def"
+            self._write_cached_issue(cache, 1, "Retained", "body", [])
+            args = dict(repo_hash="abc1234567890def", project_root=tmp, db_root=root / "index")
+            self.assertTrue(runner.action_index_issues_v2(**args)["ok"])
+            db = runner.resolve_db_path(args["repo_hash"], None, "issues", args["db_root"])
+            pointer_path = runner.active_pointer_path(db)
+            original_pointer = pointer_path.read_bytes()
+            future_pointer = json.loads(original_pointer)
+            future_pointer["writer_protocol"] = "issues-records-v99"
+            pointer_path.write_text(json.dumps(future_pointer))
+            future_bytes = pointer_path.read_bytes()
+            refused = runner.action_index_issues_v2(**args, mode="incremental", repair=True)
+            self.assertFalse(refused["ok"], refused)
+            self.assertEqual(pointer_path.read_bytes(), future_bytes)
+            self.assertTrue((pointer_path.parent / future_pointer["generation"]).is_dir())
+            pointer_path.write_bytes(original_pointer)
+            client, collection = runner._open_chroma_collection(runner._issue_record_pool(db), "issues")
+            orphans = [f"{number:064x}" for number in range(20)]
+            try:
+                collection.upsert(ids=orphans, documents=["orphan"] * len(orphans),
+                                  embeddings=[[1.0] * runner._FakeEmbeddingModel.DIM] * len(orphans),
+                                  metadatas=[{"record_kind":"issue"}] * len(orphans))
+                before_ids = set(collection.get(include=[])["ids"])
+                first_unused = [record_id for record_id in collection.get(limit=16, offset=0, include=[])["ids"]
+                                if record_id in orphans]
+            finally:
+                runner._close_chroma_client(client)
+            unknown = runner.generations_root(db) / "gen-future"
+            unknown.mkdir()
+            (unknown / runner.ISSUE_MEMBERSHIP_FILENAME).write_text('{"writer_protocol":"future"}')
+            from chromadb.api.models.Collection import Collection
+            get_records = Collection.get
+            with runner.acquire_lock(db / "build", exclusive=True), runner.acquire_lock(db, exclusive=True):
+                self.assertEqual(runner._prune_issue_record_pool(db), 0)
+                (unknown / runner.ISSUE_MEMBERSHIP_FILENAME).unlink()
+                unknown.rmdir()
+                with mock.patch.object(Collection, "get", autospec=True, side_effect=get_records) as gc_read:
+                    self.assertEqual(runner._prune_issue_record_pool(db), len(first_unused))
+                self.assertGreater(len(first_unused), 0)
+                self.assertLessEqual(len(first_unused), 16)
+                client, collection = runner._open_chroma_collection(runner._issue_record_pool(db), "issues")
+                try:
+                    self.assertEqual(set(collection.get(include=[])["ids"]), before_ids - set(first_unused),
+                                     "only unused IDs from the first original 16-ID block may be deleted")
+                finally:
+                    runner._close_chroma_client(client)
+                self.assertEqual(runner._prune_issue_record_pool(db), len(orphans) - len(first_unused))
+            self.assertEqual(self._visible_issue_records(db), {"1":"Retained\nbody"})
+            self.assertEqual([call.kwargs for call in gc_read.call_args_list], [
+                {"limit": 128, "offset": 0, "include": []},
+            ])
+
+    def test_explicit_repair_quarantines_an_unreadable_issue_pool(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HOME": tmp}):
+            root = Path(tmp)
+            self._write_cached_issue(root / ".gwt/cache/issues/abc1234567890def", 1, "Recover", "body", [])
+            args = dict(repo_hash="abc1234567890def", project_root=tmp, db_root=root / "index")
+            self.assertTrue(runner.action_index_issues_v2(**args)["ok"])
+            db = runner.resolve_db_path(args["repo_hash"], None, "issues", args["db_root"])
+            pool = runner._issue_record_pool(db)
+            with mock.patch.object(runner, "_make_chroma_collection", side_effect=PermissionError("temporarily unavailable")):
+                transient = runner.action_index_issues_v2(**args, repair=True)
+            self.assertFalse(transient["ok"], transient)
+            self.assertEqual(list(pool.parent.glob(".store.quarantine-*")), [])
+            (pool / "chroma.sqlite3").write_bytes(b"not a SQLite database")
+            repaired = runner.action_index_issues_v2(**args, repair=True)
+            self.assertTrue(repaired["ok"], repaired)
+            self.assertEqual(repaired["newly_embedded"], 1)
+            self.assertTrue(runner._issue_status_v2(args["repo_hash"], args["db_root"])["healthy"])
+            quarantines = list(pool.parent.glob(".store.quarantine-*"))
+            self.assertEqual(len(quarantines), 1)
+            self.assertEqual((quarantines[0] / "chroma.sqlite3").read_bytes(), b"not a SQLite database")
 
     def test_spec_chunks_share_the_issue_store_and_filter_before_top_k(self):
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HOME": tmp}):
@@ -582,12 +853,15 @@ class IssueTtlTests(unittest.TestCase):
             self.assertTrue(runner.action_index_specs_v2(worktree_hash=None, **args)["ok"])
             db = runner.resolve_db_path(repo, None, "issues", args["db_root"])
             self.assertNotIn("source_cache_revision", runner._read_issue_meta(db))
+            source_stamp = runner._read_issue_meta(db)["source_content_fingerprint"]
+            self.assertEqual(source_stamp, runner._legacy_issue_source_snapshot(repo))
             self.assertEqual(runner.resolve_db_path(repo, None, "specs", args["db_root"]), db)
             self.assertEqual(runner.read_manifest(db, "specs"), runner.read_manifest(db, "issues"))
-            client, collection = runner._open_chroma_collection(runner.resolve_active_store(db), "issues")
+            client, collection = runner._open_chroma_collection(runner._issue_record_pool(db), "issues")
             try:
-                records = collection.get()
-                self.assertEqual(set(records["ids"]), {"1", "spec-2:chunk-0", "spec-2:chunk-1"})
+                members = runner._active_issue_members(db)
+                records = collection.get(ids=list(members.values()))
+                self.assertEqual(set(members), {"1", "spec-2:chunk-0", "spec-2:chunk-1"})
                 self.assertEqual(sorted(meta["record_kind"] for meta in records["metadatas"]), ["issue", "spec", "spec"])
             finally:
                 runner._close_chroma_client(client)
@@ -600,16 +874,51 @@ class IssueTtlTests(unittest.TestCase):
             # A section edit outside the truncated Issue body must invalidate
             # the shared source, then reuse the unchanged issue and chunk.
             spec.write_text("## Alpha\nalpha requirements\n## Omega\nchanged requirements", encoding="utf-8")
+            self.assertNotEqual(source_stamp, runner._legacy_issue_source_snapshot(repo))
             self.assertTrue(runner._issue_status_v2(repo, args["db_root"])["source_drift"])
             rebuilt = runner.action_index_issues_v2(**args, mode="incremental")
             self.assertEqual(rebuilt["newly_embedded"], 1, rebuilt)
             self._write_cached_issue(cache, 2, "Plain now", "ordinary body", [])
             rebuilt = runner.action_index_issues_v2(**args, mode="incremental")
             self.assertEqual(rebuilt["newly_embedded"], 1, rebuilt)
-            result = runner.action_search_multi_v2(
-                repo, None, tmp, "alpha", 5, ["specs", "issues"], db_root=args["db_root"])
+            from chromadb.api.models.Collection import Collection
+            query_collection = Collection.query
+
+            def omit_unchanged_issue(collection, *query_args, **query_kwargs):
+                found = query_collection(collection, *query_args, **query_kwargs)
+                if query_kwargs.get("where") == {"record_kind": "issue"}:
+                    keep = [index for index, meta in enumerate(found["metadatas"][0])
+                            if meta["number"] != 1]
+                    for field in ("ids", "metadatas", "documents", "distances"):
+                        found[field] = [[found[field][0][index] for index in keep]]
+                return found
+
+            # An ANN index may omit a member even when every member is requested.
+            # The unchanged Issue is closer than the newly reclassified Issue.
+            with mock.patch.object(Collection, "query", omit_unchanged_issue):
+                result = runner.action_search_multi_v2(
+                    repo, None, tmp, "alpha", 5, ["specs", "issues"], db_root=args["db_root"])
             self.assertEqual(result["specResults"], [], result)
             self.assertEqual({item["number"] for item in result["issueResults"]}, {1, 2}, result)
+            self.assertEqual([item["number"] for item in result["issueResults"]], [1, 2], result)
+
+            with mock.patch.object(Collection, "query", autospec=True, side_effect=query_collection) as ann:
+                runner.action_search_multi_v2(
+                    repo, None, tmp, "alpha", 1, ["issues"], db_root=args["db_root"])
+            self.assertEqual(ann.call_count, 1, "ordinary top-k still uses ANN")
+
+            get_records = Collection.get
+            for broken_vector in ([0.0] * 32, [float("nan")] * 32, [1.0]):
+                with self.subTest(vector=broken_vector):
+                    def invalid_vectors(collection, *get_args, **get_kwargs):
+                        found = get_records(collection, *get_args, **get_kwargs)
+                        if get_kwargs.get("include") == ["embeddings"]:
+                            found["embeddings"] = [broken_vector for _ in found["ids"]]
+                        return found
+
+                    with mock.patch.object(Collection, "get", invalid_vectors):
+                        with self.assertRaises(ValueError):
+                            runner._query_active_layers(db, "issues", "alpha", 5)
 
     def test_old_issue_layout_is_not_served_as_a_unified_store(self):
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HOME": tmp}):

@@ -1,6 +1,309 @@
 use super::*;
 use crate::app_runtime::UpdateDrainObservation;
 
+/// The returned guard pins the GUI control budget for the calling test thread:
+/// these fixtures assert the committed drain outcome through a real daemon ACK,
+/// not how fast a loaded runner answers within the 200ms hot-path deadline.
+#[must_use = "the control budget pin is released when the guard drops"]
+fn insert_monitored_update_pane(
+    runtime: &mut AppRuntime,
+    id: &str,
+) -> gwt_core::deadline_budget::ScopedDeadlineBudget {
+    let control_budget = gwt_core::deadline_budget::ScopedDeadlineBudget::hang_guard(
+        &gwt::daemon_publisher::ISSUE_MONITOR_CONTROL_BUDGET,
+    );
+    let root = runtime
+        .tab(&runtime.window_lookup[id].tab_id)
+        .unwrap()
+        .project_root
+        .clone();
+    let owner = Arc::new(
+        owner_fixture_block_on(
+            gwt::project_runtime::test_support::ProjectOwnerHarness::start_with_monitor(&root),
+        )
+        .unwrap(),
+    );
+    configure_owner_fixture_start_gate(&owner);
+    runtime.test_project_owners.insert(root, owner);
+    insert_test_pane_runtime(runtime, id);
+    runtime.runtimes.get_mut(id).unwrap().status = WindowProcessStatus::Starting;
+    control_budget
+}
+
+fn committed_update_status_events(runtime: &mut AppRuntime, root: &Path) -> Vec<OutboundEvent> {
+    // Outcome contracts read the durable control commit after the real daemon
+    // ACK; the GUI's short status-query deadline is a separate performance seam.
+    let prefs =
+        gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(root)).unwrap();
+    let monitor = gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+    runtime.issue_monitor_daemon_status_events(root, Box::new(monitor.status_view()))
+}
+
+#[test]
+fn issue_7015_update_drain_ignores_ownerless_starting_rows_but_protects_pending_launches() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_with_initial_commit(&repo);
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "ghost",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Starting,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime.rebuild_window_lookup();
+    assert!(
+        runtime.capture_update_quiescence_inputs().0.is_empty(),
+        "saved Starting rows have neither an owner pane nor a process"
+    );
+
+    runtime.blocking_tasks = BlockingTaskSpawner::queued().0;
+    let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .working_dir(&repo)
+        .suppress_execution_control()
+        .build();
+    runtime.spawn_agent_window("tab-1", config, None).unwrap();
+    let panes = runtime.capture_update_quiescence_inputs().0;
+    assert_eq!(
+        panes.len(),
+        1,
+        "a queued physical launch still protects the update boundary"
+    );
+    assert_ne!(panes[0].window_id, "tab-1::ghost");
+    let pending_id = panes[0].window_id.clone();
+    let address = runtime.window_lookup[&pending_id].clone();
+    runtime.set_window_status(&address.tab_id, &address.raw_id, WindowProcessStatus::Error);
+    assert_eq!(
+        runtime.capture_update_quiescence_inputs().0[0].state,
+        WindowProcessStatus::Starting,
+        "a pending successor overrides an old diagnostic presentation"
+    );
+
+    runtime.pending_launch_completions.clear();
+    insert_test_pane_runtime(&mut runtime, "tab-1::ghost");
+    assert_eq!(
+        runtime.capture_update_quiescence_inputs().0.len(),
+        1,
+        "the authenticated owner pane has a real child process"
+    );
+    runtime
+        .runtimes
+        .get_mut("tab-1::ghost")
+        .unwrap()
+        .exit_confirmed = true;
+    assert!(
+        runtime.capture_update_quiescence_inputs().0.is_empty(),
+        "a retained exited projection is not a live process"
+    );
+    close_test_owner_runtime(&mut runtime, "tab-1::ghost");
+}
+
+#[test]
+fn repository_labels_read_runs_off_thread_for_the_requesting_project() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let active = temp.path().join("active");
+    let requested = temp.path().join("requested");
+    for root in [&active, &requested] {
+        fs::create_dir_all(root).unwrap();
+        init_repo_with_initial_commit(root);
+    }
+    let cache = gwt::issue_cache::issue_cache_root_for_repo_path(&requested).unwrap();
+    let (owner, repo) =
+        gwt::issue_monitor_worker::github_remote_owner_and_repo(&requested).unwrap();
+    fs::create_dir_all(&cache).unwrap();
+    fs::write(
+        cache.join("repository-labels.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "repository": format!("{owner}/{repo}"),
+            "labels": [{"name":"backend","color":"123abc"}],
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let tabs = vec![
+        sample_project_tab("active", "Active", active, ProjectKind::Git, &[]),
+        sample_project_tab(
+            "requested",
+            "Requested",
+            requested.clone(),
+            ProjectKind::Git,
+            &[],
+        ),
+    ];
+    let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), tabs, Some("active"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let context = runtime.project_context("requested").unwrap();
+    let event = serde_json::from_value(serde_json::json!({
+        "kind": "get_repository_labels", "refresh": false,
+    }))
+    .expect("repository label request");
+    assert!(runtime
+        .handle_frontend_event_for_project(&context, "requesting-client".into(), event)
+        .is_empty());
+    assert_eq!(tasks.lock().unwrap().len(), 1);
+    assert!(recorded.lock().unwrap().is_empty());
+    drain_queued_blocking_tasks(&tasks);
+    let completion = recorded.lock().unwrap().pop().unwrap();
+    let UserEvent::Dispatch(events) = recorded_project_payload(&completion) else {
+        panic!("repository labels reply expected");
+    };
+    let reply = &events[0];
+    assert!(
+        matches!(&reply.target, DispatchTarget::Client(client_id) if client_id == "requesting-client")
+    );
+    let payload = serde_json::to_value(&reply.event).unwrap();
+    assert_eq!(payload["project_root"], requested.display().to_string());
+    assert_eq!(payload["loaded"], true);
+    assert_eq!(payload["labels"][0]["name"], "backend");
+    assert!(payload["error"].is_null());
+}
+
+#[test]
+fn repeated_cached_owner_launch_failure_logs_one_error_and_preserves_notifications() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir(&repo).unwrap();
+    let other_repo = temp.path().join("other-repo");
+    fs::create_dir(&other_repo).unwrap();
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let other_tab = sample_project_tab("tab-2", "Other", other_repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab, other_tab], Some("tab-1"));
+    let context = runtime.project_context("tab-1").unwrap();
+    let other_context = runtime.project_context("tab-2").unwrap();
+    let request = super::super::DeferredIssueMonitorLaunch {
+        project_root: repo,
+        issue_number: 6934,
+        linked_issue_kind: LinkedIssueKind::Issue,
+        delivery_id: Some("failed-owner-delivery".into()),
+        launch_session_strategy: gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+    };
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let dispatch =
+        tracing::Dispatch::new(tracing_subscriber::registry().with(CaptureTracingLayer {
+            events: captured.clone(),
+        }));
+    let notifications = tracing::dispatcher::with_default(&dispatch, || {
+        let mut notifications = Vec::new();
+        for reason in [
+            "publish ack timeout; exact cleanup remains pending",
+            "owner endpoint unavailable",
+        ] {
+            for observation in 0..601 {
+                let mut request = request.clone();
+                request.delivery_id =
+                    (observation % 3 != 0).then(|| format!("failed-owner-delivery-{observation}"));
+                notifications.extend(runtime.schedule_issue_monitor_launch_failure(
+                    context.clone(),
+                    request,
+                    reason.into(),
+                    None,
+                ));
+            }
+        }
+        let mut other_request = request.clone();
+        other_request.project_root = other_repo;
+        notifications.extend(runtime.schedule_issue_monitor_launch_failure(
+            other_context,
+            other_request,
+            "owner endpoint unavailable".into(),
+            None,
+        ));
+        notifications.extend(runtime.schedule_issue_monitor_launch_failure(
+            context,
+            request,
+            "owner endpoint unavailable".into(),
+            None,
+        ));
+        notifications
+    });
+    let errors = captured
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|event| {
+            event.level == Level::ERROR
+                && event.target == "gwt.launch.timing"
+                && event
+                    .fields
+                    .get("message")
+                    .is_some_and(|message| message == "Issues launch did not reach an owner pane")
+        })
+        .count();
+    assert_eq!(
+        errors, 3,
+        "each project logs a new cause once across changing or absent deliveries"
+    );
+    assert_eq!(
+        notifications
+            .iter()
+            .filter(|event| matches!(event.event, BackendEvent::IssueMonitorToast { .. }))
+            .count(),
+        1204,
+        "notification aggregation retains its existing raw observation path"
+    );
+}
+
+#[test]
+fn issue_6996_cached_finalizer_timeout_does_not_repeat_error_notifications() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir(&repo).unwrap();
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let context = runtime.project_context("tab-1").unwrap();
+    let request = super::super::DeferredIssueMonitorLaunch {
+        project_root: repo,
+        issue_number: 6996,
+        linked_issue_kind: LinkedIssueKind::Issue,
+        delivery_id: Some("finalizer-timeout-delivery".into()),
+        launch_session_strategy: gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
+    };
+    let message = "workspace finalizer fresh-launch-6996 timed out after 120000ms while publishing launch Work; live external commit did not finish before operation deadline";
+    assert_eq!(
+        runtime
+            .schedule_issue_monitor_launch_failure(
+                context.clone(),
+                request.clone(),
+                message.into(),
+                None,
+            )
+            .len(),
+        1
+    );
+    for replay in 0..5 {
+        assert!(
+            runtime
+                .schedule_issue_monitor_launch_failure(
+                    context.clone(),
+                    request.clone(),
+                    message.replace("120000ms", &format!("{}ms", 120000 + replay * 5000)),
+                    None,
+                )
+                .is_empty(),
+            "cached timeout keeps recovery state without another error toast"
+        );
+    }
+    assert_eq!(
+        runtime
+            .schedule_issue_monitor_launch_failure(
+                context,
+                request,
+                message.replace("fresh-launch-6996", "fresh-launch-next"),
+                None,
+            )
+            .len(),
+        1,
+        "a different finalizer still reports its own timeout"
+    );
+}
+
 fn commit_issue_monitor_preparations(
     runtime: &mut AppRuntime,
     queued: &BlockingTestTaskQueue,
@@ -492,7 +795,7 @@ fn app_runtime_lifecycle_recovery_blocked_preserves_corrupt_prefs() {
         &event.event,
         BackendEvent::IssueMonitorToast { level, message, .. }
             if level == "error" && message.contains(
-                gwt::runtime_daemon_events::ISSUE_MONITOR_CONTROL_RECOVERY_BLOCKED_ERROR
+                "Issues control rejected: authority recovery is blocked"
             )
     )));
 }
@@ -1267,7 +1570,7 @@ fn app_runtime_local_driver_locked_latest_state_preserves_proposal_fence_result_
         issues: vec![gwt::IssueMonitorIssue {
             author_login: None,
             number: 42,
-            title: "Issue Monitor local proposal".to_string(),
+            title: "Issues local proposal".to_string(),
             labels: vec!["bug".to_string()],
             state: gwt::IssueMonitorIssueState::Open,
             body: None,
@@ -1423,7 +1726,7 @@ fn app_runtime_local_driver_slow_persist_does_not_silently_drop_prepared_proposa
         issues: vec![gwt::IssueMonitorIssue {
             author_login: None,
             number: 42,
-            title: "Issue Monitor slow persist".to_string(),
+            title: "Issues slow persist".to_string(),
             labels: vec!["bug".to_string()],
             state: gwt::IssueMonitorIssueState::Open,
             body: None,
@@ -1886,7 +2189,7 @@ fn app_runtime_lifecycle_publish_failure_uses_latest_state_fallback_with_outbox_
     monitor.record_candidate(gwt::IssueMonitorIssue {
         author_login: None,
         number: 42,
-        title: "Issue Monitor lifecycle fallback".to_string(),
+        title: "Issues lifecycle fallback".to_string(),
         labels: vec!["bug".to_string()],
         state: gwt::IssueMonitorIssueState::Open,
         body: None,
@@ -2019,7 +2322,7 @@ fn app_runtime_recovery_blocked_control_never_recovers_or_mutates_corrupt_prefs(
         BackendEvent::IssueMonitorToast { level, message, .. }
             if level == "error"
                 && message.contains(
-                    gwt::runtime_daemon_events::ISSUE_MONITOR_CONTROL_RECOVERY_BLOCKED_ERROR
+                    "Issues control rejected: authority recovery is blocked"
                 )
     )));
 }
@@ -2174,6 +2477,7 @@ fn issue_5062_daemon_drain_status_includes_other_project_window() {
     let active = sample_project_tab("active", "gwt", active_root.clone(), ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![active, other], Some("active"));
     runtime.rebuild_window_lookup();
+    insert_test_pane_runtime(&mut runtime, "other::agent-14");
     let mut monitor = test_monitor(gwt::IssueMonitorConfig::default());
     monitor.set_update_drain(
         gwt::IssueMonitorUpdateDrainReason::Auto,
@@ -2200,6 +2504,7 @@ fn issue_5062_daemon_drain_status_includes_other_project_window() {
         label.contains("llmlb") && label.contains("SPEC #821 T012c"),
         "{label}"
     );
+    close_test_owner_runtime(&mut runtime, "other::agent-14");
 }
 
 #[test]
@@ -3153,6 +3458,8 @@ fn app_runtime_update_drain_blocking_lists_running_agent_panes_and_pending_claim
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     runtime.rebuild_window_lookup();
+    insert_test_pane_runtime(&mut runtime, "tab-1::agent-1");
+    runtime.runtimes.get_mut("tab-1::agent-1").unwrap().status = WindowProcessStatus::Starting;
 
     let mut monitor = test_monitor(gwt::IssueMonitorConfig::default());
     monitor.terminal_queue_push(&[42], "operator", "2026-07-28T00:00:00Z");
@@ -3175,8 +3482,7 @@ fn app_runtime_update_drain_blocking_lists_running_agent_panes_and_pending_claim
         "2026-09-06T01:00:00Z",
     );
 
-    // An Agent pane with a live PTY but no hook state yet composes to
-    // `Starting` (no agent session bound), which blocks just like Running.
+    // An owner-backed pane awaiting its first hook blocks just like Running.
     let blocking = runtime.update_drain_blockers(&monitor);
     assert_eq!(
         blocking,
@@ -3194,10 +3500,12 @@ fn app_runtime_update_drain_blocking_lists_running_agent_panes_and_pending_claim
     runtime
         .window_hook_states
         .insert("tab-1::agent-1".to_string(), WindowProcessStatus::Idle);
+    runtime.runtimes.get_mut("tab-1::agent-1").unwrap().status = WindowProcessStatus::Idle;
     assert_eq!(
         runtime.update_drain_blockers(&monitor),
         vec![gwt::update_drain::UpdateBlocker::PendingAcquireClaim { issue_number: 42 }]
     );
+    close_test_owner_runtime(&mut runtime, "tab-1::agent-1");
 }
 
 /// Issue #4076 AC-2 (the 2026-09-07 01:52Z incident): staging an update in
@@ -3232,8 +3540,10 @@ fn app_runtime_staged_update_never_requests_a_restart_by_itself() {
     let (mut runtime, user_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
     runtime.rebuild_window_lookup();
+    let _control_budget = insert_monitored_update_pane(&mut runtime, "tab-1::agent-1");
 
-    let events = runtime.update_staged_events_with("99.0.0", None);
+    let mut events = runtime.update_staged_events_with("99.0.0", None);
+    events.extend(committed_update_status_events(&mut runtime, &repo));
     let log = fs::read_to_string(gwt_core::update::update_log_path()).unwrap_or_default();
     assert!(
         log.lines().any(|line| {
@@ -3269,6 +3579,7 @@ fn app_runtime_staged_update_never_requests_a_restart_by_itself() {
             .is_empty(),
         "staging sends no event-loop request that could restart gwt"
     );
+    close_test_owner_runtime(&mut runtime, "tab-1::agent-1");
 }
 
 /// Issue #5062 AC-2: once a staged update raised the drain, every drain tick
@@ -3299,6 +3610,8 @@ fn app_runtime_drain_tick_reevaluates_after_the_staged_update_raised_the_drain()
     );
     let (mut runtime, user_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    runtime.rebuild_window_lookup();
+    let _control_budget = insert_monitored_update_pane(&mut runtime, "tab-1::agent-1");
     let (spawner, tasks) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = spawner;
     runtime.rebuild_window_lookup();
@@ -3333,6 +3646,7 @@ fn app_runtime_drain_tick_reevaluates_after_the_staged_update_raised_the_drain()
             Some((tick + chrono::Duration::seconds(15)).to_rfc3339())
         );
     }
+    close_test_owner_runtime(&mut runtime, "tab-1::agent-1");
 }
 
 /// Issue #4376 AC-1 / AC-2 / AC-7: a manual Update click (attended monitor,
@@ -3349,6 +3663,17 @@ fn app_runtime_manual_update_click_with_running_agent_enters_drain_instead_of_ap
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo_with_initial_commit(&repo);
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let (mut runtime, user_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    runtime.rebuild_window_lookup();
+    let _control_budget = insert_monitored_update_pane(&mut runtime, "tab-1::agent-1");
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
     let seed = || {
         gwt::save_issue_monitor_prefs(
@@ -3387,18 +3712,9 @@ fn app_runtime_manual_update_click_with_running_agent_enters_drain_instead_of_ap
             .auto_apply_deferred,
         "global OFF preserves the operator defer flag"
     );
-    let tab = sample_project_tab_with_window_at(
-        "tab-1",
-        "agent-1",
-        repo.clone(),
-        WindowPreset::Agent,
-        WindowProcessStatus::Running,
-    );
-    let (mut runtime, user_events) =
-        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
-    runtime.rebuild_window_lookup();
     runtime.update_download_in_flight = Some("manual-client".into());
-    let events = runtime.update_staged_events_with("99.0.0", None);
+    let mut events = runtime.update_staged_events_with("99.0.0", None);
+    events.extend(committed_update_status_events(&mut runtime, &repo));
     let status = events
         .iter()
         .find_map(|event| match &event.event {
@@ -3440,7 +3756,7 @@ fn app_runtime_manual_update_click_with_running_agent_enters_drain_instead_of_ap
             .as_ref()
             .map(|drain| drain.version.as_str()),
         Some("99.0.0"),
-        "the hold is persisted for the Issue Monitor"
+        "the hold is persisted for Issues"
     );
     assert!(persisted.enabled, "the drain is a hold, not enabled:false");
     assert!(
@@ -3457,6 +3773,7 @@ fn app_runtime_manual_update_click_with_running_agent_enters_drain_instead_of_ap
         "launch ledger untouched"
     );
 
+    close_test_owner_runtime(&mut runtime, "tab-1::agent-1");
     // Quiet host: no drain, the ready modal's Restart now applies as before.
     seed();
     let quiet_tab = sample_project_tab("tab-2", "Repo", repo.clone(), ProjectKind::Git, &[]);
@@ -3533,6 +3850,7 @@ fn app_runtime_manual_drain_applies_gracefully_once_quiescent() {
     let (mut runtime, user_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
     runtime.rebuild_window_lookup();
+    let _control_budget = insert_monitored_update_pane(&mut runtime, "tab-1::agent-1");
     let drained_events = |user_events: &Arc<Mutex<Vec<UserEvent>>>| {
         user_events
             .lock()
@@ -3581,6 +3899,7 @@ fn app_runtime_manual_drain_applies_gracefully_once_quiescent() {
     runtime
         .window_hook_states
         .insert("tab-1::agent-1".to_string(), WindowProcessStatus::Idle);
+    runtime.runtimes.get_mut("tab-1::agent-1").unwrap().status = WindowProcessStatus::Idle;
     assert!(runtime
         .update_drain_tick_events_and_drain_at(at(45))
         .is_empty());
@@ -3679,10 +3998,11 @@ fn app_runtime_manual_drain_applies_gracefully_once_quiescent() {
             )),
         "the drained manual click never uses the Restart-now route"
     );
+    close_test_owner_runtime(&mut runtime, "tab-1::agent-1");
 }
 
 /// Issue #4376 AC-4 / AC-7: after the restart that applied a manually
-/// requested update, the Issue Monitor setting from before the drain is in
+/// requested update, Issues setting from before the drain is in
 /// effect again. The drain is a #4037 admission hold layered over the
 /// setting — `enabled` is never flipped — so the resume marker records the
 /// raised hold per project and the settling bootstrap releases exactly that:
@@ -3897,6 +4217,102 @@ fn update_auto_apply_keeps_project_planners_and_releases_all_matching_drains() {
 }
 
 #[test]
+fn issue_7072_update_drain_reaps_stopped_holder_without_monitor_scan() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let worktree = temp.path().join("stopped-owner");
+    run_git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "work/stopped-owner",
+            worktree.to_str().unwrap(),
+        ],
+    );
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Error,
+    );
+    let (mut runtime, events) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 7072,
+    };
+    let session_id = "update-stopped-holder";
+    seed_defunct_active_owner(
+        &runtime.sessions_dir,
+        &repo,
+        &worktree,
+        "work/stopped-owner",
+        owner,
+        session_id,
+        gwt_agent::AgentStatus::Stopped,
+    );
+    let mut active = sample_active_agent_session("tab-1", "tab-1::agent-1");
+    active.session_id = session_id.into();
+    active.worktree_path = worktree.clone();
+    runtime
+        .active_agent_sessions
+        .insert(active.window_id.clone(), active);
+    let since = chrono::DateTime::parse_from_rfc3339("2026-11-11T00:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    gwt::save_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
+        &gwt::IssueMonitorPrefs {
+            enabled: false,
+            update_drain: Some(gwt::IssueMonitorUpdateDrain {
+                version: "99.0.0".into(),
+                since: since.to_rfc3339(),
+                reason: gwt::IssueMonitorUpdateDrainReason::Auto,
+                automatic: Some(false),
+                blocking: Vec::new(),
+            }),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    // An admitted restore has no live runtime yet and must remain protected.
+    runtime
+        .restore_launch_windows
+        .insert("tab-1::agent-1".into(), Some(session_id.into()));
+    runtime.update_drain_tick_events_and_drain_at(since + chrono::Duration::seconds(15));
+    assert_eq!(
+        gwt::cli::execution_state::load(&worktree)
+            .unwrap()
+            .unwrap()
+            .status,
+        gwt::cli::execution_state::ExecutionControlStatus::Active
+    );
+    runtime.restore_launch_windows.clear();
+    runtime.update_drain_tick_events_and_drain_at(since + chrono::Duration::seconds(30));
+    assert_eq!(
+        gwt::cli::execution_state::load(&worktree)
+            .unwrap()
+            .unwrap()
+            .status,
+        gwt::cli::execution_state::ExecutionControlStatus::Blocked,
+        "the drain worker must reclaim its stopped holder even with Monitor disabled"
+    );
+    runtime.update_drain_tick_events_and_drain_at(since + chrono::Duration::seconds(45));
+    runtime.update_drain_tick_events_and_drain_at(since + chrono::Duration::seconds(105));
+    assert!(
+        events.lock().unwrap().iter().any(|event| matches!(
+            recorded_project_payload(event),
+            UserEvent::ApplyUpdateDrained { .. }
+        )),
+        "stopped execution and error window must allow graceful update apply"
+    );
+}
+
+#[test]
 fn app_runtime_update_drain_tick_applies_after_quiescence_and_grace() {
     let temp = tempdir().expect("tempdir");
     let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
@@ -3933,6 +4349,7 @@ fn app_runtime_update_drain_tick_applies_after_quiescence_and_grace() {
     let (mut runtime, user_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
     runtime.rebuild_window_lookup();
+    insert_test_pane_runtime(&mut runtime, "tab-1::agent-1");
     let drained_events = |user_events: &Arc<Mutex<Vec<UserEvent>>>| {
         user_events
             .lock()
@@ -3999,6 +4416,7 @@ fn app_runtime_update_drain_tick_applies_after_quiescence_and_grace() {
     runtime
         .window_hook_states
         .insert("tab-1::agent-1".to_string(), WindowProcessStatus::Idle);
+    runtime.runtimes.get_mut("tab-1::agent-1").unwrap().status = WindowProcessStatus::Idle;
     assert!(runtime
         .update_drain_tick_events_and_drain_at(at(1815))
         .is_empty());
@@ -4055,6 +4473,7 @@ fn app_runtime_update_drain_tick_applies_after_quiescence_and_grace() {
             )),
         "the automatic path never uses the Restart-now route"
     );
+    close_test_owner_runtime(&mut runtime, "tab-1::agent-1");
 }
 
 /// Issue #4076 AC-2 / AC-5 (#3906 AC-7 / AC-13): cancelling inside the grace
@@ -4407,7 +4826,7 @@ fn app_runtime_full_issue_monitor_scan_migrates_legacy_git_failure_and_persists_
             BackendEvent::IssueMonitorStatus { status } => Some(status),
             _ => None,
         })
-        .expect("issue monitor status");
+        .expect("Issues status");
     assert_eq!(
         status.last_error, None,
         "the stale failure banner is removed"
@@ -4422,7 +4841,7 @@ fn app_runtime_full_issue_monitor_scan_migrates_legacy_git_failure_and_persists_
             BackendEvent::IssueMonitorInbox { items } => Some(items),
             _ => None,
         })
-        .expect("issue monitor inbox");
+        .expect("Issues inbox");
     let item = inbox
         .iter()
         .find(|item| item.issue.number == 43)
@@ -4540,7 +4959,7 @@ fn app_runtime_issue_monitor_reconciliation_error_survives_rebase_scan() {
             BackendEvent::IssueMonitorStatus { status } => Some(status),
             _ => None,
         })
-        .expect("issue monitor status");
+        .expect("Issues status");
     let error = status
         .last_error
         .as_deref()
@@ -4558,7 +4977,7 @@ fn app_runtime_issue_monitor_reconciliation_error_survives_rebase_scan() {
             BackendEvent::IssueMonitorInbox { items } => Some(items),
             _ => None,
         })
-        .expect("issue monitor inbox");
+        .expect("Issues inbox");
     assert_eq!(
         inbox
             .iter()
@@ -4576,7 +4995,7 @@ fn issue_monitor_scan_failures_prefer_launch_failure_over_merge_query_error() {
     record_issue_monitor_scan_failures(
         &mut monitor,
         "2026-07-27T00:00:00Z",
-        Some("issue monitor merge reconciliation failed: gh unavailable".to_string()),
+        Some("Issues merge reconciliation failed: gh unavailable".to_string()),
         vec![(43, "agent binary missing".to_string())],
     );
 
@@ -4636,7 +5055,7 @@ fn app_runtime_full_issue_monitor_cache_fallback_does_not_migrate_legacy_failure
             BackendEvent::IssueMonitorInbox { items } => Some(items),
             _ => None,
         })
-        .expect("issue monitor inbox");
+        .expect("Issues inbox");
     assert_eq!(
         inbox
             .iter()
@@ -4690,7 +5109,7 @@ fn app_runtime_quick_issue_monitor_snapshot_does_not_migrate_legacy_failure() {
             BackendEvent::IssueMonitorInbox { items } => Some(items),
             _ => None,
         })
-        .expect("quick issue monitor inbox");
+        .expect("quick Issues inbox");
     assert_eq!(
         inbox
             .iter()
@@ -4749,7 +5168,7 @@ fn app_runtime_agent_failed_after_migration_keeps_new_same_failure() {
         window_id.clone(),
         LaunchFeedbackContext {
             client_id: "__issue_monitor__".to_string(),
-            title: "Issue Monitor".to_string(),
+            title: "Issues".to_string(),
             issue_monitor_issue_number: Some(43),
             issue_monitor_delivery_id: None,
             issue_monitor_project_root: None,
@@ -4777,7 +5196,7 @@ fn app_runtime_agent_failed_after_migration_keeps_new_same_failure() {
             BackendEvent::IssueMonitorInbox { items } => Some(items),
             _ => None,
         })
-        .expect("issue monitor inbox");
+        .expect("Issues inbox");
     let item = inbox
         .iter()
         .find(|item| item.issue.number == 43)
@@ -4851,7 +5270,7 @@ fn app_runtime_agent_failed_rebases_concurrent_daemon_migration_before_fresh_fai
         window_id.clone(),
         LaunchFeedbackContext {
             client_id: "__issue_monitor__".to_string(),
-            title: "Issue Monitor".to_string(),
+            title: "Issues".to_string(),
             issue_monitor_issue_number: Some(43),
             issue_monitor_delivery_id: None,
             issue_monitor_project_root: None,
@@ -4869,9 +5288,8 @@ fn app_runtime_agent_failed_rebases_concurrent_daemon_migration_before_fresh_fai
         .write(true)
         .truncate(false)
         .open(prefs_path.with_extension("lock"))
-        .expect("open issue monitor prefs lock");
-    lock.lock_exclusive()
-        .expect("hold issue monitor prefs lock");
+        .expect("open Issues prefs lock");
+    lock.lock_exclusive().expect("hold Issues prefs lock");
     let (contention_tx, contention_rx) = mpsc::channel();
     let (done_tx, done_rx) = mpsc::channel();
     let writer_window = window_id.clone();
@@ -4936,7 +5354,7 @@ fn app_runtime_agent_failed_rebases_concurrent_daemon_migration_before_fresh_fai
     let joined = writer.join();
     let (profile, reviewing, implementing) =
         coordinated.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
-    unlocked.expect("release issue monitor prefs lock");
+    unlocked.expect("release Issues prefs lock");
     joined.expect("GUI writer thread");
     let events = done_rx
         .try_recv()
@@ -4947,7 +5365,7 @@ fn app_runtime_agent_failed_rebases_concurrent_daemon_migration_before_fresh_fai
             BackendEvent::IssueMonitorInbox { items } => Some(items),
             _ => None,
         })
-        .expect("issue monitor inbox");
+        .expect("Issues inbox");
     let item = inbox
         .iter()
         .find(|item| item.issue.number == 43)
@@ -5459,6 +5877,76 @@ fn app_runtime_issue_monitor_reorder_persists_and_reorders_cached_inbox() {
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
+    // Issue #5083: both writers must preserve the most recently accepted order,
+    // including when the GUI was initialized before the CLI changed it.
+    let mut env = gwt::cli::TestEnv::new(repo.clone());
+    let assert_saved_order = |env: &mut gwt::cli::TestEnv, expected: &[u64]| {
+        env.stdout.clear();
+        assert_eq!(
+            gwt::cli::run(
+                env,
+                gwt::cli::CliCommand::Issue(gwt::cli::IssueCommand::MonitorStatus {
+                    project_root: Some(repo.clone()),
+                }),
+            )
+            .expect("read CLI monitor status"),
+            0
+        );
+        let status: serde_json::Value = serde_json::from_slice(&env.stdout).unwrap();
+        assert_eq!(status["priority_order"], serde_json::json!(expected));
+        let prefs =
+            gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo))
+                .expect("load Issues prefs");
+        assert_eq!(prefs.priority_order, expected);
+        assert_eq!(
+            prefs.terminal_queues[&gwt::process::current_hostname()]
+                .entries
+                .iter()
+                .map(|entry| entry.number)
+                .collect::<Vec<_>>(),
+            expected
+        );
+    };
+    assert_eq!(
+        gwt::cli::run(
+            &mut env,
+            gwt::cli::CliCommand::Issue(gwt::cli::IssueCommand::MonitorPrioritySet {
+                project_root: Some(repo.clone()),
+                expected_priority_order: None,
+                reason: None,
+                issue_numbers: vec![3167, 3165, 3166],
+            }),
+        )
+        .expect("CLI priority set"),
+        0
+    );
+    assert_saved_order(&mut env, &[3167, 3165, 3166]);
+
+    runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::IssueMonitorQueueMove {
+            issue_number: 3166,
+            position: 0,
+        },
+    );
+    assert_saved_order(&mut env, &[3166, 3167, 3165]);
+
+    assert_eq!(
+        gwt::cli::run(
+            &mut env,
+            gwt::cli::CliCommand::Issue(gwt::cli::IssueCommand::MonitorPriorityMove {
+                project_root: Some(repo.clone()),
+                expected_priority_order: None,
+                reason: None,
+                number: 3165,
+                position: gwt::cli::IssueMonitorPriorityPosition::Head,
+            }),
+        )
+        .expect("CLI priority move"),
+        0
+    );
+    assert_saved_order(&mut env, &[3165, 3166, 3167]);
+
     let events = runtime.handle_frontend_event(
         "client-1".to_string(),
         FrontendEvent::ReorderIssueMonitorIssues {
@@ -5472,13 +5960,10 @@ fn app_runtime_issue_monitor_reorder_persists_and_reorders_cached_inbox() {
             BackendEvent::IssueMonitorInbox { items } => Some(items),
             _ => None,
         })
-        .expect("issue monitor inbox");
+        .expect("Issues inbox");
     let visible_numbers: Vec<u64> = inbox.iter().map(|item| item.issue.number).collect();
     assert_eq!(visible_numbers, vec![3167, 3165, 3166]);
-
-    let prefs = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo))
-        .expect("load issue monitor prefs");
-    assert_eq!(prefs.priority_order, vec![3167, 3165, 3166]);
+    assert_saved_order(&mut env, &[3167, 3165, 3166]);
 }
 
 #[test]
@@ -5558,7 +6043,7 @@ fn app_runtime_quick_register_issue_creates_cache_entry_without_queue_admission(
             BackendEvent::IssueMonitorInbox { items } => Some(items),
             _ => None,
         })
-        .expect("issue monitor inbox");
+        .expect("Issues inbox");
     assert!(
         inbox.iter().all(|item| item.issue.number != 1),
         "registration without launch leaves the cached Issue in Backlog"
@@ -5710,7 +6195,7 @@ fn app_runtime_issue_monitor_auto_launch_uses_start_with_last_settings() {
         matches!(
             &event.event,
             BackendEvent::IssueMonitorToast { message, issue_number, .. }
-                if message == "Issue Monitor launch requested" && *issue_number == Some(3165)
+                if message == "Issues launch requested" && *issue_number == Some(3165)
         )
     }));
     assert!(
@@ -5732,7 +6217,7 @@ fn app_runtime_issue_monitor_auto_launch_uses_start_with_last_settings() {
             .pending_launch_feedback_contexts
             .values()
             .any(|context| context.issue_monitor_issue_number == Some(3165)),
-        "auto launch errors must be wired back to Issue Monitor"
+        "auto launch errors must be wired back to Issues"
     );
     let workspace = events
         .iter()
@@ -5811,6 +6296,240 @@ fn issue_5140_expired_fallback_delivery_does_not_authorize_a_window() {
     assert!(prefs.failed_issues.iter().any(|failure| {
         failure.issue_number == 42 && failure.message.contains("launch:effect-42")
     }));
+}
+
+#[test]
+fn issue_7087_open_project_reconnects_after_daemon_restart_and_materializes_delivery() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = gwt_core::test_support::socket_tempdir().expect("fixture home");
+    let _home = ScopedGwtHome::set(temp.path());
+    // The subscribers resolve their endpoints on their own OS threads.
+    let _process_home = ScopedEnvVar::set("HOME", temp.path());
+    let _process_profile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let _session = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+    let _session_runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+    let _ready_nonce = ScopedEnvVar::unset(gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV);
+    let mut fixture = monitor_relaunch_fixture(
+        temp.path(),
+        "materializer-restart",
+        MonitorProviderConversationFixture::Present,
+        MonitorNativeHolderFixture::None,
+        true,
+    );
+    let root = fixture.project_root.clone();
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&root);
+    let mut prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+    prefs.enabled = true;
+    gwt::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+    let original_owner = start_monitor_relaunch_owner(&mut fixture, false);
+    let original_endpoint = gwt::daemon_publisher::resolve_project_daemon_endpoint(&root)
+        .unwrap()
+        .unwrap();
+    let context = fixture.runtime.test_context();
+    let recorded = fixture.recorded_events.clone();
+    let status = || {
+        gwt::daemon_publisher::read_issue_monitor_status(&root)
+            .unwrap()
+            .unwrap()
+    };
+    let scan_until = |owner: &gwt::project_runtime::test_support::ProjectOwnerHarness,
+                      label: &str,
+                      ready: &dyn Fn() -> bool| {
+        // test-hygiene: allow-wall-clock-deadline Bounds actual socket/scan progress; observed state establishes ordering.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !ready() {
+            assert!(
+                // test-hygiene: allow-wall-clock-deadline This hang guard cannot establish subscription readiness.
+                Instant::now() < deadline,
+                "timed out waiting for {label}"
+            );
+            gwt::daemon_publisher::publish_durable_issue_monitor_control(
+                &root,
+                gwt::runtime_daemon_events::issue_monitor_payload(
+                    "control",
+                    serde_json::json!({"scan_now": {}}),
+                    std::process::id(),
+                ),
+            )
+            .expect("request the actual Monitor scan");
+            owner_fixture_block_on(owner.wait_monitor_idle()).unwrap();
+            thread::yield_now();
+        }
+    };
+    let has_delivery = || {
+        recorded.lock().unwrap().iter().any(|event| {
+            matches!(
+                recorded_project_payload(event),
+                UserEvent::IssueMonitorLaunchRequest {
+                    issue_number: 3165,
+                    ..
+                }
+            )
+        })
+    };
+    fixture.runtime.deferred_issue_monitor_launches = Some(Vec::new());
+    fixture.runtime.startup_generation_reaper_pending = false;
+    fixture.runtime.pending_startup_restore_log = None;
+    // Keep the fixture's already-running owner; do not execute the unrelated
+    // background ensure intent while testing this GUI subscription boundary.
+    fixture.runtime.blocking_tasks = BlockingTaskSpawner::queued().0;
+    let mut subscribers = crate::BoardDaemonSubscriberRegistry::default();
+    subscribers.sync(&fixture.runtime, fixture.runtime.proxy.clone());
+    scan_until(&original_owner, "the original GUI observer", &|| {
+        status()["gui_action"] == gwt::issue_monitor::GUI_MATERIALIZER_RECONNECT_ACTION
+    });
+    assert!(!fixture.runtime.issue_monitor_materializer_ready());
+    assert!(subscribers.subscribers.values().all(|(_, ready, _)| !ready));
+    assert!(fixture.runtime.runtimes.is_empty());
+    fixture.runtime.test_project_owners.remove(&root);
+    let Ok(original_owner) = Arc::try_unwrap(original_owner) else {
+        panic!("the fixture must release its exact original owner");
+    };
+    owner_fixture_block_on(original_owner.shutdown());
+    recorded.lock().unwrap().clear();
+
+    // Preserve the GUI, its pending startup admission, and its registry while
+    // the real daemon listener restarts and publishes a fresh credential.
+    let restarted_owner = start_monitor_relaunch_owner(&mut fixture, false);
+    let restarted_endpoint = gwt::daemon_publisher::resolve_project_daemon_endpoint(&root)
+        .unwrap()
+        .unwrap();
+    assert_ne!(original_endpoint.auth_token, restarted_endpoint.auth_token);
+    assert_eq!(fixture.runtime.test_context(), context);
+    // No registry sync here: the same observer must rediscover the new daemon.
+    scan_until(
+        &restarted_owner,
+        "the GUI observer after host restart",
+        &|| status()["gui_action"] == gwt::issue_monitor::GUI_MATERIALIZER_RECONNECT_ACTION,
+    );
+    assert_eq!(status()["stall_reason"], "gui_disconnected");
+    assert!(fixture.runtime.runtimes.is_empty());
+    assert!(!has_delivery(), "an observer cannot authorize a launch");
+
+    let callback_context = context.clone();
+    let proxy = fixture.runtime.proxy.clone();
+    let resolver_root = root.clone();
+    let observation = gwt::daemon_subscriber::DaemonSubscriber::spawn_with_resolver(
+        move || {
+            gwt::daemon_publisher::resolve_project_daemon_endpoint(&resolver_root)?
+                .ok_or_else(|| "project daemon is unavailable".into())
+        },
+        crate::daemon_subscriber_channels(),
+        move |channel, payload| {
+            // The actual daemon shares this test PID. This observer uses a
+            // distinct logical GUI PID only to avoid suppressing its echoes;
+            // materialization authority belongs exclusively to the real registry.
+            crate::dispatch_daemon_project_event(&proxy, &callback_context, &channel, payload, 0);
+        },
+    );
+    scan_until(&restarted_owner, "the read-only callback observer", &|| {
+        recorded.lock().unwrap().iter().any(|event| {
+            matches!(
+                recorded_project_payload(event),
+                UserEvent::IssueMonitorDaemonStatus { .. }
+            )
+        })
+    });
+    assert!(
+        !has_delivery(),
+        "both observers still lack materializer authority"
+    );
+    let proxy = fixture.runtime.proxy.clone();
+    let mut outbound = Vec::new();
+    crate::dispatch_startup_auto_resume_admission_prepared(
+        &mut fixture.runtime,
+        super::super::StartupAutoResumeAdmissionPrepared {
+            sessions: Vec::new(),
+        },
+        &mut subscribers,
+        proxy,
+        |events| outbound.extend(events),
+    );
+    assert!(fixture.runtime.issue_monitor_materializer_ready());
+    assert!(
+        subscribers.subscribers.values().all(|(_, ready, _)| *ready),
+        "startup admission must promote the retained GUI observer to materializer"
+    );
+    scan_until(
+        &restarted_owner,
+        "the promoted materializer delivery",
+        &has_delivery,
+    );
+    assert_ne!(status()["stall_reason"], "gui_disconnected");
+    let launch = {
+        let mut events = recorded.lock().unwrap();
+        let index = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    recorded_project_payload(event),
+                    UserEvent::IssueMonitorLaunchRequest { .. }
+                )
+            })
+            .unwrap();
+        into_recorded_project_payload(events.remove(index))
+    };
+    let UserEvent::IssueMonitorLaunchRequest {
+        project_root,
+        issue_number,
+        linked_issue_kind,
+        delivery_id,
+        launch_session_strategy,
+    } = launch
+    else {
+        unreachable!("matched actual subscriber delivery")
+    };
+    assert_eq!(project_root, root);
+    assert_eq!(delivery_id, fixture.delivery_id);
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    fixture.runtime.blocking_tasks = spawner;
+    outbound.extend(
+        fixture
+            .runtime
+            .auto_launch_issue_monitor_delivery_events_for_project(
+                &project_root,
+                issue_number,
+                linked_issue_kind,
+                delivery_id,
+                launch_session_strategy,
+            ),
+    );
+    outbound.extend(commit_issue_monitor_preparations(
+        &mut fixture.runtime,
+        &tasks,
+        &recorded,
+    ));
+    assert!(outbound
+        .iter()
+        .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })));
+    assert_eq!(fixture.runtime.runtimes.len(), 1);
+    let window_id = fixture.runtime.runtimes.keys().next().unwrap().clone();
+    let pane = owner_runtime_probe(&fixture.runtime, &window_id);
+    let child_pid = pane
+        .pty
+        .process_id()
+        .expect("actual launched provider process");
+    assert_ne!(child_pid, std::process::id());
+    assert!(pane.pty.try_wait().unwrap().is_none());
+    assert_eq!(
+        fixture.runtime.runtimes[&window_id].child_pid,
+        Some(child_pid)
+    );
+    assert_eq!(
+        fixture.runtime.active_agent_sessions[&window_id].session_id,
+        pane.session.as_ref().unwrap().id
+    );
+    close_test_owner_runtime(&mut fixture.runtime, &window_id);
+    observation.stop();
+    subscribers.shutdown();
+    fixture.runtime.test_project_owners.remove(&root);
+    let Ok(restarted_owner) = Arc::try_unwrap(restarted_owner) else {
+        panic!("the fixture must release its exact restarted owner");
+    };
+    owner_fixture_block_on(restarted_owner.shutdown());
 }
 
 #[test]
@@ -5924,9 +6643,22 @@ fn durable_issue_monitor_delivery_materializes_one_window_and_replay_only_acks()
     assert_eq!(before_ready["acknowledged"], false);
     assert_eq!(before_ready["id"], pane.id);
     assert_eq!(before_ready["incarnation"], pane.incarnation);
+    let other_project = temp.path().join("other-project");
+    runtime
+        .issue_monitor_launch_failure_causes
+        .insert(repo.clone(), "owner endpoint unavailable".into());
+    runtime
+        .issue_monitor_launch_failure_causes
+        .insert(other_project.clone(), "owner endpoint unavailable".into());
     // Accepted replay now observes readiness too. Consume its negative GUI
     // completion before asserting a separate ACK worker can be scheduled.
     runtime.finish_queued_delivery_acks(&launch_tasks);
+    assert!(
+        runtime
+            .issue_monitor_launch_failure_causes
+            .contains_key(&repo),
+        "a negative ACK must retain the consecutive failure cause"
+    );
     assert!(!runtime
         .pending_launch_delivery_acks
         .contains_key(&window_id));
@@ -6136,6 +6868,18 @@ fn durable_issue_monitor_delivery_materializes_one_window_and_replay_only_acks()
         *ack
     };
     runtime.handle_issue_monitor_launch_delivery_ack(take_ack());
+    assert!(
+        !runtime
+            .issue_monitor_launch_failure_causes
+            .contains_key(&repo),
+        "a successful owner ACK starts a new failure episode for its project"
+    );
+    assert!(
+        runtime
+            .issue_monitor_launch_failure_causes
+            .contains_key(&other_project),
+        "an ACK must preserve another project's consecutive failure cause"
+    );
     assert_eq!(
         gwt::load_workspace_state(&gwt::workspace_state_path(&repo)).unwrap(),
         disk_after_ready
@@ -6284,10 +7028,19 @@ fn durable_issue_monitor_delivery_materializes_one_window_and_replay_only_acks()
         stale_owner_ack.is_err(),
         "the replaced owner incarnation cannot ACK"
     );
+    runtime
+        .issue_monitor_launch_failure_causes
+        .insert(repo.clone(), "owner endpoint unavailable".into());
     stale_ack();
     assert!(runtime
         .handle_issue_monitor_launch_delivery_ack(take_ack())
         .is_empty());
+    assert!(
+        runtime
+            .issue_monitor_launch_failure_causes
+            .contains_key(&repo),
+        "a stale ACK must retain the consecutive failure cause"
+    );
     assert_eq!(
         gwt::load_workspace_state(&gwt::workspace_state_path(&repo)).unwrap(),
         disk_before_stale_ack
@@ -6518,38 +7271,39 @@ fn assert_expired_launch_ack_cleanup(
         .unwrap();
         None
     } else {
-        // The real scan commit rebases and expires at real now. Age only this
-        // exact fixture delivery so expiry survives that canonical recheck.
-        let created_at = (Utc::now() - chrono::Duration::seconds(121)).to_rfc3339();
-        gwt::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
-            let delivery = prefs
-                .pending_launch_deliveries
-                .iter_mut()
-                .find(|pending| Some(&pending.delivery_id) == delivery_id.as_ref())
-                .expect("the exact paused materializer delivery");
-            assert_eq!(delivery.issue_number, 42);
-            assert_eq!(
-                delivery.materializer_window_id.as_deref(),
-                Some(id.as_str())
-            );
-            delivery.created_at = created_at.clone();
-            prefs
-                .launching_issues
-                .iter_mut()
-                .find(|launch| launch.issue_number == 42)
-                .unwrap()
-                .claimed_at = Some(created_at.clone());
-            Ok(())
-        })
-        .unwrap();
-        owner_fixture_block_on(
-            owner.expire_monitor_windowless_launches_at(Utc::now().to_rfc3339()),
+        // This verifies cleanup after a committed expiry, not the deadline
+        // predicate. A scan can observe the paused Session's provisional live
+        // execution and correctly refuse to expire it (Issue #7098). Commit
+        // the exact delivery's timeout before releasing its launch checkpoint.
+        let delivery = gwt::load_issue_monitor_prefs(&prefs_path)
+            .unwrap()
+            .pending_launch_deliveries
+            .into_iter()
+            .find(|pending| Some(&pending.delivery_id) == delivery_id.as_ref())
+            .expect("the exact paused materializer delivery");
+        assert_eq!(delivery.issue_number, 42);
+        assert_eq!(
+            delivery.materializer_window_id.as_deref(),
+            Some(id.as_str())
+        );
+        gwt::daemon_publisher::publish_durable_issue_monitor_control(
+            &root,
+            gwt::runtime_daemon_events::issue_monitor_payload(
+                "control",
+                serde_json::json!({"launch_failed": {
+                    "issue_number": 42,
+                    "message": "Launch timed out: no window was created within 120s",
+                    "delivery_id": delivery.delivery_id,
+                    "materializer_id": delivery.materializer_id,
+                }}),
+                std::process::id(),
+            ),
         )
         .unwrap();
         let expired = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
         assert!(
             expired.pending_launch_deliveries.is_empty(),
-            "the real daemon expired its windowless delivery"
+            "the real daemon committed the exact delivery's timeout"
         );
         assert!(expired.launching_issues.is_empty());
         Some(expired)
@@ -9200,7 +9954,7 @@ fn app_runtime_issue_monitor_pending_launch_error_marks_issue_row_failed() {
             BackendEvent::IssueMonitorStatus { status } => Some(status),
             _ => None,
         })
-        .expect("issue monitor status");
+        .expect("Issues status");
     assert_eq!(status.state, "idle");
     assert_eq!(
         status.last_error.as_deref(),
@@ -9212,7 +9966,7 @@ fn app_runtime_issue_monitor_pending_launch_error_marks_issue_row_failed() {
             BackendEvent::IssueMonitorInbox { items } => Some(items),
             _ => None,
         })
-        .expect("issue monitor inbox");
+        .expect("Issues inbox");
     let item = inbox
         .iter()
         .find(|item| item.issue.number == issue)
@@ -9404,16 +10158,486 @@ fn app_runtime_issue_monitor_auto_launch_uses_last_settings_runtime_target() {
     assert_eq!(runtime_target, gwt_agent::LaunchRuntimeTarget::Host);
     assert!(
         prompt.contains(
-            "This prompt was generated by Issue Monitor. It is not a statement, approval, or visual confirmation by a human user."
+            "This prompt was generated by Issues. It is not a statement, approval, or visual confirmation by a human user."
         ),
-        "Issue Monitor auto launch must identify the generated prompt as non-human provenance: {prompt}"
+        "Issues auto launch must identify the generated prompt as non-human provenance: {prompt}"
     );
     assert_eq!(
         prompt.matches("$gwt-execute #3165").count(),
         1,
-        "Issue Monitor auto launch must pass the generated prompt to the agent exactly once: {prompt}"
+        "Issues auto launch must pass the generated prompt to the agent exactly once: {prompt}"
     );
 }
+/// Issue #3706: the native initial argv survives CLI startup and produces a
+/// first response without racing an early PTY input write.
+#[test]
+fn grok_monitor_auto_launch_delivers_initial_task_before_first_response() {
+    use gwt::project_runtime::events::OwnerCommand;
+
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let _user_home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _session = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+    let _runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+    let _nonce = ScopedEnvVar::unset(gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV);
+    let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+    let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+    let _pane_url = ScopedEnvVar::unset(gwt_agent::GWT_PANE_WS_URL_ENV);
+    let grok_home = temp.path().join("grok-home");
+    let _grok_home = ScopedEnvVar::set("GROK_HOME", &grok_home);
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join("codex-home"));
+    let mut fixture = monitor_relaunch_fixture(
+        temp.path(),
+        "grok-initial-task",
+        MonitorProviderConversationFixture::Missing,
+        MonitorNativeHolderFixture::None,
+        false,
+    );
+    convert_monitor_relaunch_fixture_to_grok(&mut fixture, &grok_home);
+    let capture_path = temp.path().join("grok-native.txt");
+    let runner_root = temp.path().join("grok-runner");
+    pin_monitor_fixture_agents(
+        &fixture,
+        &runner_root,
+        &[(
+            "GWT_TEST_MONITOR_NATIVE_CAPTURE",
+            capture_path.to_str().unwrap(),
+        )],
+    );
+    let owner = start_monitor_relaunch_owner(&mut fixture, false);
+    let runner = runner_root
+        .join("fixture-runner-bin")
+        .join(if cfg!(windows) { "grok.cmd" } else { "grok" });
+    let script = fs::read_to_string(&runner).unwrap();
+    // Reuse the native argv capture fixture. Its response is emitted only
+    // after the complete initial task has been read and atomically captured.
+    #[cfg(windows)]
+    let responding = script
+        .replace("echo owner-monitor-fixture-ready", "echo Read Terms and Privacy Policy. owner-monitor-fixture-ready")
+        .replace(
+            "[IO.File]::Move($temporary, $env:GWT_TEST_MONITOR_NATIVE_CAPTURE)",
+            "[IO.File]::Move($temporary, $env:GWT_TEST_MONITOR_NATIVE_CAPTURE); [Console]::WriteLine('GWT_GROK_FIRST_RESPONSE')",
+        );
+    #[cfg(not(windows))]
+    let responding = script
+        .replace(
+            "if [ -n \"${GWT_TEST_MONITOR_NATIVE_CAPTURE-}\" ]; then",
+            "printf 'Read Terms and Privacy Policy.\\n'\nif [ -n \"${GWT_TEST_MONITOR_NATIVE_CAPTURE-}\" ]; then",
+        )
+        .replace(
+            "  mv \"$GWT_TEST_MONITOR_NATIVE_CAPTURE.pending\" \"$GWT_TEST_MONITOR_NATIVE_CAPTURE\"",
+            "  mv \"$GWT_TEST_MONITOR_NATIVE_CAPTURE.pending\" \"$GWT_TEST_MONITOR_NATIVE_CAPTURE\"\n  printf 'GWT_GROK_FIRST_RESPONSE\\n'",
+        );
+    assert!(responding.contains("GWT_GROK_FIRST_RESPONSE"));
+    fs::write(&runner, responding).unwrap();
+
+    let events = prepare_monitor_relaunch(
+        &mut fixture,
+        gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+    );
+    let (window_id, pane, _) = finish_monitor_relaunch_owner(&mut fixture, events);
+    let pane = pane.expect("actual Grok Monitor launch");
+    let registered = gwt_agent::Session::load(
+        &gwt_core::paths::gwt_sessions_dir()
+            .join(format!("{}.toml", pane.session.as_ref().unwrap().id)),
+    );
+    let observed = owner_fixture_block_on(async {
+        // test-hygiene: allow-wall-clock-deadline Bound a real fixture process hang; the response marker, not elapsed time, establishes ordering.
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let snapshot = owner
+                    .command(OwnerCommand::Snapshot {
+                        id: pane.id.clone(),
+                        incarnation: pane.incarnation,
+                    })
+                    .await?;
+                if snapshot["screen"]
+                    .as_str()
+                    .is_some_and(|screen| screen.contains("GWT_GROK_FIRST_RESPONSE"))
+                {
+                    return fs::read_to_string(&capture_path).map_err(|error| error.to_string());
+                }
+                if let Some(exit) = pane.pty.try_wait().map_err(|error| error.to_string())? {
+                    return Err(format!("Grok fixture exited before its response: {exit:?}"));
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+    });
+    close_test_owner_runtime(&mut fixture.runtime, &window_id);
+    fixture
+        .runtime
+        .test_project_owners
+        .remove(&fixture.project_root);
+    owner_fixture_block_on(
+        Arc::try_unwrap(owner)
+            .ok()
+            .expect("drained Grok owner")
+            .shutdown(),
+    );
+
+    let registered = registered.expect("Grok launch must register its durable Session");
+    assert_eq!(registered.agent_id, gwt_agent::AgentId::GrokBuild);
+    assert_eq!(registered.id, pane.session.as_ref().unwrap().id);
+    assert_eq!(registered.session_mode, gwt_agent::SessionMode::Normal);
+    let captured = observed
+        .expect("Grok fixture must emit a first response")
+        .expect("Grok fixture must capture its initial task");
+    let (session_id, arguments) = captured.split_once('\n').unwrap();
+    let (prompt_file, arguments) = arguments.split_once('\n').unwrap();
+    let (arguments, prompt) = arguments
+        .split_once("\n__GWT_MONITOR_PROMPT_CONTENT__\n")
+        .unwrap();
+    assert_eq!(session_id, registered.id);
+    if prompt_file.is_empty() {
+        assert_eq!(arguments.matches("$gwt-execute #3165").count(), 1);
+    } else {
+        assert_eq!(
+            arguments
+                .matches("Read the complete initial task from the UTF-8 file")
+                .count(),
+            1
+        );
+    }
+    assert_eq!(prompt.matches("$gwt-execute #3165").count(), 1);
+    assert!(pane.pty.try_wait().unwrap().is_some());
+}
+
+struct GrokTrustCleanup {
+    path: PathBuf,
+    key: String,
+}
+
+impl GrokTrustCleanup {
+    fn remove_grant(&self) -> std::io::Result<()> {
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(self.path.with_extension("toml.lock"))?;
+        FileExt::lock_exclusive(&lock)?;
+        let contents = match fs::read_to_string(&self.path) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        let mut document: toml::Value = toml::from_str(&contents).map_err(std::io::Error::other)?;
+        let Some(folders) = document.get_mut("folders") else {
+            return Ok(());
+        };
+        let folders = folders
+            .as_table_mut()
+            .ok_or_else(|| std::io::Error::other("Grok trust folders must be a table"))?;
+        if folders.remove(&self.key).is_none() {
+            return Ok(());
+        }
+        let contents = toml::to_string_pretty(&document).map_err(std::io::Error::other)?;
+        // Match Grok's locked read-modify-write protocol, including its 0600
+        // temporary file and atomic replacement. Never restore a stale snapshot.
+        let mut staged = tempfile::NamedTempFile::new_in(self.path.parent().unwrap())?;
+        staged.write_all(contents.as_bytes())?;
+        staged.as_file().sync_all()?;
+        staged.persist(&self.path).map_err(|error| error.error)?;
+        Ok(())
+    }
+}
+
+impl Drop for GrokTrustCleanup {
+    fn drop(&mut self) {
+        if let Err(error) = self.remove_grant() {
+            if thread::panicking() {
+                eprintln!("Grok fixture trust cleanup failed: {error}");
+            } else {
+                panic!("Grok fixture trust cleanup failed: {error}");
+            }
+        }
+    }
+}
+
+#[test]
+fn grok_trust_cleanup_preserves_existing_and_intervening_entries() {
+    let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let path = temp.path().join("trusted_folders.toml");
+    fs::write(
+        &path,
+        "[folders.fixture]\ntrusted=true\n[folders.existing]\ntrusted=false\n",
+    )
+    .unwrap();
+    let cleanup = GrokTrustCleanup {
+        path: path.clone(),
+        key: "fixture".into(),
+    };
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path.with_extension("toml.lock"))
+        .unwrap();
+    lock.lock_exclusive().unwrap();
+    let dropping = thread::spawn(move || drop(cleanup));
+    fs::write(&path, "[folders.fixture]\ntrusted=true\n[folders.existing]\ntrusted=false\n[folders.concurrent]\ntrusted=true\n").unwrap();
+    FileExt::unlock(&lock).unwrap();
+    dropping.join().unwrap();
+    let value: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert!(value["folders"].get("fixture").is_none());
+    assert_eq!(
+        value["folders"]["existing"]["trusted"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        value["folders"]["concurrent"]["trusted"].as_bool(),
+        Some(true)
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+}
+
+#[test]
+fn grok_trust_cleanup_runs_while_fixture_unwinds() {
+    let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let path = temp.path().join("trusted_folders.toml");
+    fs::write(
+        &path,
+        "[folders.fixture]\ntrusted=true\n[folders.existing]\ntrusted=true\n",
+    )
+    .unwrap();
+    let result = std::panic::catch_unwind(|| {
+        let _cleanup = GrokTrustCleanup {
+            path: path.clone(),
+            key: "fixture".into(),
+        };
+        panic!("simulate failed live assertion");
+    });
+    assert!(result.is_err());
+    let value: toml::Value = toml::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+    assert!(value["folders"].get("fixture").is_none());
+    assert_eq!(
+        value["folders"]["existing"]["trusted"].as_bool(),
+        Some(true)
+    );
+}
+
+#[test]
+#[ignore = "requires explicit opt-in, installed Grok and authentication; makes one paid model request"]
+fn grok_live_native_initial_task_starts_first_response() {
+    use gwt::project_runtime::events::OwnerEvent;
+
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert_eq!(std::env::var("GWT_GROK_LIVE_SMOKE").as_deref(), Ok("1"));
+    // The test harness isolates HOME before this test starts. The opt-in
+    // caller must explicitly identify the already-authenticated Grok home.
+    let live_home = PathBuf::from(
+        std::env::var_os("GWT_GROK_LIVE_HOME")
+            .expect("set GWT_GROK_LIVE_HOME to the existing authenticated Grok home"),
+    );
+    assert!(live_home.is_absolute());
+    let trust_path = live_home.join("trusted_folders.toml");
+    let previous_trust = fs::read_to_string(&trust_path)
+        .map(|text| toml::from_str::<toml::Value>(&text).expect("existing native trust store"))
+        .ok();
+    let binary = std::env::var_os("GWT_GROK_LIVE_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| which::which("grok").expect("installed Grok executable"));
+    assert!(binary.is_absolute() && binary.is_file());
+    let gwtd = PathBuf::from(
+        std::env::var_os("GWT_GROK_LIVE_GWTD")
+            .expect("set GWT_GROK_LIVE_GWTD to the freshly built checkout gwtd"),
+    );
+    assert!(gwtd.is_absolute() && gwtd.is_file());
+    #[cfg(windows)]
+    assert!(binary
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("exe")));
+    let temp = tempdir().expect("isolated live Monitor");
+    let _home = ScopedGwtHome::set(temp.path());
+    let _user_home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _session = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+    let _runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+    let _nonce = ScopedEnvVar::unset(gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV);
+    let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+    let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+    let _pane_url = ScopedEnvVar::unset(gwt_agent::GWT_PANE_WS_URL_ENV);
+    let _grok_home = ScopedEnvVar::set("GROK_HOME", &live_home);
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join("codex-home"));
+    // Declare before the fixture so its owner/process cleanup runs before
+    // this guard removes the temporary repository's persisted trust grant.
+    let _trust_cleanup: GrokTrustCleanup;
+    let mut fixture = monitor_relaunch_fixture(
+        temp.path(),
+        "grok-live-initial-task",
+        MonitorProviderConversationFixture::Missing,
+        MonitorNativeHolderFixture::None,
+        false,
+    );
+    let repository_key = fs::canonicalize(&fixture.project_root).unwrap();
+    let native_key = repository_key.to_string_lossy();
+    assert!(
+        previous_trust
+            .as_ref()
+            .and_then(|value| value.get("folders"))
+            .and_then(|folders| folders.get(native_key.as_ref()))
+            .is_none(),
+        "the temporary repository must not have an existing trust entry"
+    );
+    _trust_cleanup = GrokTrustCleanup {
+        path: trust_path.clone(),
+        key: native_key.to_string(),
+    };
+    // Synthetic history belongs to the fixture; only the real CLI uses the
+    // existing authentication home. Never read or copy credential files.
+    convert_monitor_relaunch_fixture_to_grok(&mut fixture, &temp.path().join("fixture-grok-home"));
+    let runner_root = temp.path().join("grok-runner");
+    pin_monitor_fixture_agents(
+        &fixture,
+        &runner_root,
+        &[
+            (gwt_agent::session::GWT_BIN_PATH_ENV, gwtd.to_str().unwrap()),
+            ("GROK_HOME", live_home.to_str().unwrap()),
+        ],
+    );
+    let owner = start_monitor_relaunch_owner(&mut fixture, false);
+    let mut observed = owner.subscribe();
+    let runner = runner_root
+        .join("fixture-runner-bin")
+        .join(if cfg!(windows) { "grok.cmd" } else { "grok" });
+    // Preserve the actual Issues-generated task and launch arguments. Limit
+    // this paid smoke to one harmless response, without forging any hook.
+    let rules = "This is an isolated launch verification. Do not use tools or modify files. Reply only with GWT_GROK_LIVE_RESPONSE.";
+    #[cfg(unix)]
+    let script = format!(
+        "#!/bin/sh\nexec '{}' \"$@\" --max-turns 1 --rules '{}'\n",
+        binary.to_str().unwrap().replace('\'', "'\\''"),
+        rules,
+    );
+    #[cfg(windows)]
+    let script = format!(
+        "@echo off\r\n\"{}\" %* --max-turns 1 --rules \"{}\"\r\n",
+        binary.display(),
+        rules,
+    );
+    fs::write(&runner, script).expect("route Monitor launch to the installed Grok");
+    let started = Instant::now();
+    let events = prepare_monitor_relaunch(
+        &mut fixture,
+        gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+    );
+    let (window_id, pane, _) = finish_monitor_relaunch_owner(&mut fixture, events);
+    let pane = pane.expect("real Grok Monitor launch");
+    let session = pane.session.as_ref().expect("registered Grok Session");
+    assert_eq!(session.agent_id, gwt_agent::AgentId::GrokBuild);
+    assert_eq!(session.linked_issue_number, Some(3165));
+    assert!(session.launch_args.iter().any(|arg| arg == "--trust"));
+    let result = owner_fixture_block_on(async {
+        // test-hygiene: allow-wall-clock-deadline The owner has a real 180-second startup contract; only native accepted-turn evidence proves success.
+        tokio::time::timeout(Duration::from_secs(180), async {
+            let mut accepted_turn = false;
+            loop {
+                while let Ok(event) = observed.try_recv() {
+                    if let OwnerEvent::Hook { event } = event {
+                        if event.gwt_session_id.as_deref() == Some(session.id.as_str()) {
+                            accepted_turn |= matches!(
+                                event.source_event.as_deref(),
+                                Some("PreToolUse" | "PostToolUse" | "Stop")
+                            );
+                        }
+                    }
+                }
+                let current = owner.probe(&pane.id, pane.incarnation).await?;
+                // The owner clears Grok's watch only for a tool event or a
+                // Stop carrying its native prompt id; pre-submit is insufficient.
+                if accepted_turn
+                    && current.monitor_startup_at.is_none()
+                    && current
+                        .pane
+                        .lock()
+                        .unwrap()
+                        .screen()
+                        .contents()
+                        .contains("GWT_GROK_LIVE_RESPONSE")
+                {
+                    // test-hygiene: allow-wall-clock-deadline Measure the live 180-second startup contract after accepted native work and the response; elapsed time is not synchronization.
+                    return Ok::<_, String>(started.elapsed());
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+    });
+    let screen =
+        gwt_core::process_console::redact_line(&pane.pane.lock().unwrap().screen().contents());
+    close_test_owner_runtime(&mut fixture.runtime, &window_id);
+    fixture
+        .runtime
+        .test_project_owners
+        .remove(&fixture.project_root);
+    owner_fixture_block_on(
+        Arc::try_unwrap(owner)
+            .ok()
+            .expect("drained live Grok owner")
+            .shutdown(),
+    );
+    let elapsed = result
+        .unwrap_or_else(|_| panic!("Grok native acceptance timed out; screen={screen}"))
+        .unwrap_or_else(|error| panic!("Grok native acceptance failed: {error}; screen={screen}"));
+    assert!(elapsed < Duration::from_secs(180));
+    let trust =
+        fs::read_to_string(trust_path).expect("Grok must persist the managed worktree's trust");
+    let current_trust: toml::Value = toml::from_str(&trust).expect("valid native trust store");
+    fn assert_preserved_trust(before: &toml::Value, after: &toml::Value) {
+        match (before, after) {
+            (toml::Value::Table(before), toml::Value::Table(after)) => {
+                for (key, value) in before {
+                    assert_preserved_trust(value, after.get(key).expect("existing trust key"));
+                }
+            }
+            (toml::Value::Array(before), toml::Value::Array(after)) => {
+                assert!(before.iter().all(|value| after.contains(value)));
+            }
+            _ => assert_eq!(before, after, "an existing native trust entry changed"),
+        }
+    }
+    if let Some(previous) = previous_trust.as_ref() {
+        assert_preserved_trust(previous, &current_trust);
+    }
+    let recorded = current_trust["folders"]
+        .get(native_key.as_ref())
+        .expect("Grok records the shared repository key");
+    assert_eq!(recorded["trusted"].as_bool(), Some(true));
+    let before_keys = previous_trust
+        .as_ref()
+        .and_then(|value| value.get("folders"))
+        .and_then(toml::Value::as_table);
+    for key in current_trust["folders"].as_table().unwrap().keys() {
+        assert!(
+            key == native_key.as_ref() || before_keys.is_some_and(|keys| keys.contains_key(key)),
+            "the launch must not grant another repository: {key}"
+        );
+    }
+    eprintln!(
+        "Grok live Issues launch: issue=3165, accepted native turn in {elapsed:?}, startup watch cleared, trusted repository={}",
+        repository_key.display(),
+    );
+}
+
 #[test]
 fn terminal_convergence_tick_defers_durable_update_reads_and_coalesces_scans() {
     let temp = tempdir().expect("tempdir");
@@ -9445,6 +10669,9 @@ fn update_drain_worker_snapshot_rechecks_a_pane_that_became_busy() {
     use crate::app_runtime::UpdateDrainObservation;
     let temp = tempdir().unwrap();
     let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_with_initial_commit(&repo);
     let tab = sample_project_tab_with_window_at(
         "tab-1",
         "agent-1",
@@ -9453,6 +10680,8 @@ fn update_drain_worker_snapshot_rechecks_a_pane_that_became_busy() {
         WindowProcessStatus::Idle,
     );
     let (mut runtime, events) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    insert_test_pane_runtime(&mut runtime, "tab-1::agent-1");
+    runtime.runtimes.get_mut("tab-1::agent-1").unwrap().status = WindowProcessStatus::Idle;
     let (spawner, tasks) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = spawner;
     let context = runtime.project_context("tab-1").unwrap();
@@ -9482,6 +10711,7 @@ fn update_drain_worker_snapshot_rechecks_a_pane_that_became_busy() {
     runtime
         .window_hook_states
         .insert("tab-1::agent-1".into(), WindowProcessStatus::Running);
+    runtime.runtimes.get_mut("tab-1::agent-1").unwrap().status = WindowProcessStatus::Running;
     let outbound =
         runtime.update_drain_observed_events(now + chrono::Duration::seconds(15), vec![observe()]);
     assert!(!outbound
@@ -9493,4 +10723,5 @@ fn update_drain_worker_snapshot_rechecks_a_pane_that_became_busy() {
         .iter()
         .any(|event| matches!(event, UserEvent::ApplyUpdateDrained { .. })));
     drain_queued_blocking_tasks(&tasks);
+    close_test_owner_runtime(&mut runtime, "tab-1::agent-1");
 }

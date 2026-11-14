@@ -18,7 +18,7 @@
 //!
 //! Connect, publish, and ack are each bounded by `timeout` (default
 //! 200 ms per stage, so the worst-case wall time is ~600 ms across
-//! the three stages). Generic notifications remain best-effort. Issue Monitor
+//! the three stages). Generic notifications remain best-effort. Issues
 //! controls use a stricter typed path: after a live endpoint establishes daemon
 //! authority, connection/send/receipt uncertainty never authorizes a local
 //! fallback writer.
@@ -55,7 +55,7 @@ use crate::runtime_daemon_events::{
 const DEFAULT_TIMEOUT: Duration = Duration::from_millis(200);
 
 /// Normal controls keep the hot-path default; outcome fixtures may pin it.
-const ISSUE_MONITOR_CONTROL_BUDGET: gwt_core::deadline_budget::DeadlineBudget =
+pub const ISSUE_MONITOR_CONTROL_BUDGET: gwt_core::deadline_budget::DeadlineBudget =
     gwt_core::deadline_budget::DeadlineBudget::new("ISSUE_MONITOR_CONTROL", DEFAULT_TIMEOUT);
 
 /// Durable controls wait for the daemon's actual commit. Outcome fixtures pin
@@ -180,7 +180,7 @@ pub fn publish_event(project_root: &Path, channel: &str, payload: Value) -> Resu
     publish_event_with_timeout(project_root, channel, payload, DEFAULT_TIMEOUT)
 }
 
-/// Publish an Issue Monitor command with an outcome classification that lets
+/// Publish an Issues command with an outcome classification that lets
 /// the GUI distinguish a definitely-unsent transport failure from an
 /// ambiguous or explicitly rejected command. Only the former may use the
 /// local single-writer fallback.
@@ -240,7 +240,7 @@ fn authority_owned_endpoint(
     let daemon_dir = requested_scope.daemon_dir(gwt_home);
     let entries = std::fs::read_dir(&daemon_dir).map_err(|error| {
         format!(
-            "Issue Monitor authority fence pid {} endpoint directory {} is unavailable: {error}",
+            "Issues authority fence pid {} endpoint directory {} is unavailable: {error}",
             fence.pid,
             daemon_dir.display()
         )
@@ -293,7 +293,7 @@ fn authority_owned_endpoint(
     }
     if !unreadable.is_empty() {
         return Err(format!(
-            "Issue Monitor authority fence pid {} cannot prove a unique endpoint in {}; unreadable endpoint evidence: {}",
+            "Issues authority fence pid {} cannot prove a unique endpoint in {}; unreadable endpoint evidence: {}",
             fence.pid,
             daemon_dir.display(),
             unreadable.join(" | ")
@@ -311,7 +311,7 @@ fn authority_owned_endpoint(
                 .map(|socket| crate::cli::daemon::transport::bind_is_present(&socket.path))
                 .unwrap_or(false);
             Err(format!(
-                "Issue Monitor authority fence pid {} has no usable endpoint in {} \
+                "Issues authority fence pid {} has no usable endpoint in {} \
                  (diagnosis: fence pid alive={}, descriptor json present={}, \
                  socket present={}; a live fence-holding daemon rewrites its missing \
                  descriptor within seconds — retry, and restart the GWT app if this \
@@ -324,7 +324,7 @@ fn authority_owned_endpoint(
             ))
         }
         count => Err(format!(
-            "Issue Monitor authority fence pid {} matched {count} endpoints in {}",
+            "Issues authority fence pid {} matched {count} endpoints in {}",
             fence.pid,
             daemon_dir.display()
         )),
@@ -357,7 +357,7 @@ pub(crate) fn resolve_live_project_authority(
         ProjectAuthorityResolution::Live(endpoint) => Ok(Some(*endpoint)),
         ProjectAuthorityResolution::Missing => Ok(None),
         ProjectAuthorityResolution::Recover => {
-            Err("Issue Monitor authority fence retains pending crash recovery".to_string())
+            Err("Issues authority fence retains pending crash recovery".to_string())
         }
     }
 }
@@ -422,7 +422,7 @@ fn resolve_project_authority(
                     Ok(ProjectAuthorityResolution::Missing)
                 }
                 AuthorityResolutionPurpose::Route => {
-                    Err("Issue Monitor authority fence retains pending crash recovery".to_string())
+                    Err("Issues authority fence retains pending crash recovery".to_string())
                 }
             }
         }
@@ -624,7 +624,7 @@ pub fn publish_issue_monitor_window_snapshot_with_timeout(
     )
 }
 
-/// Read the daemon-owned atomic Issue Monitor projection. `Ok(None)` means no
+/// Read the daemon-owned atomic Issues projection. `Ok(None)` means no
 /// live daemon has authority and callers may use their offline cache fallback.
 /// A live daemon without a projection is an ambiguous read and fails closed.
 pub fn read_issue_monitor_status(
@@ -711,7 +711,7 @@ fn read_issue_monitor_status_from_endpoint(
             .map_err(OutcomeUnknown)?;
         match response {
             DaemonFrame::Status(status) => status.issue_monitor.ok_or_else(|| {
-                OutcomeUnknown("live daemon omitted Issue Monitor status projection".to_string())
+                OutcomeUnknown("live daemon omitted Issues status projection".to_string())
             }),
             DaemonFrame::Error { message } => Err(Rejected(message)),
             other => Err(OutcomeUnknown(format!(
@@ -970,7 +970,7 @@ mod window_snapshot_publish_tests {
     use crate::runtime_daemon_events::IssueMonitorControlPublishError;
 
     /// Without a daemon the publish must report a real transport outcome. A
-    /// platform where it silently does nothing leaves the Issue Monitor's idle
+    /// platform where it silently does nothing leaves Issues' idle
     /// classifier blind and its slots leaked (Issue #4131 AC-1).
     #[test]
     fn window_snapshot_publish_reaches_the_transport_on_every_platform() {

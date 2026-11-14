@@ -11,6 +11,47 @@ test.describe("Agent window scrollback lifecycle", () => {
   test.use({
     deviceScaleFactor: 1,
     viewport: { width: 1440, height: 900 },
+    // Exercise the host's native selection/copy modifiers. Desktop Chrome's
+    // Windows UA otherwise disagrees with navigator.platform on macOS.
+    userAgent: "",
+  });
+
+  test("mouse motion cannot return history review to the live screen", async ({ page }, info) => {
+    const errors = await openAgentsFixture(page, info.project.name);
+    const id = "agent-1";
+    const history = numberedLines("tracking", 1200).replace(/tracking \d+/g,
+      line => `\x1b]8;;https://example.com\x1b\\${line}\x1b]8;;\x1b\\`);
+    await emitTerminalText(page, id, history + "\x1b[?1003h\x1b[?1006h");
+    await waitForScrollableTerminal(page, id);
+    await expectWheelMovesScrollback(page, id, true, 1000);
+    const before = await terminalScrollMetrics(page, id);
+    const inputs = await terminalInputs(page, id);
+    const box = await agentTile(page, id).locator(".xterm-screen").boundingBox();
+    await page.mouse.move(box!.x + 40, box!.y + 40);
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    expect((await terminalScrollMetrics(page, id)).viewportY).toBe(before.viewportY);
+    expect(await terminalInputs(page, id), "history coordinates stay local").toEqual(inputs);
+    await expect(agentTile(page, id).locator(".xterm-screen")).toHaveClass(/xterm-cursor-pointer/);
+    await scrollTerminalToBottom(page, id);
+    await page.mouse.move(box!.x + 80, box!.y + 80);
+    await expect.poll(async () => (await terminalInputs(page, id)).length).toBeGreaterThan(inputs.length);
+    expect(errors, "zero console/page errors").toEqual([]);
+  });
+
+  test("Codex inline redraw without mouse tracking retains history", async ({ page }, info) => {
+    const errors = await openAgentsFixture(page, info.project.name);
+    const id = "agent-1";
+    // Codex 0.167.0 on Windows ConPTY emits ED2 without mouse tracking.
+    await emitTerminalText(page, id, numberedLines("Codex", 1200));
+    await emitTerminalText(page, id, "\x1b[H\x1b[2J" + numberedLines("Codex redraw", 40));
+    await waitForScrollableTerminal(page, id);
+    const metrics = await terminalScrollMetrics(page, id);
+    expect(metrics.bufferLength - metrics.rows).toBeGreaterThanOrEqual(1000);
+    // Windows overrides wheel deltas; native xterm normalizes a large delta
+    // to a notch elsewhere. Tracking history below still verifies 1,000 lines.
+    const windows = await page.evaluate(() => /\bWin/i.test(navigator.platform));
+    await expectWheelMovesScrollback(page, id, true, windows ? 1000 : 1);
+    expect(errors, "zero console/page errors").toEqual([]);
   });
 
   test("keeps wheel scrollback alive after hidden-visible cycles and Plan-mode idle", async ({ page }, info) => {
@@ -62,11 +103,61 @@ test.describe("Agent window scrollback lifecycle", () => {
     expect(errors, "zero console/page errors").toEqual([]);
   });
 
+  test("stopped and interrupted scrolling stays local while keyboard input remains enabled", async ({ page }, info) => {
+    const errors = await openAgentsFixture(page, info.project.name);
+    const id = "agent-1";
+    const box = await agentTile(page, id).boundingBox();
+    expect(box).not.toBeNull();
+    // Position before enabling mouse tracking: pointer motion remains input.
+    await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2);
+    const wheel = async () => {
+      await page.mouse.wheel(0, -96);
+      await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    };
+
+    for (const state of ["stopped", "interrupted"]) {
+      await emitTerminalText(page, id, "\x1b[?1049h\x1b[?1003l\x1b[?1006l\x1b[HRetained terminal\r\n");
+      await emitBackendEvent(page, { kind: "window_state", window_id: id, state });
+      await expect(page.locator(`.workspace-window[data-id="${id}"]`)).toHaveAttribute("data-agent-state", state);
+      await expect.poll(() => terminalScrollMetrics(page, id)).toMatchObject({ baseY: 0, hidden: false });
+      const before = await terminalInputs(page, id);
+      await wheel();
+      expect(await terminalInputs(page, id), `${state} wheel must not send fallback keys`).toEqual(before);
+      await emitTerminalText(page, id, `\x1b[?1003h\x1b[?1006h${state} tracking ready\r\n`);
+      await expect.poll(() => page.evaluate(() => window.__gwtTerminalTestApi!.bufferText("agent-1")))
+        .toContain(`${state} tracking ready`);
+      await wheel();
+      expect(await terminalInputs(page, id), `${state} wheel must not send mouse reports`).toEqual(before);
+
+      await emitTerminalText(page, id, "\x1b[?1003l\x1b[?1006l\x1b[?1049l" + numberedLines(state, 150));
+      await waitForScrollableTerminal(page, id);
+      await expectWheelMovesScrollback(page, id, true);
+      const input = agentTile(page, id).locator(".xterm-helper-textarea");
+      await input.focus();
+      const beforeTyping = (await terminalInputs(page, id)).length;
+      await page.keyboard.type("x");
+      await expect.poll(async () => (await terminalInputs(page, id)).slice(beforeTyping)).toContain("x");
+      await page.screenshot({ path: info.outputPath(`scroll-${state}.png`) });
+    }
+
+    await emitTerminalText(page, id, "\x1b[?1049h\x1b[HRunning terminal\r\n");
+    await emitBackendEvent(page, { kind: "window_state", window_id: id, state: "running" });
+    await expect(page.locator(`.workspace-window[data-id="${id}"]`)).toHaveAttribute("data-agent-state", "running");
+    await expect.poll(() => terminalScrollMetrics(page, id)).toMatchObject({ baseY: 0 });
+    const before = (await terminalInputs(page, id)).length;
+    await wheel();
+    await expect.poll(async () => (await terminalInputs(page, id)).slice(before)).toContain("\x1b[5~");
+    expect(errors, "zero console/page errors").toEqual([]);
+  });
+
   test("surfaces runtime error detail without covering the terminal with an overlay", async ({ page }, info) => {
     const errors = await openAgentsFixture(page, info.project.name);
 
     await expect(agentTile(page, "agent-1")).toBeVisible();
     await emitTerminalStatus(page, "agent-1", "error", "Stop-block hit an error");
+    // SPEC #5016 AC-HS1: the backend publishes the project aggregate the strip renders.
+    await emitBackendEvent(page, { kind: "project_agent_aggregate", aggregate: {
+      running_count: 0, block_count: 1, idle_count: 0, error_count: 1, unread: true, revision: 1 } });
 
     // SPEC-2014 US-36 (FR-120/121): the raw TTY must never be covered by a
     // foreground status/error overlay. Error detail surfaces in the window
@@ -181,11 +272,180 @@ test.describe("Agent window touch scroll on a phone viewport", () => {
     viewport: { width: 390, height: 844 },
   });
 
+  // SPEC #6476 T-005r (AC-1): the Command Rail groups wrapped separately into
+  // three rows on a phone (213px at 390px) and left the agent terminal 312px.
+  // Every entry must stay visible without scrolling (#4777) as a 44px tap
+  // target, in at most two rows at 390px and three at 320px.
+  test("command rail stays compact on a phone and leaves the screen to the terminal", async ({ page }, info) => {
+    const errors = await openAgentsFixture(page, info.project.name);
+    for (const [width, rows] of [[320, 3], [390, 2]] as const) {
+      await page.setViewportSize({ width, height: 844 });
+      const rail = (await page.locator(".op-rail").boundingBox())!;
+      const bar = (await page.locator(".project-bar").boundingBox())!;
+      expect(rail.height, `rail height at ${width}px`).toBeLessThanOrEqual(rows * 48);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth),
+        "the page itself must not scroll sideways").toBeLessThanOrEqual(0);
+      expect(await page.locator(".op-rail").evaluate(element => element.scrollWidth - element.clientWidth),
+        "the rail must not hide entries behind a sideways scroll").toBeLessThanOrEqual(0);
+      const items = page.locator(".op-rail__item:visible");
+      expect(await items.count()).toBeGreaterThanOrEqual(11);
+      for (const item of await items.all()) {
+        await expect(item).toBeInViewport({ ratio: 1 });
+        const box = (await item.boundingBox())!;
+        expect(box.width, await item.innerText()).toBeGreaterThanOrEqual(44);
+        expect(box.height, await item.innerText()).toBeGreaterThanOrEqual(44);
+        expect(box.y + box.height).toBeLessThanOrEqual(rail.y + rail.height + 1);
+        expect(await item.evaluate(element => {
+          const r = element.getBoundingClientRect();
+          return element.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2));
+        }), "rail entry must be tappable").toBe(true);
+      }
+      const surface = (await page.locator(".surface-area").boundingBox())!;
+      expect(surface.y, "the surface starts right below the rail").toBeLessThanOrEqual(bar.y + bar.height + rows * 48 + 1);
+      if (width === 390) {
+        const screen = (await agentTile(page, "agent-1").locator(".xterm-screen").boundingBox())!;
+        expect(screen.height, "the terminal gains the rows the wrapped rail took (312px before)").toBeGreaterThanOrEqual(412);
+      }
+      await page.screenshot({ path: info.outputPath(`mobile-rail-${width}.png`) });
+    }
+    await page.getByRole("button", { name: "Logs", exact: true }).tap();
+    await page.getByRole("button", { name: "Works", exact: true }).tap();
+    await expect(agentTile(page, "agent-1")).toBeVisible();
+    await page.setViewportSize({ width: 1360, height: 900 });
+    const desktop = (await page.locator(".op-rail").boundingBox())!;
+    expect(desktop.height, "desktop rail remains a vertical column").toBeGreaterThan(desktop.width);
+    expect(errors, "zero console/page errors").toEqual([]);
+  });
+
+  // SPEC #6476 T-005h (AC-1): the Works header wrapped meta and usage over
+  // several lines on a phone (about 160px at 390px). Below 601px it is three
+  // fixed rows: Back / name / previous / next, then meta and usage on one
+  // line each, with the full text kept in the DOM.
+  test("works header stays three rows on a phone and keeps desktop layout", async ({ page }, info) => {
+    const errors = await openAgentsFixture(page, info.project.name);
+    const header = page.locator(".works-full-header");
+    const desktopLayout = () => header.evaluate(element => {
+      const meta = element.querySelector(".works-full-meta")!;
+      const back = element.querySelector("[data-action='back']")!;
+      return {
+        padding: getComputedStyle(element).padding,
+        metaWhiteSpace: getComputedStyle(meta).whiteSpace,
+        metaBasis: getComputedStyle(meta).flexBasis,
+        backMinHeight: getComputedStyle(back).minHeight,
+      };
+    });
+    for (const width of [601, 1360]) {
+      await page.setViewportSize({ width, height: 900 });
+      expect(await desktopLayout(), `header unchanged at ${width}px`).toEqual({
+        padding: "8px 12px", metaWhiteSpace: "normal", metaBasis: "240px", backMinHeight: "auto",
+      });
+    }
+    for (const width of [320, 390]) {
+      await page.setViewportSize({ width, height: 844 });
+      const box = (await header.boundingBox())!;
+      expect(box.height, `header height at ${width}px`).toBeLessThanOrEqual(100);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth))
+        .toBeLessThanOrEqual(0);
+      const firstRow = await Promise.all(["[data-action='back']", "[data-action='previous']", "[data-action='next']"]
+        .map(selector => header.locator(selector).boundingBox()));
+      for (const control of firstRow) {
+        expect(control!.width).toBeGreaterThanOrEqual(44);
+        expect(control!.height).toBeGreaterThanOrEqual(44);
+        expect(Math.abs(control!.y - firstRow[0]!.y), "controls share the first row").toBeLessThanOrEqual(1);
+      }
+      for (const selector of [".works-full-meta", ".works-full-usage"]) {
+        const line = header.locator(selector);
+        const lineBox = (await line.boundingBox())!;
+        expect(lineBox.y, `${selector} sits below the controls`).toBeGreaterThanOrEqual(firstRow[0]!.y + firstRow[0]!.height - 1);
+        expect(await line.evaluate(element => {
+          const lineHeight = parseFloat(getComputedStyle(element).lineHeight);
+          return element.getBoundingClientRect().height <= lineHeight + 1;
+        }), `${selector} is one line`).toBe(true);
+        expect((await line.textContent())!.length, `${selector} keeps its full text`).toBeGreaterThan(20);
+      }
+      await page.screenshot({ path: info.outputPath(`works-header-${width}.png`) });
+    }
+    const screen = (await agentTile(page, "agent-1").locator(".xterm-screen").boundingBox())!;
+    expect(screen.height, "the terminal gains the header rows (412px before)").toBeGreaterThanOrEqual(460);
+    expect(errors, "zero console/page errors").toEqual([]);
+  });
+
+  // SPEC #6476 T-005k (AC-2): on Android Chrome the software keyboard only
+  // shrank the visual viewport and covered the terminal input row. The meta
+  // assertion guards interactive-widget=resizes-content, which makes the
+  // keyboard shrink the layout instead; desktop Chromium cannot raise a real
+  // keyboard, so the 520px resize checks the refit path that relies on it.
+  // IME composition is sent once, when committed.
+  test("software keyboard keeps the terminal input row visible and IME sends committed text", async ({ page }, info) => {
+    const errors = await openAgentsFixture(page, info.project.name);
+    expect(await page.locator("meta[name=viewport]").getAttribute("content"))
+      .toContain("interactive-widget=resizes-content");
+    const tile = agentTile(page, "agent-1");
+    await tile.locator(".xterm-screen").tap();
+    const focused = page.locator(".xterm-helper-textarea:focus");
+    await expect(focused).toHaveCount(1);
+    const before = (await terminalInputs(page, "agent-1")).length;
+    const cdp = await page.context().newCDPSession(page);
+    for (const text of ["n", "に", "にほ", "にほん"]) {
+      await cdp.send("Input.imeSetComposition", { text, selectionStart: text.length, selectionEnd: text.length });
+    }
+    await expect(page.locator(".xterm .composition-view.active")).toHaveText("にほん");
+    expect(await terminalInputs(page, "agent-1"), "nothing is sent while composing").toHaveLength(before);
+    await cdp.send("Input.insertText", { text: "日本" });
+    await expect.poll(async () => (await terminalInputs(page, "agent-1")).slice(before)).toEqual(["日本"]);
+
+    const gridRows = () => page.evaluate(() => window.__agentScrollFixture!.instance!.recordedSends
+      .filter(message => message.kind === "update_terminal_grid" && message.id === "agent-1").map(message => message.rows));
+    const rowsBefore = (await gridRows()).at(-1);
+    expect(rowsBefore, "the initial fit sent a grid").toEqual(expect.any(Number));
+    await page.setViewportSize({ width: 390, height: 520 });
+    await expect.poll(async () => (await gridRows()).at(-1), "the shrunken layout refits the PTY grid")
+      .toBeLessThan(rowsBefore);
+    const screen = (await tile.locator(".xterm-screen").boundingBox())!;
+    expect(screen.y + screen.height, "the input row stays above the keyboard").toBeLessThanOrEqual(520);
+    await expect(focused, "the keyboard stays up").toHaveCount(1);
+    await page.keyboard.press("Enter");
+    await expect.poll(async () => (await terminalInputs(page, "agent-1")).slice(before)).toEqual(["日本", "\r"]);
+    await page.screenshot({ path: info.outputPath("soft-keyboard-520.png") });
+    expect(errors, "zero console/page errors").toEqual([]);
+  });
+
+  // SPEC #6476 T-005t (AC-1): tapping a rail entry raised its explanation from
+  // the compatibility mouseover a tap emits and, with no mouseout on touch,
+  // left it over the top of the opened surface. A mouse still hovers it open
+  // and a keyboard still focuses it open.
+  test("tapping the rail does not leave an explanation over the surface", async ({ page }, info) => {
+    const errors = await openAgentsFixture(page, info.project.name);
+    const explanation = page.locator("#rail-control-explanation");
+    for (const name of ["Agents", "Board", "Works"]) {
+      await page.getByRole("button", { name, exact: true }).tap();
+      await expect(page.getByRole("button", { name, exact: true })).toHaveAttribute("aria-pressed", "true");
+      await page.waitForTimeout(300);
+      await expect(explanation, `no explanation after tapping ${name}`).toBeHidden();
+    }
+    await page.screenshot({ path: info.outputPath("rail-tap-no-explanation.png") });
+    await page.setViewportSize({ width: 1360, height: 900 });
+    await page.getByRole("button", { name: "Agents", exact: true }).hover();
+    await expect(explanation).toHaveText("Agents: project members, capacity and assignment history");
+    await page.mouse.move(700, 450);
+    await expect(explanation).toBeHidden();
+    await page.getByRole("button", { name: "Board", exact: true }).focus();
+    await page.keyboard.press("Tab");
+    await page.keyboard.press("Shift+Tab");
+    await expect(explanation).toHaveText(/^Board:/);
+    expect(errors, "zero console/page errors").toEqual([]);
+  });
+
   test("swipe sends PageUp/PageDown to a fullscreen agent that does not track the mouse", async ({ page }, info) => {
     const errors = await openAgentsFixture(page, info.project.name);
     await setActiveAgentTab(page, "agent-2");
     await emitTerminalText(page, "agent-2", "\x1b[?1049h\x1b[Hfullscreen claude\r\n");
     await expect.poll(() => terminalScrollMetrics(page, "agent-2")).toMatchObject({ hidden: false, baseY: 0 });
+    // baseY is also zero before parsing. Settle output-driven activation
+    // before blur so its queued focus is not attributed to the gesture.
+    await expect.poll(() => page.evaluate(() => window.__gwtTerminalTestApi!.bufferText("agent-2")))
+      .toContain("fullscreen claude");
+    await expectPendingRefresh(page, "agent-2", false);
 
     await page.evaluate(() => (document.activeElement as HTMLElement)?.blur());
     const before = (await terminalInputs(page, "agent-2")).length;

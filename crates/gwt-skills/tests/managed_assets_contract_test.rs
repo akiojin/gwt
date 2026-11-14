@@ -434,7 +434,7 @@ fn browser_check_embedded_seed_disables_automatic_agents() {
         .filter(|line| line.trim_start().starts_with('{'))
         .map(|line| serde_json::from_str(line.trim()).expect("valid seed JSON"))
         .collect();
-    assert_eq!(prefs.len(), 2, "seed both PM and Issue Monitor preferences");
+    assert_eq!(prefs.len(), 2, "seed both PM and Issues preferences");
     assert_eq!(prefs[0]["settings"]["auto_start"], false);
     assert_eq!(prefs[1]["enabled"], false);
     assert!(prefs[1]["max_active_agents"].as_u64().unwrap() > 0);
@@ -1337,6 +1337,12 @@ fn generate_coordination_guidance_writes_skill_for_claude_and_codex() {
             content.contains("Read-only `gh` commands are allowed")
                 && content.contains("Mutations must use gwtd JSON-envelope operations"),
             "generated guidance must distinguish GitHub reads from mutations"
+        );
+        assert!(
+            content.contains("Do not call `workspace.*`, `execution.*`, `build.*`, or `pr.*`")
+                && content.contains("Return results to the parent")
+                && content.contains("Do not commit or push"),
+            "both provider assets must keep delegated helpers out of parent delivery"
         );
         assert!(
             content.contains("\"operation\":\"board.post\""),

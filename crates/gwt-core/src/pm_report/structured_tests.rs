@@ -212,6 +212,47 @@ fn structured_concurrent_retries_publish_one_card_and_revision_conflicts_do_not_
 }
 
 #[test]
+fn question_format_contrasts_prose_only_decisions_with_original_description_requests() {
+    let home = tempfile::tempdir().unwrap();
+    let _home = ScopedGwtHome::set(home.path());
+    let repo = home.path().join("repo");
+    let mut input = submission("prose-only-decision", 0);
+    input.events[0].kind = PmReportKind::Decision;
+    input.events[0].state.action = Some(ReportAction {
+        id: "deployment-target".into(),
+        kind: ReportActionKind::Decide,
+        deadline: None,
+    });
+    input.events[0].summary.result = "Should we deploy to preview or production?".into();
+    input.events[0].details = "Tell me which environment to use.".into();
+    let error = post_submission(&repo, &input).unwrap_err();
+    assert!(error.to_string().contains("decision packet"), "{error}");
+    assert!(
+        !reports_path(&repo).exists(),
+        "refused questions must not persist"
+    );
+
+    // The PM classifies these requests; this is not a natural-language classifier.
+    input.request_id = "original-description".into();
+    input.events[0].kind = PmReportKind::Blocker;
+    input.events[0].state.action = Some(ReportAction {
+        id: "expected-behavior".into(),
+        kind: ReportActionKind::Respond,
+        deadline: None,
+    });
+    input.events[0].summary.result = "What behavior did you expect?".into();
+    input.events[0].details =
+        "Describe the expected result. Example: opening the project should restore my tabs.".into();
+    let receipt = post_submission(&repo, &input).unwrap();
+    assert_eq!(receipt.reports.len(), 1);
+    let saved = receipt.reports[0].structured.as_ref().unwrap();
+    assert_eq!(saved.summary, input.events[0].summary);
+    assert_eq!(saved.details, input.events[0].details);
+    assert_eq!(post_submission(&repo, &input).unwrap(), receipt);
+    assert_eq!(load_reports(&repo).unwrap(), receipt.reports);
+}
+
+#[test]
 fn structured_decisions_and_corrections_are_material_but_internal_actions_still_digest() {
     let home = tempfile::tempdir().unwrap();
     let _home = ScopedGwtHome::set(home.path());
@@ -227,10 +268,34 @@ fn structured_decisions_and_corrections_are_material_but_internal_actions_still_
         question: "Ship?".into(),
         recommendation: "Wait".into(),
         reason: "CI is red".into(),
-        options: vec!["Wait".into(), "Investigate".into()],
+        options: vec![
+            "Wait — preserve the current state".into(),
+            "Investigate — collect more evidence".into(),
+            "Retry — repeat the failed check".into(),
+            "Cancel — stop this attempt".into(),
+        ],
     });
+    for count in [1, 5] {
+        let mut invalid = input.clone();
+        invalid.events[0].summary.decision.as_mut().unwrap().options = vec!["Choice".into(); count];
+        assert!(post_submission(&repo, &invalid).is_err());
+        assert!(!reports_path(&repo).exists());
+    }
     let first = post_submission(&repo, &input).unwrap();
     assert_eq!(first.decisions[0].reason, PostingReason::Immediate);
+    assert_eq!(load_reports(&repo).unwrap(), first.reports);
+    assert_eq!(post_submission(&repo, &input).unwrap(), first);
+    for count in [2, 3] {
+        let mut compatible = input.clone();
+        compatible.events[0]
+            .summary
+            .decision
+            .as_mut()
+            .unwrap()
+            .options
+            .truncate(count);
+        compatible.validate().unwrap();
+    }
     input.request_id = "same-decision".into();
     input.events[0].expected_revision = 1;
     assert!(post_submission(&repo, &input).unwrap().reports.is_empty());

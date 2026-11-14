@@ -1069,7 +1069,7 @@ mod agent_endpoint_env_tests {
     /// Issue #3759: the owner ledger is committed before the worktree-scoped
     /// pointer/projection pair (`write_activated_generation`), and trusted-
     /// store GC of a removed worktree deletes that pair while the owner ledger
-    /// stays. Either way the next Issue Monitor / Start Work launch on the
+    /// stays. Either way the next Issues / Start Work launch on the
     /// same worktree used to die before the PTY with "execution generation
     /// pointer is missing after ledger ownership was established", burning
     /// every retry. A lost publication is a pure function of the ledger and
@@ -1204,7 +1204,7 @@ mod agent_endpoint_env_tests {
     /// returned its authority on the way out, so nothing can ever reopen it in
     /// place. Refusing a later fresh launch there permanently strands the
     /// owner: only the manual Launch Agent wizard reaches the Completed
-    /// successor route, so Issue Monitor retries and Start Work collide
+    /// successor route, so Issues retries and Start Work collide
     /// forever with a generation that finished successfully. A Completed
     /// predecessor must mint the next lifetime instead of blocking it.
     #[test]
@@ -1575,7 +1575,7 @@ mod agent_endpoint_env_tests {
         assert_eq!(grant.principal().execution_binding(), Some(&binding));
     }
 
-    /// Issue #4207: drive the Issue Monitor resume coordinator over a
+    /// Issue #4207: drive Issues resume coordinator over a
     /// predecessor generation that is already settled — exactly what a Session
     /// that finished its work and pushed leaves behind.
     ///
@@ -2597,10 +2597,7 @@ mod agent_endpoint_env_tests {
             session_before,
             "the failed write must retain the pre-binding Session byte-identically",
         );
-        assert!(durable_launch_recovery_exists(
-            &launch.sessions_dir,
-            &launch.session.id,
-        ));
+        assert!(durable_launch_recovery_exists(&launch.sessions_dir, &launch.session.id,).unwrap());
         assert!(
             gwt_core::workspace_projection::load_workspace_work_items(&launch.project)
                 .expect("read absent Work projection")
@@ -2763,7 +2760,8 @@ mod agent_endpoint_env_tests {
             !crate::session_launch::durable_launch_recovery_exists(
                 &sessions_dir,
                 &genesis.session_id,
-            ),
+            )
+            .unwrap(),
             "the receipt may clear only after exact Session cleanup"
         );
     }

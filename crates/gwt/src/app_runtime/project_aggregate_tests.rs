@@ -28,7 +28,7 @@ fn remote_operation_failure_preserves_lifecycle_and_recovers_after_reattach() {
     let mut wire = Vec::new();
     for (kind, operation) in [
         (
-            RemoteRuntimeCommandKind::Input { reply_client: None },
+            RemoteRuntimeCommandKind::Input { reply_client: None, request_id: None },
             "input",
         ),
         (RemoteRuntimeCommandKind::Resize, "resize"),
@@ -53,8 +53,7 @@ fn remote_operation_failure_preserves_lifecycle_and_recovers_after_reattach() {
     }
     let ack = runtime.handle_remote_runtime_command_complete(completion(
         RemoteRuntimeCommandKind::Input {
-            reply_client: Some("origin".into()),
-        },
+            reply_client: Some("origin".into()), request_id: None },
     ));
     assert!(matches!(&ack[0].target, DispatchTarget::Client(client) if client == "origin"));
     assert!(matches!(
@@ -71,7 +70,7 @@ fn remote_operation_failure_preserves_lifecycle_and_recovers_after_reattach() {
         .handle_remote_runtime_command_complete(stale)
         .is_empty());
 
-    // Both pre-send fences remain closed; no worker may send to the old pane.
+    // Both pre-send fences defer delivery; no worker may send to the old pane.
     let pane_id = runtime.runtimes[&id].owner_pane_id.clone();
     runtime
         .project_state_mut(&context)
@@ -95,17 +94,9 @@ fn remote_operation_failure_preserves_lifecycle_and_recovers_after_reattach() {
             },
             RemoteRuntimeCommandKind::Resize,
         );
-        assert_eq!(events.len(), 1);
-        assert_eq!(
-            serde_json::to_value(&events[0].event).unwrap()["kind"],
-            "window_command_error"
-        );
-        let BlockingTaskSpawner::Queued(tasks) = &runtime.blocking_tasks else {
-            unreachable!()
-        };
         assert!(
-            tasks.lock().unwrap().is_empty(),
-            "refusal must happen before sending"
+            events.is_empty(),
+            "transient owner drift must recover automatically"
         );
     }
 
@@ -115,6 +106,7 @@ fn remote_operation_failure_preserves_lifecycle_and_recovers_after_reattach() {
         2,
         Some(identity.clone()),
         gwt::protocol::ProjectOwnerHealthView {
+            recovery_id: None,
             project_key: context.project_key.to_string(),
             state: gwt::protocol::ProjectOwnerHealthState::Healthy,
             detail: None,
@@ -138,7 +130,7 @@ fn remote_operation_failure_preserves_lifecycle_and_recovers_after_reattach() {
     assert_eq!(runtime.runtimes[&id].owner_pane_id, pane_id);
     assert_eq!(runtime.runtimes[&id].owner_identity, identity);
     assert!(runtime
-        .pane_send_input_to_window_events("origin".into(), &id, "reattached\n")
+        .pane_send_input_to_window_events("origin".into(), &id, "reattached\n", None)
         .is_empty());
     let ack = drain_browser_owner_input(&mut runtime);
     assert!(ack
@@ -177,6 +169,207 @@ fn remote_operation_failure_preserves_lifecycle_and_recovers_after_reattach() {
         .starts_with("actual PTY read failure"));
     assert!(!runtime.runtimes[&id].exit_confirmed);
     println!("ISSUE3340_EVENTS={}", serde_json::to_string(&wire).unwrap());
+}
+
+#[test]
+fn remote_command_recovers_after_owner_identity_switch_and_health_recovery() {
+    use gwt::protocol::{ProjectOwnerHealthState, ProjectOwnerHealthView};
+    let _env = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for identity_switch in [true, false] {
+        let temp = tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path());
+        let (mut runtime, probe, id) = owner_browser_input_fixture(temp.path());
+        let context = runtime.test_context();
+        let identity = runtime.runtimes[&id].owner_identity.clone();
+        if identity_switch {
+            // The authenticated fixture owner replaces the GUI's stale owner.
+            runtime
+                .runtimes
+                .get_mut(&id)
+                .unwrap()
+                .owner_identity
+                .host_instance_id = "previous-owner-instance".into();
+        } else {
+            runtime.handle_project_owner_health(
+                &context,
+                2,
+                None,
+                ProjectOwnerHealthView {
+                    recovery_id: None,
+                    project_key: context.project_key.to_string(),
+                    state: ProjectOwnerHealthState::Degraded,
+                    detail: Some("fixture reconnect".into()),
+                },
+            );
+        }
+        let events = runtime.pane_send_input_to_window_events("origin".into(), &id, "recover\n", Some(74));
+        assert!(
+            events.is_empty(),
+            "owner drift must defer, not refuse: {events:?}"
+        );
+        runtime.handle_project_owner_health(
+            &context,
+            3,
+            Some(identity),
+            ProjectOwnerHealthView {
+                recovery_id: None,
+                project_key: context.project_key.to_string(),
+                state: ProjectOwnerHealthState::Healthy,
+                detail: None,
+            },
+        );
+        let events = finish_remote_command_recovery(&mut runtime);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event.event,
+                    BackendEvent::PaneSendResult { ok: true, request_id: Some(74), .. }
+                ))
+                .count(),
+            1
+        );
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event.event, BackendEvent::PaneSendResult { ok: false, .. })));
+        assert!(probe.pty.try_wait().unwrap().is_none());
+        assert!(
+            finish_remote_command_recovery(&mut runtime).is_empty(),
+            "never replay a completed command"
+        );
+    }
+}
+
+#[test]
+fn remote_command_owner_recovery_expires_with_reason_and_attempts() {
+    let _env = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, _probe, id) = owner_browser_input_fixture(temp.path());
+    let context = runtime.test_context();
+    runtime.runtimes.get_mut(&id).unwrap().owner_pane_id.clear();
+    runtime.handle_project_owner_health(
+        &context,
+        2,
+        None,
+        gwt::protocol::ProjectOwnerHealthView {
+            recovery_id: None,
+            project_key: context.project_key.to_string(),
+            state: gwt::protocol::ProjectOwnerHealthState::Degraded,
+            detail: None,
+        },
+    );
+    assert!(runtime
+        .pane_send_input_to_window_events("origin".into(), &id, "expire\n", None)
+        .is_empty());
+    let start = Instant::now();
+    assert!(runtime.next_runtime_output_deadline().is_some());
+    // Drive the existing event-loop clock directly; no wall-clock sleep.
+    let events = runtime.flush_runtime_output_batches(start + Duration::from_secs(11));
+    let error = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::PaneSendResult {
+                ok: false, error, ..
+            } => error.as_ref(),
+            _ => None,
+        })
+        .expect("expired command outcome");
+    assert!(error.contains("Degraded"), "{error}");
+    assert!(error.contains("identity mismatch"), "{error}");
+    assert!(error.contains("owner pane unset"), "{error}");
+    assert!(error.contains("Automatic recovery"), "{error}");
+    assert!(error.contains("ms") && error.contains("attempt"), "{error}");
+    assert!(
+        !error.contains("Refresh") && !error.contains("try again"),
+        "{error}"
+    );
+    assert!(
+        !runtime.pane_has_unsent_user_input(&id),
+        "expired input must clear its speculative busy hint"
+    );
+}
+
+#[test]
+fn remote_command_recovery_rejects_a_successor_session() {
+    let _env = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, _probe, id) = owner_browser_input_fixture(temp.path());
+    let context = runtime.test_context();
+    let identity = runtime.runtimes[&id].owner_identity.clone();
+    runtime
+        .project_state_mut(&context)
+        .unwrap()
+        .project_owner_identity = None;
+    assert!(runtime
+        .pane_send_input_to_window_events("origin".into(), &id, "old session input\n", None)
+        .is_empty());
+    // An owner restart may reuse a pane ID and incarnation for another Session.
+    runtime
+        .tab_mut(&context.tab_id)
+        .unwrap()
+        .workspace
+        .set_session_id("agent", Some("successor-session".into()));
+    runtime
+        .project_state_mut(&context)
+        .unwrap()
+        .project_owner_identity = Some(identity);
+    let events = runtime.retry_remote_runtime_commands(&id, Instant::now());
+    assert!(events.iter().any(|event| matches!(&event.event,
+        BackendEvent::PaneSendResult { ok: false, error: Some(error), .. } if error.contains("Session"))));
+    let BlockingTaskSpawner::Queued(tasks) = &runtime.blocking_tasks else {
+        panic!("queued fixture")
+    };
+    assert!(
+        tasks.lock().unwrap().is_empty(),
+        "never send old input to a successor Session"
+    );
+}
+
+fn finish_remote_command_recovery(runtime: &mut AppRuntime) -> Vec<OutboundEvent> {
+    let BlockingTaskSpawner::Queued(tasks) = &runtime.blocking_tasks else {
+        panic!("queued fixture")
+    };
+    let tasks = Arc::clone(tasks);
+    let AppEventProxy::Stub(completions) = &runtime.proxy else {
+        panic!("stub fixture")
+    };
+    let completions = Arc::clone(completions);
+    let mut events = Vec::new();
+    loop {
+        let queued = std::mem::take(&mut *tasks.lock().unwrap());
+        let had_tasks = !queued.is_empty();
+        for task in queued {
+            task();
+        }
+        let completed = std::mem::take(&mut *completions.lock().unwrap());
+        let had_completions = !completed.is_empty();
+        for event in completed {
+            match runtime.accept_project_completion(event) {
+                Some(UserEvent::RemoteOwnerInventoryComplete(completion)) => {
+                    events.extend(runtime.handle_remote_owner_inventory_complete(*completion))
+                }
+                Some(UserEvent::RemoteRuntimeCommandComplete(completion)) => {
+                    events.extend(runtime.handle_remote_runtime_command_complete(*completion))
+                }
+                Some(UserEvent::ProjectOwnerSnapshot(completion)) => {
+                    events.extend(runtime.handle_project_owner_snapshot(*completion))
+                }
+                _ => {}
+            }
+        }
+        if !had_tasks && !had_completions {
+            break;
+        }
+    }
+    events
 }
 
 fn aggregate_test_runtime(root: &Path) -> AppRuntime {
@@ -263,6 +456,34 @@ fn project_aggregate_counts_hidden_agents_and_scopes_changes() {
             .unwrap()
             .error_count,
         1
+    );
+}
+
+#[test]
+fn project_aggregate_is_the_single_definition_of_run_block_idle_error() {
+    let statuses: std::collections::HashMap<String, WindowProcessStatus> = [
+        WindowProcessStatus::Running,
+        WindowProcessStatus::Starting,
+        WindowProcessStatus::Waiting,
+        WindowProcessStatus::Stopped,
+        WindowProcessStatus::Interrupted,
+        WindowProcessStatus::Error,
+        WindowProcessStatus::Idle,
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, status)| (format!("agent-{index}"), status))
+    .collect();
+    let aggregate = AppRuntime::aggregate_counts(&statuses);
+    assert_eq!(
+        (
+            aggregate.running_count,
+            aggregate.block_count,
+            aggregate.idle_count,
+            aggregate.error_count
+        ),
+        (2, 4, 1, 1),
+        "RUN counts launching agents, BLOCK includes stopped and errored agents, IDLE is waiting for work"
     );
 }
 
@@ -589,6 +810,7 @@ fn project_owner_health_is_project_scoped_and_rejects_stale_context() {
     let a = runtime.project_context("a").unwrap();
     let b = runtime.project_context("b").unwrap();
     let health = gwt::protocol::ProjectOwnerHealthView {
+        recovery_id: None,
         project_key: a.project_key.to_string(),
         state: gwt::protocol::ProjectOwnerHealthState::Degraded,
         detail: Some("Project connection lost".into()),
@@ -727,7 +949,15 @@ fn project_owner_health_is_project_scoped_and_rejects_stale_context() {
     let deadline = runtime
         .next_runtime_output_deadline()
         .expect("existing preview batch");
-    assert!(runtime.flush_runtime_output_batches(deadline).iter().any(|event| matches!(&event.event, BackendEvent::TerminalPreview { text, .. } if text == "owner screen")));
+    let timing = capture_tracing_events(|| {
+        assert!(runtime.flush_runtime_output_batches(deadline).iter().any(|event| matches!(&event.event, BackendEvent::TerminalPreview { text, .. } if text == "owner screen")));
+    });
+    assert!(timing.iter().any(|event| {
+        event.target == "gwt.frontend.timing"
+            && event.fields.get("marker").map(String::as_str)
+                == Some("issue_5379_runtime_output_batch")
+            && event.fields.contains_key("elapsed_ms")
+    }), "authoritative owner batches must remain independently measurable");
     let status = gwt::project_runtime::events::OwnerEvent::Status {
         id: "owner-pane-a".into(),
         incarnation: 7,
@@ -810,10 +1040,19 @@ fn project_owner_health_is_project_scoped_and_rejects_stale_context() {
             screen_seq: 8,
         },
     );
-    assert!(!gap.iter().any(|event| matches!(event.event, BackendEvent::TerminalSnapshot { .. })),
-        "a visible-only frame cannot replace the terminal's retained history");
-    let BlockingTaskSpawner::Queued(tasks) = &runtime.blocking_tasks else { unreachable!() };
-    assert_eq!(tasks.lock().unwrap().len(), 1, "request the owner's semantic snapshot");
+    assert!(
+        !gap.iter()
+            .any(|event| matches!(event.event, BackendEvent::TerminalSnapshot { .. })),
+        "a visible-only frame cannot replace the terminal's retained history"
+    );
+    let BlockingTaskSpawner::Queued(tasks) = &runtime.blocking_tasks else {
+        unreachable!()
+    };
+    assert_eq!(
+        tasks.lock().unwrap().len(),
+        1,
+        "request the owner's semantic snapshot"
+    );
     assert!(
         !gap.iter()
             .any(|event| matches!(event.event, BackendEvent::TerminalOutput { .. })),
@@ -859,12 +1098,14 @@ fn project_owner_health_is_project_scoped_and_rejects_stale_context() {
         if base64::engine::general_purpose::STANDARD.decode(data_base64).unwrap() == b"final ANSI")
         && event.terminal_stream_seq == Some(9)));
     let restored = runtime.request_owner_snapshot("a::agent", Some("reconnected-client".into()));
-    assert!(restored.iter().any(|event| matches!(&event.event,
+    assert!(
+        restored.iter().any(|event| matches!(&event.event,
         BackendEvent::TerminalSnapshot { data_base64, .. }
         if base64::engine::general_purpose::STANDARD.decode(data_base64).unwrap() == b"final ANSI")
-        && event.terminal_stream_seq == Some(9)
-        && event.target == DispatchTarget::Client("reconnected-client".into())),
-        "closed diagnostic panes restore the final semantic snapshot without a live owner");
+            && event.terminal_stream_seq == Some(9)
+            && event.target == DispatchTarget::Client("reconnected-client".into())),
+        "closed diagnostic panes restore the final semantic snapshot without a live owner"
+    );
     assert!(runtime
         .handle_project_owner_event(&a, 2, &identity, output(7))
         .is_empty());
@@ -937,5 +1178,60 @@ fn project_owner_health_is_project_scoped_and_rejects_stale_context() {
             .handle_project_owner_event(&a, 2, &identity, output(7))
             .is_empty(),
         "closed ProjectContext generation"
+    );
+}
+
+#[test]
+fn wedged_owner_restart_requires_current_project_observation_and_confirmation() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let mut runtime = aggregate_test_runtime(temp.path());
+    let a = runtime.project_context("a").unwrap();
+    let b = runtime.project_context("b").unwrap();
+    let (spawner, queued) = super::BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    runtime.handle_project_owner_health(
+        &a,
+        1,
+        None,
+        gwt::protocol::ProjectOwnerHealthView {
+            recovery_id: Some("current".into()),
+            project_key: a.project_key.to_string(),
+            state: gwt::protocol::ProjectOwnerHealthState::Wedged,
+            detail: None,
+        },
+    );
+    for (context, confirmed, recovery_id) in [
+        (&a, false, "current"),
+        (&a, true, "old"),
+        (&b, true, "current"),
+    ] {
+        let events = runtime.handle_frontend_event_for_project(
+            context,
+            "client".into(),
+            FrontendEvent::RestartWedgedOwner {
+                confirmed,
+                recovery_id: recovery_id.into(),
+            },
+        );
+        assert!(!events.is_empty(), "refusal is visible");
+        assert!(
+            queued.lock().unwrap().is_empty(),
+            "no process worker may start"
+        );
+    }
+    let events = runtime.handle_frontend_event_for_project(
+        &a,
+        "client".into(),
+        FrontendEvent::RestartWedgedOwner {
+            confirmed: true,
+            recovery_id: "current".into(),
+        },
+    );
+    assert!(events.is_empty());
+    assert_eq!(
+        queued.lock().unwrap().len(),
+        1,
+        "only the exact confirmed project starts recovery"
     );
 }

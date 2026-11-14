@@ -90,7 +90,12 @@ export async function startManagedBrowserSource(browser: Browser, info: TestInfo
         const blocked = /"decision"\s*:\s*"block"/.test(result.stdout);
         observation.hook = {status:result.status,signal:result.signal,blocked,
           error:result.error ? {name:result.error.name,code:result.error.code ?? null} : null};
-        if (result.error || result.status !== 0 || blocked) throw new Error('normal provider hook refused');
+        if (result.error || result.status !== 0 || blocked) {
+          // Keep the original refusal before the isolated source is cleaned up.
+          observation.hook.stdout = result.stdout ?? '';
+          observation.hook.stderr = result.stderr ?? '';
+          throw new Error('normal provider hook refused');
+        }
         hookCommands++;
       }
       if (!hookCommands) throw new Error('normal provider hook missing');
@@ -139,7 +144,7 @@ export async function startManagedBrowserSource(browser: Browser, info: TestInfo
     page.on("pageerror", error => errors.push(error.message));
     page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
     await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
-    // This source needs an ordinary managed provider, not a Monitor delivery.
+    // This source needs an ordinary managed provider, not a Issues delivery.
     // Launch through the same manual wizard as the exact-relaunch live tests.
     async function wizard(message: unknown, requireOpen = false) {
       const after = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence || 0);

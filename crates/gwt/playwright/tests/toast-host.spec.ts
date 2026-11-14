@@ -15,7 +15,51 @@ import { expect, test } from "@playwright/test";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
 import { gotoLiveGwt, readLiveHubCatalog } from "./_helpers/live-gwt";
 
-test("Issue #6659 removes attention for unmounted and mounted windows while preserving history (isolated checkout)", async ({ page }, testInfo) => {
+test("Issue #5333: Issues naming across Issues, Settings and notifications (isolated checkout)", async ({ page }, info) => {
+  test.setTimeout(120_000);
+  const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
+  test.skip(!base || !process.env.GWT_PLAYWRIGHT_CHECK_HOME, "requires browser-check checkout and fresh HOME");
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  const theme = info.project.name.includes("light") ? "light" : "dark";
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+  await page.addInitScript(({ theme, origin }) => {
+    if (location.origin === origin) localStorage.setItem("gwt:ui:theme", theme);
+  }, { theme, origin: new URL(base!).origin });
+  await gotoLiveGwt(page, base!, { enableTestBridge: true });
+  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  const capture = async (surface: string) => {
+    const path = info.outputPath(`issues-naming-${surface}-${theme}.png`);
+    await page.screenshot({ path, fullPage: true });
+    await info.attach(`${surface}-${theme}`, { path, contentType: "image/png" });
+  };
+
+  await page.locator('#op-rail [data-surface="issues"]').click();
+  await expect(page.locator('.workspace-window[data-preset="issue"]')).toBeVisible({ timeout: 30_000 });
+  await expect(page.locator("#op-strip-issue-monitor")).toHaveAttribute("title", /Issues:/);
+  await capture("issues");
+
+  await page.locator('#op-rail [data-surface="settings"]').click();
+  const settings = page.locator('.workspace-window[data-preset="settings"]');
+  await expect(settings).toBeVisible();
+  await settings.getByRole("tab", { name: "Issues execution settings", exact: true }).click();
+  await expect(settings.locator('[data-settings-panel="issues"]')).toBeVisible();
+  await capture("settings");
+
+  await inject(page, { kind: "issue_monitor_toast", level: "error",
+    message: "Issues scan stalled; last scan at 2026-11-10T00:00:00Z", issue_number: 5333 });
+  await page.locator("#op-notifications-button").click();
+  await expect(page.locator("#notification-center")).toBeVisible();
+  await expect(page.locator("#notification-center")).toContainText("Issues");
+  await expect(page.locator("#notification-center")).toContainText("#5333");
+  await capture("notifications");
+  const retiredName = new RegExp(["issue", "monitor"].join("\\s+"), "i");
+  expect(await page.locator("body").innerText()).not.toMatch(retiredName);
+  expect(errors, "zero console and page errors across the renamed surfaces").toEqual([]);
+});
+
+test("Issue #6659 / Issue #6932 removes resolved Agent Error rows for unmounted and mounted windows (isolated checkout)", async ({ page }, testInfo) => {
   const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
   test.skip(!base || !process.env.GWT_PLAYWRIGHT_CHECK_HOME, "requires browser-check checkout and fresh HOME");
   const errors: string[] = [];
@@ -101,7 +145,7 @@ test("Issue #6659 removes attention for unmounted and mounted windows while pres
   await publish();
   await expect(toast(orphan.id)).toHaveCount(0);
   await expect(toast(keeper.id)).toHaveCount(1);
-  await expect(rows).toHaveCount(2);
+  await expect(rows).toHaveCount(1);
 
   snapshot.tabs[0].workspace.windows = [mounted];
   await publish();
@@ -109,20 +153,20 @@ test("Issue #6659 removes attention for unmounted and mounted windows while pres
   await expect(page.locator(`.workspace-window[data-id="${mounted.id}"]`)).toHaveCount(1);
   await expect(toast(mounted.id)).toHaveCount(1);
   await publish();
-  await expect(rows).toHaveCount(3);
+  await expect(rows).toHaveCount(2);
   snapshot.tabs[0].workspace.windows = [];
   await publish();
   await expect(toast(mounted.id)).toHaveCount(0);
-  await expect(rows).toHaveCount(3);
+  await expect(rows).toHaveCount(1);
 
   for (let cycle = 0; cycle < 3; cycle += 1) {
     snapshot.tabs[1].workspace.windows = [orphan, keeper];
     await publish();
     await diagnose(orphan.id);
     await expect(toast(orphan.id)).toHaveCount(1);
-    await expect(rows).toHaveCount(3);
+    await expect(rows).toHaveCount(2);
     await publish();
-    await expect(rows).toHaveCount(3);
+    await expect(rows).toHaveCount(2);
     snapshot.tabs[1].workspace.windows = [keeper];
     await publish();
     await expect(toast(orphan.id)).toHaveCount(0);
@@ -135,10 +179,7 @@ test("Issue #6659 removes attention for unmounted and mounted windows while pres
   } });
   await expect(alerts).toHaveCount(0);
   await page.locator("#op-notifications-button").click();
-  await expect(rows).toHaveCount(3);
-  await expect(rows.filter({ hasText: orphan.id })).toHaveCount(1);
-  await expect(rows.filter({ hasText: mounted.id })).toHaveCount(1);
-  await expect(rows.filter({ hasText: keeper.id })).toHaveCount(1);
+  await expect(rows).toHaveCount(0);
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
   const screenshot = testInfo.outputPath(`removed-window-attention-${theme}.png`);
   await page.screenshot({ path: screenshot, fullPage: true });
@@ -174,13 +215,13 @@ test("Issue #6729 keeps only unresolved local errors across launch retry and for
     app_version: "playwright", active_tab_id: primary.id, recent_projects: [],
     tabs: [
       { ...primary, kind: "git", workspace: { viewport: { x: 0, y: 0, zoom: 1 }, windows: [] } },
-      { id: "notifications-background", project_key: "6729672967296729", title: "Monitor Off", project_root: "/fixture/foreign",
+      { id: "notifications-background", project_key: "6729672967296729", title: "Issues Off", project_root: "/fixture/foreign",
         kind: "git", workspace: { viewport: { x: 0, y: 0, zoom: 1 },
           windows: [first, successor, real, unprovenSuccessor, agent("foreign-machine", 9999), recoveredOld, recoveredNew] } },
     ],
   };
   // Use binary-served assets with a deterministic runtime stream. No Agent is
-  // launched and the isolated Monitor remains Off throughout the measurement.
+  // launched and the isolated Issues remains Off throughout the measurement.
   await page.addInitScript(({ theme, snapshot }) => {
     localStorage.setItem("gwt:ui:theme", theme);
     class SnapshotSocket extends EventTarget {
@@ -241,7 +282,7 @@ test("Issue #6729 keeps only unresolved local errors across launch retry and for
   await expect(alerts).toContainText(successor.id);
   await status(successor.id, "error", "Retry scheduled", true);
   await expect(alerts).toHaveCount(0);
-  await expect(rows).toHaveAttribute("data-resolved", "true");
+  await expect(rows).toHaveCount(0);
   await status(real.id, "error", "Process exited with status 1");
   unprovenSuccessor.runtime_started_at_ms = 3000;
   await inject(page, { kind: "workspace_state", workspace: snapshot });
@@ -251,7 +292,7 @@ test("Issue #6729 keeps only unresolved local errors across launch retry and for
   await status(successor.id, "running", null);
   await expect(alerts).toHaveCount(1);
   await expect(alerts).toContainText(real.id);
-  await expect(rows).toHaveCount(2);
+  await expect(rows).toHaveCount(1);
   await expect(page.locator("#op-notifications-button .op-rail__badge")).toHaveText("1");
 
   const startedAt = new Date().toISOString();
@@ -267,7 +308,7 @@ test("Issue #6729 keeps only unresolved local errors across launch retry and for
     await status(recoveredOld.id, "error", "Retained old local diagnostic");
     await expect(alerts).toHaveCount(1);
     await expect(alerts).toContainText(real.id);
-    await expect(rows).toHaveCount(2);
+    await expect(rows).toHaveCount(1);
     expect(errors, "console and page errors").toEqual([]);
     cycles++;
     if (soakSeconds > 0 && cycles % 6 === 0) {
@@ -284,7 +325,7 @@ test("Issue #6729 keeps only unresolved local errors across launch retry and for
   expect(errors).toEqual([]);
 });
 
-test("Monitor notifications coalesce launch requests and preserve other events (isolated checkout)", async ({ page }, testInfo) => {
+test("Issue #6932 Issues notifications group repeated failures and continued/stalled diagnoses (isolated checkout)", async ({ page }, testInfo) => {
   const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
   test.skip(!base || !process.env.GWT_PLAYWRIGHT_CHECK_HOME, "requires browser-check checkout and fresh HOME");
   const errors: string[] = [];
@@ -303,7 +344,7 @@ test("Monitor notifications coalesce launch requests and preserve other events (
   // Deterministic receive events exercise binary-served app wiring, without
   // triggering real autonomous launches or changing the backend protocol.
   await page.evaluate(() => {
-    const launch = { kind: "issue_monitor_toast", level: "info", message: "Issue Monitor launch requested", issue_number: 5016 };
+    const launch = { kind: "issue_monitor_toast", level: "info", message: "Issues launch requested", issue_number: 5016 };
     for (let i = 0; i < 4; i += 1) {
       window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: launch }));
     }
@@ -312,33 +353,34 @@ test("Monitor notifications coalesce launch requests and preserve other events (
   await page.evaluate(() => {
     const notice = { kind: "issue_monitor_toast", level: "warn", message: "Repeated notice", issue_number: 5016 };
     for (const payload of [
-      { ...notice, level: "info", message: "Issue Monitor launch requested", issue_number: 5017 },
+      { ...notice, level: "info", message: "Issues launch requested", issue_number: 5017 },
       notice, notice,
-      { ...notice, level: "error", message: "Issue Monitor launch requested" },
+      { ...notice, level: "error", message: "Issues launch requested" },
       { ...notice, notification_transition: "needs_human", level: "error", message: "Decision needed" },
     ]) {
       window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: payload }));
     }
   });
-  await expect(badge).toHaveText("6");
+  await expect(badge).toHaveText("5");
   await expect(badge).toHaveAttribute("data-has-error", "true");
   await bell.click();
-  await expect(rows).toHaveCount(6);
+  await expect(rows).toHaveCount(5);
   await expect(rows.first()).toContainText("Needs human #5016");
   await expect(rows.first()).toHaveAttribute("data-level", "error");
-  await expect(rows.filter({ hasText: "Repeated notice" })).toHaveCount(2);
-  await expect(rows.filter({ hasText: "Issue Monitor launch requested" })).toHaveCount(3);
-  await expect(rows.last()).toContainText("Issue Monitor #5016");
+  await expect(rows.filter({ hasText: "Repeated notice" })).toHaveCount(1);
+  await expect(rows.filter({ hasText: "Repeated notice" }).locator(".notification-center__count")).toHaveText("×2");
+  await expect(rows.filter({ hasText: "Issues launch requested" })).toHaveCount(3);
+  await expect(rows.last()).toContainText("Issues #5016");
   await expect(badge).toBeHidden();
   const launchRow = drawer.locator('[data-error-key="issue-monitor:launch-requested:5016"]');
   await expect(launchRow).toHaveCount(1);
   await launchRow.locator(".notification-center__dismiss").click();
-  await expect(rows).toHaveCount(5);
+  await expect(rows).toHaveCount(4);
   await page.evaluate(() => window.dispatchEvent(new CustomEvent("__gwt_test_inject", {
-    detail: { kind: "issue_monitor_toast", level: "info", message: "Issue Monitor launch requested", issue_number: 5016 },
+    detail: { kind: "issue_monitor_toast", level: "info", message: "Issues launch requested", issue_number: 5016 },
   })));
   await expect(launchRow).toHaveCount(1);
-  await expect(rows).toHaveCount(6);
+  await expect(rows).toHaveCount(5);
   const theme = testInfo.project.name.includes("light") ? "light" : "dark";
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
   const screenshot = testInfo.outputPath(`monitor-notifications-${theme}.png`);
@@ -348,6 +390,31 @@ test("Monitor notifications coalesce launch requests and preserve other events (
   await expect(rows).toHaveCount(0);
   await page.getByRole("button", { name: "Close notifications", exact: true }).click();
   await expect(drawer).toBeHidden();
+  const failure = { kind: "issue_monitor_toast", level: "error",
+    message: "Issues scan failed at open-pr-readback stage: GitHub connection failed" };
+  for (let i = 0; i < 5; i++) await inject(page, failure);
+  await expect(rows).toHaveCount(1);
+  await expect(rows.locator(".notification-center__count")).toHaveText("×5");
+  await bell.click();
+  await drawer.getByRole("button", { name: "Clear all", exact: true }).click();
+  await page.getByRole("button", { name: "Close notifications", exact: true }).click();
+  for (const disposition of ["stale_readback", "previous_candidates"]) {
+    const message = `scan continued: candidate-load failed (continued_with_${disposition}): offline`;
+    await inject(page, { ...failure, message });
+    await inject(page, { kind: "issue_monitor_status", status: { enabled: true, state: "error",
+      queue_len: 0, active_count: 0, max_active_agents: 1, last_error: message } });
+  }
+  await expect(rows).toHaveCount(0);
+  const stalled = "Issues scan stalled; last scan at 2026-11-09T00:00:00Z; previous failure: issue #42: needs_human: decision needed";
+  await inject(page, { ...failure, message: stalled });
+  await bell.click();
+  await page.getByRole("button", { name: "Close notifications", exact: true }).click();
+  await inject(page, { ...failure, message: stalled.replace("00:00:00Z", "00:01:00Z") });
+  await expect(rows).toHaveCount(1);
+  await expect(badge).toBeHidden();
+  await inject(page, { ...failure, message: stalled.replace("#42", "#43") });
+  await expect(rows).toHaveCount(2);
+  await expect(badge).toHaveText("1");
   expect(errors).toEqual([]);
 });
 
@@ -415,6 +482,48 @@ test.describe("toast-host alerts region (real browser, SPEC #3206 P1)", () => {
     });
     expect(layout.hostPosition).toBe("fixed");
     expect(layout.alertsPosition).not.toBe("fixed");
+  });
+
+  // SPEC #6476 T-005c (AC-1): the dismiss control was a 20x19px target on a
+  // phone. Below 601px it is a 44px tap target; wider layouts keep 20px.
+  test.describe("on a phone", () => {
+    test.use({ hasTouch: true });
+    test("the dismiss control is a 44px tap target that dismisses only its toast", async ({ page }) => {
+      const errors: string[] = [];
+      page.on("pageerror", error => errors.push(String(error)));
+      page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+      const push = (id: string) => page.evaluate(toastId => (window as any).__alerts.push({
+        id: toastId, level: "error", title: `Alert ${toastId}`, message: "detail", timeoutMs: 0, dismissible: true,
+      }), id);
+      const dismiss = (id: string) => page.locator(`.toast-alerts__item[data-toast-id="${id}"] .toast-alerts__dismiss`);
+      await page.setViewportSize({ width: 601, height: 900 });
+      await push("desktop");
+      expect((await dismiss("desktop").boundingBox())!.width, "601px keeps the desktop width").toBe(20);
+      const layout = (id: string) => page.locator(`.toast-alerts__item[data-toast-id="${id}"]`).evaluate(item => {
+        const box = (selector: string) => item.querySelector(selector)!.getBoundingClientRect();
+        const outer = item.getBoundingClientRect();
+        const close = box(".toast-alerts__dismiss");
+        return { gap: box(".toast-alerts__message").top - box(".toast-alerts__title").bottom,
+          inside: close.top >= outer.top && close.bottom <= outer.bottom && close.right <= outer.right };
+      });
+      const desktopGap = (await layout("desktop")).gap;
+      for (const width of [320, 390]) {
+        await page.setViewportSize({ width, height: 844 });
+        await push(`keep-${width}`);
+        await push(`phone-${width}`);
+        const box = (await dismiss(`phone-${width}`).boundingBox())!;
+        expect(box.width, `dismiss width at ${width}px`).toBeGreaterThanOrEqual(44);
+        expect(box.height, `dismiss height at ${width}px`).toBeGreaterThanOrEqual(44);
+        await expect(dismiss(`phone-${width}`)).toBeInViewport({ ratio: 1 });
+        const phone = await layout(`phone-${width}`);
+        expect(phone.inside, "the whole 44px target stays inside its toast").toBe(true);
+        expect(phone.gap, "the message stays as close to the title as on desktop").toBeLessThanOrEqual(desktopGap + 1);
+        await dismiss(`phone-${width}`).tap();
+        await expect(page.locator(`.toast-alerts__item[data-toast-id="phone-${width}"]`)).toHaveCount(0);
+        await expect(page.locator(`.toast-alerts__item[data-toast-id="keep-${width}"]`)).toHaveCount(1);
+      }
+      expect(errors, "zero console/page errors").toEqual([]);
+    });
   });
 
   test("sticky alerts and the update CTA remain visible and operable without overlap", async ({
@@ -786,7 +895,7 @@ test.describe("notification center (real browser, SPEC #3206 v2)", () => {
 
     const rows = drawer.locator(".notification-center__item");
     await expect(rows).toHaveCount(12);
-    await expect(rows.first()).toContainText("Issue Monitor #3011");
+    await expect(rows.first()).toContainText("Issues #3011");
     await expect(rows.first()).toContainText("autonomous event 11");
     await expect(rows.first()).toHaveAttribute("data-level", "error");
     await expect(rows.last()).toContainText("#3000");
@@ -884,7 +993,7 @@ test.describe("notification center (real browser, SPEC #3206 v2)", () => {
     await expect(drawer).toHaveAttribute("data-open", "false");
   });
 
-  test("FR-017: an Issue Monitor error is read only in the notification center, never in the Issue window", async ({
+  test("FR-017: an Issues error is read only in the notification center, never in the Issue window", async ({
     page,
   }) => {
     const issueWindow = page.locator(".surface-knowledge .issue-bridge-root");
@@ -893,7 +1002,7 @@ test.describe("notification center (real browser, SPEC #3206 v2)", () => {
     await expect(issueWindow.locator(".knowledge-monitor-error")).toHaveCount(0);
     await expect(issueWindow.locator(".surface-error-indicator")).toHaveCount(0);
 
-    const status = (lastError: string | null) => ({
+    const status = (lastError: string | null, recordedAt = "2026-11-09T00:00:00Z") => ({
       kind: "issue_monitor_status",
       status: {
         enabled: true,
@@ -906,10 +1015,12 @@ test.describe("notification center (real browser, SPEC #3206 v2)", () => {
         launch_profile_source: "saved",
         launch_profile_summary: "codex / host",
         last_error: lastError,
+        last_error_source: lastError ? "scan_failure" : null,
+        last_scan_error: lastError ? { message: lastError, phase: "candidate-load", recorded_at: recordedAt } : null,
       },
     });
 
-    await inject(page, status("issue #3785: gh issue list: github_rate_limited"));
+    await inject(page, status("issue #3785: gh issue list: github_rate_limited (retry)"));
     const badge = page.locator("#op-notifications-button .op-rail__badge");
     await expect(badge).toHaveText("1");
     await expect(badge).toHaveAttribute("data-has-error", "true");
@@ -917,12 +1028,12 @@ test.describe("notification center (real browser, SPEC #3206 v2)", () => {
     await expect(issueWindow.locator(".surface-error-indicator")).toHaveCount(0);
     await expect(issueWindow.locator(".knowledge-status.error")).toHaveCount(0);
 
-    // A changed error text is a new occurrence of the same key: one row, x2.
-    await inject(page, status("issue #3785: gh issue list: github_rate_limited (retry)"));
+    // A later scan failure with the same cause updates one row to x2.
+    await inject(page, status("issue #3785: gh issue list: github_rate_limited (retry)", "2026-11-09T00:01:00Z"));
     await page.locator("#op-notifications-button").click();
     const drawer = page.locator("#notification-center");
     await expect(drawer).toHaveAttribute("data-open", "true");
-    const row = drawer.locator('.notification-center__item[data-error-key="issue-monitor:last_error"]');
+    const row = drawer.locator('.notification-center__item[data-error-key^="issue-monitor:"]').filter({ hasText: "issue #3785: gh issue list: github_rate_limited (retry)" });
     await expect(row).toHaveCount(1);
     await expect(row).toHaveAttribute("data-level", "error");
     await expect(row.locator(".notification-center__count")).toHaveText("\u00d72");
@@ -934,8 +1045,7 @@ test.describe("notification center (real browser, SPEC #3206 v2)", () => {
     await expect(row).toHaveAttribute("data-resolved", "true");
     await expect(badge).toBeHidden();
 
-    const rendered = await page.evaluate(() => {
-      const rowNode = document.querySelector('.notification-center__item[data-error-key="issue-monitor:last_error"]') as HTMLElement;
+    const rendered = await row.evaluate((rowNode) => {
       return {
         theme: document.documentElement.getAttribute("data-theme"),
         rim: getComputedStyle(rowNode).borderLeftColor,

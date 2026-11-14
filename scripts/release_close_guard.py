@@ -6,8 +6,7 @@ Release PR body or in a commit message carried by the merge — closes the
 referenced Issue even when acceptance criteria are still open. This guard runs
 from `release.yml` right after the merge, lists Issues closed at or after the
 merge time, keeps the ones whose closer is the Release PR itself or a commit,
-and reopens them with a marker comment. Issues closed through the API (Issue
-Monitor settlement, humans) have no closer and are left alone.
+and reopens them with a marker comment. Issues closed through the API (Issues settlement, humans) have no closer and are left alone.
 """
 
 from __future__ import annotations
@@ -134,7 +133,7 @@ def describe_closer(closer: dict | None) -> str | None:
 def detect_release_closures(issues: Sequence[dict], release_pr: int, merged_at: str) -> list[ReleaseClosure]:
     """Keep Issues the release merge closed: closer is the Release PR or a commit.
 
-    API closures (Issue Monitor settlement, `gh issue close`, the web UI) carry
+    API closures (Issues settlement, `gh issue close`, the web UI) carry
     no closer and are intentional. A different PR closing an Issue after the
     merge is that PR's decision, not the release's.
     """
@@ -173,7 +172,7 @@ def render_reopen_comment(issue_number: int, release_pr: int, merge_sha: str, cl
         f"Issue #{issue_number} が閉じられました（closer: {closer}）。"
         "Release PR は Issue を close しない運用（Issue #3545）のため、"
         "gwt release close guard が reopen します。\n\n"
-        "受け入れ基準の決着は work ブランチの develop merge 時に Issue Monitor が行います（Issue #3917）。"
+        "受け入れ基準の決着は work ブランチの develop merge 時に Issues が行います（Issue #3917）。"
         "本当に完了している場合はそちらの settlement コメントを確認のうえ手動で close してください。\n"
     )
 

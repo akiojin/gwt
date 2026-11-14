@@ -52,8 +52,9 @@ struct Verdict {
 }
 
 /// Whether `branch_sha` is fully merged into `base_sha`, consulting and
-/// updating the persistent verdict cache. `is_ancestor` must already have
-/// been ruled out by the caller (that is the cheap, always-fresh path).
+/// updating the persistent verdict cache. A cached or advanced lineage answers
+/// before any per-branch `merge-base`: the gained commits of a base advance
+/// include a merge-commit landing's own patches, so it is still detected.
 pub(crate) fn is_merged_cached(repo_path: &Path, branch_sha: &str, base_sha: &str) -> Result<bool> {
     let _guard = file_lock()
         .lock()
@@ -66,12 +67,15 @@ pub(crate) fn is_merged_cached(repo_path: &Path, branch_sha: &str, base_sha: &st
         return Ok(verdict.unmatched_patch_ids.is_empty());
     }
 
-    let advanced = verdicts
-        .iter()
-        .position(|verdict| is_ancestor(repo_path, &verdict.base_sha, base_sha).unwrap_or(false));
+    // Keep the lineage being advanced: after a release `main` contains the old
+    // `develop` tip, and consuming that lineage for `main` would force a full
+    // `git cherry` on the next `develop` check.
+    let advanced = verdicts.iter().position(|verdict| {
+        base_is_ancestor_memoized(repo_path, &verdict.base_sha, base_sha).unwrap_or(false)
+    });
     let refreshed = match advanced {
         Some(index) => {
-            let previous = verdicts.remove(index);
+            let previous = verdicts[index].clone();
             match advance_verdict(repo_path, previous, base_sha)? {
                 Some(verdict) => verdict,
                 None => compute_verdict(repo_path, branch_sha, base_sha)?,
@@ -154,9 +158,48 @@ fn gained_patch_ids(
     Ok(gained)
 }
 
-/// Full verdict through `git cherry`, keeping the patch ids of the commits it
-/// reports as unmatched (`+`) so a later base advance can settle them.
+/// `is_ancestor` for two base tips, memoised per process: commit ancestry never
+/// changes, and every branch in one branch-list load asks about the same few
+/// base pairs. Errors are not memoised.
+fn base_is_ancestor_memoized(repo_path: &Path, ancestor: &str, descendant: &str) -> Result<bool> {
+    type AncestryMemo = Mutex<HashMap<(PathBuf, String, String), bool>>;
+    static MEMO: OnceLock<AncestryMemo> = OnceLock::new();
+    let key = (
+        repo_path.to_path_buf(),
+        ancestor.to_string(),
+        descendant.to_string(),
+    );
+    let memo = MEMO.get_or_init(Default::default);
+    if let Some(answer) = memo
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&key)
+    {
+        return Ok(*answer);
+    }
+    let answer = is_ancestor(repo_path, ancestor, descendant)?;
+    let mut memo = memo
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if memo.len() >= 4096 {
+        memo.clear();
+    }
+    memo.insert(key, answer);
+    Ok(answer)
+}
+
+/// Full verdict for a tip with no usable lineage: a merge-commit landing
+/// (`--is-ancestor`) is merged outright, otherwise `git cherry` keeps the patch
+/// ids of the commits it reports as unmatched (`+`) so a later base advance can
+/// settle them.
 fn compute_verdict(repo_path: &Path, branch_sha: &str, base_sha: &str) -> Result<Verdict> {
+    if is_ancestor(repo_path, branch_sha, base_sha)? {
+        return Ok(Verdict {
+            base_sha: base_sha.to_string(),
+            unmatched_patch_ids: Vec::new(),
+            computed_at: now_secs(),
+        });
+    }
     let stdout = run_git(repo_path, &["cherry", base_sha, branch_sha])
         .map_err(|error| GwtError::Git(format!("cherry {base_sha} {branch_sha}: {error}")))?;
     let unmatched = unmatched_cherry_commits(&stdout);
@@ -341,4 +384,15 @@ fn now_secs() -> i64 {
 #[cfg(test)]
 pub(crate) fn cached_branch_tips(repo_path: &Path) -> Vec<String> {
     load(&cache_path(repo_path)).entries.into_keys().collect()
+}
+
+#[cfg(test)]
+pub(crate) fn cached_lineage_bases(repo_path: &Path, branch_sha: &str) -> Vec<String> {
+    load(&cache_path(repo_path))
+        .entries
+        .remove(branch_sha)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|verdict| verdict.base_sha)
+        .collect()
 }

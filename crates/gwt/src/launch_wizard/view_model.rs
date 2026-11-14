@@ -189,7 +189,9 @@ impl LaunchWizardState {
                 && show_runtime_confirmation,
             show_execution_mode: false,
             show_skip_permissions: false,
-            show_fast_mode: false,
+            show_fast_mode: show_manual_setup && self.effective_agent_id() == "claude",
+            show_codex_speed: show_manual_setup && self.agent_is_codex(),
+            codex_speed: self.codex_speed,
             show_hermes_options,
             hermes_needs_setup: show_hermes_options && self.agent_needs_configuration("hermes"),
             show_opencode_options,
@@ -197,7 +199,7 @@ impl LaunchWizardState {
                 && self.agent_needs_configuration("opencode"),
             agent_setup: self.agent_setup_view(show_manual_setup),
             // Issue #4079 AC-2: only the app runtime knows the saved candidate
-            // pool, so it fills this in when the wizard is the Issue Monitor
+            // pool, so it fills this in when the wizard is Issues
             // Agent Settings form.
             issue_monitor_pool_impact: None,
             issue_monitor_pool: None,
@@ -599,7 +601,12 @@ impl LaunchWizardState {
                 },
             });
         }
-        if self.current_agent_supports_fast_mode() {
+        if self.agent_is_codex() {
+            summary.push(LaunchWizardSummaryView {
+                label: "Speed".to_string(),
+                value: format!("{:?}", self.codex_speed),
+            });
+        } else if self.current_agent_supports_fast_mode() {
             summary.push(LaunchWizardSummaryView {
                 label: "Fast mode".to_string(),
                 value: if self.fast_mode_enabled_for_current_agent() {
@@ -1526,13 +1533,13 @@ mod tests {
             agent_id: "codex".to_string(),
         });
         state.apply(LaunchWizardAction::SetModel {
-            model: "gpt-5.5".to_string(),
+            model: "gpt-6-luna".to_string(),
         });
 
         let configured = state.view();
         assert!(!configured.show_start_methods);
         assert!(configured.show_manual_setup);
-        assert_eq!(configured.selected_model, "gpt-5.5");
+        assert_eq!(configured.selected_model, "gpt-6-luna");
 
         state.apply(LaunchWizardAction::Back);
 
@@ -1540,7 +1547,7 @@ mod tests {
         assert!(state.completion.is_none());
         assert!(backed.show_start_methods);
         assert!(!backed.show_manual_setup);
-        assert_eq!(backed.selected_model, "gpt-5.5");
+        assert_eq!(backed.selected_model, "gpt-6-luna");
 
         state.apply(LaunchWizardAction::UseStartMethod {
             method: LaunchWizardStartMethodKind::ConfigureAndStart,
@@ -1548,7 +1555,7 @@ mod tests {
         let configured_again = state.view();
         assert!(!configured_again.show_start_methods);
         assert!(configured_again.show_manual_setup);
-        assert_eq!(configured_again.selected_model, "gpt-5.5");
+        assert_eq!(configured_again.selected_model, "gpt-6-luna");
     }
 
     #[test]
@@ -1593,6 +1600,7 @@ mod tests {
             session_mode: gwt_agent::SessionMode::Normal,
             skip_permissions: true,
             fast_mode: false,
+            codex_speed: Default::default(),
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             docker_service: None,
             docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -1667,12 +1675,13 @@ mod tests {
                 linked_issue_number: None,
                 agent_id: "codex".to_string(),
                 tool_label: "Codex".to_string(),
-                model: Some("gpt-5.5".to_string()),
+                model: Some("gpt-6-luna".to_string()),
                 reasoning: Some("high".to_string()),
                 resume_session_id: Some("resume-1".to_string()),
                 live_window_id: None,
                 skip_permissions: true,
                 codex_fast_mode: true,
+                codex_speed: Default::default(),
                 runtime_target: gwt_agent::LaunchRuntimeTarget::Docker,
                 docker_service: Some("gwt".to_string()),
                 docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Restart,
@@ -1685,7 +1694,7 @@ mod tests {
         });
 
         assert_eq!(state.agent_id, "codex");
-        assert_eq!(state.model, "gpt-5.5");
+        assert_eq!(state.model, "gpt-6-luna");
         assert_eq!(state.reasoning, "high");
         assert_eq!(state.mode, "resume");
         assert_eq!(state.resume_session_id.as_deref(), Some("resume-1"));
@@ -1696,7 +1705,7 @@ mod tests {
     }
 
     #[test]
-    fn quick_start_with_removed_codex_model_falls_back_to_current_default() {
+    fn quick_start_with_removed_codex_model_preserves_saved_selection() {
         let mut state = LaunchWizardState::open_with(
             context(branch("feature/gui"), "feature/gui"),
             sample_agent_options(),
@@ -1711,6 +1720,7 @@ mod tests {
                 live_window_id: None,
                 skip_permissions: true,
                 codex_fast_mode: true,
+                codex_speed: Default::default(),
                 runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
                 docker_service: None,
                 docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -1722,20 +1732,20 @@ mod tests {
             mode: QuickStartLaunchMode::Resume,
         });
 
-        assert_eq!(state.model, "gpt-6.1-sol");
-        // Issue #3962 AC-5: the swap is reported, not silent.
+        assert_eq!(state.model, "gpt-5.2-codex");
+        // Issue #6933 AC-3: the saved model stays visible and is not swapped.
         let notice = state
             .model_fallback_notice
             .as_deref()
             .expect("a removed Quick Start model must be reported");
         assert!(
-            notice.contains("gpt-5.2-codex") && notice.contains("gpt-6.1-sol"),
-            "the notice must name both models: {notice}"
+            notice.contains("gpt-5.2-codex") && notice.contains("kept"),
+            "the notice must explain the saved model: {notice}"
         );
         match state.completion.as_ref() {
             Some(LaunchWizardCompletion::Launch(config)) => match config.as_ref() {
                 LaunchWizardLaunchRequest::Agent(config) => {
-                    assert_eq!(config.model.as_deref(), Some("gpt-6.1-sol"));
+                    assert_eq!(config.model.as_deref(), Some("gpt-5.2-codex"));
                 }
                 other => panic!("expected agent launch request, got {other:?}"),
             },
@@ -1765,12 +1775,13 @@ mod tests {
                 linked_issue_number: None,
                 agent_id: "codex".to_string(),
                 tool_label: "Codex".to_string(),
-                model: Some("gpt-5.5".to_string()),
+                model: Some("gpt-6-luna".to_string()),
                 reasoning: Some("high".to_string()),
                 resume_session_id: Some("resume-1".to_string()),
                 live_window_id: None,
                 skip_permissions: true,
                 codex_fast_mode: true,
+                codex_speed: Default::default(),
                 runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
                 docker_service: None,
                 docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -1839,12 +1850,13 @@ mod tests {
                 linked_issue_number: None,
                 agent_id: "codex".to_string(),
                 tool_label: "Codex".to_string(),
-                model: Some("gpt-5.5".to_string()),
+                model: Some("gpt-6-luna".to_string()),
                 reasoning: Some("high".to_string()),
                 resume_session_id: Some("resume-1".to_string()),
                 live_window_id: None,
                 skip_permissions: true,
                 codex_fast_mode: true,
+                codex_speed: Default::default(),
                 runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
                 docker_service: None,
                 docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -1880,12 +1892,13 @@ mod tests {
                 linked_issue_number: None,
                 agent_id: "codex".to_string(),
                 tool_label: "Codex".to_string(),
-                model: Some("gpt-5.5".to_string()),
+                model: Some("gpt-6-luna".to_string()),
                 reasoning: Some("high".to_string()),
                 resume_session_id: None,
                 live_window_id: None,
                 skip_permissions: true,
                 codex_fast_mode: true,
+                codex_speed: Default::default(),
                 runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
                 docker_service: None,
                 docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -1931,7 +1944,7 @@ mod tests {
             agent_id: "codex".to_string(),
         });
         state.apply(LaunchWizardAction::SetModel {
-            model: "gpt-5.5".to_string(),
+            model: "gpt-6-luna".to_string(),
         });
         state.apply(LaunchWizardAction::SetReasoning {
             reasoning: "high".to_string(),
@@ -1946,7 +1959,7 @@ mod tests {
 
         assert_eq!(view.branch_mode, "use_selected");
         assert_eq!(view.selected_agent_id, "codex");
-        assert_eq!(view.selected_model, "gpt-5.5");
+        assert_eq!(view.selected_model, "gpt-6-luna");
         assert_eq!(view.selected_reasoning, "high");
         assert_eq!(view.selected_runtime_target, "host");
         assert!(view.show_reasoning);
@@ -1963,7 +1976,7 @@ mod tests {
         assert!(view
             .launch_summary
             .iter()
-            .any(|item| item.label == "Fast mode" && item.value == "off"));
+            .any(|item| item.label == "Speed" && item.value == "Off"));
     }
 
     #[test]
@@ -2003,8 +2016,8 @@ mod tests {
         state.set_agent_id("missing");
         assert_eq!(state.error.as_deref(), Some("Agent option is unavailable"));
 
-        state.set_model("gpt-5.5");
-        assert_eq!(state.model, "gpt-5.5");
+        state.set_model("gpt-6-luna");
+        assert_eq!(state.model, "gpt-6-luna");
         state.set_model("bad-model");
         assert_eq!(state.error.as_deref(), Some("Model option is unavailable"));
 
@@ -2256,6 +2269,7 @@ mod tests {
                 live_window_id: None,
                 skip_permissions: true,
                 codex_fast_mode: false,
+                codex_speed: Default::default(),
                 runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
                 docker_service: None,
                 docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -3115,6 +3129,7 @@ mod tests {
             session_mode: gwt_agent::SessionMode::Normal,
             skip_permissions: false,
             fast_mode: false,
+            codex_speed: Default::default(),
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             docker_service: None,
             docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,

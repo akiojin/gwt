@@ -20,6 +20,8 @@ pub struct PmReportsData {
     pub reports: Vec<gwt_core::pm_report::PmReport>,
     pub current: Option<PmCurrentSnapshot>,
     pub error: Option<String>,
+    /// A failed Current card never freezes independently readable reports.
+    pub current_error: Option<String>,
     refresh_at: Option<DateTime<Utc>>,
     processes: Vec<(u32, u64)>,
     uncertain: bool,
@@ -43,9 +45,13 @@ impl PmReportsData {
     fn same_content(&self, other: &Self) -> bool {
         self.reports == other.reports
             && self.error == other.error
+            && self.current_error == other.current_error
             && match (&self.current, &other.current) {
                 (Some(a), Some(b)) => {
-                    a.status == b.status && a.stale_minutes == b.stale_minutes && a.facts == b.facts
+                    a.status == b.status
+                        && a.stale_minutes == b.stale_minutes
+                        && a.facts == b.facts
+                        && a.request_tasks == b.request_tasks
                 }
                 (None, None) => true,
                 _ => false,
@@ -110,6 +116,8 @@ impl PmReportsReader {
                     project_dir(repo).join(gwt_git::PR_INVENTORY_CACHE_FILE),
                     home.join("config.toml"),
                     gwt_core::update::pending_update_manifest_path(),
+                    project_dir(repo).join("project-state/request-tasks/state.json"),
+                    project_dir(repo).join("project-state/request-tasks/state.initialized"),
                 ],
                 crate::issue_monitor_prefs_path_for_repo_path(repo),
             ));
@@ -172,7 +180,26 @@ impl PmReportsReader {
                 .data
                 .as_ref()
                 .is_none_or(|old| !old.same_content(&next));
-            self.inputs = if next.error.is_none() { inputs } else { None };
+            let task_failed = matches!(
+                next.current
+                    .as_ref()
+                    .and_then(|current| current.request_tasks.as_ref()),
+                Some(super::PmTaskOverview::Error { .. })
+            );
+            if task_failed {
+                // Share the existing retry cadence across viewers instead of
+                // rebuilding the whole projection on every failed Task poll.
+                let retry_at = now + chrono::Duration::seconds(5);
+                next.refresh_at = Some(
+                    next.refresh_at
+                        .map_or(retry_at, |deadline| deadline.min(retry_at)),
+                );
+            }
+            self.inputs = if next.error.is_none() && next.current_error.is_none() {
+                inputs
+            } else {
+                None
+            };
             self.data = Some(next);
         }
         let data = self.data.as_mut()?;
@@ -350,7 +377,23 @@ fn load(repo: &Path, update: Option<&gwt_core::update::UpdateState>) -> PmReport
     data.uncertain = !inventory.uncertainties.is_empty();
     match snapshot_from_inventory(repo, update, now, &inventory) {
         Ok(current) => data.current = Some(current),
-        Err(error) => data.error = Some(data.error.unwrap_or(error)),
+        Err(error) => {
+            // A broken PM explanation must not hide independently readable
+            // request tracking or saved reports (Issue #6950). The error fences
+            // only the current card; its client keeps the last confirmed one.
+            data.current = Some(PmCurrentSnapshot {
+                observed_at: now,
+                status: None,
+                stale_minutes: None,
+                facts: super::PmMonitorFacts {
+                    source: "unavailable".into(),
+                    error: Some(error.clone()),
+                    ..Default::default()
+                },
+                request_tasks: Some(super::tasks::load(repo)),
+            });
+            data.current_error = Some(error);
+        }
     }
     let settings =
         gwt_config::Settings::load_from_path(&gwt_core::paths::gwt_home().join("config.toml"))
@@ -385,6 +428,29 @@ fn load(repo: &Path, update: Option<&gwt_core::update::UpdateState>) -> PmReport
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_broken_current_status_does_not_hide_saved_reports() {
+        // Issue #6950: saved reports must reach the view even when the PM's
+        // current status is unreadable; only the current card is fenced.
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let repo = temp.path().join("repo");
+        fs::create_dir(&repo).unwrap();
+        let saved = gwt_core::pm_report::post_report(
+            &repo,
+            gwt_core::pm_report::PmReportKind::Qa,
+            "answer",
+            Some("question"),
+        )
+        .unwrap();
+        fs::create_dir_all(status_path(&repo).parent().unwrap()).unwrap();
+        fs::write(status_path(&repo), "not json\n").unwrap();
+        let data = load(&repo, None);
+        assert_eq!(data.reports, vec![saved]);
+        assert_eq!(data.error, None);
+        assert!(data.current_error.is_some());
+    }
 
     #[test]
     fn snapshots_are_resent_until_the_client_acknowledges_them() {
@@ -497,6 +563,7 @@ mod tests {
                 status: Some(status),
                 stale_minutes: Some(15),
                 facts: Default::default(),
+                request_tasks: None,
             }),
             refresh_at: Some(now + chrono::Duration::minutes(2)),
             ..Default::default()
@@ -549,6 +616,7 @@ mod tests {
                 status: None,
                 stale_minutes: None,
                 facts: Default::default(),
+                request_tasks: None,
             }),
             ..Default::default()
         };

@@ -25,7 +25,12 @@ mod projection;
 pub mod store_migration;
 mod work_items;
 
-pub(crate) use persistence::resolve_workspace_work_event_container;
+pub(crate) use persistence::{
+    machine_local_close_event_matches_projected_lifecycle, resolve_workspace_work_event_container,
+};
+
+#[cfg(any(test, feature = "test-support"))]
+pub use persistence::ScopedWorkItemsDecodeObserver;
 
 pub use agents::{WorkKind, WorkspaceAgentSummary, SHELL_WORK_AGENT_ID};
 pub use identity::{
@@ -54,9 +59,15 @@ pub use persistence::{
     emit_workspace_done_event_for_session_paths, emit_workspace_done_event_if_absent,
     emit_workspace_done_event_if_absent_paths,
     emit_workspace_terminal_event_for_exact_resolved_work_target,
-    emit_workspace_terminal_event_for_resolved_work_target, external_workspace_operation_lock_path,
-    external_workspace_operation_retry_hint_at, find_work_item_for_container,
+    emit_workspace_terminal_event_for_exact_resolved_work_target_with_provenance,
+    emit_workspace_terminal_event_for_resolved_work_target,
+    emit_workspace_terminal_event_for_resolved_work_target_with_provenance,
+    emit_workspace_terminal_event_for_session_with_provenance,
+    external_workspace_operation_lock_path, external_workspace_operation_retry_hint_at,
+    find_work_item_for_container,
     heal_same_container_duplicate_claim_attachments_for_work_event_root,
+    inspect_workspace_state_external_commit_recovery,
+    inspect_workspace_state_external_commit_recovery_for_work_event_root,
     load_or_default_workspace_projection, load_or_default_workspace_projection_from_path,
     load_or_synthesize_workspace_work_items, load_or_synthesize_workspace_work_items_from_paths,
     load_recent_workspace_journal_entries, load_recent_workspace_journal_entries_from_path,
@@ -65,6 +76,7 @@ pub use persistence::{
     mark_workspace_agent_stopped_at, mutate_existing_workspace_projection,
     mutate_existing_workspace_projection_for_cleanup, mutate_workspace_projection,
     mutate_workspace_projection_at, preserve_workspace_work_event_log_as_shards,
+    read_machine_local_workspace_work_events_from_path_read_only,
     rebuild_work_items_from_events_for_repo, rebuild_work_items_from_events_paths,
     reconcile_worktree_work_items, reconcile_worktree_work_items_paths,
     record_workspace_backfill_event_paths, record_workspace_pr_metadata_for_execution,
@@ -77,6 +89,7 @@ pub use persistence::{
     resolve_workspace_id_for_mention, resolve_workspace_id_for_session,
     resolve_workspace_state_external_commit, resolve_workspace_state_external_commit_at,
     resolve_workspace_state_external_commit_for_authority,
+    resolve_workspace_state_external_commit_recovery,
     resolve_workspace_work_event_from_board_entry, retroactive_auto_done_scan,
     retroactive_auto_done_scan_paths, save_workspace_projection, save_workspace_projection_to_path,
     save_workspace_work_items_projection_to_path,
@@ -91,6 +104,7 @@ pub use persistence::{
     try_resolve_workspace_assignment_for_session, try_resolve_workspace_id_for_session,
     update_workspace_projection_with_journal,
     update_workspace_projection_with_journal_for_resolved_work_target,
+    update_workspace_projection_with_journal_for_resolved_work_target_with_provenance,
     update_workspace_projection_with_journal_for_work_event_root,
     update_workspace_projection_with_journal_paths,
     update_workspace_projection_with_journal_paths_at, with_exact_workspace_done_read_only,
@@ -100,12 +114,13 @@ pub use persistence::{
     workspace_work_event_from_board_entry, workspace_work_event_shard_matches,
     worktree_sources_needing_backfill, ClassifiedProjection, DecodedWorkspaceWorkEvent,
     ExactWorkspaceTerminalPolicy, ExternalWorkspaceCommitAuthority,
-    ExternalWorkspaceCommitDecision, ExternalWorkspaceCommitResolution, PruneAction,
-    PruneSkipReason, PruneSummary, ResumeOwnerBleedRepairReport,
-    SessionBoundWorkspaceMutationTarget, SessionBoundWorkspaceTerminalTarget, StaleReason,
-    TrackedWorkEventPolicy, WorkItemsCache, WorkItemsLoadProfile, WorkItemsRebuildOutcome,
-    WorkspaceRetentionConfig, WorkspaceSessionAssignment, WorkspaceTerminalEventOutcome,
-    WorktreeReconcileSource, WORKSPACE_WORK_ITEMS_LOCK_OPERATION, WORK_ITEMS_REBUILD_VERSION,
+    ExternalWorkspaceCommitDecision, ExternalWorkspaceCommitRecovery,
+    ExternalWorkspaceCommitResolution, PruneAction, PruneSkipReason, PruneSummary,
+    ResumeOwnerBleedRepairReport, SessionBoundWorkspaceMutationTarget,
+    SessionBoundWorkspaceTerminalTarget, StaleReason, TrackedWorkEventPolicy, WorkItemsCache,
+    WorkItemsLoadProfile, WorkItemsRebuildOutcome, WorkspaceRetentionConfig,
+    WorkspaceSessionAssignment, WorkspaceTerminalEventOutcome, WorktreeReconcileSource,
+    WORKSPACE_WORK_ITEMS_LOCK_OPERATION, WORK_ITEMS_REBUILD_VERSION,
 };
 pub(crate) use persistence::{
     apply_workspace_container_detachments, save_workspace_work_items_projection_after_rebuild,
@@ -119,9 +134,10 @@ pub use projection::{
 pub use work_items::workspace_execution_container_same;
 pub use work_items::MAX_INLINE_WORK_EVENTS;
 pub use work_items::{
-    DuplicateWorkEventProvenance, WorkAgentRef, WorkEvent, WorkEventApplyOutcome, WorkEventKind,
-    WorkItem, WorkItemsProjection, WorkspaceExecutionContainerRef, WorkspaceIssueLink,
-    WorkspacePrLink, WorkspaceWorkAgentRef, WorkspaceWorkEvent, WorkspaceWorkEventKind,
-    WorkspaceWorkItem, WorkspaceWorkItemsCache, WorkspaceWorkItemsProjection,
-    WorkspaceWorkItemsRebuildOutcome,
+    DuplicateWorkEventProvenance, WorkAgentRef, WorkAuthorityClass, WorkEvent,
+    WorkEventApplyOutcome, WorkEventKind, WorkItem, WorkItemsProjection, WorkRecoveryLink,
+    WorkTerminalDiagnosis, WorkTerminalProvenance, WorkspaceExecutionContainerRef,
+    WorkspaceIssueLink, WorkspacePrLink, WorkspaceWorkAgentRef, WorkspaceWorkEvent,
+    WorkspaceWorkEventKind, WorkspaceWorkItem, WorkspaceWorkItemsCache,
+    WorkspaceWorkItemsProjection, WorkspaceWorkItemsRebuildOutcome,
 };

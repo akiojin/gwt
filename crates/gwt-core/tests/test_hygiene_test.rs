@@ -449,6 +449,79 @@ fn classified() {
 }
 
 #[test]
+fn coverage_elapsed_aliases_respect_binding_scope() {
+    let findings = hygiene::scan_time_dependencies(
+        "crates/demo/tests/demo.rs",
+        r#"
+fn before_declaration(elapsed: Duration) {
+    assert!(LIMIT >= elapsed);
+    let elapsed = started.elapsed();
+    assert!(elapsed < LIMIT);
+}
+fn after_inner_block(elapsed: Duration) {
+    {
+        let elapsed = started.elapsed();
+        assert!(elapsed < LIMIT);
+    }
+    assert!(elapsed < LIMIT);
+}
+fn shadowed() {
+    let elapsed = started.elapsed();
+    {
+        let elapsed = elapsed < LIMIT;
+        assert!(elapsed > false);
+    }
+    assert!(LIMIT >= elapsed);
+    let elapsed = Duration::from_secs(1);
+    assert!(elapsed < LIMIT);
+}
+fn assigned() {
+    let mut elapsed = Duration::ZERO;
+    elapsed = started.elapsed();
+    assert!(elapsed < LIMIT);
+}
+fn conditional_shadow() {
+    let elapsed = started.elapsed();
+    if let elapsed = Duration::ZERO { assert!(elapsed < LIMIT); };
+    assert!(elapsed < LIMIT);
+}
+fn conditional_clock(elapsed: Duration) {
+    if let elapsed = started.elapsed() { assert!(elapsed < LIMIT); }
+    assert!(elapsed < LIMIT);
+}
+fn outer() {
+    let elapsed = started.elapsed();
+    fn inner(mut elapsed: Duration, started: Instant) {
+        { elapsed = started.elapsed(); }
+        assert!(elapsed < LIMIT);
+    }
+    assert!(elapsed < LIMIT);
+}
+"#,
+        SourceKind::WholeFileIsTest,
+    );
+    let locations: Vec<_> = findings
+        .iter()
+        .map(|finding| (finding.context.as_str(), finding.line))
+        .collect();
+    assert_eq!(
+        locations,
+        [
+            ("before_declaration", 5),
+            ("after_inner_block", 10),
+            ("shadowed", 17),
+            ("shadowed", 20),
+            ("assigned", 27),
+            ("conditional_shadow", 32),
+            ("conditional_clock", 35),
+            ("inner", 42),
+            ("outer", 44)
+        ],
+        "unexpected dependencies: {findings:?}"
+    );
+}
+
+#[test]
 fn coverage_dependencies_ignore_production_literals_and_diagnostic_clock_reads() {
     let findings = hygiene::scan_time_dependencies(
         "crates/demo/src/lib.rs",
@@ -794,6 +867,30 @@ fn coverage_inventory_rejects_a_new_deadline_in_each_regression_test() {
     let recorded = recorded_time_dependencies();
     for (file, name) in [
         (
+            "crates/gwt/src/app_runtime/tests.rs",
+            "owner_monitor_fixture_with_prefs",
+        ),
+        (
+            "crates/gwt/src/app_runtime/tests/pm_context_tests.rs",
+            "pm_crash_with_unreadable_registration_preserves_durable_state",
+        ),
+        (
+            "crates/gwt/src/app_runtime/tests/issue_monitor_claim_tests.rs",
+            "issue_5642_consumed_delivery_ack_replay_preserves_the_exact_live_pane",
+        ),
+        (
+            "crates/gwt/src/app_runtime/tests/monitor_feedback_tests.rs",
+            "assert_issue5596_unsubmitted_answer_packet_retries",
+        ),
+        (
+            "crates/gwt/src/app_runtime/tests/execution_readiness_tests.rs",
+            "assert_fresh_monitor_startup_failures_stop",
+        ),
+        (
+            "crates/gwt/src/app_runtime/tests/execution_readiness_tests.rs",
+            "issue_monitor_scan_reconciles_activated_launch_but_preserves_unready_candidate",
+        ),
+        (
             "crates/gwt/src/app_runtime/tests/pane_control_tests.rs",
             "agent_pane_close_bypasses_a_contended_pane_lock",
         ),
@@ -1134,22 +1231,19 @@ mod hygiene {
         // Follow only the obvious local `elapsed = start.elapsed()` shape.
         // Imports/aliases, arbitrary data flow and indirect helper calls are
         // intentionally outside this lexical inventory's contract.
-        let aliases: Vec<_> = elapsed_assignment_regex()
-            .captures_iter(&test_code)
-            .filter_map(|capture| {
-                let line = line_at(capture.get(0)?.start());
-                enclosing_function(&functions, line)
-                    .map(|function| (capture[1].to_string(), function))
-            })
-            .collect();
-        if !aliases.is_empty() {
+        let function_at =
+            |at| enclosing_function(&functions, line_at(at)).map(|function| function.start);
+        let bindings = elapsed_bindings(&test_code, &functions, &line_offsets);
+        if !bindings.is_empty() {
             for found in identifier_regex().find_iter(&test_code) {
-                let line = line_at(found.start());
-                if aliases.iter().any(|(name, function)| {
-                    name == found.as_str()
-                        && enclosing_function(&functions, line)
-                            .is_some_and(|enclosing| enclosing.start == function.start)
-                }) && clock_is_verdict(&test_code, found.start(), found.end(), false)
+                if active_binding(
+                    &bindings,
+                    found.as_str(),
+                    found.start(),
+                    function_at(found.start()),
+                )
+                .is_some_and(|binding| binding.clock)
+                    && clock_is_verdict(&test_code, found.start(), found.end(), false)
                 {
                     anchors.insert(found.start());
                 }
@@ -1203,6 +1297,151 @@ mod hygiene {
             .collect()
     }
 
+    struct ElapsedBinding<'a> {
+        name: &'a str,
+        origin: usize,
+        active_from: usize,
+        scope: (usize, usize),
+        function: Option<usize>,
+        clock: bool,
+    }
+
+    fn active_binding<'a, 's>(
+        bindings: &'a [ElapsedBinding<'s>],
+        name: &str,
+        at: usize,
+        function: Option<usize>,
+    ) -> Option<&'a ElapsedBinding<'s>> {
+        function?;
+        bindings
+            .iter()
+            .filter(|binding| {
+                binding.name == name
+                    && binding.function == function
+                    && binding.active_from <= at
+                    && at < binding.scope.1
+            })
+            .max_by_key(|binding| (binding.scope.0, binding.active_from))
+    }
+
+    fn elapsed_bindings<'a>(
+        code: &'a str,
+        functions: &[FunctionRange],
+        line_offsets: &[usize],
+    ) -> Vec<ElapsedBinding<'a>> {
+        let assignments: Vec<_> = elapsed_assignment_regex().captures_iter(code).collect();
+        if assignments.is_empty() {
+            return Vec::new();
+        }
+        let mut scopes = vec![(0, code.len())];
+        let mut opened = Vec::new();
+        for (at, ch) in code.char_indices() {
+            match ch {
+                '{' => opened.push(at),
+                '}' => {
+                    if let Some(start) = opened.pop() {
+                        scopes.push((start, at));
+                    }
+                }
+                _ => {}
+            }
+        }
+        let scope_at = |at| {
+            *scopes
+                .iter()
+                .filter(|(start, end)| *start <= at && at < *end)
+                .max_by_key(|(start, _)| *start)
+                .unwrap()
+        };
+        let function_at = |at| {
+            let line = line_offsets.partition_point(|start| *start <= at) - 1;
+            enclosing_function(functions, line).map(|function| function.start)
+        };
+        let mut bindings = Vec::new();
+        for capture in local_declaration_regex().captures_iter(code) {
+            let name = capture.get(1).unwrap();
+            let start = capture.get(0).unwrap().start();
+            let statement = code[..start].rfind([';', '{', '}']).map_or(0, |at| at + 1);
+            let prefix = code[statement..start].trim();
+            let conditional = matches!(prefix.split_whitespace().last(), Some("if" | "while"));
+            if !prefix.is_empty() && !conditional {
+                continue;
+            }
+            if !assignments
+                .iter()
+                .any(|assignment| assignment[1] == *name.as_str())
+            {
+                continue;
+            }
+            // Initializers see the old binding. A conditional let is active
+            // only in its body; an ordinary let lasts through its own block.
+            let mut depth = 0_i32;
+            let end = code[name.end()..]
+                .char_indices()
+                .find_map(|(offset, ch)| {
+                    match ch {
+                        '{' if conditional && depth == 0 => return Some(name.end() + offset),
+                        '(' | '[' | '{' => depth += 1,
+                        ')' | ']' | '}' => depth -= 1,
+                        ';' if depth == 0 => return Some(name.end() + offset),
+                        _ => {}
+                    }
+                    None
+                })
+                .unwrap_or(code.len());
+            bindings.push(ElapsedBinding {
+                name: name.as_str(),
+                origin: name.start(),
+                active_from: end,
+                scope: scope_at(if conditional { end } else { name.start() }),
+                function: function_at(name.start()),
+                clock: assignments
+                    .iter()
+                    .any(|assignment| assignment.get(1).unwrap().start() == name.start()),
+            });
+        }
+        for assignment in assignments {
+            let name = assignment.get(1).unwrap();
+            if bindings
+                .iter()
+                .any(|binding| binding.origin == name.start())
+            {
+                continue;
+            }
+            // Retain the existing simple reassignment shape in its binding's scope.
+            let function = function_at(name.start());
+            let scope = active_binding(&bindings, name.as_str(), name.start(), function)
+                .map(|binding| binding.scope)
+                .unwrap_or_else(|| {
+                    // Without a local declaration, a simple assignment may
+                    // target a parameter. Keep it in this function's body,
+                    // never an outer function's same-name binding.
+                    function
+                        .and_then(|start| {
+                            scopes
+                                .iter()
+                                .filter(|(open, close)| {
+                                    line_offsets[start] <= *open
+                                        && *open <= name.start()
+                                        && name.start() < *close
+                                })
+                                .min_by_key(|(open, _)| *open)
+                                .copied()
+                        })
+                        .unwrap_or_else(|| scope_at(name.start()))
+                });
+            bindings.push(ElapsedBinding {
+                name: name.as_str(),
+                origin: name.start(),
+                active_from: assignment.get(0).unwrap().end(),
+                scope,
+                function,
+                clock: true,
+            });
+        }
+        bindings
+    }
+
     fn clock_is_verdict(code: &str, start: usize, end: usize, arithmetic: bool) -> bool {
         let before = code[..start].trim_end_matches(|ch: char| ch.is_whitespace() || ch == '(');
         let mut after = code[end..].trim_start();
@@ -1249,6 +1488,11 @@ mod hygiene {
             Regex::new(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*=\s*[^=;{}][^;{}]*\.\s*elapsed\s*\(\s*\)")
                 .unwrap()
         })
+    }
+
+    fn local_declaration_regex() -> &'static Regex {
+        static RE: OnceLock<Regex> = OnceLock::new();
+        RE.get_or_init(|| Regex::new(r"\blet\s+(?:mut\s+)?([A-Za-z_][A-Za-z0-9_]*)\b").unwrap())
     }
 
     fn identifier_regex() -> &'static Regex {

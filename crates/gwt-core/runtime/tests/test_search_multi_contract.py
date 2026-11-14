@@ -18,7 +18,9 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 import unittest
+import weakref
 from pathlib import Path
 from unittest import mock
 
@@ -275,6 +277,58 @@ class SearchMultiContractTests(unittest.TestCase):
             or []
         )
 
+    def test_file_record_pool_queries_exact_pinned_membership_and_detects_missing_member(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project, db_root, model = self._build_v2_view_fixture(
+                Path(tmp),
+                {"src/changed.rs": "//! MARK_POOL_OLD alpha\n",
+                 "src/keep.rs": "//! MARK_POOL_KEEP alpha\n"},
+                {},
+                {"MARK_POOL_OLD": 0.001, "MARK_POOL_KEEP": 0.2, "MARK_POOL_NEW": 0.1},
+            )
+            old = runner._select_file_index_v2_view(
+                REPO_HASH, WORKTREE_HASH, db_root, repair_corruption=False
+            )["view"]
+            self._write_fixture_sources(project, {"src/changed.rs": "//! MARK_POOL_NEW alpha\n"})
+            with mock.patch.object(runner, "_get_embedding_model", return_value=model), mock.patch.object(
+                runner, "_expected_file_index_vector_dimension", return_value=model.DIMENSION
+            ):
+                built = runner.action_index_files_v2(
+                    str(project), REPO_HASH, WORKTREE_HASH, db_root=db_root,
+                    file_index_protocol="v2", compatibility_descriptor=old["compatibility"]
+                )
+            self.assertTrue(built.get("ok"), built)
+            latest = self._search_v2_view(project, db_root, model)
+            latest_results = self._scope_file_results(latest, "files")
+            self.assertEqual(len(latest_results), 2, latest)
+            self.assertIn("MARK_POOL_NEW", latest_results[0]["description"])
+            old_result = runner._search_file_index_v2_scope(
+                old, "files", "alpha", 10, "semantic", [1.0] + [0.0] * 15
+            )
+            self.assertIn("MARK_POOL_OLD", old_result["results"][0]["description"])
+            hash_only = runner._search_file_index_v2_scope(
+                old, "files", old["base_members"]["files"][0][:16], 10,
+                "all_terms", [1.0] + [0.0] * 15
+            )
+            self.assertEqual(hash_only["results"], [])
+            self.assertEqual(len(hash_only["suggestions"]), 2)
+            latest_view = runner._select_file_index_v2_view(
+                REPO_HASH, WORKTREE_HASH, db_root, repair_corruption=False
+            )["view"]
+            client, collection = runner._open_file_index_v2_collection(
+                latest_view["overlay_store"], runner.V2_FILES_CODE_COLLECTION
+            )
+            try:
+                collection.delete(ids=latest_view["overlay_members"]["files"])
+                self.assertEqual(collection.count(), 2)  # Same as the logical view count.
+            finally:
+                runner._close_chroma_client(client)
+            fallback = runner._select_file_index_v2_view(
+                REPO_HASH, WORKTREE_HASH, db_root, repair_corruption=False
+            )
+            self.assertEqual(fallback["state"], "stale", fallback)
+            self.assertEqual(fallback["view"]["view_id"], old["view_id"])
+
     def test_v2_view_search_excludes_tombstone_and_uses_overlay_authority(self):
         with tempfile.TemporaryDirectory() as tmp:
             project, db_root, model = self._build_v2_view_fixture(
@@ -350,17 +404,18 @@ class SearchMultiContractTests(unittest.TestCase):
             collection_counts = {}
             real_search = runner._search_collection_v2
 
-            def record_fetch(collection, query, n_results, query_embedding=None):
-                collection_identity = str(collection.id)
+            def record_fetch(collection, query, n_results, query_embedding=None, ids=None):
+                collection_identity = (str(collection.id), tuple(ids) if ids is not None else None)
                 fetch_requests_by_collection.setdefault(collection_identity, []).append(
                     n_results
                 )
-                collection_counts.setdefault(collection_identity, collection.count())
+                collection_counts.setdefault(collection_identity, len(ids) if ids is not None else collection.count())
                 return real_search(
                     collection,
                     query,
                     n_results,
                     query_embedding=query_embedding,
+                    ids=ids,
                 )
 
             with mock.patch.object(
@@ -544,6 +599,7 @@ class SearchMultiContractTests(unittest.TestCase):
 
     def test_model_cache_reuses_each_revision_after_scope_switches(self):
         now = [100.0]
+        download = mock.Mock(side_effect=AssertionError("interactive work must not prefetch"))
 
         def load(*_args, **_kwargs):
             now[0] += 2.5
@@ -552,10 +608,12 @@ class SearchMultiContractTests(unittest.TestCase):
         constructor = mock.Mock(side_effect=load)
         with mock.patch.dict(os.environ, {"GWT_INDEX_FAKE_EMBEDDING": "0"}), \
                 mock.patch.dict("sys.modules", {
-                    "sentence_transformers": mock.Mock(SentenceTransformer=constructor)
+                    "sentence_transformers": mock.Mock(SentenceTransformer=constructor),
+                    "huggingface_hub": types.SimpleNamespace(hf_hub_download=download),
                 }), \
                 mock.patch.object(runner, "_model_load_clock", lambda: now[0]), \
-                mock.patch.object(runner, "_MODEL_LOAD_MS", 0):
+                mock.patch.object(runner, "_MODEL_LOAD_MS", 0), \
+                mock.patch.object(runner, "_SEARCH_WORKER_QOS", "interactive", create=True):
             models, load_times = [], []
             for revision in (None, runner.FILE_INDEX_V2_MODEL_REVISION) * 2:
                 before = runner._MODEL_LOAD_MS
@@ -566,6 +624,113 @@ class SearchMultiContractTests(unittest.TestCase):
             self.assertIs(models[1], models[3])
             self.assertIsNot(models[0], models[1])
             self.assertEqual(constructor.call_count, 2)
+            download.assert_not_called()
+
+    def test_background_default_snapshot_reuses_the_pinned_graph_in_either_order(self):
+        pin = runner.FILE_INDEX_V2_MODEL_REVISION
+        snapshot = Path(self._coord_tmp.name) / "models--intfloat--multilingual-e5-base" / "snapshots" / pin / "modules.json"
+        for order in ((None, pin, None, pin), (pin, None, pin, None)):
+            with self.subTest(order=order):
+                constructor = mock.Mock(return_value=object())
+                download = mock.Mock(return_value=str(snapshot))
+                with mock.patch.dict(os.environ, GWT_INDEX_FAKE_EMBEDDING="0", SENTENCE_TRANSFORMERS_HOME="model-cache"), \
+                        mock.patch.dict(sys.modules, {
+                            "sentence_transformers": types.SimpleNamespace(SentenceTransformer=constructor),
+                            "huggingface_hub": types.SimpleNamespace(hf_hub_download=download),
+                        }), \
+                        mock.patch.object(runner, "_MODEL_CACHE", {}), \
+                        mock.patch.object(runner, "_SEARCH_WORKER_QOS", "background"), \
+                        mock.patch.object(runner.Path, "exists", return_value=False):
+                    models = [runner._get_embedding_model(revision) for revision in order]
+                    self.assertTrue(all(model is models[0] for model in models))
+                    self.assertEqual(set(runner._MODEL_CACHE), {None, pin})
+                constructor.assert_called_once_with(runner.FILE_INDEX_V2_MODEL_ID, revision=pin)
+                download.assert_called_once_with(
+                    runner.FILE_INDEX_V2_MODEL_ID, filename="modules.json", subfolder=".",
+                    revision=None, library_name="sentence-transformers", token=None,
+                    cache_dir="model-cache", local_files_only=False,
+                )
+
+    def test_background_default_snapshot_falls_back_without_alias_on_uncertain_selection(self):
+        pin = runner.FILE_INDEX_V2_MODEL_REVISION
+        repository = Path(self._coord_tmp.name) / "models--intfloat--multilingual-e5-base"
+        cases = (
+            (repository / "snapshots" / ("f" * 40) / "modules.json", False, True),
+            (repository / "snapshots" / "main" / "modules.json", False, True),
+            (repository.parent / "other-model" / "snapshots" / pin / "modules.json", False, True),
+            (OSError("offline cache miss"), False, True),
+            (None, False, False),  # Older SDK without the public download API.
+            (repository / "snapshots" / pin / "modules.json", True, True),
+        )
+        for selection, local, available in cases:
+            with self.subTest(selection=selection, local=local):
+                constructor = mock.Mock(return_value=object())
+                download = mock.Mock(side_effect=selection) if isinstance(selection, Exception) else mock.Mock(return_value=str(selection))
+                hub = types.SimpleNamespace(hf_hub_download=download) if available else types.SimpleNamespace()
+                with mock.patch.dict(os.environ, GWT_INDEX_FAKE_EMBEDDING="0"), \
+                        mock.patch.dict(sys.modules, {
+                            "sentence_transformers": types.SimpleNamespace(SentenceTransformer=constructor),
+                            "huggingface_hub": hub,
+                        }), \
+                        mock.patch.object(runner, "_MODEL_CACHE", {}), \
+                        mock.patch.object(runner, "_SEARCH_WORKER_QOS", "background"), \
+                        mock.patch.object(runner.Path, "exists", return_value=local):
+                    runner._get_embedding_model(pin)
+                    runner._get_embedding_model()
+                    self.assertEqual(set(runner._MODEL_CACHE), {None})
+                self.assertEqual(constructor.call_args_list, [
+                    mock.call(runner.FILE_INDEX_V2_MODEL_ID, revision=pin),
+                    mock.call(runner.FILE_INDEX_V2_MODEL_ID),
+                ])
+                self.assertEqual(download.call_count, int(available and not local))
+
+    def test_background_snapshot_constructor_failure_is_not_retried_as_default(self):
+        pin = runner.FILE_INDEX_V2_MODEL_REVISION
+        snapshot = Path(self._coord_tmp.name) / "models--intfloat--multilingual-e5-base" / "snapshots" / pin / "modules.json"
+        constructor = mock.Mock(side_effect=RuntimeError("model load failed"))
+        with mock.patch.dict(os.environ, GWT_INDEX_FAKE_EMBEDDING="0"), \
+                mock.patch.dict(sys.modules, {
+                    "sentence_transformers": types.SimpleNamespace(SentenceTransformer=constructor),
+                    "huggingface_hub": types.SimpleNamespace(hf_hub_download=mock.Mock(return_value=str(snapshot))),
+                }), \
+                mock.patch.object(runner, "_MODEL_CACHE", {}), \
+                mock.patch.object(runner, "_SEARCH_WORKER_QOS", "background"), \
+                mock.patch.object(runner.Path, "exists", return_value=False):
+            with self.assertRaisesRegex(RuntimeError, "model load failed"):
+                runner._get_embedding_model()
+            self.assertEqual(runner._MODEL_CACHE, {})
+        constructor.assert_called_once_with(runner.FILE_INDEX_V2_MODEL_ID, revision=pin)
+
+    def test_background_worker_releases_old_revision_before_constructing_the_next(self):
+        references = []
+        revisions = []
+        pin = runner.FILE_INDEX_V2_MODEL_REVISION
+        snapshot = Path(self._coord_tmp.name) / "models--intfloat--multilingual-e5-base" / "snapshots" / pin / "modules.json"
+
+        class Model:
+            def __init__(self):
+                self.cycle = self  # Model graphs can require collection after cache eviction.
+
+        def construct(_model_id, **kwargs):
+            self.assertTrue(all(reference() is None for reference in references),
+                            "release the prior model before allocating its replacement")
+            model = Model()
+            references.append(weakref.ref(model))
+            revisions.append(kwargs.get("revision"))
+            return model
+
+        with mock.patch.dict(os.environ, {"GWT_INDEX_FAKE_EMBEDDING": "0"}), \
+                mock.patch.dict(sys.modules, {
+                    "sentence_transformers": mock.Mock(SentenceTransformer=construct),
+                    "huggingface_hub": types.SimpleNamespace(hf_hub_download=mock.Mock(return_value=str(snapshot))),
+                }), \
+                mock.patch.object(runner, "_SEARCH_WORKER_QOS", "background", create=True), \
+                mock.patch.object(runner.Path, "exists", return_value=False):
+            for revision in (None, pin, "e" * 40, None):
+                model = runner._get_embedding_model(revision)
+                self.assertIs(runner._get_embedding_model(revision), model)
+                del model
+            self.assertEqual(revisions, [pin, "e" * 40, pin])
 
     def test_search_multi_reports_model_load_time_for_the_cold_warm_split(self):
         """Report each request's load cost, excluding prior warm worker requests.
@@ -1252,23 +1417,144 @@ class SearchWorkerTests(unittest.TestCase):
         fake_chroma = mock.Mock()
         with tempfile.TemporaryDirectory() as tmp, \
              mock.patch.dict(sys.modules, {"chromadb": fake_chroma}):
-            store = Path(tmp) / "memory.gen" / "gen-active"
-            store.mkdir(parents=True)
-            with runner._search_worker_read_clients():
-                client, _ = runner._open_chroma_collection(store, runner.V2_MEMORY_COLLECTION)
-                runner._close_chroma_client(client)
-                client.close.assert_called_once()
+            for store, name in (
+                (Path(tmp) / "memory.gen" / "gen-active", runner.V2_MEMORY_COLLECTION),
+                (runner._issue_record_pool(Path(tmp) / "issues"), runner.V2_ISSUES_COLLECTION),
+            ):
+                store.mkdir(parents=True)
+                fake_chroma.reset_mock()
+                with runner._search_worker_read_clients():
+                    client, _ = runner._open_chroma_collection(store, name)
+                    runner._close_chroma_client(client)
+                    client.close.assert_called_once()
 
     def test_worker_transport_failure_remains_retryable(self):
-        args = argparse.Namespace(action="search-multi", qos=None,
-                                  repo_hash=REPO_HASH, query="alpha")
-        with mock.patch.object(runner, "parse_args", return_value=args), \
-             mock.patch.object(runner, "_search_worker_request", side_effect=ConnectionError("gone")), \
-             mock.patch.object(runner, "emit") as emit:
-            self.assertEqual(runner.main(), 1)
-        payload = emit.call_args.args[0]
-        self.assertEqual(payload["error_code"], "SEARCH_UNAVAILABLE")
-        self.assertTrue(payload["retryable"])
+        for action, code in (("search-multi", "SEARCH_UNAVAILABLE"), ("index-issues", "RUNTIME_ERROR")):
+            with self.subTest(action=action):
+                args = argparse.Namespace(action=action, qos=None, project_root="owned-project",
+                                          repo_hash=REPO_HASH, query="alpha")
+                with mock.patch.object(runner, "parse_args", return_value=args), \
+                     mock.patch.object(runner, "configure_qos_threads"), \
+                     mock.patch.object(runner, "_search_worker_request", side_effect=ConnectionError("gone")) as request, \
+                     mock.patch.object(runner, "_dispatch_v2") as fallback, \
+                     mock.patch.object(runner, "emit") as emit:
+                    self.assertEqual(runner.main(), 1)
+                request.assert_called_once_with(args)
+                fallback.assert_not_called()
+                payload = emit.call_args.args[0]
+                self.assertEqual(payload["error_code"], code)
+                self.assertTrue(payload["retryable"])
+
+    def test_background_worker_reuses_issue_and_file_builds_with_fresh_deadlines(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            project = base / "project"
+            project.mkdir()
+            cache = base / ".gwt/cache/issues" / REPO_HASH
+            for number in (1, 2):
+                issue = cache / str(number)
+                issue.mkdir(parents=True)
+                (issue / "meta.json").write_text(json.dumps({
+                    "number": number, "title": f"Issue {number}", "labels": [],
+                    "state": "open", "updated_at": "2026-11-12T00:00:00Z"}))
+                (issue / "body.md").write_text(f"original {number}")
+            revision = cache / "source-revision"
+            revision.write_text("00000000-0000-4000-8000-000000000001")
+            source = project / "worker.rs"
+            source.write_text("//! First worker source.\n")
+            env = dict(os.environ, HOME=tmp, USERPROFILE=tmp, GWT_INDEX_FAKE_EMBEDDING="1")
+            subprocess.run(["git", "init", "--quiet", str(project)], env=env,
+                           check=True, capture_output=True, timeout=30)
+            common = [sys.executable, str(Path(runner.__file__).resolve()),
+                      "--repo-hash", REPO_HASH, "--project-root", str(project),
+                      "--worker-dir", str(base / "worker"), "--qos", "background",
+                      "--worktree-hash", WORKTREE_HASH, "--file-index-protocol", "v2"]
+
+            def invoke(action="index-issues", context=None):
+                request_env = dict(env)
+                for key in ("GWT_INDEX_REFRESH_YIELD_AT_MS", "GWT_INDEX_REFRESH_RUN_ID"):
+                    request_env.pop(key, None)
+                request_env.update(context or {})
+                completed = subprocess.run(common + ["--action", action, "--mode", "incremental"],
+                                           env=request_env, capture_output=True, text=True, timeout=60)
+                self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+                return json.loads(completed.stdout), completed.stderr
+
+            worker_pid = None
+            try:
+                first, progress = invoke()
+                worker_pid = first.get("worker_pid")
+                self.assertIsInstance(worker_pid, int, first)
+                self.assertEqual(first["newly_embedded"], 2)
+                self.assertIn('"phase": "indexing"', progress)
+                for number in (1, 2):
+                    (cache / str(number) / "body.md").write_text(f"changed {number}")
+                    revision.write_text(f"00000000-0000-4000-8000-{number + 1:012}")
+                    changed, _ = invoke()
+                    self.assertEqual(changed["worker_pid"], worker_pid)
+                    self.assertEqual(changed["newly_embedded"], 1)
+                unchanged, _ = invoke()
+                self.assertEqual(unchanged["newly_embedded"], 0)
+                files, _ = invoke("index-files")
+                self.assertEqual(files["worker_pid"], worker_pid)
+                self.assertEqual(files["computed_embeddings"], 1)
+                source.write_text("//! Changed worker source.\n")
+                files, _ = invoke("index-files")
+                self.assertEqual(files["worker_pid"], worker_pid)
+                self.assertEqual(files["computed_embeddings"], 1)
+                for number in (1, 2):
+                    (cache / str(number) / "body.md").write_text(f"yielded {number}")
+                revision.write_text("00000000-0000-4000-8000-000000000004")
+                yielded, _ = invoke(context={"GWT_INDEX_REFRESH_YIELD_AT_MS": "0",
+                                              "GWT_INDEX_REFRESH_RUN_ID": "first-run"})
+                self.assertTrue(yielded["yielded"], yielded)
+                self.assertEqual(yielded["worker_pid"], worker_pid)
+                resumed, _ = invoke()
+                self.assertFalse(resumed.get("yielded"), resumed)
+                self.assertEqual(resumed["worker_pid"], worker_pid)
+                self.assertEqual(resumed["newly_embedded"], 1)
+            finally:
+                endpoint = base / "worker/endpoint.json"
+                if endpoint.exists():
+                    worker_pid = json.loads(endpoint.read_text())["pid"]
+                if worker_pid is not None:
+                    import signal
+                    os.kill(worker_pid, signal.SIGTERM)
+
+    def test_worker_refresh_context_is_scoped_and_progress_frames_can_share_a_packet(self):
+        context = {"GWT_INDEX_REFRESH_YIELD_AT_MS": "next-deadline",
+                   "GWT_INDEX_REFRESH_RUN_ID": "next-run"}
+        original = dict.fromkeys(context, "original")
+        with mock.patch.dict(os.environ, original):
+            with runner._worker_refresh_environment(context):
+                self.assertEqual({key: os.environ.get(key) for key in context}, context)
+            self.assertEqual({key: os.environ.get(key) for key in context}, original)
+            with runner._worker_refresh_environment({}):
+                self.assertTrue(all(key not in os.environ for key in context))
+            with self.assertRaisesRegex(RuntimeError, "interrupted"):
+                with runner._worker_refresh_environment(context):
+                    raise RuntimeError("interrupted")
+            self.assertEqual({key: os.environ.get(key) for key in context}, original)
+            with self.assertRaises(ValueError):
+                with runner._worker_refresh_environment({"PATH": "untrusted"}):
+                    self.fail("only refresh context keys may be copied")
+            self.assertEqual({key: os.environ.get(key) for key in context}, original)
+        receiver, sender = socket.socketpair()
+        with receiver, sender:
+            sender.sendall(b'{"worker_progress":{"done":1}}\n{"ok":true}\n')
+            pending = bytearray()
+            self.assertEqual(runner._read_search_worker_message(receiver, pending),
+                             {"worker_progress": {"done": 1}})
+            self.assertEqual(runner._read_search_worker_message(receiver, pending), {"ok": True})
+
+        connection = mock.MagicMock()
+        connection.recv.return_value = b'{"ok":true}\n{"unexpected":true}\n'
+        arguments = argparse.Namespace(action="search-multi", qos="interactive", worker_dir="owned-worker")
+        with mock.patch.object(runner, "acquire_lock"), mock.patch.object(
+            Path, "read_text", return_value='{"port":1234,"token":"owned-test-token"}'
+        ), mock.patch.object(runner.socket, "create_connection", return_value=connection):
+            with self.assertRaisesRegex(ValueError, "unexpected data after search worker result"):
+                runner._search_worker_request(arguments)
 
     def test_cli_searches_reuse_worker_and_reopen_published_store(self):
         evidence = self._exercise_cli_worker_reuse()
@@ -1352,7 +1638,7 @@ class SearchWorkerTests(unittest.TestCase):
             worker_pid = first["worker_pid"]
             try:
                 self.assertEqual(json.loads((base / "worker" / "endpoint.json").read_text())["model_state"], "warm")
-                invoke("--action", "index-files")
+                invoke("--action", "index-files", "--worker-dir", str(base / "background-worker"))
                 files_first = invoke("--action", "search-multi", "--scopes", "files",
                                      "--query", "persistent worker")
                 self.assertEqual(files_first["worker_pid"], worker_pid)
@@ -1410,6 +1696,9 @@ class SearchWorkerTests(unittest.TestCase):
                 # This PID came from the worker launched by this isolated fixture.
                 import signal
                 os.kill(worker_pid, signal.SIGTERM)
+                endpoint = base / "background-worker/endpoint.json"
+                if endpoint.exists():
+                    os.kill(json.loads(endpoint.read_text())["pid"], signal.SIGTERM)
 
     def test_worker_readiness_surrounds_model_construction_and_cache_hits(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1455,6 +1744,11 @@ class SearchWorkerTests(unittest.TestCase):
                 child.communicate()
 
     def test_disconnected_caller_stops_inflight_model_work(self):
+        for action in ("search-multi", "index-issues"):
+            with self.subTest(action=action):
+                self._exercise_disconnected_caller(action)
+
+    def _exercise_disconnected_caller(self, action):
         with tempfile.TemporaryDirectory() as tmp:
             worker_dir = Path(tmp)
             code = """
@@ -1466,10 +1760,12 @@ def search(**kwargs):
     (directory / 'started').touch()
     time.sleep(60)
 r.action_search_multi_v2 = search
-r._serve_search_worker(directory)
+r.action_index_issues_v2 = search
+r._serve_search_worker(directory, qos=sys.argv[2])
 """
             env = dict(os.environ, PYTHONPATH=str(Path(runner.__file__).resolve().parent))
-            child = subprocess.Popen([sys.executable, "-c", code, tmp], env=env,
+            qos = "interactive" if action == "search-multi" else "background"
+            child = subprocess.Popen([sys.executable, "-c", code, tmp, qos], env=env,
                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             try:
                 endpoint = worker_dir / "endpoint.json"
@@ -1479,7 +1775,8 @@ r._serve_search_worker(directory)
                 metadata = json.loads(endpoint.read_text(encoding="utf-8"))
                 with socket.create_connection(("127.0.0.1", metadata["port"]), timeout=10) as connection:
                     request = {"token": metadata["token"], "args": {
-                        "action": "search-multi", "repo_hash": REPO_HASH, "query": "alpha"}}
+                        "action": action, "repo_hash": REPO_HASH, "query": "alpha",
+                        "project_root": tmp, "qos": qos}}
                     connection.sendall(json.dumps(request).encode() + b"\n")
                     while not (worker_dir / "started").exists() and time.monotonic() < deadline:
                         time.sleep(0.1)

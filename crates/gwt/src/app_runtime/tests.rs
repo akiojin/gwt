@@ -1173,6 +1173,7 @@ pub(super) fn runtime_hook_state_for_event(
         source_event: Some(source_event.to_string()),
         gwt_session_id: Some(session_id.to_string()),
         continuation_readiness_nonce: None,
+        native_prompt_id: None,
         agent_session_id: Some("agent-session-1".to_string()),
         project_root: Some("E:/gwt/test-repo".to_string()),
         branch: Some("feature/test".to_string()),
@@ -1189,6 +1190,7 @@ fn runtime_hook_coordination_event(session_id: &str) -> gwt::RuntimeHookEvent {
         source_event: Some("PostToolUse".to_string()),
         gwt_session_id: Some(session_id.to_string()),
         continuation_readiness_nonce: None,
+        native_prompt_id: None,
         agent_session_id: Some("agent-session-1".to_string()),
         project_root: Some("E:/gwt/test-repo".to_string()),
         branch: Some("feature/test".to_string()),
@@ -1569,11 +1571,13 @@ pub(super) fn owner_fixture_block_on<T: Send>(
 ) -> T {
     let home = gwt_core::test_support::gwt_home_override();
     let dispatch = tracing::dispatcher::get_default(Clone::clone);
+    let clock = gwt_core::operation_deadline::ScopedOperationClock::current();
     std::thread::scope(|scope| {
         scope
             .spawn(|| {
                 let _dispatch = tracing::dispatcher::set_default(&dispatch);
                 let _home = home.as_ref().map(ScopedGwtHome::set);
+                let _clock = clock.map(gwt_core::operation_deadline::ScopedOperationClock::set);
                 tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
@@ -1989,6 +1993,7 @@ fn sample_runtime_with_events(
         next_project_incarnation += 1;
     }
     let mut runtime = AppRuntime {
+        mobile_host: Default::default(),
         test_project_owners: HashMap::new(),
         _runtime_namespace_gc: None,
         tabs,
@@ -2036,6 +2041,7 @@ fn sample_runtime_with_events(
         pending_launch_delivery_acks: HashMap::new(),
         pending_launch_completions: HashMap::new(),
         issue_monitor_launch_deliveries: HashMap::new(),
+        issue_monitor_launch_failure_causes: HashMap::new(),
         issue_monitor_launch_preparations: HashSet::new(),
         issue_monitor_launch_attempts: HashMap::new(),
         issue_monitor_launch_queue: Vec::new(),
@@ -2062,6 +2068,8 @@ fn sample_runtime_with_events(
         pending_restore_summaries: Vec::new(),
         restore_launch_windows: HashMap::new(),
         pending_startup_auto_resume_sessions: Vec::new(),
+        startup_auto_resume_admission_in_flight: false,
+        startup_restore_drain_phase: None,
         update_resume_tab_ids: HashSet::new(),
         update_drain_released_projects: Vec::new(),
         pending_update_resume_notice: None,
@@ -2657,6 +2665,7 @@ fn sample_issue_monitor_launch_profile() -> gwt::IssueMonitorLaunchProfile {
         session_mode: gwt_agent::SessionMode::Normal,
         skip_permissions: true,
         fast_mode: true,
+        codex_speed: Default::default(),
         runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
         docker_service: None,
         docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -3350,7 +3359,7 @@ fn assert_manual_launch_action_rejects_replaced_runtime(action: StaleManualHolde
 fn issue_monitor_feedback(issue_number: u64) -> LaunchFeedbackContext {
     LaunchFeedbackContext {
         client_id: "__issue_monitor__".to_string(),
-        title: "Issue Monitor".to_string(),
+        title: "Issues".to_string(),
         issue_monitor_issue_number: Some(issue_number),
         issue_monitor_delivery_id: None,
         issue_monitor_project_root: None,
@@ -4114,6 +4123,7 @@ fn assert_genesis_receipt_cleanup_failure(close_before_enqueue: bool, close_befo
                 generation,
                 context: Some(context.clone()),
                 current: Arc::new(AtomicBool::new(true)),
+                launch_in_flight: true,
                 operation_id: captured.operation_id.clone(),
                 owner_pane_id: captured.id.clone(),
                 client_cell,
@@ -6166,7 +6176,8 @@ fn leave_fresh_execution_activated_before_projection_commit(
     assert!(durable_launch_recovery_exists(
         &fixture.runtime.sessions_dir,
         &fixture.candidate_session_id,
-    ));
+    )
+    .unwrap());
 }
 
 impl AppRuntime {
@@ -6581,7 +6592,7 @@ impl OwnerFreshLaunchFixture {
 fn assert_owner_fresh_launch_rolled_back(fixture: &OwnerFreshLaunchFixture) {
     let sessions_dir = gwt_core::paths::gwt_sessions_dir();
     let candidate = &fixture.pending.binding.session_id;
-    assert!(!durable_launch_recovery_exists(&sessions_dir, candidate));
+    assert!(!durable_launch_recovery_exists(&sessions_dir, candidate).unwrap());
     assert!(!sessions_dir.join(format!("{candidate}.toml")).exists());
     assert!(!gwt_agent::runtime_state_path(&sessions_dir, candidate).exists());
     assert!(LaunchWizardMemoryCache::load(&sessions_dir)
@@ -7141,6 +7152,71 @@ fn drive_owner_agent_fixture(
     runtime.handle_remote_owner_launch_complete(completion)
 }
 
+/// Issue #5379: pull the blocking worker's startup admission verdicts out of
+/// the stub proxy so a test can hand them to the GUI handler.
+pub(super) fn take_startup_auto_resume_admission_prepared(
+    runtime: &AppRuntime,
+) -> Option<super::StartupAutoResumeAdmissionPrepared> {
+    let AppEventProxy::Stub(recorded) = &runtime.proxy else {
+        panic!("test runtime must use a stub event proxy");
+    };
+    let mut events = recorded.lock().expect("event log");
+    let index = events.iter().position(|event| {
+        matches!(
+            recorded_project_payload(event),
+            UserEvent::StartupAutoResumeAdmissionPrepared(_)
+        )
+    })?;
+    match into_recorded_project_payload(events.remove(index)) {
+        UserEvent::StartupAutoResumeAdmissionPrepared(prepared) => Some(*prepared),
+        _ => unreachable!("matched above"),
+    }
+}
+
+/// Issue #5379: the surface-ready drain evaluates Project admission on the
+/// blocking worker. Run that worker inline and apply its verdicts, so a test
+/// observes the same restores the GUI thread spawns after the round trip.
+pub(super) fn drain_startup_auto_resume(runtime: &mut AppRuntime) -> Vec<OutboundEvent> {
+    let (mut events, completion) = with_inline_startup_admission(runtime, |runtime| {
+        runtime.startup_auto_resume_ready_events()
+    });
+    events.extend(completion);
+    events
+}
+
+/// The frontend surface-ready round trip, with the admission worker settled.
+pub(super) fn handle_startup_auto_resume_ready(
+    runtime: &mut AppRuntime,
+    client_id: &str,
+) -> Vec<OutboundEvent> {
+    let (mut events, completion) = with_inline_startup_admission(runtime, |runtime| {
+        runtime.handle_frontend_event(
+            client_id.to_string(),
+            FrontendEvent::StartupAutoResumeReady {},
+        )
+    });
+    events.extend(completion);
+    events
+}
+
+/// Run `act` with a queued blocking spawner, execute whatever it enqueued on
+/// this thread, then hand the startup admission verdicts (if any) to the GUI
+/// handler. Returns `act`'s result and the handler's events.
+pub(super) fn with_inline_startup_admission<T>(
+    runtime: &mut AppRuntime,
+    act: impl FnOnce(&mut AppRuntime) -> T,
+) -> (T, Vec<OutboundEvent>) {
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    let original = std::mem::replace(&mut runtime.blocking_tasks, spawner);
+    let result = act(runtime);
+    drain_queued_blocking_tasks(&tasks);
+    runtime.blocking_tasks = original;
+    let completion = take_startup_auto_resume_admission_prepared(runtime)
+        .map(|prepared| runtime.startup_auto_resume_admission_prepared_events(prepared))
+        .unwrap_or_default();
+    (result, completion)
+}
+
 fn drain_owner_launch_fixtures(
     runtime: &mut AppRuntime,
     tasks: &BlockingTestTaskQueue,
@@ -7579,7 +7655,14 @@ fn owner_monitor_fixture(
     gwt::project_runtime::test_support::ProjectOwnerHarness,
     Option<String>,
 ) {
-    owner_monitor_fixture_with_prefs(temp, issue, delivery, agent_ids, |_| {})
+    owner_monitor_fixture_with_prefs(
+        temp,
+        issue,
+        delivery,
+        agent_ids,
+        gwt_core::deadline_budget::HANG_GUARD,
+        |_| {},
+    )
 }
 
 fn owner_monitor_fixture_with_prefs(
@@ -7587,12 +7670,18 @@ fn owner_monitor_fixture_with_prefs(
     issue: u64,
     delivery: bool,
     agent_ids: &[&str],
+    control_budget: Duration,
     configure: impl FnOnce(&mut gwt::IssueMonitorPrefs),
 ) -> (
     PathBuf,
     gwt::project_runtime::test_support::ProjectOwnerHarness,
     Option<String>,
 ) {
+    // This shared fixture verifies scan/launch outcomes, not the production
+    // five-second control deadline on the caller thread.
+    let _control_budget = gwt_core::deadline_budget::ScopedDeadlineBudget::hang_guard(
+        &gwt::daemon_publisher::DURABLE_ISSUE_MONITOR_CONTROL_BUDGET,
+    );
     assert!(!agent_ids.is_empty());
     let root = temp.join("monitor-project");
     fs::create_dir_all(&root).unwrap();
@@ -7656,7 +7745,10 @@ fn owner_monitor_fixture_with_prefs(
     )
     .unwrap();
     let owner = owner_fixture_block_on(
-        gwt::project_runtime::test_support::ProjectOwnerHarness::start_with_monitor(&root),
+        gwt::project_runtime::test_support::ProjectOwnerHarness::start_with_monitor_control_budget(
+            &root,
+            control_budget,
+        ),
     )
     .unwrap();
     configure_owner_fixture_start_gate(&owner);
@@ -7671,9 +7763,10 @@ fn owner_monitor_fixture_with_prefs(
             std::process::id(),
         ),
     ) {
-        assert_eq!(
-            error.to_string(),
-            gwt::runtime_daemon_events::ISSUE_MONITOR_CONTROL_SCAN_ALREADY_IN_FLIGHT_ERROR,
+        assert!(
+            matches!(error,
+                gwt::runtime_daemon_events::IssueMonitorControlPublishError::Rejected(message)
+                if message == gwt::runtime_daemon_events::ISSUE_MONITOR_CONTROL_SCAN_ALREADY_IN_FLIGHT_ERROR),
             "the actual initial source scan must be reserved or already running"
         );
     }
@@ -7783,8 +7876,32 @@ fn owner_monitor_fresh_fixture(
     delivery: bool,
     prepty_failure: bool,
 ) -> OwnerFreshLaunchFixture {
-    let (root, owner, delivery_id) =
-        owner_monitor_fixture(temp, 2359, delivery, &["fixture", "pane-contract-fixture"]);
+    owner_monitor_fresh_fixture_with_control_budget(
+        temp,
+        operation_id,
+        delivery,
+        prepty_failure,
+        gwt_core::deadline_budget::HANG_GUARD,
+        |_| {},
+    )
+}
+
+fn owner_monitor_fresh_fixture_with_control_budget(
+    temp: &Path,
+    operation_id: &str,
+    delivery: bool,
+    prepty_failure: bool,
+    control_budget: Duration,
+    configure: impl FnOnce(&mut gwt_agent::LaunchConfig),
+) -> OwnerFreshLaunchFixture {
+    let (root, owner, delivery_id) = owner_monitor_fixture_with_prefs(
+        temp,
+        2359,
+        delivery,
+        &["fixture", "pane-contract-fixture"],
+        control_budget,
+        |_| {},
+    );
     let owner = Arc::new(owner);
     let selected = pane_control_tests::control_launch_config(&root, 2359);
     let repo = selected.working_dir.unwrap();
@@ -7818,10 +7935,13 @@ fn owner_monitor_fresh_fixture(
                 .unwrap();
         }
         let mut command = owner_fresh_agent_command(&owner, &repo, choice, None);
-        let gwt::project_runtime::events::OwnerCommand::LaunchAgent { metadata, .. } = &mut command
+        let gwt::project_runtime::events::OwnerCommand::LaunchAgent {
+            config, metadata, ..
+        } = &mut command
         else {
             unreachable!()
         };
+        configure(config);
         let mut feedback = issue_monitor_feedback(2359);
         feedback.issue_monitor_delivery_id = delivery_id;
         feedback.issue_monitor_session_mode = Some(gwt_agent::SessionMode::Normal);
@@ -9151,6 +9271,7 @@ fn codex_issue_monitor_launch_profile() -> gwt::IssueMonitorLaunchProfile {
         session_mode: gwt_agent::SessionMode::Normal,
         skip_permissions: true,
         fast_mode: false,
+        codex_speed: Default::default(),
         runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
         docker_service: None,
         docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -9169,6 +9290,7 @@ fn claude_issue_monitor_launch_profile() -> gwt::IssueMonitorLaunchProfile {
         session_mode: gwt_agent::SessionMode::Normal,
         skip_permissions: true,
         fast_mode: false,
+        codex_speed: Default::default(),
         runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
         docker_service: None,
         docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -9631,6 +9753,7 @@ fn convert_monitor_relaunch_fixture_to_grok(
         session_mode: gwt_agent::SessionMode::Normal,
         skip_permissions: true,
         fast_mode: false,
+        codex_speed: Default::default(),
         runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
         docker_service: None,
         docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -9919,6 +10042,7 @@ fn pool_profile(agent_id: &str) -> gwt::IssueMonitorLaunchProfile {
         session_mode: Default::default(),
         skip_permissions: false,
         fast_mode: false,
+        codex_speed: Default::default(),
         runtime_target: Default::default(),
         docker_service: None,
         docker_lifecycle_intent: Default::default(),
@@ -10986,6 +11110,7 @@ fn native_pm_wake_expiry_requires_ack_before_provider_file_wait() {
     for submits_before_expiry in [0, 1] {
         let operation_id = uuid::Uuid::new_v4().to_string();
         let prepared = pm_registry::PmDeliveryReceipt {
+            grok_prompt: None,
             operation_id: operation_id.clone(),
             recorded_at: "2026-11-06T00:00:00Z".into(),
             status: Status::Prepared,
@@ -11658,7 +11783,7 @@ fn pm_wake_inbox_item(number: u64, state: gwt::MonitorInboxState) -> gwt::IssueM
     }
 }
 
-/// Repo with an enabled Issue Monitor, a registered PM whose pane is live,
+/// Repo with an enabled Issues, a registered PM whose pane is live,
 /// and a second non-PM pane that the wake must never reach.
 pub(super) fn pm_wake_fixture(temp: &tempfile::TempDir) -> (PathBuf, AppRuntime, String) {
     let repo = temp.path().join("repo");
@@ -12241,6 +12366,7 @@ fn codex_usage_account(
         account_label: None,
         plan: None,
         extra_usage: None,
+        credits: None,
         windows: vec![gwt_core::usage::UsageWindow::new(
             gwt_core::usage::WindowKind::Weekly,
             weekly_used_percent,
@@ -12514,6 +12640,7 @@ fn assert_pm_delivery_refused(
         let path = gwt::pm_registry::pm_delivery_receipts_path_for_repo_path(&fixture.repo);
         let hash = gwt::pm_registry::pm_delivery_prompt_sha256("do not deliver to the PM");
         let receipt = gwt::pm_registry::PmDeliveryReceipt {
+            grok_prompt: None,
             operation_id: operation_id.clone(),
             recorded_at: Utc::now().to_rfc3339(),
             status: gwt::pm_registry::PmDeliveryReceiptStatus::Prepared,
@@ -12776,3 +12903,6 @@ mod work_projection_tests;
 mod workspace_resume_tests;
 #[cfg(test)]
 mod workspace_watcher_tests;
+
+#[cfg(test)]
+mod codex_speed_tests;

@@ -1888,6 +1888,8 @@ fn hook_doctor_keeps_unmaterialized_worktree_inactive_with_shared_hooks() {
             .len(),
         5
     );
+    let shared_hook_key =
+        gwt_skills::codex_hook_trust_key_path(&repo.join(".codex/hooks.json")).unwrap();
     assert!(audit["trust"]["missing_managed_events"]
         .as_array()
         .unwrap()
@@ -1895,7 +1897,7 @@ fn hook_doctor_keeps_unmaterialized_worktree_inactive_with_shared_hooks() {
         .all(|entry| entry
             .as_str()
             .unwrap()
-            .starts_with(repo.join(".codex/hooks.json").to_str().unwrap())));
+            .starts_with(shared_hook_key.to_str().unwrap())));
     assert_eq!(fs::read(hooks_path).unwrap(), hooks_before);
     assert!(!codex_home.join("config.toml").exists());
 

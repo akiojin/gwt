@@ -22,6 +22,16 @@ export const HUB_URL = ORIGIN_URL;
 const ROOT_MODULES = new Set([
   "app.js",
   "pm-chat.js",
+  // SPEC #7007 — task-centered Home island host imported by pm-chat.js.
+  "task-home.js",
+  // SPEC #7007 — task-centered Decide island host imported by pm-chat.js.
+  "task-decisions.js",
+  // SPEC #7007 — task-centered Progress island host imported by pm-chat.js.
+  "task-progress.js",
+  // SPEC #7007 — task-centered Log island host imported by pm-chat.js and app.js.
+  "task-log.js",
+  // SPEC #7007 T-014 — typed window command error presentation imported by app.js.
+  "window-command-error.js",
   // Issue #4538 — route bootstrap, route helpers, and the Hub picker.
   "frontend-bootstrap.js",
   "frontend-route.js",
@@ -109,6 +119,7 @@ const ROOT_MODULES = new Set([
   "issue-render-sync.js",
   "render-degradation-banner.js",
   "workspace-state-notice.js",
+  "react/islands.js",
   // SPEC-3064 Phase 3 (E2) — terminal attachments & clipboard surface.
   "terminal-attachments.js",
   "terminal-copy-shortcut.js",

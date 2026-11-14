@@ -34,6 +34,57 @@ WORKTREE_HASH = "111122223333ffff"
 SECOND_WORKTREE_HASH = "aaaabbbbccccdddd"
 
 
+class FileVectorVerificationTests(unittest.TestCase):
+    def test_native_vector_comparison_preserves_scalar_boundary_without_scalar_loop(self):
+        import numpy as np
+
+        stored = np.array([0.0, 1.0], dtype=np.float32)
+        with mock.patch.object(runner.math, "isclose", wraps=runner.math.isclose) as scalar:
+            self.assertTrue(runner._chroma_vector_matches_cas(stored, [1e-6, 1.000001]))
+            self.assertFalse(runner._chroma_vector_matches_cas(
+                stored, [float(np.nextafter(1e-6, np.inf)), 1.0]
+            ))
+            self.assertFalse(runner._chroma_vector_matches_cas(
+                np.array([1.0], dtype=np.float32), [float(np.nextafter(1.000001, np.inf))]
+            ))
+            self.assertFalse(runner._chroma_vector_matches_cas(np.array([np.nan]), [0.0]))
+            self.assertFalse(runner._chroma_vector_matches_cas(np.array([np.inf]), [float("inf")]))
+            self.assertFalse(runner._chroma_vector_matches_cas(np.array([0.0]), [float("nan")]))
+            self.assertFalse(runner._chroma_vector_matches_cas(stored, [0.0]))
+            scalar.assert_not_called()
+            # Generic conversion remains on the original scalar fallback.
+            self.assertTrue(runner._chroma_vector_matches_cas(["1.0"], [1.0]))
+            self.assertTrue(runner._chroma_vector_matches_cas(np.array([1.0]), ["1.0"]))
+            self.assertEqual(scalar.call_count, 2)
+
+    def test_staging_verification_uses_the_fresh_cas_checksum_without_rehashing(self):
+        compatibility = dict(runner.default_file_index_compatibility(), dimension=2)
+        descriptor = {"kind": "base", "compatibility": compatibility}
+        vector = [0.25, -0.5]
+        checksum = runner._vector_checksum(vector)
+        metadata = {"path": "src/unit.rs"}
+        record = {"path": "src/unit.rs", "bucket": "code", "document": "unit", "metadata": metadata}
+        identity = {"cas_key": "a" * 64, "input_digest": "b" * 64}
+        entry = {"path": record["path"], "scope": "files", "dimension": 2,
+                 "vector_checksum": checksum, "payload_digest": hashlib.sha256(b"unit").hexdigest(),
+                 "metadata_digest": runner._sha256_json(metadata)}
+        collection = mock.Mock()
+        collection.get.return_value = {"ids": [runner._file_record_id(entry)], "documents": ["unit"],
+                                       "metadatas": [metadata], "embeddings": [vector]}
+        cas_root = Path("file-index-v2/cas")
+        with mock.patch.object(runner, "_artifact_pair_metadata_is_verified", return_value=True), \
+                mock.patch.object(runner, "_open_file_index_v2_collection", return_value=(mock.Mock(), collection)), \
+                mock.patch.object(runner, "_read_cas_vector", return_value=vector) as read_cas, \
+                mock.patch.object(runner, "_vector_checksum", side_effect=AssertionError("fresh CAS read already hashed")):
+            self.assertTrue(runner._staged_artifact_vectors_are_verified(
+                Path("file-index-v2/bases/staging"), [record], [identity], [entry], descriptor, cas_root
+            ))
+        read_cas.assert_called_once_with(
+            cas_root, identity, runner._embedding_contract(compatibility), 2,
+            expected_manifest_checksum=checksum,
+        )
+
+
 class CompatibilityDescriptorTests(unittest.TestCase):
     def _descriptor(self) -> dict:
         return {
@@ -260,17 +311,27 @@ class _IncrementalFixture(unittest.TestCase):
             "runner_hash": "runner-a",
         }
 
-    def _physical_collection_count(self, artifact_dir: Path) -> int:
-        stores = [path.parent for path in artifact_dir.rglob("chroma.sqlite3")]
-        self.assertEqual(
-            len(stores),
-            1,
-            f"one files vector store is required under {artifact_dir}: {stores}",
+    def _artifact_collection_count(
+        self, artifact_dir: Path, collection_name: str = runner.V2_FILES_CODE_COLLECTION
+    ) -> int:
+        descriptor = json.loads(
+            (artifact_dir / "descriptor.json").read_text(encoding="utf-8")
         )
-        client, collection = runner._open_chroma_collection(
-            stores[0], runner.V2_FILES_CODE_COLLECTION
+        store = runner._file_artifact_store(artifact_dir, descriptor)
+        self.assertTrue((store / "chroma.sqlite3").is_file())
+        client, collection = runner._open_file_index_v2_collection(
+            store, collection_name
         )
         try:
+            if runner._uses_file_record_pool(descriptor):
+                entries = json.loads(
+                    (artifact_dir / "manifest.json").read_text(encoding="utf-8")
+                )["entries"]
+                scope = "files" if collection_name == runner.V2_FILES_CODE_COLLECTION else "files-docs"
+                ids = runner._file_member_ids(entries, scope)
+                stored_ids = collection.get(ids=ids, include=[])["ids"] if ids else []
+                self.assertEqual(set(stored_ids), set(ids))
+                return len(stored_ids)
             return int(collection.count())
         finally:
             runner._close_chroma_client(client)
@@ -378,6 +439,203 @@ class _IncrementalFixture(unittest.TestCase):
 
 
 class IncrementalGenerationTests(_IncrementalFixture):
+    def test_file_record_pool_pruning_retains_members_and_respects_reader_pin(self):
+        result = self._build_protocol_v2(self.project, WORKTREE_HASH)
+        self.assertTrue(result.get("ok"), result)
+        v2_root = runner.resolve_file_index_v2_root(REPO_HASH, db_root=self.db_root)
+        overlay_dir = runner.resolve_file_index_v2_overlay_dir(
+            REPO_HASH, WORKTREE_HASH, result["overlay_generation_id"], db_root=self.db_root
+        )
+        descriptor = runner._read_artifact_descriptor(overlay_dir)
+        store = runner._file_artifact_store(overlay_dir, descriptor)
+        client, collection = runner._open_file_index_v2_collection(store, runner.V2_FILES_DOCS_COLLECTION)
+        try:
+            collection.upsert(ids=["orphan"], documents=["unused"],
+                              embeddings=[[1.0] * runner._FakeEmbeddingModel.DIM],
+                              metadatas=[{"path": "unused.rs"}])
+        finally:
+            runner._close_chroma_client(client)
+        future_artifact = v2_root / "bases" / "future-artifact"
+        future_artifact.mkdir(parents=True)
+        future_descriptor = copy.deepcopy(descriptor)
+        future_descriptor["compatibility"]["writer_protocol"] = "future-writer"
+        (future_artifact / "descriptor.json").write_text(json.dumps(future_descriptor))
+        self.assertEqual(runner._prune_file_record_pool(v2_root), 0)
+        (future_artifact / "descriptor.json").unlink()
+        future_artifact.rmdir()
+        with runner._file_index_v2_pin(REPO_HASH, WORKTREE_HASH, "reader", self.db_root):
+            self.assertEqual(runner._prune_file_record_pool(v2_root), 0)
+        self.assertEqual(runner._prune_file_record_pool(v2_root), 1)
+        client, collection = runner._open_file_index_v2_collection(store, runner.V2_FILES_CODE_COLLECTION)
+        try:
+            self.assertEqual(collection.count(), 8)
+        finally:
+            runner._close_chroma_client(client)
+
+    def test_canonical_refresh_reuses_records_across_successive_file_changes(self):
+        project = self._make_canonical_repo()
+        first = self._build_protocol_v2(project, WORKTREE_HASH)
+        self.assertTrue(first.get("ok"), first)
+        original_make = runner._make_file_index_v2_collection
+        original_open = runner._open_file_index_v2_collection
+        written_paths = []
+        vector_read_ids = []
+
+        def observed_collection(factory, *args, **kwargs):
+            client, collection = factory(*args, **kwargs)
+            original_upsert = collection.upsert
+
+            def observed_upsert(*args, **kwargs):
+                written_paths.extend(meta["path"] for meta in kwargs["metadatas"])
+                return original_upsert(*args, **kwargs)
+
+            def observed_get(*args, **kwargs):
+                if "embeddings" in (kwargs.get("include") or []):
+                    self.assertIsNotNone(kwargs.get("ids"), "vector reads must be bounded by exact IDs")
+                    vector_read_ids.extend(kwargs["ids"])
+                return collection.get(*args, **kwargs)
+
+            return client, mock.Mock(wraps=collection, upsert=observed_upsert, get=observed_get)
+
+        for index in (0, 1):
+            changed_path = f"src/module_{index:02}.rs"
+            path = project / changed_path
+            path.write_text(f"//! updated module {index}\nfn updated_{index}() {{}}\n", encoding="utf-8")
+            self._run_git("-C", str(project), "add", "src")
+            self._run_git(
+                "-C", str(project), "-c", "user.name=gwt tests", "-c",
+                "user.email=gwt-tests@example.invalid", "commit", "--quiet",
+                "-m", f"change module {index}",
+            )
+            written_paths.clear()
+            vector_read_ids.clear()
+            with contextlib.ExitStack() as patches:
+                patches.enter_context(mock.patch.object(
+                    runner, "_make_file_index_v2_collection",
+                    side_effect=lambda *args, **kwargs: observed_collection(original_make, *args, **kwargs),
+                ))
+                patches.enter_context(mock.patch.object(
+                    runner, "_open_file_index_v2_collection",
+                    side_effect=lambda *args, **kwargs: observed_collection(original_open, *args, **kwargs),
+                ))
+                resolve = patches.enter_context(mock.patch.object(
+                    runner, "_resolve_record_vector_batch", wraps=runner._resolve_record_vector_batch,
+                ))
+                cas_read = patches.enter_context(mock.patch.object(
+                    runner, "_read_cas_vector", wraps=runner._read_cas_vector,
+                ))
+                parse = patches.enter_context(mock.patch.object(
+                    runner, "_record_from_bytes", wraps=runner._record_from_bytes,
+                ))
+                result = self._build_protocol_v2(project, WORKTREE_HASH)
+            self.assertTrue(result.get("ok"), result)
+            self.assertEqual(written_paths, [changed_path])
+            resolved_paths = [record["path"] for call in resolve.call_args_list for record in call.args[0]]
+            self.assertEqual(resolved_paths, [changed_path], "unchanged immutable records must bypass CAS resolution")
+            self.assertEqual([call.args[0] for call in parse.call_args_list], [changed_path])
+            base_dir = runner.resolve_file_index_v2_base_dir(
+                REPO_HASH, result["base_generation_id"], db_root=self.db_root,
+            )
+            entries = json.loads((base_dir / "manifest.json").read_text(encoding="utf-8"))["entries"]
+            changed_entry = next(entry for entry in entries if entry["path"] == changed_path)
+            self.assertEqual({call.args[1]["cas_key"] for call in cas_read.call_args_list}, {changed_entry["cas_key"]})
+            self.assertEqual(set(vector_read_ids), {runner._file_record_id(changed_entry)})
+            self.assertEqual(result.get("computed_embeddings"), 1, result)
+            self.assertEqual(result.get("embedding_cache_hits"), 7, result)
+
+    def test_new_base_repairs_unproven_members_without_reading_unused_cas(self):
+        project = self._make_canonical_repo()
+        first = self._build_protocol_v2(project, WORKTREE_HASH)
+        self.assertTrue(first.get("ok"), first)
+        base_dir = runner.resolve_file_index_v2_base_dir(
+            REPO_HASH, first["base_generation_id"], db_root=self.db_root,
+        )
+        descriptor = runner._read_artifact_descriptor(base_dir)
+        entries = {entry["path"]: entry for entry in json.loads(
+            (base_dir / "manifest.json").read_text(encoding="utf-8"),
+        )["entries"]}
+        store = runner._file_artifact_store(base_dir, descriptor)
+        repaired_paths = [f"src/module_{index:02}.rs" for index in (4, 5, 6)]
+        repair_ids = [runner._file_record_id(entries[path]) for path in repaired_paths]
+        client, collection = runner._open_file_index_v2_collection(store, runner.V2_FILES_CODE_COLLECTION)
+        try:
+            expected = collection.get(ids=repair_ids, include=["documents", "metadatas", "embeddings"])
+            vectors = dict(zip(expected["ids"], expected["embeddings"]))
+            collection.update(ids=[repair_ids[0]], metadatas=[{"path": "incorrect.rs"}])
+            collection.delete(ids=[repair_ids[1]])
+            collection.update(ids=[repair_ids[2]], documents=["not the source payload"],
+                              embeddings=[vectors[repair_ids[2]]])
+        finally:
+            runner._close_chroma_client(client)
+
+        cas_root = runner.resolve_file_index_v2_root(REPO_HASH, db_root=self.db_root) / "cas"
+        unused_key = entries["src/module_07.rs"]["cas_key"]
+        unused_cas = runner._cas_entry_path(cas_root, unused_key)
+        unused_cas.write_bytes(b"invalid unused CAS")
+        changed_path = "src/module_00.rs"
+        path = project / changed_path
+        path.write_text("//! updated module 0\nfn updated_0() {}\n", encoding="utf-8")
+        changed_record = runner._record_from_bytes(changed_path, path.read_bytes())
+        identities, _ = runner._plan_file_artifact([changed_record], descriptor["compatibility"])
+        needed_cas = runner._cas_entry_path(cas_root, identities[0]["cas_key"])
+        needed_cas.parent.mkdir(parents=True, exist_ok=True)
+        needed_cas.write_bytes(b"invalid needed CAS")
+        self._run_git("-C", str(project), "add", "src")
+        self._run_git("-C", str(project), "-c", "user.name=gwt tests", "-c",
+                      "user.email=gwt-tests@example.invalid", "commit", "--quiet", "-m", "change module 0")
+
+        with mock.patch.object(runner, "_resolve_record_vector_batch", wraps=runner._resolve_record_vector_batch) as resolve, \
+                mock.patch.object(runner, "_read_cas_vector", wraps=runner._read_cas_vector) as cas_read, \
+                mock.patch.object(runner, "_record_from_bytes", wraps=runner._record_from_bytes) as parse:
+            result = self._build_protocol_v2(project, WORKTREE_HASH)
+        self.assertTrue(result.get("ok"), result)
+        self.assertEqual(result.get("computed_embeddings"), 1, result)
+        self.assertEqual(result.get("embedding_cache_hits"), 7, result)
+        expected_paths = {changed_path, *repaired_paths}
+        self.assertEqual({record["path"] for call in resolve.call_args_list for record in call.args[0]}, expected_paths)
+        self.assertEqual({call.args[0] for call in parse.call_args_list}, expected_paths,
+                         "missing or digest-invalid actual payloads must return to source parsing")
+        self.assertNotIn(unused_key, [call.args[1]["cas_key"] for call in cas_read.call_args_list])
+        self.assertEqual(unused_cas.read_bytes(), b"invalid unused CAS")
+        self.assertNotEqual(needed_cas.read_bytes(), b"invalid needed CAS")
+        client, collection = runner._open_file_index_v2_collection(store, runner.V2_FILES_CODE_COLLECTION)
+        try:
+            actual = collection.get(ids=repair_ids, include=["documents", "metadatas"])
+            self.assertEqual(
+                dict(zip(actual["ids"], zip(actual["documents"], actual["metadatas"]))),
+                dict(zip(expected["ids"], zip(expected["documents"], expected["metadatas"]))),
+                "missing IDs and each invalid payload field must be repaired",
+            )
+        finally:
+            runner._close_chroma_client(client)
+
+    def test_new_base_recreates_a_missing_native_collection(self):
+        project = self._make_canonical_repo()
+        first = self._build_protocol_v2(project, WORKTREE_HASH)
+        self.assertTrue(first.get("ok"), first)
+        base_dir = runner.resolve_file_index_v2_base_dir(
+            REPO_HASH, first["base_generation_id"], db_root=self.db_root,
+        )
+        store = runner._file_artifact_store(base_dir, runner._read_artifact_descriptor(base_dir))
+        client, _ = runner._open_file_index_v2_collection(store, runner.V2_FILES_CODE_COLLECTION)
+        try:
+            client.delete_collection(runner.V2_FILES_CODE_COLLECTION)
+        finally:
+            runner._close_chroma_client(client)
+        self.assertTrue((store / "chroma.sqlite3").is_file())
+        (project / "src/module_00.rs").write_text("//! updated module 0\nfn updated_0() {}\n", encoding="utf-8")
+        self._run_git("-C", str(project), "add", "src")
+        self._run_git("-C", str(project), "-c", "user.name=gwt tests", "-c",
+                      "user.email=gwt-tests@example.invalid", "commit", "--quiet", "-m", "change module 0")
+        result = self._build_protocol_v2(project, WORKTREE_HASH)
+        self.assertTrue(result.get("ok"), result)
+        self.assertEqual(result.get("computed_embeddings"), 1, result)
+        self.assertEqual(result.get("embedding_cache_hits"), 7, result)
+        rebuilt_base = runner.resolve_file_index_v2_base_dir(
+            REPO_HASH, result["base_generation_id"], db_root=self.db_root,
+        )
+        self.assertEqual(self._artifact_collection_count(rebuilt_base), 8)
+
     def test_file_index_v2_collection_creation_failure_closes_client(self):
         for operation, client_method in (
             (runner._make_file_index_v2_collection, "get_or_create_collection"),
@@ -456,7 +714,12 @@ class IncrementalGenerationTests(_IncrementalFixture):
         self.assertNotIn(None, embedding_get_batch_sizes)
         self.assertLessEqual(max(embedding_get_batch_sizes), 16)
 
-        class CountOnlyCollection:
+        membership_get_batch_sizes = []
+        live_read_clients = {}
+        readonly_pair_overlaps = []
+        original_close = runner._close_chroma_client
+
+        class MembershipOnlyCollection:
             def __init__(self, collection):
                 self._collection = collection
 
@@ -464,11 +727,26 @@ class IncrementalGenerationTests(_IncrementalFixture):
                 return getattr(self._collection, name)
 
             def get(self, *args, **kwargs):
-                raise AssertionError("warm verified reuse must not fetch collection rows")
+                self_ids = kwargs.get("ids")
+                if self_ids is None or kwargs.get("include") != []:
+                    raise AssertionError("warm verified reuse may only check member IDs")
+                membership_get_batch_sizes.append(len(self_ids))
+                return self._collection.get(*args, **kwargs)
 
         def count_only_open(*args, **kwargs):
             client, collection = original_open(*args, **kwargs)
-            return client, CountOnlyCollection(collection)
+            store, collection_name = args[:2]
+            if collection_name == runner.V2_FILES_DOCS_COLLECTION:
+                readonly_pair_overlaps.append(any(
+                    previous == (store, runner.V2_FILES_CODE_COLLECTION)
+                    for previous in live_read_clients.values()
+                ))
+            live_read_clients[id(client)] = (store, collection_name)
+            return client, MembershipOnlyCollection(collection)
+
+        def close_read_client(client):
+            live_read_clients.pop(id(client), None)
+            return original_close(client)
 
         with mock.patch.object(
             runner,
@@ -480,10 +758,9 @@ class IncrementalGenerationTests(_IncrementalFixture):
                 "_get_embedding_model",
                 side_effect=AssertionError("warm verified reuse must not load the model"),
             ) as model_load:
-                with mock.patch.object(
-                    runner,
-                    "_open_file_index_v2_collection",
-                    side_effect=count_only_open,
+                with (
+                    mock.patch.object(runner, "_open_file_index_v2_collection", side_effect=count_only_open),
+                    mock.patch.object(runner, "_close_chroma_client", side_effect=close_read_client),
                 ):
                     warm = self._build_protocol_v2(
                         large_project,
@@ -501,6 +778,53 @@ class IncrementalGenerationTests(_IncrementalFixture):
         self.assertEqual(warm.get("embedding_cache_hits"), 130, warm)
         cas_read.assert_not_called()
         model_load.assert_not_called()
+        self.assertIn(128, membership_get_batch_sizes)
+        self.assertLessEqual(max(membership_get_batch_sizes), 128)
+        self.assertTrue(readonly_pair_overlaps)
+        self.assertTrue(all(readonly_pair_overlaps), readonly_pair_overlaps)
+        self.assertEqual(live_read_clients, {}, "read-only clients must close at the helper boundary")
+
+        from chromadb.api.models.Collection import Collection
+        get_records = Collection.get
+        v2_root = runner.resolve_file_index_v2_root("abc1234567890401", db_root=self.db_root)
+        with mock.patch.object(Collection, "get", autospec=True, side_effect=get_records) as gc_read:
+            self.assertEqual(runner._prune_file_record_pool(v2_root), 0)
+        self.assertEqual([call.kwargs for call in gc_read.call_args_list], [
+            {"limit": 128, "offset": 0, "include": []},
+            {"limit": 128, "offset": 128, "include": []},
+        ])
+
+    def test_ignore_matcher_reuses_identical_inputs_and_observes_fresh_rules(self):
+        self._run_git("init", "--quiet", str(self.project))
+        ignore = self.project / ".gitignore"
+        ignore.write_text(f"unmatched-{self.base.name}\n*.rs\n", encoding="utf-8")
+        patterns = [pattern for base, raw in runner.load_project_ignore_patterns(self.project)
+                    if (pattern := runner._pattern_to_regex(raw, base)) is not None]
+        relative_path = "src/module_00.rs"
+        searches = []
+
+        def record_search(frame, event, function):
+            if (event == "c_call" and getattr(function, "__name__", None) == "search"
+                    and isinstance(getattr(function, "__self__", None), runner.re.Pattern)):
+                searches.append(function.__self__)
+
+        previous_profiler = sys.getprofile()
+        try:
+            sys.setprofile(record_search)
+            first = runner.should_ignore(relative_path, patterns)
+            repeated = runner.should_ignore(relative_path, list(patterns))
+        finally:
+            sys.setprofile(previous_profiler)
+        self.assertTrue(first)
+        self.assertTrue(repeated)
+        self.assertEqual(searches, patterns[:2], "only the first identical check may search through its first match")
+
+        ignore.write_text("*.md\n", encoding="utf-8")
+        changed = [pattern for base, raw in runner.load_project_ignore_patterns(self.project)
+                   if (pattern := runner._pattern_to_regex(raw, base)) is not None]
+        self.assertFalse(runner.should_ignore(relative_path, changed))
+        self.assertTrue(runner.should_ignore(relative_path, [runner.re.compile(r"\.RS$", runner.re.IGNORECASE)]))
+        self.assertFalse(runner.should_ignore(relative_path, [runner.re.compile(r"\.RS$")]))
 
     def test_v2_action_rejects_bad_arguments_before_source_or_store_access(self):
         invalid_descriptor = self._compatibility_descriptor()
@@ -540,6 +864,39 @@ class IncrementalGenerationTests(_IncrementalFixture):
                 scan.assert_not_called()
                 git_probe.assert_not_called()
                 materialize.assert_not_called()
+
+    def test_canonical_capture_consolidates_git_probes_without_changing_the_pinned_tree(self):
+        repo = self._make_canonical_repo()
+        self._run_git("-C", str(repo), "update-ref", "refs/remotes/origin/develop", "HEAD")
+        expected_tree = subprocess.check_output(
+            ["git", "-C", str(repo), "rev-parse", "refs/remotes/origin/develop^{tree}"],
+            env=git_fixture_env(),
+        ).decode("ascii").strip()
+        (repo / "src/branch.rs").write_text("//! Only on the work branch.\n", encoding="utf-8")
+        self._run_git("-C", str(repo), "add", "src/branch.rs")
+        self._run_git("-C", str(repo), "-c", "user.name=gwt tests", "-c",
+                      "user.email=gwt-tests@example.invalid", "commit", "--quiet", "-m", "work branch change")
+
+        with mock.patch.object(runner, "_git_command", wraps=runner._git_command) as probe:
+            snapshot = runner._canonical_git_tree(repo / "src")
+        self.assertEqual(snapshot, {"reference": "origin/develop", "root_tree_oid": expected_tree,
+                                    "tree_prefix": "src/"})
+        self.assertLessEqual(probe.call_count, 3, [call.args[1] for call in probe.call_args_list])
+
+        original_git = runner._git_command
+        injected = []
+
+        def ambiguous_boundary(root, args, input_bytes=None):
+            completed = original_git(root, args, input_bytes)
+            if list(args) == ["rev-parse", "--is-inside-work-tree", "--show-toplevel", "--show-prefix"]:
+                injected.append(True)
+                return subprocess.CompletedProcess(completed.args, completed.returncode,
+                                                   completed.stdout + b"\n", completed.stderr)
+            return completed
+
+        with mock.patch.object(runner, "_git_command", side_effect=ambiguous_boundary):
+            self.assertEqual(runner._canonical_git_tree(repo / "src"), snapshot)
+        self.assertEqual(injected, [True], "ambiguous combined output must use the original probes")
 
     def test_canonical_ref_peel_failure_does_not_fallback_to_lower_ref(self):
         repo = self._make_canonical_repo()
@@ -585,6 +942,12 @@ class IncrementalGenerationTests(_IncrementalFixture):
         object_path.rename(object_path.with_name(f"{object_path.name}.missing"))
 
         with self.assertRaisesRegex(RuntimeError, "origin/develop"):
+            runner._canonical_git_tree(repo)
+
+        for reference in ("refs/remotes/origin/develop", "refs/remotes/origin/main"):
+            self._run_git("-C", str(repo), "update-ref", "-d", reference)
+        (repo / ".git/HEAD").write_text(f"{commit_oid}\n", encoding="ascii")
+        with self.assertRaisesRegex(RuntimeError, "HEAD"):
             runner._canonical_git_tree(repo)
 
     def test_canonical_git_commands_disable_lazy_fetch_and_prompts(self):
@@ -633,6 +996,17 @@ class IncrementalGenerationTests(_IncrementalFixture):
             )
         self.assertIsNotNone(vector)
         rewrite.assert_not_called()
+        self.assertEqual(cas_entry.read_bytes(), before)
+        with mock.patch.object(runner, "_vector_checksum", wraps=runner._vector_checksum) as checksum:
+            self.assertEqual(runner._read_cas_vector(
+                cas_root, identity, payload["embedding_contract"], payload["dimension"],
+                expected_manifest_checksum=payload["vector_checksum"],
+            ), vector)
+        checksum.assert_called_once()
+        self.assertIsNone(runner._read_cas_vector(
+            cas_root, identity, payload["embedding_contract"], payload["dimension"],
+            expected_manifest_checksum="0" * 64,
+        ))
         self.assertEqual(cas_entry.read_bytes(), before)
 
         failed_json = self.base / "atomic" / "payload.json"
@@ -869,19 +1243,19 @@ class IncrementalGenerationTests(_IncrementalFixture):
         })
         self.assertEqual(
             base_descriptor["files_generation"],
-            {"store": "store", "collection": runner.V2_FILES_CODE_COLLECTION},
+            {"store": "records", "collection": runner.V2_FILES_CODE_COLLECTION},
         )
         self.assertEqual(
             base_descriptor["files_docs_generation"],
-            {"store": "store", "collection": runner.V2_FILES_DOCS_COLLECTION},
+            {"store": "records", "collection": runner.V2_FILES_DOCS_COLLECTION},
         )
         self.assertEqual(
             overlay_descriptor["files_generation"],
-            {"store": "store", "collection": runner.V2_FILES_CODE_COLLECTION},
+            {"store": "records", "collection": runner.V2_FILES_CODE_COLLECTION},
         )
         self.assertEqual(
             overlay_descriptor["files_docs_generation"],
-            {"store": "store", "collection": runner.V2_FILES_DOCS_COLLECTION},
+            {"store": "records", "collection": runner.V2_FILES_DOCS_COLLECTION},
         )
         self.assertEqual(overlay_descriptor["files_shadow"], ["src/overlay.rs"])
         self.assertEqual(
@@ -894,13 +1268,10 @@ class IncrementalGenerationTests(_IncrementalFixture):
             (overlay_dir, {runner.V2_FILES_CODE_COLLECTION: 1, runner.V2_FILES_DOCS_COLLECTION: 1}),
         ):
             for collection_name, expected_count in expected_counts.items():
-                client, collection = runner._open_file_index_v2_collection(
-                    artifact_dir / "store", collection_name
+                self.assertEqual(
+                    self._artifact_collection_count(artifact_dir, collection_name),
+                    expected_count,
                 )
-                try:
-                    self.assertEqual(collection.count(), expected_count)
-                finally:
-                    runner._close_chroma_client(client)
 
     def test_concurrent_subprocess_builds_single_flight_cas_and_atomic_artifacts(self):
         canonical_repo = self._make_canonical_repo()
@@ -1076,7 +1447,7 @@ class IncrementalGenerationTests(_IncrementalFixture):
         for artifact_dir, expected_count in artifact_counts:
             self.assertTrue((artifact_dir / "descriptor.json").is_file())
             self.assertTrue((artifact_dir / "manifest.json").is_file())
-            self.assertTrue((artifact_dir / "store" / "chroma.sqlite3").is_file())
+            self.assertEqual(self._artifact_collection_count(artifact_dir), expected_count)
             descriptor = json.loads(
                 (artifact_dir / "descriptor.json").read_text(encoding="utf-8")
             )
@@ -1311,8 +1682,8 @@ class IncrementalGenerationTests(_IncrementalFixture):
                         db_root=self.db_root,
                     )
                 )
-                self.assertEqual(self._physical_collection_count(base_dir), 8)
-                self.assertEqual(self._physical_collection_count(overlay_dir), 1)
+                self.assertEqual(self._artifact_collection_count(base_dir), 8)
+                self.assertEqual(self._artifact_collection_count(overlay_dir), 1)
                 physical_base_dirs.add(base_dir.resolve())
                 physical_overlay_dirs.add(overlay_dir.resolve())
 

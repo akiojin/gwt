@@ -62,6 +62,50 @@ test.describe("Anshin Phase 1 kill-switch + attention", () => {
     }
   });
 
+  test("AS-01: stopped and interrupted retain runtime meaning without completion or dimming", async ({ page }, info) => {
+    if (!liveBase) await installEmbeddedRoutes(page);
+    await installKillSwitchBackend(page);
+    await page.goto(appUrl);
+    const win = page.locator('.workspace-window[data-id="agent-1"]');
+    await expect(win).toBeAttached();
+    await page.getByRole("button", { name: "Works", exact: true }).click();
+    await page.locator('.work-row[data-window-id="agent-1"] .work-open').click();
+    await expect(page.locator('.works-terminal[data-window-id="agent-1"]')).toBeVisible();
+    for (const [wire, state, label] of [
+      ["stopped", "stopped", "Stopped"],
+      ["exited", "stopped", "Stopped"],
+      ["interrupted", "interrupted", "Interrupted"],
+    ]) {
+      await page.evaluate(state => window.__emit({ kind: "terminal_status", id: "agent-1", status: state }), wire);
+      await expect(win.locator(".status-label")).toHaveText(label);
+      await expect(page.locator(".works-full-meta")).toContainText(` · ${label} · `);
+      const row = page.locator('.work-row[data-window-id="agent-1"]');
+      await expect(row.locator(".work-state")).toHaveText(label);
+      const colors = await row.locator(".work-state").evaluate((node, token) => {
+        const probe = document.createElement("span");
+        probe.style.color = `var(${token})`;
+        document.body.append(probe);
+        const expected = getComputedStyle(probe).color;
+        probe.remove();
+        return { expected, actual: getComputedStyle(node).color };
+      }, state === "stopped" ? "--color-state-idle" : "--color-state-blocked");
+      expect(colors.actual).toBe(colors.expected);
+      await expect(win).toHaveAttribute("data-agent-state", state);
+      await expect(win).toHaveCSS("opacity", "1");
+      await expect(win).toHaveCSS("pointer-events", "auto");
+      await expect(page.locator('.toast-alerts__item[data-level="done"]')).toHaveCount(0);
+      await expect(page.locator(".toast-alerts__item").filter({ hasText: /Agent (stopped|finished)/ })).toHaveCount(0);
+    }
+    await info.attach("runtime-without-completion", {
+      body: await page.screenshot({ path: info.outputPath("runtime-without-completion.png") }), contentType: "image/png",
+    });
+    await page.locator('.works-full [data-action="back"]').click();
+    await expect(page.locator('.work-row[data-window-id="agent-1"] .work-state')).toBeVisible();
+    await info.attach("runtime-list", {
+      body: await page.screenshot({ path: info.outputPath("runtime-list.png") }), contentType: "image/png",
+    });
+  });
+
   // SPEC #3885 FR-015 (user ruling 2026-09-03) supersedes FR-041's titlebar
   // STOP: stopping an agent is offered only from the Issue row's ⋯ menu
   // (issue-preview.spec.ts). The chrome keeps close and, once stopped, RESTART.
@@ -160,7 +204,7 @@ test.describe("Anshin Phase 1 kill-switch + attention", () => {
     expect(inj.text).toBe("hello agent");
   });
 
-  test("manual and Monitor-linked panes dedupe waiting projection and rearm after running", async ({ page }) => {
+  test("manual and Issues-linked panes dedupe waiting projection and rearm after running", async ({ page }) => {
     if (!liveBase) await installEmbeddedRoutes(page);
     await installKillSwitchBackend(page);
     await page.goto(appUrl);
@@ -290,7 +334,7 @@ test.describe("Anshin Phase 1 kill-switch + attention", () => {
     await expect(waitingCount).toHaveText("0");
     await expect(waitingCell).not.toHaveClass(/op-status-strip__cell--alert/);
 
-    // `agent-3` models a pane launched by Issue Monitor. WindowState has no
+    // `agent-3` models a pane launched by Issues. WindowState has no
     // launch-source field by design, so the fixture deliberately uses the same
     // Agent window schema and exact event projection as the manual pane. Switch
     // to it through Works before exercising its cues.
@@ -376,13 +420,13 @@ async function installKillSwitchBackend(page) {
         tab_group_id: "approval-agent-tabs",
         tab_group_active: true,
       }),
-      // Issue Monitor launches an ordinary Agent window; its issue linkage is
+      // Issues launches an ordinary Agent window; its issue linkage is
       // session metadata and is intentionally not copied into the frontend
       // window schema. This second pane therefore exercises source parity
       // without inventing a frontend-only `source` discriminator.
       agentWindow("agent-3", 1600, 1200, 2, {
-        title: "Monitor-linked Agent",
-        purpose_title: "Monitor-linked Agent",
+        title: "Issues-linked Agent",
+        purpose_title: "Issues-linked Agent",
         agent_color: "violet",
         tab_group_id: "approval-agent-tabs",
       }),
@@ -413,6 +457,17 @@ async function installKillSwitchBackend(page) {
     }
 
     let socketRef = null;
+    // SPEC #5016 AC-HS1: like the backend, publish the RUN / BLOCK / IDLE /
+    // ERROR aggregate the status strip renders after each status change.
+    let aggregateRevision = 0;
+    const aggregateMsg = () => {
+      const statuses = windows.filter(data => data.preset === "agent").map(data => data.status);
+      const count = (...states) => statuses.filter(status => states.includes(status)).length;
+      return { kind: "project_agent_aggregate", aggregate: {
+        running_count: count("running", "starting"), block_count: count("waiting", "stopped", "interrupted", "error"),
+        idle_count: count("idle"), error_count: count("error"), unread: false, revision: ++aggregateRevision,
+      } };
+    };
 
     class FixtureWebSocket extends EventTarget {
       static CONNECTING = 0;
@@ -429,6 +484,7 @@ async function installKillSwitchBackend(page) {
           this.readyState = FixtureWebSocket.OPEN;
           this.dispatchEvent(new Event("open"));
           this.emit(stateMsg());
+          this.emit(aggregateMsg());
           this.emit({ kind: "active_work_projection", projection: { id: "attention-local-live", active_works: [], local_agent_activity: {
             project_key: location.pathname.split("/").filter(Boolean).at(-1), host_id: "attention-fixture", observed_at: new Date().toISOString(), agents: [
               { window_id: "agent-1", session_id: "session-agent-1", runtime_incarnation: 1, is_pm: false, issue_number: null },
@@ -486,6 +542,9 @@ async function installKillSwitchBackend(page) {
             this.dispatchEvent(
               new MessageEvent("message", { data: JSON.stringify(payload) }),
             );
+            if (payload.kind === "terminal_status") {
+              this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(aggregateMsg()) }));
+            }
             queueMicrotask(resolve);
           }, 0);
         });

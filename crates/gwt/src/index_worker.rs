@@ -1600,15 +1600,6 @@ pub fn rebuild_index_target(
                 "project index rebuild started"
             );
             let output = run_rebuild_runner_for_target(&ctx, action, qos)?;
-            tracing::info!(
-                target: "gwt::index",
-                scope = rebuild_label,
-                worktree_hash = %rebuild_worktree_hash,
-                action = rebuild_action,
-                elapsed_ms = rebuild_started.elapsed().as_millis() as u64,
-                exit_status = %output.exit_status(),
-                "project index rebuild completed"
-            );
             if !output.success() {
                 return Err(output.failure());
             }
@@ -1634,6 +1625,15 @@ pub fn rebuild_index_target(
                 );
                 return Ok(BuildStep::Yielded);
             }
+            tracing::info!(
+                target: "gwt::index",
+                scope = rebuild_label,
+                worktree_hash = %rebuild_worktree_hash,
+                action = rebuild_action,
+                elapsed_ms = rebuild_started.elapsed().as_millis() as u64,
+                exit_status = %output.exit_status(),
+                "project index rebuild completed"
+            );
             Ok(BuildStep::Done(()))
         },
     )?;
@@ -1947,12 +1947,6 @@ fn issue_index_needs_rebuild_for_cache(
     repo_hash: &RepoHash,
     cache_root: &Path,
 ) -> Result<bool, String> {
-    let Some(source) = crate::issue_cache::issue_cache_source_fingerprint(cache_root)? else {
-        return Ok(false);
-    };
-    if source.document_count == 0 {
-        return Ok(false);
-    }
     let interrupted = std::fs::read(
         index_root
             .join(repo_hash.as_str())
@@ -1960,21 +1954,16 @@ fn issue_index_needs_rebuild_for_cache(
     )
     .ok()
     .and_then(|raw| serde_json::from_slice::<serde_json::Value>(&raw).ok());
-    if let Some(repair) = interrupted {
+    let interrupted = interrupted.is_some_and(|repair| {
         let expected = &repair["expected_budget_interruption"];
-        if repair["last_error"].as_str() == Some("BUILD_INCOMPLETE")
+        repair["last_error"].as_str() == Some("BUILD_INCOMPLETE")
             && repair["fingerprint"].as_str().is_some_and(|fingerprint| {
                 !fingerprint.is_empty() && expected["fingerprint"].as_str() == Some(fingerprint)
             })
             && repair["refresh_run_id"].as_str().is_some_and(|run_id| {
                 !run_id.is_empty() && expected["run_id"].as_str() == Some(run_id)
             })
-        {
-            // Publication may precede the deadline; even current metadata
-            // must drain the known interruption and clear its repair marker.
-            return Ok(true);
-        }
-    }
+    });
     let meta = std::fs::read(index_root.join(repo_hash.as_str()).join("issues/meta.json"))
         .ok()
         .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
@@ -1982,12 +1971,28 @@ fn issue_index_needs_rebuild_for_cache(
     let revision = std::fs::read_to_string(cache_root.join("source-revision"))
         .ok()
         .and_then(|value| uuid::Uuid::parse_str(&value).ok());
+    let indexed = meta["source_cache_revision"]
+        .as_str()
+        .and_then(|value| uuid::Uuid::parse_str(value).ok());
+    if !interrupted {
+        if let (Some(revision), Some(indexed)) = (revision, indexed) {
+            // Canonical UUIDs include SPEC section edits. A changed stamp still
+            // cannot authorize rebuilding an empty/unparseable source corpus.
+            return Ok(indexed != revision
+                && crate::issue_cache::issue_cache_has_source_documents(cache_root)?);
+        }
+    }
+    let Some(source) = crate::issue_cache::issue_cache_source_fingerprint(cache_root)? else {
+        return Ok(false);
+    };
+    if source.document_count == 0 {
+        return Ok(false);
+    }
+    if interrupted {
+        // Publication may precede the deadline; drain its known interruption.
+        return Ok(true);
+    }
     if let Some(revision) = revision {
-        // The canonical stamp includes SPEC section edits. The record hash
-        // includes chunking and must not be compared to the legacy Issue hash.
-        let indexed = meta["source_cache_revision"]
-            .as_str()
-            .and_then(|value| uuid::Uuid::parse_str(value).ok());
         return Ok(indexed != Some(revision));
     }
     Ok(meta
@@ -2061,9 +2066,15 @@ fn repo_scope_source_paths(scope: RefreshScope, root: &Path, repo_hash: &RepoHas
     let home = gwt_core::paths::gwt_project_dir(repo_hash);
     match scope {
         RefreshScope::Issues | RefreshScope::Specs => {
-            vec![crate::issue_cache::issue_cache_root_for_repo_hash(
-                repo_hash,
-            )]
+            let cache_root = crate::issue_cache::issue_cache_root_for_repo_hash(repo_hash);
+            let revision = cache_root.join("source-revision");
+            // Cache refresh rewrites transport metadata even when the source
+            // content is unchanged. Only its canonical revision admits retry.
+            vec![if revision.is_file() {
+                revision
+            } else {
+                cache_root
+            }]
         }
         RefreshScope::Memory | RefreshScope::Discussions => {
             let name = if scope == RefreshScope::Memory {
@@ -2235,6 +2246,60 @@ fn refresh_source_snapshot(paths: &[PathBuf]) -> Result<String, String> {
     Ok(format!("source:{:x}", digest.finalize()))
 }
 
+/// Legacy caches lack a canonical revision. Hash their indexed fields and
+/// full SPEC payloads without admitting transport metadata rewrites as input.
+pub(crate) fn legacy_issue_source_snapshot(cache_root: &Path) -> io::Result<String> {
+    use sha2::{Digest, Sha256};
+    let mut digest = Sha256::new();
+    if let Some(source) =
+        crate::issue_cache::issue_cache_source_fingerprint(cache_root).map_err(io::Error::other)?
+    {
+        digest.update(source.fingerprint.as_bytes());
+    }
+    let mut paths = Vec::new();
+    for entry in std::fs::read_dir(cache_root)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir()
+            || entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse::<u64>().ok())
+                .is_none()
+        {
+            continue;
+        }
+        let body = entry.path().join("body.md");
+        if body.is_file() {
+            paths.push(body);
+        }
+        let sections = entry.path().join("sections");
+        if sections.is_dir() {
+            for section in std::fs::read_dir(sections)? {
+                let section = section?;
+                if section.file_type()?.is_file()
+                    && section.path().extension() == Some(OsStr::new("md"))
+                {
+                    paths.push(section.path());
+                }
+            }
+        }
+    }
+    paths.sort();
+    for path in paths {
+        digest.update(
+            path.strip_prefix(cache_root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .as_bytes(),
+        );
+        digest.update([0]);
+        let mut file = std::fs::File::open(&path)?;
+        digest.update(file.metadata()?.len().to_le_bytes());
+        io::copy(&mut file, &mut digest)?;
+    }
+    Ok(format!("source:{:x}", digest.finalize()))
+}
+
 #[cfg(test)]
 #[derive(Default)]
 struct RefreshSourceReads {
@@ -2270,17 +2335,34 @@ impl<'a> SourceRefreshPoll<'a> {
     fn submit_repo_sources(&mut self, root: &Path, repo_hash: &RepoHash) -> Result<(), String> {
         let root = dunce::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
         for scope in REFRESH_REPO_SCOPES {
-            let snapshot = self.repo_snapshot(repo_scope_source_paths(scope, &root, repo_hash))?;
+            let snapshot =
+                self.repo_snapshot(scope, repo_scope_source_paths(scope, &root, repo_hash))?;
             self.submit(RefreshTarget::base(repo_hash.as_str(), [scope]), snapshot)?;
         }
         Ok(())
     }
 
-    fn repo_snapshot(&mut self, paths: Vec<PathBuf>) -> Result<String, String> {
+    fn repo_snapshot(
+        &mut self,
+        scope: RefreshScope,
+        paths: Vec<PathBuf>,
+    ) -> Result<String, String> {
         match self.repo_fingerprints.get(&paths) {
             Some(snapshot) => Ok(snapshot.clone()),
             None => {
-                let snapshot = refresh_source_snapshot(&paths)?;
+                let snapshot = if matches!(scope, RefreshScope::Issues | RefreshScope::Specs)
+                    && paths.len() == 1
+                    && paths[0].is_dir()
+                {
+                    legacy_issue_source_snapshot(&paths[0]).map_err(|error| {
+                        format!(
+                            "legacy index source snapshot {}: {error}",
+                            paths[0].display()
+                        )
+                    })?
+                } else {
+                    refresh_source_snapshot(&paths)?
+                };
                 self.repo_fingerprints.insert(paths, snapshot.clone());
                 Ok(snapshot)
             }
@@ -2333,7 +2415,7 @@ fn submit_repo_scope_refresh(
 ) -> Result<(), String> {
     let root = dunce::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     let mut poll = SourceRefreshPoll::new(broker)?;
-    let snapshot = poll.repo_snapshot(repo_scope_source_paths(scope, &root, repo_hash))?;
+    let snapshot = poll.repo_snapshot(scope, repo_scope_source_paths(scope, &root, repo_hash))?;
     poll.submit(RefreshTarget::base(repo_hash.as_str(), [scope]), snapshot)
 }
 
@@ -2592,6 +2674,19 @@ fn execute_claimed_refresh(
                 .complete()
                 .map_err(|err| format!("complete project index refresh claim: {err}"))
         }
+        Err(error) if error == REFRESH_QUANTUM_EXHAUSTED => {
+            tracing::info!(
+                target: "gwt::index",
+                repo_hash = intent.target.repo_hash(),
+                kind = ?intent.target.kind(),
+                desired_epoch = intent.desired_epoch,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "project index refresh checkpointed for continuation"
+            );
+            claim
+                .defer()
+                .map_err(|err| format!("defer project index refresh claim: {err}"))
+        }
         Err(error) => {
             tracing::warn!(
                 target: "gwt::index",
@@ -2677,17 +2772,16 @@ fn execute_claimed_refresh_inner(
         }
     }
     let cache_root = crate::issue_cache::issue_cache_root_for_repo_hash(&repo_hash);
-    match crate::issue_cache::sync_issue_cache_from_remote_if_stale_with_fingerprint(
+    match crate::issue_cache::sync_issue_cache_from_remote_if_stale(
         &refresh_project_root,
         &cache_root,
         crate::issue_cache::ISSUE_CACHE_TTL,
     ) {
-        Ok(outcome) => {
+        Ok(refreshed) => {
             tracing::info!(
                 target: "gwt::index",
                 project_root = %repo_root.display(),
-                cache_refreshed = outcome.refreshed,
-                source_changed = outcome.source_changed,
+                cache_refreshed = refreshed,
                 "project index issue cache refresh checked"
             );
         }
@@ -2740,16 +2834,17 @@ fn execute_claimed_refresh_inner(
     Ok(())
 }
 
-/// File scopes of a refresh target, in build order. Non-file scopes
-/// (`Issues`) are handled by the claim's Issue-cache check, not here.
+/// One v2 action publishes both file scopes atomically; never start a second
+/// cold runner for the same view. Non-file scopes are handled separately.
 fn file_rebuild_scopes(scopes: &[RefreshScope]) -> Vec<IndexRebuildScope> {
     scopes
         .iter()
-        .filter_map(|scope| match scope {
+        .find_map(|scope| match scope {
             RefreshScope::Files => Some(IndexRebuildScope::Files),
             RefreshScope::FilesDocs => Some(IndexRebuildScope::FilesDocs),
             _ => None,
         })
+        .into_iter()
         .collect()
 }
 
@@ -2992,8 +3087,19 @@ mod tests {
 
     #[test]
     fn background_refresh_maintenance_has_one_finite_deadline() {
+        struct FixedBrokerClock;
+        impl gwt_core::index::broker::RefreshBrokerClock for FixedBrokerClock {
+            fn now_millis(&self) -> u64 {
+                10_000
+            }
+        }
         let temp = tempfile::tempdir().expect("tempdir");
-        let broker = RefreshBroker::open(temp.path(), Duration::ZERO).expect("broker");
+        let broker = RefreshBroker::open_with_clock(
+            temp.path(),
+            Duration::ZERO,
+            std::sync::Arc::new(FixedBrokerClock),
+        )
+        .expect("broker");
         let target = RefreshTarget::base("budget-repo", [RefreshScope::Issues]);
         broker
             .submit(RefreshIntent {
@@ -3009,6 +3115,21 @@ mod tests {
         let claim = broker.claim_next().expect("claim").expect("claimable");
         let started = Instant::now();
         let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(started);
+        execute_claimed_refresh(claim, |_| Err(REFRESH_QUANTUM_EXHAUSTED.to_string()))
+            .expect("checkpointed maintenance defers without failure");
+        let snapshot = broker.inspect().expect("snapshot");
+        let pending = snapshot.target(&target).expect("target");
+        assert_eq!(pending.completed_epoch(), None);
+        assert_eq!(pending.last_error(), None);
+        assert_eq!(
+            pending.state(),
+            gwt_core::index::broker::RefreshTargetState::Quiet
+        );
+        assert_eq!(pending.quiet_deadline_millis(), Some(10_000));
+        let claim = broker
+            .claim_next()
+            .expect("claim")
+            .expect("checkpointed input remains resumable");
         execute_claimed_refresh(claim, |_| {
             assert_eq!(
                 gwt_core::operation_deadline::current(),
@@ -3067,6 +3188,8 @@ mod tests {
         );
         assert_eq!(pending.desired_epoch(), 7);
         assert_eq!(pending.completed_epoch(), None);
+        assert_eq!(pending.quiet_deadline_millis(), None);
+        assert!(broker.claim_next().expect("stopped input").is_none());
         assert!(pending
             .last_error()
             .expect("error")
@@ -3176,7 +3299,11 @@ mod tests {
                 RefreshScope::FilesDocs,
                 RefreshScope::Issues
             ]),
-            vec![IndexRebuildScope::Files, IndexRebuildScope::FilesDocs]
+            vec![IndexRebuildScope::Files]
+        );
+        assert_eq!(
+            file_rebuild_scopes(&[RefreshScope::FilesDocs]),
+            vec![IndexRebuildScope::FilesDocs]
         );
     }
 
@@ -3344,9 +3471,9 @@ mod tests {
             .join("worktrees/linked-index/keep");
         std::fs::create_dir_all(kept.parent().expect("parent")).expect("index directory");
         std::fs::write(&kept, b"live index").expect("live index");
-        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-            Instant::now() - Duration::from_millis(1),
-        );
+        let now = Instant::now();
+        let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(now);
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(now);
 
         assert!(
             project_index_git_context(&checkout_root).is_none(),
@@ -4528,6 +4655,10 @@ mod tests {
             roots.push(root);
         }
         let repo_hash = detect_repo_hash(&roots[0]).unwrap();
+        let cache_root = crate::issue_cache::issue_cache_root_for_repo_hash(&repo_hash);
+        std::fs::create_dir_all(&cache_root).unwrap();
+        std::fs::write(cache_root.join("source-revision"), "content-revision-1").unwrap();
+        std::fs::write(cache_root.join("refresh-meta.json"), "{}").unwrap();
         let issue_sources = repo_scope_source_paths(RefreshScope::Issues, &roots[0], &repo_hash);
         REFRESH_SOURCE_READS.with(|reads| *reads.borrow_mut() = RefreshSourceReads::default());
         poll_registered_project_index_sources(&broker).unwrap();
@@ -4558,6 +4689,9 @@ mod tests {
             })
             .collect();
         let before = broker.inspect().unwrap();
+        // A successful cache refresh can rewrite transport metadata while the
+        // canonical content revision remains unchanged.
+        std::fs::write(cache_root.join("refresh-meta.json"), "{\"refreshed\":true}").unwrap();
         std::fs::write(roots[0].join("lib.rs"), "fn changed_source() {}\n").unwrap();
         poll_registered_project_index_sources(&broker).unwrap();
         REFRESH_SOURCE_READS.with(|reads| {
@@ -4569,6 +4703,16 @@ mod tests {
             );
         });
         let after = broker.inspect().unwrap();
+        let issue_target = RefreshTarget::base(repo_hash.as_str(), [RefreshScope::Issues]);
+        assert_eq!(
+            before.target(&issue_target).unwrap().desired_snapshot(),
+            after.target(&issue_target).unwrap().desired_snapshot(),
+            "cache transport rewrites must not resume unchanged failed input"
+        );
+        assert_eq!(
+            before.target(&issue_target).unwrap().desired_epoch(),
+            after.target(&issue_target).unwrap().desired_epoch()
+        );
         let memory_target = RefreshTarget::base(repo_hash.as_str(), [RefreshScope::Memory]);
         assert_eq!(
             before.target(&memory_target).unwrap().desired_epoch(),
@@ -4586,6 +4730,81 @@ mod tests {
         assert_eq!(
             before.target(&targets[1]).unwrap().quiet_deadline_millis(),
             after.target(&targets[1]).unwrap().quiet_deadline_millis()
+        );
+
+        std::fs::remove_file(cache_root.join("source-revision")).unwrap();
+        let issue_dir = cache_root.join("7");
+        std::fs::create_dir_all(issue_dir.join("sections")).unwrap();
+        let meta_path = issue_dir.join("meta.json");
+        std::fs::write(
+            &meta_path,
+            r#"{"title":"Legacy SPEC","state":"open","labels":["gwt-spec"],"generation":"initial"}"#,
+        )
+        .unwrap();
+        let body = format!("{}original ending", "x".repeat(2000));
+        std::fs::write(issue_dir.join("body.md"), &body).unwrap();
+        let section_path = issue_dir.join("sections/spec.md");
+        std::fs::write(&section_path, "Full specification").unwrap();
+        poll_registered_project_index_sources(&broker).unwrap();
+        let legacy_before = broker
+            .inspect()
+            .unwrap()
+            .target(&issue_target)
+            .unwrap()
+            .clone();
+        std::fs::write(
+            &meta_path,
+            r#"{"title":"Legacy SPEC","state":"open","labels":["gwt-spec"],"generation":"refreshed transport"}"#,
+        )
+        .unwrap();
+        std::fs::write(cache_root.join("refresh-meta.json"), "{\"refreshed\":2}").unwrap();
+        std::fs::write(issue_dir.join("body.md"), &body).unwrap();
+        std::fs::write(&section_path, "Full specification").unwrap();
+        poll_registered_project_index_sources(&broker).unwrap();
+        let legacy_after = broker
+            .inspect()
+            .unwrap()
+            .target(&issue_target)
+            .unwrap()
+            .clone();
+        assert_eq!(
+            (
+                legacy_before.desired_snapshot(),
+                legacy_before.desired_epoch()
+            ),
+            (
+                legacy_after.desired_snapshot(),
+                legacy_after.desired_epoch()
+            ),
+            "legacy cache transport rewrites must not resume unchanged input"
+        );
+        std::fs::write(&section_path, "Changed full specification").unwrap();
+        poll_registered_project_index_sources(&broker).unwrap();
+        let section_changed = broker
+            .inspect()
+            .unwrap()
+            .target(&issue_target)
+            .unwrap()
+            .clone();
+        assert_ne!(
+            legacy_after.desired_snapshot(),
+            section_changed.desired_snapshot()
+        );
+        std::fs::write(
+            issue_dir.join("body.md"),
+            format!("{}new ending", "x".repeat(2000)),
+        )
+        .unwrap();
+        poll_registered_project_index_sources(&broker).unwrap();
+        assert_ne!(
+            section_changed.desired_snapshot(),
+            broker
+                .inspect()
+                .unwrap()
+                .target(&issue_target)
+                .unwrap()
+                .desired_snapshot(),
+            "legacy full body edits beyond the Issue preview remain observable"
         );
     }
 
@@ -4945,6 +5164,82 @@ mod tests {
     }
 
     #[test]
+    fn fresh_issue_claim_uses_canonical_revision_without_full_payload_scans() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let repo = temp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_git_repo_with_origin(&repo);
+        run_git_at(
+            &repo,
+            &[
+                "-c",
+                "user.name=Native latency",
+                "-c",
+                "user.email=native@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "init",
+            ],
+        );
+        let repo_hash = detect_repo_hash(&repo).expect("repo hash");
+        let cache_root = crate::issue_cache::issue_cache_root_for_repo_hash(&repo_hash);
+        gwt_github::Cache::new(cache_root.clone())
+            .write_snapshot(&gwt_github::IssueSnapshot {
+                author_login: None,
+                number: gwt_github::IssueNumber(7),
+                title: "Unchanged".into(),
+                body: "body".into(),
+                labels: vec![],
+                state: gwt_github::IssueState::Closed,
+                updated_at: gwt_github::UpdatedAt::new("2026-11-12T00:00:00Z"),
+                comments: vec![],
+            })
+            .unwrap();
+        std::fs::write(
+            cache_root.join("refresh-meta.json"),
+            serde_json::json!({
+                "last_full_refresh": chrono::Utc::now().to_rfc3339(), "ttl_minutes": 15,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let revision = std::fs::read_to_string(cache_root.join("source-revision")).unwrap();
+        let source = crate::issue_cache::issue_cache_source_fingerprint(&cache_root)
+            .unwrap()
+            .unwrap();
+        let index_root = temp.path().join("index");
+        let issues = index_root.join(repo_hash.as_str()).join("issues");
+        std::fs::create_dir_all(&issues).unwrap();
+        std::fs::write(
+            issues.join("meta.json"),
+            serde_json::json!({
+                "source_cache_revision": revision, "issue_cache_fingerprint": source.fingerprint,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let broker = RefreshBroker::open(temp.path().join("broker"), Duration::ZERO).unwrap();
+        submit_issue_index_refresh(&broker, repo_hash.as_str()).unwrap();
+        let claim = broker
+            .claim_next()
+            .unwrap()
+            .expect("claimable without a real-time wait");
+        crate::issue_cache::take_issue_source_fingerprint_scans();
+        execute_claimed_project_index_refresh_with(claim, &repo, &index_root, &PanicRunnerSpawner)
+            .expect("fresh unchanged Issue claim");
+        assert_eq!(
+            crate::issue_cache::take_issue_source_fingerprint_scans(),
+            0,
+            "fresh TTL and canonical UUID metadata require no complete Issue payload scans"
+        );
+    }
+
+    #[test]
     fn issue_index_source_mismatch_requires_startup_rebuild() {
         let temp = tempfile::tempdir().expect("tempdir");
         let repo_hash =
@@ -5000,16 +5295,38 @@ mod tests {
             .to_string(),
         )
         .expect("current published metadata");
+        crate::issue_cache::take_issue_source_fingerprint_scans();
         assert!(
             !issue_index_needs_rebuild_for_cache(&index_root, &repo_hash, &cache_root)
                 .expect("current source")
         );
+        assert_eq!(
+            crate::issue_cache::take_issue_source_fingerprint_scans(),
+            0,
+            "equal known UUIDs do not re-read all Issue bodies"
+        );
         std::fs::write(&revision_path, uuid::Uuid::new_v4().to_string()).unwrap();
         assert!(issue_index_needs_rebuild_for_cache(&index_root, &repo_hash, &cache_root).unwrap());
-        std::fs::remove_file(&revision_path).unwrap();
-        assert!(
-            !issue_index_needs_rebuild_for_cache(&index_root, &repo_hash, &cache_root).unwrap()
+        assert_eq!(
+            crate::issue_cache::take_issue_source_fingerprint_scans(),
+            0,
+            "changed known UUIDs only need a nonempty valid source guard"
         );
+        for invalid in [None, Some("not-a-uuid")] {
+            match invalid {
+                None => std::fs::remove_file(&revision_path).unwrap(),
+                Some(value) => std::fs::write(&revision_path, value).unwrap(),
+            }
+            assert!(
+                !issue_index_needs_rebuild_for_cache(&index_root, &repo_hash, &cache_root).unwrap()
+            );
+            assert_eq!(
+                crate::issue_cache::take_issue_source_fingerprint_scans(),
+                1,
+                "unversioned or invalid sources retain the complete fingerprint fallback"
+            );
+        }
+        std::fs::write(&revision_path, &revision).unwrap();
         std::fs::write(
             issues_dir.join("repair.json"),
             serde_json::json!({
@@ -5024,6 +5341,28 @@ mod tests {
         assert!(
             issue_index_needs_rebuild_for_cache(&index_root, &repo_hash, &cache_root)
                 .expect("known interruption must resume and clear the marker")
+        );
+        assert_eq!(
+            crate::issue_cache::take_issue_source_fingerprint_scans(),
+            1,
+            "known interruption keeps the complete nonempty-source check even after metadata publication"
+        );
+        std::fs::remove_dir_all(cache_root.join("2867")).unwrap();
+        assert!(
+            !issue_index_needs_rebuild_for_cache(&index_root, &repo_hash, &cache_root).unwrap(),
+            "an empty source must not resume even a known interrupted build"
+        );
+        std::fs::remove_file(issues_dir.join("repair.json")).unwrap();
+        std::fs::write(&revision_path, uuid::Uuid::new_v4().to_string()).unwrap();
+        assert!(
+            !issue_index_needs_rebuild_for_cache(&index_root, &repo_hash, &cache_root).unwrap(),
+            "a changed UUID does not make an empty source indexable"
+        );
+        std::fs::create_dir_all(cache_root.join("2867")).unwrap();
+        std::fs::write(cache_root.join("2867/meta.json"), "not-json").unwrap();
+        assert!(
+            !issue_index_needs_rebuild_for_cache(&index_root, &repo_hash, &cache_root).unwrap(),
+            "numeric directories without a parseable Issue meta remain an empty source"
         );
     }
 

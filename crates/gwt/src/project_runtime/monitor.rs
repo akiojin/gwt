@@ -72,7 +72,7 @@ pub(crate) fn capture_restored_launch(
         current,
         feedback: LaunchFeedbackContext {
             client_id: "__issue_monitor__".into(),
-            title: "Issue Monitor".into(),
+            title: "Issues".into(),
             issue_monitor_issue_number: Some(issue),
             issue_monitor_delivery_id: None,
             issue_monitor_project_root: Some(root.into()),
@@ -394,7 +394,7 @@ pub(crate) fn reject_preflight_launch(
             source: None,
             feedback: LaunchFeedbackContext {
                 client_id: "__issue_monitor__".into(),
-                title: "Issue Monitor".into(),
+                title: "Issues".into(),
                 issue_monitor_issue_number: Some(issue),
                 issue_monitor_delivery_id: expected.map(|expected| expected.delivery_id.clone()),
                 issue_monitor_project_root: Some(root.into()),
@@ -565,6 +565,15 @@ impl MonitorLaunch {
     ) -> Result<Option<IssueMonitorAgentFailureSource>, String> {
         self.check_current()?;
         let issue = self.issue()?;
+        let launch_span = tracing::info_span!(target: "gwt.launch.timing", "issue_monitor_publication",
+            issue_number = issue, delivery_id = self.feedback.issue_monitor_delivery_id.as_deref().unwrap_or("none"),
+            window_id = %self.id);
+        let _launch_span = launch_span.enter();
+        let phase = super::launch::LaunchPhaseTimer::start(if ready {
+            "window_publish_ack"
+        } else {
+            "window_publish"
+        });
         let before = self.read_monitor()?;
         // OFF revokes existing reservations, not the materialized owner. Auto
         // may already be OFF while a valid manual reservation awaits its ACK.
@@ -574,6 +583,7 @@ impl MonitorLaunch {
         }
         if ready {
             if let Some(source) = self.confirmed_source(&before) {
+                phase.finish();
                 return Ok(Some(source));
             }
         }
@@ -690,6 +700,7 @@ impl MonitorLaunch {
             }
         }
         if !ready {
+            phase.finish();
             return Ok(None);
         }
         self.check_current()?;
@@ -771,6 +782,7 @@ impl MonitorLaunch {
         if !source.matches(&monitor, &self.id) || monitor.live_claim_id(issue) != expected_claim {
             return Err("Monitor ACK did not bind the exact owner pane".into());
         }
+        phase.finish();
         Ok(Some(source))
     }
 
@@ -811,6 +823,31 @@ impl MonitorLaunch {
             payload
         };
         publish(&self.root, payload).map_err(|error| error.to_string())
+    }
+
+    /// Retire an exited diagnostic only after this exact launch's failure
+    /// committed an automatic retry. Publishing alone is not a close receipt.
+    pub(crate) fn terminal_failure_retry(
+        &self,
+        detail: &str,
+        failure: Option<&crate::IssueMonitorFailure>,
+    ) -> Result<Option<u64>, String> {
+        let before = self.read_monitor();
+        let publication = self.failure(detail, failure, true);
+        let before = before?;
+        let exact_source = self
+            .source
+            .as_ref()
+            .is_some_and(|source| source.matches(&before, &self.id));
+        let previous_version = before.prefs().failure_release_version;
+        let after = self.read_monitor()?;
+        let issue = self.issue()?;
+        if exact_source
+            && automatic_retry_committed(&after.prefs(), issue, previous_version, detail)
+        {
+            return Ok(Some(issue));
+        }
+        publication.map(|()| None)
     }
 
     /// A failed worker has proved that no physical candidate remains. Only
@@ -1170,29 +1207,184 @@ impl MonitorLaunch {
     }
 }
 
-const MONITOR_STARTUP_TIMEOUT_PREFIX: &str = "Issue Monitor startup timed out after ";
+fn automatic_retry_committed(
+    prefs: &crate::IssueMonitorPrefs,
+    issue: u64,
+    previous_version: u64,
+    detail: &str,
+) -> bool {
+    prefs.autonomous_mode
+        && prefs.autonomous_records.iter().any(|record| {
+            record.issue_number == issue && record.phase != crate::AutonomousPhase::NeedsHuman
+        })
+        && prefs.requeue_audit.iter().any(|release| {
+            release.issue_number == issue
+                && release.release_version > previous_version
+                && !release.operator_requested
+                && release.reason == detail
+                && release.retry_record.is_some()
+        })
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+
+    #[test]
+    fn terminal_retry_close_requires_a_new_matching_automatic_audit() {
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                autonomous_mode: true,
+                ..Default::default()
+            },
+        );
+        let detail = "Process exited with status 1";
+        monitor.record_autonomous_failure(4131, detail, "2026-11-11T02:16:12Z");
+        let mut prefs = monitor.prefs();
+        assert!(automatic_retry_committed(&prefs, 4131, 0, detail));
+        assert!(!automatic_retry_committed(&prefs, 4131, 1, detail));
+        assert!(!automatic_retry_committed(
+            &prefs,
+            4131,
+            0,
+            "another failure"
+        ));
+        prefs.requeue_audit[0].operator_requested = true;
+        assert!(!automatic_retry_committed(&prefs, 4131, 0, detail));
+        prefs.requeue_audit[0].operator_requested = false;
+        prefs.autonomous_records[0].phase = crate::AutonomousPhase::NeedsHuman;
+        assert!(!automatic_retry_committed(&prefs, 4131, 0, detail));
+    }
+}
+
+const MONITOR_STARTUP_TIMEOUT_PREFIX: &str = "Issues startup timed out after ";
+
+#[cfg(test)]
+mod startup_diagnosis_tests {
+    use super::monitor_startup_failure_detail;
+
+    #[test]
+    fn grok_unsubmitted_composer_and_hook_rejection_are_distinct() {
+        let composer = monitor_startup_failure_detail(
+            7183,
+            Some("Grok Build\n╭────────────────────╮\n  ❯ $gwt-execute #7183\n╰────────────────────╯\nShift+Tab mode"),
+        );
+        assert!(
+            composer.contains("initial prompt was not submitted"),
+            "{composer}"
+        );
+        let rejected = monitor_startup_failure_detail(
+            7183,
+            Some("Grok Build\nUserPromptSubmit hook blocked: project policy denied this prompt\n│ ❯ │"),
+        );
+        assert!(
+            rejected.contains("initial prompt rejected by hook"),
+            "{rejected}"
+        );
+        assert!(rejected.contains("project policy denied this prompt"));
+    }
+
+    #[test]
+    fn grok_startup_reports_authentication_and_confirmation_evidence() {
+        let auth =
+            monitor_startup_failure_detail(7183, Some("Sign in to Grok\nEnter your API key"));
+        assert!(auth.contains("authentication required"), "{auth}");
+        let confirmation = monitor_startup_failure_detail(
+            7183,
+            Some("Do you trust the contents of this directory?\nYes, proceed\nNo, quit"),
+        );
+        assert!(
+            confirmation.contains("confirmation required"),
+            "{confirmation}"
+        );
+    }
+
+    #[test]
+    fn ordinary_banner_and_codex_diagnostics_keep_their_meaning() {
+        let banner = monitor_startup_failure_detail(
+            7183,
+            Some("Grok Build\nRead Terms and Privacy Policy.\n│ ❯ │"),
+        );
+        assert!(!banner.contains("confirmation required"), "{banner}");
+        assert!(banner.contains("no initial prompt submission or tool activity"));
+        let history = monitor_startup_failure_detail(
+            7183,
+            Some("❯ $gwt-execute #7183\nPreToolUse hook denied: tool not allowed\n╭────╮\n  ❯\n╰────╯"),
+        );
+        assert!(
+            history.contains("no initial prompt submission or tool activity"),
+            "{history}"
+        );
+        let codex = monitor_startup_failure_detail(
+            7183,
+            Some("› $gwt-execute #7183\nError: startup failed"),
+        );
+        assert!(codex.contains("initial prompt was not submitted"));
+        assert!(codex.contains("last output: Error: startup failed"));
+    }
+}
+
 pub fn monitor_startup_failure_detail(issue: u64, screen: Option<&str>) -> String {
     let screen = screen.unwrap_or_default();
     let owner = format!("#{issue}");
+    let mut in_prompt_box = false;
     let unsubmitted = screen.lines().any(|line| {
-        let Some(composer) = line.trim_start().strip_prefix('›') else {
+        let line = line.trim_start();
+        if line.starts_with('╭') || line.starts_with('╰') {
+            in_prompt_box = line.starts_with('╭');
+            return false;
+        }
+        let Some(composer) = line.strip_prefix('›').or_else(|| {
+            // Grok's composer is inside a rounded box, while submitted
+            // conversation history also uses ❯ outside that box.
+            in_prompt_box
+                .then_some(line.trim_start_matches('│').trim_start())?
+                .strip_prefix('❯')
+        }) else {
             return false;
         };
         let mut words = composer.split_whitespace();
         words.next() == Some("$gwt-execute") && words.next() == Some(owner.as_str())
     });
-    let observation = if unsubmitted {
+    let blocked_hook = screen.lines().rev().find(|line| {
+        let lower = line.to_ascii_lowercase();
+        (lower.contains("userpromptsubmit") || lower.trim_start().starts_with("prompt "))
+            && lower.contains("hook")
+            && ["blocked", "rejected", "denied"]
+                .iter()
+                .any(|word| lower.contains(word))
+    });
+    let authentication = screen.lines().rev().find(|line| {
+        let lower = line.trim().to_ascii_lowercase();
+        lower.starts_with("sign in to grok") || lower.starts_with("enter your api key")
+    });
+    let confirmation = screen.lines().rev().find(|line| {
+        line.trim()
+            .to_ascii_lowercase()
+            .starts_with("do you trust ")
+    });
+    let observation = if blocked_hook.is_some() {
+        "initial prompt rejected by hook"
+    } else if authentication.is_some() {
+        "authentication required before initial prompt can start"
+    } else if confirmation.is_some() {
+        "confirmation required: folder trust must be granted before initial prompt can start"
+    } else if unsubmitted {
         "initial prompt was not submitted"
     } else {
         "no initial prompt submission or tool activity"
     };
-    let error = screen
-        .lines()
-        .find(|line| {
-            let lower = line.to_ascii_lowercase();
-            lower.contains("could not read windows sandbox configuration")
-                || lower.contains("error")
-                || lower.contains("failed")
+    let error = blocked_hook
+        .or(authentication)
+        .or(confirmation)
+        .or_else(|| {
+            screen.lines().find(|line| {
+                let lower = line.to_ascii_lowercase();
+                lower.contains("could not read windows sandbox configuration")
+                    || lower.contains("error")
+                    || lower.contains("failed")
+            })
         })
         .map(|line| {
             format!(

@@ -203,7 +203,7 @@ try {
     const quote = value => "'" + value.replaceAll("'", "'\\''") + "'";
     await writeFile(gh, `#!/bin/sh\nexec ${quote(process.execPath)} ${quote(script)} --gh "$@"\n`, { mode: 0o755 });
     fixtureIssues = [[532101, ["agent:fixture", "gwt-queued"]], [532102, ["agent:elsewhere"]], [532103, []]].map(([number, labels]) => ({
-      number, title: `Isolated Issues settings fixture #${number}`, body: "Offline Issue Monitor admission fixture.",
+      number, title: `Isolated Issues settings fixture #${number}`, body: "Offline Issues admission fixture.",
       state: "OPEN", labels: labels.map(name => ({ name })), updatedAt: "2026-10-13T00:00:00Z",
       url: `https://github.com/fixture/issues-live/issues/${number}`, comments: [],
     }));

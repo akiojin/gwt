@@ -2734,9 +2734,10 @@ mod transport_tests {
     #[test]
     fn reqwest_execute_rejects_expired_scoped_deadline_before_submission() {
         let transport = ReqwestTransport::new().expect("transport");
-        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-            Instant::now() - Duration::from_millis(1),
-        );
+        // A deadline at the captured instant is already expired: the monotonic
+        // operation clock can only reach or pass it before the pre-submit check.
+        let _deadline =
+            gwt_core::operation_deadline::ScopedOperationDeadline::enter(Instant::now());
 
         let error = transport
             .execute(HttpRequest {

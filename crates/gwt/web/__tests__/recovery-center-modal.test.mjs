@@ -128,8 +128,8 @@ test("rejected action shows its handle and reason without opening Board", () => 
 
 test("Recovery Center CSS references defined Operator tokens", () => {
   const components = readFileSync(resolve(here, "..", "styles", "components.css"), "utf8");
-  const recoveryCss = components.split("/* SPEC-1921 Phase 80 — read-only durable delivery Recovery Center. */")[1];
-  assert.ok(recoveryCss, "Recovery Center styles must be present");
+  const recoveryCss = components.match(/\/\* SPEC-1921 Phase 80 — read-only durable delivery Recovery Center\. \*\/([\s\S]*?)\/\* \/SPEC-1921 Phase 80 \*\//)?.[1];
+  assert.ok(recoveryCss?.trim(), "Recovery Center styles must have nonempty start/end boundaries");
   const tokenSources = ["tokens.css", "typography.css"]
     .map((file) => readFileSync(resolve(here, "..", "styles", file), "utf8"))
     .join("\n");
@@ -156,6 +156,8 @@ test("open requests a fresh projection and defaults to Pending plus Conflicted a
   const { controller, sent, document } = fixture();
   controller.open();
   assert.deepEqual(sent, [{ kind: "load_recovery_center", request_id: "load-1" }]);
+  controller.reconnect("load-1");
+  assert.equal(sent.length, 1, "the actual replay owns the fresh backend handles without another read");
   assert.match(document.querySelector("#recovery-center-modal .modal-body").textContent, /Loading/);
   ready(controller);
 

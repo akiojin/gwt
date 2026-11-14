@@ -38,6 +38,38 @@ use std::{
     sync::Arc,
 };
 
+/// Always-on launch diagnostics, including the phase interrupted by an error.
+/// The owner's span supplies the Issue, delivery and window identities.
+pub(super) struct LaunchPhaseTimer {
+    phase: &'static str,
+    started: std::time::Instant,
+    finished: bool,
+}
+
+impl LaunchPhaseTimer {
+    pub(super) fn start(phase: &'static str) -> Self {
+        tracing::info!(target: "gwt.launch.timing", phase, state = "started", "Issues owner launch phase");
+        Self {
+            phase,
+            started: std::time::Instant::now(),
+            finished: false,
+        }
+    }
+
+    pub(super) fn finish(mut self) {
+        self.finished = true;
+    }
+}
+
+impl Drop for LaunchPhaseTimer {
+    fn drop(&mut self) {
+        tracing::info!(target: "gwt.launch.timing", phase = self.phase,
+            state = if self.finished { "finished" } else { "interrupted" },
+            elapsed_ms = self.started.elapsed().as_secs_f64() * 1000.0,
+            "Issues owner launch phase");
+    }
+}
+
 /// Inputs captured by the project owner; prepared authority never crosses its wire boundary.
 pub struct AgentLaunchInput {
     pub sessions_dir: PathBuf,
@@ -227,6 +259,7 @@ pub fn prepare_agent_launch(
     // the next regression is read from the perf stream, not guessed.
     let mut phases = gwt::perf::RoutePhaseClock::start(gwt::perf::PerfRoute::PaneCreate);
     let result: AgentLaunchResult = (|| {
+        let phase = LaunchPhaseTimer::start("worktree");
         emit(AgentLaunchEvent::Progress {
             message: "Preparing worktree...".to_string(),
         });
@@ -250,14 +283,18 @@ pub fn prepare_agent_launch(
             None
         };
         phases.mark("worktree");
+        phase.finish();
 
+        let phase = LaunchPhaseTimer::start("docker");
         emit(AgentLaunchEvent::Progress {
             message: "Starting Docker service...".to_string(),
         });
         let docker_launch_binding =
             prepare_docker_runtime_for_launch(Path::new(&project_root), &mut config)?;
         phases.mark("docker");
+        phase.finish();
 
+        let phase = LaunchPhaseTimer::start("environment");
         emit(AgentLaunchEvent::Progress {
             message: "Configuring work...".to_string(),
         });
@@ -291,12 +328,23 @@ pub fn prepare_agent_launch(
                 });
             }
         }
+        if let Some(repository) = configure_grok_repository_trust(&mut config, &worktree_path)? {
+            tracing::info!(
+                repository = %repository.display(),
+                worktree = %worktree_path.display(),
+                "Grok repository trust requested with native --trust"
+            );
+        }
         resolve_docker_agent_program_with_binding(&mut config, docker_launch_binding.as_ref())?;
         phases.mark("environment");
+        phase.finish();
+        let phase = LaunchPhaseTimer::start("runner_health");
         let runner_health_report = (config.runtime_target == gwt_agent::LaunchRuntimeTarget::Host)
             .then(|| resolve_host_runner_health_checked(&mut config))
             .transpose()?;
         phases.mark("runner_health");
+        phase.finish();
+        let phase = LaunchPhaseTimer::start("managed_assets");
         let codex_hook_discovery_mode =
             codex_hook_discovery_mode_for_launch_config(&config, runner_health_report.as_ref());
         let managed_assets = refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode(
@@ -315,6 +363,8 @@ pub fn prepare_agent_launch(
             )
         })?;
         phases.mark("managed_assets");
+        phase.finish();
+        let phase = LaunchPhaseTimer::start("session");
         // Issue #4283 AC-5: a split of the phase above, not a sibling of
         // it. Materialization takes one lock per worktree and a short one
         // per repository; when this is most of `managed_assets` the fleet
@@ -800,7 +850,9 @@ pub fn prepare_agent_launch(
         // thread, never on the UI thread, and a worktree-local CODEX_HOME
         // has no contention to pace.
         phases.mark("session");
+        phase.finish();
         if gwt_agent::shares_user_codex_state(&agent_id, runtime_target, &process_launch.env) {
+            let phase = LaunchPhaseTimer::start("codex_pace");
             let waited = gwt_agent::pace_shared_codex_spawn();
             if !waited.is_zero() {
                 tracing::debug!(
@@ -809,6 +861,7 @@ pub fn prepare_agent_launch(
                 );
             }
             phases.mark("codex_pace");
+            phase.finish();
         }
         Ok((
             process_launch,
@@ -872,7 +925,7 @@ pub fn prepare_agent_launch(
 /// for a launch whose repository is `repo_path`, handing the build
 /// parallelism to build tools through `env` where it is not already pinned. Settings come from
 /// the global profile config; `max_active` from the repository's persisted
-/// Issue Monitor preferences (missing preferences count as one agent).
+/// Issues preferences (missing preferences count as one agent).
 pub fn resolve_agent_resource_launch(
     profile_config_path: &Path,
     repo_path: &Path,
@@ -1079,7 +1132,7 @@ mod delivered_owner_launch_tests {
     }
 }
 
-/// Provenance carried only by Issue Monitor launches. Possessing this value is
+/// Provenance carried only by Issues launches. Possessing this value is
 /// not sufficient to trust a path: [`validate_issue_monitor_managed_codex_worktree`]
 /// still reconciles it with the resolved launch and Git's authoritative
 /// worktree inventory.
@@ -1091,7 +1144,7 @@ pub struct IssueMonitorTrustCandidate {
     pub review_dispatch: bool,
 }
 
-/// A canonical worktree whose Issue Monitor ownership and Git inventory have
+/// A canonical worktree whose Issues ownership and Git inventory have
 /// been checked together. Keep the path private so an arbitrary launch cwd
 /// cannot be passed directly to the Codex trust writer.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1118,17 +1171,17 @@ pub fn issue_monitor_trust_candidate_from_feedback(
         return Ok(None);
     };
     let project_root = context.issue_monitor_project_root.clone().ok_or_else(|| {
-        format!("Issue Monitor launch for Issue #{issue_number} has no project root provenance")
+        format!("Issues launch for Issue #{issue_number} has no project root provenance")
     })?;
     let session_mode = context.issue_monitor_session_mode.ok_or_else(|| {
-        format!("Issue Monitor launch for Issue #{issue_number} has no session mode provenance")
+        format!("Issues launch for Issue #{issue_number} has no session mode provenance")
     })?;
     if !matches!(
         session_mode,
         gwt_agent::SessionMode::Normal | gwt_agent::SessionMode::Resume
     ) {
         return Err(format!(
-            "Issue Monitor managed Codex trust requires Normal or Resume session mode, got {session_mode:?}"
+            "Issues managed Codex trust requires Normal or Resume session mode, got {session_mode:?}"
         ));
     }
     Ok(Some(IssueMonitorTrustCandidate {
@@ -1408,7 +1461,8 @@ pub fn effective_host_codex_config_path(
         } else {
             child_cwd.join(codex_home)
         };
-        return canonical_launch_path(&resolved, "CODEX_HOME").map(|home| home.join("config.toml"));
+        return canonical_launch_path(&resolved, "CODEX_HOME")
+            .map(|home| test_isolated_codex_config(home.join("config.toml")));
     }
 
     let user_home = match semantics {
@@ -1433,13 +1487,55 @@ pub fn effective_host_codex_config_path(
             user_home.display()
         ));
     }
-    Ok(user_home.join(".codex").join("config.toml"))
+    Ok(test_isolated_codex_config(
+        user_home.join(".codex").join("config.toml"),
+    ))
+}
+
+fn test_isolated_codex_config(path: PathBuf) -> PathBuf {
+    gwt_config::home::test_isolated_config_path(path, Path::new(".codex/config.toml"))
 }
 
 fn canonical_launch_path(path: &Path, role: &str) -> Result<PathBuf, String> {
     std::fs::canonicalize(path)
         .map(|path| gwt_core::paths::normalize_windows_child_process_path(&path))
         .map_err(|error| format!("failed to canonicalize {role} {}: {error}", path.display()))
+}
+
+/// Request native repository trust only when gwt launches Grok on the Host.
+/// Grok shares a normal repository's trust across its linked worktrees; a
+/// worktree of a bare repository has no main workdir and uses its own root.
+fn configure_grok_repository_trust(
+    config: &mut gwt_agent::LaunchConfig,
+    cwd: &Path,
+) -> Result<Option<PathBuf>, String> {
+    if config.agent_id != gwt_agent::AgentId::GrokBuild
+        || config.runtime_target != gwt_agent::LaunchRuntimeTarget::Host
+    {
+        return Ok(None);
+    }
+    // A missing cwd otherwise makes the PTY inherit gwt's own directory.
+    // Keep the logged trust key and the eventual provider process aligned.
+    let launch_cwd = config
+        .working_dir
+        .get_or_insert_with(|| cwd.to_path_buf())
+        .clone();
+    let provider_cwd = pm_provider_runtime_dir(config).unwrap_or(launch_cwd);
+    let Ok(repository) = gwt_git::Repository::discover(&provider_cwd) else {
+        return Ok(None);
+    };
+    let main = gwt_git::worktree::main_worktree_root(repository.path())
+        .map_err(|error| error.to_string())?;
+    let root = if main.join(".git").is_dir() {
+        main.as_path()
+    } else {
+        repository.path()
+    };
+    let root = canonical_launch_path(root, "Grok repository trust root")?;
+    if !config.args.iter().any(|arg| arg == "--trust") {
+        config.args.insert(0, "--trust".to_string());
+    }
+    Ok(Some(root))
 }
 
 pub fn validate_issue_monitor_managed_codex_worktree(
@@ -1455,19 +1551,18 @@ pub fn validate_issue_monitor_managed_codex_worktree(
         return Ok(None);
     };
 
-    let candidate_root =
-        canonical_launch_path(&candidate.project_root, "Issue Monitor project root")?;
+    let candidate_root = canonical_launch_path(&candidate.project_root, "Issues project root")?;
     let actual_root = canonical_launch_path(actual_project_root, "launch project root")?;
     if candidate_root != actual_root {
         return Err(format!(
-            "Issue Monitor project root {} does not match launch project root {}",
+            "Issues project root {} does not match launch project root {}",
             candidate_root.display(),
             actual_root.display()
         ));
     }
     if config.linked_issue_number != Some(candidate.issue_number) {
         return Err(format!(
-            "Issue Monitor linked Issue #{} does not match launch metadata {:?}",
+            "Issues linked Issue #{} does not match launch metadata {:?}",
             candidate.issue_number, config.linked_issue_number
         ));
     }
@@ -1477,7 +1572,7 @@ pub fn validate_issue_monitor_managed_codex_worktree(
     ) || config.session_mode != candidate.session_mode
     {
         return Err(format!(
-            "Issue Monitor session mode {:?} does not match launch session mode {:?}; managed trust requires matching Normal or Resume provenance",
+            "Issues session mode {:?} does not match launch session mode {:?}; managed trust requires matching Normal or Resume provenance",
             candidate.session_mode, config.session_mode
         ));
     }
@@ -1485,13 +1580,13 @@ pub fn validate_issue_monitor_managed_codex_worktree(
     let expected_branch = format!("work/issue-{}", candidate.issue_number);
     if !candidate.review_dispatch && config.branch.as_deref() != Some(expected_branch.as_str()) {
         return Err(format!(
-            "Issue Monitor branch must be {expected_branch}, got {:?}",
+            "Issues branch must be {expected_branch}, got {:?}",
             config.branch
         ));
     }
 
     let configured_worktree = config.working_dir.as_deref().ok_or_else(|| {
-        "Issue Monitor Codex launch has no resolved working directory to validate".to_string()
+        "Issues Codex launch has no resolved working directory to validate".to_string()
     })?;
     let configured_worktree = canonical_launch_path(configured_worktree, "launch worktree")?;
     if candidate.review_dispatch {
@@ -1506,7 +1601,7 @@ pub fn validate_issue_monitor_managed_codex_worktree(
             || !is_ephemeral_worktree_path(&configured_worktree)
         {
             return Err(
-                "Issue Monitor review trust requires an isolated read-only detached launch".into(),
+                "Issues review trust requires an isolated read-only detached launch".into(),
             );
         }
         if !worktrees.iter().any(|worktree| {
@@ -1516,25 +1611,22 @@ pub fn validate_issue_monitor_managed_codex_worktree(
                     .is_ok_and(|path| path == configured_worktree)
         }) {
             return Err(
-                "Issue Monitor review checkout is not an authoritative detached gwt worktree"
-                    .into(),
+                "Issues review checkout is not an authoritative detached gwt worktree".into(),
             );
         }
         let reviewed_sha = config
             .ephemeral_base_ref
             .as_deref()
             .filter(|sha| !sha.is_empty())
-            .ok_or_else(|| "Issue Monitor review trust requires its reviewed SHA".to_string())?;
+            .ok_or_else(|| "Issues review trust requires its reviewed SHA".to_string())?;
         let head = gwt_core::process::run_git_logged(
             &["rev-parse", "--verify", "HEAD"],
             Some(&configured_worktree),
         )
-        .map_err(|error| {
-            format!("failed to inspect Issue Monitor review checkout HEAD: {error}")
-        })?;
+        .map_err(|error| format!("failed to inspect Issues review checkout HEAD: {error}"))?;
         if !head.status.success() || String::from_utf8_lossy(&head.stdout).trim() != reviewed_sha {
             return Err(format!(
-                "Issue Monitor review checkout HEAD does not match reviewed SHA {reviewed_sha}"
+                "Issues review checkout HEAD does not match reviewed SHA {reviewed_sha}"
             ));
         }
         return Ok(Some(ManagedCodexWorktree(configured_worktree)));
@@ -1542,7 +1634,7 @@ pub fn validate_issue_monitor_managed_codex_worktree(
     let authoritative_worktree =
         crate::launch_runtime::usable_worktree_path_for_branch(worktrees, &expected_branch)
             .ok_or_else(|| {
-                format!("Issue Monitor branch {expected_branch} has no authoritative gwt worktree")
+                format!("Issues branch {expected_branch} has no authoritative gwt worktree")
             })?;
     let authoritative_worktree =
         canonical_launch_path(&authoritative_worktree, "authoritative gwt worktree")?;
@@ -1762,4 +1854,145 @@ pub(crate) fn record_named_launch_assignment(
     )
     .map_err(|error| error.to_string())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod grok_repository_trust_tests {
+    use super::*;
+
+    fn git(cwd: &Path, args: &[&str]) {
+        let output = gwt_core::process::run_git_logged(args, Some(cwd)).unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn grok_repository_trust_matches_main_and_linked_git_roots() {
+        let temp = tempfile::tempdir().unwrap();
+        let main = temp.path().join("main");
+        let linked = temp.path().join("linked");
+        let bare = temp.path().join("bare.git");
+        let bare_linked = temp.path().join("bare-linked");
+        git(
+            temp.path(),
+            &["init", "--quiet", "-b", "main", main.to_str().unwrap()],
+        );
+        git(
+            &main,
+            &[
+                "-c",
+                "user.name=Grok trust test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "--quiet",
+                "--allow-empty",
+                "-m",
+                "initial",
+            ],
+        );
+        git(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "linked",
+                linked.to_str().unwrap(),
+            ],
+        );
+        git(
+            temp.path(),
+            &[
+                "clone",
+                "--quiet",
+                "--bare",
+                main.to_str().unwrap(),
+                bare.to_str().unwrap(),
+            ],
+        );
+        git(
+            &bare,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                bare_linked.to_str().unwrap(),
+                "main",
+            ],
+        );
+
+        for (cwd, expected) in [
+            (&main, &main),
+            (&linked, &main),
+            (&bare_linked, &bare_linked),
+        ] {
+            let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::GrokBuild)
+                .working_dir(cwd)
+                .extra_arg("$gwt-execute #7183")
+                .build();
+            if cwd == &main {
+                // The central launch path also uses the project root when
+                // LaunchConfig has no explicit working directory.
+                config.working_dir = None;
+            }
+            let original = config.args.clone();
+            assert!(!original.iter().any(|arg| arg == "--trust"));
+            assert_eq!(
+                configure_grok_repository_trust(&mut config, cwd).unwrap(),
+                Some(canonical_launch_path(expected, "expected trust root").unwrap())
+            );
+            assert_eq!(
+                config.working_dir.as_deref(),
+                Some(cwd.as_path()),
+                "the spawned Grok must use the directory whose trust was resolved"
+            );
+            assert_eq!(config.args[0], "--trust");
+            assert_eq!(&config.args[1..], original);
+            configure_grok_repository_trust(&mut config, cwd).unwrap();
+            assert_eq!(
+                config.args.iter().filter(|arg| *arg == "--trust").count(),
+                1
+            );
+        }
+
+        let mut codex = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .working_dir(&main)
+            .build();
+        let original = codex.args.clone();
+        assert_eq!(
+            configure_grok_repository_trust(&mut codex, &main).unwrap(),
+            None
+        );
+        assert_eq!(codex.args, original);
+
+        let mut docker = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::GrokBuild)
+            .working_dir(&linked)
+            .runtime_target(gwt_agent::LaunchRuntimeTarget::Docker)
+            .build();
+        let original = docker.args.clone();
+        assert_eq!(
+            configure_grok_repository_trust(&mut docker, &linked).unwrap(),
+            None
+        );
+        assert_eq!(docker.args, original);
+    }
+
+    #[test]
+    fn grok_repository_trust_leaves_non_git_launch_unchanged() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::GrokBuild)
+            .working_dir(temp.path())
+            .build();
+        let original = config.args.clone();
+        assert_eq!(
+            configure_grok_repository_trust(&mut config, temp.path()).unwrap(),
+            None
+        );
+        assert_eq!(config.args, original);
+    }
 }

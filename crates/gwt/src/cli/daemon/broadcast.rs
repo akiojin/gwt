@@ -6,7 +6,7 @@
 //! the hub for a receiver. Daemon-side code paths (Board projection writer,
 //! runtime status aggregator, hook event router) call
 //! [`BroadcastHub::publish`] to fan a single payload out to all subscribers.
-//! Issue Monitor controls are commands rather than notifications, so they use
+//! Issues controls are commands rather than notifications, so they use
 //! a separate single-worker queue. A bounded admission semaphore covers both
 //! queued and in-flight commands; acceptance alone is not an ACK. Each caller
 //! receives a completion receipt that resolves only after the worker commits
@@ -26,6 +26,7 @@ use std::{
         atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
     },
+    time::{Duration, Instant},
 };
 
 use gwt_core::daemon::DaemonFrame;
@@ -37,7 +38,7 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch, OwnedSemaphorePermit, Semapho
 /// frames (subscribers that do fall behind get a `RecvError::Lagged`).
 pub(super) const DEFAULT_CHANNEL_CAPACITY: usize = 64;
 
-/// Issue Monitor controls are commands whose daemon ACK confirms the exact
+/// Issues controls are commands whose daemon ACK confirms the exact
 /// control transaction was durably committed. Keep them off the lossy
 /// broadcast rings.
 const ISSUE_MONITOR_CONTROL_CAPACITY: usize = 64;
@@ -90,7 +91,7 @@ impl IssueMonitorControlQueueError {
             Self::Rejected => crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_REJECTED_ERROR,
             Self::ConfigConflict => crate::issue_monitor::ISSUE_MONITOR_CONFIG_CONFLICT_ERROR,
             Self::WaitNotLaunched => {
-                "issue monitor control rejected before commit: reason=not_launched; no durable launch owns this issue; inspect issue.monitor.status and declare the wait from the actual launch context"
+                "Issues control rejected before commit: reason=not_launched; no durable launch owns this issue; inspect issue.monitor.status and declare the wait from the actual launch context"
             }
             Self::ScanAlreadyInFlight => crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_SCAN_ALREADY_IN_FLIGHT_ERROR,
             Self::Busy => crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_BUSY_ERROR,
@@ -135,6 +136,33 @@ impl Drop for IssueMonitorMaterializerLease {
     }
 }
 
+/// How long a dropped GUI window subscriber still counts as an open window.
+/// The subscriber retries within 5s, so this covers that gap without treating
+/// a closed window as open for the rest of the scan.
+pub(crate) const GUI_WINDOW_RECONNECT_GRACE: Duration = Duration::from_secs(15);
+
+/// Connection-bound proof that the GUI project window is attached. It does
+/// not authorize Issues materialization.
+pub(crate) struct GuiWindowLease {
+    count: Arc<AtomicUsize>,
+    detached_at: Arc<Mutex<Option<Instant>>>,
+}
+
+impl Drop for GuiWindowLease {
+    fn drop(&mut self) {
+        // Readers that observe zero windows must wait until the reconnect
+        // grace timestamp is published before deciding the window is closed.
+        let mut detached_at = self
+            .detached_at
+            .lock()
+            .expect("GUI window detach mutex poisoned");
+        let previous = self.count.fetch_sub(1, Ordering::SeqCst);
+        if previous == 1 {
+            *detached_at = Some(Instant::now());
+        }
+    }
+}
+
 impl IssueMonitorControlRequest {
     #[cfg(test)]
     pub(crate) fn frame(&self) -> &DaemonFrame {
@@ -157,7 +185,7 @@ impl IssueMonitorControlRequest {
     }
 }
 
-/// Runtime notification registry plus the dedicated Issue Monitor command
+/// Runtime notification registry plus the dedicated Issues command
 /// queue, shared by all per-connection tasks.
 ///
 /// Cheap to clone via [`Arc`] — internal mutation is guarded by a
@@ -169,6 +197,8 @@ pub struct BroadcastHub {
     issue_monitor_controls: Arc<IssueMonitorControlQueue>,
     issue_monitor_status: Arc<Mutex<Option<Value>>>,
     issue_monitor_materializers: Arc<AtomicUsize>,
+    gui_windows: Arc<AtomicUsize>,
+    gui_window_detached_at: Arc<Mutex<Option<Instant>>>,
 }
 
 impl Default for BroadcastHub {
@@ -178,6 +208,8 @@ impl Default for BroadcastHub {
             issue_monitor_controls: Arc::new(IssueMonitorControlQueue::new()),
             issue_monitor_status: Arc::new(Mutex::new(None)),
             issue_monitor_materializers: Arc::new(AtomicUsize::new(0)),
+            gui_windows: Arc::new(AtomicUsize::new(0)),
+            gui_window_detached_at: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -213,7 +245,45 @@ impl BroadcastHub {
         self.issue_monitor_materializers.load(Ordering::SeqCst)
     }
 
-    /// Claim the sole lossless Issue Monitor control receiver. Until the
+    pub(crate) fn acquire_gui_window(&self) -> GuiWindowLease {
+        self.gui_windows.fetch_add(1, Ordering::SeqCst);
+        GuiWindowLease {
+            count: Arc::clone(&self.gui_windows),
+            detached_at: Arc::clone(&self.gui_window_detached_at),
+        }
+    }
+
+    pub(crate) fn gui_window_count(&self) -> usize {
+        self.gui_windows.load(Ordering::SeqCst)
+    }
+
+    /// The project window is open when a GUI subscriber is attached, or when
+    /// the last one dropped inside [`GUI_WINDOW_RECONNECT_GRACE`].
+    pub(crate) fn gui_window_open(&self) -> bool {
+        self.gui_window_open_at(Instant::now())
+    }
+
+    pub(crate) fn gui_window_open_at(&self, now: Instant) -> bool {
+        if self.gui_window_count() > 0 {
+            return true;
+        }
+        self.gui_window_detached_at
+            .lock()
+            .expect("GUI window detach mutex poisoned")
+            .is_some_and(|detached_at| {
+                now.saturating_duration_since(detached_at) < GUI_WINDOW_RECONNECT_GRACE
+            })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_gui_window_detached_at_for_test(&self, at: Instant) {
+        *self
+            .gui_window_detached_at
+            .lock()
+            .expect("GUI window detach mutex poisoned") = Some(at);
+    }
+
+    /// Claim the sole lossless Issues control receiver. Until the
     /// worker calls this, publishers fail closed instead of ACKing a command
     /// that no active worker has accepted.
     pub(crate) fn take_issue_monitor_control_receiver(
@@ -226,7 +296,7 @@ impl BroadcastHub {
             .issue_monitor_controls
             .receiver
             .lock()
-            .expect("Issue Monitor control receiver mutex poisoned")
+            .expect("Issues control receiver mutex poisoned")
             .take()?;
         self.issue_monitor_controls
             .state
@@ -238,7 +308,7 @@ impl BroadcastHub {
         self.issue_monitor_controls
             .receiver
             .lock()
-            .expect("Issue Monitor control receiver mutex poisoned")
+            .expect("Issues control receiver mutex poisoned")
             .take();
         self.issue_monitor_controls
             .state
@@ -252,7 +322,7 @@ impl BroadcastHub {
         *self
             .issue_monitor_status
             .lock()
-            .expect("Issue Monitor status mutex poisoned") = None;
+            .expect("Issues status mutex poisoned") = None;
     }
 
     /// Replace the daemon-owned atomic projection consumed by agent status
@@ -262,7 +332,7 @@ impl BroadcastHub {
         *self
             .issue_monitor_status
             .lock()
-            .expect("Issue Monitor status mutex poisoned") = Some(status);
+            .expect("Issues status mutex poisoned") = Some(status);
     }
 
     /// Read the latest projection from a ready or recovery-blocked worker.
@@ -277,7 +347,7 @@ impl BroadcastHub {
         }
         self.issue_monitor_status
             .lock()
-            .expect("Issue Monitor status mutex poisoned")
+            .expect("Issues status mutex poisoned")
             .clone()
     }
 
@@ -405,7 +475,7 @@ impl BroadcastHub {
 
 #[cfg(test)]
 mod tests {
-    use std::{future::Future, task::Poll};
+    use std::{future::Future, task::Poll, time::Instant};
 
     use gwt_core::daemon::DaemonFrame;
     use serde_json::json;
@@ -413,7 +483,7 @@ mod tests {
 
     use super::{
         BroadcastHub, IssueMonitorControlQueueError, DEFAULT_CHANNEL_CAPACITY,
-        ISSUE_MONITOR_CONTROL_CAPACITY,
+        GUI_WINDOW_RECONNECT_GRACE, ISSUE_MONITOR_CONTROL_CAPACITY,
     };
 
     #[test]
@@ -448,6 +518,22 @@ mod tests {
         drop(second);
         assert!(!hub.issue_monitor_materializer_connected());
         assert_eq!(hub.issue_monitor_materializer_count(), 0);
+    }
+
+    #[test]
+    fn gui_window_lease_stays_open_through_reconnect_grace_then_closes() {
+        let hub = BroadcastHub::new();
+        assert!(!hub.gui_window_open());
+        let lease = hub.acquire_gui_window();
+        assert!(hub.gui_window_open());
+        assert_eq!(hub.gui_window_count(), 1);
+        drop(lease);
+        assert_eq!(hub.gui_window_count(), 0);
+        assert!(hub.gui_window_open());
+        let detached = Instant::now();
+        hub.set_gui_window_detached_at_for_test(detached);
+        assert!(hub.gui_window_open_at(detached));
+        assert!(!hub.gui_window_open_at(detached + GUI_WINDOW_RECONNECT_GRACE));
     }
 
     #[test]
@@ -585,7 +671,7 @@ mod tests {
         let hub = BroadcastHub::new();
         let mut receiver = hub
             .take_issue_monitor_control_receiver()
-            .expect("single issue monitor worker receiver");
+            .expect("single Issues worker receiver");
         let mut receipts = Vec::with_capacity(ISSUE_MONITOR_CONTROL_CAPACITY);
         for seq in 0..ISSUE_MONITOR_CONTROL_CAPACITY {
             receipts.push(

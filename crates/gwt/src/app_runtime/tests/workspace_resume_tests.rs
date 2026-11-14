@@ -1,6 +1,68 @@
 use super::*;
 
 #[test]
+fn bootstrap_defers_physical_restores_until_runtime_ownership_is_installed() {
+    // Quit can discard PendingApp before the event loop installs its owner
+    // subscribers. Bootstrap therefore prepares restores without starting a
+    // physical process; StartupReady resumes Continue without waiting for UI.
+    let source = include_str!("../startup.rs").replace("\r\n", "\n");
+    for source in [source.clone(), source.replace('\n', "\r\n")] {
+        let source = source.replace("\r\n", "\n");
+        let bootstrap = source
+            .split_once("pub(crate) fn bootstrap(&mut self)")
+            .expect("bootstrap implementation")
+            .1
+            .split_once("\n    }\n")
+            .expect("bootstrap boundary")
+            .0;
+        assert!(
+            !bootstrap.contains("self.start_window("),
+            "startup Quit must not inherit a shell launched before GUI ownership is installed"
+        );
+        assert!(
+            !bootstrap.contains("self.startup_auto_resume_ready_events()"),
+            "Continue must resume after GUI ownership is installed, including legacy PM restores"
+        );
+    }
+}
+
+#[test]
+fn installed_startup_resumes_continue_without_a_browser_ready_event() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    runtime.blocking_tasks = BlockingTaskSpawner::queued().0;
+    gwt_core::project_execution_policy::choose(
+        &repo,
+        &gwt_core::project_execution_policy::ChoiceRequest {
+            operation_id: uuid::Uuid::new_v4().to_string(),
+            expected_revision: 0,
+            generation: 1,
+            choice: gwt_core::project_execution_policy::Choice::Continue,
+            consent_source_id: "explicit-continue".into(),
+            actor: "browser:fixture".into(),
+            authorized_work_lineage: vec!["pm".into()],
+        },
+    )
+    .unwrap();
+    runtime.bootstrap();
+    assert_eq!(runtime.pending_startup_pm_tabs, vec!["tab-1"]);
+    runtime.resume_bootstrapped_runtimes();
+    assert!(
+        runtime.pending_startup_pm_tabs.is_empty(),
+        "Continue must consume its prepared PM queue before any browser-ready event"
+    );
+    assert!(recorded
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|event| matches!(event, UserEvent::Dispatch(_))));
+}
+
+#[test]
 fn startup_reaper_runs_after_restore_selection_before_monitor_and_pm_dispatch() {
     let source = include_str!("../startup.rs");
     let bootstrap = source
@@ -288,10 +350,7 @@ fn app_runtime_startup_auto_resume_removes_stale_placeholders_across_agent_famil
     }
 
     runtime.bootstrap();
-    runtime.handle_frontend_event(
-        "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {},
-    );
+    handle_startup_auto_resume_ready(&mut runtime, "client-1");
 
     let agent_windows = runtime.tabs[0]
         .workspace
@@ -399,7 +458,7 @@ fn app_runtime_startup_auto_resume_without_exact_id_keeps_placeholder_with_diagn
     let owner = executor.block_on(production_owner_fixture(&worktree));
     let (spawner, tasks) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = spawner;
-    runtime.startup_auto_resume_ready_events();
+    drain_startup_auto_resume(&mut runtime);
     drain_queued_blocking_tasks(&tasks);
     let completion = take_remote_owner_launch_completion(match &runtime.proxy {
         AppEventProxy::Stub(events) => events,
@@ -590,10 +649,7 @@ fn app_runtime_startup_auto_resume_restores_each_eligible_session() {
     }
 
     runtime.bootstrap();
-    runtime.handle_frontend_event(
-        "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {},
-    );
+    handle_startup_auto_resume_ready(&mut runtime, "client-1");
 
     let agents = runtime.tabs[0]
         .workspace
@@ -672,10 +728,7 @@ fn app_runtime_startup_auto_resume_excludes_closed_stopped_windows() {
     }
 
     runtime.bootstrap();
-    runtime.handle_frontend_event(
-        "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {},
-    );
+    handle_startup_auto_resume_ready(&mut runtime, "client-1");
 
     let resumed_sources = runtime
         .pending_auto_resume_sources
@@ -1178,10 +1231,7 @@ fn app_runtime_startup_auto_resume_includes_legacy_non_stopped_sessions() {
         .expect("save legacy open session");
 
     runtime.bootstrap();
-    runtime.handle_frontend_event(
-        "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {},
-    );
+    handle_startup_auto_resume_ready(&mut runtime, "client-1");
 
     let resumed_sources = runtime
         .pending_auto_resume_sources
@@ -1311,10 +1361,7 @@ fn app_runtime_bootstrap_auto_resumes_same_repo_worktree_session_from_restored_p
         .expect("save resumable session");
 
     runtime.bootstrap();
-    runtime.handle_frontend_event(
-        "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {},
-    );
+    handle_startup_auto_resume_ready(&mut runtime, "client-1");
 
     assert_eq!(
         runtime.tabs.len(),
@@ -1372,10 +1419,7 @@ fn app_runtime_bootstrap_ignores_same_repo_worktree_session_without_lifecycle() 
         .expect("save stale session");
 
     runtime.bootstrap();
-    runtime.handle_frontend_event(
-        "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {},
-    );
+    handle_startup_auto_resume_ready(&mut runtime, "client-1");
 
     let agent_windows = runtime.tabs[0]
         .workspace
@@ -1428,10 +1472,7 @@ fn app_runtime_bootstrap_ignores_same_repo_worktree_session_with_placeholder_res
         .expect("save placeholder session");
 
     runtime.bootstrap();
-    runtime.handle_frontend_event(
-        "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {},
-    );
+    handle_startup_auto_resume_ready(&mut runtime, "client-1");
 
     let agent_windows = runtime.tabs[0]
         .workspace
@@ -1483,10 +1524,7 @@ fn app_runtime_bootstrap_does_not_auto_resume_sessions_outside_restored_tabs() {
         .expect("save resumable session");
 
     runtime.bootstrap();
-    runtime.handle_frontend_event(
-        "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {},
-    );
+    handle_startup_auto_resume_ready(&mut runtime, "client-1");
 
     assert!(
             runtime.tabs.is_empty(),
@@ -1562,10 +1600,7 @@ fn app_runtime_bootstrap_auto_resume_dedupes_and_skips_stale_without_count_cap()
     }
 
     runtime.bootstrap();
-    runtime.handle_frontend_event(
-        "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {},
-    );
+    handle_startup_auto_resume_ready(&mut runtime, "client-1");
 
     assert_eq!(
         runtime.pending_auto_resume_sources.len(),
@@ -1841,6 +1876,140 @@ fn app_runtime_resume_workspace_journal_derives_feature_branch_under_work_named_
     let view = session.wizard.view();
     assert_eq!(view.title, "Launch Agent");
     assert_eq!(view.branch_name, branch);
+}
+
+#[test]
+fn closed_issue_worktrees_remain_cleanup_workspaces_without_reopening_work() {
+    use gwt_core::workspace_projection::{
+        WorkEvent, WorkEventKind, WorkItemsProjection, WorkspaceExecutionContainerRef,
+    };
+
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_with_initial_commit(&repo);
+    let at = chrono::DateTime::parse_from_rfc3339("2026-11-13T07:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let mut items = WorkItemsProjection::empty(at);
+    for (number, close) in [
+        (3447, WorkEventKind::Done),
+        (3448, WorkEventKind::Discard),
+        (3449, WorkEventKind::Done),
+        (3450, WorkEventKind::Done),
+    ] {
+        let branch = format!("work/issue-{number}");
+        let worktree = repo.join(&branch);
+        if number != 3449 {
+            fs::create_dir_all(&worktree).unwrap();
+        }
+        let mut event = WorkEvent::new(WorkEventKind::Update, format!("closed-{number}"), at);
+        event.title = Some(format!("Closed Issue {number}"));
+        event.owner = Some(format!("Issue #{number}"));
+        event.execution_container = Some(WorkspaceExecutionContainerRef {
+            branch: Some(branch),
+            worktree_path: Some(worktree),
+            pr_number: Some(number + 100),
+            pr_url: None,
+            pr_state: Some("MERGED".into()),
+        });
+        items.apply_event(event);
+        items.apply_event(WorkEvent::new(close, format!("closed-{number}"), at));
+    }
+    let mut current = WorkEvent::new(WorkEventKind::Update, "current-3450", at);
+    current.owner = Some("Issue #3450".into());
+    current.execution_container = Some(WorkspaceExecutionContainerRef {
+        branch: Some("work/issue-3450".into()),
+        worktree_path: Some(repo.join("work/issue-3450")),
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+    });
+    items.apply_event(current);
+    let path = gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&repo);
+    gwt_core::workspace_projection::save_workspace_work_items_projection_to_path(&path, &items)
+        .unwrap();
+    let original = fs::read(&path).unwrap();
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime
+        .work_dirty_branches
+        .insert(repo.clone(), HashSet::new());
+    runtime
+        .work_live_process_branches
+        .insert(repo.clone(), HashSet::new());
+    runtime.work_cleanup_ready_branches.insert(
+        repo.clone(),
+        [3447, 3448]
+            .map(|n| (format!("work/issue-{n}"), "pr_merged".into()))
+            .into(),
+    );
+
+    let view = runtime
+        .build_active_work_projection_for_tab_for_test("tab-1", &runtime.tabs[0])
+        .expect("projection");
+    assert_eq!(
+        view.active_works.len(),
+        3,
+        "include physical closed worktrees, omit missing paths"
+    );
+    for (number, lifecycle) in [(3447, "done"), (3448, "discarded")] {
+        let row = view
+            .active_works
+            .iter()
+            .find(|row| row.branch.as_deref() == Some(format!("work/issue-{number}").as_str()))
+            .expect("closed Work's remaining physical Workspace");
+        assert_eq!(row.owner, None);
+        assert!(
+            row.linked_issue_numbers.is_empty(),
+            "closed materialization belongs in Other"
+        );
+        assert_eq!(row.lifecycle_state, lifecycle);
+        assert_eq!(row.closed_at.as_deref(), Some("2026-11-13T07:00:00Z"));
+        assert!(row.cleanup_candidate.is_some());
+        let child = row
+            .works
+            .iter()
+            .find(|child| child.id == format!("closed-{number}"))
+            .unwrap();
+        assert_eq!(child.lifecycle_state, lifecycle);
+        assert_eq!(child.owner, Some(format!("Issue #{number}")));
+        assert_eq!(child.closed_at, row.closed_at);
+        assert!(!child.manual_close_allowed);
+    }
+    let current = view
+        .active_works
+        .iter()
+        .find(|row| row.branch.as_deref() == Some("work/issue-3450"))
+        .unwrap();
+    assert_eq!(current.owner.as_deref(), Some("Issue #3450"));
+    assert_eq!(current.lifecycle_state, "paused");
+    assert!(current.works.iter().any(|child| child.id == "current-3450"));
+    assert!(!current.works.iter().any(|child| child.id == "closed-3450"));
+    runtime
+        .work_cleanup_ready_branches
+        .insert(repo.clone(), HashMap::new());
+    let unproven = runtime
+        .build_active_work_projection_for_tab_for_test("tab-1", &runtime.tabs[0])
+        .expect("projection without positive readiness");
+    assert_eq!(unproven.active_works.len(), 3);
+    assert!(
+        unproven
+            .active_works
+            .iter()
+            .filter(|row| matches!(row.lifecycle_state.as_str(), "done" | "discarded"))
+            .all(|row| row.cleanup_candidate.is_none()),
+        "historical MERGED PR metadata cannot replace current base evidence"
+    );
+    assert_eq!(
+        fs::read(path).unwrap(),
+        original,
+        "view construction never reopens or writes Work"
+    );
 }
 
 #[test]

@@ -6271,6 +6271,130 @@ fn session_bound_terminalization_rejects_conflicting_current_authority_shadows()
 }
 
 #[test]
+fn external_recovery_snapshot_preserves_legacy_split_pair_and_receipt_reconciliation() {
+    let _guard = lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _home = ScopedHome::set(home.path());
+    let temp = tempfile::tempdir().unwrap();
+    for committed in [false, true] {
+        let label = if committed {
+            "typed-committed"
+        } else {
+            "typed-cancelled"
+        };
+        let legacy = t812_prepare_legacy_external_resume(&temp.path().join(label), label, None);
+        let target = &legacy.fixture.target;
+        let marker = pending_workspace_state_transaction_path(&legacy.fixture.current_path);
+        let before = fs::read(&marker).unwrap();
+        let canonical_before = fs::read(&legacy.fixture.work_items_path).unwrap();
+        let transaction: PendingWorkspaceStateTransaction =
+            serde_json::from_slice(&before).unwrap();
+        if !committed {
+            // A pre-split transaction remains discoverable from its legacy
+            // WorkItems marker even without a current/coordinator copy.
+            fs::remove_file(&marker).unwrap();
+            fs::remove_file(
+                pending_workspace_state_transaction_coordinator_path(&transaction).unwrap(),
+            )
+            .unwrap();
+        }
+        if committed {
+            persist_external_workspace_commit_receipt(
+                &legacy.fixture.current_path,
+                &legacy.legacy_work_items_path,
+                &legacy.operation_id,
+                &transaction,
+                ExternalWorkspaceCommitResolution::Committed,
+            )
+            .unwrap();
+        }
+        let recovery = inspect_workspace_state_external_commit_recovery_for_work_event_root(
+            &target.project_state_root,
+            &target.work_event_root,
+        )
+        .unwrap()
+        .unwrap();
+        if !committed {
+            assert!(!marker.exists(), "inspection must remain read-only");
+            write_workspace_state_transaction_markers(&transaction, false).unwrap();
+        }
+        assert_eq!(recovery.current_path, legacy.fixture.current_path);
+        assert_eq!(recovery.work_items_path, legacy.legacy_work_items_path);
+        assert_eq!(
+            recovery.project_state_root.as_ref(),
+            Some(&target.project_state_root)
+        );
+        assert_eq!(
+            recovery.resolution,
+            committed.then_some(ExternalWorkspaceCommitResolution::Committed)
+        );
+        assert!(matches!(
+            inspect_workspace_state_external_commit_recovery_for_work_event_root(
+                &target.project_state_root,
+                &temp.path().join("foreign-root"),
+            ),
+            Err(GwtError::ExternalWorkspacePathPairMismatch { .. })
+        ));
+        assert_eq!(fs::read(&marker).unwrap(), before);
+        let mut foreign = recovery.clone();
+        foreign.work_items_path = legacy.fixture.work_items_path.clone();
+        assert!(resolve_workspace_state_external_commit_recovery(&foreign).is_err());
+        assert_eq!(fs::read(&marker).unwrap(), before);
+        let expected = if committed {
+            ExternalWorkspaceCommitResolution::Committed
+        } else {
+            ExternalWorkspaceCommitResolution::Rejected
+        };
+        assert_eq!(
+            resolve_workspace_state_external_commit_recovery(&recovery).unwrap(),
+            expected
+        );
+        if committed {
+            // Receipt-only retries must still fold legacy events into canonical WorkItems.
+            let mut canonical =
+                load_workspace_work_items_from_path(&legacy.fixture.work_items_path)
+                    .unwrap()
+                    .unwrap();
+            for item in &mut canonical.work_items {
+                item.events
+                    .retain(|event| event.id != legacy.resume_event_id);
+            }
+            save_workspace_work_items_projection_to_path(
+                &legacy.fixture.work_items_path,
+                &canonical,
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            resolve_workspace_state_external_commit_recovery(&recovery).unwrap(),
+            expected
+        );
+        if committed {
+            let canonical = load_workspace_work_items_from_path(&legacy.fixture.work_items_path)
+                .unwrap()
+                .unwrap();
+            assert!(canonical
+                .work_items
+                .iter()
+                .flat_map(|item| &item.events)
+                .any(|event| event.id == legacy.resume_event_id));
+            assert_eq!(
+                t812_read_events(&legacy.fixture.events_path)
+                    .iter()
+                    .filter(|event| event.id == legacy.resume_event_id)
+                    .count(),
+                1
+            );
+        } else {
+            assert_eq!(
+                fs::read(&legacy.fixture.work_items_path).unwrap(),
+                canonical_before
+            );
+        }
+    }
+}
+
+#[test]
 fn legacy_external_fold_rejects_terminal_authority_shadows_and_keeps_reconciliation_pending() {
     let _guard = lock_test_env();
     let home = tempfile::tempdir().expect("home");
@@ -6991,6 +7115,20 @@ fn legacy_external_receipt_retry_restores_backfill_created_assigned_target() {
 
 #[test]
 fn legacy_external_start_adds_missing_target_and_receipt_retry_recreates_it() {
+    legacy_external_fresh_start_recovery(None);
+}
+
+#[test]
+fn legacy_external_fresh_start_rejects_ancestor_event_id_collision() {
+    legacy_external_fresh_start_recovery(Some("event-id"));
+}
+
+#[test]
+fn legacy_external_fresh_start_rejects_ancestor_session_conflict() {
+    legacy_external_fresh_start_recovery(Some("session"));
+}
+
+fn legacy_external_fresh_start_recovery(conflict: Option<&str>) {
     let _guard = lock_test_env();
     let home = tempfile::tempdir().expect("home");
     let _home = ScopedHome::set(home.path());
@@ -7006,12 +7144,24 @@ fn legacy_external_start_adds_missing_target_and_receipt_retry_recreates_it() {
         repo_local_work_events_path_with_migration(&work_event_root).expect("tracked events path");
     let now = Utc.with_ymd_and_hms(2026, 7, 22, 2, 0, 0).unwrap();
     let session_id = "legacy-fresh-session";
-    let target_work_id = "legacy-fresh-target";
     let target_event_id = "legacy-fresh-start-event";
     let branch = "work/legacy-fresh-target";
     let operation_id = "legacy-fresh-start-operation";
+    let predecessor_id = canonical_work_id(&work_event_root, Some(branch), None).unwrap();
+    let occupied_id = successor_work_id(&predecessor_id);
+    let second_occupied_id = successor_work_id(&occupied_id);
+    let target_work_id = successor_work_id(&second_occupied_id);
+    let historical_session = "legacy-historical-session";
+    let container = WorkspaceExecutionContainerRef {
+        branch: Some(branch.to_string()),
+        worktree_path: Some(work_event_root.clone()),
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+    };
 
     let mut current = WorkspaceProjection::default_for_project(&project_state_root);
+    current.id = occupied_id.clone();
     current.agents.push(WorkspaceAgentSummary {
         session_id: session_id.to_string(),
         window_id: None,
@@ -7039,55 +7189,159 @@ fn legacy_external_start_adds_missing_target_and_receipt_retry_recreates_it() {
     unrelated_start.title = Some("Existing canonical Work".to_string());
     let mut unrelated_only = WorkItemsProjection::empty(unrelated_start.updated_at);
     unrelated_only.apply_event(unrelated_start);
-    save_workspace_work_items_projection_to_path(&canonical_path, &unrelated_only)
-        .expect("seed unrelated canonical Work");
-    save_workspace_work_items_projection_to_path(&legacy_path, &WorkItemsProjection::empty(now))
-        .expect("seed empty legacy WorkItems");
-
-    let container = WorkspaceExecutionContainerRef {
-        branch: Some(branch.to_string()),
-        worktree_path: Some(work_event_root.clone()),
-        pr_number: None,
-        pr_url: None,
-        pr_state: None,
-    };
-    let prepared = transact_workspace_state_at_with_commit(
+    let mut source_before = unrelated_only.clone();
+    let mut predecessor = WorkEvent::new(
+        WorkEventKind::Start,
+        &predecessor_id,
+        now - chrono::Duration::seconds(3),
+    );
+    predecessor.id = "legacy-predecessor-start-event".into();
+    predecessor.agent_session_id = Some(historical_session.into());
+    predecessor.agent_id = Some("codex".into());
+    predecessor.owner = Some("Issue #3412".into());
+    predecessor.execution_container = Some(container.clone());
+    source_before.apply_event(predecessor);
+    source_before.apply_event(WorkEvent::new(
+        WorkEventKind::Done,
+        &predecessor_id,
+        now - chrono::Duration::seconds(2),
+    ));
+    let terminal_parent_seed = source_before.clone();
+    let mut before_launch = source_before;
+    let mut occupied = WorkEvent::new(
+        WorkEventKind::Backfill,
+        &occupied_id,
+        now - chrono::Duration::seconds(1),
+    );
+    occupied.owner = Some("Issue #3412".into());
+    occupied.execution_container = Some(container.clone());
+    before_launch.apply_event(occupied);
+    let mut second_occupied = WorkEvent::new(
+        WorkEventKind::Backfill,
+        &second_occupied_id,
+        now - chrono::Duration::seconds(1),
+    );
+    second_occupied.owner = Some("Issue #3412".into());
+    second_occupied.execution_container = Some(container.clone());
+    before_launch.apply_event(second_occupied);
+    save_workspace_work_items_projection_to_path(&canonical_path, &unrelated_only).unwrap();
+    save_workspace_work_items_projection_to_path(&legacy_path, &before_launch).unwrap();
+    let mut audit = WorkEvent::new(WorkEventKind::Discard, &occupied_id, now);
+    audit.id = format!("superseded-{occupied_id}");
+    audit.related_work_item_id = Some(predecessor_id.clone());
+    audit.execution_container = Some(container.clone());
+    audit.bind_successor_supersession_identity().unwrap();
+    let mut second_audit = WorkEvent::new(WorkEventKind::Discard, &second_occupied_id, now);
+    second_audit.id = format!("superseded-{second_occupied_id}");
+    second_audit.related_work_item_id = Some(occupied_id.clone());
+    second_audit.execution_container = Some(container.clone());
+    second_audit.bind_successor_supersession_identity().unwrap();
+    let (_, mut pending) =
+        with_workspace_current_and_work_items_lock(&current_path, &legacy_path, || {
+            build_workspace_state_transaction_locked(
+                &current_path,
+                &legacy_path,
+                &events_path,
+                &project_state_root,
+                true,
+                |projection, _, _| {
+                    assert!(projection.assign_agent(session_id, &target_work_id, None, None, now));
+                    let mut start = WorkEvent::new(WorkEventKind::Start, &target_work_id, now);
+                    start.id = target_event_id.to_string();
+                    start.title = Some("Legacy fresh target".to_string());
+                    start.owner = Some("Issue #3412".to_string());
+                    start.status_category = Some(WorkspaceStatusCategory::Active);
+                    start.agent_session_id = Some(session_id.to_string());
+                    start.agent_id = Some("codex".to_string());
+                    start.execution_container = Some(container.clone());
+                    start.related_work_item_id = Some(second_occupied_id.clone());
+                    Ok(((), vec![audit.clone(), second_audit.clone(), start]))
+                },
+            )
+        })
+        .expect("stage the authenticated producer's same-time supersession batch");
+    pending.external_commit = Some(ExternalWorkspaceCommit {
+        operation_id: operation_id.into(),
+        phase: ExternalWorkspaceCommitPhase::Prepared,
+        reconciliation_work_items_path: None,
+    });
+    write_new_workspace_state_transaction_markers(&pending).unwrap();
+    persist_external_workspace_commit_receipt(
         &current_path,
         &legacy_path,
-        &events_path,
-        &project_state_root,
         operation_id,
-        |projection, _, _| {
-            assert!(projection.assign_agent(session_id, target_work_id, None, None, now));
-            let mut start = WorkEvent::new(WorkEventKind::Start, target_work_id, now);
-            start.id = target_event_id.to_string();
-            start.title = Some("Legacy fresh target".to_string());
-            start.owner = Some("Issue #3412".to_string());
-            start.status_category = Some(WorkspaceStatusCategory::Active);
-            start.agent_session_id = Some(session_id.to_string());
-            start.agent_id = Some("codex".to_string());
-            start.execution_container = Some(container.clone());
-            Ok(((), vec![start]))
-        },
-        || {
-            Err(GwtError::Other(
-                "simulated fresh activation response loss".to_string(),
-            ))
-        },
-    );
-    assert!(
-        prepared.is_err(),
-        "legacy fresh transaction must be Prepared"
-    );
-
+        &pending,
+        ExternalWorkspaceCommitResolution::Committed,
+    )
+    .unwrap();
+    // A crash after durable Commit and promotion retains the exact markers.
+    let external = pending.external_commit.as_mut().unwrap();
+    external.phase = ExternalWorkspaceCommitPhase::Committed;
+    external.reconciliation_work_items_path = Some(canonical_path.clone());
+    write_workspace_state_transaction_markers(&pending, true).unwrap();
+    let recovery = inspect_workspace_state_external_commit_recovery_for_work_event_root(
+        &project_state_root,
+        &work_event_root,
+    )
+    .unwrap()
+    .unwrap();
     assert_eq!(
-        resolve_legacy_workspace_state_external_commit_for_work_event_root(
-            &project_state_root,
-            &work_event_root,
-            operation_id,
-            ExternalWorkspaceCommitDecision::Commit,
-        )
-        .expect("commit legacy fresh transaction"),
+        recovery.resolution,
+        Some(ExternalWorkspaceCommitResolution::Committed)
+    );
+    if let Some(conflict) = conflict {
+        let mut canonical = unrelated_only.clone();
+        match conflict {
+            "event-id" => {
+                canonical.work_items[0].events[0].id = "legacy-predecessor-start-event".into();
+            }
+            "session" => {
+                let mut foreign = WorkEvent::new(
+                    WorkEventKind::Update,
+                    "canonical-unrelated-work",
+                    now - chrono::Duration::seconds(1),
+                );
+                foreign.agent_session_id = Some(historical_session.into());
+                foreign.agent_id = Some("codex".into());
+                foreign.execution_container = Some(WorkspaceExecutionContainerRef {
+                    branch: Some("work/foreign-history".into()),
+                    worktree_path: Some(temp.path().join("foreign-worktree")),
+                    ..container.clone()
+                });
+                canonical.apply_event(foreign);
+            }
+            _ => unreachable!(),
+        }
+        save_workspace_work_items_projection_to_path(&canonical_path, &canonical).unwrap();
+        let canonical_before = fs::read(&canonical_path).unwrap();
+        let legacy_before = fs::read(&legacy_path).unwrap();
+        let current_before = fs::read(&current_path).unwrap();
+        let receipt_path =
+            external_workspace_commit_receipt_path(&current_path, &legacy_path, operation_id);
+        let receipt_before = fs::read(&receipt_path).unwrap();
+        let marker_paths = pending_workspace_state_transaction_paths(&pending);
+        let markers_before = marker_paths
+            .iter()
+            .map(|path| fs::read(path).unwrap())
+            .collect::<Vec<_>>();
+        resolve_workspace_state_external_commit_recovery(&recovery)
+            .expect_err("snapshot insertion must reject conflicting canonical authority");
+        assert_eq!(fs::read(&canonical_path).unwrap(), canonical_before);
+        assert_eq!(fs::read(&legacy_path).unwrap(), legacy_before);
+        assert_eq!(fs::read(&current_path).unwrap(), current_before);
+        assert_eq!(fs::read(&receipt_path).unwrap(), receipt_before);
+        assert_eq!(
+            marker_paths
+                .iter()
+                .map(|path| fs::read(path).unwrap())
+                .collect::<Vec<_>>(),
+            markers_before
+        );
+        return;
+    }
+    assert_eq!(
+        resolve_workspace_state_external_commit_recovery(&recovery)
+            .expect("commit legacy supersession and fresh Start"),
         ExternalWorkspaceCommitResolution::Committed
     );
     let assert_converged = || {
@@ -7107,6 +7361,39 @@ fn legacy_external_start_adds_missing_target_and_receipt_retry_recreates_it() {
             .events
             .iter()
             .any(|event| event.id == target_event_id));
+        let retired = canonical
+            .work_items
+            .iter()
+            .find(|item| item.id == occupied_id)
+            .unwrap();
+        assert!(retired.is_terminal());
+        assert!(retired.events.iter().any(|event| event == &audit));
+        assert!(!retired
+            .agents
+            .iter()
+            .any(|agent| agent.session_id == session_id));
+        let second_retired = canonical
+            .work_items
+            .iter()
+            .find(|item| item.id == second_occupied_id)
+            .unwrap();
+        assert!(second_retired.is_terminal());
+        assert!(second_retired
+            .events
+            .iter()
+            .any(|event| event == &second_audit));
+        assert_eq!(
+            current_work_id_for_launch(
+                &canonical,
+                &work_event_root,
+                Some(branch),
+                Some(&work_event_root),
+                Some("Issue #3412"),
+            )
+            .unwrap(),
+            Some(target_work_id.clone()),
+            "partial migration must preserve usable canonical successor selection"
+        );
     };
     assert_converged();
     assert_eq!(
@@ -7118,16 +7405,33 @@ fn legacy_external_start_adds_missing_target_and_receipt_retry_recreates_it() {
         "legacy Start must publish exactly one tracked event"
     );
 
+    let mut conflicted = load_workspace_work_items_from_path(&canonical_path)
+        .unwrap()
+        .unwrap();
+    conflicted
+        .work_items
+        .iter_mut()
+        .find(|item| item.id == occupied_id)
+        .unwrap()
+        .related_work_item_ids
+        .push("foreign-parent".into());
+    save_workspace_work_items_projection_to_path(&canonical_path, &conflicted).unwrap();
+    let conflict_before = fs::read(&canonical_path).unwrap();
+    assert!(
+        resolve_workspace_state_external_commit_recovery(&recovery).is_err(),
+        "receipt retry must reject contradictory structural lineage"
+    );
+    assert_eq!(fs::read(&canonical_path).unwrap(), conflict_before);
+    save_workspace_work_items_projection_to_path(&canonical_path, &terminal_parent_seed)
+        .expect("simulate a receipt with only the canonical terminal predecessor");
+    resolve_workspace_state_external_commit_recovery(&recovery)
+        .expect("same-time receipt retry must retire ancestors before attaching the new Session");
+    assert_converged();
     save_workspace_work_items_projection_to_path(&canonical_path, &unrelated_only)
         .expect("simulate a pre-upgrade receipt without canonical target");
     assert_eq!(
-        resolve_legacy_workspace_state_external_commit_for_work_event_root(
-            &project_state_root,
-            &work_event_root,
-            operation_id,
-            ExternalWorkspaceCommitDecision::Commit,
-        )
-        .expect("receipt-only retry must recreate canonical target"),
+        resolve_workspace_state_external_commit_recovery(&recovery)
+            .expect("receipt-only retry must recreate canonical target"),
         ExternalWorkspaceCommitResolution::Committed
     );
     assert_converged();
@@ -7138,6 +7442,14 @@ fn legacy_external_start_adds_missing_target_and_receipt_retry_recreates_it() {
             .count(),
         1,
         "receipt-only reconciliation must not duplicate the tracked event"
+    );
+    assert_eq!(
+        t812_read_events(&events_path)
+            .iter()
+            .filter(|event| event.id == audit.id)
+            .count(),
+        1,
+        "receipt-only reconciliation must retain one structural audit"
     );
 }
 
@@ -7159,14 +7471,35 @@ fn split_root_terminal_events_use_project_state_close_ledger() {
         agent_id: strict.target.agent_id.clone(),
     };
     assert_eq!(
-        emit_workspace_terminal_event_for_resolved_work_target(
+        emit_workspace_terminal_event_for_resolved_work_target_with_provenance(
             &strict_target,
             WorkCloseKind::Done,
             Utc::now(),
+            WorkTerminalProvenance {
+                source_operation: "execution.complete".to_string(),
+                authority_class: WorkAuthorityClass::PrimaryAgent,
+                execution_generation: Some("generation-1".to_string()),
+            },
             |_, _| Ok(()),
         )
         .expect("strict split-root terminal event"),
         WorkspaceTerminalEventOutcome::Emitted
+    );
+    let terminal_events = t812_read_events(&gwt_workspace_work_events_closed_path_for_repo_path(
+        &strict.target.project_state_root,
+    ));
+    let terminal = terminal_events.last().expect("terminal event");
+    assert_eq!(
+        terminal.source_operation.as_deref(),
+        Some("execution.complete")
+    );
+    assert_eq!(
+        terminal.authority_class,
+        Some(WorkAuthorityClass::PrimaryAgent)
+    );
+    assert_eq!(
+        terminal.execution_generation.as_deref(),
+        Some("generation-1")
     );
     assert!(
         gwt_workspace_work_events_closed_path_for_repo_path(&strict.target.project_state_root)
@@ -7180,12 +7513,17 @@ fn split_root_terminal_events_use_project_state_close_ledger() {
 
     let wrapper = t812_seed_session_bound_fixture(&temp.path().join("wrapper"));
     assert_eq!(
-        emit_workspace_done_event_for_session_outcome(
+        emit_workspace_terminal_event_for_session_with_provenance(
             &wrapper.target.project_state_root,
-            &wrapper.target.work_event_root,
             &wrapper.target.session_id,
             &wrapper.target.work_id,
+            WorkCloseKind::Done,
             Utc::now(),
+            WorkTerminalProvenance {
+                source_operation: "build.complete".into(),
+                authority_class: WorkAuthorityClass::TrustedHost,
+                execution_generation: None,
+            },
         )
         .expect("wrapper split-root terminal event"),
         WorkspaceTerminalEventOutcome::Emitted
@@ -7198,6 +7536,13 @@ fn split_root_terminal_events_use_project_state_close_ledger() {
         !gwt_workspace_work_events_closed_path_for_repo_path(&wrapper.target.work_event_root)
             .exists(),
         "wrapper must keep the close ledger with repo-global WorkItems"
+    );
+    let legacy_events = t812_read_events(&gwt_workspace_work_events_closed_path_for_repo_path(
+        &wrapper.target.project_state_root,
+    ));
+    assert_eq!(
+        legacy_events.last().unwrap().source_operation.as_deref(),
+        Some("build.complete")
     );
 }
 
@@ -8303,7 +8648,7 @@ fn session_bound_update_persists_identity_rewritten_by_pre_persist_recovery() {
     let recovered_event_id = "event-recovered-before-persist";
     let recovered_journal_id = "journal-recovered-before-persist";
 
-    let entry = update_workspace_projection_with_journal_for_resolved_work_target(
+    let entry = update_workspace_projection_with_journal_for_resolved_work_target_with_provenance(
         &fixture.target,
         WorkspaceProjectionUpdate {
             title: None,
@@ -8318,6 +8663,11 @@ fn session_bound_update_persists_identity_rewritten_by_pre_persist_recovery() {
             agent_title_summary: None,
         },
         TrackedWorkEventPolicy::Persist,
+        Some(WorkTerminalProvenance {
+            source_operation: "workspace.update".to_string(),
+            authority_class: WorkAuthorityClass::PrimaryAgent,
+            execution_generation: Some("generation-1".to_string()),
+        }),
         |_, _| Ok(()),
         |event, entry| {
             event.id = recovered_event_id.to_string();
@@ -8352,6 +8702,21 @@ fn session_bound_update_persists_identity_rewritten_by_pre_persist_recovery() {
     assert_eq!(
         target.events.last().expect("projected recovered event").id,
         recovered_event_id
+    );
+    let terminal = target
+        .current_terminal_event()
+        .expect("attributable terminal event");
+    assert_eq!(
+        terminal.source_operation.as_deref(),
+        Some("workspace.update")
+    );
+    assert_eq!(
+        terminal.authority_class,
+        Some(WorkAuthorityClass::PrimaryAgent)
+    );
+    assert_eq!(
+        terminal.execution_generation.as_deref(),
+        Some("generation-1")
     );
 }
 
@@ -15910,6 +16275,90 @@ fn execution_pr_metadata_preserves_done_and_rejects_unproven_targets() {
 }
 
 #[test]
+fn issue_7033_pr_metadata_uses_local_anchor_with_portable_and_other_host_containers() {
+    let _env_lock = lock_test_env();
+    struct RestoreCwd(PathBuf);
+    impl Drop for RestoreCwd {
+        fn drop(&mut self) {
+            // test-hygiene: allow-unlocked-env enclosing test holds lock_test_env through restoration
+            std::env::set_current_dir(&self.0).unwrap();
+        }
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let _cwd = RestoreCwd(std::env::current_dir().unwrap());
+    // test-hygiene: allow-unlocked-env lock_test_env serializes process environment changes
+    std::env::set_current_dir(tmp.path()).unwrap();
+    let works = tmp.path().join("works.json");
+    let events = gwt_repo_local_work_events_dir(tmp.path());
+    let now = Utc::now();
+    let local = WorkspaceExecutionContainerRef {
+        branch: Some("work/issue-7033".into()),
+        worktree_path: Some(std::env::current_dir().unwrap()),
+        pr_number: Some(7034),
+        pr_url: Some("https://example.test/pull/7034".into()),
+        pr_state: Some("MERGED".into()),
+    };
+    let mut projection = WorkItemsProjection::empty(now);
+    for (id, path) in [
+        ("local", local.worktree_path.clone().unwrap()),
+        ("portable", PathBuf::from(".")),
+        ("other-host", tmp.path().join("other-host/work/issue-7033")),
+    ] {
+        let mut event = WorkEvent::new(WorkEventKind::Start, "delivery-work", now);
+        event.id = id.into();
+        event.owner = Some("Issue #7033".into());
+        event.agent_session_id = Some("delivery-session".into());
+        let mut container = local.clone();
+        container.worktree_path = Some(path);
+        container.pr_state = Some("OPEN".into());
+        event.execution_container = Some(container);
+        projection.apply_event(event);
+    }
+    projection.apply_event(WorkEvent::new(WorkEventKind::Done, "delivery-work", now));
+    save_workspace_work_items_projection_to_path(&works, &projection).unwrap();
+    let before = projection.work_items[0].clone();
+    record_workspace_pr_metadata_for_execution_at(
+        &works,
+        &events,
+        "Issue #7033",
+        "delivery-session",
+        &local,
+    )
+    .expect("portable alias and another host must not block delivered PR metadata");
+    let saved = load_workspace_work_items_from_path(&works)
+        .unwrap()
+        .unwrap();
+    let item = &saved.work_items[0];
+    assert_eq!(item.status_category, WorkspaceStatusCategory::Done);
+    assert_eq!(item.execution_containers.len(), 3);
+    assert!(item.execution_containers.contains(&local));
+    for container in before.execution_containers.iter().skip(1) {
+        assert!(item.execution_containers.contains(container));
+    }
+    assert!(record_workspace_pr_metadata_for_execution_at(
+        &works,
+        &events,
+        "Issue #7033",
+        "foreign-session",
+        &local,
+    )
+    .is_err());
+    let mut duplicate = item.clone();
+    duplicate.id = "duplicate-work".into();
+    let mut ambiguous = saved;
+    ambiguous.work_items.push(duplicate);
+    save_workspace_work_items_projection_to_path(&works, &ambiguous).unwrap();
+    assert!(record_workspace_pr_metadata_for_execution_at(
+        &works,
+        &events,
+        "Issue #7033",
+        "delivery-session",
+        &local,
+    )
+    .is_err());
+}
+
+#[test]
 fn issue_4606_execution_pr_metadata_ignores_discarded_rows_sharing_the_container() {
     let tmp = tempfile::tempdir().unwrap();
     let works = tmp.path().join("works.json");
@@ -16224,6 +16673,114 @@ fn retired_layout_transaction_refuses_before_markers_receipts_or_events() {
 }
 
 #[test]
+fn external_recovery_snapshot_checks_payload_and_preserves_committed_receipts() {
+    let _guard = lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _home = ScopedHome::set(home.path());
+    let repo = home.path().join("repo");
+    init_test_git_repo(&repo);
+    let current = gwt_workspace_projection_path_for_repo_path(&repo);
+    let works = gwt_workspace_work_items_path_for_repo_path(&repo);
+    let projection = WorkspaceProjection::default_for_project(&repo);
+    save_workspace_projection(&repo, &projection).unwrap();
+    let mut event = WorkEvent::new(WorkEventKind::Resume, &projection.id, Utc::now());
+    event.owner = Some("Issue #5012".into());
+    event.agent_session_id = Some("repair-target".into());
+    event.execution_container = Some(WorkspaceExecutionContainerRef {
+        worktree_path: Some(repo.clone()),
+        branch: None,
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+    });
+    for (operation_id, committed) in [
+        ("cancel-before-repair", false),
+        ("commit-before-crash", true),
+    ] {
+        transact_workspace_state_with_commit(
+            &repo,
+            operation_id,
+            |_, _, _| Ok(((), vec![event.clone()])),
+            || Err(GwtError::Other("lost external response".into())),
+        )
+        .unwrap_err();
+        let marker = pending_workspace_state_transaction_path(&current);
+        let before = fs::read(&marker).unwrap();
+        let transaction: PendingWorkspaceStateTransaction =
+            serde_json::from_slice(&before).unwrap();
+        let coordinator =
+            pending_workspace_state_transaction_coordinator_path(&transaction).unwrap();
+        if !committed {
+            // Only the coordinator may survive a partial marker publication.
+            for path in pending_workspace_state_transaction_paths(&transaction) {
+                if path != coordinator {
+                    fs::remove_file(path).unwrap();
+                }
+            }
+        }
+        let recovery = inspect_workspace_state_external_commit_recovery(&repo)
+            .unwrap()
+            .unwrap();
+        if !committed {
+            assert!(!marker.exists(), "inspection must not recreate markers");
+            assert_eq!(fs::read(&coordinator).unwrap(), before);
+            write_workspace_state_transaction_markers(&transaction, false).unwrap();
+        }
+        assert_eq!(recovery.operation_id, operation_id);
+        assert_eq!(recovery.owner, "Issue #5012");
+        assert_eq!(recovery.session_id, "repair-target");
+        assert_eq!(recovery.work_id, projection.id);
+        assert_eq!(recovery.resolution, None);
+        let mut changed = recovery.clone();
+        changed.transaction_payload_hash = "different payload".into();
+        assert!(resolve_workspace_state_external_commit_recovery(&changed).is_err());
+        changed = recovery.clone();
+        changed.owner = "Issue #5013".into();
+        assert!(resolve_workspace_state_external_commit_recovery(&changed).is_err());
+        assert_eq!(fs::read(&marker).unwrap(), before);
+        assert!(!external_workspace_commit_receipt_path(&current, &works, operation_id).exists());
+        let expected = if committed {
+            // Commit became durable before the Prepared marker was promoted.
+            persist_external_workspace_commit_receipt(
+                &current,
+                &works,
+                operation_id,
+                &transaction,
+                ExternalWorkspaceCommitResolution::Committed,
+            )
+            .unwrap();
+            assert!(resolve_workspace_state_external_commit_recovery(&recovery).is_err());
+            inspect_workspace_state_external_commit_recovery(&repo)
+                .unwrap()
+                .unwrap()
+        } else {
+            recovery
+        };
+        let resolution = if committed {
+            ExternalWorkspaceCommitResolution::Committed
+        } else {
+            ExternalWorkspaceCommitResolution::Rejected
+        };
+        assert_eq!(expected.resolution, committed.then_some(resolution));
+        assert_eq!(
+            resolve_workspace_state_external_commit_recovery(&expected).unwrap(),
+            resolution
+        );
+        assert!(!marker.exists());
+        assert_eq!(
+            resolve_workspace_state_external_commit_recovery(&expected).unwrap(),
+            resolution
+        );
+        let mut wrong_receipt = expected.clone();
+        wrong_receipt.transaction_id = "different transaction".into();
+        assert!(resolve_workspace_state_external_commit_recovery(&wrong_receipt).is_err());
+        assert!(inspect_workspace_state_external_commit_recovery(&repo)
+            .unwrap()
+            .is_none());
+    }
+}
+
+#[test]
 fn guarded_external_recovery_rejects_foreign_owner_without_mutation() {
     let _guard = lock_test_env();
     let home = tempfile::tempdir().unwrap();
@@ -16508,13 +17065,391 @@ fn exact_close_confirmation_survives_compacted_done_and_prior_pauses() {
         assert!(item
             .events
             .iter()
-            .all(|event| event.kind == WorkEventKind::Update));
+            .any(|event| event.kind == WorkEventKind::Done));
         let works_before = fs::read(&works).unwrap();
         let closes_before = fs::read(&closes).unwrap();
         validate_exact_work_machine_local_close_events_read_only(item, &works, &closes)
             .expect("accepted close identities must survive projection compaction");
         assert_eq!(fs::read(&works).unwrap(), works_before);
         assert_eq!(fs::read(&closes).unwrap(), closes_before);
+    }
+}
+
+struct CloseProofRepairFixture {
+    works: PathBuf,
+    closes: PathBuf,
+    sources: Vec<crate::work_events_intake::SharedWorkEventsSource>,
+    done: WorkEvent,
+}
+
+impl CloseProofRepairFixture {
+    fn new(directory: &Path, compacted: bool) -> Self {
+        let works = directory.join("works.json");
+        let closes = directory.join("work-events-closed.jsonl");
+        let at = Utc.timestamp_opt(20_000, 0).unwrap();
+        let start = WorkEvent::new(WorkEventKind::Start, "proof-repair-work", at);
+        let mut done = WorkEvent::new(
+            WorkEventKind::Done,
+            &start.work_item_id,
+            at + chrono::Duration::seconds(1),
+        );
+        done.status_category = Some(WorkspaceStatusCategory::Done);
+        let mut projection = WorkItemsProjection::empty(at);
+        projection.apply_event(start.clone());
+        projection.apply_event(done.clone());
+        let mut shared = vec![start];
+        if compacted {
+            for index in 0..=super::super::MAX_INLINE_WORK_EVENTS {
+                let update = WorkEvent::new(
+                    WorkEventKind::Update,
+                    &done.work_item_id,
+                    at + chrono::Duration::seconds(index as i64 + 2),
+                );
+                projection.apply_event(update.clone());
+                shared.push(update);
+            }
+        }
+        save_workspace_work_items_projection_to_path(&works, &projection).unwrap();
+        if compacted {
+            // Model a projection compacted before current-close retention.
+            let mut legacy = load_workspace_work_items_from_path(&works)
+                .unwrap()
+                .unwrap();
+            legacy.work_items[0]
+                .events
+                .retain(|event| event.id != done.id);
+            let bytes = serde_json::to_vec_pretty(&legacy).unwrap();
+            let proof_path = workspace_close_projection_proofs_path(&works);
+            let mut proofs: CloseProjectionProofs =
+                serde_json::from_slice(&fs::read(&proof_path).unwrap()).unwrap();
+            proofs.snapshots.last_mut().unwrap().projection_hash = close_projection_hash(&bytes);
+            fs::write(&works, bytes).unwrap();
+            fs::write(&proof_path, serde_json::to_vec(&proofs).unwrap()).unwrap();
+        }
+        append_workspace_work_events_to_path(&closes, std::slice::from_ref(&done)).unwrap();
+        let content = shared
+            .iter()
+            .map(|event| format!("{}\n", serde_json::to_string(event).unwrap()))
+            .collect::<String>();
+        Self {
+            works,
+            closes,
+            sources: vec![crate::work_events_intake::SharedWorkEventsSource::new(
+                content, None,
+            )],
+            done,
+        }
+    }
+
+    fn bytes(&self) -> Vec<Option<Vec<u8>>> {
+        [
+            self.works.clone(),
+            workspace_close_projection_proofs_path(&self.works),
+            self.closes.clone(),
+            pending_workspace_state_transaction_path_for_work_items(&self.works),
+        ]
+        .iter()
+        .map(|path| fs::read(path).ok())
+        .collect()
+    }
+}
+
+#[test]
+fn close_proof_repair_replays_accepted_compacted_history() {
+    let _guard = lock_test_env();
+    for proof_gap in ["missing", "stale", "omitted"] {
+        let temp = tempfile::tempdir().unwrap();
+        let fixture = CloseProofRepairFixture::new(temp.path(), true);
+        let proof_path = workspace_close_projection_proofs_path(&fixture.works);
+        if proof_gap == "missing" {
+            fs::remove_file(&proof_path).unwrap();
+        } else {
+            let mut proofs: CloseProjectionProofs =
+                serde_json::from_slice(&fs::read(&proof_path).unwrap()).unwrap();
+            for snapshot in &mut proofs.snapshots {
+                if proof_gap == "stale" {
+                    snapshot.projection_hash = "stale".into();
+                } else if let Some(events) = snapshot.events.get_mut(&fixture.done.work_item_id) {
+                    events.remove(&fixture.done.id);
+                }
+            }
+            fs::write(&proof_path, serde_json::to_vec(&proofs).unwrap()).unwrap();
+        }
+        let stored = load_workspace_work_items_from_path(&fixture.works)
+            .unwrap()
+            .unwrap();
+        assert!(validate_exact_work_machine_local_close_events_read_only(
+            &stored.work_items[0],
+            &fixture.works,
+            &fixture.closes,
+        )
+        .is_err());
+        if proof_gap == "omitted" {
+            assert!(
+                !workspace_close_projection_needs_rebuild(&fixture.works, &fixture.closes).unwrap(),
+                "explicit repair must preserve the automatic intake guard"
+            );
+        }
+        let closes_before = fs::read(&fixture.closes).unwrap();
+        let validated = std::cell::Cell::new(false);
+        let guarded = std::cell::Cell::new(false);
+        let (report, metadata, fingerprint) =
+            crate::work_events_intake::repair_work_events_with_shared_loader(
+                &fixture.works,
+                &fixture.done.work_item_id,
+                || Ok((fixture.sources.clone(), "complete sources")),
+                Some(&fixture.closes),
+                |candidate| {
+                    assert!(candidate.work_items[0]
+                        .events
+                        .iter()
+                        .any(|event| event == &fixture.done));
+                    assert!(
+                        candidate.work_items[0].events.len() > super::super::MAX_INLINE_WORK_EVENTS
+                    );
+                    validated.set(true);
+                    Ok(())
+                },
+                || {
+                    assert!(validated.get());
+                    let lock = fs::OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .open(fixture.works.with_extension("lock"))
+                        .unwrap();
+                    assert!(fs2::FileExt::try_lock_exclusive(&lock).is_err());
+                    guarded.set(true);
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert!(report.applied > 0);
+        assert_eq!(metadata, "complete sources");
+        assert_eq!(
+            fingerprint,
+            Some(crate::work_events_intake::content_fingerprint(
+                std::str::from_utf8(&closes_before).unwrap()
+            ))
+        );
+        assert!(guarded.get());
+        let repaired = load_workspace_work_items_from_path(&fixture.works)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            repaired.work_items[0].completed_at,
+            Some(fixture.done.updated_at)
+        );
+        validate_exact_work_machine_local_close_events_read_only(
+            &repaired.work_items[0],
+            &fixture.works,
+            &fixture.closes,
+        )
+        .unwrap();
+        assert_eq!(fs::read(&fixture.closes).unwrap(), closes_before);
+    }
+}
+
+#[test]
+fn close_proof_repair_replays_active_projection_only_with_durable_done() {
+    let _guard = lock_test_env();
+    for has_durable_done in [true, false] {
+        let temp = tempfile::tempdir().unwrap();
+        let fixture = CloseProofRepairFixture::new(temp.path(), false);
+        let stored = load_workspace_work_items_from_path(&fixture.works)
+            .unwrap()
+            .unwrap();
+        let mut active = WorkItemsProjection::empty(stored.updated_at);
+        for event in stored.work_items[0]
+            .events
+            .iter()
+            .filter(|event| event.kind != WorkEventKind::Done)
+        {
+            active.apply_event(event.clone());
+        }
+        save_workspace_work_items_projection_to_path(&fixture.works, &active).unwrap();
+        let mut sources = fixture.sources.clone();
+        if !has_durable_done {
+            fs::write(&fixture.closes, b"").unwrap();
+            let mut derived_done = fixture.done.clone();
+            derived_done.id = "shared-derived-done".into();
+            derived_done.kind = WorkEventKind::Update;
+            sources.push(crate::work_events_intake::SharedWorkEventsSource::new(
+                serde_json::to_string(&derived_done).unwrap() + "\n",
+                None,
+            ));
+        }
+        let before = fixture.bytes();
+        let result = crate::work_events_intake::repair_work_events_with_shared_loader(
+            &fixture.works,
+            &fixture.done.work_item_id,
+            || Ok((sources, ())),
+            Some(&fixture.closes),
+            |candidate| {
+                assert_eq!(
+                    candidate.work_items[0].status_category,
+                    WorkspaceStatusCategory::Done
+                );
+                Ok(())
+            },
+            || Ok(()),
+        );
+        if has_durable_done {
+            result.expect("accepted durable Done repairs its stale Active projection");
+            let repaired = load_workspace_work_items_from_path(&fixture.works)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                repaired.work_items[0].completed_at,
+                Some(fixture.done.updated_at)
+            );
+            validate_exact_work_machine_local_close_events_read_only(
+                &repaired.work_items[0],
+                &fixture.works,
+                &fixture.closes,
+            )
+            .unwrap();
+            assert_eq!(fs::read(&fixture.closes).ok(), before[2]);
+        } else {
+            let error = result.expect_err("derived status alone is not a durable Done close");
+            assert!(
+                error.to_string().contains("accepted durable Done"),
+                "{error}"
+            );
+            assert_eq!(fixture.bytes(), before);
+        }
+    }
+}
+
+#[test]
+fn close_proof_repair_refuses_divergent_terminal_authority_without_publication() {
+    let _guard = lock_test_env();
+    for field in ["operation", "authority", "generation", "recovery"] {
+        let temp = tempfile::tempdir().unwrap();
+        let fixture = CloseProofRepairFixture::new(temp.path(), false);
+        let mut divergent = fixture.done.clone();
+        match field {
+            "operation" => divergent.source_operation = Some("foreign.close".into()),
+            "authority" => divergent.authority_class = Some(WorkAuthorityClass::PrimaryAgent),
+            "generation" => divergent.execution_generation = Some("foreign-generation".into()),
+            "recovery" => {
+                divergent.recovery = Some(WorkRecoveryLink {
+                    terminal_event_id: "foreign-terminal".into(),
+                    reason: "foreign recovery".into(),
+                });
+            }
+            _ => unreachable!(),
+        }
+        append_workspace_work_events_to_path(&fixture.closes, &[divergent]).unwrap();
+        let before = fixture.bytes();
+        let error = crate::work_events_intake::repair_work_events_with_shared_loader(
+            &fixture.works,
+            &fixture.done.work_item_id,
+            || Ok((fixture.sources.clone(), ())),
+            Some(&fixture.closes),
+            |_| panic!("contradictory close authority must not reach candidate validation"),
+            || panic!("contradictory close authority must not reach publication"),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("not accepted by complete replay"),
+            "{error}"
+        );
+        assert_eq!(fixture.bytes(), before, "{field}");
+    }
+}
+
+#[test]
+fn close_proof_repair_refuses_unaccepted_history_without_publication() {
+    let _guard = lock_test_env();
+    for invalid_history in ["rejected", "divergent", "discarded", "incomplete"] {
+        let temp = tempfile::tempdir().unwrap();
+        let fixture = CloseProofRepairFixture::new(temp.path(), false);
+        let mut sources = fixture.sources.clone();
+        if invalid_history == "incomplete" {
+            sources.push(crate::work_events_intake::SharedWorkEventsSource::new(
+                "{broken", None,
+            ));
+        } else {
+            let mut invalid = fixture.done.clone();
+            match invalid_history {
+                "rejected" => invalid.id = "zz-rejected-close".into(),
+                "divergent" => invalid.updated_at += chrono::Duration::seconds(1),
+                "discarded" => {
+                    invalid.id = "discarded-close".into();
+                    invalid.kind = WorkEventKind::Discard;
+                    invalid.status_category = None;
+                    invalid.updated_at -= chrono::Duration::seconds(1);
+                }
+                _ => unreachable!(),
+            }
+            append_workspace_work_events_to_path(&fixture.closes, &[invalid]).unwrap();
+        }
+        let before = fixture.bytes();
+        let error = crate::work_events_intake::repair_work_events_with_shared_loader(
+            &fixture.works,
+            &fixture.done.work_item_id,
+            || Ok((sources, ())),
+            Some(&fixture.closes),
+            |_| panic!("invalid rebuilt history must not reach caller validation"),
+            || panic!("invalid rebuilt history must not reach publication"),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("repair refused"), "{error}");
+        assert_eq!(fixture.bytes(), before, "{invalid_history}");
+    }
+}
+
+#[test]
+fn close_proof_repair_preserves_state_on_guard_or_snapshot_refusal() {
+    let _guard = lock_test_env();
+    for rejection in ["candidate", "publication", "snapshot", "pending"] {
+        let temp = tempfile::tempdir().unwrap();
+        let fixture = CloseProofRepairFixture::new(temp.path(), false);
+        let before = fixture.bytes();
+        let guarded = std::cell::Cell::new(false);
+        let error = crate::work_events_intake::repair_work_events_with_shared_loader(
+            &fixture.works,
+            &fixture.done.work_item_id,
+            || {
+                if rejection == "snapshot" {
+                    let proof = workspace_close_projection_proofs_path(&fixture.works);
+                    let mut changed = fs::read(&proof).unwrap();
+                    changed.push(b'\n');
+                    fs::write(proof, changed).unwrap();
+                } else if rejection == "pending" {
+                    fs::write(
+                        pending_workspace_state_transaction_path_for_work_items(&fixture.works),
+                        b"{pending",
+                    )
+                    .unwrap();
+                }
+                Ok((fixture.sources.clone(), ()))
+            },
+            Some(&fixture.closes),
+            |_| {
+                if rejection == "candidate" {
+                    Err(GwtError::Other("candidate authority changed".into()))
+                } else {
+                    Ok(())
+                }
+            },
+            || {
+                guarded.set(true);
+                Err(GwtError::Other("publication authority changed".into()))
+            },
+        )
+        .unwrap_err();
+        let mut expected = before;
+        match rejection {
+            "snapshot" => expected[1].as_mut().unwrap().push(b'\n'),
+            "pending" => expected[3] = Some(b"{pending".to_vec()),
+            _ => {}
+        }
+        assert_eq!(fixture.bytes(), expected, "{rejection}: {error}");
+        assert_eq!(guarded.get(), rejection == "publication");
+        assert!(!error.to_string().is_empty());
     }
 }
 
@@ -16527,9 +17462,15 @@ fn exact_close_projection_proof_refuses_missing_stale_and_unprojected_ids() {
     let now = Utc::now();
     let done = WorkEvent::new(WorkEventKind::Done, "proof-work", now);
     let mut full = WorkItemsProjection::empty(now);
+    let pause = WorkEvent::new(
+        WorkEventKind::Pause,
+        "proof-work",
+        now - chrono::Duration::seconds(1),
+    );
+    full.apply_event(pause.clone());
     full.apply_event(done.clone());
     save_workspace_work_items_projection_to_path(&works, &full).unwrap();
-    append_workspace_work_events_to_path(&closes, std::slice::from_ref(&done)).unwrap();
+    append_workspace_work_events_to_path(&closes, &[pause, done.clone()]).unwrap();
     let proof_path = workspace_close_projection_proofs_path(&works);
     fs::remove_file(&proof_path).unwrap();
     let inline_bytes = fs::read(&works).unwrap();

@@ -6,6 +6,7 @@ import { bindControlExplanations, setControlExplanation } from "../control-expla
 import { createUiStateStore } from "../ui-state-store.js";
 import { createInteractionGuard } from "../interaction-guard.js";
 import { renderCustomAgentEnvEditor } from "../custom-agent-env-editor.js";
+import * as uiContent from "../ui-content.js";
 import { renderHookCenterPanel, hookRepairUnavailableReason } from "../hook-center-panel.js";
 
 const source = readFileSync(new URL("../settings-surface.js", import.meta.url), "utf8");
@@ -41,7 +42,7 @@ function selectValue(control, value) {
   option.selected = true;
 }
 function load(name, bindings = {}) {
-  bindings = { setControlExplanation, ...bindings };
+  bindings = { setControlExplanation, createRepositoryLabelChip: uiContent.createRepositoryLabelChip, ...bindings };
   const start = source.indexOf(`function ${name}(`);
   assert.notEqual(start, -1, `missing ${name}`);
   const open = source.indexOf("{", source.indexOf(")", start));
@@ -118,6 +119,7 @@ test("Issues Settings keeps labels and values together and sends existing projec
     status: { enabled: true, autonomous_mode: false, max_active_agents: 4,
       max_active_agents_override: 4, terminal_queue_auto_refill: false,
       terminal_queue_auto_refill_limit: 3, allowed_labels: ["auto-merge"] },
+    catalog: { loaded: true, labels: [{ name: "auto-merge", color: "008800" }, { name: "bug", color: "ff0000" }] },
     send: message => sent.push(message),
   });
   assert.match(panel.textContent, /Project settings.*Project A/);
@@ -139,7 +141,7 @@ test("Issues Settings keeps labels and values together and sends existing projec
   };
   change("Auto-refill", true);
   change("Refill limit", "5");
-  change("Allowed labels", "auto-merge, bug");
+  change("bug", true);
   assert.deepEqual(sent, [
     { kind: "set_issue_monitor_auto_refill", enabled: true, limit: 3 },
     { kind: "set_issue_monitor_auto_refill", enabled: true, limit: 5 },
@@ -170,6 +172,19 @@ test("Settings launch controls retain their nodes and save once across status re
   assert.match(css, /\[data-settings-issues-controls\] \.settings-field\s*\{[^}]*grid-template-columns:\s*140px minmax\(0, 1fr\)/);
 });
 
+test("Issue #6922: Refill limit displays the saved zero and confirmed default after enabling", () => {
+  const { document } = parseHTML("<section></section>");
+  const panel = document.querySelector("section");
+  const render = load("renderIssuesSettingsPanel");
+  const options = { project: { name: "A" }, send: () => {} };
+  render(panel, { ...options, status: { terminal_queue_auto_refill:false } });
+  assert.equal(panel.querySelector('[aria-label="Refill limit"]').value, "0", "missing saved fields use the stored default");
+  render(panel, { ...options, status: { terminal_queue_auto_refill:false,terminal_queue_auto_refill_limit:0 } });
+  assert.equal(panel.querySelector('[aria-label="Refill limit"]').value, "0");
+  render(panel, { ...options, status: { terminal_queue_auto_refill:true,terminal_queue_auto_refill_limit:3 } });
+  assert.equal(panel.querySelector('[aria-label="Refill limit"]').value, "3");
+});
+
 test("Project settings never writes capacity when opened, remounted or updated", () => {
   const { document } = parseHTML("<section></section>");
   const panel = document.querySelector("section"), sent = [];
@@ -197,7 +212,7 @@ test("AC-6: Issues Settings exposes explanations for launch, refill and targetin
     status: { max_active_agents: 4, max_active_agents_override: null }, send: message => sent.push(message) });
   for (const [name, meaning] of [
     ["Autonomous", /human approval.*structured gwt feedback.*without.*dialog.*free text.*capacity.*GH_TOKEN.*GitHub CLI.*unsent/i], ["Monitoring", /monitoring/i],
-    ["Auto-refill", /automatically.*queue/i], ["Refill limit", /0.*disables/i],
+    ["Auto-refill", /automatically.*queue/i], ["Refill limit", /0.*default limit of 3/i],
     ["Allowed labels", /matching issues/i],
   ]) {
     const control = panel.querySelector(`[aria-label="${name}"]`);
@@ -323,6 +338,20 @@ test("Agents Settings edits full profiles while preserving runtime fields and pr
   assert.ok(a.querySelector('[data-action="add-candidate"]'));
 });
 
+test("Codex warns about a saved model even when the public catalog is empty", () => {
+  const { document } = parseHTML("<section></section>");
+  const choices = structuredClone(candidateChoices);
+  choices.agents.find(agent => agent.id === "codex").models = [];
+  const panel = document.querySelector("section");
+  load("renderAgentsSettingsPanel")(panel, {
+    profiles: [{ agent_member_id: "m-codex", agent_id: "codex", model: "retired-model" }],
+    choices,
+    send: () => {},
+  });
+  assert.equal(panel.querySelector("[data-model-unavailable]").hidden, false);
+  assert.match(panel.querySelector("[data-model-unavailable]").textContent, /retired-model/);
+});
+
 test("Candidates restore shared choices, preserve saved values, and gate dependent controls", () => {
   const { document, Event } = parseHTML("<section></section>");
   const panel = document.querySelector("section"), sent = [];
@@ -339,6 +368,11 @@ test("Candidates restore shared choices, preserve saved values, and gate depende
   }
   assert.equal(control("model").value, "retired-model");
   assert.equal(control("reasoning").value, "retired-effort");
+  // Issue #6933 AC-3: a saved model the tool no longer lists is announced, never swapped.
+  const retiredNotice = () => control("model").closest("fieldset").querySelector("[data-model-unavailable]");
+  assert.equal(retiredNotice().hidden, false);
+  assert.equal(retiredNotice().textContent,
+    "Saved model retired-model is no longer offered by Codex. It is kept as saved and not replaced; choose a listed model before launching.");
   assert.ok([...control("agent_member_id").options].some(option => option.value === "m-hermes"),
     "shared choices populate Agent before the separate catalog response arrives");
   assert.equal(panel.querySelector('[data-profile-field="new"]').disabled, false,
@@ -354,6 +388,7 @@ test("Candidates restore shared choices, preserve saved values, and gate depende
   selectValue(control("model"), "gpt-6-luna");
   control("model").dispatchEvent(new Event("change", { bubbles: true }));
   assert.equal(control("reasoning").value, "medium", "a new model uses its shared default");
+  assert.equal(retiredNotice().hidden, true, "choosing a listed model clears the notice");
   assert.equal(sent.at(-1).profiles[0].reasoning, "medium");
   const custom = panel.querySelector('[data-agent-id="custom"]');
   for (const key of ["reasoning", "fast_mode", "skip_permissions"]) assert.equal(custom.querySelector(`[data-profile-field="${key}"]`).disabled, true, key);
@@ -483,8 +518,8 @@ test("Candidates follow the shared roster and retain dirty or focused controls",
   const frames = new Set(), flush = () => { for (const fn of [...frames]) { frames.delete(fn); fn(); } };
   const rosterModel = createUiStateStore({ revision: null, members: [] }, { scheduleFrame: fn => { frames.add(fn); return () => frames.delete(fn); } });
   const factory = Function("document", "window", "createInteractionGuard", "createUiStateStore", "setControlExplanation", "bindControlExplanations",
-    "renderIndexSettingsPanel", "renderCustomAgentEnvEditor", "renderHookCenterPanel", "hookRepairUnavailableReason", `${source.replace(/^import .*;\r?\n/gm, "").replace(/^export /gm, "")}\nreturn createSettingsSurface;`)(
-    document, window, createInteractionGuard, createUiStateStore, setControlExplanation, () => {}, () => {}, renderCustomAgentEnvEditor, renderHookCenterPanel, hookRepairUnavailableReason);
+    "renderIndexSettingsPanel", "renderCustomAgentEnvEditor", "renderHookCenterPanel", "hookRepairUnavailableReason", "createRepositoryLabelChip", `${source.replace(/^import .*;\r?\n/gm, "").replace(/^export /gm, "")}\nreturn createSettingsSurface;`)(
+    document, window, createInteractionGuard, createUiStateStore, setControlExplanation, () => {}, () => {}, renderCustomAgentEnvEditor, renderHookCenterPanel, hookRepairUnavailableReason, uiContent.createRepositoryLabelChip);
   const surface = factory({ send: message => sent.push(message), rosterModel,
     scheduleFrame: fn => { frames.add(fn); return () => frames.delete(fn); },
     createNode(tag, className, text) { const node = document.createElement(tag); if (className) node.className = className; if (text) node.textContent = text; return node; },
@@ -523,12 +558,13 @@ test("Candidates follow the shared roster and retain dirty or focused controls",
   assert.ok(panel.querySelector('[data-profile-field="model"]') === model);
   assert.equal(model.value, "draft");
   surface.applyIssueSettingsStatus({ enabled: true, autonomous_mode: true }, "/A");
-  const labels = document.querySelector('[aria-label="Allowed labels"]');
-  labels.value = "unfinished labels";
+  surface.applySettingsRepositoryLabels({ project_root: "/A", loaded: true, labels: [{ name: "bug", color: "d73a4a" }] });
+  flush();
+  const labels = document.querySelector('[aria-label="bug"]');
+  labels.checked = true;
   Object.defineProperty(document, "activeElement", { value: labels, configurable: true });
   surface.applyIssueSettingsStatus({ enabled: false, autonomous_mode: false }, "/A");
-  assert.equal(document.querySelector('[aria-label="Allowed labels"]'), labels);
-  assert.equal(labels.value, "unfinished labels");
+  assert.equal(document.querySelector('[aria-label="bug"]').checked, false, "server status replaces an unconfirmed selection");
   assert.equal(document.querySelector('[aria-label="Autonomous"]').checked, false);
   assert.equal(document.querySelector('[aria-label="Monitoring"]').checked, false);
   const rosterReads = () => sent.filter(message => message.kind === "agent_roster");
@@ -723,4 +759,48 @@ test("Agents Settings preserves unavailable and resting members without provider
   assert.match(panel.querySelector('[data-agent-member-id="missing"]').textContent, /unavailable/i);
   assert.equal(panel.querySelector('[data-agent-member-id="missing"] [data-profile-field="agent_member_id"]').value, "missing");
   assert.equal(panel.querySelector('[data-agent-member-id="missing"] [data-profile-field="model"]').value, "saved-model");
+});
+
+
+test("Repository label picker preserves missing selections, refresh errors and scroll position", () => {
+  const { document, Event } = parseHTML("<section></section>");
+  const panel = document.querySelector("section"), sent = [];
+  const render = load("renderIssuesSettingsPanel");
+  const options = { project: { name: "A" }, status: { allowed_labels: ["removed"] },
+    catalog: { loaded: true, labels: [{ name: "bug", color: "d73a4a" }], error: "GitHub unavailable" },
+    send: event => sent.push(event) };
+  render(panel, options);
+  assert.equal(panel.querySelector('[aria-label="Allowed labels"]').tagName, "DIV");
+  assert.equal(panel.querySelector('input[type="text"]'), null);
+  assert.match(panel.querySelector('[role="alert"]').textContent, /GitHub unavailable/);
+  const missing = panel.querySelector('[aria-label="removed"]');
+  assert.equal(missing.checked, true);
+  assert.match(missing.closest("label").textContent, /Unavailable/);
+  const bug = panel.querySelector('[aria-label="bug"]');
+  bug.checked = true; bug.dispatchEvent(new Event("change"));
+  assert.deepEqual(sent.pop(), { kind: "set_issue_monitor_allowed_labels", allowed_labels: ["removed", "bug"] });
+  assert.equal(bug.checked, false, "rejected or pending changes retain the authoritative selection");
+  panel.querySelector('[aria-label="Refresh repository labels"]').click();
+  assert.deepEqual(sent.pop(), { kind: "get_repository_labels", refresh: true });
+  panel.querySelector('.settings-label-options').scrollTop = 120;
+  render(panel, { ...options, catalog: { loaded: false, labels: [] } });
+  assert.equal(panel.querySelector('.settings-label-options').scrollTop, 120, "status redraw keeps the label list position");
+  assert.doesNotMatch(panel.textContent, /Unavailable/);
+  assert.equal(panel.querySelector('[aria-label="removed"]').checked, true);
+});
+
+
+test("Repository label picker matches saved ASCII casing and serializes saves", () => {
+  const { document, Event } = parseHTML("<section></section>");
+  const panel = document.querySelector("section"), sent = [];
+  load("renderIssuesSettingsPanel")(panel, { status: { allowed_labels: ["BUG"] },
+    catalog: { loaded: true, labels: [{ name: "bug", color: "d73a4a" }, { name: "help", color: "008800" }] },
+    send: event => sent.push(event) });
+  assert.doesNotMatch(panel.textContent, /Unavailable/);
+  const bug = panel.querySelector('[aria-label="bug"]');
+  assert.equal(bug.checked, true);
+  bug.checked = false; bug.dispatchEvent(new Event("change"));
+  assert.equal(bug.checked, true, "wait for server confirmation");
+  assert.deepEqual(sent, [{ kind: "set_issue_monitor_allowed_labels", allowed_labels: [] }]);
+  assert.ok([...panel.querySelectorAll('[data-repository-label]')].every(input => input.disabled));
 });

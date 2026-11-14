@@ -61,6 +61,29 @@ fn run_action<E: CliEnv>(
             start_evidence,
         );
     }
+    if matches!(
+        &action,
+        SkillStateAction::Complete { .. } | SkillStateAction::Abort { .. }
+    ) {
+        if let Ok(session_id) = std::env::var(gwt_agent::GWT_SESSION_ID_ENV) {
+            let path = gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml"));
+            if gwt_agent::Session::load(&path)
+                .ok()
+                .is_some_and(|session| session.execution_binding.is_some())
+            {
+                if let Err(error) = crate::agent_project_state::validate_primary_provider_session(
+                    &session_id,
+                    super::workspace::native_primary_provider_session_id().as_deref(),
+                ) {
+                    out.push_str(
+                        &serde_json::to_string(&error).expect("serializable workspace error"),
+                    );
+                    out.push('\n');
+                    return Ok(1);
+                }
+            }
+        }
+    }
     let mut completion_verification_hash = None;
     let mut completion_session_id = None;
     if let SkillStateAction::Complete { spec, .. } | SkillStateAction::Abort { spec, .. } = &action
@@ -528,6 +551,8 @@ fn push_start_preflight_refusal(
 
 fn workspace_error_code(code: crate::AgentWorkspaceUpdateErrorCode) -> &'static str {
     match code {
+        crate::AgentWorkspaceUpdateErrorCode::PrimaryActorRequired => "primary_actor_required",
+        crate::AgentWorkspaceUpdateErrorCode::TerminalWork => "terminal_work",
         crate::AgentWorkspaceUpdateErrorCode::InvalidRequest => "invalid_request",
         crate::AgentWorkspaceUpdateErrorCode::RelaunchRequired => "relaunch_required",
         crate::AgentWorkspaceUpdateErrorCode::ExecutionBindingMismatch => {
@@ -545,6 +570,8 @@ fn workspace_error_code(code: crate::AgentWorkspaceUpdateErrorCode) -> &'static 
 
 fn recovery_operation(code: crate::AgentWorkspaceUpdateErrorCode) -> &'static str {
     match code {
+        crate::AgentWorkspaceUpdateErrorCode::PrimaryActorRequired
+        | crate::AgentWorkspaceUpdateErrorCode::TerminalWork => "execution.status",
         crate::AgentWorkspaceUpdateErrorCode::WorkspaceEnsureRequired => "workspace.ensure",
         crate::AgentWorkspaceUpdateErrorCode::RelaunchRequired
         | crate::AgentWorkspaceUpdateErrorCode::ExecutionBindingMismatch => "execution.status",
@@ -558,6 +585,8 @@ fn recovery_operation(code: crate::AgentWorkspaceUpdateErrorCode) -> &'static st
 
 fn preflight_rejection_reason(code: crate::AgentWorkspaceUpdateErrorCode) -> &'static str {
     match code {
+        crate::AgentWorkspaceUpdateErrorCode::PrimaryActorRequired => "terminal Work mutation requires the primary agent",
+        crate::AgentWorkspaceUpdateErrorCode::TerminalWork => "assigned Work is terminal; inspect execution.status",
         crate::AgentWorkspaceUpdateErrorCode::WorkspaceEnsureRequired => {
             "Session-bound Work is not materialized"
         }
@@ -1245,6 +1274,7 @@ fn record_current_work_terminal_before_finalize_with_lease<E: CliEnv>(
         let request = crate::AgentWorkTerminalizationRequest {
             schema_version: crate::AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION,
             claimed_session_id: session_id.clone(),
+            primary_provider_session_id: super::workspace::native_primary_provider_session_id(),
             observation,
             terminal_kind: match close_kind {
                 WorkTerminalKind::Done => crate::AgentWorkTerminalKind::Done,
@@ -1286,6 +1316,7 @@ fn record_current_work_terminal_before_finalize_with_lease<E: CliEnv>(
                 &crate::AgentBuildAbortTerminalizationRequest {
                     schema_version: crate::AGENT_BUILD_ABORT_TERMINALIZATION_SCHEMA_VERSION,
                     claimed_session_id: request.claimed_session_id.clone(),
+                    primary_provider_session_id: request.primary_provider_session_id.clone(),
                     owner_number: spec,
                     reason: reason.to_string(),
                     observation: request.observation.clone(),
@@ -1369,33 +1400,58 @@ fn record_current_work_terminal_before_finalize_with_lease<E: CliEnv>(
         );
     }
 
-    let (project_state_root, work_event_root) =
+    let (project_state_root, _work_event_root) =
         crate::agent_project_state::agent_session_roots_or_fallback(repo, &session_id)
             .map_err(|error| error.to_string())?;
     let legacy_work_id = format!("work-session-{session_id}");
 
-    let now = chrono::Utc::now();
-    let outcome = match close_kind {
-        WorkTerminalKind::Done => {
-            gwt_core::workspace_projection::emit_workspace_done_event_for_session_outcome(
-                &project_state_root,
-                &work_event_root,
-                &session_id,
-                &legacy_work_id,
-                now,
-            )
-        }
-        WorkTerminalKind::Discarded => {
-            gwt_core::workspace_projection::emit_workspace_discard_event_for_session_outcome(
-                &project_state_root,
-                &work_event_root,
-                &session_id,
-                &legacy_work_id,
-                now,
-            )
-        }
+    let session = gwt_agent::Session::load(
+        &gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml")),
+    )
+    .ok();
+    if session
+        .as_ref()
+        .is_some_and(crate::agent_project_state::primary_provider_guard_applies)
+    {
+        crate::agent_project_state::validate_primary_provider_session(
+            &session_id,
+            super::workspace::native_primary_provider_session_id().as_deref(),
+        )
+        .map_err(|error| error.to_string())?;
     }
-    .map_err(|error| error.to_string())?;
+    let outcome =
+        gwt_core::workspace_projection::emit_workspace_terminal_event_for_session_with_provenance(
+            &project_state_root,
+            &session_id,
+            &legacy_work_id,
+            match close_kind {
+                WorkTerminalKind::Done => gwt_core::workspace_projection::WorkCloseKind::Done,
+                WorkTerminalKind::Discarded => {
+                    gwt_core::workspace_projection::WorkCloseKind::Discarded
+                }
+            },
+            chrono::Utc::now(),
+            gwt_core::workspace_projection::WorkTerminalProvenance {
+                source_operation: match close_kind {
+                    WorkTerminalKind::Done => "build.complete",
+                    WorkTerminalKind::Discarded => "build.abort",
+                }
+                .to_string(),
+                authority_class: if session
+                    .as_ref()
+                    .is_some_and(crate::agent_project_state::primary_provider_guard_applies)
+                {
+                    gwt_core::workspace_projection::WorkAuthorityClass::PrimaryAgent
+                } else {
+                    gwt_core::workspace_projection::WorkAuthorityClass::TrustedHost
+                },
+                execution_generation: session
+                    .as_ref()
+                    .and_then(|session| session.execution_binding.as_ref())
+                    .map(|binding| binding.identity.generation_id.clone()),
+            },
+        )
+        .map_err(|error| error.to_string())?;
     match outcome {
         gwt_core::workspace_projection::WorkspaceTerminalEventOutcome::Emitted
         | gwt_core::workspace_projection::WorkspaceTerminalEventOutcome::AlreadyMatching
@@ -2022,6 +2078,7 @@ mod tests {
                 &self.session.id,
                 &self.binding,
                 crate::AgentWorkTerminalizationRequest {
+                    primary_provider_session_id: self.session.agent_session_id.clone(),
                     schema_version: crate::AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION,
                     claimed_session_id: self.session.id.clone(),
                     observation: crate::observe_agent_runtime(&self.git.repo)
@@ -2285,6 +2342,7 @@ mod tests {
                 &self.session.id,
                 &self.binding,
                 crate::AgentWorkTerminalizationRequest {
+                    primary_provider_session_id: None,
                     schema_version: crate::AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION,
                     claimed_session_id: self.session.id.clone(),
                     observation: crate::observe_agent_runtime(&self.worktree)
@@ -3501,6 +3559,30 @@ format_version: Some(1),
             )
             .unwrap();
         }
+        // Preserve the older compactor's missing inline Done with valid proof.
+        let mut legacy =
+            gwt_core::workspace_projection::load_workspace_work_items_from_path(&works_path)
+                .unwrap()
+                .unwrap();
+        legacy
+            .work_items
+            .iter_mut()
+            .find(|work| work.id == fixture.work_id)
+            .unwrap()
+            .events
+            .retain(|event| event.kind != gwt_core::workspace_projection::WorkEventKind::Done);
+        let legacy = serde_json::to_string_pretty(&legacy).unwrap();
+        let proof_path = works_path.with_extension("close-proofs.json");
+        let mut proofs: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&proof_path).unwrap()).unwrap();
+        proofs["snapshots"]
+            .as_array_mut()
+            .unwrap()
+            .last_mut()
+            .unwrap()["projection_hash"] =
+            gwt_core::work_events_intake::content_fingerprint(&legacy).into();
+        std::fs::write(&works_path, legacy).unwrap();
+        std::fs::write(&proof_path, serde_json::to_vec(&proofs).unwrap()).unwrap();
         assert!(fixture
             .canonical_work()
             .events
@@ -4308,6 +4390,140 @@ format_version: Some(1),
     }
 
     #[test]
+    fn managed_build_completes_after_explicit_repair_of_unprojected_done() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("trusted store home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let mut fixture = BoundTerminalFixture::new();
+        let primary = "private-unprojected-producer-primary";
+        fixture.session.agent_session_id = Some(primary.into());
+        fixture
+            .session
+            .save(&gwt_core::paths::gwt_sessions_dir())
+            .unwrap();
+        let _native = ScopedEnvVar::set("CODEX_THREAD_ID", primary);
+        let start = fixture.canonical_work().events[0].clone();
+        let legacy = gwt_core::paths::gwt_repo_local_work_events_path(&fixture.git.repo);
+        // Complete replay must see real accepted history in both the worktree
+        // and its fetched ref, not the generic fixture's sentinel legacy row.
+        std::fs::write(&legacy, serde_json::to_string(&start).unwrap() + "\n").unwrap();
+        fixture.git.stage_events();
+        fixture
+            .git
+            .commit("chore(work): seed complete producer Work history");
+        fixture.git.push();
+        let current_path =
+            gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&fixture.git.repo);
+        let works_path =
+            gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&fixture.git.repo);
+        let proof_path = works_path.with_extension("close-proofs.json");
+        let current_before = std::fs::read(&current_path).unwrap();
+        let works_before = std::fs::read(&works_path).unwrap();
+        let proof_before = std::fs::read(&proof_path).unwrap();
+        fixture.terminalize_canonical_done();
+        let closes_path =
+            gwt_core::paths::gwt_workspace_work_events_closed_path_for_repo_path(&fixture.git.repo);
+        let closes_before = std::fs::read(&closes_path).unwrap();
+        // Reproduce interruption after the real authenticated close was made
+        // durable but before its derived Current/Works/proof publication.
+        std::fs::write(&current_path, &current_before).unwrap();
+        std::fs::write(&works_path, &works_before).unwrap();
+        std::fs::write(&proof_path, &proof_before).unwrap();
+        assert!(fixture.canonical_work().is_incomplete());
+        let execution_path = crate::cli::execution_state::state_path(&fixture.git.repo);
+        let execution_before = std::fs::read(&execution_path).unwrap();
+        let session_path =
+            gwt_core::paths::gwt_sessions_dir().join(format!("{}.toml", fixture.session.id));
+        let session_before = std::fs::read(&session_path).unwrap();
+        let sources_before = std::fs::read(&legacy).unwrap();
+        let server = TerminalBridgeServer::start(
+            StatusCode::OK,
+            terminal_receipt(crate::AgentWorkTerminalizationOutcome::Emitted),
+        );
+        with_terminal_bridge_env(&fixture, &server, |env| {
+            let action = SkillStateAction::Complete {
+                spec: 3327,
+                pr: None,
+            };
+            record_current_work_terminal_before_finalize(env, &action)
+                .expect_err("post-Emitted confirmation stays read-only until explicit repair");
+            server.receive();
+            assert_eq!(std::fs::read(&works_path).unwrap(), works_before);
+            assert_eq!(std::fs::read(&closes_path).unwrap(), closes_before);
+            assert!(
+                crate::agent_project_state::close_proof_repair_needed_for_session(
+                    &fixture.git.repo,
+                    &fixture.session.id,
+                    Some(primary),
+                )
+                .expect("the current producer must discover recovery for its unprojected Done")
+            );
+            let diagnosis =
+                crate::cli::execution_state::diagnose(&fixture.git.repo, Some(&fixture.session.id));
+            assert!(diagnosis
+                .recovery_probes
+                .iter()
+                .any(|probe| probe.operation == "workspace.repair_close_proof"
+                    && probe.state == crate::cli::governance::RecoveryProbeState::Available));
+            let receipt =
+                crate::agent_project_state::apply_authenticated_workspace_close_proof_repair(
+                    &fixture.git.repo,
+                    &fixture.session.id,
+                    crate::AgentWorkspaceCloseProofRepairRequest {
+                        schema_version: crate::AGENT_WORKSPACE_CLOSE_PROOF_REPAIR_SCHEMA_VERSION,
+                        claimed_session_id: fixture.session.id.clone(),
+                        primary_provider_session_id: Some(primary.into()),
+                        observation: crate::observe_agent_runtime(&fixture.git.repo).unwrap(),
+                        reason: "restore the producer's accepted durable Done".into(),
+                    },
+                )
+                .expect("complete canonical replay restores the real unprojected Done");
+            assert!(!receipt.already_applied);
+            let repaired = fixture.canonical_work();
+            assert!(repaired.is_terminal());
+            assert!(!repaired.discarded);
+            let repaired_bytes = std::fs::read(&works_path).unwrap();
+            record_current_work_terminal_before_finalize(env, &action)
+                .expect("the normal producer completion guard converges after explicit repair");
+            assert_eq!(std::fs::read(&works_path).unwrap(), repaired_bytes);
+        });
+        server.assert_no_request();
+        assert_eq!(std::fs::read(&current_path).unwrap(), current_before);
+        assert_eq!(std::fs::read(&closes_path).unwrap(), closes_before);
+        assert_eq!(std::fs::read(&legacy).unwrap(), sources_before);
+        assert_eq!(std::fs::read(&execution_path).unwrap(), execution_before);
+        assert_eq!(std::fs::read(&session_path).unwrap(), session_before);
+        with_terminal_bridge_env(&fixture, &server, |_| {
+            let mut env = crate::cli::TestEnv::new(fixture.git.repo.clone());
+            let mut output = String::new();
+            assert_eq!(
+                run(
+                    &mut env,
+                    SkillStateAction::Complete {
+                        spec: 3327,
+                        pr: None
+                    },
+                    &mut output
+                )
+                .unwrap(),
+                0,
+                "{output}"
+            );
+            assert!(
+                !gwt_core::skill_state::load(&fixture.git.repo, SKILL_NAME)
+                    .unwrap()
+                    .unwrap()
+                    .active
+            );
+        });
+        server.assert_no_request();
+        assert_eq!(std::fs::read(&closes_path).unwrap(), closes_before);
+    }
+
+    #[test]
     fn managed_build_rejects_host_emitted_without_exact_canonical_readback() {
         let _env_lock = crate::env_test_lock()
             .lock()
@@ -4520,6 +4736,7 @@ format_version: Some(1),
                     &session_id,
                     &binding,
                     crate::AgentWorkTerminalizationRequest {
+                        primary_provider_session_id: None,
                         schema_version: crate::AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION,
                         claimed_session_id: session_id.clone(),
                         observation: crate::observe_agent_runtime(&repo)
@@ -5024,6 +5241,7 @@ format_version: Some(1),
             token: "redirect-secret".to_string(),
         };
         let request = crate::AgentWorkTerminalizationRequest {
+            primary_provider_session_id: None,
             schema_version: crate::AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION,
             claimed_session_id: "redirect-session".to_string(),
             observation: crate::AgentRuntimeObservation {
@@ -5486,12 +5704,10 @@ format_version: Some(1),
         let home = tempfile::tempdir().expect("trusted store home");
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
-        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let url = format!(
-            "http://{}/internal/hook-live",
-            listener.local_addr().unwrap()
-        );
-        drop(listener);
+        // Reserve the port without listening so parallel servers cannot claim it.
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let url = format!("http://{}/internal/hook-live", socket.local_addr().unwrap());
         let (code, output, fixture) = run_start_action(Some(&url), Some("terminal-secret"), true);
         assert_eq!(code, 2, "{output}");
         let refusal: serde_json::Value = serde_json::from_str(output.trim()).unwrap();
@@ -6297,6 +6513,51 @@ format_version: Some(1),
                     .active
             );
             server.assert_no_request();
+        }
+    }
+
+    #[test]
+    fn delegated_build_terminal_actions_preserve_primary_work_and_lifecycle() {
+        let _guard = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _profile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _native = ScopedEnvVar::unset("CODEX_THREAD_ID");
+        let mut fixture = BoundTerminalFixture::new();
+        fixture.session.agent_session_id = Some("private-build-primary".to_string());
+        fixture
+            .session
+            .save(&gwt_core::paths::gwt_sessions_dir())
+            .unwrap();
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, &fixture.session.id);
+        let works = gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&fixture.git.repo);
+        let before_work = std::fs::read(&works).unwrap();
+        let before_build = gwt_core::skill_state::load(&fixture.git.repo, SKILL_NAME).unwrap();
+        for action in [
+            SkillStateAction::Complete {
+                spec: 3327,
+                pr: None,
+            },
+            SkillStateAction::Abort {
+                spec: 3327,
+                reason: Some("helper finished".to_string()),
+            },
+        ] {
+            let mut env = crate::cli::TestEnv::new(fixture.git.repo.clone());
+            let mut out = String::new();
+            assert_eq!(run(&mut env, action, &mut out).unwrap(), 1);
+            let error: crate::AgentWorkspaceUpdateError = serde_json::from_str(&out).unwrap();
+            assert_eq!(
+                error.code,
+                crate::AgentWorkspaceUpdateErrorCode::PrimaryActorRequired
+            );
+            assert_eq!(std::fs::read(&works).unwrap(), before_work);
+            assert_eq!(
+                gwt_core::skill_state::load(&fixture.git.repo, SKILL_NAME).unwrap(),
+                before_build
+            );
         }
     }
 

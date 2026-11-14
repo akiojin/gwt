@@ -1,0 +1,82 @@
+{
+  "schema_version": 1,
+  "recorded_at": "2026-11-10T09:39:49.126776+00:00",
+  "purpose": "Diagnose the existing 30-second cold CLI fixture timeout; not owner AC-2 performance acceptance",
+  "base_commit": "4647e005b5dff157525d7f9099a5480754840790",
+  "trace": "One cold real CLI invocation per version with the same eight synthetic files and fake embeddings; normal background QoS; diagnostic cap 40 seconds; test cap unchanged at 30 seconds.",
+  "limitations": [
+    "Not a one-hour trace; no p95 or production byte ratio is claimed.",
+    "The exact source file SHA-256 is recorded for each invocation; these are precommit source observations.",
+    "Both versions published valid views. Chroma imports dominated sampled startup and both showed roughly three seconds between terminal JSON and process exit. Native shutdown components were not distinguished."
+  ],
+  "runs": [
+    {
+      "kind": "branch",
+      "command": [
+        "C:\\Users\\AkioJinsenji\u79e6\u6cc9\u5bfa\u7ae0\u592b\\.gwt\\runtime\\venvs\\chroma-venv-eac269738a090205\\Scripts\\python.exe",
+        "E:\\gwt\\work\\issue-6979\\crates\\gwt-core\\runtime\\chroma_index_runner.py",
+        "--action",
+        "index-files",
+        "--project-root",
+        "C:\\Users\\AKIOJI~1\\AppData\\Local\\Temp\\gwt-6979-cli-diagnostic-g51hqhqb\\branch-timing\\project",
+        "--repo-hash",
+        "abc1234567890def",
+        "--worktree-hash",
+        "111122223333ffff",
+        "--db-root",
+        "C:\\Users\\AKIOJI~1\\AppData\\Local\\Temp\\gwt-6979-cli-diagnostic-g51hqhqb\\branch-timing\\index",
+        "--file-index-protocol",
+        "v2"
+      ],
+      "runner_sha256": "e021cdad81e23438a4ada50a72a3bce4097d356161d7b965d595b2ba7f8aec06",
+      "stdout_chunks": [
+        {
+          "at_s": 25.164585599995917,
+          "text": "{\"ok\": true, \"scope\": \"files\", \"indexed\": 8, \"total\": 8, \"base_document_count\": 0, \"overlay_document_count\": 8, \"base_generation_id\": \"7484b5befadf748b4d1f33baef6796176e30589a48fd0cef6fbeccf6f8158cca\", \"overlay_generation_id\": \"c0b60d61ec310d0b18bdce84f16b44cc4c7e67ff399dd8038f19a1e774d7518a\", \"requested_embeddings\": 8, \"computed_embeddings\": 8, \"embedding_cache_hits\": 0, \"compatibility_rejections\": 0, \"view_id\": \"5a5c1e0287433e7820847a22e8dc8a26153b3ca74827d6bc9397bd164d6159c1\", \"published\": true, \"superseded\": false}"
+        }
+      ],
+      "stderr_chunks": [],
+      "returncode": 0,
+      "status": "completed",
+      "exit_at_s": 28.822739099996397,
+      "stdout": "{\"ok\": true, \"scope\": \"files\", \"indexed\": 8, \"total\": 8, \"base_document_count\": 0, \"overlay_document_count\": 8, \"base_generation_id\": \"7484b5befadf748b4d1f33baef6796176e30589a48fd0cef6fbeccf6f8158cca\", \"overlay_generation_id\": \"c0b60d61ec310d0b18bdce84f16b44cc4c7e67ff399dd8038f19a1e774d7518a\", \"requested_embeddings\": 8, \"computed_embeddings\": 8, \"embedding_cache_hits\": 0, \"compatibility_rejections\": 0, \"view_id\": \"5a5c1e0287433e7820847a22e8dc8a26153b3ca74827d6bc9397bd164d6159c1\", \"published\": true, \"superseded\": false}",
+      "stderr": "",
+      "final_json_at_s": 25.164585599995917,
+      "after_json_until_exit_s": 3.6581535000004806
+    },
+    {
+      "kind": "develop",
+      "command": [
+        "C:\\Users\\AkioJinsenji\u79e6\u6cc9\u5bfa\u7ae0\u592b\\.gwt\\runtime\\venvs\\chroma-venv-eac269738a090205\\Scripts\\python.exe",
+        "C:\\Users\\AKIOJI~1\\AppData\\Local\\Temp\\gwt-6979-cli-diagnostic-g51hqhqb\\develop\\chroma_index_runner.py",
+        "--action",
+        "index-files",
+        "--project-root",
+        "C:\\Users\\AKIOJI~1\\AppData\\Local\\Temp\\gwt-6979-cli-diagnostic-g51hqhqb\\develop-timing\\project",
+        "--repo-hash",
+        "abc1234567890def",
+        "--worktree-hash",
+        "111122223333ffff",
+        "--db-root",
+        "C:\\Users\\AKIOJI~1\\AppData\\Local\\Temp\\gwt-6979-cli-diagnostic-g51hqhqb\\develop-timing\\index",
+        "--file-index-protocol",
+        "v2"
+      ],
+      "runner_sha256": "3aee6c542b73d2699e7660a8eafdce14bfd2bda9039e895f4a51a5790d5de62c",
+      "stdout_chunks": [
+        {
+          "at_s": 31.896609199990053,
+          "text": "{\"ok\": true, \"scope\": \"files\", \"indexed\": 8, \"total\": 8, \"base_document_count\": 0, \"overlay_document_count\": 8, \"base_generation_id\": \"49148c94c56fd362c27c3dbb64b93da2a781606a5d4f33a2cf759b5cdbd33dcf\", \"overlay_generation_id\": \"ac42c07c177515ae893be1351f3ad3bb5443e43ed2f5fc3de0d500f40f477be8\", \"requested_embeddings\": 8, \"computed_embeddings\": 8, \"embedding_cache_hits\": 0, \"compatibility_rejections\": 0, \"view_id\": \"eef0449672f93c5d30d5973f45d5acd47c017a60a199dd173a4f8ac696ace13e\", \"published\": true, \"superseded\": false}"
+        }
+      ],
+      "stderr_chunks": [],
+      "returncode": 0,
+      "status": "completed",
+      "exit_at_s": 34.851910400000634,
+      "stdout": "{\"ok\": true, \"scope\": \"files\", \"indexed\": 8, \"total\": 8, \"base_document_count\": 0, \"overlay_document_count\": 8, \"base_generation_id\": \"49148c94c56fd362c27c3dbb64b93da2a781606a5d4f33a2cf759b5cdbd33dcf\", \"overlay_generation_id\": \"ac42c07c177515ae893be1351f3ad3bb5443e43ed2f5fc3de0d500f40f477be8\", \"requested_embeddings\": 8, \"computed_embeddings\": 8, \"embedding_cache_hits\": 0, \"compatibility_rejections\": 0, \"view_id\": \"eef0449672f93c5d30d5973f45d5acd47c017a60a199dd173a4f8ac696ace13e\", \"published\": true, \"superseded\": false}",
+      "stderr": "",
+      "final_json_at_s": 31.896609199990053,
+      "after_json_until_exit_s": 2.955301200010581
+    }
+  ]
+}

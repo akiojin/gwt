@@ -308,7 +308,10 @@ pub fn compose_window_state_with_active_session(
             return hook_state;
         }
     }
-    if matches!(pty_state, WindowState::Stopped | WindowState::Error) {
+    if matches!(
+        pty_state,
+        WindowState::Stopped | WindowState::Error | WindowState::Interrupted
+    ) {
         return pty_state;
     }
     if uses_agent_hook_state(preset) {
@@ -331,7 +334,12 @@ pub fn compose_window_state_with_approval_wait(
     has_active_agent_session: bool,
     approval_waiting: bool,
 ) -> WindowState {
-    if approval_waiting && matches!(pty_state, WindowState::Stopped | WindowState::Error) {
+    if approval_waiting
+        && matches!(
+            pty_state,
+            WindowState::Stopped | WindowState::Error | WindowState::Interrupted
+        )
+    {
         return pty_state;
     }
     let composed = compose_window_state_with_active_session(
@@ -342,7 +350,10 @@ pub fn compose_window_state_with_approval_wait(
     );
     if approval_waiting
         && uses_agent_hook_state(preset)
-        && !matches!(composed, WindowState::Stopped | WindowState::Error)
+        && !matches!(
+            composed,
+            WindowState::Stopped | WindowState::Error | WindowState::Interrupted
+        )
     {
         WindowState::Waiting
     } else {
@@ -383,13 +394,18 @@ pub fn apply_provider_quota_block(composed: WindowState, quota_blocked: bool) ->
 /// pane needs something from outside before it can continue", which is
 /// exactly true here, and the PM contract already routes it.
 ///
-/// Unlike [`apply_provider_quota_block`] this does not override `Stopped` or
-/// `Error`. A quota hold has to, because the account is out for hours whether
-/// or not the process survived. Here the process surviving *is* the observed
+/// Unlike [`apply_provider_quota_block`] this does not override `Stopped`,
+/// `Interrupted`, or `Error`. A quota hold has to, because the account is out
+/// for hours whether or not the process survived. Here the process surviving *is* the observed
 /// shape, and a pane that genuinely ended is better described by its own
 /// terminal state than by a projection guessing at it.
 pub fn apply_provider_api_error_block(composed: WindowState, api_error: bool) -> WindowState {
-    if api_error && !matches!(composed, WindowState::Stopped | WindowState::Error) {
+    if api_error
+        && !matches!(
+            composed,
+            WindowState::Stopped | WindowState::Error | WindowState::Interrupted
+        )
+    {
         WindowState::Waiting
     } else {
         composed
@@ -477,6 +493,7 @@ mod tests {
             source_event: source_event.map(str::to_string),
             gwt_session_id: Some("session-1".to_string()),
             continuation_readiness_nonce: None,
+            native_prompt_id: None,
             agent_session_id: Some("agent-1".to_string()),
             project_root: Some("E:/gwt/test".to_string()),
             branch: Some("feature/runtime".to_string()),
@@ -612,7 +629,7 @@ mod tests {
     }
 
     #[test]
-    fn compose_window_state_keeps_pty_stopped_for_active_agent_recovery() {
+    fn compose_window_state_keeps_pty_terminal_state_for_active_agent_recovery() {
         assert_eq!(
             compose_window_state_with_active_session(
                 WindowState::Stopped,
@@ -621,6 +638,15 @@ mod tests {
                 true,
             ),
             WindowState::Stopped
+        );
+        assert_eq!(
+            compose_window_state_with_active_session(
+                WindowState::Interrupted,
+                WindowPreset::Codex,
+                Some(WindowState::Running),
+                true,
+            ),
+            WindowState::Interrupted
         );
         assert_eq!(
             compose_window_state_with_active_session(
@@ -1019,6 +1045,21 @@ Press enter to confirm or esc to cancel
             ),
             WindowState::Error
         );
+        for (pty, hook) in [
+            (WindowState::Interrupted, WindowState::Running),
+            (WindowState::Running, WindowState::Interrupted),
+        ] {
+            assert_eq!(
+                compose_window_state_with_approval_wait(
+                    pty,
+                    WindowPreset::Codex,
+                    Some(hook),
+                    true,
+                    true,
+                ),
+                WindowState::Interrupted
+            );
+        }
     }
 
     /// Issue #4584 AC-1: the whole defect is that this pane reads `running`.
@@ -1052,7 +1093,11 @@ Press enter to confirm or esc to cancel
     /// live pane back at its prompt.
     #[test]
     fn provider_api_error_leaves_a_terminal_pane_alone() {
-        for terminal in [WindowState::Stopped, WindowState::Error] {
+        for terminal in [
+            WindowState::Stopped,
+            WindowState::Error,
+            WindowState::Interrupted,
+        ] {
             assert_eq!(
                 super::apply_provider_api_error_block(terminal, true),
                 terminal

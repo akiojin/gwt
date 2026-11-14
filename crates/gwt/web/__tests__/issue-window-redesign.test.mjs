@@ -1,3 +1,4 @@
+import { monitorDiagnostic } from "../agent-completion-notifications.js";
 // SPEC #3885 Phase 5 (Issue #4559, T-032..T-035): the Issue window's two-band
 // toolbar, the "+ New" popover, the ⚠ monitor pill, and the detail pane order.
 // These are the SPEC #3885 T-0xx tasks, not the SPEC #3200 T-032/T-033/T-035
@@ -23,7 +24,7 @@ async function importSurfaceModule() {
       'from "./launch-pending-controller.js"',
       'from "data:text/javascript,export function createLaunchOperationId(){return%20%22t%22}"',
     );
-  return import(`data:text/javascript;base64,${Buffer.from(source.replace('from "./agent-kanban-surface.js"', `from "${new URL("../agent-kanban-surface.js", import.meta.url).href}"`).replace('from "./control-explanations.js"', `from "${new URL("../control-explanations.js", import.meta.url).href}"`).replace('from "./ui-state-store.js"', `from "${new URL("../ui-state-store.js", import.meta.url).href}"`).replace('from "./ui-content.js"', `from "${new URL("../ui-content.js", import.meta.url).href}"`)).toString("base64")}`);
+  return import(`data:text/javascript;base64,${Buffer.from(source.replace('from "./agent-completion-notifications.js"', `from "${new URL("../agent-completion-notifications.js", import.meta.url).href}"`).replace('from "./agent-kanban-surface.js"', `from "${new URL("../agent-kanban-surface.js", import.meta.url).href}"`).replace('from "./control-explanations.js"', `from "${new URL("../control-explanations.js", import.meta.url).href}"`).replace('from "./ui-state-store.js"', `from "${new URL("../ui-state-store.js", import.meta.url).href}"`).replace('from "./ui-content.js"', `from "${new URL("../ui-content.js", import.meta.url).href}"`)).toString("base64")}`);
 }
 
 function entry(number, monitorState, extra = {}) {
@@ -109,7 +110,7 @@ test("AC-23: the toolbar is two bands and no summary/settings/quick/error/status
       node.classList.contains("workspace-toolbar") ||
       node.classList.contains("knowledge-monitor-bar"),
   );
-  assert.equal(bands.length, 2, "exactly the Issue band and the Monitor band");
+  assert.equal(bands.length, 2, "exactly the Issue band and the Issues band");
   for (const gone of [
     ".knowledge-monitor-panel",
     ".knowledge-monitor-summary",
@@ -287,11 +288,11 @@ test("AC-24: a monitor error links the pill to its center item without adding a 
   assert.equal(pill.textContent, "⚠ Error");
   assert.equal(pill.dataset.tone, "blocked");
   assert.equal(pill.title, "Details in notifications");
-  assert.equal(pill.dataset.notificationKey, "issue-monitor:last_error");
+  assert.equal(pill.dataset.notificationKey, monitorDiagnostic({ message: "issue #3785: scan failed\nstack line" }).key);
   assert.equal(root.childElementCount, childCount, "no row is added to the toolbar");
   assert.deepEqual(reported.at(-1), {
-    key: "issue-monitor:last_error",
-    title: "Issue Monitor",
+    key: monitorDiagnostic({ message: "issue #3785: scan failed\nstack line" }).key,
+    title: "Issues",
     message: "issue #3785: scan failed\nstack line",
   });
 });
@@ -308,7 +309,7 @@ test("AC-24: a fleet outage is announced through the pill and the center, not a 
   assert.equal(pill.dataset.notificationKey, "issue-monitor:agent_blackout");
   assert.deepEqual(reported.at(-1), {
     key: "issue-monitor:agent_blackout",
-    title: "Issue Monitor",
+    title: "Issues",
     message: outage,
   });
 
@@ -785,7 +786,7 @@ test("Issue #4499: running profile is separate from next-tier overrides in both 
   assert.doesNotMatch(body.querySelector(".issue-detail-tier").textContent, /Running tier|gpt-6-luna/);
 });
 
-test("Monitor list bursts render once while controls and notifications stay synchronous", async (t) => {
+test("Issues list bursts render once while controls and notifications stay synchronous", async (t) => {
   const frames = new Set();
   let renders = 0;
   const { body, surface, state, reported, resolved, sent } = await makeFixture({ surface: {
@@ -810,12 +811,12 @@ test("Monitor list bursts render once while controls and notifications stay sync
   assert.equal(surface.issueMonitorModel.read().inboxByIssue[11].state, "launched");
   assert.equal(before.status.queue_len, 0, "previous snapshots remain immutable");
   assert.ok(reported.some(error => error.message === "Transient error"), "transient errors are not coalesced away");
-  assert.ok(resolved.includes("issue-monitor:last_error"), "error recovery stays synchronous");
+  assert.ok(resolved.includes(monitorDiagnostic({ message: "Transient error" }).key), "error recovery stays synchronous");
   assert.equal(body.querySelector('[data-metric="queue"]').textContent, "Queue 49", "independent controls stay current");
   assert.equal(body.querySelector('[data-metric="active"]').textContent, "Active —", "inbox updates cannot prove local child liveness");
   body.querySelector('[data-action="monitor-toggle"]').click();
   assert.ok(sent.some(message => message.kind === "set_issue_monitor_enabled" && message.enabled === true));
-  assert.equal(renders, 0, "Monitor receipts wait for the shared frame before rendering the list");
+  assert.equal(renders, 0, "Issues receipts wait for the shared frame before rendering the list");
   assert.equal(body.querySelector(".knowledge-row"), row);
   assert.equal(frames.size, 1);
   for (const run of [...frames]) { frames.delete(run); run(); }

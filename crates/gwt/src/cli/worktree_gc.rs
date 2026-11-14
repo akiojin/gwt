@@ -585,7 +585,7 @@ fn try_lock_gc_build_artifacts(target: &Path) -> std::io::Result<GcArtifactAcces
 /// The directory every `git` call in the sweep runs from (Issue #4566 AC-1).
 ///
 /// `run_gc` is handed a worktree by the CLI and the *project root* by the
-/// Issue Monitor scan. In the Nested Bare + Worktree layout that project root
+/// Issues scan. In the Nested Bare + Worktree layout that project root
 /// is the container holding `<repo>.git` next to `work/`, `develop/`, … — not
 /// a repository at all — so `git worktree list` there failed with `not a git
 /// repository` and the automatic sweep reported zero candidates while the CLI
@@ -1576,7 +1576,7 @@ mod tests {
         assert!(repo.join(BUILD_ARTIFACT_DIR).is_dir());
     }
 
-    /// Issue #4566 AC-1 / AC-3: the Issue Monitor hands the sweep the project
+    /// Issue #4566 AC-1 / AC-3: Issues hands the sweep the project
     /// root — the Nested Bare + Worktree container that holds `<repo>.git`
     /// next to `work/`, `develop/`, … — which is not itself a repository.
     /// Enumerating from there used to fail with `not a git repository` and

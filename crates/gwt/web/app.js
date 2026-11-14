@@ -10,6 +10,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         initOperatorShell,
         applyTelemetryCounts,
         subscribeIssueMonitorStatus,
+        subscribeWorkAttentionSummary,
         applyProviderUsage,
         subscribeRuntimeHealth,
         subscribeProjectOwnerHealth,
@@ -62,6 +63,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         createAgentCompletionNotifier,
         createAgentAttentionToaster,
         notificationForTransition,
+        monitorDiagnostic,
       } from "/agent-completion-notifications.js";
       import { createReleaseNotesWindow } from "/release-notes-window.js";
 
@@ -79,7 +81,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       // every Settings window and owns both navigation entry points.
       import { createPmSettingsPanel } from "/pm-settings-panel.js";
       import { createToastStack } from "/toast-host.js";
-      import { createProjectPageMetadata } from "/project-page-metadata.js";
+      import { createProjectPageMetadata, projectAgentSummary } from "/project-page-metadata.js";
       import { createNotificationCenter, renderNotificationBell } from "/notification-center.js";
       // SPEC-3064 Phase 3 (E6b): the Branches window & cleanup surface moved
       // to /branches-cleanup-surface.js.
@@ -151,6 +153,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       import { createWorksSurface } from "/works-surface.js";
       import { createTerminalTextPreview } from "/terminal-text-preview.js";
       import { createPmChat, createPmWindowModel } from "/pm-chat.js";
+      import { logGroupsFromHistoryRows } from "/task-log.js";
+      import { windowCommandErrorPresentation } from "/window-command-error.js";
       import { shouldSkipTerminalFocusActivation } from "/clone-modal-focus-guard.js";
       import { createUiTraceProfiler } from "/ui-trace-profiler.js";
       import { bindControlExplanations, setControlExplanation } from "/control-explanations.js";
@@ -190,7 +194,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         };
       }
       const projectOwnerHealthModel = createUiStateStore(null);
-      subscribeProjectOwnerHealth(document, projectOwnerHealthModel);
+      subscribeProjectOwnerHealth(document, projectOwnerHealthModel, { send, createFocusTrap });
       const runtimeHealthModel = createUiStateStore(null);
       subscribeRuntimeHealth(document, runtimeHealthModel, {
         focusWindow: (windowId) => requestWindowFrame(windowId),
@@ -487,6 +491,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       // /launch-wizard-surface.js.
       let activeWorkProjection = null;
       const { model: activeWorkProjectionModel, applyActiveWorkProjectionReceiveEvent } = createActiveWorkProjectionModel();
+      subscribeWorkAttentionSummary(document, activeWorkProjectionModel);
       const agentKanbanPendingPlacement =
         createAgentKanbanPendingPlacementController();
       // SPEC-3064 Phase 3 (E6b): branchCleanupWindowId and the synthetic
@@ -932,7 +937,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         }
         // These explicit writes belong to this live connection.
         // Never replay an unacknowledged write after reconnect.
-        if (["confirm_close_project", "cancel_close_project", "preview_close_project", "project_view_ready"].includes(message.kind) ||
+        if (["confirm_close_project", "cancel_close_project", "preview_close_project", "project_view_ready", "restart_wedged_owner"].includes(message.kind) ||
             (message.kind === "agent_switch" && message.action.kind !== "read") ||
             (message.kind === "agent_roster" && message.action.kind === "rename") ||
             (message.kind === "get_hook_doctor" && message.repair === true)) {
@@ -1340,8 +1345,9 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         send({ kind: "frontend_ready" });
         closeProjectController.reconnect();
         if (socketProjectKey) projectPageMetadata.reportAttention();
-        recoveryCenterController?.reconnect();
         let replayedReleaseNotesId = null;
+        let replayedRecoveryCenterId = null;
+        const replayedWorkAdvisoryIds = [];
         for (let index = 0; index < pendingMessages.length;) {
           const pending = pendingMessages[index];
           if (pending.projectKey !== socketProjectKey) {
@@ -1356,7 +1362,11 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           }
           socket.send(JSON.stringify(pending.message));
           if (pending.message.kind === "open_release_notes") replayedReleaseNotesId = pending.message.id;
+          if (pending.message.kind === "load_recovery_center") replayedRecoveryCenterId = pending.message.request_id;
+          if (pending.message.kind === "request_work_advisory") replayedWorkAdvisoryIds.push(pending.message.request_id);
         }
+        resyncWorkAdvisory(replayedWorkAdvisoryIds);
+        recoveryCenterController?.reconnect(replayedRecoveryCenterId);
         // Issue #4433 AC-2: this client has a new client_id, so it missed
         // every cleanup event emitted while it was away. Re-subscribe to the
         // operations it still shows as running.
@@ -1372,7 +1382,13 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         releaseNotesWindow.reconnect(replayedReleaseNotesId);
         syncRunningBranchCleanups();
         requestVisiblePmReports(true);
-        requestSupportedAgentRefresh();
+        if (socketProjectKey && rosterHost) {
+          // Registration needs both catalogs even when Settings is not mounted.
+          send({ kind: "list_supported_agents" });
+          send({ kind: "list_custom_agents" });
+        } else {
+          requestSupportedAgentRefresh();
+        }
       }
 
       function handleSocketMessage(event) {
@@ -1507,7 +1523,12 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           if (hubSocket !== connection) return;
           if (socket === connection) handleSocketOpen();
           else connection.send(JSON.stringify({ kind: "frontend_ready" }));
-          for (const message of pendingHubMessages.splice(0)) connection.send(JSON.stringify(message));
+          const replayedCloneSearchQueries = [];
+          for (const message of pendingHubMessages.splice(0)) {
+            connection.send(JSON.stringify(message));
+            if (message.kind === "github_repository_search") replayedCloneSearchQueries.push(message.query);
+          }
+          resyncCloneProjectSearch(replayedCloneSearchQueries);
         });
         connection.addEventListener("message", (event) => {
           if (hubSocket === connection) dispatcher.handle(event);
@@ -1645,7 +1666,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           // are different faces. Collapsing them to one "Issue" label made an open
           // window's title unable to say which face it was.
           issue: "Issue",
-          issue_monitor: "Issue Monitor",
+          issue_monitor: "Issues",
           spec: "SPEC",
           // SPEC-3671 FR-015: the wire preset is `work` (`workspace` is only a
           // legacy deserialization alias), and the surface lists Works.
@@ -2535,41 +2556,35 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         send({ kind: "open_pm_agent" });
       }
 
-      function recomputeOperatorTelemetry() {
+      // SPEC #5016 AC-HS1: assigned once the project metadata owns the summary.
+      let projectAgentSummaryModel = null;
 
+      function recomputeOperatorTelemetry() {
         if (!window.__operatorShell?.applyTelemetryCounts) return;
+        // RUNNING / BLOCK / IDLE / ERROR come only from the server aggregate
+        // summary, the same value the tab title and the Works heading render.
+        const summary = projectAgentSummaryModel?.read() ?? projectAgentSummary();
         const counts = {
-          running: 0,
+          running: summary.running,
           // Issue #3884 AC-3: running agents whose `issue_preview` placement keeps
           // them inside their owning surface — they live inside the Issue window.
           running_inline: 0,
-          idle: 0,
-          // FR-039 (anshin): waiting is its own LOUD telemetry state for
-          // agents waiting on the operator. It used to collapse into idle;
-          // now it drives the WAITING strip cell instead.
-          waiting: 0,
-          error: 0,
+          idle: summary.idle,
+          waiting: summary.block,
+          error: summary.error,
         };
-        // The same host census supplies Agents and Works membership. Catalog
-        // state enriches that proof; a historical Work never creates an agent.
+        // The host census only explains where running agents are placed.
         const activity = agentActivityModel.read();
         const catalog = windowCatalogModel.read().catalog;
         const windows = (catalog.appState.tabs || []).filter(tab => !activity.snapshot?.project_key
           || tab.project_key === activity.snapshot.project_key).flatMap(tab => tab.workspace?.windows || []);
-        let unknown = activity.count === null;
         for (const agent of activity.agents) {
           const data = windows.find(data => data.id === agent.window_id && data.session_id === agent.session_id);
-          if (!data || !presetSupportsWaitingStatus(data.preset)) { unknown = true; continue; }
-          const state = { starting: "running", running: "running", waiting: "waiting",
-            idle: "idle", ready: "idle", error: "error", interrupted: "error" }[catalog.runtimeStates[data.id] ?? data.status];
-          if (state) counts[state] += 1;
-          else unknown = true;
-          if (state === "running" && data.placement?.kind === "issue_preview") counts.running_inline += 1;
+          if (!data || !presetSupportsWaitingStatus(data.preset)) continue;
+          const status = catalog.runtimeStates[data.id] ?? data.status;
+          if ((status === "running" || status === "starting") && data.placement?.kind === "issue_preview") counts.running_inline += 1;
         }
-        if (unknown) {
-          for (const state of ["running", "waiting", "idle", "error"]) counts[state] = "—";
-          counts.running_inline = 0;
-        }
+        counts.running_inline = Math.min(counts.running_inline, counts.running);
         const activeWorks = activeWorkItemsFromProjection();
         if (activeWorks.length > 0) counts.branches = activeWorks.length;
         applyOperatorTelemetryCounts(counts);
@@ -3045,6 +3060,11 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           window,
           isApplicationScrollFallbackEnabled: () =>
             isAgentWindowPreset(workspaceWindowById(windowId)?.preset),
+          isRuntimeStopped: () => {
+            const windowData = workspaceWindowById(windowId);
+            return isAgentWindowPreset(windowData?.preset)
+              && ["stopped", "interrupted"].includes(runtimeStateForWindow(windowData));
+          },
           sendTerminalInput: (data, { focus = true } = {}) => {
             if (readOnly || terminalMap.get(windowId)?.isReady !== true) {
               return;
@@ -3145,6 +3165,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           lineHeight: isBlinkBrowser() ? 1.35 : 1.3,
           scrollback: 5000,
           macOptionClickForcesSelection: true,
+          // The context menu copies the existing range on every platform.
+          rightClickSelectsWord: false,
           // SPEC-3671 FR-008.
           disableStdin: options.readOnly === true,
         });
@@ -3586,12 +3608,16 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         applyIssueMonitorQueueResult,
         applyKnowledgeCacheRevision,
         applyIssueMonitorStatus: applyKnowledgeIssueMonitorStatus,
+        applyRepositoryLabels,
         applyIssueMonitorInbox: applyKnowledgeIssueMonitorInbox,
+        applyPmDecisions,
+        applyPmReviewAttention,
         scheduleIssueMonitorProjectionRefresh,
         handleKnowledgeTransportChange,
         refreshVisibleKnowledgeWindows,
       } = createKnowledgeKanbanSurface({
         send,
+        currentProjectRoot: () => activeProjectTab()?.project_root,
         sendKnowledgeSemanticSearchNow,
         createNode,
         windowMap,
@@ -3959,6 +3985,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         applyLaunchWizardStateEvent,
         applyLaunchWizardOpenErrorEvent,
         applyWorkAdvisoryResultEvent,
+        resyncWorkAdvisory,
         handleLaunchWizardTransportChange,
         handleWizardEscapeKeydown,
         installWizardChrome,
@@ -4075,6 +4102,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       const {
         sendOpenProjectDialog,
         closeCloneProjectModal,
+        resyncCloneProjectSearch,
         renderRecentProjects,
         renderProjectPicker,
         renderProjectOnboarding,
@@ -4176,7 +4204,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       }
 
       const pmChatViews = new Map();
-      const { requestPmReports, bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, subscribePmWindowState } = createPmWindowModel();
+      const { requestPmReports, requestPmConversation, requestPmTaskDetail, markPmTaskDetailUnavailable, requestPmChatSend, markPmChatSendUnavailable, expirePmChatSend, readPmWindowState, bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, subscribePmWindowState } = createPmWindowModel();
       subscribePmWindowState(state => state.resyncRequest, recovery => {
         if (!recovery) return;
         const request = requestPmReports(recovery.windowId);
@@ -4199,7 +4227,11 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         const view = pmChatViews.get(windowId);
         if (!view) return;
         view.unsubscribe();
+        view.unsubscribeLog?.();
+        view.unsubscribeHumanAttention?.();
         view.controller.dispose();
+        applyPmDecisions(windowId, null);
+        applyPmReviewAttention(windowId, null);
         view.body.classList.remove("pm-conversation-body");
         // Return the terminal nodes to their original body when PM ownership ends.
         view.body.append(...view.logHost.childNodes);
@@ -4237,6 +4269,25 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         view = { root, body, logHost, sessionId: windowData.session_id };
         view.controller = createPmChat({
           document, root, windowId: windowData.id, sessionId: windowData.session_id,
+          onChatVisible: () => requestVisiblePmReports(false, windowData.id),
+          onTaskDetail: key => {
+            const request = requestPmTaskDetail(windowData.id, key);
+            if (!request) return;
+            if (send(request) === "unavailable") return markPmTaskDetailUnavailable(windowData.id, request.request_id);
+            window.setTimeout(() => markPmTaskDetailUnavailable(windowData.id, request.request_id), 30000);
+          },
+          onOpenTerminal: sessionId => {
+            if (!sessionId || !worksSurface.openWork({ window_id: windowData.id, session_id: sessionId })) return false;
+            openSurface("works");
+            return true;
+          },
+          onSend: text => {
+            const request = requestPmChatSend(windowData.id, text);
+            if (!request) return;
+            if (send(request) === "unavailable") return markPmChatSendUnavailable(windowData.id);
+            const sequence = readPmWindowState().windows[windowData.id]?.chatSend?.sequence;
+            window.setTimeout(() => expirePmChatSend(windowData.id, sequence), 30000);
+          },
           onLogVisibility: (visible) => {
             logHost.hidden = !visible;
             if (!visible) requestVisiblePmReports(true);
@@ -4245,8 +4296,24 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
               activateTerminalOnReveal(windowData.id);
             });
           },
+          // SPEC #7007 T-013: a Log group opens the notification drawer at
+          // its original record (keyed rows focus their history row).
+          onViewNotification: entry => notificationCenter.open(entry?.key || undefined),
+          // SPEC #5016 HSK: unanswered decisions join the shared attention count.
+          onDecisionsWaiting: decisions => applyPmDecisions(windowData.id, decisions),
+          // SPEC #5016 HSV: unresolved reviews join the same shared count.
+          onReviewAttention: items => applyPmReviewAttention(windowData.id, items),
         });
         pmChatViews.set(windowData.id, view);
+        // SPEC #7007 T-013: the Log view mirrors this page's notification
+        // history (#5016 groups). The subscription fires immediately with
+        // the current rows, then on every history change.
+        view.unsubscribeLog = notificationCenter.subscribe(state => state.rows, rows => {
+          view.controller.receiveLog(logGroupsFromHistoryRows(rows));
+        });
+        // SPEC #5016 HSF: Live facts shows the strip's needs_human value.
+        view.unsubscribeHumanAttention = issueMonitorModel.subscribe(model => model.humanAttention.count,
+          count => view.controller.receiveHumanAttention(count));
         bindPmWindowState(windowData.id, windowData.session_id);
         view.unsubscribe = subscribePmWindowState(state => state.windows[windowData.id], state => {
           view.controller.update(state);
@@ -4263,6 +4330,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           if (windowData.is_pm && view && view.logHost.hidden) {
             const request = requestPmReports(windowData.id, resync);
             if (request) send(request);
+            const conversation = view.controller?.isChatVisible() ? requestPmConversation(windowData.id) : null;
+            if (conversation) send(conversation);
           }
         }
       }
@@ -4435,6 +4504,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         applyHookDoctorEvent,
         applyGlobalUpdateSettings,
         applyIssueSettingsStatus,
+        applySettingsRepositoryLabels,
+        applySettingsLabelsFailure,
         applyIssueMonitorProfiles,
         refreshProfilesAfterRoster,
         applyIssueMonitorProfilesError,
@@ -4762,6 +4833,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       });
 
       const { update: applyProjectAggregate, ...projectPageMetadata } = createProjectPageMetadata({ document, window, send });
+      projectAgentSummaryModel = projectPageMetadata.summary;
+      projectAgentSummaryModel.subscribe(summary => summary, () => recomputeOperatorTelemetry());
 
       const agentCompletionNotifier = createAgentCompletionNotifier({
         window,
@@ -4820,10 +4893,12 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       const windowCommandErrorModel = createUiStateStore(null);
       windowCommandErrorModel.subscribe(event => event, event => {
         if (!event) return;
-        const title = { input: "Input failed", resize: "Resize failed", stop: "Stop failed" }[event.operation] || "Window command failed";
-        const key = `window-command:${event.id}:${event.operation}`;
-        notificationCenter.recordError({ key, title, message: event.message });
-        alertsToasts.push({ id: key, level: "error", title, message: event.message, timeoutMs: 8000 });
+        // SPEC #7007 T-014: the backend message is internal wording. The
+        // typed presentation (impact + next action) is the headline; the
+        // original travels as history details.
+        const presentation = windowCommandErrorPresentation(event);
+        notificationCenter.recordError({ key: presentation.key, title: presentation.title, message: presentation.message, details: presentation.details });
+        alertsToasts.push({ id: presentation.key, level: "error", title: presentation.title, message: presentation.message, timeoutMs: 8000 });
       });
 
       const launchProgressModel = createUiStateStore(null);
@@ -4844,15 +4919,28 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
 
       const issueMonitorNotificationModel = createUiStateStore(null);
       issueMonitorNotificationModel.subscribe(event => event, event => {
+        if (event?.level === "error" && event.message?.toLowerCase().includes("allowed labels")) {
+          applySettingsLabelsFailure({ ...event, project_root: activeProjectTab()?.project_root });
+        }
         if (!event) return;
+        if (event.level === "error") {
+          const diagnostic = monitorDiagnostic({ ...event, kind: event.notification_transition });
+          if (diagnostic) {
+            const transition = notificationForTransition({ source: "monitor", state: event.notification_transition, issueNumber: event.issue_number });
+            const notice = { ...diagnostic, title: `${transition?.title || "Issues"}${event.issue_number ? ` #${event.issue_number}` : ""}`, level: "error" };
+            if (diagnostic.stalled) notificationCenter.recordSurfaceNotice(notice);
+            else notificationCenter.recordError(notice);
+          }
+          return;
+        }
         // Repeated launch attempts update one Issue notice until it is dismissed.
         if (event.level === "info" && !event.notification_transition
-          && event.message === "Issue Monitor launch requested"
+          && event.message === "Issues launch requested"
           && Number.isInteger(event.issue_number) && event.issue_number > 0) {
           notificationCenter.recordSurfaceNotice({
             key: `issue-monitor:launch-requested:${event.issue_number}`,
             level: event.level,
-            title: `Issue Monitor #${event.issue_number}`,
+            title: `Issues #${event.issue_number}`,
             message: event.message,
           });
           return;
@@ -4871,7 +4959,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         notificationCenter.record({
           kind: "issue-monitor",
           level: event?.level,
-          title: monitorNotice?.title || "Issue Monitor",
+          title: monitorNotice?.title || "Issues",
           message: event?.message,
           issueNumber: event?.issue_number,
         });
@@ -4882,7 +4970,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         showToast: showAttentionToast,
         dismissToast: (id) => {
           alertsToasts.dismiss(id);
-          notificationCenter.resolveError(id);
+          notificationCenter.removeNotice(id);
         },
       });
 
@@ -5150,7 +5238,10 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           case "runtime_health":
             runtimeHealthModel.update(() => event.snapshot || {});
             break;
-          case "pm_reports": {
+          case "pm_reports":
+          case "pm_conversation":
+          case "pm_request_task":
+          case "pane_send_result": {
             applyPmWindowReceiveEvent(event);
             break;
           }
@@ -5164,6 +5255,10 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             applyIssueSettingsStatus(event.status || {}, activeProjectTab()?.project_root);
             // Issue #3906 AC-12: the update CTA shows the drain progress.
             break;
+          case "repository_labels":
+            applySettingsRepositoryLabels(event);
+            applyRepositoryLabels(event);
+            break;
           case "issue_monitor_profiles":
             applyIssueMonitorProfiles(event);
             break;
@@ -5171,6 +5266,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             applyIssueMonitorProfilesError(event);
             break;
           case "issue_monitor_allowed_labels_write_failed":
+            applySettingsLabelsFailure(event);
             applyKnowledgeReceiveEvent(event);
             break;
           case "issue_monitor_queue_result":
@@ -5608,6 +5704,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       }
       worksSurface = createWorksSurface({
         systemSettingsModel,
+        summaryModel: projectAgentSummaryModel,
+        workProjectionModel: activeWorkProjectionModel,
         document,
         windowCatalogModel,
         activityModel: agentActivityModel,

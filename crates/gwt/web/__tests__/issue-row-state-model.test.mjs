@@ -33,7 +33,7 @@ async function importSurfaceModule() {
       'from "./launch-pending-controller.js"',
       'from "data:text/javascript,export function createLaunchOperationId(){return%20%22row-test%22}"',
     );
-  return import(`data:text/javascript;base64,${Buffer.from(source.replace('from "./agent-kanban-surface.js"', `from "${new URL("../agent-kanban-surface.js", import.meta.url).href}"`).replace('from "./control-explanations.js"', `from "${new URL("../control-explanations.js", import.meta.url).href}"`).replace('from "./ui-state-store.js"', `from "${new URL("../ui-state-store.js", import.meta.url).href}"`).replace('from "./ui-content.js"', `from "${new URL("../ui-content.js", import.meta.url).href}"`)).toString("base64")}`);
+  return import(`data:text/javascript;base64,${Buffer.from(source.replace('from "./agent-completion-notifications.js"', `from "${new URL("../agent-completion-notifications.js", import.meta.url).href}"`).replace('from "./agent-kanban-surface.js"', `from "${new URL("../agent-kanban-surface.js", import.meta.url).href}"`).replace('from "./control-explanations.js"', `from "${new URL("../control-explanations.js", import.meta.url).href}"`).replace('from "./ui-state-store.js"', `from "${new URL("../ui-state-store.js", import.meta.url).href}"`).replace('from "./ui-content.js"', `from "${new URL("../ui-content.js", import.meta.url).href}"`)).toString("base64")}`);
 }
 
 test("pending SessionStart diagnosis uses the existing row reason without changing launch state", async () => {
@@ -85,6 +85,17 @@ test("Issue #4862 a deliberate stop stays Held despite stale window activity", a
     assert.deepEqual(model.actions, prior.actions, "presentation must not change actions");
     assert.deepEqual(model.overflow, prior.overflow);
   }
+});
+
+test("Issue #6994 measurement waits stay in Backlog and offer an explicit return to queue", async () => {
+  const { issueQueueColumn, issueRowStateModel } = await importSurfaceModule();
+  const entry = knowledgeEntry(6994, { monitor_state: "awaiting_measurement", queue_position: 1,
+    exclusion_reason: "Waiting for one day of production observations: AC-4" });
+  assert.equal(issueQueueColumn(entry), "backlog", "queue membership must not relaunch a measurement wait");
+  const model = issueRowStateModel({ entry });
+  assert.deepEqual(model.primary, { key: "monitor:awaiting_measurement", label: "Awaiting measurement", tone: "idle" });
+  assert.equal(model.secondary[0].label, entry.exclusion_reason);
+  assert.deepEqual(model.actions, ["requeue-issue", "configure-issue"]);
 });
 
 test("Issue #4862 launch diagnoses retain the cause and name the next operation", async () => {
@@ -579,7 +590,7 @@ test("issueRowStateModel derives one primary badge, bounded secondary info, and 
     entry: knowledgeEntry(1, { monitor_state: "launched" }),
     inlineWindow: agentWindow("agent-1", 1, { status: "stopped" }),
   });
-  assert.equal(stopped.primary.label, "Launched", "a stopped agent falls back to the Monitor state");
+  assert.equal(stopped.primary.label, "Launched", "a stopped agent falls back to the Issues state");
 
   const needsHuman = issueRowStateModel({
     entry: knowledgeEntry(47, { monitor_state: "needs_human" }),
@@ -1101,7 +1112,7 @@ test("after Windowize the row shows the agent as on the canvas and offers focus"
   );
 
   // The agent window is closed: the row drops the face and falls back to the
-  // Monitor state.
+  // Issues state.
   fixture.setWindows([]);
   fixture.surface.renderKnowledgeBridge("win-1");
   const gone = fixture.body.querySelector('[data-issue-number="3671"]');

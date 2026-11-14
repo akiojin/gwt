@@ -48,7 +48,10 @@ impl AppRuntime {
                                 identity,
                                 id,
                                 incarnation,
-                                kind: super::RemoteRuntimeCommandKind::Input { reply_client: None },
+                                kind: super::RemoteRuntimeCommandKind::Input {
+                                    reply_client: None,
+                                    request_id: None,
+                                },
                                 approval_resolution_started: false,
                                 input_command_id: None,
                                 result: Ok(outcome.observation),
@@ -79,6 +82,9 @@ impl AppRuntime {
         after_ready: impl FnOnce(&ProjectRuntimeClient, &OwnerMobileInputReady) + Send + 'static,
     ) -> Result<impl FnOnce() -> InputResult + Send + 'static, AuthorizationError> {
         use sha2::{Digest, Sha256};
+        if !request.belongs_to_host(self.mobile_host.authorization()) {
+            return Err(AuthorizationError::WrongHost);
+        }
         // Keep shared HTTP connection drivers active while this blocking
         // worker waits on authorization or another native control operation.
         let executor = match &self.blocking_tasks {
@@ -629,14 +635,37 @@ mod tests {
             None,
         );
         app.blocking_tasks = BlockingTaskSpawner::queued().0;
-        let mut auth = MobileAuthorization::default();
-        auth.enable();
-        let auth = Arc::new(std::sync::RwLock::new(auth));
+        let auth = app.mobile_host.authorization().clone();
+        auth.write().unwrap().enable();
         let (connection, device) = paired_connection(&auth, &project);
         let clients = ClientHub::default();
         clients.register_scoped(
             "phone".into(),
             crate::app_runtime::ClientScope::Project(project.clone()),
+        );
+        let mut foreign = MobileAuthorization::default();
+        foreign.enable();
+        let foreign = Arc::new(RwLock::new(foreign));
+        let (foreign_connection, _) = paired_connection(&foreign, &project);
+        assert_eq!(
+            app.mobile_input_task(
+                Arc::new(MobileInputRequest::new(
+                    foreign_connection,
+                    "phone".into(),
+                    project.clone(),
+                    0,
+                    window_id.clone(),
+                    "foreign-host\n".into(),
+                )),
+                clients.clone(),
+                || panic!("a foreign Host must be rejected before reading the clock"),
+            )
+            .err()
+            .map(|error| error.to_string()),
+            Some(
+                "mobile input belongs to a different Host; reconnect through the current Host"
+                    .into()
+            ),
         );
         let request = |seq, data: &str| {
             Arc::new(MobileInputRequest::new(
@@ -1021,36 +1050,6 @@ mod tests {
         owner_fixture_block_on(settle_native_input(&native, &fresh_ready));
         assert_unchanged();
 
-        // A Commit delayed until after logical revocation must be refused at
-        // the real owner's final writer boundary, even with an exact Ready.
-        let delayed_permit = NativeInputPermit::new().unwrap();
-        let data = b"must-not-write\n".to_vec();
-        let mut delayed_identity = private_identity(&data);
-        delayed_identity.permit = delayed_permit.reference();
-        let delayed_ready =
-            owner_fixture_block_on(prepare_native_input(&native, &delayed_identity, data)).unwrap();
-        delayed_permit
-            .arm(test_now(), test_now() + 300, test_now())
-            .unwrap();
-        delayed_permit.revoke();
-        if let Ok(value) = owner_fixture_block_on(native.mobile_input_command(
-            OwnerCommand::CommitMobileInput {
-                ready: delayed_ready.clone(),
-            },
-        )) {
-            let outcome = input_outcome(value, &delayed_identity, Some(&delayed_ready)).unwrap();
-            assert_ne!(outcome.phase, OwnerMobileInputPhase::Written);
-        }
-        let prevented = owner_fixture_block_on(cancel_native_input(
-            &native,
-            &delayed_identity,
-            Some(&delayed_ready),
-        ))
-        .unwrap();
-        assert_eq!(prevented.phase, OwnerMobileInputPhase::Prevented);
-        owner_fixture_block_on(settle_native_input(&native, &delayed_ready));
-        assert_unchanged();
-
         let (abandoned_connection, _) = paired_connection(&auth, &project);
         let abandoned = app
             .mobile_input_task(
@@ -1097,7 +1096,9 @@ mod tests {
             .project_key_for_window(&agent_window)
             .unwrap()
             .clone();
-        let (agent_connection, _) = paired_connection(&auth, &agent_project);
+        let agent_auth = agent_app.mobile_host.authorization().clone();
+        agent_auth.write().unwrap().enable();
+        let (agent_connection, _) = paired_connection(&agent_auth, &agent_project);
         let agent_clients = ClientHub::default();
         agent_clients.register_scoped(
             "agent-phone".into(),
@@ -1195,6 +1196,48 @@ mod tests {
         .unwrap();
         agent_app.test_project_owners.clear();
         owner_fixture_block_on(Arc::try_unwrap(agent_owner).ok().unwrap().shutdown());
+        // Shutdown revokes before AppRuntime Drop, even while the Project
+        // owner survives and a prepared input retains the old authority.
+        let (shutdown_connection, _) = paired_connection(&auth, &project);
+        let shutdown_request = ready_request(shutdown_connection.clone());
+        let delayed_permit = shutdown_request.native_permit().unwrap();
+        let data = b"must-not-write\n".to_vec();
+        let mut delayed_identity = private_identity(&data);
+        delayed_identity.permit = delayed_permit.reference();
+        let delayed_ready =
+            owner_fixture_block_on(prepare_native_input(&native, &delayed_identity, data)).unwrap();
+        shutdown_request
+            .authorize_native(&delayed_permit, || Some(project.clone()), test_now)
+            .unwrap();
+        app.stop_all_runtimes();
+        assert!(app.runtimes.is_empty());
+        assert!(delayed_permit.is_revoked());
+        assert!(delayed_permit
+            .arm(test_now(), test_now() + 300, test_now())
+            .is_err());
+        assert_eq!(
+            shutdown_connection.dispatch(&project, 1, test_now, || panic!("closed Host effect")),
+            Err(AuthorizationError::Disabled)
+        );
+        owner_fixture_block_on(native.command(OwnerCommand::Health)).unwrap();
+        if let Ok(value) = owner_fixture_block_on(native.mobile_input_command(
+            OwnerCommand::CommitMobileInput {
+                ready: delayed_ready.clone(),
+            },
+        )) {
+            let outcome = input_outcome(value, &delayed_identity, Some(&delayed_ready)).unwrap();
+            assert_ne!(outcome.phase, OwnerMobileInputPhase::Written);
+        }
+        let prevented = owner_fixture_block_on(cancel_native_input(
+            &native,
+            &delayed_identity,
+            Some(&delayed_ready),
+        ))
+        .unwrap();
+        assert_eq!(prevented.phase, OwnerMobileInputPhase::Prevented);
+        owner_fixture_block_on(settle_native_input(&native, &delayed_ready));
+        assert_unchanged();
+
         owner_fixture_block_on(owner.command(OwnerCommand::Close {
             id,
             incarnation: probe.incarnation,

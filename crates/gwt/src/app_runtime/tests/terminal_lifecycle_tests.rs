@@ -2176,7 +2176,7 @@ fn spawn_work_merge_status_scan_treats_gwt_runtime_writes_as_clean() {
     fs::write(repo.join(".codex/hooks.json"), "{\n  \"hooks\": {}\n}\n").expect("seed hooks");
     run_git(&repo, &["add", "README.md", ".codex/hooks.json"]);
     run_git(&repo, &["commit", "-qm", "seed"]);
-    run_git(&repo, &["branch", "work/gwt-writes"]);
+    run_git(&repo, &["branch", "work/issue-3447"]);
     run_git(
         &repo,
         &["update-ref", "refs/remotes/origin/develop", "develop"],
@@ -2184,19 +2184,24 @@ fn spawn_work_merge_status_scan_treats_gwt_runtime_writes_as_clean() {
     // The materialization rewrite every launch performs: same managed shape,
     // different bytes, so git reports a tracked modification.
     fs::write(repo.join(".codex/hooks.json"), "{ \"hooks\": {} }\n").expect("rewrite hooks");
+    // Issue #3447: the canonical agent work log is bookkeeping too. Leave it
+    // untracked, so a collapsed `?? tasks/` status must be expanded safely.
+    fs::create_dir_all(repo.join("tasks")).expect("create tasks");
+    fs::write(repo.join("tasks/todo.md"), "agent work log\n").expect("write work log");
 
     // Recording the Work event is what writes `.gwt/work/`, exactly as the
     // runtime does in a real worktree.
     gwt_core::workspace_projection::record_workspace_work_event(&repo, {
         let mut event = gwt_core::workspace_projection::WorkEvent::new(
-            gwt_core::workspace_projection::WorkEventKind::Update,
+            gwt_core::workspace_projection::WorkEventKind::Done,
             "work-gwt-writes-row",
             chrono::Utc::now(),
         );
         event.title = Some("gwt writes only".to_string());
+        event.status_category = Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Done);
         event.execution_container = Some(
             gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
-                branch: Some("work/gwt-writes".to_string()),
+                branch: Some("work/issue-3447".to_string()),
                 worktree_path: Some(repo.clone()),
                 pr_number: None,
                 pr_url: None,
@@ -2250,7 +2255,7 @@ fn spawn_work_merge_status_scan_treats_gwt_runtime_writes_as_clean() {
         "gwt's own runtime writes must not make a branch dirty: {dirty_branches:?}"
     );
     assert!(
-        cleanup_ready_branches.contains_key("work/gwt-writes"),
+        cleanup_ready_branches.contains_key("work/issue-3447"),
         "a change-free branch whose only diff is gwt's own writes stays cleanup-ready: \
          {cleanup_ready_branches:?}"
     );
@@ -2265,7 +2270,7 @@ fn spawn_work_merge_status_scan_treats_gwt_runtime_writes_as_clean() {
     let before = gwt_core::process::thread_git_spawn_count();
     assert!(cache
         .readiness
-        .base_target(&repo, "work/gwt-writes", &tips)
+        .base_target(&repo, "work/issue-3447", &tips)
         .unwrap()
         .is_some());
     assert_eq!(gwt_core::process::thread_git_spawn_count() - before, 0);
@@ -2273,6 +2278,17 @@ fn spawn_work_merge_status_scan_treats_gwt_runtime_writes_as_clean() {
     drop(caches);
     runtime.invalidate_project_caches(&repo);
     assert!(!runtime.work_merge_status_cache.borrow().contains_key(&repo));
+
+    // A project may keep production code in the same directory. Ignoring all
+    // of `tasks/` would silently discard it alongside the agent work log.
+    fs::write(repo.join("tasks/worker.rs"), "fn main() {}\n").expect("write production task");
+    assert!(super::super::work_branch_has_dirty_worktree(
+        &super::super::WorkBranchScanTarget {
+            branch: "work/issue-3447".to_string(),
+            worktree_paths: vec![repo],
+            has_merged_pr: false,
+        }
+    ));
 }
 
 #[test]
@@ -2564,7 +2580,7 @@ fn work_merge_scan_unchanged_inputs_spawn_no_git() {
     let control = counts(&control);
     let treatment = counts(&treatment);
     assert_eq!(
-        control.get("git --no-optional-locks status --porcelain=v1"),
+        control.get("git --no-optional-locks status --porcelain=v1 --untracked-files=all"),
         Some(&10)
     );
     assert!(treatment.is_empty());
@@ -3030,6 +3046,8 @@ fn pane_snapshot_never_replays_spinner_redraw_chunks_it_already_contains() {
 
 #[test]
 fn issue_5351_applied_update_drains_are_cleared_before_cross_project_launch_and_scan() {
+    // This verifies successful reconciliation, not elapsed disk I/O time.
+    let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(Instant::now());
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
     for (case, version) in [env!("CARGO_PKG_VERSION"), "0.1.0"].into_iter().enumerate() {
@@ -3596,7 +3614,7 @@ fn resume_workspace_agent_replies_started_ack_to_requesting_client() {
 /// Paused Work marker (FR-350) on a background thread — the works.json
 /// load+save must not run on the UI event loop (it reaches megabytes and the
 /// synchronous write made × clicks stall for seconds). The record itself must
-/// still land; the test polls for it.
+/// still land before the exact stop ACK, without removing the retained window.
 #[test]
 fn stop_window_runtime_records_paused_work_off_the_event_loop() {
     let _env_lock = env_test_lock()
@@ -3620,6 +3638,12 @@ fn stop_window_runtime_records_paused_work_off_the_event_loop() {
     state.project_owner_connection_id = 1;
     state.project_owner_identity = owner.client().identity().cloned();
     let window_id = combined_window_id("tab-1", "agent-1");
+    let before = runtime.tabs[0]
+        .workspace
+        .window("agent-1")
+        .expect("owner-persisted Agent window")
+        .clone();
+    let mut owner_events = owner.subscribe();
     let (spawner, tasks) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = spawner;
     let started = Instant::now();
@@ -3638,11 +3662,118 @@ fn stop_window_runtime_records_paused_work_off_the_event_loop() {
         1,
         "the exact close runs off the event loop"
     );
-    drain_queued_blocking_tasks(&tasks);
+    drain_browser_owner_input(&mut runtime);
     assert!(
         pane.pty.try_wait().unwrap().is_some(),
         "the owner reaps its captured child"
     );
+    let inventory = owner_fixture_block_on(
+        owner.command(gwt::project_runtime::events::OwnerCommand::ListPanes),
+    )
+    .expect("owner mailbox barrier after the exact stop ACK");
+    let retained: gwt::persistence::PersistedWindowRegistry =
+        serde_json::from_value(inventory["canonical_rows"].clone()).unwrap();
+    let retained = retained
+        .windows
+        .iter()
+        .find(|row| row.id == before.id)
+        .expect("STOP retains the canonical window instead of closing it");
+    assert_eq!(retained.status, WindowProcessStatus::Stopped);
+    assert!(!retained.persist);
+    assert_eq!(retained.session_id, before.session_id);
+    assert_eq!(retained.placement, before.placement);
+    let saved =
+        gwt::persistence::load_workspace_state(&gwt::persistence::workspace_state_path(&repo))
+            .expect("durable stopped snapshot");
+    assert!(
+        saved.windows.iter().all(|row| row.id != before.id),
+        "the retained Agent window must not be restored on the next startup"
+    );
+    let observed: Vec<_> = std::iter::from_fn(|| owner_events.try_recv().ok()).collect();
+    assert!(!observed.iter().any(|event| matches!(event,
+        gwt::project_runtime::events::OwnerEvent::WindowRemoved { id, .. } if id == &pane.id
+    )));
+    let final_screen = observed
+        .iter()
+        .find_map(|event| match event {
+            gwt::project_runtime::events::OwnerEvent::Closed {
+                id,
+                incarnation,
+                error: None,
+                final_screen: Some(frame),
+                ..
+            } if id == &pane.id && *incarnation == pane.incarnation => Some(frame.clone()),
+            _ => None,
+        })
+        .expect("the exact owner stop carries its reader-drained final screen");
+    let identity = owner.client().identity().unwrap().clone();
+    let mut projected = Vec::new();
+    for event in observed {
+        projected.extend(runtime.handle_project_owner_event(&context, 1, &identity, event));
+    }
+    assert!(
+        projected.iter().any(|event| match &event.event {
+            BackendEvent::WorkspaceState { workspace } => workspace
+                .tabs
+                .iter()
+                .flat_map(|tab| &tab.workspace.windows)
+                .any(|row| row.id == window_id
+                    && row.status == WindowProcessStatus::Stopped
+                    && !row.persist),
+            _ => false,
+        }),
+        "STOP publishes the retained snapshot marker to existing clients"
+    );
+    let window = runtime.tabs[0]
+        .workspace
+        .window(&before.id)
+        .expect("the GUI keeps the same stopped window after owner publications");
+    assert_eq!(window.status, WindowProcessStatus::Stopped);
+    assert!(!window.persist);
+    assert_eq!(window.session_id, before.session_id);
+    assert_eq!(window.placement, before.placement);
+    assert!(runtime.tabs[0]
+        .workspace
+        .persistable_state()
+        .windows
+        .iter()
+        .all(|row| row.id != before.id));
+    let stopped = &runtime.runtimes[&window_id];
+    assert!(stopped.has_final_snapshot);
+    assert_eq!(stopped.screen, final_screen.screen);
+    assert_eq!(stopped.screen_ansi, final_screen.screen_ansi);
+    assert_eq!(stopped.screen_seq, final_screen.screen_seq);
+    let queued = tasks.lock().unwrap().len();
+    assert!(runtime
+        .update_terminal_grid_events(&window_id, 90, 30)
+        .is_empty());
+    assert_eq!(
+        tasks.lock().unwrap().len(),
+        queued,
+        "a confirmed stopped PTY must not receive another resize command"
+    );
+    assert!(
+        runtime
+            .handle_remote_runtime_command_complete(super::super::RemoteRuntimeCommandCompletion {
+                context: context.clone(),
+                connection_id: 1,
+                identity: identity.clone(),
+                id: window_id.clone(),
+                incarnation: pane.incarnation,
+                kind: super::super::RemoteRuntimeCommandKind::Resize,
+                approval_resolution_started: false,
+                input_command_id: None,
+                result: Err("pane incarnation mismatch".into()),
+            })
+            .is_empty(),
+        "a late resize failure after confirmed exit is no longer actionable"
+    );
+    let session = gwt_agent::Session::load(
+        &gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml")),
+    )
+    .unwrap();
+    assert_eq!(session.status, gwt_agent::AgentStatus::Stopped);
+    assert!(!session.restore_window_on_startup);
     let works = gwt_core::workspace_projection::load_workspace_work_items(&repo)
         .unwrap()
         .expect("owner-persisted Work");
@@ -3655,6 +3786,82 @@ fn stop_window_runtime_records_paused_work_off_the_event_loop() {
                     .any(|event| event.agent_session_id.as_deref() == Some(&session_id))
         }),
         "the exact stopped Session still records its Paused Work"
+    );
+    owner_fixture_block_on(
+        owner.command(gwt::project_runtime::events::OwnerCommand::Close {
+            id: pane.id.clone(),
+            incarnation: pane.incarnation,
+        }),
+    )
+    .expect("explicit Close after STOP removes the exact retained window");
+    let closed = owner_fixture_block_on(
+        owner.command(gwt::project_runtime::events::OwnerCommand::ListPanes),
+    )
+    .unwrap();
+    assert!(closed["canonical_rows"]["windows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|row| row["id"] != before.id));
+    assert!(
+        std::iter::from_fn(|| owner_events.try_recv().ok()).any(|event| matches!(event,
+            gwt::project_runtime::events::OwnerEvent::WindowRemoved { id, incarnation, .. }
+                if id == pane.id && incarnation == pane.incarnation
+        )),
+        "explicit Close publishes removal to every connected GUI"
+    );
+}
+
+#[test]
+fn stop_failure_close_retry_removes_the_exact_owner_window() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    let (owner, pane) = pane_control_tests::control_owner_agent(&repo, "agent-1", 42);
+    let mut events = owner.subscribe();
+    let snapshot = gwt::persistence::workspace_state_path(&repo);
+    fs::remove_file(&snapshot).unwrap();
+    fs::create_dir(&snapshot).unwrap();
+    let stopped = owner_fixture_block_on(owner.command(
+        gwt::project_runtime::events::OwnerCommand::Stop {
+            id: pane.id.clone(),
+            incarnation: pane.incarnation,
+        },
+    ));
+    // Repair the isolated storage before any assertion, so owner drain can
+    // finish even when the deliberately failed STOP has unexpected results.
+    fs::remove_dir(&snapshot).unwrap();
+    assert!(stopped.is_err(), "STOP must retain its failed finalizer");
+    owner_fixture_block_on(
+        owner.command(gwt::project_runtime::events::OwnerCommand::Close {
+            id: pane.id.clone(),
+            incarnation: pane.incarnation,
+        }),
+    )
+    .expect("Close retries the exact failed STOP after storage recovers");
+    let inventory = owner_fixture_block_on(
+        owner.command(gwt::project_runtime::events::OwnerCommand::ListPanes),
+    )
+    .unwrap();
+    assert!(
+        inventory["canonical_rows"]["windows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["id"] != "agent-1"),
+        "Close retry must remove the row instead of repeating STOP retention"
+    );
+    assert!(
+        std::iter::from_fn(|| events.try_recv().ok()).any(|event| matches!(event,
+            gwt::project_runtime::events::OwnerEvent::WindowRemoved { id, incarnation, .. }
+                if id == pane.id && incarnation == pane.incarnation
+        )),
+        "successful Close retry publishes removal to every connected GUI"
     );
 }
 
@@ -4647,9 +4854,10 @@ fn issue6096_target_prefs_churn_is_settled_by_the_admission_decision() {
         prepared.can_revalidate(&input.host_project_roots),
         "an unrelated target prefs rewrite must not force a full re-preparation"
     );
-    let revalidated = input
-        .refresh(&prepared)
-        .expect("the same decision keeps the launch");
+    let mut revalidated = prepared;
+    revalidated
+        .revalidate_if_needed(&input)
+        .expect("Issue #7016: owner admission must retain an unchanged decision after prefs churn");
     assert!(revalidated.is_current(&input.host_project_roots));
 
     // A busy project rewrites prefs faster than a slow host re-evaluates.
@@ -4677,6 +4885,10 @@ fn issue6096_target_prefs_churn_is_settled_by_the_admission_decision() {
         "a PR hold for the launched Issue stays a strict fence"
     );
     assert!(!revalidated.can_revalidate(&input.host_project_roots));
+    assert!(
+        revalidated.revalidate_if_needed(&input).is_err(),
+        "owner admission must still reject a newly added PR hold"
+    );
 
     prefs.open_pr_observations.clear();
     gwt::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();

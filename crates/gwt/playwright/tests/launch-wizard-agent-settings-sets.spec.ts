@@ -1,4 +1,4 @@
-/* Issue #4911 — the Issue Monitor settings form repeats the Agent Settings
+/* Issue #4911 — Issues settings form repeats the Agent Settings
  * block once per launch candidate: `＋` adds a set, `−` removes one, the arrows
  * reorder them, and the order is the launch order. Only the open set carries
  * the editable form; the others show what they will launch with.
@@ -15,7 +15,7 @@ import { expect, test } from "@playwright/test";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
 
 const LAST_SET_REASON =
-  "At least one Agent Settings set is required: Issue Monitor needs an agent to launch.";
+  "At least one Agent Settings set is required: Issues needs an agent to launch.";
 const ALL_AGENTS_USED_REASON = "Every available agent already has an Agent Settings set.";
 
 const CLAUDE_SUMMARY = [
@@ -26,7 +26,7 @@ const CLAUDE_SUMMARY = [
 ];
 
 const SETTINGS_WIZARD = {
-  title: "Configure Issue Monitor",
+  title: "Configure Issues",
   branch_name: "develop",
   selected_branch_name: "develop",
   branch_mode: "use_selected",
@@ -75,7 +75,7 @@ const SETTINGS_WIZARD = {
   },
 };
 
-test.describe("Launch Wizard — Issue Monitor Agent Settings sets", () => {
+test.describe("Launch Wizard — Issues Agent Settings sets", () => {
   test.use({ viewport: { width: 1440, height: 900 } });
 
   test("adds, removes, reorders and opens sets through wizard actions", async ({

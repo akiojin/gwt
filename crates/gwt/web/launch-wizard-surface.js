@@ -240,7 +240,7 @@ export function createLaunchWizardSurface({
         return note;
       }
 
-      // Issue #4079 AC-2: the Issue Monitor Agent Settings form always writes
+      // Issue #4079 AC-2: Issues Agent Settings form always writes
       // candidate 1 of the launch pool, so the backend derives which candidate
       // that replaces and the pool summary the save will produce. Rendering it
       // here is what stops a switch from looking like it did nothing when the
@@ -261,7 +261,7 @@ export function createLaunchWizardSurface({
         return note;
       }
 
-      // Issue #4911: the Issue Monitor settings form repeats the Agent
+      // Issue #4911: Issues settings form repeats the Agent
       // Settings block once per launch candidate, in launch order. The backend
       // owns the list — it holds one editable draft, so only the open set
       // carries the form and the others show what they launch with. Returns
@@ -749,6 +749,10 @@ export function createLaunchWizardSurface({
         renderWorkAdvisoryPanel();
         wizardAdvisoryTimer = setTimeout(() => {
           wizardAdvisoryTimer = 0;
+          if (!isStartWorkLaunch()) {
+            wizardAdvisoryLoading = false;
+            return;
+          }
           wizardAdvisoryRequestSeq += 1;
           wizardAdvisoryLatestRequestId = wizardAdvisoryRequestSeq;
           requestWorkAdvisory({
@@ -757,6 +761,12 @@ export function createLaunchWizardSurface({
             request_id: wizardAdvisoryRequestSeq,
           });
         }, 280);
+      }
+
+      function resyncWorkAdvisory(replayedRequestIds = []) {
+        if (!isStartWorkLaunch() || !wizardAdvisoryLoading || wizardAdvisoryTimer
+          || replayedRequestIds.includes(wizardAdvisoryLatestRequestId)) return;
+        scheduleWorkAdvisory();
       }
 
       // SPEC-2359 US-80 — apply a duplicate-work advisory result. Ignore stale
@@ -1757,7 +1767,7 @@ export function createLaunchWizardSurface({
           panel.appendChild(section);
         }
 
-        // Issue #4911: in the Issue Monitor settings form the sections below
+        // Issue #4911: in Issues settings form the sections below
         // are one Agent Settings set, so they render inside the open set.
         const setupParent = (
           showSetupForms
@@ -1810,8 +1820,9 @@ export function createLaunchWizardSurface({
                     model: value,
                   }),
               );
-            } else if ((launchWizard.model_options || []).length > 0) {
-              appendSelectField(
+            } else if ((launchWizard.model_options || []).length > 0
+              || (launchWizard.selected_agent_id === "codex" && launchWizard.selected_model)) {
+              const modelField = appendSelectField(
                 grid,
                 "Model",
                 launchWizard.model_options || [],
@@ -1822,16 +1833,50 @@ export function createLaunchWizardSurface({
                     model: value,
                   }),
               );
+              if (launchWizard.selected_agent_id === "codex" && launchWizard.selected_model
+                && !(launchWizard.model_options || []).some(option => option.value === launchWizard.selected_model)) {
+                const select = modelField.querySelector("select");
+                const saved = createNode("option", "", `${launchWizard.selected_model} · unavailable`);
+                saved.value = launchWizard.selected_model;
+                saved.disabled = true;
+                select.prepend(saved);
+                select.value = saved.value;
+              }
             }
-            // Issue #3962 AC-5: a saved model that left the agent's catalog
-            // falls back to the default instead of failing the launch. Say so
-            // next to the Model field so the swap is never silent.
+            // Explain restored model status beside the model field.
             if (launchWizard.model_fallback_notice) {
               const fallback = createLaunchField("Model changed", true);
               fallback.appendChild(
                 createNode("div", "launch-note", launchWizard.model_fallback_notice),
               );
               grid.appendChild(fallback);
+            }
+            if (launchWizard.selected_agent_id === "codex" && launchWizard.show_codex_speed) {
+              const speed = appendChoiceOrSelectField(
+                grid,
+                "Speed",
+                [
+                  { value: "off", label: "Off" },
+                  { value: "fast", label: "Fast" },
+                  { value: "ultrafast", label: "Ultrafast" },
+                ],
+                launchWizard.codex_speed || "off",
+                (value) => sendWizardAction({ kind: "set_codex_speed", speed: value }),
+              );
+              speed.appendChild(createNode(
+                "div",
+                "launch-field-help",
+                "Ultrafast requires GPT-6 Astra or GPT-6.1 Sol and Pro $500 or an eligible Enterprise / Edu plan with workspace access. Codex warns and omits unsupported tiers; check its launch output if the requested speed is unavailable.",
+              ));
+            }
+            if (launchWizard.selected_agent_id === "claude" && launchWizard.show_fast_mode) {
+              appendToggleField(
+                grid,
+                "Fast mode",
+                "Use Claude Code Fast mode",
+                launchWizard.fast_mode,
+                (enabled) => sendWizardAction({ kind: "set_fast_mode", enabled }),
+              );
             }
             if (launchWizard.show_reasoning) {
               const reasoningLabel = launchWizard.selected_agent_id === "grok"
@@ -2320,6 +2365,7 @@ export function createLaunchWizardSurface({
         applyLaunchWizardStateEvent,
         applyLaunchWizardOpenErrorEvent,
         applyWorkAdvisoryResultEvent,
+        resyncWorkAdvisory,
         handleLaunchWizardTransportChange,
         handleWizardEscapeKeydown,
         installWizardChrome,

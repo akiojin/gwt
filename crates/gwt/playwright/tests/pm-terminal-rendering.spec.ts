@@ -9,6 +9,31 @@ const liveBase = process.env.GWT_PLAYWRIGHT_BASE_URL;
 const appUrl = liveBase ? new URL(new URL(APP_URL).pathname, liveBase).href : APP_URL;
 const PM = "pm-terminal";
 
+// Issue #7030 AC-5: Codex can downgrade an unadvertised tier without exiting.
+// Preserve its actual explanation through the same terminal protocol as PTY output.
+test("Issue #7030 Ultrafast downgrade warning remains visible", async ({ page }, info) => {
+  const errors: string[] = [];
+  const theme = info.project.name.includes("light") ? "light" : "dark";
+  page.on("pageerror", error => errors.push(error.message));
+  page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+  await page.addInitScript(value => localStorage.setItem("gwt:ui:theme", value), theme);
+  if (!liveBase) await installEmbeddedRoutes(page);
+  await installPmBackend(page);
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await page.goto(appUrl);
+  await page.locator("#op-pm-entry").click();
+  const pm = page.locator(`.workspace-window[data-id="${PM}"]`);
+  await pm.getByRole("button", { name: "Execution log", exact: true }).click();
+  await expectGridConverged(page);
+  const warning = "Configured service tier `ultrafast` is not advertised as supported for model `gpt-6-astra` and will be omitted from requests.";
+  await emit(page, "terminal_output", warning + "\r\n");
+  await expect.poll(async () => (await text(page)).replace(/\n/g, "")).toContain(warning);
+  await expect(pm.locator(".xterm-screen")).toBeVisible();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  await info.attach(`ultrafast-warning-${theme}`, { body: await pm.screenshot(), contentType: "image/png" });
+  expect(errors, "console and page errors").toEqual([]);
+});
+
 test("PM spinner redraw queued before resize keeps its original wrap grid", async ({ page }, info) => {
   const errors: string[] = [];
   const theme = info.project.name.includes("light") ? "light" : "dark";
@@ -47,6 +72,201 @@ test("PM spinner redraw queued before resize keeps its original wrap grid", asyn
     await info.attach("terminal buffer", { body: await text(page), contentType: "text/plain" });
   }
   expect(errors).toEqual([]);
+});
+
+// SPEC #5016 AC-HS1 / AC-HS2: the waiting-decision count is derived once.
+// After a decision is answered in Decide, Home asks for the remaining one only.
+test("Home and Decide read one waiting-decision count after an answer", async ({ page }, info) => {
+  const errors: string[] = [];
+  const theme = info.project.name.includes("light") ? "light" : "dark";
+  page.on("pageerror", error => errors.push(error.message));
+  page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+  await page.addInitScript(value => localStorage.setItem("gwt:ui:theme", value), theme);
+  await page.addInitScript(() => {
+    const decision = (id: string, question: string) => ({ id, kind: "decision", created_at: "2026-11-12T00:00:00Z",
+      structured: { summary: { result: question, impact: null, owner: "PM",
+        decision: { question, recommendation: "Retry", reason: "fixture", options: ["Retry", "Wait"] } }, details: "", refs: [] } });
+    (window as any).__pmFixtureReports = [decision("hs1-a", "Retry the launch?"), decision("hs1-b", "Ship the fix now?")];
+    (window as any).__pmFixtureCurrent = { request_tasks: { state: "ready", revision: 1, total: 0, pending_intake: 0, tasks: [] } };
+  });
+  if (!liveBase) await installEmbeddedRoutes(page);
+  await installPmBackend(page);
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await page.goto(appUrl);
+  await page.locator("#op-pm-entry").click();
+  const pm = page.locator(`.workspace-window[data-id="${PM}"]`);
+  await pm.getByRole("button", { name: "Home", exact: true }).click();
+  await expect(pm.locator(".task-home")).toContainText("2 decisions need your attention");
+  // SPEC #5016 HSK: the status strip reads the same waiting set from the shared model.
+  const strip = page.locator("#op-strip-issue-monitor");
+  await expect(strip).toHaveAttribute("title", /Awaiting attention 2 \| PM decisions 2/);
+  await pm.getByRole("button", { name: "Decide", exact: true }).click();
+  await pm.locator(".task-decisions__card").first().getByRole("button", { name: "1. Retry" }).click();
+  const send = await page.evaluate(() => (window as any).__pmTerminalFixture.sent.find((packet: any) => packet.kind === "pane_send_input"));
+  expect(send, "the answer travels the chat reply path").toBeTruthy();
+  await page.evaluate(requestId => (window as any).__pmTerminalFixture.emit({ kind: "pane_send_result", id: "pm-terminal",
+    window_id: "pm-terminal", request_id: requestId, ok: true, error: null }), send.request_id);
+  await expect(pm.locator(".task-decisions__card").first()).toContainText("Answer sent: Retry");
+  await info.attach(`hs1-decide-${theme}`, { body: await pm.screenshot(), contentType: "image/png" });
+  await pm.getByRole("button", { name: "Home", exact: true }).click();
+  await expect(pm.locator(".task-home")).toContainText("1 decision needs your attention");
+  await expect(strip).toHaveAttribute("title", /Awaiting attention 1 \| PM decisions 1/);
+  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  await info.attach(`hs1-home-${theme}`, { body: await pm.screenshot(), contentType: "image/png" });
+  expect(errors, "console and page errors").toEqual([]);
+});
+
+// SPEC #5016 HSV: unresolved reviews from the PM current facts join the
+// same awaiting-attention value the status strip reads.
+test("status strip counts unresolved reviews from the PM current facts", async ({ page }, info) => {
+  const errors: string[] = [];
+  const theme = info.project.name.includes("light") ? "light" : "dark";
+  page.on("pageerror", error => errors.push(error.message));
+  page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+  await page.addInitScript(value => localStorage.setItem("gwt:ui:theme", value), theme);
+  await page.addInitScript(() => {
+    (window as any).__pmFixtureCurrent = {
+      facts: { source: "daemon", active_windows: [], review_attention: [
+        { pr_number: 801, issue_numbers: [71], reason: "Changes requested" },
+        { pr_number: 803, issue_numbers: [], reason: "2 unresolved review threads" },
+      ] },
+      request_tasks: { state: "ready", revision: 1, total: 0, pending_intake: 0, tasks: [] },
+    };
+  });
+  if (!liveBase) await installEmbeddedRoutes(page);
+  await installPmBackend(page);
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await page.goto(appUrl);
+  await page.locator("#op-pm-entry").click();
+  const pm = page.locator(`.workspace-window[data-id="${PM}"]`);
+  await expect(pm).toBeVisible();
+  const strip = page.locator("#op-strip-issue-monitor");
+  await expect(strip).toHaveAttribute("title", /Awaiting attention 2 \| Unresolved reviews 2/);
+  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  await info.attach(`hsv-strip-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
+  expect(errors, "console and page errors").toEqual([]);
+});
+
+// SPEC #5016 HSF: the PM Live facts needs_human line shows the shared value
+// the status strip reads. A stopped (Held) Issue is not a pending decision,
+// even though the raw facts list still names it.
+test("PM Live facts and the status strip read one needs_human value", async ({ page }, info) => {
+  const errors: string[] = [];
+  const theme = info.project.name.includes("light") ? "light" : "dark";
+  page.on("pageerror", error => errors.push(error.message));
+  page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+  await page.addInitScript(value => localStorage.setItem("gwt:ui:theme", value), theme);
+  await page.addInitScript(() => {
+    (window as any).__pmFixtureCurrent = {
+      facts: { source: "daemon", active_windows: [], needs_human_count: 2 },
+      request_tasks: { state: "ready", revision: 1, total: 0, pending_intake: 0, tasks: [] },
+    };
+  });
+  if (!liveBase) await installEmbeddedRoutes(page);
+  await installPmBackend(page);
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await page.goto(appUrl);
+  await page.locator("#op-pm-entry").click();
+  const pm = page.locator(`.workspace-window[data-id="${PM}"]`);
+  await expect(pm).toBeVisible();
+  await page.evaluate(() => (window as any).__pmTerminalFixture.emit({ kind: "issue_monitor_inbox", items: [
+    { issue: { number: 91, title: "Decide the scope", state: "open", labels: [] }, state: "needs_human", error_message: "Scope decision" },
+    { issue: { number: 92, title: "Held work", state: "open", labels: [] }, state: "needs_human", error_message: "stopped: held by PM" },
+  ] }));
+  await expect(page.locator("#op-strip-issue-monitor")).toHaveAttribute("title", /Needs human 1/);
+  await expect(pm.locator('[aria-label="Live facts"]')).toContainText("needs_human: 1");
+  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  await info.attach(`hsf-live-facts-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
+  expect(errors, "console and page errors").toEqual([]);
+});
+
+// SPEC #6476 T-005pm (AC-1): on a phone the PM view toolbar stayed one 625px
+// row in a 380px window, so Log / Reports / Execution log sat off screen, and
+// the PM buttons, the report filter and the expanders were 18-31px tall.
+test.describe("PM touch targets", () => {
+  test.use({ hasTouch: true });
+  test("PM views and their controls are reachable 44px tap targets on a phone", async ({ page }, info) => {
+    const errors: string[] = [];
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    page.on("pageerror", error => errors.push(error.message));
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    await page.addInitScript(value => localStorage.setItem("gwt:ui:theme", value), theme);
+    await page.addInitScript(() => {
+      (window as any).__pmFixtureReports = [{ id: "t005pm-a", kind: "decision", created_at: "2026-11-14T00:00:00Z",
+        structured: { summary: { result: "Retry the launch?", impact: null, owner: "PM",
+          decision: { question: "Retry the launch?", recommendation: "Retry", reason: "fixture", options: ["Retry", "Wait"] } },
+          details: "The last launch timed out.", refs: [] } }];
+      (window as any).__pmFixtureCurrent = { request_tasks: { state: "ready", revision: 1, total: 1, pending_intake: 0, tasks: [{
+        key: "t005pm-task", title: "Ship the fix", status: "in_progress", assignee: "agent-one", next_action: "Review the PR",
+        criteria_preview: { purpose: "Fix the launch", completion_conditions: ["Tests pass"], completion_condition_total: 1 } }] } };
+    });
+    if (!liveBase) await installEmbeddedRoutes(page);
+    await installPmBackend(page);
+    await page.setViewportSize({ width: 1920, height: 1080 });
+    await page.goto(appUrl);
+    await page.locator("#op-pm-entry").click();
+    const pm = page.locator(`.workspace-window[data-id="${PM}"] .pm-chat`);
+    const views = pm.locator(".pm-chat__toolbar[role='group'] button");
+    await expect(views).toHaveCount(8);
+    const names = await views.allTextContents();
+    const view = (name: string) => views.filter({ hasText: new RegExp(`^${name}$`) });
+    const controls = () => pm.evaluate(root => [...root.querySelectorAll("button, select, summary")]
+      .filter(node => (node as HTMLElement).offsetParent !== null)
+      .map(node => {
+        const box = node.getBoundingClientRect();
+        return { name: node.getAttribute("aria-label") || node.textContent!.trim().slice(0, 30), left: box.left, right: box.right,
+          width: box.width, height: box.height, minHeight: getComputedStyle(node).minHeight };
+      }));
+    // The fixture data renders the controls that only exist with PM data.
+    await view("Decide").click();
+    await expect(pm.getByRole("button", { name: "1. Retry" })).toBeVisible();
+    await view("Tasks").click();
+    await expect(pm.locator(".pm-chat__task-criteria > summary")).toBeVisible();
+    await expect(pm.getByRole("button", { name: "View task details" })).toBeVisible();
+    await view("Reports").click();
+    await expect(pm.locator(".pm-chat__transcript summary").first()).toBeVisible();
+    const minHeights = async () => {
+      const seen: string[] = [];
+      for (const name of names) {
+        await view(name).click();
+        seen.push(...(await controls()).map(control => `${name}:${control.name}:${control.minHeight}`));
+      }
+      return seen;
+    };
+    const desktop = await minHeights();
+    expect(desktop.join("\n")).not.toContain(":44px");
+    await page.setViewportSize({ width: 601, height: 900 });
+    await expect.poll(minHeights, { message: "601px keeps the desktop control sizes" }).toEqual(desktop);
+    for (const width of [320, 390]) {
+      await page.setViewportSize({ width, height: 844 });
+      const viewport = await page.evaluate(() => document.documentElement.clientWidth);
+      for (const name of names) {
+        await view(name).tap();
+        await expect(view(name), `${name} opens at ${width}px`).toHaveAttribute("aria-pressed", "true");
+        for (const control of await controls()) {
+          expect(control.height, `${name} ${control.name} height at ${width}px`).toBeGreaterThanOrEqual(44);
+          expect(control.width, `${name} ${control.name} width at ${width}px`).toBeGreaterThanOrEqual(44);
+          expect(control.left, `${name} ${control.name} is on screen at ${width}px`).toBeGreaterThanOrEqual(0);
+          expect(control.right, `${name} ${control.name} is on screen at ${width}px`).toBeLessThanOrEqual(viewport);
+        }
+        expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth),
+          `${name} does not scroll sideways at ${width}px`).toBe(true);
+      }
+      await view("Tasks").tap();
+      const criteria = pm.locator(".pm-chat__task-criteria");
+      const before = await criteria.evaluate(node => (node as HTMLDetailsElement).open);
+      const summary = (await criteria.locator("> summary").boundingBox())!;
+      await criteria.locator("> summary").tap({ position: { x: summary.width / 2, y: summary.height - 4 } });
+      await expect.poll(() => criteria.evaluate(node => (node as HTMLDetailsElement).open), "the enlarged summary area toggles").toBe(!before);
+      await view("Home").tap();
+      await pm.locator(".task-home__primary", { hasText: "Create task" }).tap();
+      await expect(view("Chat"), "Create task opens the PM chat").toHaveAttribute("aria-pressed", "true");
+      await expect(pm.locator(".pm-chat__draft")).toBeFocused();
+      await info.attach(`t005pm-${width}-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
+    }
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+    expect(errors, "console and page errors").toEqual([]);
+  });
 });
 
 // A deterministic PTY-protocol fixture isolates browser parsing, layout and input
@@ -403,7 +623,7 @@ async function installPmBackend(page: Pick<Page, "addInitScript">): Promise<void
       send(raw: string) {
         const packet = JSON.parse(raw);
         fixture.sent.push(packet);
-        if (packet.kind === "load_pm_reports") this.emit({ kind: "pm_reports", id: packet.id, session_id: "pm-terminal-session", request_id: packet.request_id, snapshot: packet.version === null, version: { epoch: "fixture", revision: 1 }, reports: [], current: null });
+        if (packet.kind === "load_pm_reports") this.emit({ kind: "pm_reports", id: packet.id, session_id: "pm-terminal-session", request_id: packet.request_id, snapshot: packet.version === null, version: { epoch: "fixture", revision: 1 }, reports: (window as any).__pmFixtureReports ?? [], current: (window as any).__pmFixtureCurrent ?? null });
       }
       emit(packet: unknown) { this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(packet) })); }
       close() { this.readyState = 3; this.dispatchEvent(new CloseEvent("close")); }
@@ -449,6 +669,11 @@ test("real PTY receives one input and converges with the visible terminal grid",
     try {
       await page.setViewportSize({ width: 1920, height: 1080 });
       await gotoLiveGwt(page, liveBase!, { enableTestBridge: true });
+      await expect.poll(async () => {
+        await sendLiveGwtEvent(page, { kind: "get_project_execution_status" });
+        return page.evaluate(() => (window as any).__gwtPlaywrightMessages
+          .findLast((entry: any) => entry.payload.kind === "project_execution_status")?.payload.status);
+      }, { timeout: 60_000 }).toMatchObject({ view_state: "open", degraded: false });
       const windows = () => page.evaluate(() => {
         const state = (window as any).__gwtPlaywrightMessages.findLast((entry: any) => entry.payload.kind === "workspace_state");
         return state?.payload.workspace.tabs.flatMap((tab: any) => tab.workspace.windows) || [];
@@ -457,10 +682,14 @@ test("real PTY receives one input and converges with the visible terminal grid",
       await sendLiveGwtEvent(page, { kind: "create_window", preset: "shell" });
       await expect.poll(async () => (await windows()).filter((entry: any) => entry.preset === "shell" && !before.has(entry.id))).toHaveLength(1);
       id = (await windows()).find((entry: any) => entry.preset === "shell" && !before.has(entry.id)).id;
+      await expect.poll(() => page.evaluate(id => (window as any).__gwtPlaywrightMessages
+        .findLast((entry: any) => entry.payload.kind === "terminal_status" && entry.payload.id === id)?.payload, id),
+      { timeout: 60_000 }).toMatchObject({ status: "running" });
       const showShell = async () => {
-        const index = (await windows()).findIndex((entry: any) => entry.id === id);
-        await page.locator("#window-list-button").click();
-        await page.locator("#window-list-panel .window-list-row").nth(index).click();
+        await sendLiveGwtEvent(page, { kind: "focus_window", id });
+        await expect.poll(async () => (await windows()).reduce((top: any, entry: any) =>
+          !top || (entry.z_index || 0) > (top.z_index || 0) ? entry : top, null)?.id).toBe(id);
+        await page.reload();
         await expect(page.locator(`.split-pane .workspace-window[data-id="${id}"]`)).toBeVisible();
       };
       await showShell();
@@ -487,7 +716,7 @@ test("real PTY receives one input and converges with the visible terminal grid",
       await page.getByRole("button", { name: "Board", exact: true }).click();
       await page.setViewportSize({ width: 1280, height: 900 });
       await showShell();
-      await grid("hidden-resize-reveal");
+      await grid("hidden-resize-reconnect");
       await page.locator("#split-view-button").click();
       await grid("split");
       await page.locator("#split-view-button").click();
@@ -495,14 +724,15 @@ test("real PTY receives one input and converges with the visible terminal grid",
       await shell.locator(".xterm-helper-textarea").focus();
       await page.keyboard.type("/model");
       await sendLiveGwtEvent(page, { kind: "terminal_input", id, data: "\x04" });
-      await expect.poll(() => outputs.get(id!) || "").toContain("PTY_INPUT_1:2f6d6f64656c\r\n");
+      // Unix PTYs can apply ONLCR to the probe's CRLF; ConPTY preserves it.
+      await expect.poll(() => outputs.get(id!) || "").toMatch(/PTY_INPUT_1:2f6d6f64656c\r+\n/);
       await shell.locator(".xterm-helper-textarea").evaluate(node => {
         const clipboard = new DataTransfer();
         clipboard.setData("text/plain", "/model");
         node.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: clipboard }));
       });
       await sendLiveGwtEvent(page, { kind: "terminal_input", id, data: "\x04" });
-      await expect.poll(() => outputs.get(id!) || "").toContain("PTY_INPUT_2:2f6d6f64656c\r\n");
+      await expect.poll(() => outputs.get(id!) || "").toMatch(/PTY_INPUT_2:2f6d6f64656c\r+\n/);
       await info.attach("real PTY observations", { body: JSON.stringify({ theme, observations, inputHex: "2f6d6f64656c", errors }), contentType: "application/json" });
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
       expect(errors, "zero console/page errors").toEqual([]);

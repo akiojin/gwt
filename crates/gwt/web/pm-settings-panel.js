@@ -61,6 +61,7 @@ function emptyStatus() {
     configuredAgentId: "",
     configuredModel: "",
     configuredReasoning: "",
+    configuredSpeed: "",
     loopIntervalSecs: String(DEFAULT_LOOP_INTERVAL_SECS),
     runningAgentId: "",
     runningModel: "",
@@ -79,6 +80,9 @@ function normalizeStatus(status) {
     configuredAgentId: String(status?.configured_agent_id ?? ""),
     configuredModel: String(status?.configured_model ?? ""),
     configuredReasoning: String(status?.configured_reasoning ?? ""),
+    configuredSpeed: status?.configured_agent_id === "codex"
+      ? String(status?.configured_codex_speed ?? "")
+      : status?.configured_fast_mode == null ? "" : status.configured_fast_mode ? "fast" : "off",
     loopIntervalSecs: normalizedLoopInterval(
       status?.loop_interval_secs_decimal ?? status?.loop_interval_secs,
     ),
@@ -172,7 +176,7 @@ export function createPmSettingsPanel({ document, send, confirm, scheduleFrame, 
     view.pauseToggle.textContent = state.paused ? "Resume" : "Pause";
     view.pauseToggle.setAttribute("aria-pressed", String(state.paused));
     setControlExplanation(view.autonomyStatus,
-      `${view.autonomyStatus.textContent}. Pause autonomous coordination while keeping the Project Manager available. Issue Monitor stays unchanged.`, "pm-autonomy-status");
+      `${view.autonomyStatus.textContent}. Pause autonomous coordination while keeping the Project Manager available. Issues stays unchanged.`, "pm-autonomy-status");
 
     view.pendingChip.hidden = !(
       state.isRunning
@@ -180,8 +184,8 @@ export function createPmSettingsPanel({ document, send, confirm, scheduleFrame, 
       && state.configuredAgentId !== ""
       && (
         state.configuredAgentId !== state.runningAgentId
-        || state.configuredModel !== state.runningModel
-        || state.configuredReasoning !== state.runningReasoning
+        || (state.configuredModel !== "" && state.configuredModel !== state.runningModel)
+        || (state.configuredReasoning !== "" && state.configuredReasoning !== state.runningReasoning)
       )
     );
 
@@ -213,11 +217,22 @@ export function createPmSettingsPanel({ document, send, confirm, scheduleFrame, 
       view.effortSelect.appendChild(option);
     }
     view.intervalInput.value = String(state.loopIntervalSecs);
+    view.speedField.hidden = !["codex", "claude"].includes(state.configuredAgentId);
+    clear(view.speedSelect);
+    const speeds = state.configuredAgentId === "codex" ? ["", "off", "fast", "ultrafast"] : ["", "off", "fast"];
+    for (const value of speeds) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = value === "" ? "Agent Settings default" : value === "ultrafast" ? "Ultrafast" : value === "fast" ? "Fast" : "Off";
+      if (value === state.configuredSpeed) option.selected = true;
+      view.speedSelect.appendChild(option);
+    }
     view.autoStartInput.checked = state.autoStart;
     for (const control of [
       view.agentSelect,
       view.modelInput,
       view.effortSelect,
+      view.speedSelect,
       view.intervalInput,
       view.autoStartInput,
       view.pauseToggle,
@@ -249,11 +264,14 @@ export function createPmSettingsPanel({ document, send, confirm, scheduleFrame, 
     if (!agentId) return;
     const configuredModel = view.modelInput.value.trim();
     const reasoning = view.effortSelect.value.trim();
+    const speed = agentId === state.configuredAgentId ? view.speedSelect.value : "";
     dispatch({
       kind: "set_pm_launch_profile",
       agent_id: agentId,
       model: configuredModel === "" ? null : configuredModel,
       reasoning: reasoning === "" ? null : reasoning,
+      ...(speed !== "" && agentId === "codex" ? { codex_speed: speed } : {}),
+      ...(speed !== "" && agentId === "claude" ? { fast_mode: speed === "fast" } : {}),
     });
   }
 
@@ -314,7 +332,7 @@ export function createPmSettingsPanel({ document, send, confirm, scheduleFrame, 
     pauseToggle.dataset.role = "pm-pause-toggle";
     section.appendChild(pauseToggle);
     section.appendChild(el("p", "settings-help",
-      "Pause autonomous coordination while keeping the Project Manager available. Issue Monitor stays unchanged."));
+      "Pause autonomous coordination while keeping the Project Manager available. Issues stays unchanged."));
 
     const pendingChip = el(
       "p",
@@ -347,6 +365,12 @@ export function createPmSettingsPanel({ document, send, confirm, scheduleFrame, 
     effortSelect.dataset.role = "pm-effort-select";
     effortField.appendChild(effortSelect);
     section.appendChild(effortField);
+    const speedField = el("label", "settings-field");
+    speedField.appendChild(el("span", "settings-label", "Speed"));
+    const speedSelect = el("select", "settings-select");
+    speedSelect.dataset.role = "pm-speed-select";
+    speedField.appendChild(speedSelect);
+    section.appendChild(speedField);
     section.appendChild(el("p", "settings-help", PROFILE_HELP));
 
     const intervalField = el("label", "settings-field");
@@ -393,11 +417,12 @@ export function createPmSettingsPanel({ document, send, confirm, scheduleFrame, 
 
     for (const [control, text, key] of [
       [runningLine, "The agent, model and effort of the current Project Manager session. Saved profile changes apply after restart.", "pm-running-as"],
-      [pauseToggle, "Pause autonomous coordination while keeping the Project Manager available. Issue Monitor stays unchanged.", "pm-pause-toggle"],
+      [pauseToggle, "Pause autonomous coordination while keeping the Project Manager available. Issues stays unchanged.", "pm-pause-toggle"],
       [pendingChip, PROFILE_HELP, "pm-pending-chip"],
       [agentSelect, PROFILE_HELP, "pm-agent-select"],
       [modelInput, PROFILE_HELP, "pm-model-input"],
       [effortSelect, PROFILE_HELP, "pm-effort-select"],
+      [speedSelect, "Ultrafast requires Pro $500 or an eligible Enterprise/Edu workspace and a supported Codex model. Provider warnings explain unavailable service tiers. Changes apply after restart.", "pm-speed-select"],
       [intervalInput, LOOP_INTERVAL_HELP, "pm-loop-interval"],
       [autoStartInput, AUTO_START_HELP, "pm-auto-start"],
       [restart, RESTART_CONFIRM, "pm-restart"],
@@ -410,6 +435,8 @@ export function createPmSettingsPanel({ document, send, confirm, scheduleFrame, 
       autoStartInput,
       autonomyStatus,
       effortSelect,
+      speedField,
+      speedSelect,
       explanations,
       intervalError,
       intervalInput,
@@ -424,6 +451,7 @@ export function createPmSettingsPanel({ document, send, confirm, scheduleFrame, 
     agentSelect.addEventListener("change", () => sendProfile(view));
     modelInput.addEventListener("change", () => sendProfile(view));
     effortSelect.addEventListener("change", () => sendProfile(view));
+    speedSelect.addEventListener("change", () => sendProfile(view));
     intervalInput.addEventListener("change", () => sendLoopInterval(view));
     autoStartInput.addEventListener("change", () => {
       if (!model.read().available) return;

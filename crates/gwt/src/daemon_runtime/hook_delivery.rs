@@ -48,6 +48,21 @@ pub(super) fn deliver(
     event: &RuntimeHookEvent,
     mut send: impl FnMut(&RuntimeHookEvent) -> Result<(), String>,
 ) -> Result<(), String> {
+    let mut send = |notice: &RuntimeHookEvent| {
+        // Journal preparation uses the aggregate hook deadline. Start the
+        // missing-GUI transport cap only after pending state is published;
+        // entering a nested deadline still preserves any shorter aggregate.
+        // Scope it to this runtime-state invocation, not a later Forward replay.
+        let _live_deadline = (event.kind == RuntimeHookEventKind::RuntimeState
+            && event.source_event.as_deref() == Some("UserPromptSubmit"))
+        .then(|| {
+            gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+                gwt_core::operation_deadline::now()
+                    + super::USER_PROMPT_SUBMIT_HOOK_LIVE_BUDGET.resolve(),
+            )
+        });
+        send(notice)
+    };
     // An inherited environment must never journal a different Session's hook.
     if event.gwt_session_id.as_deref() != runtime_path.file_stem().and_then(|id| id.to_str()) {
         return send(event);
@@ -64,26 +79,33 @@ fn deliver_journaled(
     event: &RuntimeHookEvent,
     send: &mut impl FnMut(&RuntimeHookEvent) -> Result<(), String>,
 ) -> io::Result<Result<(), String>> {
-    fs::create_dir_all(path.parent().expect("delivery path has a parent"))?;
-    let lock = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(path.with_extension("lock"))?;
+    let lock = super::profile_hook_live_phase(event, "hook-live/journal-prepare", || {
+        fs::create_dir_all(path.parent().expect("delivery path has a parent"))?;
+        fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(path.with_extension("lock"))
+    })?;
     // Serialize this Session only, including its bounded POST, so an older
     // attempt cannot clear or replay state after a newer hook has delivered it.
-    fs2::FileExt::lock_exclusive(&lock)?;
-    let mut state: DeliveryState = match fs::read(path) {
-        Ok(bytes) => serde_json::from_slice(&bytes).map_err(io::Error::other)?,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => DeliveryState::default(),
-        Err(error) => return Err(error),
-    };
+    super::profile_hook_live_phase(event, "hook-live/journal-lock", || {
+        gwt_core::operation_deadline::lock_exclusive(&lock)
+    })?;
+    let mut state: DeliveryState =
+        super::profile_hook_live_phase(event, "hook-live/journal-read", || match fs::read(path) {
+            Ok(bytes) => serde_json::from_slice(&bytes).map_err(io::Error::other),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(DeliveryState::default()),
+            Err(error) => Err(error),
+        })?;
     if event.kind == RuntimeHookEventKind::RuntimeState {
         state.pending = Some(event.clone());
         state.health.pending_runtime_state = true;
         // Publish before attempting the POST; process exit cannot discard it.
-        state.save(path)?;
+        super::profile_hook_live_phase(event, "hook-live/journal-pending-save", || {
+            state.save(path)
+        })?;
     }
     let mut result = Ok(());
     if let Some(pending) = state.pending.as_ref() {
@@ -98,7 +120,7 @@ fn deliver_journaled(
         state.observe(&result);
     }
     state.health.pending_runtime_state = state.pending.is_some();
-    state.save(path)?;
+    super::profile_hook_live_phase(event, "hook-live/journal-health-save", || state.save(path))?;
     Ok(result)
 }
 
@@ -134,6 +156,8 @@ impl DeliveryState {
 mod tests {
     use super::*;
     use crate::daemon_runtime::RuntimeHookEventKind;
+    use gwt_core::operation_deadline::{self, ScopedOperationClock, ScopedOperationDeadline};
+    use std::time::{Duration, Instant};
 
     fn event(kind: RuntimeHookEventKind, status: Option<&str>) -> RuntimeHookEvent {
         RuntimeHookEvent {
@@ -141,6 +165,7 @@ mod tests {
             source_event: Some("PreToolUse".into()),
             gwt_session_id: Some("session-test".into()),
             continuation_readiness_nonce: None,
+            native_prompt_id: None,
             agent_session_id: Some("provider-session".into()),
             project_root: Some("/project".into()),
             branch: Some("work/test".into()),
@@ -152,8 +177,73 @@ mod tests {
     }
 
     #[test]
-    fn issue_4905_later_forward_recovers_failed_runtime_state_and_health() {
+    fn user_prompt_submit_transport_budget_begins_after_pending_publication() {
         let home = tempfile::tempdir().unwrap();
+        let runtime_path = home.path().join("runtime/123/session-test.json");
+        let journal = delivery_path(&runtime_path).unwrap();
+        let mut runtime = event(RuntimeHookEventKind::RuntimeState, Some("Running"));
+        runtime.source_event = Some("UserPromptSubmit".into());
+        let now = Instant::now();
+        let _clock = ScopedOperationClock::set(now);
+        let aggregate = now + Duration::from_secs(1);
+        let _aggregate = ScopedOperationDeadline::enter(aggregate);
+        let budget = &super::super::USER_PROMPT_SUBMIT_HOOK_LIVE_BUDGET;
+        let live_budget = budget.default_value();
+        let _live = gwt_core::deadline_budget::ScopedDeadlineBudget::pin(budget, live_budget);
+
+        deliver(&runtime_path, &runtime, |sent| {
+            let saved: DeliveryState =
+                serde_json::from_slice(&fs::read(&journal).unwrap()).unwrap();
+            assert_eq!(saved.pending.as_ref(), Some(sent));
+            assert_eq!(operation_deadline::current(), Some(now + live_budget));
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(operation_deadline::current(), Some(aggregate));
+
+        // A shorter aggregate remainder is never replenished by the live cap.
+        let aggregate = now + live_budget / 2;
+        let _shorter_aggregate = ScopedOperationDeadline::enter(aggregate);
+        deliver(&runtime_path, &runtime, |_| {
+            assert_eq!(operation_deadline::current(), Some(aggregate));
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn expired_aggregate_refuses_journal_delivery_without_losing_pending_state() {
+        let home = tempfile::tempdir().unwrap();
+        let runtime_path = home.path().join("runtime/123/session-test.json");
+        let runtime = event(RuntimeHookEventKind::RuntimeState, Some("Running"));
+        assert!(deliver(&runtime_path, &runtime, |_| Err("offline".into())).is_err());
+        let journal = delivery_path(&runtime_path).unwrap();
+        let before = fs::read(&journal).unwrap();
+        let deadline = Instant::now();
+        let _clock = ScopedOperationClock::set(deadline);
+        let _aggregate = ScopedOperationDeadline::enter(deadline);
+        let mut attempts = 0;
+        let result = deliver(
+            &runtime_path,
+            &event(RuntimeHookEventKind::Forward, None),
+            |_| {
+                attempts += 1;
+                Ok(())
+            },
+        );
+        assert!(result.unwrap_err().contains("deadline expired"));
+        assert_eq!(attempts, 0);
+        assert_eq!(fs::read(journal).unwrap(), before);
+    }
+
+    #[test]
+    fn issue_4905_later_forward_recovers_failed_runtime_state_and_health() {
+        let _env = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let profile = home.path().join("hook-profile.jsonl");
+        let _profile = gwt_core::test_support::ScopedEnvVar::set("GWT_HOOK_PROFILE_PATH", &profile);
         let path = home.path().join("runtime/123/session-test.json");
         let runtime = event(RuntimeHookEventKind::RuntimeState, Some("Running"));
         for _ in 0..2 {
@@ -177,6 +267,22 @@ mod tests {
         assert_eq!(health.consecutive_failures, 0);
         assert!(!health.pending_runtime_state);
         assert!(health.last_success_at.is_some());
+        assert!(
+            profile.exists(),
+            "journal stages must be observable without a live Host"
+        );
+        let records: Vec<serde_json::Value> = fs::read_to_string(profile)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        for stage in ["prepare", "lock", "read", "pending-save", "health-save"] {
+            let name = format!("hook-live/journal-{stage}");
+            assert!(
+                records.iter().any(|record| record["handler"] == name),
+                "missing {name}"
+            );
+        }
     }
 
     #[test]

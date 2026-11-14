@@ -1,6 +1,6 @@
 /* SPEC-3671 — Issue window as the primary surface, amended by Issue #3884.
  *
- * An Issue Monitor auto-launch must not change the selected surface. It becomes an
+ * An Issues auto-launch must not change the selected surface. It becomes an
  * `issue_preview` placement that the Issue window mirrors read-only in its right
  * pane, and an explicit Windowize opens its live terminal in Agents. Since Issue
  * #3884 that placement is also visible without selection as a read-only status
@@ -962,6 +962,14 @@ async function installIssuePreviewBackend(page, { agentStatus = "running", issue
           window.__knowledgeLoadMessages.push(message);
           if (message.kind === "frontend_ready") {
             this.emit(workspaceState());
+            // SPEC #5016 AC-HS1: like the backend, publish the agent aggregate
+            // that the status strip renders.
+            const agentStatuses = windows.filter((entry) => entry.id.includes("agent")).map((entry) => entry.status);
+            const count = (...states) => agentStatuses.filter((status) => states.includes(status)).length;
+            this.emit({ kind: "project_agent_aggregate", aggregate: {
+              running_count: count("running", "starting"), block_count: count("waiting", "stopped", "interrupted", "error"),
+              idle_count: count("idle"), error_count: count("error"), unread: false, revision: 1,
+            } });
             this.emit({
               kind: "active_work_projection",
               projection: localActivityProjection(),

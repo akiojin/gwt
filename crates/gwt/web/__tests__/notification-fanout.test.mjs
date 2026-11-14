@@ -16,7 +16,8 @@ import { parseHTML } from "linkedom";
 
 import { DEFAULT_COALESCE_KINDS } from "../socket-receive-dispatcher.js";
 import { createUiStateStore } from "../ui-state-store.js";
-import { notificationForTransition } from "../agent-completion-notifications.js";
+import { windowCommandErrorPresentation } from "../window-command-error.js";
+import { notificationForTransition, monitorDiagnostic } from "../agent-completion-notifications.js";
 import { createNotificationCenter } from "../notification-center.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -32,15 +33,19 @@ test("window command failures notify without publishing a lifecycle transition",
   const initialization = appSource.match(/const windowCommandErrorModel = createUiStateStore\(null\);[\s\S]*?\n {6}\}\);/)?.[0];
   assert.ok(initialization, "operation errors need their own UI model");
   const records = [], alerts = [];
-  const receive = new Function("createUiStateStore", "notificationCenter", "alertsToasts", `
+  const receive = new Function("createUiStateStore", "notificationCenter", "alertsToasts", "windowCommandErrorPresentation", `
     ${initialization}
     return event => { ${caseBlock(appSource, "window_command_error").replace('case "window_command_error":', '')} };
-  `)(createUiStateStore, { recordError: event => records.push(event) }, { push: event => alerts.push(event) });
+  `)(createUiStateStore, { recordError: event => records.push(event) }, { push: event => alerts.push(event) }, windowCommandErrorPresentation);
   receive({ kind: "window_command_error", id: "agent-1", operation: "resize", message: "Refresh the project connection and try again." });
   assert.equal(records.length, 1);
   assert.equal(alerts.length, 1);
   assert.equal(alerts[0].title, "Resize failed");
   assert.equal(alerts[0].message, records[0].message);
+  // SPEC #7007 T-014: the headline is the typed presentation, and the raw
+  // backend wording travels as history details instead of the message.
+  assert.match(records[0].message, /terminal size may be out of date/i);
+  assert.equal(records[0].details, "Refresh the project connection and try again.");
   assert.doesNotMatch(initialization, /applyStatus|terminalStatusModel|Agent error|hit an error/);
   assert.equal(DEFAULT_COALESCE_KINDS.has("window_command_error"), false);
 });
@@ -94,40 +99,40 @@ function recordCalls(snippet) {
 
 // --- T-015: issue_monitor_toast fan-out (FR-011 / FR-012, Sc 2) ---
 
-test("issue_monitor_toast records into the notification center with the Issue Monitor title and issue suffix", () => {
+test("issue_monitor_toast records into the notification center with Issues title and issue suffix", () => {
   const receiver = caseBlock(appSource, "issue_monitor_toast");
   assert.match(receiver, /issueMonitorNotificationModel\.update\(\(\) => \(\{ \.\.\.event \}\)\)/);
   assert.doesNotMatch(receiver, /notificationCenter\.record/);
   const block = appSource.match(/const issueMonitorNotificationModel = createUiStateStore\(null\);[\s\S]*?\n {6}\}\);/)?.[0];
-  assert.ok(block, "Monitor notifications must be recorded by a model subscriber");
+  assert.ok(block, "Issues notifications must be recorded by a model subscriber");
   const calls = recordCalls(block);
-  assert.equal(calls.length, 1, "ordinary Monitor events keep one history record path");
+  assert.equal(calls.length, 1, "ordinary Issues events keep one history record path");
   const call = calls[0];
   assert.match(call, /kind:\s*"issue-monitor"/);
   assert.match(call, /level:\s*event\?\.level/);
-  assert.match(call, /title:\s*monitorNotice\?\.title \|\| "Issue Monitor"/, "typed Monitor transitions use state wording");
+  assert.match(call, /title:\s*monitorNotice\?\.title \|\| "Issues"/, "typed Issues transitions use state wording");
   assert.match(block, /notification_transition/);
   assert.match(block, /source: "monitor"/);
   assert.match(call, /message:\s*event\?\.message/);
   assert.match(call, /issueNumber:\s*event\?\.issue_number/);
   assert.doesNotMatch(call, /event\?\.title/, "do not copy the dead `event?.title` read");
-  // FR-011: ordinary Monitor events reach history independently of display.
+  // FR-011: ordinary Issues events reach history independently of display.
   const recordAt = block.indexOf("notificationCenter.record(");
   const firstIf = block.indexOf("if (");
   assert.match(block, /if \(!event\) return;/, "initial null state creates no history entry");
   assert.ok(firstIf < recordAt, "the initial null state is ignored before recording");
 });
 
-test("Monitor model snapshots are immutable and repeated events each reach history once", () => {
+test("Issues model snapshots are immutable and repeated events each reach history once", () => {
   const initialization = appSource.match(/const issueMonitorNotificationModel = createUiStateStore\(null\);[\s\S]*?\n {6}\}\);/)?.[0];
-  assert.ok(initialization, "Monitor notification model must exist");
+  assert.ok(initialization, "Issues notification model must exist");
   const records = [];
-  const { model, receive } = new Function("createUiStateStore", "notificationForTransition", "notificationCenter", `
+  const { model, receive } = new Function("createUiStateStore", "notificationForTransition", "notificationCenter", "monitorDiagnostic", `
     ${initialization}
     return { model: issueMonitorNotificationModel, receive(event) {
       ${caseBlock(appSource, "issue_monitor_toast").replace('case "issue_monitor_toast":', '')}
     }};
-  `)(createUiStateStore, notificationForTransition, { record: notice => records.push(notice) });
+  `)(createUiStateStore, notificationForTransition, { recordError: notice => records.push(notice) }, monitorDiagnostic);
   assert.equal(records.length, 0);
   const event = { kind: "issue_monitor_toast", level: "error", message: "retry", issue_number: 5016 };
   receive(event);
@@ -146,13 +151,13 @@ test("launch requested repeats share one Issue row until dismissed or cleared", 
   const { document } = parseHTML("<!doctype html><html><body></body></html>");
   const center = createNotificationCenter({ document });
   center.mount(document.body);
-  const receive = new Function("createUiStateStore", "notificationForTransition", "notificationCenter", `
+  const receive = new Function("createUiStateStore", "notificationForTransition", "notificationCenter", "monitorDiagnostic", `
     ${initialization}
     return event => {
       ${caseBlock(appSource, "issue_monitor_toast").replace('case "issue_monitor_toast":', '')}
     };
-  `)(createUiStateStore, notificationForTransition, center);
-  const launch = { kind: "issue_monitor_toast", level: "info", message: "Issue Monitor launch requested", issue_number: 3852 };
+  `)(createUiStateStore, notificationForTransition, center, monitorDiagnostic);
+  const launch = { kind: "issue_monitor_toast", level: "info", message: "Issues launch requested", issue_number: 3852 };
   for (let i = 0; i < 4; i += 1) receive(launch);
   assert.equal(center.count(), 1, "repeated launch attempts share one visible row");
   assert.equal(center.unreadCount(), 1);
@@ -164,7 +169,7 @@ test("launch requested repeats share one Issue row until dismissed or cleared", 
   assert.match(document.body.textContent, /Needs human #3852/);
   const launchRow = document.querySelector('[data-error-key="issue-monitor:launch-requested:3852"]');
   assert.ok(launchRow);
-  assert.match(launchRow.textContent, /Issue Monitor #3852/);
+  assert.match(launchRow.textContent, /Issues #3852/);
   assert.equal(launchRow.querySelector(".notification-center__count"), null);
   launchRow.querySelector(".notification-center__dismiss")
     .dispatchEvent(new document.defaultView.Event("click", { bubbles: true }));
@@ -174,6 +179,43 @@ test("launch requested repeats share one Issue row until dismissed or cleared", 
   center.clearAll();
   receive(launch);
   assert.equal(center.count(), 1, "clear all also releases the keyed row");
+});
+
+test("Issue #6932 groups repeated Issues failures and suppresses continued/stable stalled attention", () => {
+  const initialization = appSource.match(/const issueMonitorNotificationModel = createUiStateStore\(null\);[\s\S]*?\n {6}\}\);/)?.[0];
+  const { document } = parseHTML("<!doctype html><html><body></body></html>");
+  let clock = new Date("2026-11-09T00:00:00Z");
+  const center = createNotificationCenter({ document, now: () => clock });
+  center.mount(document.body);
+  const receive = new Function("createUiStateStore", "notificationForTransition", "notificationCenter", "monitorDiagnostic", `
+    ${initialization}
+    return event => { ${caseBlock(appSource, "issue_monitor_toast").replace('case "issue_monitor_toast":', '')} };
+  `)(createUiStateStore, notificationForTransition, center, monitorDiagnostic);
+  const failure = { kind: "issue_monitor_toast", level: "error", message: "Issues scan failed at open-pr-readback stage: GitHub connection failed after 30s" };
+  for (let i = 0; i < 5; i++) { clock = new Date(clock.getTime() + 60_000); receive({ ...failure, message: failure.message.replace("30s", `${30 + i}s`) }); }
+  assert.equal(center.count(), 1);
+  const row = document.querySelector(".notification-center__item");
+  assert.equal(row.querySelector(".notification-center__count").textContent, "×5");
+  assert.equal(row.querySelector("time").dateTime, clock.toISOString());
+  assert.match(row.textContent, /GitHub connection failed after 34s/, "grouping preserves the latest diagnostic text");
+  for (const disposition of ["stale_readback", "previous_candidates"]) {
+    receive({ ...failure, message: `scan continued: candidate-load failed (continued_with_${disposition}): offline` });
+  }
+  assert.equal(center.count(), 1, "continued diagnostics must not add red errors");
+  receive({ ...failure, message: "Issues scan failed at candidate-load stage: GitHub connection failed" });
+  assert.equal(center.count(), 2, "different stages remain distinct");
+  receive({ ...failure, message: "Issues scan stalled; last scan at 2026-11-09T00:00:00Z; previous failure: issue #42: needs_human: decision needed" });
+  const stalled = "Issues scan stalled; last scan at 2026-11-09T00:00:00Z; previous failure: issue #42: needs_human: decision needed";
+  assert.equal(monitorDiagnostic({ message: stalled, kind: "failed_issues", stage: "candidate-load" }).key,
+    monitorDiagnostic({ message: stalled }).key, "toast and status share one stalled diagnosis");
+  const recovery = "Issues authority recovery is blocked: unreadable authority";
+  assert.equal(monitorDiagnostic({ message: recovery }).key, monitorDiagnostic({ message: recovery, kind: "monitor" }).key);
+  center.open(); center.close();
+  receive({ ...failure, message: "Issues scan stalled; last scan at 2026-11-09T00:01:00Z; previous failure: issue #42: needs_human: decision needed" });
+  assert.equal(center.count(), 3);
+  assert.equal(center.unreadCount(), 0, "stable stalled cause must not rearm unread");
+  receive({ ...failure, message: "Issues scan stalled; last scan at 2026-11-09T00:02:00Z; previous failure: issue #43: needs_human: decision needed" });
+  assert.equal(center.count(), 4, "changed human decision remains actionable");
 });
 
 // --- T-017: completion / attention / board-mention seams (FR-011, Sc 3, Sc 7) ---
@@ -197,7 +239,7 @@ test("attention keeps lifetimes and uses the controller key for Issue error grou
   assert.match(body, /notificationCenter\.recordSurfaceNotice\(\{ key: notice\.id/);
   assert.match(appSource, /applyStatus\(state\.id, state\.status, state\.detail, state\.kind, state\.retryable\)/);
   assert.match(appSource, /projectKey: windowContext\?\.tab\.project_key/);
-  assert.match(appSource, /notificationCenter\.resolveError\(id\)/);
+  assert.match(appSource, /notificationCenter\.removeNotice\(id\)/);
   assert.match(body, /alertsToasts\.push\(/);
   const calls = recordCalls(body);
   assert.equal(calls.length, 1);

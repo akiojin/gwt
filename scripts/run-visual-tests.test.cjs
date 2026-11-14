@@ -42,17 +42,31 @@ git init --quiet --initial-branch=develop --separate-git-dir "$GWT_GIT_ENV_ROOT/
 
 for (const exitCode of [0, 1]) {
   test(`runner keeps PNG/trace and cleans temporary files after exit ${exitCode}`, () => {
-    const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "gwt-visual-runner-"));
+    const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "gwt visual runner-"));
     try {
-      for (const directory of ["scripts", "crates/gwt/playwright/test-results", "crates/gwt/web", "deps/node_modules/.bin", "scratch"]) {
+      for (const directory of ["scripts", "crates/gwt/playwright/test-results", "crates/gwt/web", "deps/node_modules/.bin", "deps/node_modules/@playwright/test", "inherited-node-path/gwt-inherited-fixture", "scratch"]) {
         fs.mkdirSync(path.join(fixture, directory), { recursive: true });
       }
       fs.copyFileSync(path.join(__dirname, "run-visual-tests.sh"), path.join(fixture, "scripts/run-visual-tests.sh"));
       fs.writeFileSync(path.join(fixture, "scripts/playwright-version.txt"), "1.49.1\n");
       fs.writeFileSync(path.join(fixture, "crates/gwt/playwright/playwright.config.ts"), "");
       fs.writeFileSync(path.join(fixture, "crates/gwt/web/index.html"), "fixture");
+      fs.writeFileSync(path.join(fixture, "deps/node_modules/@playwright/test/index.js"), 'module.exports = { origin: "pinned" };');
+      fs.writeFileSync(path.join(fixture, "inherited-node-path/gwt-inherited-fixture/index.js"), 'module.exports = { origin: "inherited" };');
       fs.writeFileSync(path.join(fixture, "deps/node_modules/.bin/playwright"), `#!/usr/bin/env bash
 set -euo pipefail
+node -e '
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
+const root = fs.realpathSync(process.env.GWT_RUNNER_TEST_NATIVE_ROOT);
+assert.equal(require("@playwright/test").origin, "pinned");
+assert.equal(require("gwt-inherited-fixture").origin, "inherited");
+assert.equal(fs.realpathSync(process.env.GWT_PLAYWRIGHT_NODE_MODULES), fs.realpathSync(path.join(root, "deps/node_modules")));
+for (const key of ["GWT_PLAYWRIGHT_CHECKOUT_ROOT", "GWT_PLAYWRIGHT_PROJECT_ROOT"]) {
+  assert.equal(fs.realpathSync(process.env[key]), root);
+}
+'
 output="$PWD/crates/gwt/playwright/test-results"
 printf '%s\\n' "$@" > "$GWT_RUNNER_TEST_LOG.args"
 while [[ $# -gt 0 ]]; do
@@ -80,9 +94,13 @@ exit "$GWT_RUNNER_TEST_EXIT"
           ...process.env,
           TMPDIR: shellPath(path.join(fixture, "scratch")),
           GWT_PLAYWRIGHT_DEPS_DIR: shellPath(path.join(fixture, "deps")),
+          GWT_PLAYWRIGHT_CHECKOUT_ROOT: shellPath(fixture),
+          GWT_PLAYWRIGHT_PROJECT_ROOT: shellPath(fixture),
           GWT_RUNNER_TEST_LOG: shellPath(log),
           GWT_RUNNER_TEST_ROOT: shellPath(fixture),
+          GWT_RUNNER_TEST_NATIVE_ROOT: fixture,
           GWT_RUNNER_TEST_EXIT: String(exitCode),
+          NODE_PATH: path.join(fixture, "inherited-node-path"),
         },
       });
       assert.equal(result.status, exitCode, result.stderr);

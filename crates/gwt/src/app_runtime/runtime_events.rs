@@ -463,6 +463,13 @@ impl AppRuntime {
                     .values()
                     .filter_map(|runtime| runtime.pending_snapshot.as_ref()?.retry_at),
             )
+            .chain(self.runtimes.values().flat_map(|runtime| {
+                runtime.pending_owner_commands.iter().map(|pending| {
+                    pending
+                        .retry_at
+                        .min(pending.queued_at + super::pty_io::REMOTE_COMMAND_RECOVERY_GRACE)
+                })
+            }))
             .min()
     }
 
@@ -494,6 +501,20 @@ impl AppRuntime {
                 events.extend(self.request_owner_snapshot(&id, target));
             }
         }
+        let recovery_retries = self
+            .runtimes
+            .iter()
+            .filter(|(_, runtime)| {
+                runtime.pending_owner_commands.iter().any(|pending| {
+                    pending.retry_at <= now
+                        || pending.queued_at + super::pty_io::REMOTE_COMMAND_RECOVERY_GRACE <= now
+                })
+            })
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        for id in recovery_retries {
+            events.extend(self.retry_remote_runtime_commands(&id, now));
+        }
         events
     }
 
@@ -518,22 +539,15 @@ impl AppRuntime {
         let screen = pending.screen;
         let preview = screen.as_deref().map(terminal_preview_text);
         let preview_elapsed = batch_started.elapsed();
-        if pending.authoritative_owner {
-            return preview
-                .into_iter()
-                .map(|text| {
-                    OutboundEvent::project(
-                        project_key.clone(),
-                        BackendEvent::TerminalPreview {
-                            id: id.to_string(),
-                            text,
-                        },
-                    )
-                })
-                .collect();
-        }
-        if let Some(tab) = self.tab(&address.tab_id) {
-            publish_runtime_output_change(&tab.project_root, id, &pending.data, preview.clone());
+        if !pending.authoritative_owner {
+            if let Some(tab) = self.tab(&address.tab_id) {
+                publish_runtime_output_change(
+                    &tab.project_root,
+                    id,
+                    &pending.data,
+                    preview.clone(),
+                );
+            }
         }
         let relay_elapsed = batch_started.elapsed();
         let mut events = Vec::new();
@@ -1242,6 +1256,7 @@ impl AppRuntime {
             if let Some(key) = key {
                 let mut public = event.clone();
                 public.continuation_readiness_nonce = None;
+                public.native_prompt_id = None;
                 events.push(OutboundEvent::project(
                     key,
                     BackendEvent::RuntimeHookEvent { event: public },

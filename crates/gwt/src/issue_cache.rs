@@ -35,6 +35,132 @@ const ISSUE_CACHE_REFRESH_META_FILE: &str = "refresh-meta.json";
 const ISSUE_CACHE_REFRESH_LIMIT: &str = "1000";
 pub const ISSUE_CACHE_TTL: Duration = Duration::from_secs(15 * 60);
 
+/// Repository-wide label metadata shared by Settings and Kanban cards.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepositoryLabel {
+    pub name: String,
+    pub color: String,
+}
+
+#[derive(Debug, Default)]
+pub struct RepositoryLabelsSnapshot {
+    pub labels: Vec<RepositoryLabel>,
+    pub loaded: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct RepositoryLabelsCache {
+    repository: String,
+    labels: Vec<RepositoryLabel>,
+}
+
+// Recheck the file after entering the worker lane so concurrent first opens
+// share the persisted catalog instead of duplicating the remote read.
+static REPOSITORY_LABELS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+pub fn load_repository_labels(repo_path: &Path, refresh: bool) -> RepositoryLabelsSnapshot {
+    let repo_root = gh_repo_cwd(repo_path);
+    let configured = gwt_core::repo_hash::configured_origin_url(&repo_root).and_then(|origin| {
+        crate::issue_monitor_worker::parse_github_remote_url(&format!(
+            "https://{}",
+            gwt_core::repo_hash::normalize_origin_url(&origin)
+        ))
+    });
+    let (owner, repo) = match configured
+        .map(Ok)
+        .unwrap_or_else(|| crate::issue_monitor_worker::github_remote_owner_and_repo(&repo_root))
+    {
+        Ok(repository) => repository,
+        Err(error) => {
+            return RepositoryLabelsSnapshot {
+                error: Some(format!(
+                    "Repository labels require a GitHub repository: {error}"
+                )),
+                ..Default::default()
+            };
+        }
+    };
+    let repository = format!("{owner}/{repo}").to_ascii_lowercase();
+    let cache_root = issue_cache_root_for_repo_slug(&owner, &repo);
+    load_repository_labels_with(&cache_root, &repository, refresh, |path| {
+        run_gh_issue_command(
+            &repo_root,
+            &["api", path, "--hostname", "github.com", "--include"],
+            "gh api repository labels",
+        )
+    })
+}
+
+fn valid_repository_labels(labels: &[RepositoryLabel]) -> bool {
+    labels.iter().all(|label| {
+        !label.name.trim().is_empty()
+            && label.color.len() == 6
+            && label.color.bytes().all(|byte| byte.is_ascii_hexdigit())
+    })
+}
+
+fn load_repository_labels_with(
+    cache_root: &Path,
+    repository: &str,
+    refresh: bool,
+    fetch: impl FnMut(&str) -> Result<String, String>,
+) -> RepositoryLabelsSnapshot {
+    let _guard = REPOSITORY_LABELS_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let path = cache_root.join("repository-labels.json");
+    let cached = fs::read(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<RepositoryLabelsCache>(&bytes).ok())
+        .filter(|cached| cached.repository == repository && valid_repository_labels(&cached.labels))
+        .map(|cached| cached.labels);
+    if !refresh {
+        if let Some(labels) = cached.as_ref() {
+            return RepositoryLabelsSnapshot {
+                labels: labels.clone(),
+                loaded: true,
+                error: None,
+            };
+        }
+    }
+    let result = (|| {
+        let pages = gwt_git::gh_rest::read_complete_pages_with(
+            &format!("repos/{repository}/labels"),
+            fetch,
+        )?;
+        let mut labels: Vec<RepositoryLabel> = serde_json::from_value(Value::Array(pages.rows))
+            .map_err(|error| format!("Invalid repository labels: {error}"))?;
+        if !valid_repository_labels(&labels) {
+            return Err("Invalid repository label name or color.".into());
+        }
+        labels.sort_by_cached_key(|label| label.name.to_lowercase());
+        let cached = RepositoryLabelsCache {
+            repository: repository.to_string(),
+            labels,
+        };
+        fs::create_dir_all(cache_root).map_err(|error| error.to_string())?;
+        write_atomic(
+            &path,
+            &serde_json::to_vec(&cached).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| format!("Cannot cache repository labels: {error}"))?;
+        Ok(cached.labels)
+    })();
+    match result {
+        Ok(labels) => RepositoryLabelsSnapshot {
+            labels,
+            loaded: true,
+            error: None,
+        },
+        Err(error) => RepositoryLabelsSnapshot {
+            loaded: cached.is_some(),
+            labels: cached.unwrap_or_default(),
+            error: Some(error),
+        },
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct IssueCacheRefreshMeta {
     last_full_refresh: String,
@@ -142,6 +268,16 @@ pub fn issue_is_open_in_cache(cache_root: &Path, issue_number: u64) -> Option<bo
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static ISSUE_SOURCE_FINGERPRINT_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_issue_source_fingerprint_scans() -> usize {
+    ISSUE_SOURCE_FINGERPRINT_SCANS.with(|scans| scans.replace(0))
+}
+
 pub fn issue_cache_source_fingerprint(
     cache_root: &Path,
 ) -> Result<Option<IssueCacheSourceFingerprint>, String> {
@@ -149,6 +285,8 @@ pub fn issue_cache_source_fingerprint(
         return Ok(None);
     }
 
+    #[cfg(test)]
+    ISSUE_SOURCE_FINGERPRINT_SCANS.with(|scans| scans.set(scans.get() + 1));
     let mut docs = Vec::new();
     let entries = fs::read_dir(cache_root).map_err(|err| err.to_string())?;
     for entry in entries.flatten() {
@@ -273,7 +411,9 @@ pub fn sync_issue_cache_from_remote_if_stale(
     if !issue_cache_refresh_is_stale(cache_root, ttl) {
         return Ok(false);
     }
-    sync_issue_cache_from_remote(repo_path, cache_root)?;
+    // Background retries share the Monitor's acquired pages. A failed full
+    // refresh leaves its marker stale, but its successful pages remain usable.
+    sync_issue_cache_from_remote_with_reuse(repo_path, cache_root, true)?;
     Ok(true)
 }
 
@@ -309,22 +449,34 @@ pub fn sync_issue_cache_from_remote_with_fingerprint(
 }
 
 pub fn sync_issue_cache_from_remote(repo_path: &Path, cache_root: &Path) -> Result<(), String> {
-    sync_issue_cache_from_remote_with_wait(repo_path, cache_root, &mut std::thread::sleep).map_err(
-        |error| {
-            // Issue #4087 AC-2: every full-refresh caller used to downgrade this
-            // to a log line, so a refresh that had stopped for hours was only
-            // discoverable through the Issues it failed to deliver.
-            gwt_core::error_ledger::record_fail_open(
-                gwt_core::error_ledger::ErrorKind::CacheRefreshFailure,
-                format!("issue cache full refresh: {error}"),
-                gwt_core::error_ledger::ErrorTarget {
-                    project_root: Some(repo_path.display().to_string()),
-                    ..gwt_core::error_ledger::ErrorTarget::default()
-                },
-            );
-            error
-        },
+    sync_issue_cache_from_remote_with_reuse(repo_path, cache_root, false)
+}
+
+fn sync_issue_cache_from_remote_with_reuse(
+    repo_path: &Path,
+    cache_root: &Path,
+    reuse_pages: bool,
+) -> Result<(), String> {
+    sync_issue_cache_from_remote_with_page_cache(
+        repo_path,
+        cache_root,
+        &mut std::thread::sleep,
+        reuse_pages,
     )
+    .map_err(|error| {
+        // Issue #4087 AC-2: every full-refresh caller used to downgrade this
+        // to a log line, so a refresh that had stopped for hours was only
+        // discoverable through the Issues it failed to deliver.
+        gwt_core::error_ledger::record_fail_open(
+            gwt_core::error_ledger::ErrorKind::CacheRefreshFailure,
+            format!("issue cache full refresh: {error}"),
+            gwt_core::error_ledger::ErrorTarget {
+                project_root: Some(repo_path.display().to_string()),
+                ..gwt_core::error_ledger::ErrorTarget::default()
+            },
+        );
+        error
+    })
 }
 
 /// [`sync_issue_cache_from_remote`] with the pacing wait injected.
@@ -343,6 +495,7 @@ pub fn sync_issue_cache_from_remote(repo_path: &Path, cache_root: &Path) -> Resu
 ///
 /// Progress is persisted per entry, so a resync cut short by a refusal resumes
 /// from where it stopped once the backoff window ends.
+#[cfg(test)]
 pub fn sync_issue_cache_from_remote_with_wait(
     repo_path: &Path,
     cache_root: &Path,
@@ -364,14 +517,19 @@ pub fn sync_issue_cache_from_remote_for_monitor(
         true,
     )
     .map_err(|error| {
-        gwt_core::error_ledger::record_fail_open(
-            gwt_core::error_ledger::ErrorKind::CacheRefreshFailure,
-            format!("issue cache full refresh: {error}"),
-            gwt_core::error_ledger::ErrorTarget {
-                project_root: Some(repo_path.display().to_string()),
-                ..gwt_core::error_ledger::ErrorTarget::default()
-            },
-        );
+        // The scan has a live list and can continue after this optional
+        // refresh exhausts its budget. Its outer outcome records degradation;
+        // an actual scan abort still records its own failure.
+        if !crate::issue_monitor_worker::is_readback_budget_deferral(&error) {
+            gwt_core::error_ledger::record_fail_open(
+                gwt_core::error_ledger::ErrorKind::CacheRefreshFailure,
+                format!("issue cache full refresh: {error}"),
+                gwt_core::error_ledger::ErrorTarget {
+                    project_root: Some(repo_path.display().to_string()),
+                    ..gwt_core::error_ledger::ErrorTarget::default()
+                },
+            );
+        }
         error
     })
 }
@@ -542,6 +700,37 @@ pub fn refresh_issue_cache_entry_from_remote(
 fn gh_repo_cwd(repo_path: &Path) -> PathBuf {
     crate::index_worker::resolve_project_index_repo_root(repo_path)
         .unwrap_or_else(|| repo_path.to_path_buf())
+}
+
+/// Whether the indexed Issue source contains any document, without reading body payloads.
+/// Match the fingerprint reader's admission rules so a UUID cannot bypass its empty-source guard.
+pub(crate) fn issue_cache_has_source_documents(cache_root: &Path) -> Result<bool, String> {
+    if !cache_root.is_dir() {
+        return Ok(false);
+    }
+    for entry in fs::read_dir(cache_root)
+        .map_err(|error| error.to_string())?
+        .flatten()
+    {
+        if !entry.file_type().is_ok_and(|kind| kind.is_dir())
+            || !entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.parse::<u64>().is_ok())
+        {
+            continue;
+        }
+        let meta = entry.path().join("meta.json");
+        if meta.is_file()
+            && fs::read(meta)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                .is_some()
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 pub fn issue_cache_has_entries(cache_root: &Path) -> bool {
@@ -1008,6 +1197,91 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    #[test]
+    fn repository_labels_rejects_unbound_and_other_repository_cache() {
+        let temp = tempdir().unwrap();
+        for cached in [
+            r#"[{"name":"wrong","color":"123abc"}]"#,
+            r#"{"repository":"other/repo","labels":[{"name":"wrong","color":"123abc"}]}"#,
+        ] {
+            fs::write(temp.path().join("repository-labels.json"), cached).unwrap();
+            let snapshot = load_repository_labels_with(temp.path(), "o/r", false, |path| {
+                assert_eq!(path, "repos/o/r/labels?per_page=100&page=1");
+                Ok("HTTP/2 200 OK\n\n[{\"name\":\"origin\",\"color\":\"123abc\"}]".into())
+            });
+            assert!(snapshot.loaded && snapshot.error.is_none(), "{snapshot:?}");
+            assert_eq!(snapshot.labels[0].name, "origin");
+        }
+    }
+
+    #[test]
+    fn repository_labels_cache_reuses_complete_catalog_and_preserves_failed_refresh() {
+        let temp = tempdir().unwrap();
+        let mut calls = Vec::new();
+        let first = load_repository_labels_with(temp.path(), "o/r", false, |path| {
+            calls.push(path.to_string());
+            Ok(if calls.len() == 1 {
+                "HTTP/2 200 OK\nLink: <https://api.github.com/repos/o/r/labels?page=2>; rel=\"next\"\n\n[{\"name\":\"bug\",\"color\":\"d73a4a\"}]".into()
+            } else {
+                "HTTP/2 200 OK\n\n[{\"name\":\"backend\",\"color\":\"123abc\"}]".into()
+            })
+        });
+        assert_eq!(calls.len(), 2, "all label pages must be collected");
+        assert!(first.loaded && first.error.is_none());
+        assert_eq!(first.labels.len(), 2);
+        let cached = load_repository_labels_with(temp.path(), "o/r", false, |_| {
+            panic!("opening settings again must not refetch a cached catalog")
+        });
+        assert_eq!(cached.labels, first.labels);
+        let failed =
+            load_repository_labels_with(temp.path(), "o/r", true, |_| Err("offline".into()));
+        assert!(failed.loaded);
+        assert_eq!(failed.error.as_deref(), Some("offline"));
+        assert_eq!(failed.labels, first.labels);
+        let retained = load_repository_labels_with(temp.path(), "o/r", false, |_| {
+            panic!("failed refresh must leave the persisted catalog intact")
+        });
+        assert_eq!(retained.labels, first.labels);
+    }
+
+    #[test]
+    fn repository_labels_distinguishes_empty_catalog_from_initial_failure() {
+        let temp = tempdir().unwrap();
+        let failed =
+            load_repository_labels_with(temp.path(), "o/r", false, |_| Err("offline".into()));
+        assert!(!failed.loaded);
+        assert!(failed.labels.is_empty());
+        let empty = load_repository_labels_with(temp.path(), "o/r", false, |_| {
+            Ok("HTTP/2 200 OK\n\n[]".into())
+        });
+        assert!(empty.loaded && empty.labels.is_empty() && empty.error.is_none());
+        let cached = load_repository_labels_with(temp.path(), "o/r", false, |_| {
+            panic!("a successfully loaded empty catalog is cached")
+        });
+        assert!(cached.loaded && cached.error.is_none());
+    }
+
+    #[test]
+    fn optional_monitor_refresh_budget_is_not_an_error_but_explicit_refresh_is() {
+        let temp = tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let _expired = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            gwt_core::operation_deadline::now(),
+        );
+        let cache = temp.path().join("cache");
+        let error = sync_issue_cache_from_remote_for_monitor(temp.path(), &cache).unwrap_err();
+        assert!(error.contains("deadline expired"), "{error}");
+        assert!(gwt_core::error_ledger::list_since(None).unwrap().is_empty());
+
+        sync_issue_cache_from_remote(temp.path(), &cache).unwrap_err();
+        let rows = gwt_core::error_ledger::list_since(None).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].kind,
+            gwt_core::error_ledger::ErrorKind::CacheRefreshFailure
+        );
+    }
+
     fn clear_gh_sandbox_markers() -> Vec<gwt_core::test_support::ScopedEnvVar> {
         [
             "GWT_TEST_GH_SANDBOX",
@@ -1169,6 +1443,22 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().unwrap();
         let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        for args in [
+            vec!["init"],
+            vec![
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/cache-retry.git",
+            ],
+        ] {
+            let output = gwt_core::process::hidden_command("git")
+                .args(args)
+                .current_dir(temp.path())
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+        }
         let cache_root = temp.path().join("cache");
         let log = temp.path().join("calls.txt");
         let fake = temp.path().join("gh.cmd");
@@ -1198,9 +1488,12 @@ echo [{"number":8,"title":"older open issue","state":"open","updated_at":"2026-1
         let _gh = gwt_core::test_support::ScopedEnvVar::set("GWT_TEST_GH", &fake);
         let _log = gwt_core::test_support::ScopedEnvVar::set("GWT_5730_CALLS", &log);
         let _mode = gwt_core::test_support::ScopedEnvVar::set("GWT_5730_MODE", "fail");
-        for _ in 0..2 {
-            let error =
-                sync_issue_cache_from_remote_for_monitor(temp.path(), &cache_root).unwrap_err();
+        for refresh in [
+            sync_issue_cache_from_remote_for_monitor(temp.path(), &cache_root),
+            sync_issue_cache_from_remote_if_stale(temp.path(), &cache_root, ISSUE_CACHE_TTL)
+                .map(|_| ()),
+        ] {
+            let error = refresh.unwrap_err();
             assert!(error.contains("queue unavailable"), "{error}");
             assert!(!issue_cache_refresh_meta_path(&cache_root).exists());
         }
@@ -1218,7 +1511,10 @@ echo [{"number":8,"title":"older open issue","state":"open","updated_at":"2026-1
             .write_snapshot(&authoritative)
             .unwrap();
         let _success = gwt_core::test_support::ScopedEnvVar::set("GWT_5730_MODE", "ok");
-        sync_issue_cache_from_remote_for_monitor(temp.path(), &cache_root).unwrap();
+        assert!(
+            sync_issue_cache_from_remote_if_stale(temp.path(), &cache_root, ISSUE_CACHE_TTL)
+                .unwrap()
+        );
         let entry = Cache::new(cache_root.clone())
             .load_entry(IssueNumber(7))
             .unwrap();
@@ -1783,6 +2079,22 @@ exit 1\n",
         assert!(
             !issue_cache_refresh_is_stale(&cache_root, Duration::from_secs(60)),
             "fresh refresh metadata should suppress stale refresh",
+        );
+
+        take_issue_source_fingerprint_scans();
+        let outcome = sync_issue_cache_from_remote_if_stale_with_fingerprint(
+            temp.path(),
+            &cache_root,
+            Duration::from_secs(60),
+        )
+        .expect("public fingerprint outcome remains available");
+        assert!(!outcome.refreshed && !outcome.source_changed);
+        assert_eq!(outcome.before, outcome.after);
+        assert_eq!(outcome.after.unwrap().document_count, 0);
+        assert_eq!(
+            take_issue_source_fingerprint_scans(),
+            2,
+            "explicit public fingerprint callers still receive complete before/after snapshots"
         );
 
         let stale_meta = IssueCacheRefreshMeta {

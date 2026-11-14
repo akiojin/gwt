@@ -62,10 +62,19 @@ impl HostBinding {
     pub fn new(host_id: &str, coordinator_origin: &str) -> io::Result<Self> {
         let host_id = Uuid::parse_str(host_id)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid mobile Host ID"))?;
-        let origin = reqwest::Url::parse(coordinator_origin)
-            .ok()
-            .filter(|url| {
-                url.scheme() == "https"
+        let coordinator_origin = normalize_coordinator_origin(coordinator_origin)?;
+        Ok(Self {
+            host_id: host_id.to_string(),
+            coordinator_origin,
+        })
+    }
+}
+
+pub(crate) fn normalize_coordinator_origin(coordinator_origin: &str) -> io::Result<String> {
+    let origin = reqwest::Url::parse(coordinator_origin)
+        .ok()
+        .filter(|url| {
+            url.scheme() == "https"
                     && url.host_str().is_some()
                     && url.username().is_empty()
                     && url.password().is_none()
@@ -79,18 +88,14 @@ impl HostBinding {
                     })
                     && coordinator_origin.trim() == coordinator_origin
                     && !coordinator_origin.chars().any(char::is_control)
-            })
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "invalid mobile coordinator origin",
-                )
-            })?;
-        Ok(Self {
-            host_id: host_id.to_string(),
-            coordinator_origin: origin.origin().ascii_serialization(),
         })
-    }
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid mobile coordinator origin",
+            )
+        })?;
+    Ok(origin.origin().ascii_serialization())
 }
 
 impl TryFrom<StoredHostBinding> for HostBinding {
@@ -143,6 +148,8 @@ pub enum AuthorizationError {
     Revoked,
     #[error("device is not authorized for this project")]
     WrongProject,
+    #[error("mobile input belongs to a different Host; reconnect through the current Host")]
+    WrongHost,
     #[error("mobile peer binding mismatch; reconnect using a fresh peer-bound challenge")]
     WrongPeer,
     #[error("invalid device signature")]
@@ -548,6 +555,12 @@ impl MobileInputRequest {
     }
     pub fn project(&self) -> &ProjectKey {
         &self.project
+    }
+
+    /// Check runtime provenance only; final effects still require the existing
+    /// session, registration, Project, sequence and revocation checks.
+    pub fn belongs_to_host(&self, authority: &Arc<RwLock<MobileAuthorization>>) -> bool {
+        Arc::ptr_eq(&self.connection.authorization, authority)
     }
 
     #[doc(hidden)]
@@ -2037,6 +2050,68 @@ mod tests {
         let queued = || connection.dispatch(&project(), 0, || NOW, || panic!("revoked effect"));
         auth.write().unwrap().revoke(device.id()).unwrap();
         assert_eq!(queued(), Err(AuthorizationError::Revoked));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_drop_revokes_retained_connections_and_native_permits() {
+        for poison in [false, true] {
+            let host = crate::mobile_host::MobileHost::default();
+            let authority = host.authorization().clone();
+            assert!(!authority.read().unwrap().runtime.lock().unwrap().enabled);
+            authority.write().unwrap().enable();
+            let key = key();
+            let device = paired(&mut authority.write().unwrap(), &key);
+            let session = session(&mut authority.write().unwrap(), &device, &key);
+            let connection = Arc::new(MobileConnection::new(authority.clone(), session));
+            let request = MobileInputRequest::new(
+                connection.clone(),
+                "phone".into(),
+                project(),
+                0,
+                "pane".into(),
+                "input".into(),
+            );
+            let permit = request.native_permit().unwrap();
+            request
+                .authorize_native(&permit, || Some(project()), || NOW)
+                .unwrap();
+            let epoch = authority.read().unwrap().runtime.lock().unwrap().host_epoch;
+            let successor = crate::mobile_host::MobileHost::default();
+            assert!(request.belongs_to_host(host.authorization()));
+            assert!(!request.belongs_to_host(successor.authorization()));
+            successor.authorization().write().unwrap().enable();
+            if poison {
+                assert!(std::panic::catch_unwind(|| {
+                    let _guard = authority.write().unwrap();
+                    panic!("poison Host authority");
+                })
+                .is_err());
+            }
+            // Shutdown must never acquire the session held by a native worker.
+            let held_session = connection.session.lock().unwrap();
+            drop(host);
+            assert!(permit.is_revoked());
+            assert!(permit.arm(NOW, NOW + SESSION_TTL_SECS, NOW).is_err());
+            drop(held_session);
+            assert!(connection
+                .dispatch(&project(), 1, || NOW, || panic!("closed Host effect"))
+                .is_err());
+            let auth = authority.read().unwrap_or_else(|error| error.into_inner());
+            let runtime = auth.runtime.lock().unwrap();
+            assert!(!runtime.enabled);
+            assert_ne!(runtime.host_epoch, epoch);
+            assert!(
+                successor
+                    .authorization()
+                    .read()
+                    .unwrap()
+                    .runtime
+                    .lock()
+                    .unwrap()
+                    .enabled
+            );
+        }
     }
 
     #[cfg(unix)]

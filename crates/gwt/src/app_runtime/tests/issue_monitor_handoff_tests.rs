@@ -31,6 +31,10 @@ fn issue_3852_stop_close_requeue_launch_now_materializes_an_active_successor() {
             missing_verification: None,
         },
     );
+    // The Monitor's health probe and this runtime must use the same profile.
+    let settings =
+        Settings::load_from_path(fixture.runtime.profile_config_path.as_deref().unwrap()).unwrap();
+    write_profile_config(&gwt_core::paths::gwt_config_path(), &settings);
     let raw_id = fixture.runtime.tabs[0]
         .workspace
         .add_window(WindowPreset::Agent)
@@ -1632,6 +1636,7 @@ fn assert_monitor_fresh_terminal_predecessor_materializes_usable_successor_work(
         &session_id,
         session.execution_binding.as_ref().unwrap(),
         gwt::AgentWorkspaceUpdateRequest {
+            primary_provider_session_id: None,
             schema_version: gwt::AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
             claimed_session_id: session_id.clone(),
             observation: gwt::observe_agent_runtime(&fixture.worktree).unwrap(),
@@ -2447,7 +2452,7 @@ fn assert_monitor_resume_if_safe_provider_conversation(
     }
     let fresh_reason = events.iter().find_map(|event| match &event.event {
         BackendEvent::IssueMonitorToast { message, .. }
-            if message.starts_with("Issue Monitor started a fresh session because ") =>
+            if message.starts_with("Issues started a fresh session because ") =>
         {
             Some(message.as_str())
         }
@@ -3034,20 +3039,43 @@ fn app_runtime_answered_handoff_continues_the_exact_live_holder() {
         "completion is emitted by the worker callback: {events:#?}"
     );
     drain_queued_blocking_tasks(&queued_tasks);
+    let prepared = take_issue4803_monitor_preparation(&fixture.recorded_events);
+    // A legitimate prefs refresh can add a preparation callback before the
+    // exact live holder's physical submit is scheduled.
+    gwt::try_mutate_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root),
+        |prefs| {
+            prefs.priority_order.push(9001);
+            Ok(())
+        },
+    )
+    .expect("change unrelated queue priority before handoff revalidation");
     fixture
         .runtime
-        .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
-            &fixture.recorded_events,
-        ));
-    // Both the outer facts callback and the nested answer adapter emit their
-    // own verified telemetry job; only the remaining task is the owner RPC.
-    run_queued_monitor_gui_diagnostics(&queued_tasks, &[2, 1]);
-    assert_eq!(queued_tasks.lock().expect("queued tasks").len(), 1);
+        .handle_issue_monitor_launch_prepared(prepared);
+    // Settle freshness callbacks before holding the actual answer RPC.
+    while !fixture.runtime.issue_monitor_launch_preparations.is_empty() {
+        drain_queued_blocking_tasks(&queued_tasks);
+        fixture
+            .runtime
+            .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
+                &fixture.recorded_events,
+            ));
+    }
     assert!(matches!(
         fixture.runtime.issue_monitor_launch_deliveries.get(&delivery_id),
         Some(super::super::IssueMonitorLaunchDeliveryState::Materializing { window_id, .. })
             if window_id == &holder_window_id
     ));
+    let diagnostics = (1..queued_tasks.lock().expect("queued tasks").len())
+        .rev()
+        .collect::<Vec<_>>();
+    run_queued_monitor_gui_diagnostics(&queued_tasks, &diagnostics);
+    assert_eq!(
+        queued_tasks.lock().expect("queued tasks").len(),
+        1,
+        "only the exact holder's answer RPC remains held",
+    );
     let before_owner = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
         &fixture.project_root,
     ))
@@ -3218,7 +3246,7 @@ fn app_runtime_answered_handoff_continues_the_exact_live_holder() {
     assert!(completion_events.iter().any(|event| matches!(
         &event.event,
         BackendEvent::IssueMonitorToast { message, .. }
-            if message == "Issue Monitor submitted the human answer; waiting for the provider receipt"
+            if message == "Issues submitted the human answer; waiting for the provider receipt"
     )));
     assert!(fixture
         .recorded_events
@@ -3298,7 +3326,28 @@ fn app_runtime_failed_live_handoff_delivery_keeps_the_answer_pending() {
         .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
             &fixture.recorded_events,
         ));
-    run_queued_monitor_gui_diagnostics(&queued_tasks, &[2, 1]);
+    while !fixture.runtime.issue_monitor_launch_preparations.is_empty() {
+        drain_queued_blocking_tasks(&queued_tasks);
+        fixture
+            .runtime
+            .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
+                &fixture.recorded_events,
+            ));
+    }
+    assert!(matches!(
+        fixture.runtime.issue_monitor_launch_deliveries.get(&delivery_id),
+        Some(super::super::IssueMonitorLaunchDeliveryState::Materializing { window_id, .. })
+            if window_id == &holder_window_id
+    ));
+    let diagnostics = (1..queued_tasks.lock().expect("queued tasks").len())
+        .rev()
+        .collect::<Vec<_>>();
+    run_queued_monitor_gui_diagnostics(&queued_tasks, &diagnostics);
+    assert_eq!(
+        queued_tasks.lock().expect("queued tasks").len(),
+        1,
+        "only the exact holder's answer RPC remains held",
+    );
     // Apply the real GUI canvas before the held answer RPC. An unobserved
     // canvas must not make a claim pass merely because it ran first.
     let context = fixture.runtime.test_context();
@@ -3492,7 +3541,18 @@ fn app_runtime_failed_live_handoff_delivery_keeps_the_answer_pending() {
         .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
             &fixture.recorded_events,
         ));
-    run_queued_monitor_gui_diagnostics(&retry_tasks, &[2, 1]);
+    while !fixture.runtime.issue_monitor_launch_preparations.is_empty() {
+        drain_queued_blocking_tasks(&retry_tasks);
+        fixture
+            .runtime
+            .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
+                &fixture.recorded_events,
+            ));
+    }
+    let diagnostics = (1..retry_tasks.lock().expect("retry tasks").len())
+        .rev()
+        .collect::<Vec<_>>();
+    run_queued_monitor_gui_diagnostics(&retry_tasks, &diagnostics);
     assert_eq!(
         retry_tasks.lock().unwrap().len(),
         1,
@@ -5342,14 +5402,14 @@ fn app_runtime_issue_monitor_status_reports_last_settings_source() {
             BackendEvent::IssueMonitorStatus { status } => Some(status),
             _ => None,
         })
-        .expect("issue monitor status");
+        .expect("Issues status");
     assert_eq!(
         status.launch_profile_source,
         gwt::IssueMonitorLaunchProfileSource::LastSettings
     );
     assert_eq!(
         status.launch_profile_summary,
-        "codex / gpt-5.5 / high / host / fast:off"
+        "codex / gpt-5.5 / high / host / speed:off"
     );
 }
 
@@ -5385,7 +5445,7 @@ fn app_runtime_issue_monitor_configure_recovers_malformed_prefs_without_launchin
         matches!(
             &event.event,
             BackendEvent::IssueMonitorToast { message, issue_number, .. }
-                if message == "Issue Monitor settings opened" && *issue_number == Some(3165)
+                if message == "Issues settings opened" && *issue_number == Some(3165)
         )
     }));
     let view = events
@@ -5414,13 +5474,13 @@ fn app_runtime_issue_monitor_configure_recovers_malformed_prefs_without_launchin
             .expect("launch wizard")
             .wizard
             .initial_prompt,
-        "$gwt-execute #3165\n\nThis prompt was generated by Issue Monitor. It is not a statement, approval, or visual confirmation by a human user."
+        "$gwt-execute #3165\n\nThis prompt was generated by Issues. It is not a statement, approval, or visual confirmation by a human user."
     );
 
     runtime.handle_launch_wizard_action(
         &runtime.test_context(),
         LaunchWizardAction::SetModel {
-            model: "gpt-5.5".to_string(),
+            model: "gpt-6-luna".to_string(),
         },
     );
     runtime.handle_launch_wizard_action(
@@ -5435,7 +5495,7 @@ fn app_runtime_issue_monitor_configure_recovers_malformed_prefs_without_launchin
     );
     runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit);
     wait_for_recorded_event(
-        "issue monitor settings runtime resolution",
+        "Issues settings runtime resolution",
         &recorded_events,
         |events| {
             events.iter().any(|event| {
@@ -5486,7 +5546,7 @@ fn app_runtime_issue_monitor_configure_recovers_malformed_prefs_without_launchin
             matches!(
                 &event.event,
                 BackendEvent::IssueMonitorToast { message, issue_number, .. }
-                    if message == "Issue Monitor settings saved" && *issue_number == Some(3165)
+                    if message == "Issues settings saved" && *issue_number == Some(3165)
             )
         }),
         "profile recovery save must commit successfully: {saved_events:?}"
@@ -5498,17 +5558,17 @@ fn app_runtime_issue_monitor_configure_recovers_malformed_prefs_without_launchin
         .is_none());
     assert!(
         runtime.window_details.is_empty(),
-        "saving Issue Monitor settings must not spawn an agent window"
+        "saving Issues settings must not spawn an agent window"
     );
 
-    let prefs = gwt::load_issue_monitor_prefs(&prefs_path).expect("load issue monitor prefs");
+    let prefs = gwt::load_issue_monitor_prefs(&prefs_path).expect("load Issues prefs");
     assert_eq!(
         prefs.legacy_git_launch_failure_migration_version, 0,
         "saving settings after recovery cannot mark the live-scan migration complete"
     );
     let profile = prefs.launch_profile.expect("saved launch profile");
     assert_eq!(profile.agent_id, "codex");
-    assert_eq!(profile.model.as_deref(), Some("gpt-5.5"));
+    assert_eq!(profile.model.as_deref(), Some("gpt-6-luna"));
     assert_eq!(profile.reasoning.as_deref(), Some("high"));
     assert!(profile.skip_permissions);
 }
@@ -6098,7 +6158,7 @@ fn app_runtime_issue_monitor_profile_save_switches_the_pool_head() {
         events.iter().any(|event| matches!(
             &event.event,
             BackendEvent::IssueMonitorToast { message, level, .. }
-                if message == "Issue Monitor settings saved" && level == "info"
+                if message == "Issues settings saved" && level == "info"
         )),
         "profile save must commit successfully: {events:?}"
     );
@@ -6171,7 +6231,9 @@ fn app_runtime_issue_monitor_configure_issue_previews_the_pool_head_replacement(
     );
     let events = runtime.handle_launch_wizard_action(
         &runtime.test_context(),
-        LaunchWizardAction::SetFastMode { enabled: true },
+        LaunchWizardAction::SetCodexSpeed {
+            speed: gwt_agent::CodexSpeed::Fast,
+        },
     );
     let view = events
         .iter()
@@ -6182,9 +6244,10 @@ fn app_runtime_issue_monitor_configure_issue_previews_the_pool_head_replacement(
             _ => None,
         })
         .expect("launch wizard view");
-    assert!(
-        view.fast_mode,
-        "profile editing honors its own Fast preference"
+    assert_eq!(
+        view.codex_speed,
+        gwt_agent::CodexSpeed::Fast,
+        "profile editing honors its explicit speed preference"
     );
     let pool = view
         .issue_monitor_pool
@@ -6212,7 +6275,7 @@ fn app_runtime_issue_monitor_configure_issue_previews_the_pool_head_replacement(
 
     runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit);
     wait_for_recorded_event(
-        "issue monitor settings runtime resolution",
+        "Issues settings runtime resolution",
         &recorded_events,
         |events| {
             events.iter().any(|event| {
@@ -6251,7 +6314,7 @@ fn app_runtime_issue_monitor_configure_issue_previews_the_pool_head_replacement(
         saved_events.iter().any(|event| matches!(
             &event.event,
             BackendEvent::IssueMonitorToast { message, level, .. }
-                if message == "Issue Monitor settings saved" && level == "info"
+                if message == "Issues settings saved" && level == "info"
         )),
         "profile preview save must commit successfully: {saved_events:#?}"
     );
@@ -6266,7 +6329,14 @@ fn app_runtime_issue_monitor_configure_issue_previews_the_pool_head_replacement(
         expected_members,
         "saving preserves the exact previewed member order"
     );
-    assert!(prefs.launch_profile.as_ref().expect("saved head").fast_mode);
+    assert_eq!(
+        prefs
+            .launch_profile
+            .as_ref()
+            .expect("saved head")
+            .codex_speed,
+        gwt_agent::CodexSpeed::Fast
+    );
     let saved_summary = test_monitor_with_prefs(gwt::IssueMonitorConfig::default(), prefs)
         .status_view()
         .launch_profile_summary;
@@ -6341,7 +6411,6 @@ fn app_runtime_monitor_quota_hold_clear_resumes_the_same_conversation() {
     for exit_code in [0, 1] {
         let temp = tempdir().unwrap();
         let _home = ScopedGwtHome::set(temp.path());
-        let (root, owner, _) = owner_monitor_fixture(temp.path(), 3165, false, &["codex"]);
         let runner = write_fake_codex(temp.path());
         #[cfg(unix)]
         fs::write(&runner, format!("#!/bin/sh\ncase \"$*\" in *--version*) printf '1.2.3\\n'; exit 0;; *'features list'*) exit 0;; esac\nprintf 'quota-fixture-ready\\n'\nread value\nprintf '%s\\n' \"{}\"\nexit {exit_code}\n", CODEX_USAGE_LIMIT_SCREEN)).unwrap();
@@ -6377,6 +6446,8 @@ fn app_runtime_monitor_quota_hold_clear_resumes_the_same_conversation() {
         };
         pin_launch_agents(&mut settings, temp.path());
         write_profile_config(&profile, &settings);
+        // The fixture performs its first schedule scan during initialization.
+        let (root, owner, _) = owner_monitor_fixture(temp.path(), 3165, false, &["codex"]);
         let mut selected = super::pane_control_tests::control_launch_config(&root, 3165);
         run_git(
             selected.working_dir.as_ref().unwrap(),

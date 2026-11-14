@@ -50,6 +50,16 @@ test.describe("Works and Agents approved baseline", () => {
     expect((await sent(page)).filter(message => ["close_window", "stop_agent", "stop_window", "restart_window"].includes(message.kind))).toEqual([]);
   });
 
+  test("a workspace snapshot cannot roll back a later runtime status in the same burst", async ({ page }) => {
+    await page.evaluate(() => {
+      const fixture = (window as any).__worksAgentsFixture;
+      fixture.workspaceStatus("starting");
+      fixture.status("agent-one", "idle");
+    });
+    await expect(workRow(page, "agent-one")).toHaveAttribute("data-state", "idle");
+    await expect(workRow(page, "agent-one").locator(".work-state")).toHaveText("Idle");
+  });
+
   test("live Works never disappear while activity and catalogs converge", async ({ page }, info) => {
     await page.evaluate(() => {
       const surface = document.querySelector(".works-surface:not(.works-surface--preview)")!;
@@ -153,7 +163,9 @@ test.describe("Works and Agents approved baseline", () => {
   });
 
   test("Issue #6362 shared census preserves member, runtime and reservation counts", async ({ page }, info) => {
-    await expect(page.locator("#op-strip-running")).toHaveText("2");
+    // SPEC #5016 AC-HS1: the strip renders the server aggregate (recorded-window
+    // included); census changes below never recount it.
+    await expect(page.locator("#op-strip-running")).toHaveText("3");
     await expect(page.locator("#op-strip-waiting")).toHaveText("1");
     await page.evaluate(() => (window as any).__worksAgentsFixture.output("agent-one", "Waiting for background terminal\r\n"));
     await openRail(page, "agents");
@@ -162,14 +174,14 @@ test.describe("Works and Agents approved baseline", () => {
     await page.screenshot({ path: info.outputPath("issue-6362-background-busy.png") });
     await page.evaluate(() => (window as any).__worksAgentsFixture.census(null));
     await expect(roster(page).locator(".roster-capacity-note")).toContainText("Busy — / Team 3");
-    await expect(page.locator("#op-strip-running")).toHaveText("—");
+    await expect(page.locator("#op-strip-running")).toHaveText("3");
     await page.evaluate(() => (window as any).__worksAgentsFixture.census(["pm-window", "agent-one"]));
     await expect(roster(page).locator(".roster-capacity-note")).toContainText("Busy 1 / Team 3");
-    await expect(page.locator("#op-strip-running")).toHaveText("2");
-    await expect(page.locator("#op-strip-waiting")).toHaveText("0");
+    await expect(page.locator("#op-strip-running")).toHaveText("3");
+    await expect(page.locator("#op-strip-waiting")).toHaveText("1");
     await openRail(page, "works");
     await expect(works(page).locator(".work-row")).toHaveCount(2);
-    await expect(works(page).locator('[data-count="running"]')).toHaveText("2");
+    await expect(works(page).locator('[data-count="running"]')).toHaveText("3");
     await expect(workRow(page, "agent-one")).toBeVisible();
     await page.screenshot({ path: info.outputPath("issue-6362-shared-census.png") });
 
@@ -177,7 +189,7 @@ test.describe("Works and Agents approved baseline", () => {
     await page.evaluate(() => (window as any).__worksAgentsFixture.census(["pm-window"]));
     await expect(works(page).locator(".work-row")).toHaveCount(1);
     await expect(workRow(page, "pm-window").locator(".window-role-badge")).toHaveText("PM");
-    await expect(page.locator("#op-strip-running")).toHaveText("1");
+    await expect(page.locator("#op-strip-running")).toHaveText("3");
     await openRail(page, "agents");
     await expect(roster(page).locator(".roster-capacity-note")).toContainText("Busy 0 / Team 3");
 
@@ -187,7 +199,7 @@ test.describe("Works and Agents approved baseline", () => {
       (window as any).__worksAgentsFixture.status("agent-one", "idle");
     });
     await expect(roster(page).locator(".roster-capacity-note")).toContainText("Busy 1 / Team 3");
-    await expect(page.locator("#op-strip-running")).toHaveText("0");
+    await expect(page.locator("#op-strip-running")).toHaveText("2");
     await expect(page.locator("#op-strip-idle")).toHaveText("1");
     await openRail(page, "works");
     await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => resolve())));
@@ -195,25 +207,45 @@ test.describe("Works and Agents approved baseline", () => {
     await expect(workRow(page, "agent-one").locator(".work-state")).toHaveText("Idle");
     await page.evaluate(() => (window as any).__worksAgentsFixture.workspaceStatus("waiting"));
     await expect(workRow(page, "agent-one").locator(".work-state")).toHaveText("Waiting");
-    await expect(page.locator("#op-strip-waiting")).toHaveText("1");
+    await expect(page.locator("#op-strip-waiting")).toHaveText("2");
+    await expect(works(page).locator('[data-count="block"]')).toHaveText("2");
     await page.evaluate(() => (window as any).__worksAgentsFixture.status("agent-one", "running"));
-    await expect(page.locator("#op-strip-running")).toHaveText("1");
-    await expect(works(page).locator('[data-count="running"]')).toHaveText("1");
+    await expect(page.locator("#op-strip-running")).toHaveText("3");
+    await expect(works(page).locator('[data-count="running"]')).toHaveText("3");
     await openRail(page, "agents");
     await expect(roster(page).locator(".roster-capacity-note")).toContainText("Busy 1 / Team 3");
 
-    // A Monitor reservation retains its slot without inventing a live member.
+    // A Issues reservation retains its slot without inventing a live member.
     await page.evaluate(() => {
       (window as any).__worksAgentsFixture.census([]);
       (window as any).__worksAgentsFixture.monitorActive(1);
     });
     await expect(roster(page).locator(".roster-capacity-note")).toContainText("Busy 0 / Team 3");
-    await expect(page.locator("#op-strip-running")).toHaveText("0");
+    await expect(page.locator("#op-strip-running")).toHaveText("3");
     await expect(page.locator("#op-strip-issue-monitor-value")).toHaveText("Run Q0 A1/3");
     await openRail(page, "works");
     await expect(works(page).locator(".work-row")).toHaveCount(0);
     await expect(works(page).locator(".works-empty")).toBeVisible();
     await expect(works(page).locator(".works-empty")).toHaveText("No local agents are active.");
+  });
+
+  test("Issue #7035 Agents lists slot-occupying review windows and counts them as busy", async ({ page }, info) => {
+    await openRail(page, "agents");
+    await expect(roster(page).locator(".roster-capacity-note")).toContainText("Busy 2 / Team 3");
+    const reviews = roster(page).getByRole("list", { name: "Review windows" });
+    await expect(reviews).toBeHidden();
+    await page.evaluate(() => (window as any).__worksAgentsFixture.reviewWindow(2970));
+    await expect(reviews).toBeVisible();
+    const row = reviews.locator('.roster-row[data-review-session-id="s-review"]');
+    await expect(row.locator("h3")).toHaveText("Uta");
+    await expect(row.locator(".roster-purpose")).toHaveText("Review · Issue #2970");
+    await expect(row.locator(".roster-state")).toHaveText("Reviewing #2970");
+    await expect(roster(page).locator(".roster-capacity-note")).toContainText("Busy 3 / Team 3");
+    await expectNoHorizontalOverflow(page, ".agents-surface:not(.agents-surface--preview)");
+    await page.screenshot({ path: info.outputPath("issue-7035-review-windows.png") });
+    await page.evaluate(() => (window as any).__worksAgentsFixture.census(["pm-window", "agent-one"]));
+    await expect(reviews).toBeHidden();
+    await expect(roster(page).locator(".roster-capacity-note")).toContainText("Busy 1 / Team 3");
   });
 
   test("PM-first list opens the same native terminal, passes Esc and links exact current members", async ({ page }, info) => {
@@ -222,7 +254,7 @@ test.describe("Works and Agents approved baseline", () => {
     await expect(workRow(page, "pm-window").locator(".work-name")).toHaveText("Yuu");
     await expect(workRow(page, "pm-window").locator(".window-role-badge")).toHaveText("PM");
     await expect(workRow(page, "pm-window").locator(".work-member")).toHaveCount(0);
-    for (const [state, count] of [["running", "2"], ["waiting", "1"], ["idle", "0"], ["error", "0"]]) await expect(works(page).locator(`[data-count="${state}"]`)).toHaveText(count);
+    for (const [state, count] of [["running", "3"], ["block", "1"], ["idle", "0"], ["error", "0"]]) await expect(works(page).locator(`[data-count="${state}"]`)).toHaveText(count);
     await expect(works(page).locator(".works-active")).toHaveText("Active 3");
     await expect(page.locator(".agents-grid, .agent-tile, .agents-tabs")).toHaveCount(0);
     await expect(page.getByRole("spinbutton", { name: "Agent columns" })).toHaveCount(0);
@@ -330,7 +362,7 @@ test.describe("Works and Agents approved baseline", () => {
       await expect(workRow(page, "agent-two").locator(".work-state")).toHaveText(label);
       expect(await workRow(page, "agent-two").locator(".work-spark").evaluate(node => getComputedStyle(node).color))
         .toBe(await workRow(page, "agent-two").locator(".work-state").evaluate(node => getComputedStyle(node).color));
-      await expect(works(page).locator(`[data-count="${state}"]`)).toHaveText("1");
+      await expect(works(page).locator(`[data-count="${state === "waiting" ? "block" : state}"]`)).toHaveText("1");
     }
     for (const state of ["unavailable", "partial"]) {
       await page.evaluate(state => (window as any).__worksAgentsFixture.usage(state), state);
@@ -579,6 +611,94 @@ test.describe("Works and Agents approved baseline", () => {
     await expect(works(page).locator(".works-source-note")).toBeVisible();
   });
 
+  // SPEC #6476 T-005g (AC-1): on a phone the Agents controls kept their
+  // desktop size (Team/Past 28px, settings, rest, register, name and tool
+  // 31-32px), below a 44px tap target. Below 601px every control on Team and
+  // Past is at least 44px; wider layouts keep their sizes.
+  test("Agents controls are 44px tap targets on a phone and keep their desktop size", async ({ page }, info) => {
+    await openRail(page, "agents");
+    await expect(roster(page).locator(".roster-count")).toHaveText("3");
+    const controls = ".agents-surface:not(.agents-surface--preview) :is(button, input, select, textarea):visible";
+    const sizes = () => page.locator(controls).evaluateAll(nodes => nodes.filter(node => node.isConnected).map(node => {
+      const box = node.getBoundingClientRect();
+      return { name: node.getAttribute("aria-label") || node.textContent!.trim().slice(0, 40) || node.tagName, width: box.width, height: box.height };
+    }));
+    const minHeights = () => page.locator(controls).evaluateAll(nodes => [...new Set(nodes.filter(node => node.isConnected).map(node => getComputedStyle(node).minHeight))].sort());
+    expect((await sizes()).some(control => control.height < 44), "the fixture has desktop-sized controls").toBe(true);
+    const desktop = await minHeights();
+    await page.setViewportSize({ width: 601, height: 1000 });
+    await expect.poll(minHeights, { message: "601px keeps the desktop control sizes" }).toEqual(desktop);
+    expect(desktop).not.toContain("44px");
+    for (const width of [320, 390]) {
+      await page.setViewportSize({ width, height: 844 });
+      for (const tab of ["Past", "Team"]) {
+        await roster(page).getByRole("tab", { name: tab, exact: true }).click();
+        const measured = await sizes();
+        expect(measured.length, `${tab} has controls at ${width}px`).toBeGreaterThan(2);
+        for (const control of measured) {
+          expect(control.height, `${tab} ${control.name} height at ${width}px`).toBeGreaterThanOrEqual(44);
+          expect(control.width, `${tab} ${control.name} width at ${width}px`).toBeGreaterThanOrEqual(44);
+        }
+        await expectNoHorizontalOverflow(page, ".agents-surface:not([hidden]):not(.agents-surface--preview)");
+        await page.screenshot({ path: info.outputPath(`agents-${tab.toLowerCase()}-${width}.png`) });
+      }
+    }
+  });
+
+  // SPEC #6476 T-005wo (AC-1): each Works row's Open terminal (97x28px) and
+  // member name link (about 40x24px) kept their desktop size on a phone. Below
+  // 601px both are 44px tap targets that still open the full terminal view or
+  // the member in Agents; wider layouts keep their size.
+  test("Works row controls are 44px tap targets on a phone and keep their desktop size", async ({ page }, info) => {
+    const open = works(page).locator(".work-row :is(.work-open, .work-member):visible");
+    await expect(open).toHaveCount(5);
+    const minHeights = () => open.evaluateAll(nodes => nodes.map(node => `${getComputedStyle(node).minWidth}x${getComputedStyle(node).minHeight}`));
+    const desktop = await minHeights();
+    expect(desktop.join(" ")).not.toContain("44px");
+    await page.setViewportSize({ width: 601, height: 1000 });
+    expect(await minHeights(), "601px keeps the desktop size").toEqual(desktop);
+    for (const width of [320, 390]) {
+      await page.setViewportSize({ width, height: 844 });
+      const sizes = await works(page).locator(":is(button, input, select, textarea):visible").evaluateAll(nodes => nodes.map(node => {
+        const box = node.getBoundingClientRect();
+        return { name: node.getAttribute("aria-label") || node.textContent!.trim().slice(0, 40), width: box.width, height: box.height };
+      }));
+      expect(sizes.filter(control => control.name === "Open terminal")).toHaveLength(3);
+      expect(sizes.filter(control => /^View .* in Agents$/.test(control.name))).toHaveLength(2);
+      for (const control of sizes) {
+        expect(control.height, `${control.name} height at ${width}px`).toBeGreaterThanOrEqual(44);
+        expect(control.width, `${control.name} width at ${width}px`).toBeGreaterThanOrEqual(44);
+      }
+      await expectNoHorizontalOverflow(page, ".works-surface:not(.works-surface--preview)");
+      await page.screenshot({ path: info.outputPath(`works-open-${width}.png`) });
+    }
+    await workRow(page, "agent-one").locator(".work-member").click();
+    await expect(main(page)).toHaveAttribute("data-surface", "agents");
+    await openRail(page, "works");
+    await workRow(page, "agent-one").locator(".work-open").click();
+    await expect(full(page)).toBeVisible();
+  });
+
+  test("Agents recovers lost registration catalogs on reconnect without losing the name draft", async ({ page }, info) => {
+    await page.evaluate(() => (window as any).__worksAgentsFixture.holdCatalogs());
+    await openRail(page, "agents");
+    const name = roster(page).getByLabel("Name for new member", { exact: true });
+    const tool = roster(page).getByRole("combobox", { name: "Tool for new member", exact: true });
+    const register = roster(page).locator('.roster-capacity [data-action="add"]');
+    await name.fill("Maple");
+    await expect(tool).toBeDisabled();
+    await expect(register).toBeDisabled();
+    await name.evaluate(node => { (window as any).__catalogDraftInput = node; });
+    await page.evaluate(() => (window as any).__worksAgentsFixture.reconnectCatalogs());
+    await expect(tool.locator("option")).toHaveText(["Codex", "Claude Code"]);
+    await expect(tool).toBeEnabled();
+    await expect(register).toBeEnabled();
+    await expect(name).toHaveValue("Maple");
+    expect(await name.evaluate(node => node === (window as any).__catalogDraftInput)).toBe(true);
+    expect((await sent(page)).filter(message => message.kind === "agent_roster" && message.action.kind !== "read")).toEqual([]);
+    await page.screenshot({ path: info.outputPath("agents-reconnected-catalogs.png") });
+  });
+
   test("inline member names preserve drafts, IME, current work and history through conflict retry", async ({ page }, info) => {
     await openRail(page, "agents");
     const name = roster(page).getByRole("textbox", { name: "Display name", exact: true });
@@ -765,6 +885,7 @@ async function installWorksAgentsBackend(page: Page) {
     const rejectedScheduleRevisions: any[] = [];
     let queueRevision = "queue-v1:fixture-1", scheduleRevision = 7, deferredSchedule = false;
     let pendingSchedule: any = null, pendingRename: any = null, deferredRename = false, firstRenameReceipt: any = null;
+    let holdCatalogs = false;
     const planned = [
       { agent_member_id: "m-one", issues: [{ issue_number: 5002, reason: "same_spec_continuation" }, { issue_number: 5003, reason: "queue_order" }] },
       { agent_member_id: "m-two", issues: [{ issue_number: 5004, reason: "queue_order" }] },
@@ -800,13 +921,23 @@ async function installWorksAgentsBackend(page: Page) {
       target.issues.push({ ...issue, reason: "assigned_by_you" }); scheduleRevision++;
       socket.emit(scheduleSnapshot());
     };
+    // SPEC #5016 AC-HS1: like the backend, publish the RUN / BLOCK / IDLE / ERROR
+    // aggregate of the project's agent windows; the strip and Works heading render it.
+    let aggregateRevision = 0;
+    const aggregate = () => {
+      const statuses = windows.filter(data => ["agent", "codex", "claude"].includes(data.preset)).map(data => data.status);
+      const count = (...states: string[]) => statuses.filter(status => states.includes(status)).length;
+      return { kind: "project_agent_aggregate", aggregate: { running_count: count("running", "starting"),
+        block_count: count("waiting", "stopped", "interrupted", "error"), idle_count: count("idle"), error_count: count("error"),
+        unread: false, revision: ++aggregateRevision } };
+    };
     const activity = () => ({ kind: "active_work_projection", projection: { id: "works-agents-fixture", active_works: [], local_agent_activity: { project_key: projectKey, host_id: "fixture-host", observed_at: new Date(1792886400000 + activityRevision++).toISOString(), agents } } });
     class FixtureWebSocket extends EventTarget {
       static CONNECTING = 0; static OPEN = 1; static CLOSING = 2; static CLOSED = 3;
       readyState = FixtureWebSocket.CONNECTING;
       constructor(public readonly url: string) {
         super(); socket = this;
-        setTimeout(() => { this.readyState = FixtureWebSocket.OPEN; this.dispatchEvent(new Event("open")); this.emit(workspace()); this.emit(rosterSnapshot()); this.emit(activity()); }, 0);
+        setTimeout(() => { this.readyState = FixtureWebSocket.OPEN; this.dispatchEvent(new Event("open")); this.emit(workspace()); this.emit(aggregate()); this.emit(rosterSnapshot()); this.emit(activity()); }, 0);
       }
       send(raw: string) {
         const message = JSON.parse(raw); sentMessages.push(message);
@@ -822,10 +953,10 @@ async function installWorksAgentsBackend(page: Page) {
             this.emit({ kind: "system_settings_updated", language: message.language, works_preview_lines: worksPreviewLines });
           } else this.emit({ kind: "system_settings_error", message: "Invalid fixture Works output lines" });
         }
-        if (message.kind === "list_supported_agents") this.emit({ kind: "supported_agent_list", agents: [
+        if (message.kind === "list_supported_agents" && !holdCatalogs) this.emit({ kind: "supported_agent_list", agents: [
           { id: "codex", name: "Codex", installed: true }, { id: "claude", name: "Claude Code", installed: true },
         ] });
-        if (message.kind === "list_custom_agents") this.emit({ kind: "custom_agent_list", agents: [] });
+        if (message.kind === "list_custom_agents" && !holdCatalogs) this.emit({ kind: "custom_agent_list", agents: [] });
         if (message.kind === "agent_roster") {
           if (message.action.kind === "rename") {
             if (deferredRename) pendingRename = message;
@@ -849,6 +980,8 @@ async function installWorksAgentsBackend(page: Page) {
     Object.defineProperty(window, "WebSocket", { configurable: true, value: FixtureWebSocket });
     (window as any).__worksAgentsFixture = {
       sent: sentMessages, members, rejectedRevisions, rejectedScheduleRevisions,
+      holdCatalogs() { holdCatalogs = true; },
+      reconnectCatalogs() { holdCatalogs = false; socket.close(); },
       deferRename() { deferredRename = true; },
       releaseRename() { const message = pendingRename; pendingRename = null; if (message) applyRename(message); },
       replayRename() { if (firstRenameReceipt) socket.emit(firstRenameReceipt); },
@@ -872,7 +1005,7 @@ async function installWorksAgentsBackend(page: Page) {
         socket.emit(event);
       },
       workspaceTitle(title: string) { windows.find(data => data.id === "agent-one").dynamic_title = title; socket.emit(workspace()); },
-      workspaceStatus(status: string) { windows.find(data => data.id === "agent-one").status = status; socket.emit(workspace()); },
+      workspaceStatus(status: string) { windows.find(data => data.id === "agent-one").status = status; socket.emit(workspace()); socket.emit(aggregate()); },
       attachmentProgress() { socket.emit({ kind: "attachment_progress", id: "agent-one",
         operation_id: "telemetry-attachment", phase: "staging", filename: "fixture.txt", bytes_done: 8, bytes_total: 16 }); },
       remountInKanban() {
@@ -888,6 +1021,11 @@ async function installWorksAgentsBackend(page: Page) {
       changeQueueRevision() { queueRevision = "queue-v1:fixture-2"; },
       releaseSchedule() { if (!pendingSchedule) throw new Error("no schedule mutation is pending"); const action = pendingSchedule; pendingSchedule = null; applySchedule(action); },
       output(id: string, text: string) { socket.emit({ kind: "terminal_output", id, data_base64: btoa(text) }); },
+      reviewWindow(issue_number: number) {
+        agents = [...agents, { window_id: "review-window", session_id: "s-review", runtime_incarnation: 1, issue_number,
+          is_pm: false, review_dispatch: true, agent_name: "Uta" }];
+        socket.emit(activity());
+      },
       census(ids: string[] | null) {
         if (ids !== null) agents = agents.filter(agent => ids.includes(agent.window_id));
         const snapshot = activity().projection.local_agent_activity;
@@ -898,7 +1036,7 @@ async function installWorksAgentsBackend(page: Page) {
           enabled: true, state: "active", queue_len: 0, active_count, max_active_agents: 3,
         } });
       },
-      status(id: string, status: string) { const data = windows.find(data => data.id === id); if (data) data.status = status; socket.emit({ kind: "terminal_status", id, status }); },
+      status(id: string, status: string) { const data = windows.find(data => data.id === id); if (data) data.status = status; socket.emit({ kind: "terminal_status", id, status }); socket.emit(aggregate()); },
       retire(id: string, immediate: boolean) { agents = agents.filter(agent => agent.window_id !== id); const event = activity(); if (immediate) window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: event })); else socket.emit(event); },
       error(message: string) { socket.emit({ kind: "agent_roster_error", project_key: projectKey, message }); },
       usage(quality = "measured", inputTokens = 0) {

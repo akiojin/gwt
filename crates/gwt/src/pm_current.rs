@@ -6,7 +6,9 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 mod reports;
+mod tasks;
 pub use reports::PmReportsReader;
+pub use tasks::{task_detail, PmTaskDetail, PmTaskOverview};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PmIssueFact {
@@ -34,6 +36,17 @@ pub struct PmMonitorFacts {
     pub pending_update: Option<String>,
     pub update_known: bool,
     pub error: Option<String>,
+    /// SPEC #5016 HSV: open PRs whose review is unresolved, from the cached
+    /// `pr.list` observation. `None` means nothing was observed (not zero).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_attention: Option<Vec<PmReviewAttention>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PmReviewAttention {
+    pub pr_number: u64,
+    pub issue_numbers: Vec<u64>,
+    pub reason: String,
 }
 
 fn facts_from_monitor(
@@ -95,6 +108,61 @@ fn release_from_cache(
     (release, cache.fetched_at)
 }
 
+/// SPEC #5016 HSV: reads only what `pr.list` already observed; it never
+/// triggers a GitHub read of its own.
+fn review_attention_from_cache(
+    cache: &gwt_git::pr_status::PrInventoryCache,
+) -> Option<Vec<PmReviewAttention>> {
+    cache.fetched_at?;
+    let items = cache
+        .rows
+        .iter()
+        .filter(|row| {
+            row["state"]
+                .as_str()
+                .is_none_or(|state| state.eq_ignore_ascii_case("OPEN"))
+        })
+        .filter_map(|row| {
+            let pr_number = row["number"].as_u64()?;
+            let threads = cache
+                .heavy
+                .get(&pr_number)
+                .and_then(|heavy| heavy.review_state)
+                .map_or(0, |state| state.unresolved_threads);
+            let reason = if row["reviewDecision"] == "CHANGES_REQUESTED" {
+                "Changes requested".to_owned()
+            } else if threads > 0 {
+                format!(
+                    "{threads} unresolved review thread{}",
+                    if threads == 1 { "" } else { "s" }
+                )
+            } else {
+                return None;
+            };
+            let mut issue_numbers: Vec<u64> = row["closingIssuesReferences"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|issue| issue["number"].as_u64())
+                .collect();
+            if issue_numbers.is_empty() {
+                issue_numbers.extend(
+                    row["headRefName"]
+                        .as_str()
+                        .and_then(|name| name.strip_prefix("work/issue-"))
+                        .and_then(|tail| tail.parse::<u64>().ok()),
+                );
+            }
+            Some(PmReviewAttention {
+                pr_number,
+                issue_numbers,
+                reason,
+            })
+        })
+        .collect();
+    Some(items)
+}
+
 fn project_dir(repo: &Path) -> PathBuf {
     repo.ancestors()
         .find_map(|ancestor| {
@@ -143,6 +211,8 @@ pub struct PmCurrentSnapshot {
     pub status: Option<gwt_core::pm_status::PmCurrentStatus>,
     pub stale_minutes: Option<i64>,
     pub facts: PmMonitorFacts,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_tasks: Option<PmTaskOverview>,
 }
 
 /// Runs off the GUI thread. All facts have their own authority; a missing
@@ -223,8 +293,9 @@ fn snapshot_from_inventory(
     // Reuse pr.list's budget/TTL read, without advancing its escalation history.
     // A failed refresh can still expose the previous observation and its time.
     let _ = gwt_git::pr_status::fetch_pr_inventory_cached(repo, &cache_path, &options);
-    (facts.release, facts.release_observed_at) =
-        release_from_cache(&gwt_git::pr_status::PrInventoryCache::load(&cache_path));
+    let cache = gwt_git::pr_status::PrInventoryCache::load(&cache_path);
+    (facts.release, facts.release_observed_at) = release_from_cache(&cache);
+    facts.review_attention = review_attention_from_cache(&cache);
     if let Some(staged) = gwt_core::update::load_pending_update_manifest() {
         facts.pending_update = Some(staged.version);
         facts.update_known = true;
@@ -250,12 +321,249 @@ fn snapshot_from_inventory(
         status,
         stale_minutes,
         facts,
+        request_tasks: Some(tasks::load(repo)),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn request_task_overview_uses_reports_versions_and_bounds_private_tracking_data() {
+        use gwt_core::pm_request_tasks::{
+            Action, Actor, ActorKind, IntakeSource, Request, TaskDraft, TaskStore,
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let repo = temp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let mut reader = PmReportsReader::default();
+        let (first, absent) = reader.poll(&repo, None, None).unwrap();
+        assert_eq!(
+            serde_json::to_value(absent.current).unwrap()["request_tasks"]["state"],
+            "absent"
+        );
+        let store = TaskStore::for_repo(&repo);
+        let apply = |revision, kind, action| {
+            store
+                .apply(
+                    &Actor {
+                        kind,
+                        id: "fixture".into(),
+                    },
+                    &Request {
+                        operation_id: format!("op-{revision}"),
+                        expected_revision: revision,
+                        reason: "overview fixture".into(),
+                        action,
+                    },
+                )
+                .unwrap()
+        };
+        apply(
+            0,
+            ActorKind::Intake,
+            Action::Capture {
+                source: IntakeSource {
+                    id: "private-source".into(),
+                    project_key: project_dir(&repo)
+                        .file_name()
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                        .into(),
+                    original: "PRIVATE ORIGINAL MUST NOT CROSS THIS PROJECTION".into(),
+                    authority: gwt_core::user_instruction::InstructionAuthority {
+                        session_id: "synthetic-intake".into(),
+                        turn_id: "synthetic-turn".into(),
+                        prompt_sha256: gwt_core::pm_authorization::digest(
+                            b"PRIVATE ORIGINAL MUST NOT CROSS THIS PROJECTION",
+                        ),
+                    },
+                },
+            },
+        );
+        let (captured, pending) = reader.poll(&repo, None, Some(&first)).unwrap();
+        assert_eq!(
+            captured.revision,
+            first.revision + 1,
+            "Task-only writes advance Reports"
+        );
+        assert_eq!(
+            serde_json::to_value(pending.current).unwrap()["request_tasks"]["pending_intake"],
+            1
+        );
+        let draft = |id: String| TaskDraft {
+            title: "界".repeat(300),
+            id,
+            purpose: "目的".repeat(150),
+            completion_conditions: (0..6)
+                .map(|i| format!("{i}:{}", "条件".repeat(150)))
+                .collect(),
+            issue_numbers: vec![],
+            goal_ids: vec![],
+            assignee: Some("PM".into()),
+        };
+        apply(
+            1,
+            ActorKind::Pm,
+            Action::Decompose {
+                source_id: "private-source".into(),
+                root: draft("private-000-root".into()),
+                children: (0..55)
+                    .map(|i| draft(format!("private-child-{i:03}")))
+                    .collect(),
+            },
+        );
+        apply(
+            2,
+            ActorKind::User,
+            Action::Cancel {
+                task_id: "private-child-000".into(),
+            },
+        );
+        apply(
+            3,
+            ActorKind::Pm,
+            Action::Complete {
+                task_id: "private-child-054".into(),
+                condition_revision: 1,
+                review_generation: 1,
+                evidence: vec!["synthetic:verified-child".into()],
+            },
+        );
+        apply(
+            4,
+            ActorKind::Pm,
+            Action::AddChild {
+                parent_id: "private-child-001".into(),
+                child: draft("private-grandchild".into()),
+            },
+        );
+        let (updated, data) = reader.poll(&repo, None, Some(&captured)).unwrap();
+        let value = serde_json::to_value(data.current).unwrap();
+        let overview = &value["request_tasks"];
+        assert_eq!(overview["state"], "ready");
+        assert_eq!(overview["total"], 57);
+        assert_eq!(overview["pending_intake"], 0);
+        let rows = overview["tasks"].as_array().unwrap();
+        assert_eq!(rows.len(), 50);
+        let beyond_id_limit = format!("{:x}", Sha256::digest(b"private-child-049"));
+        assert!(rows.iter().any(|row| row["key"] == beyond_id_limit));
+        assert!(rows.iter().all(|row| row["status"] != "cancelled"));
+        assert_eq!(rows[0]["key"].as_str().unwrap().len(), 64);
+        let source_key = format!("{:x}", Sha256::digest(b"private-source"));
+        assert!(rows.iter().all(|row| row["source_key"] == source_key));
+        assert!(rows[0]["title"].as_str().unwrap().chars().count() <= 241);
+        assert!(rows[1]["parent_key"].as_str().is_some());
+        assert_eq!(
+            rows[0]["status"], "pending",
+            "child completion is not parent completion"
+        );
+        assert_eq!(
+            rows[0]["child_progress"],
+            serde_json::json!({
+                "total": 55, "completed": 1, "cancelled": 1,
+            }),
+            "counts include hidden children and exclude the grandchild"
+        );
+        assert_eq!(
+            rows[1]["child_progress"],
+            serde_json::json!({
+                "total": 1, "completed": 0, "cancelled": 0,
+            })
+        );
+        assert!(
+            rows[2].get("child_progress").is_none(),
+            "leaves have no child progress"
+        );
+        let preview = &rows[0]["criteria_preview"];
+        assert_eq!(preview["purpose"], format!("{}…", "目的".repeat(120)));
+        assert_eq!(preview["completion_condition_total"], 6);
+        let conditions = preview["completion_conditions"].as_array().unwrap();
+        assert_eq!(conditions.len(), 5);
+        for (index, condition) in conditions.iter().enumerate() {
+            assert_eq!(
+                condition,
+                &serde_json::json!(format!("{index}:{}…", "条件".repeat(119)))
+            );
+        }
+        let mut legacy = overview.clone();
+        for row in legacy["tasks"].as_array_mut().unwrap() {
+            row.as_object_mut().unwrap().remove("source_key");
+            row.as_object_mut().unwrap().remove("criteria_preview");
+            row.as_object_mut().unwrap().remove("child_progress");
+        }
+        let legacy: PmTaskOverview = serde_json::from_value(legacy).unwrap();
+        let legacy = serde_json::to_value(legacy).unwrap();
+        assert!(legacy["tasks"][0].get("source_key").is_none());
+        assert!(legacy["tasks"][0].get("criteria_preview").is_none());
+        assert!(legacy["tasks"][0].get("child_progress").is_none());
+        let text = overview.to_string();
+        for private in [
+            "private-000-root",
+            "private-child",
+            "private-source",
+            "PRIVATE ORIGINAL",
+            "5:条件",
+            "authority",
+            "receipt",
+        ] {
+            assert!(
+                !text.contains(private),
+                "private tracking field leaked: {private}"
+            );
+        }
+        assert!(
+            reader.poll(&repo, None, Some(&updated)).is_none(),
+            "unchanged Task data is acknowledged"
+        );
+        // PM status and request tracking are independent durable sources.
+        std::fs::write(status_path(&repo), "broken PM status").unwrap();
+        let (unrelated_error, data) = reader.poll(&repo, None, Some(&updated)).unwrap();
+        assert!(data.error.is_none() && data.current_error.is_some());
+        assert_eq!(
+            serde_json::to_value(data.current).unwrap()["request_tasks"]["state"],
+            "ready"
+        );
+        apply(
+            5,
+            ActorKind::Pm,
+            Action::Progress {
+                task_id: "private-child-001".into(),
+                status: gwt_core::pm_request_tasks::TaskStatus::Waiting,
+                wait_reason: Some("CI verdict".into()),
+                next_action: "Review the checks".into(),
+            },
+        );
+        let (progressed, data) = reader.poll(&repo, None, Some(&unrelated_error)).unwrap();
+        assert_eq!(progressed.revision, unrelated_error.revision + 1);
+        assert_eq!(
+            serde_json::to_value(data.current).unwrap()["request_tasks"]["tasks"][1]["wait_reason"],
+            "CI verdict"
+        );
+        std::fs::remove_file(status_path(&repo)).unwrap();
+        let (updated, _) = reader.poll(&repo, None, Some(&progressed)).unwrap();
+        let state = project_dir(&repo).join("project-state/request-tasks/state.json");
+        std::fs::write(&state, "broken").unwrap();
+        let (failed, data) = reader.poll(&repo, None, Some(&updated)).unwrap();
+        assert_eq!(
+            serde_json::to_value(data.current).unwrap()["request_tasks"]["state"],
+            "error"
+        );
+        std::fs::remove_file(state).unwrap();
+        assert!(
+            reader.poll(&repo, None, Some(&failed)).is_none(),
+            "the same safe error does not manufacture a new visible revision"
+        );
+        let (_, data) = reader.poll(&repo, None, None).unwrap();
+        assert_eq!(
+            serde_json::to_value(data.current).unwrap()["request_tasks"]["state"],
+            "error",
+            "initialized missing data is not empty"
+        );
+    }
 
     #[test]
     fn reports_poll_skips_acknowledged_loads_but_hydrates_independent_cursors() {
@@ -304,6 +612,47 @@ mod tests {
                 .0,
             recovered
         );
+        let task_input = Some(vec![super::reports::SourceStamp::Update(
+            serde_json::json!(2),
+        )]);
+        changed.error = None;
+        changed.current = Some(PmCurrentSnapshot {
+            observed_at: now,
+            status: None,
+            stale_minutes: None,
+            facts: PmMonitorFacts::default(),
+            request_tasks: Some(PmTaskOverview::Error {
+                message: "temporarily unreadable tasks".into(),
+            }),
+        });
+        let (failed, _) = reader
+            .poll_with(task_input.clone(), Some(&recovered), now, || {
+                changed.clone()
+            })
+            .unwrap();
+        assert!(reader
+            .poll_with(task_input.clone(), Some(&failed), now, || panic!(
+                "viewers share the task retry deadline"
+            ))
+            .is_none());
+        assert!(reader
+            .poll_with(
+                task_input.clone(),
+                Some(&failed),
+                now + chrono::Duration::seconds(5),
+                || changed,
+            )
+            .is_none());
+        let retry_at = now + chrono::Duration::seconds(10);
+        let (recovered, _) = reader
+            .poll_with(task_input.clone(), Some(&failed), retry_at, || data)
+            .expect("task reads recover on the shared retry deadline without a stamp change");
+        assert_eq!(recovered.revision, failed.revision + 1);
+        assert!(reader
+            .poll_with(task_input, Some(&recovered), retry_at, || panic!(
+                "the acknowledged task recovery stays silent"
+            ))
+            .is_none());
     }
 
     #[cfg(unix)]
@@ -386,5 +735,54 @@ mod tests {
         let (release, at) = release_from_cache(&cache);
         assert_eq!(release.unwrap().number, 5352);
         assert_eq!(at, Some(observed));
+    }
+
+    // SPEC #5016 HSV: unresolved reviews come from the cached observation only.
+    #[test]
+    fn review_attention_reads_changes_requested_and_unresolved_threads_from_cache() {
+        let mut cache = gwt_git::pr_status::PrInventoryCache::default();
+        assert_eq!(
+            review_attention_from_cache(&cache),
+            None,
+            "no observation is unknown, never zero"
+        );
+        cache.fetched_at = Some("2026-11-13T09:00:00Z".parse().unwrap());
+        assert_eq!(review_attention_from_cache(&cache), Some(Vec::new()));
+        cache.rows = vec![
+            serde_json::json!({"number": 801, "state": "OPEN", "headRefName": "work/issue-71", "reviewDecision": "CHANGES_REQUESTED", "closingIssuesReferences": [{"number": 70}]}),
+            serde_json::json!({"number": 802, "state": "OPEN", "headRefName": "work/issue-72", "reviewDecision": "APPROVED"}),
+            serde_json::json!({"number": 803, "state": "OPEN", "headRefName": "feature/x", "reviewDecision": "REVIEW_REQUIRED"}),
+            serde_json::json!({"number": 804, "state": "MERGED", "headRefName": "work/issue-74", "reviewDecision": "CHANGES_REQUESTED"}),
+        ];
+        cache.heavy.insert(
+            802,
+            gwt_git::pr_status::PrInventoryHeavy {
+                updated_at: None,
+                head_ref_oid: None,
+                status_check_rollup: None,
+                body: None,
+                hydrated_at: "2026-11-13T09:00:00Z".parse().unwrap(),
+                review_state: Some(gwt_git::pr_status::PrReviewState {
+                    unresolved_threads: 2,
+                    coderabbit_review_complete: true,
+                }),
+            },
+        );
+        let items = review_attention_from_cache(&cache).unwrap();
+        assert_eq!(
+            items,
+            vec![
+                PmReviewAttention {
+                    pr_number: 801,
+                    issue_numbers: vec![70],
+                    reason: "Changes requested".into(),
+                },
+                PmReviewAttention {
+                    pr_number: 802,
+                    issue_numbers: vec![72],
+                    reason: "2 unresolved review threads".into(),
+                },
+            ]
+        );
     }
 }

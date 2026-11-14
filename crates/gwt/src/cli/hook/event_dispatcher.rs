@@ -62,10 +62,15 @@ fn handle_with_observation(
     mark_playwright_hook_dispatcher_entry();
     diagnostics::begin_event();
     let _deadline = enter_event_deadline(event, started);
-    *completion = super::runtime_state::begin_hook_event(worktree_root, event, input);
+    *completion = run_value(event, "begin-hook-event", || {
+        super::runtime_state::begin_hook_event(worktree_root, event, input)
+    });
     let completion = completion.as_ref();
-    let is_pm = IntentBoundaryEvent::from_name(event).is_some()
-        && super::is_resident_pm_session(worktree_root, current_session);
+    let is_pm = run_value(event, "pm-session-check", || {
+        IntentBoundaryEvent::from_name(event).is_some()
+            && super::is_resident_pm_session(worktree_root, current_session)
+    });
+    pm_loop_stop_check::handle_grok_delivery_acceptance(worktree_root, event, input);
     let result = match event {
         "SessionStart" => handle_session_start(event, input, worktree_root, completion),
         "UserPromptSubmit" => {
@@ -214,26 +219,27 @@ fn handle_user_prompt_submit(
 ) -> Result<HookOutput, HookError> {
     // PM reporting has its own settlement path; ordinary producing obligations
     // deliberately remain unarmed in this window.
-    super::pm_reporting::handle_user_prompt_submit(worktree_root, input)?;
-    // Start the three bookkeeping writes together. The exact delivery ACK must
-    // precede the live RuntimeState notice: the Host uses it to release retained
-    // input even while paused. Other writes overlap RuntimeState and Board work;
-    // timing records retain their historical handler order.
+    let reporting_started = Instant::now();
+    let reporting = super::pm_reporting::handle_user_prompt_submit(worktree_root, input);
+    diagnostics::record_handler_duration(
+        event,
+        "pm-reporting-prompt",
+        reporting_started.elapsed(),
+        if reporting.is_ok() { "ok" } else { "error" },
+    );
+    reporting?;
+    // Start the other bookkeeping together before the live RuntimeState
+    // notice. Grok records only pre-turn correlation here; its matching
+    // PreToolUse/Stop later commits the ACK before that event's notice.
     let event_deadline = gwt_core::operation_deadline::current();
     #[cfg(test)]
     let operation_clock = gwt_core::operation_deadline::ScopedOperationClock::current();
+    #[cfg(test)]
+    let bookkeeping_gate = tests::bookkeeping_gate();
     std::thread::scope(|scope| {
-        let pm_delivery_ack = scope.spawn(|| {
-            #[cfg(test)]
-            let _clock =
-                operation_clock.map(gwt_core::operation_deadline::ScopedOperationClock::set);
-            let _deadline =
-                event_deadline.map(gwt_core::operation_deadline::ScopedOperationDeadline::enter);
-            let started = Instant::now();
-            pm_loop_stop_check::handle_delivery_acknowledgement(worktree_root, input);
-            started.elapsed()
-        });
         let action_obligation = scope.spawn(|| {
+            #[cfg(test)]
+            tests::wait_bookkeeping_gate(bookkeeping_gate.as_ref());
             #[cfg(test)]
             let _clock =
                 operation_clock.map(gwt_core::operation_deadline::ScopedOperationClock::set);
@@ -244,6 +250,8 @@ fn handle_user_prompt_submit(
             started.elapsed()
         });
         let pm_loop_reset = scope.spawn(|| {
+            #[cfg(test)]
+            tests::wait_bookkeeping_gate(bookkeeping_gate.as_ref());
             #[cfg(test)]
             let _clock =
                 operation_clock.map(gwt_core::operation_deadline::ScopedOperationClock::set);
@@ -258,11 +266,15 @@ fn handle_user_prompt_submit(
             (started.elapsed(), result)
         });
 
+        // The exact delivery ACK must precede the live RuntimeState notice, so
+        // run it on this thread. Spawning it only to join it at once let a
+        // loaded host spend the aggregate deadline scheduling that thread
+        // before RuntimeState could start (Issue #7142).
         #[cfg(test)]
         tests::release_ack_join_lock();
-        let pm_delivery_ack_duration = pm_delivery_ack
-            .join()
-            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        let ack_started = Instant::now();
+        pm_loop_stop_check::handle_delivery_acknowledgement(worktree_root, input);
+        let pm_delivery_ack_duration = ack_started.elapsed();
         let prepared_session = run_step(event, "runtime-state", || {
             crate::daemon_runtime::handle_runtime_state_owned(event, input, completion)
         });
@@ -583,7 +595,7 @@ fn gate_remediation_context(worktree_root: &Path) -> Option<String> {
         .as_ref()
         .map(|snapshot| snapshot.ids.join(", "))
         .unwrap_or_default();
-    Some(format!("Issue Monitor requests remediation for Issue #{issue}. Continue in this same window.\nReason: {reason}\nCurrent acceptance criteria: {ids}\nRead the current owner Issue through issue.view before continuing. Address its current criteria and the failure, then verify and push the corrected head for fresh independent review. This is an automated Monitor notice, not human approval."))
+    Some(format!("Issues requests remediation for Issue #{issue}. Continue in this same window.\nReason: {reason}\nCurrent acceptance criteria: {ids}\nRead the current owner Issue through issue.view before continuing. Address its current criteria and the failure, then verify and push the corrected head for fresh independent review. This is an automated Monitor notice, not human approval."))
 }
 
 fn handle_pre_tool_use(
@@ -594,7 +606,7 @@ fn handle_pre_tool_use(
     // Issue #3478 (FR-025): the question guard runs before every other policy.
     // A question tool call must be converted while it is still refusable — any
     // later check that returns first would let the provider open the question
-    // UI and hold the Issue Monitor slot until the stuck timeout.
+    // UI and hold Issues slot until the stuck timeout.
     let question_guard = run_step(event, "autonomous-question-guard", || {
         autonomous_question_guard::handle_with_input(input)
     })?;
@@ -965,10 +977,55 @@ mod tests {
         };
     }
 
+    /// Issue #7142: a gate that holds every spawned bookkeeping thread until
+    /// the live RuntimeState notice arrives, modelling a loaded host that
+    /// schedules those threads late. The critical path must not wait for them.
+    #[derive(Default)]
+    pub(super) struct BookkeepingGate {
+        state: std::sync::Mutex<(bool, bool)>,
+        changed: std::sync::Condvar,
+    }
+
+    impl BookkeepingGate {
+        fn open(&self) {
+            self.state.lock().unwrap().0 = true;
+            self.changed.notify_all();
+        }
+
+        fn starved_the_live_notice(&self) -> bool {
+            self.state.lock().unwrap().1
+        }
+    }
+
+    thread_local! {
+        static BOOKKEEPING_GATE: std::cell::RefCell<Option<std::sync::Arc<BookkeepingGate>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    pub(super) fn bookkeeping_gate() -> Option<std::sync::Arc<BookkeepingGate>> {
+        BOOKKEEPING_GATE.with(|gate| gate.borrow().clone())
+    }
+
+    pub(super) fn wait_bookkeeping_gate(gate: Option<&std::sync::Arc<BookkeepingGate>>) {
+        let Some(gate) = gate else {
+            return;
+        };
+        let state = gate.state.lock().unwrap();
+        let (mut state, wait) = gate
+            .changed
+            .wait_timeout_while(state, Duration::from_secs(10), |(open, _)| !*open)
+            .unwrap();
+        if wait.timed_out() {
+            // The live notice never came while this thread was held back.
+            *state = (true, true);
+            gate.changed.notify_all();
+        }
+    }
+
     pub(super) fn release_ack_join_lock() {
         ACK_JOIN_LOCK.with(|lock| {
             if let Some(file) = lock.borrow_mut().take() {
-                fs2::FileExt::unlock(&file).expect("release the delayed ACK before joining it");
+                fs2::FileExt::unlock(&file).expect("release the held receipt lock before the ACK");
             }
         });
     }
@@ -1127,6 +1184,7 @@ mod tests {
         pm_registry::prepare_pm_delivery_receipt(
             &receipt_path,
             &PmDeliveryReceipt {
+                grok_prompt: None,
                 operation_id: operation_id.into(),
                 recorded_at: "2026-10-26T00:00:00Z".into(),
                 status: PmDeliveryReceiptStatus::Prepared,
@@ -1147,6 +1205,9 @@ mod tests {
             .unwrap();
         fs2::FileExt::lock_exclusive(&lock).unwrap();
         ACK_JOIN_LOCK.with(|held| assert!(held.borrow_mut().replace(lock).is_none()));
+        let gate = std::sync::Arc::new(BookkeepingGate::default());
+        BOOKKEEPING_GATE.with(|held| assert!(held.borrow_mut().replace(gate.clone()).is_none()));
+        let live_gate = gate.clone();
 
         let runtime = Runtime::new().unwrap();
         let listener = runtime
@@ -1159,6 +1220,7 @@ mod tests {
             axum::routing::post(move |Json(event): Json<crate::RuntimeHookEvent>| {
                 let path = receipt_path.clone();
                 let calls = calls.clone();
+                live_gate.open();
                 async move {
                     // Observe at the real receiver without acquiring the ACK's lock.
                     let raw = std::fs::read_to_string(path).unwrap();
@@ -1211,7 +1273,12 @@ mod tests {
         );
         shutdown.send(()).unwrap();
         runtime.block_on(server).unwrap();
+        BOOKKEEPING_GATE.with(|held| held.borrow_mut().take());
         result.unwrap();
+        assert!(
+            !gate.starved_the_live_notice(),
+            "the live RuntimeState notice must not wait for a spawned bookkeeping thread",
+        );
         assert_eq!(
             pm_registry::pm_delivery_receipt_for_operation(
                 &pm_registry::pm_delivery_receipts_path_for_repo_path(&repo),

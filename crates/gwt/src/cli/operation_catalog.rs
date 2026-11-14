@@ -404,6 +404,10 @@ pub const OPERATIONS: &[Operation] = &[
     // The operator's hand on the implementation queue: list what is queued,
     // put an Issue in, take one out, and reorder what is left.
     Operation {
+        name: "issue.monitor.queue.adopt",
+        aliases: &[],
+    },
+    Operation {
         name: "issue.monitor.queue.auto_refill",
         aliases: &[],
     },
@@ -908,6 +912,14 @@ pub const OPERATIONS: &[Operation] = &[
     },
     Operation {
         name: "workspace.receipt",
+        aliases: &[],
+    },
+    Operation {
+        name: "workspace.reopen",
+        aliases: &[],
+    },
+    Operation {
+        name: "workspace.repair_close_proof",
         aliases: &[],
     },
     Operation {

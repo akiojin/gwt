@@ -1,12 +1,12 @@
 const finite = value => typeof value === "number" && Number.isFinite(value);
 const number = value => finite(value) ? new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(value) : "—";
 const seconds = value => finite(value) ? `${Math.floor(value / 3600)}h ${Math.floor(value % 3600 / 60)}m` : "—";
-const stateFor = status => ({ running: "running", starting: "running", waiting: "waiting", idle: "idle", ready: "idle", error: "error", interrupted: "error" })[status] || "unknown";
+const stateFor = status => ({ running: "running", starting: "running", waiting: "waiting", idle: "idle", ready: "idle", stopped: "stopped", exited: "stopped", error: "error", interrupted: "interrupted" })[status] || "unknown";
 const labelFor = state => state.charAt(0).toUpperCase() + state.slice(1);
 
-// Live activity owns membership; a separately arriving catalog only enriches
-// the row and authorizes access to its exact session's local terminal.
-function currentWorks(catalog, activity, roster) {
+// Live activity owns active membership. Exact stopped windows retained by the
+// backend stay available for transcript inspection without joining that census.
+function currentWorks(catalog, activity, roster, entries) {
   const app = catalog.appState, members = roster.members || [];
   const windows = (app.tabs || []).filter(tab => !activity.snapshot?.project_key
     || tab.project_key === activity.snapshot.project_key).flatMap(tab => tab.workspace?.windows || []);
@@ -15,14 +15,31 @@ function currentWorks(catalog, activity, roster) {
     const index = windows.findIndex(data => data.id === work.data.id);
     return members.length + (index < 0 ? windows.length : index);
   };
-  return (activity.agents || []).map(assignment => {
+  const live = activity.agents || [];
+  const works = live.map(assignment => {
     const matched = windows.find(data => data.id === assignment.window_id
       && data.session_id === assignment.session_id && data.preset !== "shell");
     const data = matched || { id: assignment.window_id };
     const member = assignment.is_pm ? null : members.find(member => member.assignment?.session_id === assignment.session_id);
     return { data, assignment, member, ready: !!matched,
       state: matched ? stateFor(catalog.runtimeStates[data.id] ?? data.status) : "unknown" };
-  }).sort((a, b) => Number(!!b.assignment.is_pm) - Number(!!a.assignment.is_pm) || order(a) - order(b));
+  });
+  for (const data of windows) {
+    if (live.some(assignment => assignment.window_id === data.id)
+      || !data.session_id || data.persist !== false
+      || !(data.agent_id || ["agent", "claude", "codex"].includes(data.preset))
+      || stateFor(catalog.runtimeStates[data.id] ?? data.status) !== "stopped") continue;
+    const previous = entries?.get(data.id)?.work;
+    const assignment = previous?.assignment.session_id === data.session_id
+      && finite(data.runtime_started_at_ms)
+      && previous.data.runtime_started_at_ms === data.runtime_started_at_ms
+      ? previous.assignment
+      : { window_id: data.id, session_id: data.session_id,
+        issue_number: data.linked_issue_number, is_pm: !!data.is_pm };
+    const member = assignment.is_pm ? null : members.find(member => member.assignment?.session_id === assignment.session_id);
+    works.push({ data, assignment, member, ready: true, state: "stopped" });
+  }
+  return works.sort((a, b) => Number(!!b.assignment.is_pm) - Number(!!a.assignment.is_pm) || order(a) - order(b));
 }
 
 const sparkStates = new WeakMap();
@@ -58,12 +75,14 @@ function drawSpark(document, svg, input, maximum) {
   sparkStates.set(svg, { values, maximum: max });
 }
 
+const summaryCells = [["running", "RUNNING"], ["block", "BLOCK"], ["idle", "IDLE"], ["error", "ERROR"]];
+
 export function createWorksSurface({ document, windowCatalogModel, activityModel, rosterModel, windowDisplayTitle, systemSettingsModel,
-  mountTerminal, mountPreview, onLayout = () => {}, onFocus = () => {}, onSelectMember = () => {}, getTelemetry = () => null }) {
+  summaryModel, workProjectionModel, mountTerminal, mountPreview, onLayout = () => {}, onFocus = () => {}, onSelectMember = () => {}, getTelemetry = () => null }) {
   const element = document.createElement("section");
   element.className = "works-surface"; element.setAttribute("aria-label", "Works");
   element.innerHTML = `<div class="works-overview"><header class="works-heading"><h2>Works</h2><div class="works-counts">
-    ${["running", "waiting", "idle", "error"].map(state => `<span>${state.toUpperCase()} <b data-count="${state}">—</b></span>`).join("")}</div><span class="works-active"></span></header>
+    ${summaryCells.map(([key, label]) => `<span>${label} <b data-count="${key}">—</b></span>`).join("")}</div><span class="works-active"></span></header>
     <div class="works-today">Today · Tokens <b data-metric="today-total">—</b> · Input <b data-metric="today-input">—</b> · Cache <b data-metric="today-cache">—</b> · Output <b data-metric="today-output">—</b> · Cost <b data-metric="today-cost">—</b> · Landed PRs <b data-metric="today-landed">—</b>
       <small class="works-availability" data-availability="today"></small><small class="works-availability works-source-note"></small></div>
     <div class="works-fleet"><div>Fleet tokens/min <b data-metric="fleet-now">—</b><small>Last 30 minutes</small></div><svg></svg><small class="works-availability" data-availability="fleet"></small></div>
@@ -117,7 +136,7 @@ export function createWorksSurface({ document, windowCatalogModel, activityModel
   function exactWork(target) {
     const requested = typeof target === "string" ? { window_id: target } : target;
     if (!requested?.window_id) return null;
-    return currentWorks(windowCatalogModel.read().catalog, activityModel.read(), rosterModel.read()).find(work =>
+    return currentWorks(windowCatalogModel.read().catalog, activityModel.read(), rosterModel.read(), entries).find(work =>
       work.ready && work.assignment.window_id === requested.window_id &&
       (!requested.session_id || requested.session_id === work.assignment.session_id) &&
       (requested.runtime_incarnation === undefined || requested.runtime_incarnation === work.assignment.runtime_incarnation));
@@ -218,6 +237,12 @@ export function createWorksSurface({ document, windowCatalogModel, activityModel
     previewElement = document.createElement("section"); previewElement.className = "works-surface works-surface--preview";
     previewElement.setAttribute("aria-label", "Works read-only preview"); host.append(previewElement); syncPreview();
   }
+  // SPEC #5016 AC-HS1: the heading renders the server aggregate summary that
+  // the tab title and status strip read; the listed rows never recount it.
+  function renderSummary() {
+    const summary = summaryModel?.read();
+    for (const [key] of summaryCells) element.querySelector(`[data-count="${key}"]`).textContent = summary ? String(summary[key]) : "—";
+  }
   function render(rehost) {
     if (disposed) return;
     const header = selected && isPresented() ? full.querySelector(".works-full-header") : null;
@@ -226,7 +251,7 @@ export function createWorksSurface({ document, windowCatalogModel, activityModel
     const linesChanged = element.style.getPropertyValue("--works-preview-lines") !== String(lines);
     element.style.setProperty("--works-preview-lines", String(lines));
     const catalog = windowCatalogModel.read().catalog, activity = activityModel.read(), roster = rosterModel.read();
-    const works = currentWorks(catalog, activity, roster), ids = new Set(works.map(work => work.data.id));
+    const works = currentWorks(catalog, activity, roster, entries), ids = new Set(works.map(work => work.data.id));
     let changed = false;
     for (const [id, entry] of entries) if (!ids.has(id) || !works.some(work => work.data.id === id && work.assignment.session_id === entry.work.assignment.session_id && work.assignment.runtime_incarnation === entry.work.assignment.runtime_incarnation)) {
       entry.cleanup?.(); entry.row.remove(); entry.cache.remove(); entry.terminal.remove(); entries.delete(id); changed = true;
@@ -239,7 +264,7 @@ export function createWorksSurface({ document, windowCatalogModel, activityModel
       updateEntry(entry, work, maximum);
       if (list.children[index] !== entry.row) list.insertBefore(entry.row, list.children[index] || null);
     });
-    for (const state of ["running", "waiting", "idle", "error"]) element.querySelector(`[data-count="${state}"]`).textContent = activity.count === null ? "—" : String(works.filter(work => work.state === state).length);
+    renderSummary();
     element.querySelector(".works-active").textContent = `Active ${number(activity.count)}`;
     for (const [key, value] of Object.entries({ total: finite(today.input_tokens) && finite(today.output_tokens) ? number(today.input_tokens + today.output_tokens) : "—", input: number(today.input_tokens), cache: number(today.cache_tokens), output: number(today.output_tokens), cost: finite(today.cost_usd) ? `$${today.cost_usd.toFixed(2)}` : "—", landed: number(today.landed_pr_count) })) element.querySelector(`[data-metric="today-${key}"]`).textContent = value;
     for (const key of ["today", "fleet"]) {
@@ -275,7 +300,7 @@ export function createWorksSurface({ document, windowCatalogModel, activityModel
   }
   element.querySelector('[data-action="back"]').addEventListener("click", () => back());
   for (const [action, delta] of [["previous", -1], ["next", 1]]) element.querySelector(`[data-action="${action}"]`).addEventListener("click", () => {
-    const works = currentWorks(windowCatalogModel.read().catalog, activityModel.read(), rosterModel.read()).filter(work => work.ready);
+    const works = currentWorks(windowCatalogModel.read().catalog, activityModel.read(), rosterModel.read(), entries).filter(work => work.ready);
     const index = works.findIndex(work => work.assignment.window_id === selected?.window_id && work.assignment.session_id === selected?.session_id && work.assignment.runtime_incarnation === selected?.runtime_incarnation);
     if (index < 0 || !works.length) { back(false); return; }
     openWork(works[(index + delta + works.length) % works.length].assignment);
@@ -286,6 +311,10 @@ export function createWorksSurface({ document, windowCatalogModel, activityModel
     activityModel.subscribeFrame(state => state, value => { if (value !== renderedActivity) render(false); }),
     rosterModel.subscribeFrame(state => state, value => { if (value !== renderedRoster) render(false); }),
     systemSettingsModel?.subscribeFrame(state => state.worksPreviewLines, () => render(false)),
+    summaryModel?.subscribeFrame(state => state, () => { if (!disposed) renderSummary(); }),
+    workProjectionModel?.subscribeFrame(state => state?.projection?.attentionSummary?.summary ?? "", summary => {
+      element.querySelector('[data-count="block"]').parentElement.title = summary;
+    }),
   ];
   return { element, sync: (rehost = true) => render(rehost), openWork, reveal: openWork, showList: () => back(false), setPreviewHost,
     contains: id => !!exactWork(id), isVisible: id => !element.hidden && !!exactWork(id),

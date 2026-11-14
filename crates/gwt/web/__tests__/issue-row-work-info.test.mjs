@@ -15,6 +15,7 @@ import { parseHTML } from "linkedom";
 
 import {
   attentionForWorkspace,
+  createActiveWorkProjectionModel,
   formatLifecycleStateLabel,
 } from "../issue-other-surface.js";
 
@@ -33,7 +34,7 @@ async function importSurfaceModule() {
     'from "data:text/javascript,export function createLaunchOperationId(){return%20%22work-row-test%22}"',
   );
   return import(
-    `data:text/javascript;base64,${Buffer.from(source.replace('from "./agent-kanban-surface.js"', `from "${new URL("../agent-kanban-surface.js", import.meta.url).href}"`).replace('from "./control-explanations.js"', `from "${new URL("../control-explanations.js", import.meta.url).href}"`).replace('from "./ui-state-store.js"', `from "${new URL("../ui-state-store.js", import.meta.url).href}"`).replace('from "./ui-content.js"', `from "${new URL("../ui-content.js", import.meta.url).href}"`)).toString("base64")}`
+    `data:text/javascript;base64,${Buffer.from(source.replace('from "./agent-completion-notifications.js"', `from "${new URL("../agent-completion-notifications.js", import.meta.url).href}"`).replace('from "./agent-kanban-surface.js"', `from "${new URL("../agent-kanban-surface.js", import.meta.url).href}"`).replace('from "./control-explanations.js"', `from "${new URL("../control-explanations.js", import.meta.url).href}"`).replace('from "./ui-state-store.js"', `from "${new URL("../ui-state-store.js", import.meta.url).href}"`).replace('from "./ui-content.js"', `from "${new URL("../ui-content.js", import.meta.url).href}"`)).toString("base64")}`
   );
 }
 
@@ -201,12 +202,14 @@ test("issueWorkRowForEntry joins the Issue row to the active Work projection", a
 
 // FR-012.
 test("the Issue row shows Work lifecycle, attention reason, and PR state", async (t) => {
+  const { model, applyActiveWorkProjectionReceiveEvent } = createActiveWorkProjectionModel();
+  t.after(() => model.dispose());
+  applyActiveWorkProjectionReceiveEvent({ kind: "active_work_projection", projection: {
+    active_works: [workRow({ status_category: "idle", lifecycle_state: "paused",
+      blocked_agents: 1, next_action: "Waiting on review" })],
+  } });
   const fixture = await makeFixture({
-    projection: {
-      active_works: [
-        workRow({ status_category: "blocked", blocked_reason: "Waiting on review" }),
-      ],
-    },
+    projection: model.read().projection,
   });
   t.after(() => fixture.surface.clearKnowledgeBridgeState("win-1"));
   applyEntries(fixture.surface, fixture.load, [
@@ -217,7 +220,7 @@ test("the Issue row shows Work lifecycle, attention reason, and PR state", async
   // badge and its (at most two) secondary items.
   const row = fixture.body.querySelector('[data-issue-number="3671"]');
   const badge = row.querySelector(".knowledge-row-badge");
-  // The fixture rows are Monitor-launched, so the Monitor state is the badge and
+  // The fixture rows are Issues-launched, so the Issues state is the badge and
   // the Work attention reason is the secondary line.
   assert.equal(badge.textContent, "Launched");
   assert.equal(badge.dataset.tone, "active");

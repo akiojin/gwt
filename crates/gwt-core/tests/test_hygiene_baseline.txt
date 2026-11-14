@@ -29,7 +29,6 @@ short-wall-clock|crates/gwt-agent/src/prepare.rs|runner_probe_trace_and_failure_
 short-wall-clock|crates/gwt-agent/src/prepare.rs|windows_runner_probe_job_kills_dead_root_pipe_descendant_before_marker
 short-wall-clock|crates/gwt-agent/src/session.rs|hook_metadata_backfills_project_state_root_without_overwriting_authority
 short-wall-clock|crates/gwt-agent/src/session.rs|session_lease_contention_returns_retryable_timeout_then_succeeds
-short-wall-clock|crates/gwt-core/src/coordination.rs|prompt_board_read_checks_the_operation_deadline_while_decoding_a_segment
 short-wall-clock|crates/gwt-core/src/coordination.rs|replace_retry_schedule_fits_a_prompt_sized_budget
 short-wall-clock|crates/gwt-core/src/coordination.rs|replace_retry_schedule_starts_small_and_grows
 short-wall-clock|crates/gwt-core/src/index_coordinator.rs|a_deferred_claimant_keeps_its_place_and_the_queue_shows_it
@@ -37,7 +36,6 @@ short-wall-clock|crates/gwt-core/src/index_coordinator.rs|a_newcomer_queues_behi
 short-wall-clock|crates/gwt-core/src/index_coordinator.rs|lease_extension_pushes_the_expiry_out
 short-wall-clock|crates/gwt-core/src/index_coordinator.rs|wait_until
 short-wall-clock|crates/gwt-core/src/operation_deadline.rs|contended_file_lock_stops_at_the_shared_deadline
-short-wall-clock|crates/gwt-core/src/operation_deadline.rs|expired_deadline_rejects_an_available_file_lock
 short-wall-clock|crates/gwt-core/src/process_console/hub.rs|snapshot_all_is_time_sorted
 short-wall-clock|crates/gwt-core/src/process_console/spawn.rs|cleanup_future_is_abandoned_after_grace
 short-wall-clock|crates/gwt-core/src/process_console/spawn.rs|expired_deadline_does_not_spawn_child
@@ -67,11 +65,9 @@ short-wall-clock|crates/gwt-docker/src/detect.rs|container_runtime_kind_times_ou
 short-wall-clock|crates/gwt-docker/src/detect.rs|resolved_runtime_times_out_a_stuck_known_basename_wrapper
 short-wall-clock|crates/gwt-docker/src/lib.rs|executable_file_busy_is_retried_before_succeeding
 short-wall-clock|crates/gwt-git/src/worktree.rs|run_command_with_timeout_reports_timeout
-short-wall-clock|crates/gwt-git/src/worktree.rs|worktree_listing_honors_the_active_operation_deadline
 short-wall-clock|crates/gwt-github/src/client/fake.rs|resolution_deadline_uses_one_absolute_expiry_and_caps_connect_time
 short-wall-clock|crates/gwt-github/src/client/http.rs|corpus_generation_rejects_an_expired_absolute_deadline
 short-wall-clock|crates/gwt-github/src/client/http.rs|delayed_loopback_request
-short-wall-clock|crates/gwt-github/src/client/http.rs|reqwest_execute_rejects_expired_scoped_deadline_before_submission
 short-wall-clock|crates/gwt-github/tests/http_client_test.rs|accept_loopback_with_timeout
 short-wall-clock|crates/gwt-github/tests/http_client_test.rs|expired_owner_deadline_performs_no_http_request
 short-wall-clock|crates/gwt-github/tests/http_client_test.rs|expired_owner_deadline_rejects_auth_before_spawning_gh
@@ -143,13 +139,7 @@ short-wall-clock|crates/gwt/src/daemon_subscriber.rs|subscriber_with_resolver_pi
 short-wall-clock|crates/gwt/src/embedded_server.rs|accepted_self_close_send_timeout_still_finalizes_exactly_once
 short-wall-clock|crates/gwt/src/index_search.rs|repair_spawn_failure_rolls_back_admission_and_notifies_waiters
 short-wall-clock|crates/gwt/src/index_worker.rs|aggregated_status_cache_recomputes_after_ttl_expires
-short-wall-clock|crates/gwt/src/index_worker.rs|project_index_git_context_does_not_fall_through_an_expired_deadline
 short-wall-clock|crates/gwt/src/index_worker.rs|run_coordinated_index_job_coalesces_into_a_running_equivalent_job
-short-wall-clock|crates/gwt/src/issue_monitor.rs|expired_deadline_rejects_durable_write_before_canonical_rename
-short-wall-clock|crates/gwt/src/issue_monitor_worker.rs|a_readback_is_cut_at_its_own_budget_not_the_whole_scan_window
-short-wall-clock|crates/gwt/src/issue_monitor_worker.rs|expired_scan_deadline_still_fails_default_base_resolution
-short-wall-clock|crates/gwt/src/issue_monitor_worker.rs|proposal_return_deadline_expiry_is_stage_typed
-short-wall-clock|crates/gwt/src/issue_monitor_worker.rs|the_readback_fan_out_stops_while_the_launch_stage_still_has_budget
 short-wall-clock|crates/gwt/src/main.rs|frontend_timing_warns_for_receive_latency_without_logging_input
 short-wall-clock|crates/gwt/src/main.rs|wait_for_active_work_projection
 short-wall-clock|crates/gwt/src/main.rs|wait_for_recorded_event

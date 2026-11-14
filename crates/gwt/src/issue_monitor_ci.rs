@@ -78,7 +78,7 @@ fn gh(repo_path: &Path, args: &[&str]) -> Result<String, String> {
         gwt_core::process_console::ProcessKind::Gh,
         "gh",
         args,
-        gwt_core::process_console::SpawnOptions::new("issue monitor CI rerun")
+        gwt_core::process_console::SpawnOptions::new("Issues CI rerun")
             .current_dir(repo_path)
             .forward_output(false),
     )

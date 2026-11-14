@@ -508,8 +508,16 @@ pub enum ClientFrame {
     /// Forward a managed-hook event to the daemon for routing.
     Hook(HookEnvelope),
     /// Subscribe to one or more daemon broadcast channels.
-    Subscribe { channels: Vec<String> },
-    /// Subscribe as the GUI process that materializes Issue Monitor launch
+    ///
+    /// `gui_window` marks the GUI process's project-window subscriber. It does
+    /// not authorize Issues materialization; that remains
+    /// [`Self::SubscribeMaterializer`].
+    Subscribe {
+        channels: Vec<String>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        gui_window: bool,
+    },
+    /// Subscribe as the GUI process that materializes Issues launch
     /// deliveries. Unlike [`Self::Subscribe`], the daemon binds a presence
     /// lease to this IPC connection and releases it on disconnect.
     SubscribeMaterializer { channels: Vec<String> },
@@ -531,6 +539,10 @@ pub enum ClientFrame {
     /// dedicated process group, so escaping the caller's tree never leaves
     /// orphans behind (AC-2 / AC-7, Issue #3845).
     SpawnVerification(VerificationSpawnRequest),
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// One verification command, described completely enough that the daemon can
@@ -629,7 +641,7 @@ pub struct DaemonStatus {
     /// asking for the status snapshot.
     #[serde(default)]
     pub connections: usize,
-    /// Latest atomic Issue Monitor projection owned by this daemon. Older
+    /// Latest atomic Issues projection owned by this daemon. Older
     /// daemons omit it; clients must not treat a missing projection from a live
     /// daemon as permission to reconstruct runtime state from stale cache.
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -622,6 +622,8 @@ pub struct ManagedHookFailureSnapshot {
     hook_binaries: HookBinaryResolutionCache,
     /// Session selection, health and recovery share one runtime read per projection.
     runtime_states: RefCell<HashMap<PathBuf, Arc<CachedRuntimeState>>>,
+    /// Issue #5379: every Work row of a repository shares one discussions file.
+    pending_goals: crate::discussion_resume::PendingGoalReader,
 }
 
 /// Memo of bare hook-binary resolution for one projection.
@@ -711,6 +713,7 @@ impl ManagedHookFailureSnapshot {
             surface_audits: Arc::default(),
             hook_binaries: HookBinaryResolutionCache::default(),
             runtime_states: RefCell::default(),
+            pending_goals: Default::default(),
         }
     }
 
@@ -765,16 +768,16 @@ fn read_managed_hook_health_with(
         last_event: None,
         last_event_at: None,
         pending_discussion: None,
-        pending_goal: crate::discussion_resume::load_pending_goal_from_worktree_files(
-            &input.worktree_root,
-        )
-        .ok()
-        .flatten()
-        .map(|goal| PendingHookGoal {
-            proposal_label: goal.proposal_label,
-            proposal_title: goal.proposal_title,
-            condition: goal.condition,
-        }),
+        pending_goal: failures
+            .pending_goals
+            .load(&input.worktree_root)
+            .ok()
+            .flatten()
+            .map(|goal| PendingHookGoal {
+                proposal_label: goal.proposal_label,
+                proposal_title: goal.proposal_title,
+                condition: goal.condition,
+            }),
         slow_handlers: Vec::new(),
         issues: Vec::new(),
         external_skill_conflicts: Default::default(),
@@ -1863,6 +1866,47 @@ mod tests {
         assert_eq!(
             hook_command_binary_fallback(command).as_deref(),
             Some("C:\\Users\\O'Brien\\GWT\\gwtd.exe")
+        );
+    }
+}
+
+#[cfg(test)]
+mod projection_cost_tests {
+    use super::*;
+    use gwt_core::test_support::ScopedGwtHome;
+
+    /// Issue #5379: every Work row of one repository resolves to the same
+    /// machine-local discussions file. One projection snapshot reads it once.
+    #[test]
+    fn one_snapshot_reads_a_shared_discussions_file_once_across_work_rows() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let root = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(root.path().join("home"));
+        let worktree = root.path().join("repo");
+        fs::create_dir_all(worktree.join(".gwt/work")).unwrap();
+        fs::write(
+            worktree.join(".gwt/work/discussions.md"),
+            "## 2026-06-17 — Goal\n\nStatus: active\n\n### Proposal A - Pending goal [active]\n- Goal State: pending\n- Goal Condition: finish verification\n",
+        )
+        .unwrap();
+        let snapshot = ManagedHookFailureSnapshot::default();
+        let before = crate::discussion_resume::canonical_discussion_reads();
+        for _ in 0..3 {
+            let health = snapshot.read_health(&ManagedHookHealthInput::new(&worktree));
+            assert_eq!(
+                health
+                    .pending_goal
+                    .as_ref()
+                    .map(|goal| goal.proposal_label.as_str()),
+                Some("Proposal A")
+            );
+        }
+        assert_eq!(
+            crate::discussion_resume::canonical_discussion_reads() - before,
+            1,
+            "three Work rows of one repository must share one discussions read"
         );
     }
 }

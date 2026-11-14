@@ -151,7 +151,7 @@ fn automatic_restore_preserves_names_even_when_saved_initials_collide() {
     }
 
     runtime.queue_startup_auto_resume_sessions(&HashSet::new());
-    let events = runtime.startup_auto_resume_ready_events();
+    let events = drain_startup_auto_resume(&mut runtime);
 
     assert_eq!(runtime.pending_auto_resume_sources.len(), 2, "{events:?}");
     assert_eq!(runtime.restore_launch_windows.len(), 2);
@@ -402,7 +402,7 @@ fn automatic_restore_retires_finished_sources_and_keeps_real_errors() {
         let (spawner, tasks) = BlockingTaskSpawner::queued();
         runtime.blocking_tasks = spawner;
         runtime.queue_startup_auto_resume_sessions(&HashSet::new());
-        runtime.startup_auto_resume_ready_events();
+        drain_startup_auto_resume(&mut runtime);
         drain_queued_blocking_tasks(&tasks);
         let mut completion = take_remote_owner_launch_completion(match &runtime.proxy {
             AppEventProxy::Stub(events) => events,
@@ -469,6 +469,93 @@ fn automatic_restore_retires_finished_sources_and_keeps_real_errors() {
         );
         assert_eq!(restarted.tabs[0].workspace.persisted().windows.len(), 1);
     }
+}
+
+/// Issue #6991 (AC-1 / AC-3): a saved Session the user closed (restore flag
+/// cleared) but whose status is not `Stopped` still passes the GUI's legacy
+/// "window was open" check. The owner's `window_closed` refusal is an
+/// expected exclusion: no `launch_failure`, no error toast, no window, and no
+/// second attempt on the next startup.
+#[test]
+fn automatic_restore_discards_session_no_longer_marked_for_restore_quietly() {
+    let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_with_initial_commit(&repo);
+    let tab = restore_fixture_tab(
+        "tab-unmarked",
+        &repo,
+        &[("agent-unmarked".into(), "session-unmarked".into())],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-unmarked"));
+    runtime.sessions_dir = gwt_core::paths::gwt_sessions_dir();
+    save_restore_fixture_session(
+        &runtime.sessions_dir,
+        "session-unmarked",
+        &repo,
+        Some("native-unmarked"),
+        Some(6991),
+    );
+    let path = runtime.sessions_dir.join("session-unmarked.toml");
+    let mut source = gwt_agent::Session::load(&path).unwrap();
+    source.status = gwt_agent::AgentStatus::Interrupted;
+    source.restore_window_on_startup = false;
+    source.save(&runtime.sessions_dir).unwrap();
+    save_workspace_state(
+        &workspace_state_path(&repo),
+        runtime.tabs[0].workspace.persisted(),
+    )
+    .unwrap();
+    let owner = owner_fixture_block_on(production_owner_fixture(&repo));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    runtime.queue_startup_auto_resume_sessions(&HashSet::new());
+    drain_startup_auto_resume(&mut runtime);
+    drain_queued_blocking_tasks(&tasks);
+    let completion = take_remote_owner_launch_completion(match &runtime.proxy {
+        AppEventProxy::Stub(events) => events,
+        _ => panic!("recorded restore completion"),
+    });
+    assert_eq!(
+        completion
+            .restore_refusal
+            .as_ref()
+            .map(|refusal| refusal.code.as_str()),
+        Some("window_closed")
+    );
+    let events = runtime.handle_remote_owner_launch_complete(completion);
+    assert!(
+        !events.iter().any(|event| matches!(&event.event,
+            BackendEvent::IssueMonitorToast { level, .. } if level == "error")),
+        "no Agent error toast: {events:?}"
+    );
+    let launch_failures = gwt_core::error_ledger::list_since(None)
+        .unwrap()
+        .into_iter()
+        .filter(|record| record.kind == gwt_core::error_ledger::ErrorKind::LaunchFailure)
+        .collect::<Vec<_>>();
+    assert!(launch_failures.is_empty(), "{launch_failures:?}");
+    let windows = &runtime.tabs[0].workspace.persisted().windows;
+    assert!(
+        windows
+            .iter()
+            .all(|window| window.status != WindowProcessStatus::Error),
+        "an expected exclusion is not a runtime error: {windows:?}"
+    );
+    assert!(runtime.runtimes.is_empty());
+    owner_fixture_block_on(owner.shutdown());
+
+    let mut tab = restore_fixture_tab("tab-unmarked", &repo, &[]);
+    tab.workspace =
+        WindowRegistry::from_persisted(load_workspace_state(&workspace_state_path(&repo)).unwrap());
+    let mut restarted = sample_runtime(temp.path(), vec![tab], Some("tab-unmarked"));
+    restarted.sessions_dir = runtime.sessions_dir.clone();
+    restarted.queue_startup_auto_resume_sessions(&HashSet::new());
+    assert!(
+        restarted.pending_startup_auto_resume_sessions.is_empty(),
+        "no second attempt"
+    );
 }
 
 #[test]
@@ -540,7 +627,7 @@ fn restore_summary_waits_for_async_preparation_failure_in_each_restore_route() {
         let prepared = capture_tracing_events(|| {
             if startup {
                 runtime.queue_startup_auto_resume_sessions(&HashSet::new());
-                runtime.startup_auto_resume_ready_events();
+                drain_startup_auto_resume(&mut runtime);
             } else {
                 runtime.restore_open_project_windows("tab-1");
             }
@@ -601,8 +688,8 @@ fn startup_restore_summary_includes_missing_worktrees_before_queue_and_before_sp
         runtime.queue_startup_auto_resume_sessions(&HashSet::new());
         assert_eq!(runtime.pending_startup_auto_resume_sessions.len(), 1);
         fs::remove_dir(temp.path().join("session-removed")).expect("remove queued worktree");
-        runtime.startup_auto_resume_ready_events();
-        runtime.startup_auto_resume_ready_events();
+        drain_startup_auto_resume(&mut runtime);
+        drain_startup_auto_resume(&mut runtime);
     });
     assert!(runtime.pending_auto_resume_sources.is_empty());
     let summary = restore_admission_summary(&logs);
@@ -645,7 +732,7 @@ fn startup_restore_summary_waits_for_policy_requeued_sessions() {
         .clear_fixture_views();
     fs::remove_file(gwt::project_execution_policy::observation_path(&repo)).unwrap();
     let first = capture_tracing_events(|| {
-        runtime.startup_auto_resume_ready_events();
+        drain_startup_auto_resume(&mut runtime);
     });
     assert_eq!(runtime.pending_startup_auto_resume_sessions.len(), 1);
     assert!(
@@ -658,8 +745,8 @@ fn startup_restore_summary_waits_for_policy_requeued_sessions() {
     runtime.seed_fixture_project_views();
     fs::remove_dir(&worktree).unwrap();
     let completed = capture_tracing_events(|| {
-        runtime.startup_auto_resume_ready_events();
-        runtime.startup_auto_resume_ready_events();
+        drain_startup_auto_resume(&mut runtime);
+        drain_startup_auto_resume(&mut runtime);
     });
     let summary = restore_admission_summary(&completed);
     assert_eq!(
@@ -818,7 +905,7 @@ fn startup_restore_admits_only_resumable_sessions_with_live_work() {
             3,
             "canonical Work/native admission is deferred to the actual owner"
         );
-        runtime.startup_auto_resume_ready_events();
+        drain_startup_auto_resume(&mut runtime);
         drain_owner_launch_fixtures(&mut runtime, &tasks);
     });
 
@@ -1060,7 +1147,7 @@ fn startup_restore_limits_windows_to_the_last_open_set() {
         // Issue #4305 (AC-5): the summary counts restores that actually
         // reached a PTY, so it is emitted from the canvas-ready drain once
         // every prepared window has settled — not from the selection pass.
-        runtime.startup_auto_resume_ready_events();
+        drain_startup_auto_resume(&mut runtime);
         let prepared = runtime
             .restore_launch_windows
             .keys()
@@ -2099,4 +2186,65 @@ fn restore_launch_failure_before_pty_leaves_no_error_window_across_generations()
         after_second.is_empty(),
         "restore failures must not accumulate across generations: {after_second:?}"
     );
+}
+
+/// Issue #5379: the surface-ready drain re-evaluates every policy-deferred
+/// Session on each round trip. Admission reads the policy, the Work items and
+/// the Session lineage from disk, so it runs on the blocking worker and only
+/// its verdict returns to the GUI thread.
+#[test]
+fn startup_auto_resume_drain_evaluates_admission_off_the_gui_thread() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let tab = restore_fixture_tab("tab-1", &repo, &[("agent".into(), "saved".into())]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let worktree = temp.path().join("restored-worktree");
+    save_restore_fixture_session(
+        &runtime.sessions_dir,
+        "saved",
+        &worktree,
+        Some("native"),
+        None,
+    );
+    runtime.queue_startup_auto_resume_sessions(&HashSet::new());
+    assert_eq!(runtime.pending_startup_auto_resume_sessions.len(), 1);
+    let context = runtime.test_context();
+    runtime
+        .project_state_mut(&context)
+        .unwrap()
+        .project_views
+        .clear_fixture_views();
+    fs::remove_file(gwt::project_execution_policy::observation_path(&repo)).unwrap();
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+
+    let before = super::super::startup::startup_admission_evaluations();
+    runtime.startup_auto_resume_ready_events();
+    assert_eq!(
+        super::super::startup::startup_admission_evaluations(),
+        before,
+        "the GUI thread must not read policy, Work items or Session lineage"
+    );
+    assert_eq!(
+        tasks.lock().unwrap().len(),
+        1,
+        "one blocking worker evaluates the queued Sessions"
+    );
+
+    drain_queued_blocking_tasks(&tasks);
+    assert_eq!(
+        super::super::startup::startup_admission_evaluations(),
+        before + 1,
+        "the worker evaluates each queued Session once"
+    );
+    let prepared = take_startup_auto_resume_admission_prepared(&runtime).expect("worker verdicts");
+    runtime.startup_auto_resume_admission_prepared_events(prepared);
+    assert_eq!(
+        runtime.pending_startup_auto_resume_sessions.len(),
+        1,
+        "a policy-deferred Session is requeued for the next round trip"
+    );
+    assert!(runtime.pending_auto_resume_sources.is_empty());
 }

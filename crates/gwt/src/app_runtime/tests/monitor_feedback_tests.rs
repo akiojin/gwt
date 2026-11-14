@@ -352,7 +352,7 @@ fn monitor_scan_recovery_failure_emits_one_attention_notice() {
         Some("tab-a"),
     );
     let mut monitor = test_monitor(gwt::IssueMonitorConfig::default());
-    monitor.record_control_commit_error("Issue Monitor authority recovery is blocked: project-state/issue-monitor.shutdown-revoke is malformed");
+    monitor.record_control_commit_error("Issues authority recovery is blocked: project-state/issue-monitor.shutdown-revoke is malformed");
     let first = runtime.issue_monitor_daemon_status_events(&repo, Box::new(monitor.status_view()));
     assert_eq!(
         first
@@ -2280,7 +2280,7 @@ fn issue5596_native_answer_source(
         // resend can capture Prepared just before the same bearer becomes Active.
         let ready = owner_fixture_block_on(async {
             // test-hygiene: allow-wall-clock-deadline Hang guard for the original authenticated owner finalization, not a guessed process delay.
-            tokio::time::timeout(Duration::from_secs(30), async {
+            tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
                 loop {
                     let current = owner.probe(&pane.id, pane.incarnation).await.unwrap();
                     if current.pending_fresh_execution.is_none() {
@@ -2382,7 +2382,7 @@ fn assert_issue5596_unsubmitted_answer_packet_retries(
     .expect("close and reap the actual asking provider before exact Resume");
     owner_fixture_block_on(async {
         // test-hygiene: allow-wall-clock-deadline Bounds the exact Close/Closed IPC, not a guessed process delay.
-        tokio::time::timeout(Duration::from_secs(30), async {
+        tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
             loop {
                 let event = owner_events.recv().await.unwrap();
                 let closed = matches!(&event,
@@ -2398,6 +2398,31 @@ fn assert_issue5596_unsubmitted_answer_packet_retries(
         .runtime
         .active_agent_sessions
         .contains_key(&source_window_id));
+    // The owner's periodic reconciler may publish its first empty census after
+    // Close. All three cases require that observation before preparing a new
+    // admission, not only before the byte-for-byte rejection snapshot.
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root);
+    let host_pid = std::process::id();
+    let host_started_at = gwt::process::host_process_start_time(host_pid).unwrap();
+    owner_fixture_block_on(async {
+        // test-hygiene: allow-wall-clock-deadline Bound actual census publication; elapsed time never establishes readiness.
+        tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
+            loop {
+                let prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+                if prefs.monitor_runtime_counts.values().any(|census| {
+                    census.host_pid == host_pid
+                        && census.host_started_at == host_started_at
+                        && census.counts.is_empty()
+                        && census.windows.is_empty()
+                }) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("the exact empty host census must settle before admission");
+    });
     let source = gwt_agent::Session::load(
         &fixture
             .sessions_dir
@@ -2430,7 +2455,6 @@ fn assert_issue5596_unsubmitted_answer_packet_retries(
         );
     drain_queued_blocking_tasks(&queued);
     let prepared = take_issue4803_monitor_preparation(&fixture.recorded_events);
-    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root);
     if close_project {
         // A legal unrelated roster edit asks the GUI to revalidate these facts
         // before it can submit the immutable owner launch command.
@@ -2510,7 +2534,7 @@ fn assert_issue5596_unsubmitted_answer_packet_retries(
     if close_project {
         let pause = pause.unwrap();
         // test-hygiene: allow-wall-clock-deadline Shares the original checkpoint hang guard across legitimate pre-admission callbacks.
-        let checkpoint_deadline = Instant::now() + Duration::from_secs(30);
+        let checkpoint_deadline = Instant::now() + gwt_core::deadline_budget::HANG_GUARD;
         let (evidence, launch_worker) = loop {
             let launch_tasks = queued.clone();
             let worker_sessions = fixture.sessions_dir.clone();
@@ -2691,7 +2715,7 @@ fn assert_issue5596_unsubmitted_answer_packet_retries(
         let close_worker = thread::spawn(move || drain_queued_blocking_tasks(&close_tasks));
         owner_fixture_block_on(async {
             // test-hygiene: allow-wall-clock-deadline Bounds cancellation IPC; the owner current flag is the exact cancellation evidence.
-            tokio::time::timeout(Duration::from_secs(30), async {
+            tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
                 while evidence.current.load(std::sync::atomic::Ordering::Acquire) {
                     tokio::task::yield_now().await;
                 }
@@ -2742,9 +2766,12 @@ fn assert_issue5596_unsubmitted_answer_packet_retries(
                         let worker = thread::spawn(move || drain_queued_blocking_tasks(&tasks));
                         let evidence = owner_fixture_block_on(async {
                             // test-hygiene: allow-wall-clock-deadline Bounds arrival at the actual rejection's post-check_current checkpoint, not elapsed ordering.
-                            tokio::time::timeout(Duration::from_secs(30), pause.wait())
-                                .await
-                                .unwrap()
+                            tokio::time::timeout(
+                                gwt_core::deadline_budget::HANG_GUARD,
+                                pause.wait(),
+                            )
+                            .await
+                            .unwrap()
                         });
                         let was_current =
                             evidence.current.load(std::sync::atomic::Ordering::Acquire);
@@ -3323,6 +3350,7 @@ fn termination_class_requires_exact_exit_and_readable_bridge_evidence() {
             4774,
             false,
             &["pane-contract-fixture"],
+            gwt_core::deadline_budget::HANG_GUARD,
             |prefs| {
                 prefs.autonomous_mode = true;
                 prefs.launch_auto = true;

@@ -101,6 +101,7 @@ fn every_status_entrypoint_is_model_free_and_has_zero_side_effects() {
         &hash_b,
         3,
         2,
+        "file-index-v2-records",
     );
     let corrupt_component_view_id = seed_valid_file_index_view(
         &home
@@ -111,6 +112,7 @@ fn every_status_entrypoint_is_model_free_and_has_zero_side_effects() {
         &hash_c,
         3,
         2,
+        "file-index-v2",
     );
     let corrupt_component_root = home
         .join(".gwt/index")
@@ -247,6 +249,41 @@ fn every_status_entrypoint_is_model_free_and_has_zero_side_effects() {
             (&hash_c, "view_closure_invalid"),
         ],
         Some((&hash_b, &valid_view_id)),
+    );
+
+    // A valid manifest must not make a mismatched storage contract look ready.
+    let v2_root = home
+        .join(".gwt/index")
+        .join(repo_hash.as_str())
+        .join("file-index-v2");
+    let view: Value = serde_json::from_slice(
+        &fs::read(
+            v2_root
+                .join("worktrees")
+                .join(&hash_b)
+                .join("views")
+                .join(&valid_view_id)
+                .join("descriptor.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let base_path = v2_root
+        .join("bases")
+        .join(view["base_generation_id"].as_str().unwrap())
+        .join("descriptor.json");
+    let mut base: Value = serde_json::from_slice(&fs::read(&base_path).unwrap()).unwrap();
+    base["files_generation"]["store"] = Value::String("store".into());
+    fs::write(base_path, serde_json::to_vec(&base).unwrap()).unwrap();
+    let mismatched = gwt::index_worker::project_index_status_for_path(&wt_b);
+    assert_model_free_projection(
+        "protocol/store mismatch",
+        &mismatched,
+        gwt::index_worker::ProjectIndexStatusCoverageScope::CurrentWorktree,
+        &[(&hash_b, wt_b.as_path())],
+        4,
+        &[(&hash_b, "view_closure_invalid")],
+        None,
     );
 }
 
@@ -404,6 +441,7 @@ fn seed_valid_file_index_view(
     worktree_hash: &str,
     files: usize,
     files_docs: usize,
+    writer_protocol: &str,
 ) -> String {
     assert_eq!((files, files_docs), (3, 2), "fixture manifest shape");
     let gwt_crate = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -428,7 +466,7 @@ fn seed_valid_file_index_view(
             "content_limit": 2000
         },
         "path_policy_hash": canonical_sha256(&policy),
-        "writer_protocol": "file-index-v2",
+        "writer_protocol": writer_protocol,
         "runner_hash": format!("{:x}", Sha256::digest(fs::read(runner_path).expect("read runner")))
     });
     let mut semantic_compatibility = compatibility.clone();
@@ -532,6 +570,11 @@ fn seed_valid_file_index_view(
         fs::write(root.join("store/chroma.sqlite3"), b"SQLite format 3\0")
             .expect("write immutable store marker");
     }
+    let store = if writer_protocol == "file-index-v2-records" {
+        "records"
+    } else {
+        "store"
+    };
     let base_descriptor = serde_json::json!({
         "schema_version": 1,
         "kind": "base",
@@ -540,8 +583,8 @@ fn seed_valid_file_index_view(
         "root_tree_oid": null,
         "canonical_ref": null,
         "compatibility": compatibility,
-        "files_generation": {"store": "store", "collection": "files_code"},
-        "files_docs_generation": {"store": "store", "collection": "files_docs"},
+        "files_generation": {"store": store, "collection": "files_code"},
+        "files_docs_generation": {"store": store, "collection": "files_docs"},
         "manifest_digest": manifest_digest,
         "document_counts": {"files": files, "files-docs": files_docs, "total": files + files_docs},
         "build_state": "verified",
@@ -558,8 +601,8 @@ fn seed_valid_file_index_view(
         "base_generation_id": base_id,
         "source_snapshot_id": source_snapshot_id,
         "compatibility": compatibility,
-        "files_generation": {"store": "store", "collection": "files_code"},
-        "files_docs_generation": {"store": "store", "collection": "files_docs"},
+        "files_generation": {"store": store, "collection": "files_code"},
+        "files_docs_generation": {"store": store, "collection": "files_docs"},
         "files_shadow": [],
         "files_docs_shadow": [],
         "tombstones": [],
