@@ -1,0 +1,245 @@
+- generic [ref=e2]:
+  - generic [ref=e3]:
+    - generic [ref=e4]:
+      - text: ⌜ GWT · OPERATOR ⌟
+      - generic [ref=e5]:
+        - button "gwt Close gwt" [ref=e6] [cursor=pointer]:
+          - generic [ref=e8]: gwt
+          - button "Close gwt" [ref=e9]: ×
+        - button "160-Idina Close 160-Idina" [ref=e10] [cursor=pointer]:
+          - generic [ref=e12]: 160-Idina
+          - button "Close 160-Idina" [ref=e13]: ×
+      - generic [ref=e14]:
+        - generic "v9.36.2" [ref=e15]
+        - generic [ref=e16]:
+          - button "Open project" [ref=e17] [cursor=pointer]: Open Project
+          - button "More project actions" [ref=e18] [cursor=pointer]: ▾
+        - 'radiogroup "Theme: auto (currently light)" [ref=e19]':
+          - radio "AUTO" [checked] [ref=e20] [cursor=pointer]:
+            - generic [ref=e21]: AUTO
+            - generic [ref=e22]: ▯
+          - radio "DARK" [ref=e23] [cursor=pointer]
+          - radio "LIGHT" [ref=e24] [cursor=pointer]
+    - complementary "Operator sidebar layers":
+      - generic:
+        - heading "Layers 0" [level=3]:
+          - generic: Layers
+          - generic: "0"
+        - button "● Agents 1" [pressed]:
+          - generic: ● Agents
+          - generic: "1"
+        - button "Git 0" [pressed]:
+          - generic: Git
+          - generic: "0"
+        - button "Hooks 0" [pressed]:
+          - generic: Hooks
+          - generic: "0"
+      - generic:
+        - heading "Quick" [level=3]:
+          - generic: Quick
+        - button "Start Work":
+          - generic: Start Work
+          - generic: GO
+        - button "Workspace overview":
+          - generic: Workspace Overview
+          - generic: INFO
+        - button "Open Board (Cmd+B)":
+          - generic: Board
+          - generic: ⌘ B
+        - button "Open Git (Cmd+G)":
+          - generic: Git
+          - generic: ⌘ G
+        - button "Open Logs (Cmd+L)":
+          - generic: Logs
+          - generic: ⌘ L
+    - generic [ref=e25]:
+      - status [ref=e26]:
+        - generic "Connection state" [ref=e28]: Connected
+        - generic [ref=e29]: Drag windows | Scroll/drag canvas to pan | Middle-click drag anywhere | Ctrl/Cmd + wheel to zoom
+      - generic [ref=e31]:
+        - text: ⌜ ⌟
+        - generic [ref=e32]:
+          - generic [ref=e33]:
+            - generic [ref=e34]:
+              - generic "PR" [ref=e35]
+              - generic [ref=e36]: PR
+            - generic [ref=e37]:
+              - button "Minimize window" [ref=e38] [cursor=pointer]: ▁
+              - button "Maximize window" [ref=e39] [cursor=pointer]: ◻
+              - button "Close window" [ref=e40] [cursor=pointer]: ×
+          - generic "Window tabs" [ref=e41]:
+            - generic [ref=e42]:
+              - button "Activate Workspace" [ref=e43]: Workspace
+              - button "Close Workspace" [ref=e44] [cursor=pointer]: ×
+            - generic [ref=e45]:
+              - button "Activate Branches" [ref=e46]: Branches
+              - button "Close Branches" [ref=e47] [cursor=pointer]: ×
+            - generic [ref=e48]:
+              - button "Activate Board" [ref=e49]: Board
+              - button "Close Board" [ref=e50] [cursor=pointer]: ×
+            - generic [ref=e51]:
+              - button "Activate PR" [ref=e52]: PR
+              - button "Close PR" [ref=e53] [cursor=pointer]: ×
+          - generic [ref=e55]:
+            - generic [ref=e56]:
+              - generic [ref=e57]:
+                - generic [ref=e58]: PR bridge
+                - searchbox "Search unavailable" [ref=e59]
+                - generic [ref=e60] [cursor=pointer]:
+                  - checkbox "Hide done" [ref=e61]
+                  - generic [ref=e62]: Hide done
+              - button "Refresh cached knowledge" [disabled] [ref=e64] [cursor=pointer]: ↻
+            - generic [ref=e65]: Loading cache-backed data
+            - generic [ref=e66]:
+              - list "Knowledge Bridge Kanban Board" [ref=e68]:
+                - generic "Backlog column" [ref=e69]:
+                  - generic [ref=e70]:
+                    - generic [ref=e71]: Backlog
+                    - generic [ref=e72]: "0"
+                  - generic [ref=e74]: Loading
+                - generic "Draft column" [ref=e75]:
+                  - generic [ref=e76]:
+                    - generic [ref=e77]: Draft
+                    - generic [ref=e78]: "0"
+                  - generic [ref=e80]: Loading
+                - generic "Planning column" [ref=e81]:
+                  - generic [ref=e82]:
+                    - generic [ref=e83]: Planning
+                    - generic [ref=e84]: "0"
+                  - generic [ref=e86]: Loading
+                - generic "Implementation column" [ref=e87]:
+                  - generic [ref=e88]:
+                    - generic [ref=e89]: Implementation
+                    - generic [ref=e90]: "0"
+                  - generic [ref=e92]: Loading
+                - generic "Review column" [ref=e93]:
+                  - generic [ref=e94]:
+                    - generic [ref=e95]: Review
+                    - generic [ref=e96]: "0"
+                  - generic [ref=e98]: Loading
+                - generic "Done column" [ref=e99]:
+                  - generic [ref=e100]:
+                    - generic [ref=e101]: Done
+                    - generic [ref=e102]: "0"
+                  - generic [ref=e104]: Loading
+              - generic [ref=e106]: Select a cached item
+        - generic [ref=e108]:
+          - generic [ref=e109]:
+            - generic [ref=e110]:
+              - generic "Claude Code" [ref=e111]
+              - generic [ref=e112]: Agent
+              - generic [ref=e115]: Running
+            - generic [ref=e116]:
+              - button "Minimize window" [ref=e117] [cursor=pointer]: ▁
+              - button "Maximize window" [ref=e118] [cursor=pointer]: ◻
+              - button "Close window" [ref=e119] [cursor=pointer]: ×
+          - generic [ref=e124]:
+            - textbox "Terminal input" [active] [ref=e125]
+            - generic:
+              - generic:
+                - generic: ▐
+                - generic: ▛███▜
+                - generic: ▌
+                - generic: Claude
+                - generic: Code
+                - generic: v2.1.143
+              - generic:
+                - generic: ▝▜
+                - generic: █████
+                - generic: ▛▘
+                - generic: Opus
+                - generic: "4.7"
+                - generic: (1M
+                - generic: context)
+                - generic: ·
+                - generic: Claude
+                - generic: Max
+              - generic:
+                - generic: ▘▘
+                - generic: ▝▝
+                - generic: ~/Workbench/gwt/work/20260518-0914
+              - generic:
+                - generic: ───────────────────────────────────────────────────────────────────
+              - generic:
+                - generic: ❯
+              - generic:
+                - generic: ───────────────────────────────────────────────────────────────────
+              - generic:
+                - generic: ⏵⏵
+                - generic: bypass
+                - generic: permissions
+                - generic: "on"
+                - generic: (shift+tab
+                - generic: to
+                - generic: cycle)
+      - text: ⌜ ⌟ ⌜ ⌟
+      - generic [ref=e127]:
+        - button "Command palette" [ref=e128] [cursor=pointer]:
+          - generic [ref=e129]: ⌘K
+          - generic [ref=e130]: Palette
+        - button "Zoom out" [ref=e131] [cursor=pointer]: "-"
+        - button "Reset zoom" [ref=e132] [cursor=pointer]: 100%
+        - button "Zoom in" [ref=e133] [cursor=pointer]: +
+        - button "Show window controls" [ref=e134] [cursor=pointer]
+      - button "Show sidebar" [ref=e135] [cursor=pointer]
+    - status "Operator status strip" [ref=e136]:
+      - generic [ref=e139]: LIVE
+      - generic [ref=e140]:
+        - generic [ref=e141]: ACTIVE
+        - generic "Active agents" [ref=e142]: "1"
+      - generic [ref=e143]:
+        - generic [ref=e144]: IDLE
+        - generic "Idle agents" [ref=e145]: "1"
+      - generic [ref=e146]:
+        - generic [ref=e147]: BLOCKED
+        - generic "Blocked agents" [ref=e148]: "0"
+      - generic [ref=e149]:
+        - generic [ref=e150]: BR
+        - generic "Branches" [ref=e151]: —
+      - generic [ref=e152]:
+        - generic [ref=e153]: T
+        - generic [ref=e154]:
+          - text: "18"
+          - generic [ref=e155]: ":"
+          - text: "16"
+          - generic [ref=e156]: ":"
+          - text: "52"
+  - text: ok ok ok ok
+  - generic:
+    - dialog:
+      - combobox
+      - listbox
+  - generic:
+    - dialog:
+      - heading [level=2]: Operator Hotkeys
+      - generic:
+        - heading [level=3]: Navigation
+        - generic:
+          - generic: Command palette
+          - generic: ⌘ K
+        - generic:
+          - generic: Project switcher
+          - generic: ⌘ P
+        - generic:
+          - generic: Board surface
+          - generic: ⌘ B
+        - generic:
+          - generic: Git surface
+          - generic: ⌘ G
+        - generic:
+          - generic: Logs surface
+          - generic: ⌘ L
+      - generic:
+        - heading [level=3]: Help
+        - generic:
+          - generic: This card
+          - generic: ⌘ ?
+        - generic:
+          - generic: Close overlay
+          - generic: Esc
+  - text: ⌜ ⌟
+  - dialog "Detail" [ref=e157]:
+    - banner [ref=e158]:
+      - heading "Detail" [level=2] [ref=e159]
+      - button "Close detail drawer" [ref=e160] [cursor=pointer]: ×
+    - contentinfo [ref=e162]

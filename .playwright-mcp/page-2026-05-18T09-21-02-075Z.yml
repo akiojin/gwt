@@ -1,0 +1,128 @@
+- generic [ref=e2]:
+  - generic [ref=e3]:
+    - generic [ref=e4]:
+      - text: ⌜ GWT · OPERATOR ⌟
+      - generic [ref=e5]:
+        - generic [ref=e6]:
+          - button "Open project" [ref=e7] [cursor=pointer]: Open Project
+          - button "More project actions" [ref=e8] [cursor=pointer]: ▾
+        - 'radiogroup "Theme: auto (currently light)" [ref=e9]':
+          - radio "AUTO" [checked] [ref=e10] [cursor=pointer]:
+            - generic [ref=e11]: AUTO
+            - generic [ref=e12]: ▯
+          - radio "DARK" [ref=e13] [cursor=pointer]
+          - radio "LIGHT" [ref=e14] [cursor=pointer]
+    - complementary "Operator sidebar layers":
+      - generic:
+        - heading "Layers 0" [level=3]:
+          - generic: Layers
+          - generic: "0"
+        - button "Agents 0" [pressed]:
+          - generic: Agents
+          - generic: "0"
+        - button "Git 0" [pressed]:
+          - generic: Git
+          - generic: "0"
+        - button "Hooks 0" [pressed]:
+          - generic: Hooks
+          - generic: "0"
+      - generic:
+        - heading "Quick" [level=3]:
+          - generic: Quick
+        - button "Start Work":
+          - generic: Start Work
+          - generic: GO
+        - button "Workspace overview":
+          - generic: Workspace Overview
+          - generic: INFO
+        - button "Open Board (Cmd+B)":
+          - generic: Board
+          - generic: ⌘ B
+        - button "Open Git (Cmd+G)":
+          - generic: Git
+          - generic: ⌘ G
+        - button "Open Logs (Cmd+L)":
+          - generic: Logs
+          - generic: ⌘ L
+    - generic [ref=e15]:
+      - status [ref=e16]:
+        - generic "Connection state" [ref=e18]: Reconnecting
+        - generic [ref=e19]: Drag windows | Scroll/drag canvas to pan | Middle-click drag anywhere | Ctrl/Cmd + wheel to zoom
+      - generic [ref=e23]:
+        - heading "⌜ Open a project ⌟" [level=2] [ref=e24]
+        - paragraph [ref=e25]: Restore previous workspaces or choose a new folder.
+        - button "Open Project..." [ref=e26] [cursor=pointer]
+        - button "Clone from GitHub..." [ref=e27] [cursor=pointer]
+        - generic [ref=e28]: Recent
+        - generic [ref=e30]: ⌜ No recent projects ⌟
+      - text: ⌜ ⌟
+      - generic [ref=e31]:
+        - button "Command palette" [ref=e32] [cursor=pointer]:
+          - generic [ref=e33]: ⌘K
+          - generic [ref=e34]: Palette
+        - button "Zoom out" [ref=e35] [cursor=pointer]: "-"
+        - button "Reset zoom" [ref=e36] [cursor=pointer]: 100%
+        - button "Zoom in" [ref=e37] [cursor=pointer]: +
+        - button "Show window controls" [ref=e38] [cursor=pointer]
+      - button "Show sidebar" [ref=e39] [cursor=pointer]
+    - status "Operator status strip" [ref=e40]:
+      - generic [ref=e43]: LIVE
+      - generic [ref=e44]:
+        - generic [ref=e45]: ACTIVE
+        - generic "Active agents" [ref=e46]: "0"
+      - generic [ref=e47]:
+        - generic [ref=e48]: IDLE
+        - generic "Idle agents" [ref=e49]: "0"
+      - generic [ref=e50]:
+        - generic [ref=e51]: BLOCKED
+        - generic "Blocked agents" [ref=e52]: "0"
+      - generic [ref=e53]:
+        - generic [ref=e54]: BR
+        - generic "Branches" [ref=e55]: —
+      - generic [ref=e56]:
+        - generic [ref=e57]: T
+        - generic [ref=e58]:
+          - text: "18"
+          - generic [ref=e59]: ":"
+          - text: "21"
+          - generic [ref=e60]: ":"
+          - text: "02"
+  - text: ok ok ok ok
+  - generic:
+    - dialog:
+      - combobox
+      - listbox
+  - generic:
+    - dialog:
+      - heading [level=2]: Operator Hotkeys
+      - generic:
+        - heading [level=3]: Navigation
+        - generic:
+          - generic: Command palette
+          - generic: ⌘ K
+        - generic:
+          - generic: Project switcher
+          - generic: ⌘ P
+        - generic:
+          - generic: Board surface
+          - generic: ⌘ B
+        - generic:
+          - generic: Git surface
+          - generic: ⌘ G
+        - generic:
+          - generic: Logs surface
+          - generic: ⌘ L
+      - generic:
+        - heading [level=3]: Help
+        - generic:
+          - generic: This card
+          - generic: ⌘ ?
+        - generic:
+          - generic: Close overlay
+          - generic: Esc
+  - text: ⌜ ⌟
+  - dialog "Detail" [ref=e61]:
+    - banner [ref=e62]:
+      - heading "Detail" [level=2] [ref=e63]
+      - button "Close detail drawer" [ref=e64] [cursor=pointer]: ×
+    - contentinfo [ref=e66]
