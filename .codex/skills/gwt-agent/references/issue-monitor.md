@@ -1,4 +1,4 @@
-## Issues Queue Operations
+## Issue Monitor Queue Operations
 
 Use these JSON operations for project-scoped queue inspection and control. The
 optional `project_root` parameter defaults to the caller's current worktree.
@@ -59,7 +59,7 @@ JSON
 JSON
 ```
 
-Ask the Issues runtime to take an Issue next — move it to the priority head and
+Ask the Issue Monitor to take an Issue next — move it to the priority head and
 trigger an immediate scan. The launch itself still goes through the Monitor's
 own claim/slot path, so this can never produce a duplicate agent:
 
