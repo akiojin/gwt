@@ -3842,6 +3842,21 @@ impl AppRuntime {
                 },
             );
         }
+        if let Some(context) = launch_feedback_context
+            .as_ref()
+            .filter(|context| context.issue_monitor_issue_number.is_some())
+        {
+            let lifecycle_project_root = context
+                .issue_monitor_project_root
+                .as_deref()
+                .unwrap_or(project_root_path.as_path());
+            let _ = self.capture_issue_monitor_lifecycle_source_identity(
+                lifecycle_project_root,
+                context.issue_monitor_issue_number,
+                context.issue_monitor_delivery_id.as_deref(),
+                &window_id,
+            );
+        }
         if let Some(context) = launch_feedback_context {
             self.pending_launch_feedback_contexts
                 .insert(window_id.clone(), context);

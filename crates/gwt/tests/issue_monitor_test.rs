@@ -1819,6 +1819,7 @@ fn newer_disk_failure_adoption_preserves_real_launched_window_across_roundtrip_a
             launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
                 issue_number: 42,
                 window_id: "tab::agent-42".to_string(),
+                ..gwt::IssueMonitorLaunchedIssue::default()
             }],
             ..IssueMonitorPrefs::default()
         },
@@ -1883,6 +1884,7 @@ fn prefs_newer_disk_failure_adoption_preserves_real_launch_and_reconciles_unboun
         launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
             issue_number: 42,
             window_id: "tab::agent-42".to_string(),
+            ..gwt::IssueMonitorLaunchedIssue::default()
         }],
         launching_issues: vec![gwt::IssueMonitorLaunchingIssue {
             issue_number: 43,

@@ -22,6 +22,7 @@ use super::{
 /// persistent window detail when an agent process errors out.
 const AGENT_ERROR_TAIL_LINES: usize = 3;
 const AGENT_ERROR_TAIL_MAX_CHARS: usize = 240;
+const PROVIDER_QUOTA_SETTLE_SECS: i64 = 120;
 /// Claude Code's exact-resume failure line. When a resumed conversation no
 /// longer exists in the agent's store, this is the only explanation the user
 /// ever gets — promote it to an explicit diagnostic (SPEC-1921 exact session
@@ -234,10 +235,180 @@ impl AppRuntime {
                 publish_runtime_output_change(&tab.project_root, &id, &data);
             }
         }
-        vec![OutboundEvent::broadcast(BackendEvent::TerminalOutput {
+        let output_id = id.clone();
+        let events = vec![OutboundEvent::broadcast(BackendEvent::TerminalOutput {
             id,
             data_base64: base64::engine::general_purpose::STANDARD.encode(data),
-        })]
+        })];
+        if publish_to_daemon {
+            self.observe_issue_monitor_wait_screen(&output_id, chrono::Utc::now());
+        }
+        events
+    }
+
+    fn observe_issue_monitor_wait_screen(
+        &mut self,
+        window_id: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) {
+        let Some(runtime) = self.runtimes.get(window_id) else {
+            self.clear_issue_monitor_wait_tracking(window_id);
+            return;
+        };
+        let Ok(pane) = runtime.pane.lock() else {
+            self.clear_issue_monitor_wait_tracking(window_id);
+            return;
+        };
+        let screen = pane.screen().contents();
+        drop(pane);
+
+        let approval_provider = self.issue_monitor_approval_provider(window_id);
+        match gwt::window_state::approval_prompt_fingerprint(approval_provider, &screen) {
+            Some(fingerprint) => {
+                self.issue_monitor_approval_waits
+                    .insert(window_id.to_string(), fingerprint);
+            }
+            None if !gwt::window_state::has_approval_prompt_evidence(
+                approval_provider,
+                &screen,
+            ) =>
+            {
+                self.issue_monitor_approval_waits.remove(window_id);
+            }
+            None => {}
+        }
+        self.observe_issue_monitor_provider_limit(window_id, &screen, now);
+    }
+
+    fn issue_monitor_approval_provider(
+        &self,
+        window_id: &str,
+    ) -> gwt::window_state::ApprovalPromptProvider {
+        use gwt::window_state::ApprovalPromptProvider;
+        match self.window_preset(window_id) {
+            Some(WindowPreset::Codex) => return ApprovalPromptProvider::Codex,
+            Some(WindowPreset::Claude) => return ApprovalPromptProvider::ClaudeCode,
+            Some(WindowPreset::Agent) => {}
+            _ => return ApprovalPromptProvider::Unsupported,
+        }
+        match self.issue_monitor_window_agent_id(window_id).as_deref() {
+            Some("codex") => ApprovalPromptProvider::Codex,
+            Some("claude" | "claude-code") => ApprovalPromptProvider::ClaudeCode,
+            _ => ApprovalPromptProvider::Unsupported,
+        }
+    }
+
+    fn issue_monitor_window_agent_id(&self, window_id: &str) -> Option<String> {
+        self.active_agent_sessions
+            .get(window_id)
+            .map(|session| session.agent_id.trim().to_ascii_lowercase())
+            .or_else(|| {
+                let address = self.window_lookup.get(window_id)?;
+                self.tab(&address.tab_id)?
+                    .workspace
+                    .window(&address.raw_id)?
+                    .agent_id
+                    .as_deref()
+                    .map(|agent| agent.trim().to_ascii_lowercase())
+            })
+    }
+
+    fn issue_monitor_usage_provider(
+        &self,
+        window_id: &str,
+    ) -> Option<(gwt_core::usage::UsageProvider, &'static str)> {
+        match self.issue_monitor_window_agent_id(window_id)?.as_str() {
+            "codex" => Some((gwt_core::usage::UsageProvider::Codex, "codex")),
+            "claude" | "claude-code" => {
+                Some((gwt_core::usage::UsageProvider::ClaudeCode, "claude-code"))
+            }
+            _ => None,
+        }
+    }
+
+    fn observe_issue_monitor_provider_limit(
+        &mut self,
+        window_id: &str,
+        screen: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) {
+        let Some((provider, provider_label)) = self.issue_monitor_usage_provider(window_id) else {
+            self.issue_monitor_provider_waits.remove(window_id);
+            self.provider_quota_candidates.remove(window_id);
+            return;
+        };
+        let notice = gwt_core::usage::detect_provider_limit_notice(
+            screen,
+            &now.with_timezone(&chrono::Local),
+        )
+        .filter(|notice| notice.provider.is_none_or(|observed| observed == provider));
+        let Some(notice) = notice else {
+            self.issue_monitor_provider_waits.remove(window_id);
+            self.provider_quota_candidates.remove(window_id);
+            return;
+        };
+        if self.issue_monitor_provider_waits.contains_key(window_id) {
+            return;
+        }
+        let first_seen = self
+            .provider_quota_candidates
+            .entry(window_id.to_string())
+            .or_insert(super::ProviderQuotaCandidate { first_seen: now })
+            .first_seen;
+        let account = self
+            .provider_usage_accounts
+            .iter()
+            .find(|account| account.provider == provider && account.limit_reached);
+        if account.is_none()
+            && now.signed_duration_since(first_seen).num_seconds() < PROVIDER_QUOTA_SETTLE_SECS
+        {
+            return;
+        }
+        let resets_at = account
+            .and_then(|account| {
+                account
+                    .windows
+                    .iter()
+                    .filter_map(|window| window.resets_at)
+                    .min()
+            })
+            .or(notice.resets_at)
+            .map(|reset| reset.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
+        self.provider_quota_candidates.remove(window_id);
+        self.issue_monitor_provider_waits.insert(
+            window_id.to_string(),
+            gwt::IssueMonitorRuntimeWaitSignal::ProviderUsageLimit {
+                provider: provider_label.to_string(),
+                resets_at,
+            },
+        );
+    }
+
+    fn clear_issue_monitor_wait_tracking(&mut self, window_id: &str) {
+        self.issue_monitor_approval_waits.remove(window_id);
+        self.issue_monitor_provider_waits.remove(window_id);
+        self.provider_quota_candidates.remove(window_id);
+    }
+
+    pub(crate) fn handle_provider_usage_snapshot(
+        &mut self,
+        accounts: Vec<gwt_core::usage::ProviderUsage>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Vec<OutboundEvent> {
+        self.provider_usage_accounts = accounts;
+        let pending = self
+            .provider_quota_candidates
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        for window_id in pending {
+            if self.window_lookup.contains_key(&window_id) {
+                self.observe_issue_monitor_wait_screen(&window_id, now);
+            } else {
+                self.clear_issue_monitor_wait_tracking(&window_id);
+            }
+        }
+        Vec::new()
     }
 
     pub(crate) fn handle_runtime_status(
@@ -324,6 +495,14 @@ impl AppRuntime {
         let issue_monitor_project_root = self
             .tab(&address.tab_id)
             .map(|tab| tab.project_root.clone());
+        if exit_confirmed
+            && matches!(
+                status,
+                WindowProcessStatus::Error | WindowProcessStatus::Stopped
+            )
+        {
+            self.clear_issue_monitor_wait_tracking(&id);
+        }
         let is_agent_window = self.window_preset(&id) == Some(WindowPreset::Agent);
         // SPEC-3431 FR-003: capture the exiting window's session before the
         // teardown below removes the active entry — the PM crash handler
@@ -604,6 +783,12 @@ impl AppRuntime {
         let Some(window_id) = self.active_window_for_runtime_event(&event) else {
             return events;
         };
+        if matches!(
+            event.source_event.as_deref(),
+            Some("SessionStart" | "UserPromptSubmit" | "PreToolUse" | "PostToolUse")
+        ) {
+            self.clear_issue_monitor_wait_tracking(&window_id);
+        }
         let issue_monitor_session_mode = self.issue_monitor_session_mode_for_window(&window_id);
         let issue_monitor_project_root = self.issue_monitor_project_root_for_window(&window_id);
         // SPEC-3431 FR-068: a hook arrival is the one signal that an agent is

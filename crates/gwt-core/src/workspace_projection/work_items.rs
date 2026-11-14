@@ -594,7 +594,10 @@ fn workspace_execution_container_same(
     left: &WorkspaceExecutionContainerRef,
     right: &WorkspaceExecutionContainerRef,
 ) -> bool {
-    (left.branch.is_some() && left.branch == right.branch)
+    let branch_matches = normalized_work_branch(left.branch.as_deref())
+        .zip(normalized_work_branch(right.branch.as_deref()))
+        .is_some_and(|(left, right)| left == right);
+    branch_matches
         || (left.worktree_path.is_some() && left.worktree_path == right.worktree_path)
         || (left.pr_number.is_some() && left.pr_number == right.pr_number)
         || (left.pr_url.is_some() && left.pr_url == right.pr_url)

@@ -205,25 +205,75 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 number: required_u64(params, "number")?,
             })
         }
-        "issue.monitor.stop" => CliCommand::Issue(IssueCommand::MonitorStop {
-            project_root: optional_path(params, "project_root")?,
-            number: required_u64(params, "number")?,
-            // FR-031: an unexplained stop is not auditable.
-            reason: required_string(params, "reason")?,
-            // Which identity components are required is a property of the live
-            // launch, not of the request shape, so the state layer decides.
-            claim_id: optional_string(params, "claim_id")?,
-            delivery_id: optional_string(params, "delivery_id")?,
-            window_id: optional_string(params, "window_id")?,
-        }),
-        "issue.monitor.failover" => CliCommand::Issue(IssueCommand::MonitorFailover {
-            project_root: optional_path(params, "project_root")?,
-            number: required_u64(params, "number")?,
-            reason: required_string(params, "reason")?,
-            claim_id: optional_string(params, "claim_id")?,
-            delivery_id: optional_string(params, "delivery_id")?,
-            window_id: optional_string(params, "window_id")?,
-        }),
+        "issue.monitor.stop" => {
+            reject_unknown_params(
+                params,
+                ISSUE_MONITOR_CONTROL_TARGET_PARAMS,
+                "issue.monitor.stop",
+            )?;
+            CliCommand::Issue(IssueCommand::MonitorStop {
+                project_root: optional_path(params, "project_root")?,
+                number: required_u64(params, "number")?,
+                operation_id: optional_control_operation_id(params)?,
+                reason: required_issue_monitor_control_reason(params)?,
+                launch_generation: optional_u64(params, "launch_generation")?,
+                claim_id: optional_string(params, "claim_id")?,
+                claim_owner: optional_string(params, "claim_owner")?,
+                delivery_id: optional_string(params, "delivery_id")?,
+                materializer_window_id: optional_string(params, "materializer_window_id")?,
+                window_id: optional_string(params, "window_id")?,
+                launch_profile_fingerprint: optional_string(params, "launch_profile_fingerprint")?,
+            })
+        }
+        "issue.monitor.failover" => {
+            reject_unknown_params(
+                params,
+                ISSUE_MONITOR_CONTROL_TARGET_PARAMS,
+                "issue.monitor.failover",
+            )?;
+            CliCommand::Issue(IssueCommand::MonitorFailover {
+                project_root: optional_path(params, "project_root")?,
+                number: required_u64(params, "number")?,
+                operation_id: optional_control_operation_id(params)?,
+                reason: required_issue_monitor_control_reason(params)?,
+                launch_generation: optional_u64(params, "launch_generation")?,
+                claim_id: optional_string(params, "claim_id")?,
+                claim_owner: optional_string(params, "claim_owner")?,
+                delivery_id: optional_string(params, "delivery_id")?,
+                materializer_window_id: optional_string(params, "materializer_window_id")?,
+                window_id: optional_string(params, "window_id")?,
+                launch_profile_fingerprint: optional_string(params, "launch_profile_fingerprint")?,
+            })
+        }
+        "issue.monitor.recover" => {
+            reject_unknown_params(
+                params,
+                ISSUE_MONITOR_CONTROL_TARGET_PARAMS,
+                "issue.monitor.recover",
+            )?;
+            CliCommand::Issue(IssueCommand::MonitorRecover {
+                project_root: optional_path(params, "project_root")?,
+                number: required_u64(params, "number")?,
+                operation_id: required_control_operation_id(params)?,
+                reason: required_issue_monitor_control_reason(params)?,
+                launch_generation: required_u64(params, "launch_generation")?,
+                claim_id: optional_string(params, "claim_id")?,
+                claim_owner: optional_string(params, "claim_owner")?,
+                delivery_id: optional_string(params, "delivery_id")?,
+                materializer_window_id: optional_string(params, "materializer_window_id")?,
+                window_id: optional_string(params, "window_id")?,
+                launch_profile_fingerprint: optional_string(params, "launch_profile_fingerprint")?,
+            })
+        }
+        "issue.monitor.control.reconcile" => {
+            const ALLOWED: &[&str] = &["project_root", "operation_id", "revoked_generation"];
+            reject_unknown_params(params, ALLOWED, "issue.monitor.control.reconcile")?;
+            CliCommand::Issue(IssueCommand::MonitorControlReconcile {
+                project_root: optional_path(params, "project_root")?,
+                operation_id: required_control_operation_id(params)?,
+                revoked_generation: required_u64(params, "revoked_generation")?,
+            })
+        }
         "issue.monitor.priority.set" | "issue.monitor.priority-set" => {
             CliCommand::Issue(IssueCommand::MonitorPrioritySet {
                 project_root: optional_path(params, "project_root")?,
@@ -1129,6 +1179,106 @@ fn optional_path(
     Ok(optional_string(params, key)?.map(std::path::PathBuf::from))
 }
 
+const ISSUE_MONITOR_CONTROL_TARGET_PARAMS: &[&str] = &[
+    "project_root",
+    "number",
+    "operation_id",
+    "reason",
+    "launch_generation",
+    "claim_id",
+    "claim_owner",
+    "delivery_id",
+    "materializer_window_id",
+    "window_id",
+    "launch_profile_fingerprint",
+];
+
+fn optional_control_operation_id(
+    params: &Map<String, Value>,
+) -> Result<Option<String>, CliParseError> {
+    control_operation_id(params, false)
+}
+
+fn required_control_operation_id(params: &Map<String, Value>) -> Result<String, CliParseError> {
+    control_operation_id(params, true)?.ok_or(CliParseError::MissingFlag("operation_id"))
+}
+
+fn control_operation_id(
+    params: &Map<String, Value>,
+    required: bool,
+) -> Result<Option<String>, CliParseError> {
+    let Some(value) = params.get("operation_id") else {
+        return if required {
+            Err(CliParseError::MissingFlag("operation_id"))
+        } else {
+            Ok(None)
+        };
+    };
+    let Value::String(value) = value else {
+        return Err(CliParseError::InvalidJson(
+            "operation_id must be an ASCII printable token of 1..=128 bytes".to_string(),
+        ));
+    };
+    let value = value.trim();
+    if value.is_empty()
+        || value.len() > 128
+        || !value.is_ascii()
+        || !value.as_bytes().iter().all(u8::is_ascii_graphic)
+    {
+        return Err(CliParseError::InvalidJson(
+            "operation_id must be an ASCII printable token of 1..=128 bytes".to_string(),
+        ));
+    }
+    Ok(Some(value.to_string()))
+}
+
+fn required_issue_monitor_control_reason(
+    params: &Map<String, Value>,
+) -> Result<String, CliParseError> {
+    let Some(value) = params.get("reason") else {
+        return Err(CliParseError::MissingFlag("reason"));
+    };
+    let Value::String(value) = value else {
+        return Err(CliParseError::InvalidJson(
+            "reason must be a UTF-8 string of at most 1024 bytes without control characters"
+                .to_string(),
+        ));
+    };
+    if value.chars().any(char::is_control) {
+        return Err(CliParseError::InvalidJson(
+            "reason must be a UTF-8 string of at most 1024 bytes without control characters"
+                .to_string(),
+        ));
+    }
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(CliParseError::MissingFlag("reason"));
+    }
+    if value.len() > 1024 {
+        return Err(CliParseError::InvalidJson(
+            "reason must be a UTF-8 string of at most 1024 bytes without control characters"
+                .to_string(),
+        ));
+    }
+    Ok(value.to_string())
+}
+
+fn reject_unknown_params(
+    params: &Map<String, Value>,
+    allowed: &[&str],
+    operation: &str,
+) -> Result<(), CliParseError> {
+    for key in params.keys() {
+        if !allowed.contains(&key.as_str()) {
+            return Err(CliParseError::InvalidJson(format!(
+                "{operation} does not accept the parameter {key}; accepted: {}",
+                allowed.join(", ")
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn required_u64(params: &Map<String, Value>, key: &'static str) -> Result<u64, CliParseError> {
     optional_u64(params, key)?.ok_or(CliParseError::MissingFlag(key))
 }
@@ -1926,10 +2076,15 @@ mod tests {
             CliCommand::Issue(IssueCommand::MonitorStop {
                 project_root: None,
                 number: 42,
+                operation_id: None,
                 reason: "provider rate limit".to_string(),
+                launch_generation: None,
                 claim_id: None,
+                claim_owner: None,
                 delivery_id: None,
+                materializer_window_id: None,
                 window_id: Some("tab-1::agent-1".to_string()),
+                launch_profile_fingerprint: None,
             })
         );
         assert_eq!(
@@ -1946,10 +2101,15 @@ mod tests {
             CliCommand::Issue(IssueCommand::MonitorStop {
                 project_root: Some(std::path::PathBuf::from("/tmp/project")),
                 number: 7,
+                operation_id: None,
                 reason: "switch provider".to_string(),
+                launch_generation: None,
                 claim_id: Some("claim-1".to_string()),
+                claim_owner: None,
                 delivery_id: Some("launch:effect-1".to_string()),
+                materializer_window_id: None,
                 window_id: None,
+                launch_profile_fingerprint: None,
             })
         );
         assert!(matches!(
@@ -1986,10 +2146,15 @@ mod tests {
             CliCommand::Issue(IssueCommand::MonitorFailover {
                 project_root: None,
                 number: 3476,
+                operation_id: None,
                 reason: "codex rate limit".to_string(),
+                launch_generation: None,
                 claim_id: Some("claim-1".to_string()),
+                claim_owner: None,
                 delivery_id: None,
+                materializer_window_id: None,
                 window_id: Some("tab-1::agent-1".to_string()),
+                launch_profile_fingerprint: None,
             })
         );
         assert!(matches!(
@@ -2000,6 +2165,432 @@ mod tests {
             err("issue.monitor.failover", json!({"reason": "x"})),
             CliParseError::MissingFlag("number")
         ));
+    }
+
+    /// SPEC-3431 Phase 24 T250 (FR-128/FR-130): all three PM control intents
+    /// retain the complete exact target from the wire.  Structural matching is
+    /// intentional: every field must exist in the command model and bind to
+    /// the exact parsed value before handler work can start.
+    #[test]
+    fn t250_pm_control_operations_retain_the_complete_generation_target() {
+        let target = json!({
+            "project_root": "/tmp/project",
+            "number": 42,
+            "operation_id": "control-op-42",
+            "reason": "stalled provider",
+            "launch_generation": 17,
+            "claim_id": "claim-42",
+            "claim_owner": "owner-42",
+            "delivery_id": "delivery-42",
+            "materializer_window_id": "tab-1::materializer-42",
+            "window_id": "tab-1::agent-42",
+            "launch_profile_fingerprint": "profile-sha256-42",
+        });
+
+        let assert_target =
+            |project_root: Option<std::path::PathBuf>,
+             number: u64,
+             reason: String,
+             launch_generation: Option<u64>,
+             claim_id: Option<String>,
+             claim_owner: Option<String>,
+             delivery_id: Option<String>,
+             materializer_window_id: Option<String>,
+             window_id: Option<String>,
+             launch_profile_fingerprint: Option<String>| {
+                assert_eq!(
+                    project_root.as_deref(),
+                    Some(std::path::Path::new("/tmp/project"))
+                );
+                assert_eq!(number, 42);
+                assert_eq!(reason, "stalled provider");
+                assert_eq!(launch_generation, Some(17));
+                assert_eq!(claim_id.as_deref(), Some("claim-42"));
+                assert_eq!(claim_owner.as_deref(), Some("owner-42"));
+                assert_eq!(delivery_id.as_deref(), Some("delivery-42"));
+                assert_eq!(
+                    materializer_window_id.as_deref(),
+                    Some("tab-1::materializer-42")
+                );
+                assert_eq!(window_id.as_deref(), Some("tab-1::agent-42"));
+                assert_eq!(
+                    launch_profile_fingerprint.as_deref(),
+                    Some("profile-sha256-42")
+                );
+            };
+
+        match ok("issue.monitor.stop", target.clone()) {
+            CliCommand::Issue(IssueCommand::MonitorStop {
+                project_root,
+                number,
+                operation_id,
+                reason,
+                launch_generation,
+                claim_id,
+                claim_owner,
+                delivery_id,
+                materializer_window_id,
+                window_id,
+                launch_profile_fingerprint,
+            }) => {
+                assert_eq!(operation_id.as_deref(), Some("control-op-42"));
+                assert_target(
+                    project_root,
+                    number,
+                    reason,
+                    launch_generation,
+                    claim_id,
+                    claim_owner,
+                    delivery_id,
+                    materializer_window_id,
+                    window_id,
+                    launch_profile_fingerprint,
+                );
+            }
+            other => panic!("unexpected stop command: {other:?}"),
+        }
+        match ok("issue.monitor.failover", target.clone()) {
+            CliCommand::Issue(IssueCommand::MonitorFailover {
+                project_root,
+                number,
+                operation_id,
+                reason,
+                launch_generation,
+                claim_id,
+                claim_owner,
+                delivery_id,
+                materializer_window_id,
+                window_id,
+                launch_profile_fingerprint,
+            }) => {
+                assert_eq!(operation_id.as_deref(), Some("control-op-42"));
+                assert_target(
+                    project_root,
+                    number,
+                    reason,
+                    launch_generation,
+                    claim_id,
+                    claim_owner,
+                    delivery_id,
+                    materializer_window_id,
+                    window_id,
+                    launch_profile_fingerprint,
+                );
+            }
+            other => panic!("unexpected failover command: {other:?}"),
+        }
+        match ok("issue.monitor.recover", target) {
+            CliCommand::Issue(IssueCommand::MonitorRecover {
+                project_root,
+                number,
+                operation_id,
+                reason,
+                launch_generation,
+                claim_id,
+                claim_owner,
+                delivery_id,
+                materializer_window_id,
+                window_id,
+                launch_profile_fingerprint,
+            }) => {
+                assert_eq!(operation_id, "control-op-42");
+                assert_target(
+                    project_root,
+                    number,
+                    reason,
+                    Some(launch_generation),
+                    claim_id,
+                    claim_owner,
+                    delivery_id,
+                    materializer_window_id,
+                    window_id,
+                    launch_profile_fingerprint,
+                );
+            }
+            other => panic!("unexpected recover command: {other:?}"),
+        }
+    }
+
+    fn t250_operation_id_params(operation: &str, operation_id: &str) -> Value {
+        match operation {
+            "issue.monitor.control.reconcile" => {
+                json!({"operation_id": operation_id, "revoked_generation": 17})
+            }
+            "issue.monitor.recover" => json!({
+                "number": 42,
+                "operation_id": operation_id,
+                "reason": "operator request",
+                "launch_generation": 17,
+            }),
+            _ => json!({
+                "number": 42,
+                "operation_id": operation_id,
+                "reason": "operator request",
+            }),
+        }
+    }
+
+    fn t250_parsed_operation_id(operation: &str, operation_id: &str) -> String {
+        match ok(operation, t250_operation_id_params(operation, operation_id)) {
+            CliCommand::Issue(IssueCommand::MonitorStop {
+                operation_id: Some(operation_id),
+                ..
+            })
+            | CliCommand::Issue(IssueCommand::MonitorFailover {
+                operation_id: Some(operation_id),
+                ..
+            })
+            | CliCommand::Issue(IssueCommand::MonitorRecover { operation_id, .. })
+            | CliCommand::Issue(IssueCommand::MonitorControlReconcile { operation_id, .. }) => {
+                operation_id
+            }
+            other => panic!("{operation} did not retain its operation ID: {other:?}"),
+        }
+    }
+
+    /// SPEC-3431 Phase 24 T250 (FR-129): supplied operation IDs are trimmed
+    /// ASCII tokens. Legacy stop/failover remain parse-compatible without an
+    /// ID, while recover/reconcile never receive generated replay identities.
+    #[test]
+    fn t250_pm_control_operation_id_boundaries_apply_to_every_control_action() {
+        for operation in ["issue.monitor.stop", "issue.monitor.failover"] {
+            assert!(
+                parse(&envelope(
+                    operation,
+                    json!({"number": 42, "reason": "legacy caller"})
+                ))
+                .is_ok(),
+                "legacy {operation} must remain parse-compatible"
+            );
+        }
+
+        for operation in [
+            "issue.monitor.stop",
+            "issue.monitor.failover",
+            "issue.monitor.recover",
+            "issue.monitor.control.reconcile",
+        ] {
+            assert_eq!(t250_parsed_operation_id(operation, "x"), "x");
+            assert_eq!(
+                t250_parsed_operation_id(operation, &"x".repeat(128)),
+                "x".repeat(128),
+                "{operation} must accept exactly 128 ASCII bytes"
+            );
+            assert_eq!(
+                t250_parsed_operation_id(operation, "  op-token_42.v1  "),
+                "op-token_42.v1",
+                "{operation} must trim the supplied token"
+            );
+        }
+
+        let invalid = [
+            ("blank", "   ".to_string()),
+            ("internal-space", "op token".to_string()),
+            ("display-control", "op\u{7f}".to_string()),
+            ("non-ascii", "op-é".to_string()),
+            ("129-bytes", "x".repeat(129)),
+        ];
+        let mut accepted = Vec::new();
+        for operation in [
+            "issue.monitor.stop",
+            "issue.monitor.failover",
+            "issue.monitor.recover",
+            "issue.monitor.control.reconcile",
+        ] {
+            for (label, operation_id) in &invalid {
+                if parse(&envelope(
+                    operation,
+                    t250_operation_id_params(operation, operation_id),
+                ))
+                .is_ok()
+                {
+                    accepted.push(format!("{operation}:{label}"));
+                }
+            }
+        }
+        assert!(
+            accepted.is_empty(),
+            "invalid operation IDs were accepted: {accepted:?}"
+        );
+
+        for operation in ["issue.monitor.recover", "issue.monitor.control.reconcile"] {
+            let params = if operation.ends_with("reconcile") {
+                json!({"revoked_generation": 17})
+            } else {
+                json!({"number": 42, "reason": "stalled"})
+            };
+            assert!(matches!(
+                err(operation, params),
+                CliParseError::MissingFlag("operation_id")
+            ));
+        }
+    }
+
+    /// Reasons are bounded by UTF-8 bytes, not scalar count, and display
+    /// controls can never enter a durable receipt or diagnostic projection.
+    #[test]
+    fn t250_pm_control_reason_is_trimmed_bounded_utf8_without_controls() {
+        let params = |operation: &str, reason: &str| {
+            let mut params = json!({
+                "number": 42,
+                "operation_id": "control-op-42",
+                "reason": reason,
+            });
+            if operation == "issue.monitor.recover" {
+                params["launch_generation"] = json!(17);
+            }
+            params
+        };
+        let exactly_1024_bytes = "é".repeat(512);
+        let invalid = [
+            ("blank", "   ".to_string()),
+            ("1025-utf8-bytes", format!("{}x", "é".repeat(512))),
+            ("nul", "operator\0request".to_string()),
+            ("bell", "operator\u{7}request".to_string()),
+            ("delete", "operator\u{7f}request".to_string()),
+        ];
+        let mut accepted = Vec::new();
+        for operation in [
+            "issue.monitor.stop",
+            "issue.monitor.failover",
+            "issue.monitor.recover",
+        ] {
+            for (input, expected) in [
+                ("  operator request  ", "operator request"),
+                ("x", "x"),
+                (&exactly_1024_bytes, exactly_1024_bytes.as_str()),
+            ] {
+                let reason = match ok(operation, params(operation, input)) {
+                    CliCommand::Issue(IssueCommand::MonitorStop { reason, .. })
+                    | CliCommand::Issue(IssueCommand::MonitorFailover { reason, .. })
+                    | CliCommand::Issue(IssueCommand::MonitorRecover { reason, .. }) => reason,
+                    other => panic!("unexpected {operation} command: {other:?}"),
+                };
+                assert_eq!(reason, expected, "{operation} reason normalization");
+            }
+            assert!(matches!(
+                err(
+                    operation,
+                    if operation == "issue.monitor.recover" {
+                        json!({
+                            "number": 42,
+                            "operation_id": "control-op-42",
+                            "launch_generation": 17,
+                        })
+                    } else {
+                        json!({"number": 42, "operation_id": "control-op-42"})
+                    }
+                ),
+                CliParseError::MissingFlag("reason")
+            ));
+            for (label, reason) in &invalid {
+                if parse(&envelope(operation, params(operation, reason))).is_ok() {
+                    accepted.push(format!("{operation}:{label}"));
+                }
+            }
+        }
+        assert!(
+            accepted.is_empty(),
+            "invalid control reasons were accepted: {accepted:?}"
+        );
+    }
+
+    /// SPEC-3431 FR-131: manual reconciliation identifies an already pending
+    /// operation and the exact revoked generation.  Absence itself is never a
+    /// caller-supplied field; it comes from the owning AppRuntime proof path.
+    #[test]
+    fn t250_issue_monitor_control_reconcile_parses_only_pending_identity() {
+        match ok(
+            "issue.monitor.control.reconcile",
+            json!({
+                "project_root": "/tmp/project",
+                "operation_id": "recover-op-42",
+                "revoked_generation": 17,
+            }),
+        ) {
+            CliCommand::Issue(IssueCommand::MonitorControlReconcile {
+                project_root,
+                operation_id,
+                revoked_generation,
+            }) => {
+                assert_eq!(
+                    project_root.as_deref(),
+                    Some(std::path::Path::new("/tmp/project"))
+                );
+                assert_eq!(operation_id, "recover-op-42");
+                assert_eq!(revoked_generation, 17);
+            }
+            other => panic!("unexpected reconcile command: {other:?}"),
+        }
+
+        assert!(matches!(
+            err(
+                "issue.monitor.control.reconcile",
+                json!({"revoked_generation": 17})
+            ),
+            CliParseError::MissingFlag("operation_id")
+        ));
+        assert!(matches!(
+            err(
+                "issue.monitor.control.reconcile",
+                json!({"operation_id": "recover-op-42"})
+            ),
+            CliParseError::MissingFlag("revoked_generation")
+        ));
+        for caller_proof in [
+            json!({"operation_id": "recover-op-42", "revoked_generation": 17, "absent": true}),
+            json!({"operation_id": "recover-op-42", "revoked_generation": 17, "observed_absent": true}),
+            json!({"operation_id": "recover-op-42", "revoked_generation": 17, "runtime_inventory_proof": {"present": false}}),
+        ] {
+            assert!(
+                parse(&envelope("issue.monitor.control.reconcile", caller_proof)).is_err(),
+                "caller-supplied absence/proof must be rejected"
+            );
+        }
+    }
+
+    /// No JSON field can nominate the PM control subject. Implementations may
+    /// reject spoof fields or ignore them, but an accepted envelope must still
+    /// contain only the ambient-authorized command identity.
+    #[test]
+    fn t250_pm_control_caller_spoof_fields_are_rejected_or_ignored() {
+        let exact_target = json!({
+            "number": 42,
+            "operation_id": "control-op-42",
+            "reason": "control requested",
+            "launch_generation": 17,
+            "claim_id": "claim-42",
+            "claim_owner": "owner-42",
+            "delivery_id": "delivery-42",
+            "materializer_window_id": "tab-1::materializer-42",
+            "window_id": "tab-1::agent-42",
+            "launch_profile_fingerprint": "profile-sha256-42",
+        });
+        for (operation, baseline_params) in [
+            ("issue.monitor.stop", exact_target.clone()),
+            ("issue.monitor.failover", exact_target.clone()),
+            ("issue.monitor.recover", exact_target),
+            (
+                "issue.monitor.control.reconcile",
+                json!({"operation_id": "control-op-42", "revoked_generation": 17}),
+            ),
+        ] {
+            let baseline = parse(&envelope(operation, baseline_params.clone()))
+                .unwrap_or_else(|error| panic!("baseline {operation} must parse: {error}"));
+            for field in ["caller", "actor", "session_id"] {
+                let mut spoofed_params = baseline_params.clone();
+                spoofed_params
+                    .as_object_mut()
+                    .expect("object params")
+                    .insert(field.to_string(), json!("forged-pm-session"));
+                if let Ok(spoofed) = parse(&envelope(operation, spoofed_params)) {
+                    assert_eq!(
+                        spoofed.command, baseline.command,
+                        "{operation} accepted {field} as command identity"
+                    );
+                }
+            }
+        }
     }
 
     /// SPEC-3431 FR-111 (T-206): the PM's privileged pane delivery is its own

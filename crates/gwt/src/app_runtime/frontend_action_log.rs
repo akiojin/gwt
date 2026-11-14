@@ -724,7 +724,9 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::RestartPmAgent => FrontendUserActionLog::new("restart_pm_agent", "pm"),
         // These events can contain high-volume, high-frequency, or sensitive
         // payloads. They are handled by more specific logs or diagnostics.
-        FrontendEvent::StartupAutoResumeReady { .. }
+        FrontendEvent::AgentIssueMonitorRuntimeInventory { .. }
+        | FrontendEvent::AgentIssueMonitorRuntimeInventoryProof { .. }
+        | FrontendEvent::StartupAutoResumeReady { .. }
         | FrontendEvent::UpdateViewport { .. }
         | FrontendEvent::UpdateWindowGeometry { .. }
         | FrontendEvent::TerminalInput { .. }

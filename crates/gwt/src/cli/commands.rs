@@ -144,10 +144,15 @@ pub enum IssueCommand {
     MonitorStop {
         project_root: Option<std::path::PathBuf>,
         number: u64,
+        operation_id: Option<String>,
         reason: String,
+        launch_generation: Option<u64>,
         claim_id: Option<String>,
+        claim_owner: Option<String>,
         delivery_id: Option<String>,
+        materializer_window_id: Option<String>,
         window_id: Option<String>,
+        launch_profile_fingerprint: Option<String>,
     },
     /// SPEC-3431 FR-029〜031: revoke one launch and requeue its issue at the
     /// head so the currently saved launch profile picks it up.
@@ -157,10 +162,37 @@ pub enum IssueCommand {
     MonitorFailover {
         project_root: Option<std::path::PathBuf>,
         number: u64,
+        operation_id: Option<String>,
         reason: String,
+        launch_generation: Option<u64>,
         claim_id: Option<String>,
+        claim_owner: Option<String>,
         delivery_id: Option<String>,
+        materializer_window_id: Option<String>,
         window_id: Option<String>,
+        launch_profile_fingerprint: Option<String>,
+    },
+    /// SPEC-3431 FR-130: settle one unreachable launch generation while
+    /// retaining the complete source authority as an exact recovery target.
+    MonitorRecover {
+        project_root: Option<std::path::PathBuf>,
+        number: u64,
+        operation_id: String,
+        reason: String,
+        launch_generation: u64,
+        claim_id: Option<String>,
+        claim_owner: Option<String>,
+        delivery_id: Option<String>,
+        materializer_window_id: Option<String>,
+        window_id: Option<String>,
+        launch_profile_fingerprint: Option<String>,
+    },
+    /// SPEC-3431 FR-131: reconcile a pending receipt against one exact
+    /// revoked generation. Runtime absence is supplied by the trusted runtime.
+    MonitorControlReconcile {
+        project_root: Option<std::path::PathBuf>,
+        operation_id: String,
+        revoked_generation: u64,
     },
     /// Issue #3478 (AC-9): list the questions autonomous executions are parked
     /// on, so a human can see what is blocking the queue.

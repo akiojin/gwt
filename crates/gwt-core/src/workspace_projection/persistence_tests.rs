@@ -9437,6 +9437,78 @@ fn record_workspace_work_event_writes_to_repo_local_events_log() {
 }
 
 #[test]
+fn t496_tracked_work_event_execution_container_is_checkout_portable_and_legacy_absolute_path_still_matches(
+) {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let work_items_path = temp.path().join("works.json");
+    let events_path = temp.path().join("events.jsonl");
+    let recorded_at = Utc.with_ymd_and_hms(2026, 8, 29, 10, 0, 0).unwrap();
+    let mut event = WorkEvent::new(WorkEventKind::Start, "work-issue-3578", recorded_at);
+    event.title = Some("Portable Work event".to_string());
+    event.execution_container = Some(WorkspaceExecutionContainerRef {
+        branch: Some("work/issue-3578".to_string()),
+        worktree_path: Some(PathBuf::from(
+            "/Users/first-host/Workbench/gwt/work/issue-3578",
+        )),
+        pr_number: Some(3726),
+        pr_url: Some("https://github.com/akiojin/gwt/pull/3726".to_string()),
+        pr_state: Some("open".to_string()),
+    });
+
+    record_workspace_work_event_paths(&work_items_path, &events_path, event)
+        .expect("record tracked Work event");
+
+    let line = std::fs::read_to_string(&events_path).expect("read tracked Work event");
+    let portable: WorkEvent = serde_json::from_str(line.trim()).expect("decode tracked Work event");
+    let portable_container = portable
+        .execution_container
+        .as_ref()
+        .expect("portable execution container");
+    assert_eq!(
+        portable_container.branch.as_deref(),
+        Some("work/issue-3578")
+    );
+    assert_eq!(portable_container.pr_number, Some(3726));
+    assert_eq!(
+        portable_container.worktree_path, None,
+        "a tracked event with a stable branch/PR identity must not persist a host-absolute checkout path",
+    );
+
+    let projected = load_workspace_work_items_from_path(&work_items_path)
+        .expect("load Work projection")
+        .expect("Work projection");
+    assert_eq!(
+        projected.work_items[0].execution_containers[0].worktree_path, None,
+        "the derived tracked projection must be checkout-portable too",
+    );
+
+    let mut legacy = portable.clone();
+    legacy.id = "legacy-absolute-event".to_string();
+    let legacy_container = legacy.execution_container.as_mut().unwrap();
+    legacy_container.branch = Some("origin/work/issue-3578".to_string());
+    legacy_container.worktree_path = Some(PathBuf::from(
+        "/Users/legacy-host/Workbench/gwt/work/issue-3578",
+    ));
+    legacy_container.pr_number = None;
+    legacy_container.pr_url = None;
+    legacy_container.pr_state = None;
+    let mut current = portable;
+    current.id = "current-portable-event".to_string();
+    current.updated_at += chrono::Duration::seconds(1);
+
+    let mut compatibility_projection = WorkItemsProjection::empty(recorded_at);
+    compatibility_projection.apply_event(legacy);
+    compatibility_projection.apply_event(current);
+    assert_eq!(
+        compatibility_projection.work_items[0]
+            .execution_containers
+            .len(),
+        1,
+        "a legacy absolute-path shard must still match the same branch/PR checkout identity",
+    );
+}
+
+#[test]
 fn record_workspace_work_event_adds_union_merge_gitattribute_idempotently() {
     let _guard = crate::test_support::env_lock()
         .lock()

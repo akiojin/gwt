@@ -160,6 +160,8 @@ fn backend_issue_monitor_inbox_and_toast_are_serializable() {
         }),
         error_message: None,
         exclusion_reason: None,
+        latest_pm_control_receipt: None,
+        latest_pm_control_reason: None,
     };
     let inbox = serde_json::to_value(BackendEvent::IssueMonitorInbox { items: vec![item] })
         .expect("serialize inbox");
@@ -222,6 +224,8 @@ fn backend_exclusion_states_and_reason_use_stable_wire_names() {
             launch_plan: None,
             error_message: None,
             exclusion_reason: Some("matched label: hold".to_string()),
+            latest_pm_control_receipt: None,
+            latest_pm_control_reason: None,
         };
 
         let value = serde_json::to_value(item).expect("serialize excluded inbox item");

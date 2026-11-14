@@ -30,7 +30,7 @@ use tokio::sync::Notify;
 use tokio::time::{interval, MissedTickBehavior};
 
 use crate::embedded_server::ClientHub;
-use crate::OutboundEvent;
+use crate::{AppEventProxy, OutboundEvent, UserEvent};
 use gwt::BackendEvent;
 
 /// Base polling cadence. Codex (local) refreshes every tick; Claude is further
@@ -45,12 +45,13 @@ const CONSUMPTION_CACHE_SECS: i64 = 300;
 pub fn spawn_usage_poller(
     runtime: &tokio::runtime::Runtime,
     clients: ClientHub,
+    proxy: AppEventProxy,
     refresh: Arc<Notify>,
 ) {
-    drop(runtime.handle().spawn(run(clients, refresh)));
+    drop(runtime.handle().spawn(run(clients, proxy, refresh)));
 }
 
-async fn run(clients: ClientHub, refresh: Arc<Notify>) {
+async fn run(clients: ClientHub, proxy: AppEventProxy, refresh: Arc<Notify>) {
     let mut poller = Poller::default();
     let mut ticker = interval(Duration::from_secs(TICK_SECS));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -67,6 +68,11 @@ async fn run(clients: ClientHub, refresh: Arc<Notify>) {
             continue;
         }
         let snapshot = poller.poll_once(Utc::now(), forced).await;
+        let observed_at = Utc::now();
+        proxy.send(UserEvent::ProviderUsageSnapshot {
+            accounts: snapshot.accounts.clone(),
+            observed_at,
+        });
         clients.dispatch(vec![OutboundEvent::broadcast(
             BackendEvent::ProviderUsage {
                 accounts: snapshot.accounts,

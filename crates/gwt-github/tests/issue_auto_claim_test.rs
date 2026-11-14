@@ -462,6 +462,46 @@ fn active_claim_requires_active_status_and_future_expiry() {
 }
 
 #[test]
+fn t496_exact_claim_renewal_orders_rfc3339_instants_across_offsets_and_fractional_seconds() {
+    let future_across_negative_offset = claim(
+        "claim-future-negative-offset",
+        "host-a/session-a",
+        "2026-06-23T11:59:59.900Z",
+        "2026-06-23T10:00:00.250-02:00",
+    );
+    assert!(
+        claim_is_active(&future_across_negative_offset, "2026-06-23T12:00:00.200Z"),
+        "12:00:00.250Z is later than 12:00:00.200Z even though its RFC3339 text sorts earlier",
+    );
+
+    let expired_across_positive_offset = claim(
+        "claim-expired-positive-offset",
+        "host-b/session-b",
+        "2026-06-23T07:59:59.900Z",
+        "2026-06-23T10:00:00.250+02:00",
+    );
+    assert!(
+        !claim_is_active(&expired_across_positive_offset, "2026-06-23T08:00:00.300Z"),
+        "08:00:00.250Z is earlier than 08:00:00.300Z even though its RFC3339 text sorts later",
+    );
+
+    let invalid_expiry = claim(
+        "claim-invalid-expiry",
+        "host-c/session-c",
+        "2026-06-23T10:00:00Z",
+        "not-a-valid-rfc3339-instant",
+    );
+    assert!(
+        !claim_is_active(&invalid_expiry, "2026-06-23T10:00:00Z"),
+        "an invalid exact-claim expiry must fail closed",
+    );
+    assert!(
+        !claim_is_active(&future_across_negative_offset, "0-invalid-rfc3339-instant"),
+        "an invalid comparison instant must fail closed",
+    );
+}
+
+#[test]
 fn winner_selection_ignores_stale_claims_and_picks_oldest_active() {
     let stale = claim(
         "claim-stale",
@@ -486,6 +526,52 @@ fn winner_selection_ignores_stale_claims_and_picks_oldest_active() {
     let winner = select_winning_claim(&claims, "2026-06-23T10:05:00Z").expect("winner");
 
     assert_eq!(winner.claim_id, "claim-older");
+}
+
+#[test]
+fn t496_duplicate_claim_reconcile_orders_heartbeat_instants_across_offsets() {
+    let oldest_instant = claim(
+        "stable-effect-claim",
+        "host-a/session-a",
+        "2026-06-23T10:00:00+02:00",
+        "2026-06-23T10:30:00Z",
+    );
+    let newer_instant = claim(
+        "stable-effect-claim",
+        "host-a/session-a",
+        "2026-06-23T09:00:00Z",
+        "2026-06-23T10:30:00Z",
+    );
+
+    let claims = [oldest_instant.clone(), newer_instant.clone()];
+    let winner = select_winning_claim(&claims, "2026-06-23T09:05:00Z").expect("winner");
+    assert_eq!(
+        winner.heartbeat_at, oldest_instant.heartbeat_at,
+        "08:00Z must win over 09:00Z even though its RFC3339 text sorts later",
+    );
+
+    for path in [AcquirePath::Legacy, AcquirePath::Mutation] {
+        let client = FakeIssueClient::new();
+        client.seed(snapshot(vec![
+            comment(9, &oldest_instant),
+            comment(10, &newer_instant),
+        ]));
+
+        let outcome = acquire_via(
+            path,
+            &client,
+            oldest_instant.clone(),
+            "2026-06-23T09:05:00Z",
+        );
+
+        assert!(matches!(
+            outcome,
+            ClaimAcquireOutcome::Acquired(ref acquired)
+                if acquired.comment_id == Some(CommentId(9))
+        ));
+        assert_eq!(stored_claim(&client, 9).status, ClaimStatus::Active);
+        assert_eq!(stored_claim(&client, 10).status, ClaimStatus::Lost);
+    }
 }
 
 #[test]

@@ -943,12 +943,19 @@ fn issue_monitor_daemon_user_event(
                 Some(value) => serde_json::from_value(value.clone()).ok()?,
                 None => gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
             };
+            let launch_profile = payload
+                .get("launch_profile")
+                .filter(|profile| !profile.is_null())
+                .map(|profile| serde_json::from_value(profile.clone()))
+                .transpose()
+                .ok()?;
             Some(UserEvent::IssueMonitorLaunchRequest {
                 project_root: project_root.to_path_buf(),
                 issue_number,
                 linked_issue_kind,
                 delivery_id,
                 launch_session_strategy,
+                launch_profile,
             })
         }
         "review_dispatch" => {
@@ -1117,12 +1124,17 @@ enum UserEvent {
     },
     RuntimeHook(gwt::RuntimeHookEvent),
     DaemonRuntimeHook(gwt::RuntimeHookEvent),
+    ProviderUsageSnapshot {
+        accounts: Vec<gwt_core::usage::ProviderUsage>,
+        observed_at: chrono::DateTime<chrono::Utc>,
+    },
     IssueMonitorLaunchRequest {
         project_root: PathBuf,
         issue_number: u64,
         linked_issue_kind: gwt::LinkedIssueKind,
         delivery_id: Option<String>,
         launch_session_strategy: gwt::IssueMonitorLaunchSessionStrategy,
+        launch_profile: Option<gwt::IssueMonitorLaunchProfile>,
     },
     /// SPEC-3431 T-093 (FR-012): a daemon inbox frame routed through the
     /// runtime so the PM wake path sees it before the broadcast.
@@ -1564,11 +1576,13 @@ mod tests {
                 linked_issue_kind,
                 delivery_id,
                 launch_session_strategy,
+                launch_profile,
             }) => {
                 assert_eq!(actual_project_root, project_root);
                 assert_eq!(issue_number, 42);
                 assert_eq!(linked_issue_kind, gwt::LinkedIssueKind::Spec);
                 assert_eq!(delivery_id.as_deref(), Some("launch:effect-42"));
+                assert_eq!(launch_profile, None);
                 assert_eq!(
                     launch_session_strategy,
                     gwt::IssueMonitorLaunchSessionStrategy::FreshRequired
@@ -1626,6 +1640,51 @@ mod tests {
             }
             other => panic!("unexpected issue monitor review event: {other:?}"),
         }
+    }
+
+    /// SPEC-3431 Phase 24R / T496: decoding a launch request is a transport
+    /// operation. The UserEvent itself must own the request-time profile so
+    /// the later event-loop turn never consults drifted or deleted prefs.
+    #[cfg(unix)]
+    #[test]
+    fn t496_launch_request_user_event_retains_the_carried_profile() {
+        let profile = gwt::IssueMonitorLaunchProfile {
+            agent_id: "codex".to_string(),
+            model: Some("gpt-carried".to_string()),
+            reasoning: Some("high".to_string()),
+            version: Some("request-time".to_string()),
+            session_mode: gwt_agent::SessionMode::Normal,
+            skip_permissions: true,
+            codex_fast_mode: false,
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            docker_service: None,
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+            windows_shell: None,
+        };
+        let payload = gwt::runtime_daemon_events::issue_monitor_payload(
+            "launch_request",
+            serde_json::json!({
+                "issue_number": 42,
+                "linked_issue_kind": "spec",
+                "delivery_id": "launch:effect-42",
+                "launch_session_strategy": "fresh_required",
+                "launch_profile": profile,
+            }),
+            42,
+        );
+
+        let event = super::daemon_broadcast_user_event(
+            gwt::runtime_daemon_events::ISSUE_MONITOR_CHANNEL,
+            payload,
+            Path::new("/tmp/gwt-project"),
+            99,
+        )
+        .expect("launch request maps to UserEvent");
+        let carried = format!("{event:?}");
+        assert!(
+            carried.contains("gpt-carried") && carried.contains("request-time"),
+            "UserEvent must retain the complete launch_profile; got {carried}"
+        );
     }
 
     #[test]
@@ -2701,6 +2760,11 @@ mod tests {
             pending_launch_feedback_contexts: HashMap::new(),
             issue_monitor_launch_deliveries: HashMap::new(),
             issue_monitor_materializer_id: "main-test-materializer".to_string(),
+            issue_monitor_lifecycle_sources: HashMap::new(),
+            issue_monitor_approval_waits: HashMap::new(),
+            issue_monitor_provider_waits: HashMap::new(),
+            provider_quota_candidates: HashMap::new(),
+            provider_usage_accounts: Vec::new(),
             issue_monitor_scheduled_scans_in_flight: std::collections::HashSet::new(),
             pending_workspace_resume_contexts: HashMap::new(),
             pending_continue_work: HashMap::new(),
@@ -7991,7 +8055,12 @@ fn main() -> std::io::Result<()> {
     // Claude opt-in toggle request an immediate refresh.
     let usage_refresh = std::sync::Arc::new(tokio::sync::Notify::new());
     app.set_usage_refresh(usage_refresh.clone());
-    usage_poller::spawn_usage_poller(&runtime, clients.clone(), usage_refresh);
+    usage_poller::spawn_usage_poller(
+        &runtime,
+        clients.clone(),
+        AppEventProxy::new(proxy.clone()),
+        usage_refresh,
+    );
     runtime_health_poller::spawn_runtime_health_poller(&runtime, clients.clone(), pty_writers);
     eprintln!("gwt browser URL: {browser_url}");
     // SPEC-1939 T-IDX-109/110 / Issue #2584 — Playwright e2e seam.
@@ -8336,19 +8405,27 @@ fn main() -> std::io::Result<()> {
                 let events = app.handle_daemon_runtime_hook_event(event);
                 clients.dispatch(events);
             }
+            Event::UserEvent(UserEvent::ProviderUsageSnapshot {
+                accounts,
+                observed_at,
+            }) => {
+                clients.dispatch(app.handle_provider_usage_snapshot(accounts, observed_at));
+            }
             Event::UserEvent(UserEvent::IssueMonitorLaunchRequest {
                 project_root,
                 issue_number,
                 linked_issue_kind,
                 delivery_id,
                 launch_session_strategy,
+                launch_profile,
             }) => {
-                let events = app.auto_launch_issue_monitor_delivery_events_for_project(
+                let events = app.auto_launch_issue_monitor_delivery_events_for_project_with_profile(
                     &project_root,
                     issue_number,
                     linked_issue_kind,
                     delivery_id,
                     launch_session_strategy,
+                    launch_profile,
                 );
                 clients.dispatch(events);
             }

@@ -2,12 +2,13 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fs,
     io::{self, Write},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use crate::autonomous_handoff::{AutonomousHandoffState, AutonomousQuestionHandoff};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use gwt_github::{
     issue_auto_claim::{acquire_claim, ClaimAcquireOutcome, ClaimComment, ClaimStatus},
@@ -44,6 +45,7 @@ pub const LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION: u32 = 1;
 const LEGACY_ISSUE_MONITOR_AUTHORITY_FENCE_VERSION: u32 = 1;
 const ISSUE_MONITOR_AUTHORITY_FENCE_VERSION: u32 = 2;
 const LEGACY_SHUTDOWN_REVOKE_FENCE: &[u8] = b"gwt issue-monitor shutdown revoke v1\n";
+pub const MAX_ISSUE_MONITOR_PM_CONTROL_RECEIPTS: usize = 128;
 
 const LEGACY_GIT_LAUNCH_FAILURE_PREFIX: &str =
     "Current branch is unavailable: Git error: Not a git repository: ";
@@ -170,6 +172,25 @@ pub enum IssueMonitorEffectPayload {
         #[serde(default)]
         owner: String,
     },
+    /// A cleanup-only renewal for the exact claim retained by a PM control.
+    /// Unlike `AcquireClaim`, this can never restore local launch authority.
+    RenewControlClaim {
+        operation_id: String,
+        issue_number: u64,
+        generation: u64,
+        claim_id: String,
+        owner: String,
+        heartbeat_at: String,
+        expires_at: String,
+    },
+    /// Release of the exact claim retained behind a completed teardown fence.
+    ReleaseControlClaim {
+        operation_id: String,
+        issue_number: u64,
+        generation: u64,
+        claim_id: String,
+        owner: String,
+    },
     ArmAutoMerge {
         issue_number: u64,
         pr_number: u64,
@@ -179,6 +200,8 @@ pub enum IssueMonitorEffectPayload {
         issue_number: u64,
         pr_number: u64,
         compensates_effect_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        control_operation_id: Option<String>,
     },
 }
 
@@ -431,11 +454,14 @@ fn advance_effect_authority(
                         issue_number: *issue_number,
                         pr_number: *pr_number,
                         compensates_effect_id: effect.effect_id.clone(),
+                        control_operation_id: None,
                     },
                     already,
                 )
             }
             IssueMonitorEffectPayload::ReleaseClaim { .. }
+            | IssueMonitorEffectPayload::RenewControlClaim { .. }
+            | IssueMonitorEffectPayload::ReleaseControlClaim { .. }
             | IssueMonitorEffectPayload::DisarmAutoMerge { .. } => continue,
         };
         if !already_compensated {
@@ -456,6 +482,535 @@ pub struct IssueMonitorControlReceipt {
     pub should_scan: bool,
     #[serde(default)]
     pub authority_changed: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueMonitorPmControlAction {
+    Stop,
+    Failover,
+    Recover,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorPmControlTarget {
+    pub issue_number: u64,
+    #[serde(default)]
+    pub generation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_owner: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub materializer_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub materializer_pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub materializer_window_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub materialized_window_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_durable_window_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launched_window_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_profile: Option<IssueMonitorLaunchProfile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_profile_fingerprint: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorPmControlRequest {
+    pub operation_id: String,
+    pub project_key: String,
+    pub action: IssueMonitorPmControlAction,
+    pub actor_session: String,
+    pub actor_registration_generation: u64,
+    pub target: IssueMonitorPmControlTarget,
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_profile: Option<IssueMonitorLaunchProfile>,
+    pub admitted_at: String,
+    #[serde(default)]
+    pub admission_inventory_revision: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueMonitorPmControlPrerequisite {
+    ProcessTeardown,
+    ClaimRelease,
+    AutoMergeDisarm,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueMonitorPmControlTerminalOutcome {
+    Held,
+    Queued,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueMonitorPmControlReceiptState {
+    HeldCleanupPending,
+    PendingTeardown,
+    ClaimReleasePending,
+    AutoMergeDisarmPending,
+    Terminal(IssueMonitorPmControlTerminalOutcome),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorPmControlReceipt {
+    pub schema_version: u32,
+    pub operation_id: String,
+    pub project_key: String,
+    pub action: IssueMonitorPmControlAction,
+    pub actor_session: String,
+    pub actor_registration_generation: u64,
+    pub issue_number: u64,
+    pub launch_generation: u64,
+    pub target: IssueMonitorPmControlTarget,
+    pub fingerprint: String,
+    pub reason: String,
+    pub requested_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_profile: Option<IssueMonitorLaunchProfile>,
+    #[serde(default)]
+    pub admission_inventory_revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_target: Option<IssueMonitorPmControlExecutionTarget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settled_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub teardown_evidence: Option<RuntimeInventoryProof>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_merge_pr_number: Option<u64>,
+    pub state: IssueMonitorPmControlReceiptState,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_prerequisites: Vec<IssueMonitorPmControlPrerequisite>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueMonitorControlClaimCleanup {
+    ExactClaim,
+    CanonicalReadbackRequired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeInventoryRevisionFence {
+    pub runtime_id: String,
+    pub inventory_revision: u64,
+}
+
+/// Crash-durable exact Execution authority selected before Monitor admission.
+///
+/// A later absence proof may settle only this worktree/owner/generation and
+/// Session binding. These fields are intentionally non-secret and survive
+/// process restart/replay with the pending control and audit receipt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorPmControlExecutionTarget {
+    pub worktree_path: PathBuf,
+    pub owner_kind: String,
+    pub owner_number: u64,
+    pub generation_id: String,
+    pub session_id: String,
+    pub session_binding: gwt_agent::SessionExecutionBinding,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_identity: Option<gwt_agent::SessionExecutionIdentity>,
+    pub settlement_operation_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingIssueMonitorPmControl {
+    pub operation_id: String,
+    pub project_key: String,
+    pub action: IssueMonitorPmControlAction,
+    pub actor_session: String,
+    pub actor_registration_generation: u64,
+    pub target: IssueMonitorPmControlTarget,
+    pub reason: String,
+    pub requested_at: String,
+    pub admission_inventory_revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inventory_revision_fence: Option<RuntimeInventoryRevisionFence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_target: Option<IssueMonitorPmControlExecutionTarget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_heartbeat_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_expires_at: Option<String>,
+    pub claim_cleanup: IssueMonitorControlClaimCleanup,
+    #[serde(default)]
+    pub teardown_settled: bool,
+    #[serde(default)]
+    pub claim_release_prepared: bool,
+    #[serde(default)]
+    pub claim_release_settled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub teardown_evidence: Option<RuntimeInventoryProof>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_merge_pr_number: Option<u64>,
+    #[serde(default)]
+    pub auto_merge_disarm_settled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorPmControlHeld {
+    pub operation_id: String,
+    pub reason: String,
+    pub target_fingerprint: String,
+    pub held_at: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorPmControlIssueState {
+    #[serde(default)]
+    pub generation_counter: u64,
+    #[serde(default)]
+    pub revoked_through_generation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_control: Option<PendingIssueMonitorPmControl>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned_next_profile: Option<IssueMonitorLaunchProfile>,
+    /// A completed Stop remains a durable admission fence even after its
+    /// terminal receipt is evicted from the bounded audit log.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held: Option<IssueMonitorPmControlHeld>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorPmControlState {
+    #[serde(default)]
+    pub revision: u64,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub issues: BTreeMap<u64, IssueMonitorPmControlIssueState>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub receipts: Vec<IssueMonitorPmControlReceipt>,
+}
+
+fn pm_control_issue_is_fenced(state: &IssueMonitorPmControlState, issue_number: u64) -> bool {
+    state
+        .issues
+        .get(&issue_number)
+        .is_some_and(|issue| issue.pending_control.is_some() || issue.held.is_some())
+}
+
+fn pm_control_fences_effect(
+    state: &IssueMonitorPmControlState,
+    payload: &IssueMonitorEffectPayload,
+) -> bool {
+    matches!(
+        payload,
+        IssueMonitorEffectPayload::ArmAutoMerge { issue_number, .. }
+            if pm_control_issue_is_fenced(state, *issue_number)
+    )
+}
+
+fn pm_control_pending_receipt_state(
+    action: IssueMonitorPmControlAction,
+    prerequisites: &[IssueMonitorPmControlPrerequisite],
+) -> IssueMonitorPmControlReceiptState {
+    if action == IssueMonitorPmControlAction::Stop {
+        IssueMonitorPmControlReceiptState::HeldCleanupPending
+    } else if prerequisites.contains(&IssueMonitorPmControlPrerequisite::ProcessTeardown) {
+        IssueMonitorPmControlReceiptState::PendingTeardown
+    } else if prerequisites.contains(&IssueMonitorPmControlPrerequisite::ClaimRelease) {
+        IssueMonitorPmControlReceiptState::ClaimReleasePending
+    } else {
+        IssueMonitorPmControlReceiptState::AutoMergeDisarmPending
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueMonitorPmControlReadiness {
+    Ready,
+    ReadyWithConservativeCleanup,
+    SourceProfileUnavailable,
+    IdentityIncomplete,
+    AlreadyPending,
+    NotRunning,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorPmControlReadinessByAction {
+    pub stop: IssueMonitorPmControlReadiness,
+    pub failover: IssueMonitorPmControlReadiness,
+    pub recover: IssueMonitorPmControlReadiness,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorPmControlStatus {
+    pub issue_number: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<IssueMonitorPmControlTarget>,
+    pub readiness: IssueMonitorPmControlReadinessByAction,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_receipt: Option<IssueMonitorPmControlReceipt>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub audit_receipts: Vec<IssueMonitorPmControlReceipt>,
+    #[serde(default)]
+    pub revoked_through_generation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held: Option<IssueMonitorPmControlHeld>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorPmControlAgentProjection {
+    #[serde(default)]
+    pub revision: u64,
+    #[serde(default)]
+    pub issues: Vec<IssueMonitorPmControlStatus>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub receipts: Vec<IssueMonitorPmControlReceipt>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueMonitorPmControlTargetMismatch {
+    IssueNumber,
+    Generation,
+    ClaimId,
+    ClaimOwner,
+    DeliveryId,
+    MaterializerId,
+    MaterializerPid,
+    MaterializerWindow,
+    MaterializedWindow,
+    WorkspaceDurableWindow,
+    LaunchedWindow,
+    SourceProfile,
+    SourceProfileFingerprint,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueMonitorPmControlRefusal {
+    SourceProfileUnavailable,
+    IdentityIncomplete,
+    ReceiptConflict,
+    ReceiptCapacity,
+    TargetMismatch(IssueMonitorPmControlTargetMismatch),
+    ControlRevisionExhausted,
+    GenerationExhausted,
+    EffectAuthorityExhausted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum IssueMonitorPmControlCommit {
+    Committed {
+        receipt: IssueMonitorPmControlReceipt,
+    },
+    OutcomeUnknown {
+        operation_id: String,
+    },
+}
+
+#[derive(Debug)]
+pub enum IssueMonitorPmControlCommitError {
+    Refused(IssueMonitorPmControlRefusal),
+    PreRename(io::Error),
+}
+
+impl std::fmt::Display for IssueMonitorPmControlCommitError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Refused(refusal) => write!(formatter, "PM control refused: {refusal:?}"),
+            Self::PreRename(error) => write!(formatter, "PM control was not committed: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for IssueMonitorPmControlCommitError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Refused(_) => None,
+            Self::PreRename(error) => Some(error),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorPmControlSettlement {
+    pub issue_number: u64,
+    pub should_scan: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum IssueMonitorGenerationRuntimeEvent {
+    Launched {
+        source: IssueMonitorPmControlTarget,
+        launched_window_id: String,
+        observed_at: String,
+    },
+    LaunchFailed {
+        source: IssueMonitorPmControlTarget,
+        message: String,
+        observed_at: String,
+    },
+    AgentFailed {
+        source: IssueMonitorPmControlTarget,
+        message: String,
+        observed_at: String,
+    },
+    Heartbeat {
+        source: IssueMonitorPmControlTarget,
+        observed_at: String,
+    },
+    WindowClosed {
+        source: IssueMonitorPmControlTarget,
+        observed_at: String,
+    },
+    ScanCompleted {
+        source: IssueMonitorPmControlTarget,
+        observed_at: String,
+    },
+}
+
+impl IssueMonitorGenerationRuntimeEvent {
+    fn source(&self) -> &IssueMonitorPmControlTarget {
+        match self {
+            Self::Launched { source, .. }
+            | Self::LaunchFailed { source, .. }
+            | Self::AgentFailed { source, .. }
+            | Self::Heartbeat { source, .. }
+            | Self::WindowClosed { source, .. }
+            | Self::ScanCompleted { source, .. } => source,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueMonitorGenerationEventDisposition {
+    Applied,
+    TeardownSettled,
+    Revoked,
+    Ignored,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RuntimeInventoryProofAuthor {
+    OwningAppRuntime { runtime_id: String },
+    CallerSupplied,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeInventoryObservation {
+    Present,
+    Absent,
+    Ambiguous,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeInventoryProof {
+    pub author: RuntimeInventoryProofAuthor,
+    pub project_key: String,
+    pub inventory_revision: u64,
+    pub generation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub materializer_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub materializer_pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_id: Option<String>,
+    pub observation: RuntimeInventoryObservation,
+    pub observed_at: String,
+}
+
+/// Authoritative AppRuntime state for one exact project pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueMonitorPaneState {
+    Running,
+    Stopped,
+    Error,
+    Idle,
+    Waiting,
+}
+
+/// A wait reason proven by the owning AppRuntime. `None` remains distinct
+/// from elapsed-time inference performed by status projection consumers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum IssueMonitorRuntimeWaitSignal {
+    ProviderUsageLimit {
+        provider: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resets_at: Option<String>,
+    },
+    ApprovalRequired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IssueMonitorRuntimeWindow {
+    pub window_id: String,
+    pub pane_state: IssueMonitorPaneState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_signal: Option<IssueMonitorRuntimeWaitSignal>,
+}
+
+/// One correlated, point-in-time inventory returned by the owning AppRuntime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "availability", rename_all = "snake_case", deny_unknown_fields)]
+pub enum IssueMonitorRuntimeInventory {
+    Available {
+        project_scope: String,
+        runtime_instance_id: String,
+        revision: u64,
+        observed_at: String,
+        windows: Vec<IssueMonitorRuntimeWindow>,
+    },
+    Unavailable {
+        project_scope: String,
+        observed_at: String,
+        reason: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueMonitorAbsenceReconcileOutcome {
+    Refused,
+    TeardownSettled,
+    AlreadySettled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MonitorSettlement {
+    Unrelated,
+    BoundedRetry,
+    PrerequisiteSettled {
+        issue_number: u64,
+        should_scan: bool,
+    },
+    RestartQueued {
+        issue_number: u64,
+        should_scan: bool,
+    },
+}
+
+/// Result of delivering the scan request implied by a durable PM-control
+/// settlement. Delivery failure never rolls the already committed queue back.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum IssueMonitorSettlementDelivery {
+    Unrelated,
+    BoundedRetry,
+    NoScanRequired { issue_number: u64 },
+    ScanDelivered { issue_number: u64 },
+    ScanDeliveryFailed { issue_number: u64, reason: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -523,6 +1078,10 @@ pub struct IssueMonitorPrefs {
     /// one slot is sufficient while the worker enforces a FIFO retry barrier.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_control_receipt: Option<IssueMonitorControlReceipt>,
+    /// SPEC-3431 Phase 24: PM-control state is deliberately independent from
+    /// autonomous retry/failure state and the daemon's one-slot receipt.
+    #[serde(default)]
+    pub pm_control: IssueMonitorPmControlState,
     /// Issue #3478 (FR-025): durable question handoffs. Appended by the
     /// intercepting hook (any process) and driven through their lifecycle by
     /// the Issue Monitor driver. Empty is omitted so existing prefs files keep
@@ -552,6 +1111,7 @@ impl Default for IssueMonitorPrefs {
             effect_authority_epoch: 0,
             pending_effects: Vec::new(),
             last_control_receipt: None,
+            pm_control: IssueMonitorPmControlState::default(),
             autonomous_handoffs: Vec::new(),
         }
     }
@@ -661,6 +1221,54 @@ impl IssueMonitorPrefs {
 pub struct IssueMonitorLaunchedIssue {
     pub issue_number: u64,
     pub window_id: String,
+    #[serde(default)]
+    pub generation: u64,
+    #[serde(default)]
+    pub claim_id: String,
+    #[serde(default)]
+    pub claim_owner: String,
+    #[serde(default)]
+    pub delivery_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub materializer_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub materializer_pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub materializer_window_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub materialized_window_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_durable_window_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_profile: Option<IssueMonitorLaunchProfile>,
+    #[serde(default)]
+    pub source_profile_fingerprint: String,
+    #[serde(default)]
+    pub claim_heartbeat_at: String,
+    #[serde(default)]
+    pub claim_expires_at: String,
+}
+
+impl Default for IssueMonitorLaunchedIssue {
+    fn default() -> Self {
+        Self {
+            issue_number: 0,
+            window_id: String::new(),
+            generation: 0,
+            claim_id: String::new(),
+            claim_owner: String::new(),
+            delivery_id: String::new(),
+            materializer_id: None,
+            materializer_pid: None,
+            materializer_window_id: None,
+            materialized_window_id: None,
+            workspace_durable_window_id: None,
+            source_profile: None,
+            source_profile_fingerprint: String::new(),
+            claim_heartbeat_at: String::new(),
+            claim_expires_at: String::new(),
+        }
+    }
 }
 
 /// #3223 follow-up: one claimed-but-unbound launch with its claim anchor.
@@ -712,6 +1320,8 @@ pub struct PendingIssueMonitorLaunchDelivery {
     pub claim_id: String,
     #[serde(default)]
     pub claim_owner: String,
+    #[serde(default)]
+    pub generation: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub materializer_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -724,6 +1334,14 @@ pub struct PendingIssueMonitorLaunchDelivery {
     pub workspace_durable_window_id: Option<String>,
     #[serde(default)]
     pub launch_session_strategy: IssueMonitorLaunchSessionStrategy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_profile: Option<IssueMonitorLaunchProfile>,
+    #[serde(default)]
+    pub source_profile_fingerprint: String,
+    #[serde(default)]
+    pub claim_heartbeat_at: String,
+    #[serde(default)]
+    pub claim_expires_at: String,
     pub created_at: String,
 }
 
@@ -790,6 +1408,39 @@ pub struct IssueMonitorLaunchProfile {
     pub docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent,
     #[serde(default)]
     pub windows_shell: Option<gwt_agent::WindowsShellKind>,
+}
+
+fn issue_monitor_launch_profile_fingerprint(profile: &IssueMonitorLaunchProfile) -> String {
+    let encoded = serde_json::to_vec(profile).expect("launch profile serialization is infallible");
+    format!("{:x}", Sha256::digest(encoded))
+}
+
+fn issue_monitor_pm_control_target_fingerprint(target: &IssueMonitorPmControlTarget) -> String {
+    let encoded = serde_json::to_vec(&(1_u32, target))
+        .expect("PM control target fingerprint serialization is infallible");
+    format!("{:x}", Sha256::digest(encoded))
+}
+
+fn issue_monitor_pm_control_fingerprint(request: &IssueMonitorPmControlRequest) -> String {
+    // Server-generated clocks are intentionally excluded: an exact replay can
+    // arrive later, but every caller-controlled authority/target/intent field
+    // remains part of the versioned canonical tuple.
+    let encoded = serde_json::to_vec(&(
+        1_u32,
+        &request.project_key,
+        request.action,
+        &request.actor_session,
+        request.actor_registration_generation,
+        &request.target,
+        request.reason.trim(),
+        request
+            .requested_profile
+            .as_ref()
+            .map(issue_monitor_launch_profile_fingerprint),
+        request.admission_inventory_revision,
+    ))
+    .expect("PM control fingerprint serialization is infallible");
+    format!("{:x}", Sha256::digest(encoded))
 }
 
 impl From<&gwt_agent::LaunchConfig> for IssueMonitorLaunchProfile {
@@ -992,6 +1643,10 @@ pub struct IssueMonitorInboxItem {
     pub error_message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exclusion_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_pm_control_receipt: Option<IssueMonitorPmControlReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_pm_control_reason: Option<String>,
 }
 
 /// SPEC-3431 FR-033: the exact identity a PM-requested stop must match.
@@ -1064,6 +1719,8 @@ pub struct IssueMonitorLaunchRequest {
     pub linked_issue_kind: LinkedIssueKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_profile: Option<IssueMonitorLaunchProfile>,
     #[serde(default)]
     pub launch_session_strategy: IssueMonitorLaunchSessionStrategy,
 }
@@ -1122,6 +1779,8 @@ pub struct IssueMonitorAgentStatus {
     pub last_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_scan_at: Option<String>,
+    #[serde(default)]
+    pub pm_control: IssueMonitorPmControlAgentProjection,
 }
 
 /// SPEC-3431 FR-069: when the provider backing `agent_id` is out of quota,
@@ -1187,6 +1846,10 @@ pub struct IssueMonitorInboxSummary {
     pub claim_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_pm_control_receipt: Option<IssueMonitorPmControlReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_pm_control_reason: Option<String>,
 }
 
 /// SPEC #3200 T-048: status-view summary of one issue's autonomous lifecycle.
@@ -1239,6 +1902,10 @@ pub struct IssueMonitorState {
     pending_effects: Vec<PendingIssueMonitorEffect>,
     #[serde(default)]
     last_control_receipt: Option<IssueMonitorControlReceipt>,
+    #[serde(default)]
+    pm_control: IssueMonitorPmControlState,
+    #[serde(default)]
+    launched_identities: BTreeMap<u64, IssueMonitorLaunchedIssue>,
     /// SPEC #3200 FR-030: tunable bounds for unattended operation.
     autonomous_tuning: AutonomousTuning,
     /// SPEC #3200 T-016/T-022: per-issue autonomous lifecycle records keyed by
@@ -1565,6 +2232,8 @@ pub enum AutonomousFailureOutcome {
     Retry { attempt: u32 },
     /// Escalated to `NeedsHuman`; carries the human-facing reason.
     Escalated(String),
+    /// Ignored because a durable PM control owns the Issue's runnable state.
+    Fenced,
 }
 
 impl AutonomousIssueRecord {
@@ -1693,14 +2362,23 @@ fn sync_parent_directory(_path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn durable_atomic_write(path: &Path, content: &[u8]) -> io::Result<()> {
+#[derive(Debug)]
+enum DurableAtomicWriteFailure {
+    PreRename(io::Error),
+    PostRename(io::Error),
+}
+
+fn durable_atomic_write_classified(
+    path: &Path,
+    content: &[u8],
+) -> Result<(), DurableAtomicWriteFailure> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)?;
+            fs::create_dir_all(parent).map_err(DurableAtomicWriteFailure::PreRename)?;
         }
     }
     let tmp = unique_prefs_tmp_path(path);
-    let result = (|| {
+    let pre_rename = (|| {
         let mut scratch = fs::OpenOptions::new()
             .create_new(true)
             .write(true)
@@ -1712,7 +2390,26 @@ fn durable_atomic_write(path: &Path, content: &[u8]) -> io::Result<()> {
         // canonical rename so an expired proposal cannot become visible after
         // its acceptance boundary.
         gwt_core::operation_deadline::ensure_remaining("Issue Monitor durable rename")?;
+        #[cfg(test)]
+        if std::env::var_os("GWT_TEST_FAIL_ISSUE_MONITOR_PREFS_PRE_RENAME_ONCE")
+            .is_some_and(|target| Path::new(&target) == path)
+        {
+            let fail_once = path.with_extension("pre-rename-fail-once");
+            if fail_once.exists() {
+                fs::remove_file(fail_once)?;
+                return Err(io::Error::other(
+                    "injected Issue Monitor prefs failure before rename",
+                ));
+            }
+        }
         fs::rename(&tmp, path)?;
+        Ok::<(), io::Error>(())
+    })();
+    if let Err(error) = pre_rename {
+        let _ = fs::remove_file(&tmp);
+        return Err(DurableAtomicWriteFailure::PreRename(error));
+    }
+    let post_rename = (|| {
         #[cfg(test)]
         if std::env::var_os("GWT_TEST_FAIL_ISSUE_MONITOR_PREFS_PARENT_SYNC_ONCE")
             .is_some_and(|target| Path::new(&target) == path)
@@ -1727,15 +2424,29 @@ fn durable_atomic_write(path: &Path, content: &[u8]) -> io::Result<()> {
         }
         sync_parent_directory(path)
     })();
-    if result.is_err() {
-        let _ = fs::remove_file(&tmp);
-    }
-    result
+    post_rename.map_err(DurableAtomicWriteFailure::PostRename)
+}
+
+fn durable_atomic_write(path: &Path, content: &[u8]) -> io::Result<()> {
+    durable_atomic_write_classified(path, content).map_err(|failure| match failure {
+        DurableAtomicWriteFailure::PreRename(error)
+        | DurableAtomicWriteFailure::PostRename(error) => error,
+    })
 }
 
 fn save_issue_monitor_prefs_unlocked(path: &Path, prefs: &IssueMonitorPrefs) -> io::Result<()> {
     let content = serde_json::to_string_pretty(prefs).map_err(io::Error::other)?;
     durable_atomic_write(path, content.as_bytes())
+}
+
+fn save_issue_monitor_prefs_unlocked_classified(
+    path: &Path,
+    prefs: &IssueMonitorPrefs,
+) -> Result<(), DurableAtomicWriteFailure> {
+    let content = serde_json::to_string_pretty(prefs)
+        .map_err(io::Error::other)
+        .map_err(DurableAtomicWriteFailure::PreRename)?;
+    durable_atomic_write_classified(path, content.as_bytes())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2070,6 +2781,82 @@ pub fn try_mutate_issue_monitor_prefs<T>(
     })
 }
 
+/// Admit and durably publish one PM control under the stable preferences lock.
+///
+/// Failures before the canonical rename prove that the old bytes remain
+/// authoritative. A parent-directory sync failure happens after the candidate
+/// became visible, so it is reported as `OutcomeUnknown`; replay always writes
+/// and syncs the complete candidate again even when admission returns an exact
+/// retained receipt.
+pub fn try_mutate_issue_monitor_pm_control_classified(
+    path: &Path,
+    request: IssueMonitorPmControlRequest,
+) -> Result<IssueMonitorPmControlCommit, IssueMonitorPmControlCommitError> {
+    try_mutate_issue_monitor_pm_control_with_execution_target_classified(path, request, None)
+}
+
+pub fn try_mutate_issue_monitor_pm_control_with_execution_target_classified(
+    path: &Path,
+    request: IssueMonitorPmControlRequest,
+    execution_target: Option<IssueMonitorPmControlExecutionTarget>,
+) -> Result<IssueMonitorPmControlCommit, IssueMonitorPmControlCommitError> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent).map_err(IssueMonitorPmControlCommitError::PreRename)?;
+        }
+    }
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(path.with_extension("lock"))
+        .map_err(IssueMonitorPmControlCommitError::PreRename)?;
+    gwt_core::operation_deadline::lock_exclusive(&lock)
+        .map_err(IssueMonitorPmControlCommitError::PreRename)?;
+
+    let operation_id = request.operation_id.clone();
+    let result = (|| {
+        let disk = load_issue_monitor_prefs_unlocked(path)
+            .map_err(IssueMonitorPmControlCommitError::PreRename)?;
+        let config = IssueMonitorConfig {
+            enabled: disk.enabled,
+            max_active: disk.max_active_agents.max(1),
+            ..IssueMonitorConfig::default()
+        };
+        let mut candidate = IssueMonitorState::with_prefs(config, disk);
+        let receipt = candidate
+            .admit_pm_control_with_execution_target(request, execution_target)
+            .map_err(IssueMonitorPmControlCommitError::Refused)?;
+        let candidate = candidate.prefs();
+        match save_issue_monitor_prefs_unlocked_classified(path, &candidate) {
+            Ok(()) => Ok(IssueMonitorPmControlCommit::Committed { receipt }),
+            Err(DurableAtomicWriteFailure::PreRename(error)) => {
+                Err(IssueMonitorPmControlCommitError::PreRename(error))
+            }
+            Err(DurableAtomicWriteFailure::PostRename(error)) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %error,
+                    operation_id,
+                    "PM control candidate became visible but parent sync was not confirmed"
+                );
+                Ok(IssueMonitorPmControlCommit::OutcomeUnknown {
+                    operation_id: operation_id.clone(),
+                })
+            }
+        }
+    })();
+    if let Err(error) = FileExt::unlock(&lock) {
+        tracing::warn!(
+            path = %path.display(),
+            error = %error,
+            "failed to unlock Issue Monitor prefs after classified PM control write"
+        );
+    }
+    result
+}
+
 /// Local fallback transaction ordered against daemon startup by the same
 /// stable prefs lock. A daemon that establishes its lifetime authority fence
 /// before this closure acquires the lock wins; the fallback then returns an
@@ -2251,6 +3038,8 @@ impl IssueMonitorState {
             effect_authority_epoch: 0,
             pending_effects: Vec::new(),
             last_control_receipt: None,
+            pm_control: IssueMonitorPmControlState::default(),
+            launched_identities: BTreeMap::new(),
             autonomous_tuning: AutonomousTuning::default(),
             autonomous_records: BTreeMap::new(),
             failed_issues: BTreeMap::new(),
@@ -2275,13 +3064,17 @@ impl IssueMonitorState {
         state.priority_order = prefs.priority_order;
         state.launch_profile = prefs.launch_profile;
         state.queued_launch_session_strategies = prefs.queued_launch_session_strategies;
+        state.pm_control = prefs.pm_control;
         for launched in prefs.launched_issues {
             if launched.window_id.is_empty() {
                 continue;
             }
             state
                 .launched_windows
-                .insert(launched.issue_number, launched.window_id);
+                .insert(launched.issue_number, launched.window_id.clone());
+            state
+                .launched_identities
+                .insert(launched.issue_number, launched.clone());
             if !state.active_launches.contains(&launched.issue_number) {
                 state.active_launches.push(launched.issue_number);
             }
@@ -2335,6 +3128,7 @@ impl IssueMonitorState {
                 !state.failed_issues.contains_key(issue_number)
                     && !state.merged_issues.contains(issue_number)
             });
+        state.enforce_pm_control_quarantine();
         state
     }
 
@@ -2349,9 +3143,19 @@ impl IssueMonitorState {
             launched_issues: self
                 .launched_windows
                 .iter()
-                .map(|(issue_number, window_id)| IssueMonitorLaunchedIssue {
-                    issue_number: *issue_number,
-                    window_id: window_id.clone(),
+                .map(|(issue_number, window_id)| {
+                    let mut identity = self
+                        .launched_identities
+                        .get(issue_number)
+                        .cloned()
+                        .unwrap_or_else(|| IssueMonitorLaunchedIssue {
+                            issue_number: *issue_number,
+                            window_id: window_id.clone(),
+                            ..IssueMonitorLaunchedIssue::default()
+                        });
+                    identity.issue_number = *issue_number;
+                    identity.window_id = window_id.clone();
+                    identity
                 })
                 .collect(),
             launching_issues: self
@@ -2379,6 +3183,7 @@ impl IssueMonitorState {
             effect_authority_epoch: self.effect_authority_epoch,
             pending_effects: self.pending_effects.clone(),
             last_control_receipt: self.last_control_receipt.clone(),
+            pm_control: self.pm_control.clone(),
             autonomous_tuning: self.autonomous_tuning.clone(),
             autonomous_records: self.autonomous_records.values().cloned().collect(),
             autonomous_handoffs: self.autonomous_handoffs.clone(),
@@ -2415,6 +3220,9 @@ impl IssueMonitorState {
     /// SPEC #3200 T-016 / FR-026: increment the per-issue attempt counter,
     /// returning the new count. Drives max-attempts escalation to `NeedsHuman`.
     pub fn record_attempt(&mut self, issue_number: u64) -> u32 {
+        if self.is_pm_control_runnable_fenced(issue_number) {
+            return self.attempt_count(issue_number);
+        }
         let record = self.autonomous_record_mut(issue_number);
         record.attempts = record.attempts.saturating_add(1);
         record.attempts
@@ -2460,6 +3268,9 @@ impl IssueMonitorState {
         message: impl Into<String>,
         now: &str,
     ) -> AutonomousFailureOutcome {
+        if self.is_pm_control_runnable_fenced(issue_number) {
+            return AutonomousFailureOutcome::Fenced;
+        }
         let message = message.into();
         let attempt = self.record_attempt(issue_number);
         let max = self.autonomous_tuning.max_attempts;
@@ -2523,6 +3334,9 @@ impl IssueMonitorState {
     /// SPEC #3200 T-045/FR-013: record an observed liveness signal from the
     /// launched agent for `issue_number`. Resets the stuck-detection window.
     pub fn record_autonomous_heartbeat(&mut self, issue_number: u64, now: &str) {
+        if self.is_pm_control_runnable_fenced(issue_number) {
+            return;
+        }
         self.autonomous_record_mut(issue_number).last_heartbeat = Some(now.to_string());
     }
 
@@ -2538,6 +3352,7 @@ impl IssueMonitorState {
         let timeout = self.autonomous_tuning.stuck_timeout_secs as i64;
         self.autonomous_records
             .values()
+            .filter(|record| !self.is_pm_control_runnable_fenced(record.issue_number))
             .filter(|record| self.active_launches.contains(&record.issue_number))
             .filter(|record| {
                 matches!(
@@ -2641,8 +3456,17 @@ impl IssueMonitorState {
             .map(|record| (record.issue_number, record))
             .collect::<BTreeMap<_, _>>();
         let mut resumed = Vec::new();
+        let fenced = self
+            .pm_control
+            .issues
+            .iter()
+            .filter_map(|(&issue_number, _)| {
+                pm_control_issue_is_fenced(&self.pm_control, issue_number).then_some(issue_number)
+            })
+            .collect::<BTreeSet<_>>();
         for record in self.autonomous_records.values_mut() {
             if record.phase == AutonomousPhase::Reviewing
+                && !fenced.contains(&record.issue_number)
                 && record.review_passed.is_none()
                 && startup_reviews
                     .get(&record.issue_number)
@@ -2793,10 +3617,21 @@ impl IssueMonitorState {
         if !self.autonomous_mode {
             return Vec::new();
         }
+        let fenced = self
+            .pm_control
+            .issues
+            .iter()
+            .filter_map(|(&issue_number, _)| {
+                pm_control_issue_is_fenced(&self.pm_control, issue_number).then_some(issue_number)
+            })
+            .collect::<BTreeSet<_>>();
         let answered = self
             .autonomous_handoffs
             .iter_mut()
-            .filter(|handoff| handoff.state == AutonomousHandoffState::Answered)
+            .filter(|handoff| {
+                handoff.state == AutonomousHandoffState::Answered
+                    && !fenced.contains(&handoff.issue_number)
+            })
             .map(|handoff| {
                 handoff.state = AutonomousHandoffState::Resumed;
                 AutonomousHandoffResumption {
@@ -2823,6 +3658,9 @@ impl IssueMonitorState {
         issue_number: u64,
         now: &str,
     ) -> Option<String> {
+        if self.is_pm_control_runnable_fenced(issue_number) {
+            return None;
+        }
         let handoff = self.autonomous_handoffs.iter_mut().find(|handoff| {
             handoff.issue_number == issue_number
                 && handoff.state == AutonomousHandoffState::Resumed
@@ -2836,6 +3674,9 @@ impl IssueMonitorState {
     /// did for a question park, leaving the attempt counter and the acceptance
     /// snapshot alone.
     fn unpark_answered_autonomous_issue(&mut self, issue_number: u64, now: &str) {
+        if self.is_pm_control_runnable_fenced(issue_number) {
+            return;
+        }
         self.failed_issues.remove(&issue_number);
         self.failed_windows.remove(&issue_number);
         self.last_error = None;
@@ -2980,6 +3821,7 @@ impl IssueMonitorState {
     /// Explicit GUI/control mutations run after rebase, so they still win their
     /// transaction while stale scan writers cannot roll a newer config back.
     fn refresh_disk_owned_prefs(&mut self, disk: &IssueMonitorPrefs) {
+        let adopts_newer_pm_control = disk.pm_control.revision > self.pm_control.revision;
         self.config.enabled = disk.enabled;
         self.config.max_active = disk.max_active_agents.max(1);
         self.priority_order = disk.priority_order.clone();
@@ -2989,13 +3831,59 @@ impl IssueMonitorState {
         self.autonomous_mode = disk.autonomous_mode;
         self.effect_authority_epoch = disk.effect_authority_epoch;
         self.pending_effects = disk.pending_effects.clone();
-        self.pending_launch_deliveries = disk.pending_launch_deliveries.iter().cloned().collect();
+        if disk.pm_control.revision >= self.pm_control.revision {
+            if adopts_newer_pm_control {
+                for issue_number in disk.pm_control.issues.keys() {
+                    self.active_launches.retain(|active| active != issue_number);
+                    self.launching_claimed_at.remove(issue_number);
+                    self.launched_windows.remove(issue_number);
+                    self.launched_identities.remove(issue_number);
+                    self.pending_launch_deliveries
+                        .retain(|delivery| delivery.issue_number != *issue_number);
+                }
+                for launched in &disk.launched_issues {
+                    if !launched.window_id.is_empty() {
+                        self.launched_windows
+                            .insert(launched.issue_number, launched.window_id.clone());
+                        if !self.active_launches.contains(&launched.issue_number) {
+                            self.active_launches.push(launched.issue_number);
+                        }
+                    }
+                }
+                for launching in &disk.launching_issues {
+                    if !self.active_launches.contains(&launching.issue_number) {
+                        self.active_launches.push(launching.issue_number);
+                    }
+                    if let Some(claimed_at) = &launching.claimed_at {
+                        self.launching_claimed_at
+                            .insert(launching.issue_number, claimed_at.clone());
+                    }
+                }
+                for delivery in &disk.pending_launch_deliveries {
+                    if !self.active_launches.contains(&delivery.issue_number) {
+                        self.active_launches.push(delivery.issue_number);
+                    }
+                }
+            }
+            self.pending_launch_deliveries =
+                disk.pending_launch_deliveries.iter().cloned().collect();
+            self.launched_identities = disk
+                .launched_issues
+                .iter()
+                .cloned()
+                .map(|identity| (identity.issue_number, identity))
+                .collect();
+        }
         self.queued_launch_session_strategies = disk.queued_launch_session_strategies.clone();
         self.last_control_receipt = disk.last_control_receipt.clone();
+        if adopts_newer_pm_control {
+            self.pm_control = disk.pm_control.clone();
+        }
         self.autonomous_tuning = disk.autonomous_tuning.clone();
         // Issue #3478: the hook (and the answer operation) write handoffs from
         // outside this process, so disk is the inbound source for them.
         self.absorb_autonomous_handoffs(disk.autonomous_handoffs.iter().cloned());
+        self.enforce_pm_control_quarantine();
     }
 
     /// Rebase a GUI observer on the latest committed prefs. The GUI does not
@@ -3026,6 +3914,11 @@ impl IssueMonitorState {
     ) {
         self.merge_inflight_launches_from_disk(disk);
         for issue_number in &disk.merged_issues {
+            if pm_control_issue_is_fenced(&disk.pm_control, *issue_number)
+                || self.is_pm_control_runnable_fenced(*issue_number)
+            {
+                continue;
+            }
             self.apply_merged_terminal_state(*issue_number);
         }
         let rejected_terminal_companions = self.rejected_disk_terminal_failure_companions(disk);
@@ -3481,19 +4374,40 @@ impl IssueMonitorState {
     /// this transaction commits the new merged marker.
     pub fn merge_inflight_launches_from_disk(&mut self, disk: &IssueMonitorPrefs) {
         for launched in &disk.launched_issues {
-            if launched.window_id.is_empty() || self.merged_issues.contains(&launched.issue_number)
+            if launched.window_id.is_empty()
+                || self.merged_issues.contains(&launched.issue_number)
+                || disk
+                    .pm_control
+                    .issues
+                    .get(&launched.issue_number)
+                    .is_some_and(|state| {
+                        state.pending_control.is_some()
+                            || state.held.is_some()
+                            || launched.generation <= state.revoked_through_generation
+                    })
             {
                 continue;
             }
             self.launched_windows
                 .entry(launched.issue_number)
                 .or_insert_with(|| launched.window_id.clone());
+            self.launched_identities
+                .entry(launched.issue_number)
+                .or_insert_with(|| launched.clone());
             if !self.active_launches.contains(&launched.issue_number) {
                 self.active_launches.push(launched.issue_number);
             }
         }
         for entry in &disk.launching_issues {
             if self.merged_issues.contains(&entry.issue_number) {
+                continue;
+            }
+            if disk
+                .pm_control
+                .issues
+                .get(&entry.issue_number)
+                .is_some_and(|state| state.pending_control.is_some() || state.held.is_some())
+            {
                 continue;
             }
             if !self.active_launches.contains(&entry.issue_number) {
@@ -3648,6 +4562,13 @@ impl IssueMonitorState {
 
     pub fn agent_status(&self) -> IssueMonitorAgentStatus {
         let status = self.status_view();
+        let pm_control_issue_numbers = self
+            .pm_control
+            .issues
+            .keys()
+            .copied()
+            .chain(self.inbox.iter().map(|item| item.issue.number))
+            .collect::<BTreeSet<_>>();
         IssueMonitorAgentStatus {
             queue: self.queued_issue_numbers(),
             active_launches: self.active_issue_numbers(),
@@ -3683,10 +4604,20 @@ impl IssueMonitorState {
                     // match it enforces is unsatisfiable from the PM's side.
                     claim_id: self.live_claim_id(item.issue.number),
                     delivery_id: self.pending_launch_delivery_id(item.issue.number),
+                    latest_pm_control_receipt: item.latest_pm_control_receipt.clone(),
+                    latest_pm_control_reason: item.latest_pm_control_reason.clone(),
                 })
                 .collect(),
             last_error: status.last_error,
             last_scan_at: status.last_scan_at,
+            pm_control: IssueMonitorPmControlAgentProjection {
+                revision: self.pm_control.revision,
+                issues: pm_control_issue_numbers
+                    .into_iter()
+                    .map(|issue_number| self.pm_control_status(issue_number))
+                    .collect(),
+                receipts: self.pm_control.receipts.clone(),
+            },
         }
     }
 
@@ -3741,6 +4672,7 @@ impl IssueMonitorState {
     /// entry with a fresh stable id may enter the local proposal journal.
     pub fn prepare_effect(&mut self, effect: PendingIssueMonitorEffect) -> bool {
         if effect.effect_id.is_empty()
+            || pm_control_fences_effect(&self.pm_control, &effect.payload)
             || effect.state != IssueMonitorEffectState::Prepared
             || effect.authority_epoch != self.effect_authority_epoch
             || self
@@ -3763,6 +4695,7 @@ impl IssueMonitorState {
     ) -> Option<IssueMonitorEffectAttemptKey> {
         let effect_id = effect_id.into();
         if effect_id.is_empty()
+            || pm_control_fences_effect(&self.pm_control, &payload)
             || self
                 .pending_effects
                 .iter()
@@ -3867,6 +4800,11 @@ impl IssueMonitorState {
             return EligibilityDecision::HumanGate("not an autonomous candidate".to_string());
         }
         let number = issue.number;
+        if self.is_pm_control_runnable_fenced(number) {
+            return EligibilityDecision::HumanGate(
+                "PM control owns the Issue runnable state".to_string(),
+            );
+        }
         if self.inbox_item(number).is_some_and(|item| {
             matches!(
                 item.state,
@@ -3931,7 +4869,10 @@ impl IssueMonitorState {
     pub fn autonomous_in_flight_issues(&self) -> Vec<u64> {
         self.autonomous_records
             .values()
-            .filter(|record| Self::is_in_flight_phase(record.phase))
+            .filter(|record| {
+                Self::is_in_flight_phase(record.phase)
+                    && !self.is_pm_control_runnable_fenced(record.issue_number)
+            })
             .map(|record| record.issue_number)
             .collect()
     }
@@ -3953,9 +4894,11 @@ impl IssueMonitorState {
     /// phase forever (e.g. `Reviewing` after a failed review-agent spawn, where
     /// the daemon waits for a verdict that will never arrive).
     pub fn is_autonomous_in_flight(&self, issue_number: u64) -> bool {
-        self.autonomous_records
-            .get(&issue_number)
-            .is_some_and(|record| Self::is_in_flight_phase(record.phase))
+        !self.is_pm_control_runnable_fenced(issue_number)
+            && self
+                .autonomous_records
+                .get(&issue_number)
+                .is_some_and(|record| Self::is_in_flight_phase(record.phase))
     }
 
     /// SPEC #3200: transition Implementing→Reviewing once the implementation
@@ -3967,6 +4910,9 @@ impl IssueMonitorState {
         pr_number: u64,
         reviewed_sha: impl Into<String>,
     ) {
+        if self.is_pm_control_runnable_fenced(issue_number) {
+            return;
+        }
         let record = self.autonomous_record_mut(issue_number);
         record.phase = AutonomousPhase::Reviewing;
         record.pr_number = Some(pr_number);
@@ -3977,6 +4923,9 @@ impl IssueMonitorState {
     /// SPEC #3200 FR-015: record the independent-review verdict for the in-flight
     /// reviewed SHA. The gate is evaluated on the next tick.
     pub fn record_review_verdict(&mut self, issue_number: u64, passed: bool) {
+        if self.is_pm_control_runnable_fenced(issue_number) {
+            return;
+        }
         self.autonomous_record_mut(issue_number).review_passed = Some(passed);
     }
 
@@ -3992,6 +4941,9 @@ impl IssueMonitorState {
         reviewed_sha: &str,
         verdict_raw: &str,
     ) -> Option<bool> {
+        if self.is_pm_control_runnable_fenced(issue_number) {
+            return None;
+        }
         let record = self.autonomous_records.get(&issue_number)?;
         // Reject a verdict that is not for the SHA we are reviewing.
         if record.reviewed_sha.as_deref() != Some(reviewed_sha) {
@@ -4014,6 +4966,9 @@ impl IssueMonitorState {
     /// SPEC #3200: transition Reviewing→Delivering once the strong gate passes
     /// (the auto-merge is being armed).
     pub fn begin_delivering(&mut self, issue_number: u64) {
+        if self.is_pm_control_runnable_fenced(issue_number) {
+            return;
+        }
         self.set_autonomous_phase(issue_number, AutonomousPhase::Delivering);
     }
 
@@ -4022,6 +4977,9 @@ impl IssueMonitorState {
     /// succeeded — never before — so the operator toast cannot claim an arm
     /// that failed (the merge helper's fail-closed contract).
     pub fn record_auto_merge_armed(&mut self, issue_number: u64) {
+        if self.is_pm_control_runnable_fenced(issue_number) {
+            return;
+        }
         self.push_autonomous_notice(
             "info",
             issue_number,
@@ -4042,6 +5000,9 @@ impl IssueMonitorState {
         current_head_sha: &str,
         current_issue_body: &str,
     ) -> Option<crate::issue_monitor_gate::AutonomousGateInputs> {
+        if self.is_pm_control_runnable_fenced(issue_number) {
+            return None;
+        }
         use crate::issue_monitor_gate::{classify_acceptance_criteria, classify_ci_rollup};
         use crate::issue_monitor_review::ReviewGateOutcome;
         let record = self.autonomous_records.get(&issue_number)?;
@@ -4083,13 +5044,16 @@ impl IssueMonitorState {
 
     pub fn record_claimed(&mut self, issue: IssueMonitorIssue, claim_id: impl Into<String>) {
         let issue_number = issue.number;
+        let pm_control_fenced = self.is_pm_control_runnable_fenced(issue_number);
         let error_message = self.failed_issues.get(&issue_number).cloned();
         let launched_window_id = if error_message.is_some() {
             None
         } else {
             self.launched_windows.get(&issue_number).cloned()
         };
-        let state = if error_message.is_some() {
+        let state = if pm_control_fenced {
+            MonitorInboxState::NeedsHuman
+        } else if error_message.is_some() {
             MonitorInboxState::AgentFailed
         } else if launched_window_id.is_some() {
             MonitorInboxState::Launched
@@ -4108,11 +5072,14 @@ impl IssueMonitorState {
             launched_window_id,
             error_message,
             exclusion_reason: None,
+            latest_pm_control_receipt: self.latest_pm_control_receipt(issue_number),
+            latest_pm_control_reason: self.latest_pm_control_reason(issue_number),
         };
         self.upsert_inbox(item);
         if state == MonitorInboxState::Queued
             && !self.queue.contains(&issue_number)
             && !self.active_launches.contains(&issue_number)
+            && !self.is_pm_control_runnable_fenced(issue_number)
         {
             self.queue.push_back(issue_number);
         }
@@ -4121,6 +5088,7 @@ impl IssueMonitorState {
 
     pub fn record_candidate(&mut self, issue: IssueMonitorIssue) {
         let issue_number = issue.number;
+        let pm_control_fenced = self.is_pm_control_runnable_fenced(issue_number);
         let existing = self.inbox_item(issue_number).cloned();
         let exclusion = issue_monitor_candidate_exclusion(&issue);
         let error_message = self.failed_issues.get(&issue_number).cloned().or_else(|| {
@@ -4145,6 +5113,8 @@ impl IssueMonitorState {
             // Completed work stays Merged and is never re-queued while its Issue
             // remains open until release.
             MonitorInboxState::Merged
+        } else if pm_control_fenced {
+            MonitorInboxState::NeedsHuman
         } else if error_message.is_some() {
             existing
                 .as_ref()
@@ -4208,6 +5178,8 @@ impl IssueMonitorState {
             }),
             error_message,
             exclusion_reason,
+            latest_pm_control_receipt: self.latest_pm_control_receipt(issue_number),
+            latest_pm_control_reason: self.latest_pm_control_reason(issue_number),
         };
         if matches!(
             state,
@@ -4226,6 +5198,7 @@ impl IssueMonitorState {
         if state == MonitorInboxState::Queued
             && !self.queue.contains(&issue_number)
             && !self.active_launches.contains(&issue_number)
+            && !self.is_pm_control_runnable_fenced(issue_number)
         {
             self.queue.push_back(issue_number);
             self.apply_priority_order_to_queue();
@@ -4239,9 +5212,10 @@ impl IssueMonitorState {
         owner: impl Into<String>,
         expires_at: impl Into<String>,
     ) -> bool {
-        self.queue.retain(|queued| *queued != issue.number);
+        let issue_number = issue.number;
+        self.queue.retain(|queued| *queued != issue_number);
         if !self
-            .inbox_item(issue.number)
+            .inbox_item(issue_number)
             .is_some_and(|item| item.state == MonitorInboxState::Queued)
         {
             return false;
@@ -4256,6 +5230,8 @@ impl IssueMonitorState {
             launched_window_id: None,
             error_message: None,
             exclusion_reason: None,
+            latest_pm_control_receipt: self.latest_pm_control_receipt(issue_number),
+            latest_pm_control_reason: self.latest_pm_control_reason(issue_number),
         });
         self.apply_priority_order_to_inbox();
         true
@@ -4274,7 +5250,12 @@ impl IssueMonitorState {
     }
 
     fn apply_priority_order_to_queue(&mut self) {
-        let mut remaining: Vec<u64> = self.queue.iter().copied().collect();
+        let mut remaining: Vec<u64> = self
+            .queue
+            .iter()
+            .copied()
+            .filter(|issue_number| !self.is_pm_control_runnable_fenced(*issue_number))
+            .collect();
         let mut reordered = VecDeque::new();
         for number in &self.priority_order {
             if self.active_launches.contains(number) {
@@ -4362,7 +5343,12 @@ impl IssueMonitorState {
         if !self.gui_connected || self.active_launches.len() >= max_active {
             return None;
         }
-        let issue_number = self.queue.pop_front()?;
+        let issue_number = loop {
+            let issue_number = self.queue.pop_front()?;
+            if !self.is_pm_control_runnable_fenced(issue_number) {
+                break issue_number;
+            }
+        };
         if !self.active_launches.contains(&issue_number) {
             self.active_launches.push(issue_number);
         }
@@ -4385,6 +5371,7 @@ impl IssueMonitorState {
             branch_name: knowledge_launch_target_branch_name(linked_issue_kind, issue_number),
             linked_issue_kind,
             delivery_id: None,
+            launch_profile: self.launch_profile.clone(),
             launch_session_strategy: self.take_launch_session_strategy(issue_number),
         })
     }
@@ -4451,7 +5438,10 @@ impl IssueMonitorState {
             .queue
             .iter()
             .copied()
-            .filter(|issue_number| !pending_claims.contains(issue_number))
+            .filter(|issue_number| {
+                !pending_claims.contains(issue_number)
+                    && !self.is_pm_control_runnable_fenced(*issue_number)
+            })
             .collect();
         (available, candidates)
     }
@@ -4596,6 +5586,7 @@ impl IssueMonitorState {
                                 branch_name: delivery.branch_name.clone(),
                                 linked_issue_kind: delivery.linked_issue_kind,
                                 delivery_id: Some(delivery.delivery_id.clone()),
+                                launch_profile: delivery.source_profile.clone(),
                                 launch_session_strategy: delivery.launch_session_strategy,
                             })
                         {
@@ -4639,6 +5630,7 @@ impl IssueMonitorState {
                 branch_name: delivery.branch_name.clone(),
                 linked_issue_kind: delivery.linked_issue_kind,
                 delivery_id: Some(delivery.delivery_id.clone()),
+                launch_profile: delivery.source_profile.clone(),
                 launch_session_strategy: delivery.launch_session_strategy,
             }
         }));
@@ -4648,6 +5640,9 @@ impl IssueMonitorState {
     /// SPEC #3200 Option A: queue a review-agent spawn request (orchestration
     /// loop → GUI). Deduped on issue number so repeated ticks don't pile up.
     pub fn push_review_dispatch(&mut self, dispatch: AutonomousReviewDispatch) {
+        if self.is_pm_control_runnable_fenced(dispatch.issue_number) {
+            return;
+        }
         self.pending_review_dispatches
             .retain(|pending| pending.issue_number != dispatch.issue_number);
         self.pending_review_dispatches.push_back(dispatch);
@@ -4655,7 +5650,11 @@ impl IssueMonitorState {
 
     /// Drain queued review-agent spawn requests for emission to the GUI.
     pub fn take_pending_review_dispatches(&mut self) -> Vec<AutonomousReviewDispatch> {
-        self.pending_review_dispatches.drain(..).collect()
+        let pm_control = &self.pm_control;
+        self.pending_review_dispatches
+            .drain(..)
+            .filter(|dispatch| !pm_control_issue_is_fenced(pm_control, dispatch.issue_number))
+            .collect()
     }
 
     /// SPEC #3200 FR-034 (T-111): queue an operator notice for an unattended
@@ -4722,6 +5721,7 @@ impl IssueMonitorState {
         self.autonomous_records
             .values()
             .filter(|record| record.phase == AutonomousPhase::Delivering)
+            .filter(|record| !self.is_pm_control_runnable_fenced(record.issue_number))
             .filter_map(|record| record.pr_number.map(|pr| (record.issue_number, pr)))
             .collect()
     }
@@ -4779,6 +5779,25 @@ impl IssueMonitorState {
     ) -> bool {
         let claim_id = claim_id.into();
         let claim_owner = claim_owner.into();
+        let delivery_id = format!("launch:{claim_effect_id}");
+        if self
+            .pending_launch_deliveries
+            .iter()
+            .any(|delivery| delivery.delivery_id == delivery_id)
+        {
+            return true;
+        }
+        if self.is_pm_control_runnable_fenced(issue_number) {
+            ensure_claim_release_effect(
+                &mut self.pending_effects,
+                self.effect_authority_epoch,
+                claim_effect_id,
+                issue_number,
+                &claim_id,
+                &claim_owner,
+            );
+            return false;
+        }
         let Some(issue) = self
             .inbox_item(issue_number)
             .filter(|item| item.state == MonitorInboxState::Queued)
@@ -4796,7 +5815,32 @@ impl IssueMonitorState {
         };
         let linked_issue_kind = issue_monitor_linked_issue_kind(&issue);
         let branch_name = knowledge_launch_target_branch_name(linked_issue_kind, issue_number);
-        let delivery_id = format!("launch:{claim_effect_id}");
+        let Some(next_generation) =
+            self.pm_control
+                .issues
+                .get(&issue_number)
+                .map_or(Some(1), |state| {
+                    state
+                        .generation_counter
+                        .max(state.revoked_through_generation)
+                        .checked_add(1)
+                })
+        else {
+            return false;
+        };
+        let Some(next_revision) = self.pm_control.revision.checked_add(1) else {
+            return false;
+        };
+        let source_profile = self
+            .pm_control
+            .issues
+            .get(&issue_number)
+            .and_then(|state| state.pinned_next_profile.clone())
+            .or_else(|| self.launch_profile.clone());
+        let source_profile_fingerprint = source_profile
+            .as_ref()
+            .map(issue_monitor_launch_profile_fingerprint)
+            .unwrap_or_default();
         let launch_session_strategy = self.take_launch_session_strategy(issue_number);
         self.record_claimed(issue, claim_id.clone());
         self.queue.retain(|queued| *queued != issue_number);
@@ -4819,15 +5863,24 @@ impl IssueMonitorState {
                     linked_issue_kind,
                     claim_id,
                     claim_owner,
+                    generation: next_generation,
                     materializer_id: None,
                     materializer_pid: None,
                     materializer_window_id: None,
                     materialized_window_id: None,
                     workspace_durable_window_id: None,
                     launch_session_strategy,
+                    source_profile,
+                    source_profile_fingerprint,
+                    claim_heartbeat_at: now.to_string(),
+                    claim_expires_at: expiry_from_now_lexical(now, self.config.claim_ttl_secs),
                     created_at: now.to_string(),
                 });
         }
+        let issue_control = self.pm_control.issues.entry(issue_number).or_default();
+        issue_control.generation_counter = next_generation;
+        issue_control.pinned_next_profile = None;
+        self.pm_control.revision = next_revision;
         true
     }
 
@@ -4838,6 +5891,7 @@ impl IssueMonitorState {
         delivery_id: Option<&str>,
     ) -> bool {
         let window_id = window_id.into();
+        let mut durable_identity = None;
         if let Some(delivery_id) = delivery_id {
             match self.match_pending_launch_delivery(issue_number, delivery_id) {
                 PendingLaunchDeliveryMatch::Matched(index) => {
@@ -4848,7 +5902,31 @@ impl IssueMonitorState {
                     {
                         return false;
                     }
-                    self.pending_launch_deliveries.remove(index);
+                    let Some(next_revision) = self.pm_control.revision.checked_add(1) else {
+                        return false;
+                    };
+                    let delivery = self
+                        .pending_launch_deliveries
+                        .remove(index)
+                        .expect("matched pending delivery index");
+                    durable_identity = Some(IssueMonitorLaunchedIssue {
+                        issue_number,
+                        window_id: window_id.clone(),
+                        generation: delivery.generation,
+                        claim_id: delivery.claim_id,
+                        claim_owner: delivery.claim_owner,
+                        delivery_id: delivery.delivery_id,
+                        materializer_id: delivery.materializer_id,
+                        materializer_pid: delivery.materializer_pid,
+                        materializer_window_id: delivery.materializer_window_id,
+                        materialized_window_id: delivery.materialized_window_id,
+                        workspace_durable_window_id: delivery.workspace_durable_window_id,
+                        source_profile: delivery.source_profile,
+                        source_profile_fingerprint: delivery.source_profile_fingerprint,
+                        claim_heartbeat_at: delivery.claim_heartbeat_at,
+                        claim_expires_at: delivery.claim_expires_at,
+                    });
+                    self.pm_control.revision = next_revision;
                 }
                 PendingLaunchDeliveryMatch::Missing | PendingLaunchDeliveryMatch::Mismatched => {
                     return false
@@ -4856,6 +5934,9 @@ impl IssueMonitorState {
             }
         }
         self.complete_active_launch(issue_number, window_id);
+        if let Some(identity) = durable_identity {
+            self.launched_identities.insert(issue_number, identity);
+        }
         true
     }
 
@@ -4874,12 +5955,21 @@ impl IssueMonitorState {
             return false;
         };
         if delivery.materializer_id.as_deref() == Some(materializer_id) {
+            if delivery.materializer_pid == Some(materializer_pid)
+                && delivery.materializer_window_id.as_deref() == Some(materializer_window_id)
+            {
+                return true;
+            }
+            let Some(next_revision) = self.pm_control.revision.checked_add(1) else {
+                return false;
+            };
             delivery.materializer_pid = Some(materializer_pid);
             if delivery.materializer_window_id.as_deref() != Some(materializer_window_id) {
                 delivery.materialized_window_id = None;
                 delivery.workspace_durable_window_id = None;
             }
             delivery.materializer_window_id = Some(materializer_window_id.to_string());
+            self.pm_control.revision = next_revision;
             return true;
         }
         if delivery
@@ -4889,11 +5979,15 @@ impl IssueMonitorState {
         {
             return false;
         }
+        let Some(next_revision) = self.pm_control.revision.checked_add(1) else {
+            return false;
+        };
         delivery.materializer_id = Some(materializer_id.to_string());
         delivery.materializer_pid = Some(materializer_pid);
         delivery.materializer_window_id = Some(materializer_window_id.to_string());
         delivery.materialized_window_id = None;
         delivery.workspace_durable_window_id = None;
+        self.pm_control.revision = next_revision;
         true
     }
 
@@ -4918,7 +6012,11 @@ impl IssueMonitorState {
         if delivery.materialized_window_id.as_deref() == Some(materializer_window_id) {
             return true;
         }
+        let Some(next_revision) = self.pm_control.revision.checked_add(1) else {
+            return false;
+        };
         delivery.materialized_window_id = Some(materializer_window_id.to_string());
+        self.pm_control.revision = next_revision;
         true
     }
 
@@ -4940,7 +6038,14 @@ impl IssueMonitorState {
         {
             return false;
         }
+        if delivery.workspace_durable_window_id.as_deref() == Some(materializer_window_id) {
+            return true;
+        }
+        let Some(next_revision) = self.pm_control.revision.checked_add(1) else {
+            return false;
+        };
         delivery.workspace_durable_window_id = Some(materializer_window_id.to_string());
+        self.pm_control.revision = next_revision;
         true
     }
 
@@ -5080,6 +6185,7 @@ impl IssueMonitorState {
             .retain(|active| *active != issue_number);
         self.launching_claimed_at.remove(&issue_number);
         self.launched_windows.remove(&issue_number);
+        self.launched_identities.remove(&issue_number);
         self.launched_branches.remove(&issue_number);
         // #3165 error-window lifecycle: terminal transitions (merged / released /
         // needs-human) and retry all funnel through here; drop any retained stale
@@ -5177,6 +6283,9 @@ impl IssueMonitorState {
     /// completed work is not auto-relaunched while the Issue stays open until
     /// release).
     pub fn record_merged(&mut self, issue_number: u64) {
+        if self.is_pm_control_runnable_fenced(issue_number) {
+            return;
+        }
         // FR-034: notify the operator when an issue that went through the
         // autonomous loop completes (checked BEFORE the record is cleared).
         if self.autonomous_records.contains_key(&issue_number) {
@@ -5399,6 +6508,1383 @@ impl IssueMonitorState {
                 self.inbox_item(issue_number)
                     .and_then(|item| item.claim_id.clone())
             })
+    }
+
+    fn is_pm_control_pending(&self, issue_number: u64) -> bool {
+        self.pm_control
+            .issues
+            .get(&issue_number)
+            .is_some_and(|state| state.pending_control.is_some())
+    }
+
+    fn is_pm_control_runnable_fenced(&self, issue_number: u64) -> bool {
+        pm_control_issue_is_fenced(&self.pm_control, issue_number)
+    }
+
+    fn latest_pm_control_receipt(&self, issue_number: u64) -> Option<IssueMonitorPmControlReceipt> {
+        self.pm_control
+            .receipts
+            .iter()
+            .rev()
+            .find(|receipt| receipt.issue_number == issue_number)
+            .cloned()
+    }
+
+    fn latest_pm_control_reason(&self, issue_number: u64) -> Option<String> {
+        self.latest_pm_control_receipt(issue_number)
+            .map(|receipt| receipt.reason)
+            .or_else(|| {
+                self.pm_control
+                    .issues
+                    .get(&issue_number)
+                    .and_then(|state| state.held.as_ref())
+                    .map(|held| held.reason.clone())
+            })
+    }
+
+    fn pm_control_target_from_delivery(
+        delivery: &PendingIssueMonitorLaunchDelivery,
+    ) -> IssueMonitorPmControlTarget {
+        IssueMonitorPmControlTarget {
+            issue_number: delivery.issue_number,
+            generation: delivery.generation,
+            claim_id: (!delivery.claim_id.is_empty()).then(|| delivery.claim_id.clone()),
+            claim_owner: (!delivery.claim_owner.is_empty()).then(|| delivery.claim_owner.clone()),
+            delivery_id: Some(delivery.delivery_id.clone()),
+            materializer_id: delivery.materializer_id.clone(),
+            materializer_pid: delivery.materializer_pid,
+            materializer_window_id: delivery.materializer_window_id.clone(),
+            materialized_window_id: delivery.materialized_window_id.clone(),
+            workspace_durable_window_id: delivery.workspace_durable_window_id.clone(),
+            launched_window_id: None,
+            source_profile: delivery.source_profile.clone(),
+            source_profile_fingerprint: (!delivery.source_profile_fingerprint.is_empty())
+                .then(|| delivery.source_profile_fingerprint.clone()),
+        }
+    }
+
+    fn pm_control_target_from_launched(
+        launched: &IssueMonitorLaunchedIssue,
+    ) -> IssueMonitorPmControlTarget {
+        IssueMonitorPmControlTarget {
+            issue_number: launched.issue_number,
+            generation: launched.generation,
+            claim_id: (!launched.claim_id.is_empty()).then(|| launched.claim_id.clone()),
+            claim_owner: (!launched.claim_owner.is_empty()).then(|| launched.claim_owner.clone()),
+            delivery_id: (!launched.delivery_id.is_empty()).then(|| launched.delivery_id.clone()),
+            materializer_id: launched.materializer_id.clone(),
+            materializer_pid: launched.materializer_pid,
+            materializer_window_id: launched.materializer_window_id.clone(),
+            materialized_window_id: launched.materialized_window_id.clone(),
+            workspace_durable_window_id: launched.workspace_durable_window_id.clone(),
+            launched_window_id: Some(launched.window_id.clone()),
+            source_profile: launched.source_profile.clone(),
+            source_profile_fingerprint: (!launched.source_profile_fingerprint.is_empty())
+                .then(|| launched.source_profile_fingerprint.clone()),
+        }
+    }
+
+    fn current_pm_control_target(&self, issue_number: u64) -> Option<IssueMonitorPmControlTarget> {
+        self.pending_launch_deliveries
+            .iter()
+            .find(|delivery| delivery.issue_number == issue_number)
+            .map(Self::pm_control_target_from_delivery)
+            .or_else(|| {
+                self.launched_identities
+                    .get(&issue_number)
+                    .map(Self::pm_control_target_from_launched)
+            })
+            .or_else(|| {
+                self.launched_windows.get(&issue_number).map(|window_id| {
+                    IssueMonitorPmControlTarget {
+                        issue_number,
+                        generation: 0,
+                        claim_id: None,
+                        claim_owner: None,
+                        delivery_id: None,
+                        materializer_id: None,
+                        materializer_pid: None,
+                        materializer_window_id: None,
+                        materialized_window_id: None,
+                        workspace_durable_window_id: None,
+                        launched_window_id: Some(window_id.clone()),
+                        source_profile: None,
+                        source_profile_fingerprint: None,
+                    }
+                })
+            })
+            .or_else(|| {
+                self.pm_control
+                    .issues
+                    .get(&issue_number)
+                    .and_then(|state| state.pending_control.as_ref())
+                    .map(|pending| pending.target.clone())
+            })
+    }
+
+    pub fn pm_control_status(&self, issue_number: u64) -> IssueMonitorPmControlStatus {
+        let target = self.current_pm_control_target(issue_number);
+        let pending = self.is_pm_control_pending(issue_number);
+        let readiness = if pending {
+            IssueMonitorPmControlReadinessByAction {
+                stop: IssueMonitorPmControlReadiness::AlreadyPending,
+                failover: IssueMonitorPmControlReadiness::AlreadyPending,
+                recover: IssueMonitorPmControlReadiness::AlreadyPending,
+            }
+        } else if let Some(target) = target.as_ref() {
+            if target.generation == 0 {
+                IssueMonitorPmControlReadinessByAction {
+                    stop: IssueMonitorPmControlReadiness::Ready,
+                    failover: if self.launch_profile.is_some() {
+                        IssueMonitorPmControlReadiness::ReadyWithConservativeCleanup
+                    } else {
+                        IssueMonitorPmControlReadiness::SourceProfileUnavailable
+                    },
+                    recover: IssueMonitorPmControlReadiness::SourceProfileUnavailable,
+                }
+            } else {
+                let exact_identity = target.claim_id.is_some()
+                    && target.claim_owner.is_some()
+                    && target.delivery_id.is_some()
+                    && target.source_profile_fingerprint.is_some();
+                let exact = if exact_identity {
+                    IssueMonitorPmControlReadiness::Ready
+                } else {
+                    IssueMonitorPmControlReadiness::IdentityIncomplete
+                };
+                IssueMonitorPmControlReadinessByAction {
+                    stop: exact,
+                    failover: if !exact_identity {
+                        exact
+                    } else if self.launch_profile.is_some() {
+                        IssueMonitorPmControlReadiness::Ready
+                    } else {
+                        IssueMonitorPmControlReadiness::SourceProfileUnavailable
+                    },
+                    recover: if !exact_identity {
+                        exact
+                    } else if target.source_profile.is_some() {
+                        IssueMonitorPmControlReadiness::Ready
+                    } else {
+                        IssueMonitorPmControlReadiness::SourceProfileUnavailable
+                    },
+                }
+            }
+        } else {
+            IssueMonitorPmControlReadinessByAction {
+                stop: IssueMonitorPmControlReadiness::NotRunning,
+                failover: IssueMonitorPmControlReadiness::NotRunning,
+                recover: IssueMonitorPmControlReadiness::NotRunning,
+            }
+        };
+        let audit_receipts = self
+            .pm_control
+            .receipts
+            .iter()
+            .filter(|receipt| receipt.issue_number == issue_number)
+            .cloned()
+            .collect::<Vec<_>>();
+        IssueMonitorPmControlStatus {
+            issue_number,
+            target,
+            readiness,
+            latest_receipt: audit_receipts.last().cloned(),
+            audit_receipts,
+            revoked_through_generation: self
+                .pm_control
+                .issues
+                .get(&issue_number)
+                .map_or(0, |state| state.revoked_through_generation),
+            held: self
+                .pm_control
+                .issues
+                .get(&issue_number)
+                .and_then(|state| state.held.clone()),
+        }
+    }
+
+    fn pm_control_target_mismatch(
+        expected: &IssueMonitorPmControlTarget,
+        supplied: &IssueMonitorPmControlTarget,
+    ) -> Option<IssueMonitorPmControlTargetMismatch> {
+        use IssueMonitorPmControlTargetMismatch as Mismatch;
+        [
+            (
+                expected.issue_number != supplied.issue_number,
+                Mismatch::IssueNumber,
+            ),
+            (
+                expected.generation != supplied.generation,
+                Mismatch::Generation,
+            ),
+            (expected.claim_id != supplied.claim_id, Mismatch::ClaimId),
+            (
+                expected.claim_owner != supplied.claim_owner,
+                Mismatch::ClaimOwner,
+            ),
+            (
+                expected.delivery_id != supplied.delivery_id,
+                Mismatch::DeliveryId,
+            ),
+            (
+                expected.materializer_id != supplied.materializer_id,
+                Mismatch::MaterializerId,
+            ),
+            (
+                expected.materializer_pid != supplied.materializer_pid,
+                Mismatch::MaterializerPid,
+            ),
+            (
+                expected.materializer_window_id != supplied.materializer_window_id,
+                Mismatch::MaterializerWindow,
+            ),
+            (
+                expected.materialized_window_id != supplied.materialized_window_id,
+                Mismatch::MaterializedWindow,
+            ),
+            (
+                expected.workspace_durable_window_id != supplied.workspace_durable_window_id,
+                Mismatch::WorkspaceDurableWindow,
+            ),
+            (
+                expected.launched_window_id != supplied.launched_window_id,
+                Mismatch::LaunchedWindow,
+            ),
+            (
+                expected.source_profile != supplied.source_profile,
+                Mismatch::SourceProfile,
+            ),
+            (
+                expected.source_profile_fingerprint != supplied.source_profile_fingerprint,
+                Mismatch::SourceProfileFingerprint,
+            ),
+        ]
+        .into_iter()
+        .find_map(|(different, mismatch)| different.then_some(mismatch))
+    }
+
+    fn park_autonomous_for_pm_control(
+        &mut self,
+        issue_number: u64,
+        action: IssueMonitorPmControlAction,
+    ) {
+        let Some(record) = self.autonomous_records.get_mut(&issue_number) else {
+            return;
+        };
+        record.phase = if action == IssueMonitorPmControlAction::Stop {
+            AutonomousPhase::NeedsHuman
+        } else {
+            AutonomousPhase::Idle
+        };
+        record.active_launch_id = None;
+        record.acceptance_snapshot = None;
+        record.last_heartbeat = None;
+        record.pr_number = None;
+        record.reviewed_sha = None;
+        record.review_passed = None;
+    }
+
+    fn bind_pm_control_auto_merge_disarm(
+        &mut self,
+        operation_id: &str,
+        issue_number: u64,
+        pr_number: u64,
+    ) {
+        if let Some(effect) = self.pending_effects.iter_mut().find(|effect| {
+            matches!(
+                &effect.payload,
+                IssueMonitorEffectPayload::DisarmAutoMerge {
+                    issue_number: known_issue,
+                    pr_number: known_pr,
+                    control_operation_id,
+                    ..
+                } if *known_issue == issue_number
+                    && *known_pr == pr_number
+                    && control_operation_id
+                        .as_deref()
+                        .is_none_or(|known| known == operation_id)
+            )
+        }) {
+            if let IssueMonitorEffectPayload::DisarmAutoMerge {
+                control_operation_id,
+                ..
+            } = &mut effect.payload
+            {
+                *control_operation_id = Some(operation_id.to_string());
+            }
+            return;
+        }
+        self.pending_effects
+            .push(PendingIssueMonitorEffect::prepared(
+                format!("pm-control-disarm:{operation_id}"),
+                self.effect_authority_epoch,
+                IssueMonitorEffectPayload::DisarmAutoMerge {
+                    issue_number,
+                    pr_number,
+                    compensates_effect_id: format!("pm-control:{operation_id}"),
+                    control_operation_id: Some(operation_id.to_string()),
+                },
+            ));
+    }
+
+    pub fn admit_pm_control(
+        &mut self,
+        request: IssueMonitorPmControlRequest,
+    ) -> Result<IssueMonitorPmControlReceipt, IssueMonitorPmControlRefusal> {
+        self.admit_pm_control_with_execution_target(request, None)
+    }
+
+    pub fn admit_pm_control_with_execution_target(
+        &mut self,
+        request: IssueMonitorPmControlRequest,
+        execution_target: Option<IssueMonitorPmControlExecutionTarget>,
+    ) -> Result<IssueMonitorPmControlReceipt, IssueMonitorPmControlRefusal> {
+        let fingerprint = issue_monitor_pm_control_fingerprint(&request);
+        if let Some(receipt) = self
+            .pm_control
+            .receipts
+            .iter()
+            .find(|receipt| receipt.operation_id == request.operation_id)
+        {
+            return if receipt.fingerprint == fingerprint {
+                Ok(receipt.clone())
+            } else {
+                Err(IssueMonitorPmControlRefusal::ReceiptConflict)
+            };
+        }
+
+        let expected = self
+            .current_pm_control_target(request.target.issue_number)
+            .or_else(|| {
+                // The Issue number is one component of the exact target, not
+                // the lookup authority for all the others. If every remaining
+                // identity component names exactly one live launch, report the
+                // issue-number mismatch instead of collapsing it into a vague
+                // missing-identity refusal.
+                let mut matches = self
+                    .active_launches
+                    .iter()
+                    .filter_map(|issue_number| self.current_pm_control_target(*issue_number))
+                    .filter(|candidate| {
+                        Self::pm_control_target_mismatch(candidate, &request.target)
+                            == Some(IssueMonitorPmControlTargetMismatch::IssueNumber)
+                    });
+                let candidate = matches.next()?;
+                matches.next().is_none().then_some(candidate)
+            })
+            .ok_or(IssueMonitorPmControlRefusal::IdentityIncomplete)?;
+        if let Some(mismatch) = Self::pm_control_target_mismatch(&expected, &request.target) {
+            return Err(IssueMonitorPmControlRefusal::TargetMismatch(mismatch));
+        }
+        if request.action == IssueMonitorPmControlAction::Recover
+            && (request.target.source_profile.is_none() || request.requested_profile.is_none())
+        {
+            return Err(IssueMonitorPmControlRefusal::SourceProfileUnavailable);
+        }
+        if request.action == IssueMonitorPmControlAction::Recover
+            && request.requested_profile != request.target.source_profile
+        {
+            return Err(IssueMonitorPmControlRefusal::TargetMismatch(
+                IssueMonitorPmControlTargetMismatch::SourceProfile,
+            ));
+        }
+        if request.action == IssueMonitorPmControlAction::Failover
+            && request.requested_profile.is_none()
+        {
+            return Err(IssueMonitorPmControlRefusal::SourceProfileUnavailable);
+        }
+        if request.target.generation > 0
+            && (request.target.claim_id.is_none()
+                || request.target.claim_owner.is_none()
+                || request.target.delivery_id.is_none()
+                || request.target.source_profile.is_none()
+                || request.target.source_profile_fingerprint.is_none())
+        {
+            return Err(IssueMonitorPmControlRefusal::IdentityIncomplete);
+        }
+        if request.target.generation > 0
+            && request
+                .target
+                .source_profile
+                .as_ref()
+                .map(issue_monitor_launch_profile_fingerprint)
+                .as_deref()
+                != request.target.source_profile_fingerprint.as_deref()
+        {
+            return Err(IssueMonitorPmControlRefusal::TargetMismatch(
+                IssueMonitorPmControlTargetMismatch::SourceProfileFingerprint,
+            ));
+        }
+        if let Some(target) = execution_target.as_ref() {
+            let expected_operation_id = format!(
+                "issue-monitor-control:{}:exact-absence",
+                request.operation_id
+            );
+            let identity_matches = target.session_identity.as_ref().is_some_and(|identity| {
+                identity.session_id == target.session_id
+                    && identity.execution_binding == target.session_binding
+                    && identity.linked_issue_number == Some(target.owner_number)
+                    && dunce::canonicalize(&identity.worktree_path).ok().as_ref()
+                        == dunce::canonicalize(&target.worktree_path).ok().as_ref()
+            });
+            if request.action != IssueMonitorPmControlAction::Recover
+                || !target.worktree_path.is_absolute()
+                || !matches!(target.owner_kind.as_str(), "issue" | "spec")
+                || target.owner_number != request.target.issue_number
+                || target.generation_id.trim().is_empty()
+                || target.generation_id != target.session_binding.identity.generation_id
+                || target.session_id.trim().is_empty()
+                || target.session_id != target.session_binding.session_id
+                || target.owner_kind != target.session_binding.owner_kind
+                || target.owner_number != target.session_binding.owner_number
+                || !identity_matches
+                || target.settlement_operation_id != expected_operation_id
+            {
+                return Err(IssueMonitorPmControlRefusal::IdentityIncomplete);
+            }
+        }
+        if self.is_pm_control_pending(request.target.issue_number) {
+            return Err(IssueMonitorPmControlRefusal::IdentityIncomplete);
+        }
+        if self.pm_control.revision.checked_add(1).is_none() {
+            return Err(IssueMonitorPmControlRefusal::ControlRevisionExhausted);
+        }
+        if request.action != IssueMonitorPmControlAction::Stop
+            && self
+                .pm_control
+                .issues
+                .get(&request.target.issue_number)
+                .map_or(request.target.generation, |state| {
+                    state
+                        .generation_counter
+                        .max(state.revoked_through_generation)
+                })
+                .checked_add(1)
+                .is_none()
+        {
+            return Err(IssueMonitorPmControlRefusal::GenerationExhausted);
+        }
+        if self.effect_authority_epoch.checked_add(1).is_none() {
+            return Err(IssueMonitorPmControlRefusal::EffectAuthorityExhausted);
+        }
+
+        let auto_merge_pr_number = self
+            .autonomous_records
+            .get(&request.target.issue_number)
+            .and_then(|record| {
+                (record.phase == AutonomousPhase::Delivering)
+                    .then_some(record.pr_number)
+                    .flatten()
+            });
+
+        let mut next = self.clone();
+        while next.pm_control.receipts.len() >= MAX_ISSUE_MONITOR_PM_CONTROL_RECEIPTS {
+            let Some(oldest_terminal) = next.pm_control.receipts.iter().position(|receipt| {
+                matches!(
+                    receipt.state,
+                    IssueMonitorPmControlReceiptState::Terminal(_)
+                )
+            }) else {
+                return Err(IssueMonitorPmControlRefusal::ReceiptCapacity);
+            };
+            next.pm_control.receipts.remove(oldest_terminal);
+        }
+        next.advance_effect_authority_epoch()
+            .ok_or(IssueMonitorPmControlRefusal::EffectAuthorityExhausted)?;
+        if let Some(pr_number) = auto_merge_pr_number {
+            next.bind_pm_control_auto_merge_disarm(
+                &request.operation_id,
+                request.target.issue_number,
+                pr_number,
+            );
+        }
+        let next_revision = next
+            .pm_control
+            .revision
+            .checked_add(1)
+            .ok_or(IssueMonitorPmControlRefusal::ControlRevisionExhausted)?;
+
+        let issue_number = request.target.issue_number;
+        let teardown_settled = request.target.launched_window_id.is_none()
+            && request.target.materializer_id.is_none()
+            && request.target.materializer_window_id.is_none()
+            && request.target.materialized_window_id.is_none()
+            && request.target.workspace_durable_window_id.is_none();
+        let exact_claim = request
+            .target
+            .claim_id
+            .as_ref()
+            .zip(request.target.claim_owner.as_ref());
+        let claim_cleanup = if exact_claim.is_some() {
+            IssueMonitorControlClaimCleanup::ExactClaim
+        } else {
+            IssueMonitorControlClaimCleanup::CanonicalReadbackRequired
+        };
+        let claim_release_prepared = teardown_settled && exact_claim.is_some();
+        let pinned_profile = match request.action {
+            IssueMonitorPmControlAction::Stop => None,
+            IssueMonitorPmControlAction::Recover | IssueMonitorPmControlAction::Failover => {
+                request.requested_profile.clone()
+            }
+        };
+        let pending = PendingIssueMonitorPmControl {
+            operation_id: request.operation_id.clone(),
+            project_key: request.project_key.clone(),
+            action: request.action,
+            actor_session: request.actor_session.clone(),
+            actor_registration_generation: request.actor_registration_generation,
+            target: request.target.clone(),
+            reason: request.reason.trim().to_string(),
+            requested_at: request.admitted_at.clone(),
+            admission_inventory_revision: request.admission_inventory_revision,
+            inventory_revision_fence: request.target.materializer_id.as_ref().map(|runtime_id| {
+                RuntimeInventoryRevisionFence {
+                    runtime_id: runtime_id.clone(),
+                    inventory_revision: request.admission_inventory_revision,
+                }
+            }),
+            execution_target: execution_target.clone(),
+            claim_heartbeat_at: None,
+            claim_expires_at: None,
+            claim_cleanup,
+            teardown_settled,
+            claim_release_prepared,
+            claim_release_settled: false,
+            teardown_evidence: None,
+            auto_merge_pr_number,
+            auto_merge_disarm_settled: false,
+        };
+
+        next.clear_active_tracking(issue_number);
+        next.park_autonomous_for_pm_control(issue_number, request.action);
+        next.queue.retain(|queued| *queued != issue_number);
+        next.pending_launches
+            .retain(|launch| launch.issue_number != issue_number);
+        next.priority_order
+            .retain(|priority| *priority != issue_number);
+
+        let issue_control = next.pm_control.issues.entry(issue_number).or_default();
+        issue_control.generation_counter = issue_control
+            .generation_counter
+            .max(request.target.generation);
+        issue_control.revoked_through_generation = issue_control
+            .revoked_through_generation
+            .max(request.target.generation);
+        issue_control.pending_control = Some(pending);
+        issue_control.pinned_next_profile = pinned_profile;
+        issue_control.held = (request.action == IssueMonitorPmControlAction::Stop).then(|| {
+            IssueMonitorPmControlHeld {
+                operation_id: request.operation_id.clone(),
+                reason: request.reason.trim().to_string(),
+                target_fingerprint: issue_monitor_pm_control_target_fingerprint(&request.target),
+                held_at: request.admitted_at.clone(),
+            }
+        });
+
+        let mut pending_prerequisites = if teardown_settled {
+            vec![IssueMonitorPmControlPrerequisite::ClaimRelease]
+        } else {
+            vec![
+                IssueMonitorPmControlPrerequisite::ProcessTeardown,
+                IssueMonitorPmControlPrerequisite::ClaimRelease,
+            ]
+        };
+        if auto_merge_pr_number.is_some() {
+            pending_prerequisites.push(IssueMonitorPmControlPrerequisite::AutoMergeDisarm);
+        }
+        let state = match request.action {
+            IssueMonitorPmControlAction::Stop => {
+                IssueMonitorPmControlReceiptState::HeldCleanupPending
+            }
+            IssueMonitorPmControlAction::Recover | IssueMonitorPmControlAction::Failover => {
+                if teardown_settled {
+                    IssueMonitorPmControlReceiptState::ClaimReleasePending
+                } else {
+                    IssueMonitorPmControlReceiptState::PendingTeardown
+                }
+            }
+        };
+        let receipt = IssueMonitorPmControlReceipt {
+            schema_version: 1,
+            operation_id: request.operation_id.clone(),
+            project_key: request.project_key,
+            action: request.action,
+            actor_session: request.actor_session,
+            actor_registration_generation: request.actor_registration_generation,
+            issue_number,
+            launch_generation: request.target.generation,
+            target: request.target.clone(),
+            fingerprint,
+            reason: request.reason.trim().to_string(),
+            requested_at: request.admitted_at,
+            requested_profile: request.requested_profile,
+            admission_inventory_revision: request.admission_inventory_revision,
+            execution_target,
+            settled_at: None,
+            teardown_evidence: None,
+            auto_merge_pr_number,
+            state,
+            pending_prerequisites,
+        };
+        next.pm_control.receipts.push(receipt.clone());
+        next.pm_control.revision = next_revision;
+        if claim_release_prepared {
+            next.prepare_pm_control_claim_release(&request.operation_id, issue_number);
+        }
+        if let Some(item) = next
+            .inbox
+            .iter_mut()
+            .find(|item| item.issue.number == issue_number)
+        {
+            item.state = MonitorInboxState::NeedsHuman;
+            item.claim_id = None;
+            item.launched_window_id = None;
+            item.latest_pm_control_reason = Some(receipt.reason.clone());
+            item.latest_pm_control_receipt = Some(receipt.clone());
+        }
+        next.enforce_pm_control_quarantine();
+        *self = next;
+        Ok(receipt)
+    }
+
+    fn prepare_pm_control_claim_release(&mut self, operation_id: &str, issue_number: u64) {
+        let Some(pending) = self
+            .pm_control
+            .issues
+            .get(&issue_number)
+            .and_then(|state| state.pending_control.as_ref())
+        else {
+            return;
+        };
+        let Some((claim_id, owner)) = pending
+            .target
+            .claim_id
+            .as_ref()
+            .zip(pending.target.claim_owner.as_ref())
+        else {
+            return;
+        };
+        if self.pending_effects.iter().any(|effect| {
+            matches!(
+                &effect.payload,
+                IssueMonitorEffectPayload::ReleaseControlClaim {
+                    operation_id: known_operation,
+                    issue_number: known_issue,
+                    generation,
+                    claim_id: known_claim,
+                    owner: known_owner,
+                } if known_operation == operation_id
+                    && *known_issue == issue_number
+                    && *generation == pending.target.generation
+                    && known_claim == claim_id
+                    && known_owner == owner
+            )
+        }) {
+            return;
+        }
+        self.pending_effects
+            .push(PendingIssueMonitorEffect::prepared(
+                format!(
+                    "control-release:{operation_id}:{}:{}",
+                    pending.target.generation, self.effect_authority_epoch
+                ),
+                self.effect_authority_epoch,
+                IssueMonitorEffectPayload::ReleaseControlClaim {
+                    operation_id: operation_id.to_string(),
+                    issue_number,
+                    generation: pending.target.generation,
+                    claim_id: claim_id.clone(),
+                    owner: owner.clone(),
+                },
+            ));
+    }
+
+    pub fn prepare_pending_control_claim_renewals(
+        &mut self,
+        heartbeat_at: &str,
+        expires_at: &str,
+    ) -> Vec<PendingIssueMonitorEffect> {
+        let candidates = self
+            .pm_control
+            .issues
+            .iter()
+            .filter_map(|(&issue_number, state)| {
+                let pending = state.pending_control.as_ref()?;
+                if pending.teardown_settled || pending.claim_release_prepared {
+                    return None;
+                }
+                let (claim_id, owner) = pending
+                    .target
+                    .claim_id
+                    .as_ref()
+                    .zip(pending.target.claim_owner.as_ref())?;
+                Some((
+                    issue_number,
+                    pending.operation_id.clone(),
+                    pending.target.generation,
+                    claim_id.clone(),
+                    owner.clone(),
+                ))
+            })
+            .collect::<Vec<_>>();
+        let additions = candidates
+            .into_iter()
+            .filter(
+                |(issue_number, operation_id, generation, claim_id, owner)| {
+                    !self.pending_effects.iter().any(|effect| {
+                        matches!(
+                            &effect.payload,
+                            IssueMonitorEffectPayload::RenewControlClaim {
+                                operation_id: known_operation,
+                                issue_number: known_issue,
+                                generation: known_generation,
+                                claim_id: known_claim,
+                                owner: known_owner,
+                                ..
+                            } if known_operation == operation_id
+                                && known_issue == issue_number
+                                && known_generation == generation
+                                && known_claim == claim_id
+                                && known_owner == owner
+                        )
+                    })
+                },
+            )
+            .map(
+                |(issue_number, operation_id, generation, claim_id, owner)| {
+                    PendingIssueMonitorEffect::prepared(
+                        format!(
+                            "control-renew:{operation_id}:{generation}:{}",
+                            self.effect_authority_epoch
+                        ),
+                        self.effect_authority_epoch,
+                        IssueMonitorEffectPayload::RenewControlClaim {
+                            operation_id,
+                            issue_number,
+                            generation,
+                            claim_id,
+                            owner,
+                            heartbeat_at: heartbeat_at.to_string(),
+                            expires_at: expires_at.to_string(),
+                        },
+                    )
+                },
+            )
+            .collect::<Vec<_>>();
+        if additions.is_empty() || self.pm_control.revision.checked_add(1).is_none() {
+            return Vec::new();
+        }
+        self.pending_effects.extend(additions.iter().cloned());
+        self.pm_control.revision += 1;
+        additions
+    }
+
+    /// Commit the read-back TTL from one exact pending-control renewal.
+    pub fn record_pending_control_claim_renewal(
+        &mut self,
+        operation_id: &str,
+        issue_number: u64,
+        generation: u64,
+        claim_id: &str,
+        owner: &str,
+        heartbeat_at: &str,
+        expires_at: &str,
+    ) -> bool {
+        let exact = self
+            .pm_control
+            .issues
+            .get(&issue_number)
+            .and_then(|state| state.pending_control.as_ref())
+            .is_some_and(|pending| {
+                pending.operation_id == operation_id
+                    && pending.target.generation == generation
+                    && pending.target.claim_id.as_deref() == Some(claim_id)
+                    && pending.target.claim_owner.as_deref() == Some(owner)
+                    && !pending.teardown_settled
+            });
+        let Some(next_revision) = self.pm_control.revision.checked_add(1) else {
+            return false;
+        };
+        if !exact {
+            return false;
+        }
+        if let Some(pending) = self
+            .pm_control
+            .issues
+            .get_mut(&issue_number)
+            .and_then(|state| state.pending_control.as_mut())
+        {
+            pending.claim_heartbeat_at = Some(heartbeat_at.to_string());
+            pending.claim_expires_at = Some(expires_at.to_string());
+        }
+        if let Some(item) = self
+            .inbox
+            .iter_mut()
+            .find(|item| item.issue.number == issue_number)
+        {
+            item.claim_id = Some(claim_id.to_string());
+            item.claim_expires_at = Some(expires_at.to_string());
+        }
+        self.pm_control.revision = next_revision;
+        true
+    }
+
+    fn settle_pm_control_teardown(
+        &mut self,
+        operation_id: &str,
+    ) -> IssueMonitorGenerationEventDisposition {
+        self.settle_pm_control_teardown_with_evidence(operation_id, None)
+    }
+
+    fn settle_pm_control_teardown_with_evidence(
+        &mut self,
+        operation_id: &str,
+        teardown_evidence: Option<RuntimeInventoryProof>,
+    ) -> IssueMonitorGenerationEventDisposition {
+        let Some((issue_number, already_settled)) =
+            self.pm_control
+                .issues
+                .iter()
+                .find_map(|(&issue_number, state)| {
+                    state
+                        .pending_control
+                        .as_ref()
+                        .filter(|pending| pending.operation_id == operation_id)
+                        .map(|pending| (issue_number, pending.teardown_settled))
+                })
+        else {
+            return IssueMonitorGenerationEventDisposition::Ignored;
+        };
+        if already_settled {
+            return IssueMonitorGenerationEventDisposition::Ignored;
+        }
+        let Some(next_revision) = self.pm_control.revision.checked_add(1) else {
+            return IssueMonitorGenerationEventDisposition::Ignored;
+        };
+        let mut next = self.clone();
+        let pending = next
+            .pm_control
+            .issues
+            .get_mut(&issue_number)
+            .and_then(|state| state.pending_control.as_mut())
+            .expect("pending PM control selected above");
+        pending.teardown_settled = true;
+        pending.teardown_evidence = teardown_evidence.clone();
+        let exact_claim = pending.target.claim_id.is_some() && pending.target.claim_owner.is_some();
+        pending.claim_release_prepared = exact_claim;
+        next.pending_effects.retain(|effect| {
+            !matches!(
+                &effect.payload,
+                IssueMonitorEffectPayload::RenewControlClaim {
+                    operation_id: known_operation,
+                    ..
+                } if known_operation == operation_id
+            )
+        });
+        if let Some(receipt) = next
+            .pm_control
+            .receipts
+            .iter_mut()
+            .find(|receipt| receipt.operation_id == operation_id)
+        {
+            receipt.pending_prerequisites.retain(|prerequisite| {
+                *prerequisite != IssueMonitorPmControlPrerequisite::ProcessTeardown
+            });
+            receipt.teardown_evidence = teardown_evidence;
+            receipt.state =
+                pm_control_pending_receipt_state(receipt.action, &receipt.pending_prerequisites);
+        }
+        next.pm_control.revision = next_revision;
+        if exact_claim {
+            next.prepare_pm_control_claim_release(operation_id, issue_number);
+        }
+        next.refresh_pm_control_inbox_projection(issue_number);
+        *self = next;
+        IssueMonitorGenerationEventDisposition::TeardownSettled
+    }
+
+    pub fn apply_generation_runtime_event(
+        &mut self,
+        event: IssueMonitorGenerationRuntimeEvent,
+    ) -> IssueMonitorGenerationEventDisposition {
+        let source = event.source().clone();
+        if let Some(pending) = self
+            .pm_control
+            .issues
+            .get(&source.issue_number)
+            .and_then(|state| state.pending_control.as_ref())
+        {
+            if pending.target != source {
+                return IssueMonitorGenerationEventDisposition::Ignored;
+            }
+            return match event {
+                IssueMonitorGenerationRuntimeEvent::WindowClosed { .. }
+                | IssueMonitorGenerationRuntimeEvent::LaunchFailed { .. }
+                | IssueMonitorGenerationRuntimeEvent::AgentFailed { .. } => {
+                    let operation_id = pending.operation_id.clone();
+                    self.settle_pm_control_teardown(&operation_id)
+                }
+                IssueMonitorGenerationRuntimeEvent::Launched { .. }
+                | IssueMonitorGenerationRuntimeEvent::Heartbeat { .. }
+                | IssueMonitorGenerationRuntimeEvent::ScanCompleted { .. } => {
+                    IssueMonitorGenerationEventDisposition::Ignored
+                }
+            };
+        }
+        if self
+            .pm_control
+            .issues
+            .get(&source.issue_number)
+            .is_some_and(|state| source.generation <= state.revoked_through_generation)
+        {
+            return IssueMonitorGenerationEventDisposition::Revoked;
+        }
+        if self
+            .current_pm_control_target(source.issue_number)
+            .is_some_and(|target| target != source)
+        {
+            return IssueMonitorGenerationEventDisposition::Ignored;
+        }
+        IssueMonitorGenerationEventDisposition::Applied
+    }
+
+    fn finalize_pm_control_if_ready(
+        &mut self,
+        operation_id: &str,
+        issue_number: u64,
+        settled_at: &str,
+    ) -> Option<IssueMonitorPmControlSettlement> {
+        let (action, fallback_hold) = self
+            .pm_control
+            .issues
+            .get(&issue_number)
+            .and_then(|state| state.pending_control.as_ref())
+            .filter(|pending| pending.operation_id == operation_id)
+            .map(|pending| {
+                (
+                    pending.action,
+                    IssueMonitorPmControlHeld {
+                        operation_id: pending.operation_id.clone(),
+                        reason: pending.reason.clone(),
+                        target_fingerprint: issue_monitor_pm_control_target_fingerprint(
+                            &pending.target,
+                        ),
+                        held_at: pending.requested_at.clone(),
+                    },
+                )
+            })?;
+        let receipt = self
+            .pm_control
+            .receipts
+            .iter_mut()
+            .find(|receipt| receipt.operation_id == operation_id)?;
+        if !receipt.pending_prerequisites.is_empty() {
+            receipt.state =
+                pm_control_pending_receipt_state(action, &receipt.pending_prerequisites);
+            return None;
+        }
+
+        let should_scan = action != IssueMonitorPmControlAction::Stop;
+        receipt.settled_at = Some(settled_at.to_string());
+        receipt.state = IssueMonitorPmControlReceiptState::Terminal(if should_scan {
+            IssueMonitorPmControlTerminalOutcome::Queued
+        } else {
+            IssueMonitorPmControlTerminalOutcome::Held
+        });
+        if let Some(state) = self.pm_control.issues.get_mut(&issue_number) {
+            state.pending_control = None;
+            if should_scan {
+                state.held = None;
+            } else {
+                state.held.get_or_insert(fallback_hold);
+                state.pinned_next_profile = None;
+            }
+        }
+        if should_scan {
+            self.require_fresh_launch_session(issue_number);
+            self.priority_order.retain(|known| *known != issue_number);
+            self.priority_order.insert(0, issue_number);
+            self.queue.retain(|known| *known != issue_number);
+            self.queue.push_front(issue_number);
+            self.set_inbox_state(issue_number, MonitorInboxState::Queued);
+        } else {
+            self.queue.retain(|known| *known != issue_number);
+            self.set_inbox_state(issue_number, MonitorInboxState::NeedsHuman);
+        }
+        Some(IssueMonitorPmControlSettlement {
+            issue_number,
+            should_scan,
+        })
+    }
+
+    pub fn settle_pm_control_claim_release(
+        &mut self,
+        operation_id: &str,
+        generation: u64,
+        claim_id: &str,
+        owner: &str,
+        settled_at: &str,
+    ) -> Option<IssueMonitorPmControlSettlement> {
+        if let Some(receipt) = self.pm_control.receipts.iter().find(|receipt| {
+            receipt.operation_id == operation_id
+                && matches!(
+                    receipt.state,
+                    IssueMonitorPmControlReceiptState::Terminal(_)
+                )
+        }) {
+            if receipt.launch_generation != generation
+                || receipt.target.claim_id.as_deref() != Some(claim_id)
+                || receipt.target.claim_owner.as_deref() != Some(owner)
+            {
+                return None;
+            }
+            return Some(IssueMonitorPmControlSettlement {
+                issue_number: receipt.issue_number,
+                should_scan: matches!(
+                    receipt.state,
+                    IssueMonitorPmControlReceiptState::Terminal(
+                        IssueMonitorPmControlTerminalOutcome::Queued
+                    )
+                ),
+            });
+        }
+        let issue_number = self.pm_control.issues.iter().find_map(|(&issue, state)| {
+            let pending = state.pending_control.as_ref()?;
+            (pending.operation_id == operation_id
+                && pending.target.generation == generation
+                && pending.target.claim_id.as_deref() == Some(claim_id)
+                && pending.target.claim_owner.as_deref() == Some(owner)
+                && pending.teardown_settled
+                && pending.claim_release_prepared
+                && !pending.claim_release_settled)
+                .then_some(issue)
+        })?;
+        let next_revision = self.pm_control.revision.checked_add(1)?;
+        let mut next = self.clone();
+        if let Some(pending) = next
+            .pm_control
+            .issues
+            .get_mut(&issue_number)
+            .and_then(|state| state.pending_control.as_mut())
+        {
+            pending.claim_release_settled = true;
+        }
+        next.pending_effects.retain(|effect| {
+            !matches!(
+                &effect.payload,
+                IssueMonitorEffectPayload::RenewControlClaim {
+                    operation_id: known_operation,
+                    ..
+                } | IssueMonitorEffectPayload::ReleaseControlClaim {
+                    operation_id: known_operation,
+                    ..
+                } if known_operation == operation_id
+            )
+        });
+        if let Some(receipt) = next
+            .pm_control
+            .receipts
+            .iter_mut()
+            .find(|receipt| receipt.operation_id == operation_id)
+        {
+            receipt.pending_prerequisites.retain(|prerequisite| {
+                *prerequisite != IssueMonitorPmControlPrerequisite::ClaimRelease
+            });
+            receipt.state =
+                pm_control_pending_receipt_state(receipt.action, &receipt.pending_prerequisites);
+        }
+        next.pm_control.revision = next_revision;
+        let settlement = next.finalize_pm_control_if_ready(operation_id, issue_number, settled_at);
+        next.refresh_pm_control_inbox_projection(issue_number);
+        *self = next;
+        settlement
+    }
+
+    pub fn settle_pm_control_auto_merge_disarm(
+        &mut self,
+        operation_id: &str,
+        issue_number: u64,
+        pr_number: u64,
+        settled_at: &str,
+    ) -> Option<IssueMonitorPmControlSettlement> {
+        if let Some(receipt) = self.pm_control.receipts.iter().find(|receipt| {
+            receipt.operation_id == operation_id
+                && matches!(
+                    receipt.state,
+                    IssueMonitorPmControlReceiptState::Terminal(_)
+                )
+        }) {
+            if receipt.issue_number != issue_number
+                || receipt.auto_merge_pr_number != Some(pr_number)
+            {
+                return None;
+            }
+            return Some(IssueMonitorPmControlSettlement {
+                issue_number,
+                should_scan: matches!(
+                    receipt.state,
+                    IssueMonitorPmControlReceiptState::Terminal(
+                        IssueMonitorPmControlTerminalOutcome::Queued
+                    )
+                ),
+            });
+        }
+        let exact_pending = self
+            .pm_control
+            .issues
+            .get(&issue_number)
+            .and_then(|state| state.pending_control.as_ref())
+            .is_some_and(|pending| {
+                pending.operation_id == operation_id
+                    && pending.auto_merge_pr_number == Some(pr_number)
+                    && !pending.auto_merge_disarm_settled
+            });
+        if !exact_pending {
+            return None;
+        }
+        let next_revision = self.pm_control.revision.checked_add(1)?;
+        let mut next = self.clone();
+        let pending = next
+            .pm_control
+            .issues
+            .get_mut(&issue_number)
+            .and_then(|state| state.pending_control.as_mut())
+            .expect("exact PM control disarm selected above");
+        pending.auto_merge_disarm_settled = true;
+        next.pending_effects.retain(|effect| {
+            !matches!(
+                &effect.payload,
+                IssueMonitorEffectPayload::DisarmAutoMerge {
+                    issue_number: known_issue,
+                    pr_number: known_pr,
+                    control_operation_id: Some(known_operation),
+                    ..
+                } if *known_issue == issue_number
+                    && *known_pr == pr_number
+                    && known_operation == operation_id
+            )
+        });
+        if let Some(receipt) = next
+            .pm_control
+            .receipts
+            .iter_mut()
+            .find(|receipt| receipt.operation_id == operation_id)
+        {
+            receipt.pending_prerequisites.retain(|prerequisite| {
+                *prerequisite != IssueMonitorPmControlPrerequisite::AutoMergeDisarm
+            });
+            receipt.state =
+                pm_control_pending_receipt_state(receipt.action, &receipt.pending_prerequisites);
+        }
+        next.pm_control.revision = next_revision;
+        let settlement = next.finalize_pm_control_if_ready(operation_id, issue_number, settled_at);
+        next.refresh_pm_control_inbox_projection(issue_number);
+        *self = next;
+        settlement
+    }
+
+    pub fn reconcile_pm_control_absence(
+        &mut self,
+        operation_id: &str,
+        proof: RuntimeInventoryProof,
+    ) -> IssueMonitorAbsenceReconcileOutcome {
+        let Some(pending) = self.pm_control.issues.values().find_map(|state| {
+            state
+                .pending_control
+                .as_ref()
+                .filter(|pending| pending.operation_id == operation_id)
+                .cloned()
+        }) else {
+            return IssueMonitorAbsenceReconcileOutcome::Refused;
+        };
+        if pending.teardown_settled {
+            return IssueMonitorAbsenceReconcileOutcome::AlreadySettled;
+        }
+        let RuntimeInventoryProofAuthor::OwningAppRuntime { runtime_id } = &proof.author else {
+            return IssueMonitorAbsenceReconcileOutcome::Refused;
+        };
+        let expected_window = pending
+            .target
+            .launched_window_id
+            .as_ref()
+            .or(pending.target.workspace_durable_window_id.as_ref())
+            .or(pending.target.materialized_window_id.as_ref())
+            .or(pending.target.materializer_window_id.as_ref());
+        if proof.project_key != pending.project_key
+            || proof.generation != pending.target.generation
+            || proof.materializer_id.as_deref() != pending.target.materializer_id.as_deref()
+            || proof.materializer_pid != pending.target.materializer_pid
+            || proof.window_id.as_ref() != expected_window
+            || proof.observation != RuntimeInventoryObservation::Absent
+        {
+            return IssueMonitorAbsenceReconcileOutcome::Refused;
+        }
+        match pending.inventory_revision_fence.as_ref() {
+            Some(fence) if fence.runtime_id == *runtime_id => {
+                if proof.inventory_revision <= fence.inventory_revision {
+                    return IssueMonitorAbsenceReconcileOutcome::Refused;
+                }
+            }
+            Some(_) | None => {
+                let Some(next_revision) = self.pm_control.revision.checked_add(1) else {
+                    return IssueMonitorAbsenceReconcileOutcome::Refused;
+                };
+                let mut next = self.clone();
+                let Some(rebased) = next.pm_control.issues.values_mut().find_map(|state| {
+                    state
+                        .pending_control
+                        .as_mut()
+                        .filter(|candidate| candidate.operation_id == operation_id)
+                }) else {
+                    return IssueMonitorAbsenceReconcileOutcome::Refused;
+                };
+                rebased.inventory_revision_fence = Some(RuntimeInventoryRevisionFence {
+                    runtime_id: runtime_id.clone(),
+                    inventory_revision: proof.inventory_revision,
+                });
+                next.pm_control.revision = next_revision;
+                *self = next;
+                return IssueMonitorAbsenceReconcileOutcome::Refused;
+            }
+        }
+        if self.settle_pm_control_teardown_with_evidence(operation_id, Some(proof))
+            == IssueMonitorGenerationEventDisposition::TeardownSettled
+        {
+            IssueMonitorAbsenceReconcileOutcome::TeardownSettled
+        } else {
+            IssueMonitorAbsenceReconcileOutcome::Refused
+        }
+    }
+
+    fn refresh_pm_control_inbox_projection(&mut self, issue_number: u64) {
+        let receipt = self.latest_pm_control_receipt(issue_number);
+        let reason = self.latest_pm_control_reason(issue_number);
+        if let Some(item) = self
+            .inbox
+            .iter_mut()
+            .find(|item| item.issue.number == issue_number)
+        {
+            item.latest_pm_control_reason = reason;
+            item.latest_pm_control_receipt = receipt;
+        }
+    }
+
+    fn enforce_pm_control_quarantine(&mut self) {
+        let fenced = self
+            .pm_control
+            .issues
+            .iter()
+            .filter_map(|(&issue_number, state)| {
+                (state.pending_control.is_some() || state.held.is_some()).then_some(issue_number)
+            })
+            .collect::<BTreeSet<_>>();
+        if fenced.is_empty() {
+            return;
+        }
+        self.queue.retain(|issue| !fenced.contains(issue));
+        self.active_launches.retain(|issue| !fenced.contains(issue));
+        self.pending_launches
+            .retain(|launch| !fenced.contains(&launch.issue_number));
+        self.pending_launch_deliveries
+            .retain(|delivery| !fenced.contains(&delivery.issue_number));
+        self.queued_launch_session_strategies
+            .retain(|issue, _| !fenced.contains(issue));
+        self.launching_claimed_at
+            .retain(|issue, _| !fenced.contains(issue));
+        self.launched_windows
+            .retain(|issue, _| !fenced.contains(issue));
+        self.launched_identities
+            .retain(|issue, _| !fenced.contains(issue));
+        self.pending_review_dispatches
+            .retain(|dispatch| !fenced.contains(&dispatch.issue_number));
+        for issue_number in fenced {
+            let action = self.pm_control.issues.get(&issue_number).and_then(|state| {
+                state
+                    .pending_control
+                    .as_ref()
+                    .map(|pending| pending.action)
+                    .or_else(|| {
+                        state
+                            .held
+                            .as_ref()
+                            .map(|_| IssueMonitorPmControlAction::Stop)
+                    })
+            });
+            if let Some(action) = action {
+                self.park_autonomous_for_pm_control(issue_number, action);
+            }
+            if self.inbox_item(issue_number).is_none() {
+                let latest_receipt = self.latest_pm_control_receipt(issue_number);
+                let claim_expires_at = self
+                    .pm_control
+                    .issues
+                    .get(&issue_number)
+                    .and_then(|state| state.pending_control.as_ref())
+                    .and_then(|pending| pending.claim_expires_at.clone());
+                self.inbox.push(IssueMonitorInboxItem {
+                    issue: IssueMonitorIssue {
+                        number: issue_number,
+                        title: format!("Issue {issue_number}"),
+                        labels: Vec::new(),
+                        state: IssueMonitorIssueState::Open,
+                        body: None,
+                        url: None,
+                        readiness: IssueMonitorReadiness::NotApplicable,
+                    },
+                    state: MonitorInboxState::NeedsHuman,
+                    claim_id: None,
+                    blocked_by_owner: None,
+                    claim_expires_at,
+                    launched_window_id: None,
+                    launch_plan: None,
+                    error_message: None,
+                    exclusion_reason: None,
+                    latest_pm_control_reason: latest_receipt
+                        .as_ref()
+                        .map(|receipt| receipt.reason.clone()),
+                    latest_pm_control_receipt: latest_receipt,
+                });
+            }
+            if let Some(item) = self
+                .inbox
+                .iter_mut()
+                .find(|item| item.issue.number == issue_number)
+            {
+                item.state = MonitorInboxState::NeedsHuman;
+                item.launched_window_id = None;
+                item.claim_id = None;
+                item.claim_expires_at = self
+                    .pm_control
+                    .issues
+                    .get(&issue_number)
+                    .and_then(|state| state.pending_control.as_ref())
+                    .and_then(|pending| pending.claim_expires_at.clone());
+            }
+            self.refresh_pm_control_inbox_projection(issue_number);
+        }
+    }
+
+    pub fn reconcile_runnable_queue(&mut self, _now: &str) {
+        self.enforce_pm_control_quarantine();
+        self.apply_priority_order_to_queue();
+    }
+
+    pub fn request_launch_now(&mut self, issue_number: u64) -> bool {
+        if self.is_pm_control_runnable_fenced(issue_number) {
+            return false;
+        }
+        let Some(item) = self.inbox_item(issue_number) else {
+            return false;
+        };
+        if self.merged_issues.contains(&issue_number) || item.state == MonitorInboxState::Released {
+            return false;
+        }
+        self.failed_issues.remove(&issue_number);
+        self.failed_windows.remove(&issue_number);
+        self.set_inbox_state(issue_number, MonitorInboxState::Queued);
+        self.queue.retain(|known| *known != issue_number);
+        self.queue.push_front(issue_number);
+        true
     }
 
     /// SPEC-3431 FR-030/FR-033: resolve `target` against the one live launch it
@@ -5767,6 +8253,7 @@ impl IssueMonitorState {
                 .find(|item| item.issue.number == issue_number)
                 .and_then(|item| item.launched_window_id.clone())
         });
+        self.launched_identities.remove(&issue_number);
         if let Some(window_id) = stale_window {
             self.failed_windows.insert(issue_number, window_id);
         }
@@ -6005,8 +8492,11 @@ mod tests {
                     last_activity_at: None,
                     claim_id: None,
                     delivery_id: None,
+                    latest_pm_control_receipt: None,
+                    latest_pm_control_reason: None,
                 }],
                 last_error: None,
+                pm_control: IssueMonitorPmControlAgentProjection::default(),
                 last_scan_at: Some("2026-08-03T00:00:00Z".to_string()),
             }
         );
@@ -6161,6 +8651,7 @@ mod tests {
                 launched_issues: vec![IssueMonitorLaunchedIssue {
                     issue_number: 42,
                     window_id: "tab-1::agent-1".to_string(),
+                    ..IssueMonitorLaunchedIssue::default()
                 }],
                 ..IssueMonitorPrefs::default()
             },
@@ -6370,6 +8861,7 @@ mod tests {
                 launched_issues: vec![IssueMonitorLaunchedIssue {
                     issue_number: 42,
                     window_id: "project-a::agent-1".to_string(),
+                    ..IssueMonitorLaunchedIssue::default()
                 }],
                 ..IssueMonitorPrefs::default()
             },
@@ -6409,6 +8901,7 @@ mod tests {
             launched_issues: vec![IssueMonitorLaunchedIssue {
                 issue_number: 42,
                 window_id: "project-a::agent-1".to_string(),
+                ..IssueMonitorLaunchedIssue::default()
             }],
             launching_issues: vec![IssueMonitorLaunchingIssue {
                 issue_number: 43,
@@ -6457,10 +8950,12 @@ mod tests {
                 IssueMonitorLaunchedIssue {
                     issue_number: 42,
                     window_id: "project-b::agent-1".to_string(),
+                    ..IssueMonitorLaunchedIssue::default()
                 },
                 IssueMonitorLaunchedIssue {
                     issue_number: 43,
                     window_id: "legacy-agent-1".to_string(),
+                    ..IssueMonitorLaunchedIssue::default()
                 },
             ],
             ..IssueMonitorPrefs::default()
@@ -6587,6 +9082,7 @@ mod tests {
             launched_issues: vec![IssueMonitorLaunchedIssue {
                 issue_number: 43,
                 window_id: "tab-1::agent-2".to_string(),
+                ..IssueMonitorLaunchedIssue::default()
             }],
             ..IssueMonitorPrefs::default()
         };
@@ -6651,6 +9147,7 @@ mod tests {
             launched_issues: vec![IssueMonitorLaunchedIssue {
                 issue_number: 43,
                 window_id: "tab-1::agent-43".to_string(),
+                ..IssueMonitorLaunchedIssue::default()
             }],
             launching_issues: vec![IssueMonitorLaunchingIssue {
                 issue_number: 100,
@@ -6941,6 +9438,7 @@ mod tests {
                 launched_issues: vec![IssueMonitorLaunchedIssue {
                     issue_number: 42,
                     window_id: "tab-1::agent-42".to_string(),
+                    ..IssueMonitorLaunchedIssue::default()
                 }],
                 launching_issues: vec![IssueMonitorLaunchingIssue {
                     issue_number: 43,
@@ -8478,6 +10976,7 @@ mod tests {
                 issue_number: 7,
                 pr_number: 99,
                 compensates_effect_id: "arm:7:99:abc123:4".to_string(),
+                control_operation_id: None,
             },
         };
         let prefs = IssueMonitorPrefs {
@@ -8656,6 +11155,7 @@ mod tests {
                         issue_number: 7,
                         pr_number: 99,
                         compensates_effect_id,
+                        ..
                     } if compensates_effect_id == "arm-attempting"
                 )
             })
@@ -11590,5 +14090,2543 @@ mod tests {
             monitor, before,
             "authority exhaustion must not clear the live source, requeue, mark FreshRequired, emit a notice, or mutate any transient/durable field"
         );
+    }
+
+    // SPEC #3431 Phase 24 / T251 RED support.  These helpers intentionally
+    // describe the state-domain API required by FR-128..131.  The CLI and
+    // AppRuntime transport matrices live in T250/T252; this module owns the
+    // durable identity, generation fence, settlement, and replay contracts.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    enum PmControlFixturePhase {
+        Prepared,
+        Claimed,
+        Materialized,
+        WorkspaceDurable,
+        Launched,
+    }
+
+    fn pm_control_profile(agent_id: &str, model: &str) -> IssueMonitorLaunchProfile {
+        IssueMonitorLaunchProfile {
+            agent_id: agent_id.to_string(),
+            model: Some(model.to_string()),
+            reasoning: Some("high".to_string()),
+            version: Some("phase-24".to_string()),
+            session_mode: gwt_agent::SessionMode::Normal,
+            skip_permissions: true,
+            codex_fast_mode: false,
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            docker_service: None,
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+            windows_shell: None,
+        }
+    }
+
+    fn add_pm_control_fixture_launch(
+        monitor: &mut IssueMonitorState,
+        issue_number: u64,
+        phase: PmControlFixturePhase,
+    ) {
+        let claim_id = format!("claim-{issue_number}-generation-1");
+        let effect_id = format!("effect-{issue_number}-generation-1");
+        let delivery_id = format!("launch:{effect_id}");
+        let window_id = format!("tab-a::agent-{issue_number}");
+        monitor.record_candidate(issue(issue_number));
+        assert!(monitor.apply_confirmed_claim(
+            issue_number,
+            claim_id,
+            "host/session-a",
+            &effect_id,
+            "2026-08-15T00:00:00Z",
+        ));
+        if phase >= PmControlFixturePhase::Claimed {
+            assert!(monitor.claim_launch_delivery(
+                issue_number,
+                &delivery_id,
+                "app-runtime-a",
+                4242,
+                &window_id,
+                |_| false,
+            ));
+        }
+        if phase >= PmControlFixturePhase::Materialized {
+            assert!(monitor.mark_launch_delivery_materialized(
+                issue_number,
+                &delivery_id,
+                "app-runtime-a",
+                &window_id,
+            ));
+        }
+        if phase >= PmControlFixturePhase::WorkspaceDurable {
+            assert!(monitor.mark_launch_delivery_workspace_durable(
+                issue_number,
+                &delivery_id,
+                "app-runtime-a",
+                &window_id,
+            ));
+        }
+        if phase >= PmControlFixturePhase::Launched {
+            assert!(monitor.complete_active_launch_delivery(
+                issue_number,
+                window_id.as_str(),
+                Some(delivery_id.as_str()),
+            ));
+        }
+    }
+
+    fn pm_control_fixture(phase: PmControlFixturePhase) -> IssueMonitorState {
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig {
+                enabled: true,
+                max_active: 2,
+                ..IssueMonitorConfig::default()
+            },
+            IssueMonitorPrefs {
+                launch_profile: Some(pm_control_profile("codex", "gpt-source")),
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        add_pm_control_fixture_launch(&mut monitor, 42, phase);
+        monitor
+    }
+
+    fn pm_control_fixture_with_retry_budget(phase: PmControlFixturePhase) -> IssueMonitorState {
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig {
+                enabled: true,
+                max_active: 2,
+                ..IssueMonitorConfig::default()
+            },
+            IssueMonitorPrefs {
+                launch_profile: Some(pm_control_profile("codex", "gpt-source")),
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        assert_eq!(
+            monitor.record_autonomous_failure(
+                42,
+                FailureClass::Transient,
+                "pre-control transient failure",
+                "2026-08-15T00:00:00Z",
+            ),
+            AutonomousFailureOutcome::Retry { attempt: 1 }
+        );
+        let retry_budget = retry_budget_snapshot(&monitor, 42);
+        assert!(retry_budget.0 > 0);
+        assert!(retry_budget.1.is_some());
+        add_pm_control_fixture_launch(&mut monitor, 42, phase);
+        assert_eq!(retry_budget_snapshot(&monitor, 42), retry_budget);
+        monitor
+    }
+
+    fn retry_budget_snapshot(
+        monitor: &IssueMonitorState,
+        issue_number: u64,
+    ) -> (u32, Option<String>) {
+        (
+            monitor.attempt_count(issue_number),
+            monitor
+                .autonomous_record(issue_number)
+                .and_then(|record| record.retry_not_before.clone()),
+        )
+    }
+
+    fn pm_control_target_for(
+        monitor: &IssueMonitorState,
+        issue_number: u64,
+    ) -> IssueMonitorPmControlTarget {
+        monitor
+            .pm_control_status(issue_number)
+            .target
+            .expect("fixture exposes one exact PM control target")
+    }
+
+    fn pm_control_target(monitor: &IssueMonitorState) -> IssueMonitorPmControlTarget {
+        pm_control_target_for(monitor, 42)
+    }
+
+    fn pm_control_request_for(
+        monitor: &IssueMonitorState,
+        issue_number: u64,
+        operation_id: &str,
+        action: IssueMonitorPmControlAction,
+    ) -> IssueMonitorPmControlRequest {
+        let target = pm_control_target_for(monitor, issue_number);
+        let requested_profile = match &action {
+            IssueMonitorPmControlAction::Stop => None,
+            IssueMonitorPmControlAction::Recover => target.source_profile.clone(),
+            IssueMonitorPmControlAction::Failover => monitor.prefs().launch_profile,
+        };
+        IssueMonitorPmControlRequest {
+            operation_id: operation_id.to_string(),
+            project_key: "project-key-3578".to_string(),
+            action,
+            actor_session: "pm-session-a".to_string(),
+            actor_registration_generation: 7,
+            target,
+            reason: "stalled provider".to_string(),
+            requested_profile,
+            admitted_at: "2026-08-15T00:10:00Z".to_string(),
+            admission_inventory_revision: 40,
+        }
+    }
+
+    fn pm_control_request(
+        monitor: &IssueMonitorState,
+        operation_id: &str,
+        action: IssueMonitorPmControlAction,
+    ) -> IssueMonitorPmControlRequest {
+        pm_control_request_for(monitor, 42, operation_id, action)
+    }
+
+    fn matching_window_closed(
+        target: &IssueMonitorPmControlTarget,
+    ) -> IssueMonitorGenerationRuntimeEvent {
+        IssueMonitorGenerationRuntimeEvent::WindowClosed {
+            source: target.clone(),
+            observed_at: "2026-08-15T00:11:00Z".to_string(),
+        }
+    }
+
+    fn release_control_claim_effect_count(
+        monitor: &IssueMonitorState,
+        operation_id: &str,
+        issue_number: u64,
+        generation: u64,
+        claim_id: &str,
+        owner: &str,
+    ) -> usize {
+        monitor
+            .pending_effects()
+            .iter()
+            .filter(|effect| {
+                matches!(
+                    &effect.payload,
+                    IssueMonitorEffectPayload::ReleaseControlClaim {
+                        operation_id: effect_operation_id,
+                        issue_number: effect_issue_number,
+                        generation: effect_generation,
+                        claim_id: effect_claim_id,
+                        owner: effect_owner,
+                        ..
+                    } if effect_operation_id == operation_id
+                        && *effect_issue_number == issue_number
+                        && *effect_generation == generation
+                        && effect_claim_id == claim_id
+                        && effect_owner == owner
+                )
+            })
+            .count()
+    }
+
+    fn release_control_claim_effect_count_for_issue(
+        monitor: &IssueMonitorState,
+        issue_number: u64,
+    ) -> usize {
+        monitor
+            .pending_effects()
+            .iter()
+            .filter(|effect| {
+                matches!(
+                    &effect.payload,
+                    IssueMonitorEffectPayload::ReleaseControlClaim {
+                        issue_number: effect_issue_number,
+                        ..
+                    } if *effect_issue_number == issue_number
+                )
+            })
+            .count()
+    }
+
+    fn assert_pm_control_revision_advanced_and_durable(
+        before: &IssueMonitorPrefs,
+        after: &IssueMonitorPrefs,
+    ) -> u64 {
+        let before_revision = before.pm_control.revision;
+        let after_revision = after.pm_control.revision;
+        assert!(
+            after_revision > before_revision,
+            "control_state_revision must advance strictly: {before_revision} -> {after_revision}"
+        );
+
+        let roundtrip: IssueMonitorPrefs = serde_json::from_str(
+            &serde_json::to_string(after).expect("revision-bearing prefs serialize"),
+        )
+        .expect("revision-bearing prefs deserialize");
+        assert_eq!(roundtrip.pm_control.revision, after_revision);
+        for rebase_entry in 0..2 {
+            let mut stale =
+                IssueMonitorState::with_prefs(IssueMonitorConfig::default(), before.clone());
+            if rebase_entry == 0 {
+                stale.rebase_daemon_driver_prefs(&roundtrip);
+            } else {
+                stale.rebase_gui_observer_prefs(&roundtrip);
+            }
+            assert_eq!(
+                stale.prefs().pm_control.revision,
+                after_revision,
+                "daemon and GUI rebases preserve the checked control revision"
+            );
+        }
+        after_revision
+    }
+
+    fn assert_pm_control_teardown_settled_projection(
+        prefs: &IssueMonitorPrefs,
+        operation_id: &str,
+        issue_number: u64,
+        expected_revision: u64,
+        expected_evidence: Option<&RuntimeInventoryProof>,
+    ) {
+        assert_eq!(prefs.pm_control.revision, expected_revision);
+        let pending = prefs
+            .pm_control
+            .issues
+            .get(&issue_number)
+            .unwrap()
+            .pending_control
+            .as_ref()
+            .unwrap();
+        assert_eq!(pending.operation_id, operation_id);
+        assert!(pending.teardown_settled);
+        assert!(pending.claim_release_prepared);
+        assert!(!pending.claim_release_settled);
+        assert_eq!(pending.teardown_evidence.as_ref(), expected_evidence);
+        let receipt = prefs
+            .pm_control
+            .receipts
+            .iter()
+            .find(|receipt| receipt.operation_id == operation_id)
+            .unwrap();
+        assert_eq!(
+            receipt.pending_prerequisites,
+            vec![IssueMonitorPmControlPrerequisite::ClaimRelease]
+        );
+        assert_eq!(receipt.teardown_evidence.as_ref(), expected_evidence);
+    }
+
+    fn teardown_window_id(target: &IssueMonitorPmControlTarget) -> Option<String> {
+        target
+            .launched_window_id
+            .clone()
+            .or_else(|| target.workspace_durable_window_id.clone())
+            .or_else(|| target.materialized_window_id.clone())
+            .or_else(|| target.materializer_window_id.clone())
+    }
+
+    fn generation_runtime_events(
+        source: &IssueMonitorPmControlTarget,
+    ) -> Vec<IssueMonitorGenerationRuntimeEvent> {
+        vec![
+            IssueMonitorGenerationRuntimeEvent::Launched {
+                source: source.clone(),
+                launched_window_id: source
+                    .launched_window_id
+                    .clone()
+                    .unwrap_or_else(|| "tab-a::legacy-42".to_string()),
+                observed_at: "2026-08-15T00:14:00Z".to_string(),
+            },
+            IssueMonitorGenerationRuntimeEvent::LaunchFailed {
+                source: source.clone(),
+                message: "late launch failure".to_string(),
+                observed_at: "2026-08-15T00:14:00Z".to_string(),
+            },
+            IssueMonitorGenerationRuntimeEvent::AgentFailed {
+                source: source.clone(),
+                message: "late agent failure".to_string(),
+                observed_at: "2026-08-15T00:14:00Z".to_string(),
+            },
+            IssueMonitorGenerationRuntimeEvent::Heartbeat {
+                source: source.clone(),
+                observed_at: "2026-08-15T00:14:00Z".to_string(),
+            },
+            matching_window_closed(source),
+            IssueMonitorGenerationRuntimeEvent::ScanCompleted {
+                source: source.clone(),
+                observed_at: "2026-08-15T00:14:00Z".to_string(),
+            },
+        ]
+    }
+
+    fn assert_pm_control_quarantined(monitor: &mut IssueMonitorState, issue_number: u64) {
+        assert!(!monitor.queued_issue_numbers().contains(&issue_number));
+        assert!(!monitor.active_issue_numbers().contains(&issue_number));
+        assert!(monitor
+            .next_launch_request("2026-08-15T00:20:01Z")
+            .is_none());
+        assert!(monitor
+            .prefs()
+            .pm_control
+            .issues
+            .get(&issue_number)
+            .unwrap()
+            .pending_control
+            .is_some());
+    }
+
+    fn assert_pm_control_held(
+        monitor: &IssueMonitorState,
+        issue_number: u64,
+        revoked_through_generation: u64,
+    ) {
+        let prefs = monitor.prefs();
+        let issue_control = prefs.pm_control.issues.get(&issue_number).unwrap();
+        let held = issue_control.held.as_ref().expect("typed held metadata");
+        assert_eq!(held.operation_id, "stop-generation-1-held");
+        assert_eq!(held.reason, "stalled provider");
+        assert_eq!(held.held_at, "2026-08-15T00:10:00Z");
+        assert_eq!(held.target_fingerprint.len(), 64);
+        assert!(issue_control.pending_control.is_none());
+        assert_eq!(
+            issue_control.revoked_through_generation,
+            revoked_through_generation
+        );
+        assert!(!monitor.queued_issue_numbers().contains(&issue_number));
+        assert!(!monitor.active_issue_numbers().contains(&issue_number));
+        assert!(!monitor
+            .pending_launch_deliveries
+            .iter()
+            .any(|delivery| delivery.issue_number == issue_number));
+        let status = monitor.pm_control_status(issue_number);
+        assert_eq!(status.held.as_ref(), Some(held));
+        assert_eq!(
+            monitor
+                .inbox_item(issue_number)
+                .and_then(|item| item.latest_pm_control_reason.as_deref()),
+            Some("stalled provider")
+        );
+    }
+
+    fn configure_pm_control_autonomous_attempt(
+        monitor: &mut IssueMonitorState,
+        phase: AutonomousPhase,
+    ) -> (u32, Option<String>) {
+        monitor.set_autonomous_mode(true);
+        let acceptance = crate::issue_monitor_gate::classify_acceptance_criteria(
+            "## Acceptance Criteria\n- [ ] preserves the control fence",
+        )
+        .snapshot();
+        let record = monitor.autonomous_record_mut(42);
+        record.phase = phase;
+        record.active_launch_id = Some("tab-a::agent-42".to_string());
+        record.attempts = 2;
+        record.acceptance_snapshot = Some(acceptance);
+        record.retry_not_before = Some("2026-08-15T00:30:00Z".to_string());
+        record.last_heartbeat = Some("2026-08-15T00:00:00Z".to_string());
+        record.pr_number = Some(4242);
+        record.reviewed_sha = Some("reviewed-sha-42".to_string());
+        record.review_passed = Some(true);
+        monitor.push_review_dispatch(AutonomousReviewDispatch {
+            issue_number: 42,
+            pr_number: 4242,
+            reviewed_sha: "reviewed-sha-42".to_string(),
+            required_criteria: vec!["AC-1".to_string()],
+            diff: "diff --git a/a b/a".to_string(),
+            linked_issue_kind: LinkedIssueKind::Issue,
+        });
+        if phase == AutonomousPhase::Delivering {
+            let key = monitor
+                .prepare_pending_effect(
+                    "arm-before-control",
+                    IssueMonitorEffectPayload::ArmAutoMerge {
+                        issue_number: 42,
+                        pr_number: 4242,
+                        reviewed_sha: "reviewed-sha-42".to_string(),
+                    },
+                )
+                .unwrap();
+            assert!(monitor.mark_pending_effect_attempting(&key));
+        }
+        (2, Some("2026-08-15T00:30:00Z".to_string()))
+    }
+
+    #[test]
+    fn phase24_durable_identity_generation_ack_roundtrip_matrix() {
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig {
+                enabled: true,
+                max_active: 2,
+                ..IssueMonitorConfig::default()
+            },
+            IssueMonitorPrefs {
+                launch_profile: Some(pm_control_profile("codex", "gpt-source")),
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        monitor.record_candidate(issue(42));
+        let before_identity = monitor.prefs();
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            "claim-42-generation-1".to_string(),
+            "host/session-a",
+            "effect-42-generation-1",
+            "2026-08-15T00:00:00Z",
+        ));
+        let prepared = monitor.prefs();
+        assert_pm_control_revision_advanced_and_durable(&before_identity, &prepared);
+
+        assert!(monitor.claim_launch_delivery(
+            42,
+            "launch:effect-42-generation-1",
+            "app-runtime-a",
+            4242,
+            "tab-a::agent-42",
+            |_| false,
+        ));
+        let claimed = monitor.prefs();
+        assert_pm_control_revision_advanced_and_durable(&prepared, &claimed);
+        assert!(monitor.mark_launch_delivery_materialized(
+            42,
+            "launch:effect-42-generation-1",
+            "app-runtime-a",
+            "tab-a::agent-42",
+        ));
+        let materialized = monitor.prefs();
+        assert_pm_control_revision_advanced_and_durable(&claimed, &materialized);
+        assert!(monitor.mark_launch_delivery_workspace_durable(
+            42,
+            "launch:effect-42-generation-1",
+            "app-runtime-a",
+            "tab-a::agent-42",
+        ));
+        let workspace_durable = monitor.prefs();
+        assert_pm_control_revision_advanced_and_durable(&materialized, &workspace_durable);
+        let delivery = monitor.prefs().pending_launch_deliveries[0].clone();
+
+        assert_eq!(delivery.generation, 1);
+        assert_eq!(delivery.claim_id, "claim-42-generation-1");
+        assert_eq!(delivery.claim_owner, "host/session-a");
+        assert_eq!(delivery.materializer_id.as_deref(), Some("app-runtime-a"));
+        assert_eq!(delivery.materializer_pid, Some(4242));
+        assert_eq!(
+            delivery.materializer_window_id.as_deref(),
+            Some("tab-a::agent-42")
+        );
+        assert_eq!(
+            delivery.materialized_window_id.as_deref(),
+            Some("tab-a::agent-42")
+        );
+        assert_eq!(
+            delivery.workspace_durable_window_id.as_deref(),
+            Some("tab-a::agent-42")
+        );
+        assert!(delivery.source_profile.is_some());
+        assert!(!delivery.source_profile_fingerprint.is_empty());
+        assert!(!delivery.claim_heartbeat_at.is_empty());
+        assert!(!delivery.claim_expires_at.is_empty());
+
+        assert!(monitor.complete_active_launch_delivery(
+            42,
+            "tab-a::agent-42",
+            Some("launch:effect-42-generation-1"),
+        ));
+        let prefs = monitor.prefs();
+        assert_pm_control_revision_advanced_and_durable(&workspace_durable, &prefs);
+        assert!(prefs.pending_launch_deliveries.is_empty());
+        let launched = &prefs.launched_issues[0];
+        assert_eq!(launched.generation, delivery.generation);
+        assert_eq!(launched.claim_id, delivery.claim_id);
+        assert_eq!(launched.claim_owner, delivery.claim_owner);
+        assert_eq!(launched.delivery_id, delivery.delivery_id);
+        assert_eq!(launched.materializer_id, delivery.materializer_id);
+        assert_eq!(launched.materializer_pid, delivery.materializer_pid);
+        assert_eq!(
+            launched.materializer_window_id,
+            delivery.materializer_window_id
+        );
+        assert_eq!(
+            launched.materialized_window_id,
+            delivery.materialized_window_id
+        );
+        assert_eq!(
+            launched.workspace_durable_window_id,
+            delivery.workspace_durable_window_id
+        );
+        assert_eq!(launched.source_profile, delivery.source_profile);
+        assert_eq!(
+            launched.source_profile_fingerprint,
+            delivery.source_profile_fingerprint
+        );
+        assert_eq!(launched.claim_heartbeat_at, delivery.claim_heartbeat_at);
+        assert_eq!(launched.claim_expires_at, delivery.claim_expires_at);
+        assert_eq!(launched.window_id, "tab-a::agent-42");
+        let generation = prefs
+            .pm_control
+            .issues
+            .get(&42)
+            .expect("generation state is independent from receipts");
+        assert_eq!(generation.generation_counter, 1);
+        assert_eq!(generation.revoked_through_generation, 0);
+
+        let json = serde_json::to_string(&prefs).expect("durable identity serializes");
+        let restored: IssueMonitorPrefs =
+            serde_json::from_str(&json).expect("durable identity deserializes");
+        assert_eq!(restored, prefs);
+
+        let mut legacy: IssueMonitorPrefs = serde_json::from_value(serde_json::json!({
+            "enabled": true,
+            "max_active_agents": 1,
+            "priority_order": [],
+            "launched_issues": [{"issue_number": 7, "window_id": "tab::legacy-7"}]
+        }))
+        .expect("legacy launched prefs remain readable");
+        assert_eq!(legacy.pm_control, IssueMonitorPmControlState::default());
+        let current_profile = pm_control_profile("claude", "legacy-current-profile");
+        legacy.launch_profile = Some(current_profile.clone());
+        let legacy_monitor =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), legacy.clone());
+        let legacy_status = legacy_monitor.pm_control_status(7);
+        assert_eq!(legacy_status.target.as_ref().unwrap().generation, 0);
+        assert_eq!(
+            legacy_status.readiness.stop,
+            IssueMonitorPmControlReadiness::Ready
+        );
+        assert_eq!(
+            legacy_status.readiness.failover,
+            IssueMonitorPmControlReadiness::ReadyWithConservativeCleanup
+        );
+        assert_eq!(
+            legacy_status.readiness.recover,
+            IssueMonitorPmControlReadiness::SourceProfileUnavailable
+        );
+
+        let mut stopped =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), legacy.clone());
+        let stop_request = pm_control_request_for(
+            &stopped,
+            7,
+            "legacy-stop",
+            IssueMonitorPmControlAction::Stop,
+        );
+        stopped.admit_pm_control(stop_request).unwrap();
+        assert_eq!(
+            stopped.inbox_item(7).map(|row| row.state),
+            Some(MonitorInboxState::NeedsHuman)
+        );
+        assert!(!stopped.queued_issue_numbers().contains(&7));
+        assert!(!stopped.active_issue_numbers().contains(&7));
+        let stopped_prefs = stopped.prefs();
+        let stop_pending = stopped_prefs
+            .pm_control
+            .issues
+            .get(&7)
+            .unwrap()
+            .pending_control
+            .as_ref()
+            .unwrap();
+        assert_eq!(stop_pending.target.generation, 0);
+        assert_eq!(stop_pending.target.claim_id, None);
+        assert_eq!(stop_pending.target.delivery_id, None);
+        assert_eq!(
+            stop_pending.claim_cleanup,
+            IssueMonitorControlClaimCleanup::CanonicalReadbackRequired
+        );
+
+        let mut failover =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), legacy.clone());
+        let failover_request = pm_control_request_for(
+            &failover,
+            7,
+            "legacy-failover",
+            IssueMonitorPmControlAction::Failover,
+        );
+        let legacy_failover_source = failover_request.target.clone();
+        failover.admit_pm_control(failover_request).unwrap();
+        assert!(!failover.queued_issue_numbers().contains(&7));
+        assert!(!failover.active_issue_numbers().contains(&7));
+        let failover_prefs = failover.prefs();
+        let failover_issue = failover_prefs.pm_control.issues.get(&7).unwrap();
+        let failover_pending = failover_issue.pending_control.as_ref().unwrap();
+        assert_eq!(failover_pending.target.generation, 0);
+        assert_eq!(failover_pending.target.claim_id, None);
+        assert_eq!(failover_pending.target.delivery_id, None);
+        assert_eq!(
+            failover_pending.claim_cleanup,
+            IssueMonitorControlClaimCleanup::CanonicalReadbackRequired
+        );
+        assert_eq!(
+            failover_issue.pinned_next_profile.as_ref(),
+            Some(&current_profile)
+        );
+        assert_eq!(
+            release_control_claim_effect_count_for_issue(&failover, 7),
+            0,
+            "legacy cleanup cannot fabricate any claim-release identity"
+        );
+        assert_eq!(
+            failover
+                .apply_generation_runtime_event(matching_window_closed(&legacy_failover_source,)),
+            IssueMonitorGenerationEventDisposition::TeardownSettled
+        );
+        assert_eq!(
+            release_control_claim_effect_count_for_issue(&failover, 7),
+            0,
+            "legacy close still waits for canonical claim readback before release"
+        );
+        assert!(!failover.queued_issue_numbers().contains(&7));
+        assert!(failover
+            .prefs()
+            .pm_control
+            .issues
+            .get(&7)
+            .unwrap()
+            .pending_control
+            .is_some());
+
+        let mut recover = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), legacy);
+        let recover_request = pm_control_request_for(
+            &recover,
+            7,
+            "legacy-recover",
+            IssueMonitorPmControlAction::Recover,
+        );
+        let before = recover.prefs();
+        assert_eq!(
+            recover.admit_pm_control(recover_request),
+            Err(IssueMonitorPmControlRefusal::SourceProfileUnavailable)
+        );
+        assert_eq!(recover.prefs(), before);
+    }
+
+    #[test]
+    fn phase24_stop_recover_failover_profile_and_receipt_replay_matrix() {
+        for action in [
+            IssueMonitorPmControlAction::Stop,
+            IssueMonitorPmControlAction::Recover,
+            IssueMonitorPmControlAction::Failover,
+        ] {
+            let mut monitor = pm_control_fixture(PmControlFixturePhase::Launched);
+            let source_profile = pm_control_target(&monitor)
+                .source_profile
+                .expect("launched fixture has source profile");
+            let failover_profile = pm_control_profile("claude", "opus-next");
+            if action == IssueMonitorPmControlAction::Failover {
+                let mut prefs = monitor.prefs();
+                prefs.launch_profile = Some(failover_profile.clone());
+                monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+            }
+            let request = pm_control_request(&monitor, "control-op-1", action.clone());
+            let attempts_before = monitor.attempt_count(42);
+            let before_admission = monitor.prefs();
+            let effect_authority_before = monitor.effect_authority_epoch();
+            let receipt = monitor
+                .admit_pm_control(request.clone())
+                .expect("exact authorized state request is admitted");
+
+            assert_eq!(monitor.active_count(), 0, "{action:?} frees local slot");
+            assert_eq!(monitor.attempt_count(42), attempts_before);
+            assert!(!monitor.queued_issue_numbers().contains(&42));
+            let prefs = monitor.prefs();
+            let issue_control = prefs.pm_control.issues.get(&42).unwrap();
+            assert_eq!(issue_control.revoked_through_generation, 1);
+            let pending = issue_control.pending_control.as_ref().unwrap();
+            assert_eq!(pending.operation_id, "control-op-1");
+            assert_eq!(pending.reason, "stalled provider");
+            assert_eq!(pending.target, request.target);
+            assert_eq!(prefs.pm_control.receipts.last(), Some(&receipt));
+            assert_pm_control_revision_advanced_and_durable(&before_admission, &prefs);
+            assert_eq!(
+                monitor.effect_authority_epoch(),
+                effect_authority_before + 1
+            );
+            assert_eq!(receipt.schema_version, 1);
+            assert_eq!(receipt.operation_id, request.operation_id);
+            assert_eq!(receipt.action, action);
+            assert_eq!(receipt.actor_session, request.actor_session);
+            assert_eq!(
+                receipt.actor_registration_generation,
+                request.actor_registration_generation
+            );
+            assert_eq!(receipt.issue_number, 42);
+            assert_eq!(receipt.launch_generation, 1);
+            assert_eq!(receipt.reason, "stalled provider");
+            assert_eq!(receipt.requested_at, "2026-08-15T00:10:00Z");
+            assert_eq!(receipt.settled_at, None);
+            assert_eq!(receipt.fingerprint.len(), 64, "SHA-256 hex fingerprint");
+            assert_eq!(
+                receipt.pending_prerequisites,
+                vec![
+                    IssueMonitorPmControlPrerequisite::ProcessTeardown,
+                    IssueMonitorPmControlPrerequisite::ClaimRelease,
+                ]
+            );
+            assert_eq!(
+                receipt.state,
+                match &action {
+                    IssueMonitorPmControlAction::Stop => {
+                        IssueMonitorPmControlReceiptState::HeldCleanupPending
+                    }
+                    IssueMonitorPmControlAction::Recover
+                    | IssueMonitorPmControlAction::Failover => {
+                        IssueMonitorPmControlReceiptState::PendingTeardown
+                    }
+                }
+            );
+
+            let restored_prefs: IssueMonitorPrefs = serde_json::from_str(
+                &serde_json::to_string(&prefs).expect("control admission prefs serialize"),
+            )
+            .expect("control admission prefs deserialize");
+            let mut restored =
+                IssueMonitorState::with_prefs(IssueMonitorConfig::default(), restored_prefs);
+            restored.record_candidate(issue(42));
+            let restored_status = restored.pm_control_status(42);
+            assert_eq!(restored_status.latest_receipt.as_ref(), Some(&receipt));
+            assert_eq!(restored_status.audit_receipts.last(), Some(&receipt));
+            assert_eq!(
+                restored
+                    .inbox_item(42)
+                    .and_then(|row| row.latest_pm_control_receipt.as_ref()),
+                Some(&receipt)
+            );
+            assert_eq!(
+                restored
+                    .inbox_item(42)
+                    .and_then(|row| row.latest_pm_control_reason.as_deref()),
+                Some("stalled provider")
+            );
+
+            match &action {
+                IssueMonitorPmControlAction::Stop => {
+                    assert_eq!(
+                        monitor.inbox_item(42).map(|row| row.state),
+                        Some(MonitorInboxState::NeedsHuman)
+                    );
+                    assert!(issue_control.pinned_next_profile.is_none());
+                    let held = issue_control
+                        .held
+                        .as_ref()
+                        .expect("Stop persists typed hold");
+                    assert_eq!(held.operation_id, request.operation_id);
+                    assert_eq!(held.reason, request.reason);
+                    assert_eq!(held.held_at, request.admitted_at);
+                    assert_eq!(held.target_fingerprint.len(), 64);
+                    assert_eq!(monitor.pm_control_status(42).held.as_ref(), Some(held));
+                }
+                IssueMonitorPmControlAction::Recover => {
+                    assert_eq!(
+                        issue_control.pinned_next_profile.as_ref(),
+                        Some(&source_profile)
+                    );
+                }
+                IssueMonitorPmControlAction::Failover => {
+                    assert_eq!(
+                        issue_control.pinned_next_profile.as_ref(),
+                        Some(&failover_profile)
+                    );
+                }
+            }
+
+            let before_replay = monitor.prefs();
+            let replayed = monitor
+                .admit_pm_control(request.clone())
+                .expect("exact retained replay returns prior receipt");
+            assert_eq!(replayed, receipt);
+            assert_eq!(monitor.prefs(), before_replay);
+
+            for conflict in 0..19 {
+                let mut conflicting = request.clone();
+                match conflict {
+                    0 => conflicting.project_key.push_str("-foreign"),
+                    1 => conflicting.action = IssueMonitorPmControlAction::Stop,
+                    2 => conflicting.actor_session.push_str("-replacement"),
+                    3 => conflicting.actor_registration_generation += 1,
+                    4 => conflicting.target.issue_number += 1,
+                    5 => conflicting.target.generation += 1,
+                    6 => conflicting.target.claim_id = Some("conflict-claim".to_string()),
+                    7 => conflicting.target.claim_owner = Some("conflict-owner".to_string()),
+                    8 => {
+                        conflicting.target.delivery_id = Some("conflict-delivery".to_string());
+                    }
+                    9 => {
+                        conflicting.target.materializer_id = Some("conflict-runtime".to_string());
+                    }
+                    10 => conflicting.target.materializer_pid = Some(9999),
+                    11 => {
+                        conflicting.target.materializer_window_id =
+                            Some("conflict::materializer".to_string());
+                    }
+                    12 => {
+                        conflicting.target.materialized_window_id =
+                            Some("conflict::materialized".to_string());
+                    }
+                    13 => {
+                        conflicting.target.workspace_durable_window_id =
+                            Some("conflict::durable".to_string());
+                    }
+                    14 => {
+                        conflicting.target.launched_window_id =
+                            Some("conflict::launched".to_string());
+                    }
+                    15 => conflicting.reason.push_str(" changed"),
+                    16 => conflicting.requested_profile = None,
+                    17 => {
+                        conflicting.target.source_profile_fingerprint =
+                            Some("conflict-profile".to_string());
+                    }
+                    18 => {
+                        let mut source_profile = conflicting
+                            .target
+                            .source_profile
+                            .clone()
+                            .expect("fixture source profile");
+                        source_profile.model = Some("snapshot-mutated".to_string());
+                        conflicting.target.source_profile = Some(source_profile);
+                    }
+                    _ => unreachable!(),
+                }
+                if conflicting == request {
+                    continue;
+                }
+                let mut replay_state = monitor.clone();
+                let before = replay_state.prefs();
+                assert_eq!(
+                    replay_state.admit_pm_control(conflicting),
+                    Err(IssueMonitorPmControlRefusal::ReceiptConflict)
+                );
+                assert_eq!(replay_state.prefs(), before);
+            }
+        }
+
+        for phase in [AutonomousPhase::Reviewing, AutonomousPhase::Delivering] {
+            for action in [
+                IssueMonitorPmControlAction::Stop,
+                IssueMonitorPmControlAction::Recover,
+                IssueMonitorPmControlAction::Failover,
+            ] {
+                let mut monitor = pm_control_fixture(PmControlFixturePhase::Launched);
+                if action == IssueMonitorPmControlAction::Failover {
+                    let mut prefs = monitor.prefs();
+                    prefs.launch_profile =
+                        Some(pm_control_profile("claude", "autonomous-failover"));
+                    monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+                }
+                let retry_budget = configure_pm_control_autonomous_attempt(&mut monitor, phase);
+                let request = pm_control_request(
+                    &monitor,
+                    &format!("autonomous-{phase:?}-{action:?}"),
+                    action,
+                );
+                let source = request.target.clone();
+                let receipt = monitor.admit_pm_control(request.clone()).unwrap();
+
+                assert_eq!(retry_budget_snapshot(&monitor, 42), retry_budget);
+                let parked = monitor.autonomous_record(42).unwrap();
+                assert_eq!(
+                    parked.phase,
+                    if action == IssueMonitorPmControlAction::Stop {
+                        AutonomousPhase::NeedsHuman
+                    } else {
+                        AutonomousPhase::Idle
+                    }
+                );
+                assert_eq!(parked.active_launch_id, None);
+                assert_eq!(parked.acceptance_snapshot, None);
+                assert_eq!(parked.last_heartbeat, None);
+                assert_eq!(parked.pr_number, None);
+                assert_eq!(parked.reviewed_sha, None);
+                assert_eq!(parked.review_passed, None);
+                assert!(!monitor.autonomous_in_flight_issues().contains(&42));
+                assert!(!monitor.is_autonomous_in_flight(42));
+                assert!(!monitor
+                    .stuck_autonomous_issues("2026-08-15T01:00:00Z")
+                    .contains(&42));
+                assert!(monitor
+                    .resume_inflight_reviews_after_restart("2026-08-15T01:00:00Z")
+                    .is_empty());
+                assert!(monitor.take_pending_review_dispatches().is_empty());
+                monitor.push_review_dispatch(AutonomousReviewDispatch {
+                    issue_number: 42,
+                    pr_number: 4242,
+                    reviewed_sha: "late-review-sha".to_string(),
+                    required_criteria: vec!["AC-1".to_string()],
+                    diff: "late diff".to_string(),
+                    linked_issue_kind: LinkedIssueKind::Issue,
+                });
+                assert!(monitor.take_pending_review_dispatches().is_empty());
+                assert!(monitor
+                    .prepare_pending_effect(
+                        "late-arm",
+                        IssueMonitorEffectPayload::ArmAutoMerge {
+                            issue_number: 42,
+                            pr_number: 4242,
+                            reviewed_sha: "late-review-sha".to_string(),
+                        },
+                    )
+                    .is_none());
+                let attempts_before_failure = monitor.attempt_count(42);
+                assert_eq!(
+                    monitor.record_autonomous_failure(
+                        42,
+                        FailureClass::Transient,
+                        "late worker failure",
+                        "2026-08-15T01:00:00Z",
+                    ),
+                    AutonomousFailureOutcome::Fenced
+                );
+                assert_eq!(monitor.attempt_count(42), attempts_before_failure);
+                monitor.record_merged(42);
+                assert!(!monitor.prefs().merged_issues.contains(&42));
+
+                let pending = monitor
+                    .prefs()
+                    .pm_control
+                    .issues
+                    .get(&42)
+                    .unwrap()
+                    .pending_control
+                    .clone()
+                    .unwrap();
+                if phase == AutonomousPhase::Delivering {
+                    assert_eq!(
+                        receipt.pending_prerequisites,
+                        vec![
+                            IssueMonitorPmControlPrerequisite::ProcessTeardown,
+                            IssueMonitorPmControlPrerequisite::ClaimRelease,
+                            IssueMonitorPmControlPrerequisite::AutoMergeDisarm,
+                        ]
+                    );
+                    assert_eq!(pending.auto_merge_pr_number, Some(4242));
+                    let control_disarms = monitor
+                        .pending_effects()
+                        .iter()
+                        .filter(|effect| {
+                            matches!(
+                                &effect.payload,
+                                IssueMonitorEffectPayload::DisarmAutoMerge {
+                                    issue_number: 42,
+                                    pr_number: 4242,
+                                    control_operation_id: Some(operation_id),
+                                    ..
+                                } if operation_id == &request.operation_id
+                            )
+                        })
+                        .count();
+                    assert_eq!(control_disarms, 1, "Attempting Arm compensation is reused");
+                    assert_eq!(
+                        monitor
+                            .pending_effects()
+                            .iter()
+                            .filter(|effect| matches!(
+                                &effect.payload,
+                                IssueMonitorEffectPayload::DisarmAutoMerge {
+                                    issue_number: 42,
+                                    pr_number: 4242,
+                                    ..
+                                }
+                            ))
+                            .count(),
+                        1,
+                        "authority advancement never duplicates the disarm"
+                    );
+
+                    assert_eq!(
+                        monitor.apply_generation_runtime_event(matching_window_closed(&source)),
+                        IssueMonitorGenerationEventDisposition::TeardownSettled
+                    );
+                    if action == IssueMonitorPmControlAction::Recover {
+                        assert!(monitor
+                            .settle_pm_control_claim_release(
+                                &request.operation_id,
+                                1,
+                                "claim-42-generation-1",
+                                "host/session-a",
+                                "2026-08-15T00:12:00Z",
+                            )
+                            .is_none());
+                        let mid = monitor.pm_control_status(42).latest_receipt.unwrap();
+                        assert!(!matches!(
+                            mid.state,
+                            IssueMonitorPmControlReceiptState::Terminal(_)
+                        ));
+                        assert_eq!(
+                            mid.pending_prerequisites,
+                            vec![IssueMonitorPmControlPrerequisite::AutoMergeDisarm]
+                        );
+                        assert!(!monitor.queued_issue_numbers().contains(&42));
+                        let settled = monitor
+                            .settle_pm_control_auto_merge_disarm(
+                                &request.operation_id,
+                                42,
+                                4242,
+                                "2026-08-15T00:12:01Z",
+                            )
+                            .expect("last disarm prerequisite finalizes recover");
+                        assert!(settled.should_scan);
+                    } else {
+                        assert!(monitor
+                            .settle_pm_control_auto_merge_disarm(
+                                &request.operation_id,
+                                42,
+                                4242,
+                                "2026-08-15T00:12:00Z",
+                            )
+                            .is_none());
+                        let mid = monitor.pm_control_status(42).latest_receipt.unwrap();
+                        assert_eq!(
+                            mid.pending_prerequisites,
+                            vec![IssueMonitorPmControlPrerequisite::ClaimRelease]
+                        );
+                        let settled = monitor
+                            .settle_pm_control_claim_release(
+                                &request.operation_id,
+                                1,
+                                "claim-42-generation-1",
+                                "host/session-a",
+                                "2026-08-15T00:12:01Z",
+                            )
+                            .expect("last claim prerequisite finalizes control");
+                        assert_eq!(
+                            settled.should_scan,
+                            action != IssueMonitorPmControlAction::Stop
+                        );
+                    }
+                } else {
+                    assert!(!receipt
+                        .pending_prerequisites
+                        .contains(&IssueMonitorPmControlPrerequisite::AutoMergeDisarm));
+                }
+            }
+        }
+
+        for mismatch in 0..13 {
+            let mut strict = pm_control_fixture(PmControlFixturePhase::Launched);
+            let mut request = pm_control_request(
+                &strict,
+                &format!("strict-target-{mismatch}"),
+                IssueMonitorPmControlAction::Recover,
+            );
+            let expected = match mismatch {
+                0 => {
+                    request.target.issue_number += 1;
+                    IssueMonitorPmControlTargetMismatch::IssueNumber
+                }
+                1 => {
+                    request.target.generation += 1;
+                    IssueMonitorPmControlTargetMismatch::Generation
+                }
+                2 => {
+                    request.target.claim_id = Some("stale-claim".to_string());
+                    IssueMonitorPmControlTargetMismatch::ClaimId
+                }
+                3 => {
+                    request.target.claim_owner = Some("foreign-owner".to_string());
+                    IssueMonitorPmControlTargetMismatch::ClaimOwner
+                }
+                4 => {
+                    request.target.delivery_id = Some("stale-delivery".to_string());
+                    IssueMonitorPmControlTargetMismatch::DeliveryId
+                }
+                5 => {
+                    request.target.materializer_id = Some("foreign-runtime".to_string());
+                    IssueMonitorPmControlTargetMismatch::MaterializerId
+                }
+                6 => {
+                    request.target.materializer_pid = Some(9999);
+                    IssueMonitorPmControlTargetMismatch::MaterializerPid
+                }
+                7 => {
+                    request.target.materializer_window_id = Some("agent-42".to_string());
+                    IssueMonitorPmControlTargetMismatch::MaterializerWindow
+                }
+                8 => {
+                    request.target.materialized_window_id = Some("agent-42".to_string());
+                    IssueMonitorPmControlTargetMismatch::MaterializedWindow
+                }
+                9 => {
+                    request.target.workspace_durable_window_id = Some("agent-42".to_string());
+                    IssueMonitorPmControlTargetMismatch::WorkspaceDurableWindow
+                }
+                10 => {
+                    request.target.launched_window_id = Some("agent-42".to_string());
+                    IssueMonitorPmControlTargetMismatch::LaunchedWindow
+                }
+                11 => {
+                    let mut profile = request.target.source_profile.clone().unwrap();
+                    profile.model = Some("stale-source-profile".to_string());
+                    request.target.source_profile = Some(profile);
+                    IssueMonitorPmControlTargetMismatch::SourceProfile
+                }
+                12 => {
+                    request.target.source_profile_fingerprint = Some("stale-profile".to_string());
+                    IssueMonitorPmControlTargetMismatch::SourceProfileFingerprint
+                }
+                _ => unreachable!(),
+            };
+            let before = strict.prefs();
+            assert_eq!(
+                strict.admit_pm_control(request),
+                Err(IssueMonitorPmControlRefusal::TargetMismatch(expected))
+            );
+            assert_eq!(
+                strict.prefs(),
+                before,
+                "target mismatch {mismatch} is an atomic refusal; windows are byte-exact"
+            );
+        }
+
+        for phase in [
+            PmControlFixturePhase::Prepared,
+            PmControlFixturePhase::Claimed,
+            PmControlFixturePhase::Materialized,
+            PmControlFixturePhase::WorkspaceDurable,
+            PmControlFixturePhase::Launched,
+        ] {
+            let monitor = pm_control_fixture(phase);
+            let base = pm_control_request(
+                &monitor,
+                &format!("missing-{phase:?}"),
+                IssueMonitorPmControlAction::Recover,
+            );
+            let mut missing = Vec::new();
+            let mut request = base.clone();
+            request.target.claim_id = None;
+            missing.push((
+                "claim_id",
+                IssueMonitorPmControlTargetMismatch::ClaimId,
+                request,
+            ));
+            let mut request = base.clone();
+            request.target.claim_owner = None;
+            missing.push((
+                "claim_owner",
+                IssueMonitorPmControlTargetMismatch::ClaimOwner,
+                request,
+            ));
+            let mut request = base.clone();
+            request.target.delivery_id = None;
+            missing.push((
+                "delivery_id",
+                IssueMonitorPmControlTargetMismatch::DeliveryId,
+                request,
+            ));
+            let mut request = base.clone();
+            request.target.source_profile = None;
+            missing.push((
+                "source_profile",
+                IssueMonitorPmControlTargetMismatch::SourceProfile,
+                request,
+            ));
+            let mut request = base.clone();
+            request.target.source_profile_fingerprint = None;
+            missing.push((
+                "source_profile_fingerprint",
+                IssueMonitorPmControlTargetMismatch::SourceProfileFingerprint,
+                request,
+            ));
+            if phase >= PmControlFixturePhase::Claimed {
+                let mut request = base.clone();
+                request.target.materializer_id = None;
+                missing.push((
+                    "materializer_id",
+                    IssueMonitorPmControlTargetMismatch::MaterializerId,
+                    request,
+                ));
+                let mut request = base.clone();
+                request.target.materializer_pid = None;
+                missing.push((
+                    "materializer_pid",
+                    IssueMonitorPmControlTargetMismatch::MaterializerPid,
+                    request,
+                ));
+                let mut request = base.clone();
+                request.target.materializer_window_id = None;
+                missing.push((
+                    "materializer_window_id",
+                    IssueMonitorPmControlTargetMismatch::MaterializerWindow,
+                    request,
+                ));
+            }
+            if phase >= PmControlFixturePhase::Materialized {
+                let mut request = base.clone();
+                request.target.materialized_window_id = None;
+                missing.push((
+                    "materialized_window_id",
+                    IssueMonitorPmControlTargetMismatch::MaterializedWindow,
+                    request,
+                ));
+            }
+            if phase >= PmControlFixturePhase::WorkspaceDurable {
+                let mut request = base.clone();
+                request.target.workspace_durable_window_id = None;
+                missing.push((
+                    "workspace_durable_window_id",
+                    IssueMonitorPmControlTargetMismatch::WorkspaceDurableWindow,
+                    request,
+                ));
+            }
+            if phase >= PmControlFixturePhase::Launched {
+                let mut request = base.clone();
+                request.target.launched_window_id = None;
+                missing.push((
+                    "launched_window_id",
+                    IssueMonitorPmControlTargetMismatch::LaunchedWindow,
+                    request,
+                ));
+            }
+
+            for (component, expected, request) in missing {
+                let mut refused = monitor.clone();
+                let before = refused.prefs();
+                assert_eq!(
+                    refused.admit_pm_control(request),
+                    Err(IssueMonitorPmControlRefusal::TargetMismatch(expected)),
+                    "{phase:?} requires {component}; None is never a wildcard"
+                );
+                assert_eq!(refused.prefs(), before);
+            }
+        }
+    }
+
+    #[test]
+    fn phase24_pane_then_claim_settlement_and_materializer_phase_matrix() {
+        for phase in [
+            PmControlFixturePhase::Prepared,
+            PmControlFixturePhase::Claimed,
+            PmControlFixturePhase::Materialized,
+            PmControlFixturePhase::WorkspaceDurable,
+            PmControlFixturePhase::Launched,
+        ] {
+            let mut monitor = pm_control_fixture_with_retry_budget(phase);
+            let retry_budget = retry_budget_snapshot(&monitor, 42);
+            assert!(retry_budget.0 > 0);
+            assert!(retry_budget.1.is_some());
+            let request = pm_control_request(
+                &monitor,
+                &format!("recover-{phase:?}"),
+                IssueMonitorPmControlAction::Recover,
+            );
+            let source = request.target.clone();
+            let before_admission = monitor.prefs();
+            monitor.admit_pm_control(request.clone()).unwrap();
+            let after_admission = monitor.prefs();
+            assert_pm_control_revision_advanced_and_durable(&before_admission, &after_admission);
+            assert_eq!(
+                retry_budget_snapshot(&monitor, 42),
+                retry_budget,
+                "control admission consumes neither attempt count nor retry backoff"
+            );
+            let pinned_profile = request
+                .requested_profile
+                .clone()
+                .expect("recover pins the exact source profile");
+            let mut edited_after_admission = monitor.prefs();
+            edited_after_admission.launch_profile =
+                Some(pm_control_profile("claude", "global-edited-after-recover"));
+            monitor = IssueMonitorState::with_prefs(
+                IssueMonitorConfig::default(),
+                edited_after_admission,
+            );
+            let pending = monitor
+                .prefs()
+                .pm_control
+                .issues
+                .get(&42)
+                .unwrap()
+                .pending_control
+                .clone()
+                .unwrap();
+
+            if phase == PmControlFixturePhase::Prepared {
+                assert!(pending.teardown_settled);
+                assert_eq!(
+                    release_control_claim_effect_count(
+                        &monitor,
+                        &request.operation_id,
+                        42,
+                        1,
+                        "claim-42-generation-1",
+                        "host/session-a",
+                    ),
+                    1
+                );
+            } else {
+                assert!(!pending.teardown_settled);
+                assert_eq!(
+                    release_control_claim_effect_count(
+                        &monitor,
+                        &request.operation_id,
+                        42,
+                        1,
+                        "claim-42-generation-1",
+                        "host/session-a",
+                    ),
+                    0,
+                    "{phase:?} cannot prepare release before exact teardown"
+                );
+                let early_settlements = [
+                    (
+                        request.operation_id.as_str(),
+                        1,
+                        "claim-42-generation-1",
+                        "host/session-a",
+                    ),
+                    (
+                        "foreign-operation",
+                        1,
+                        "claim-42-generation-1",
+                        "host/session-a",
+                    ),
+                    (
+                        request.operation_id.as_str(),
+                        2,
+                        "claim-42-generation-1",
+                        "host/session-a",
+                    ),
+                    (
+                        request.operation_id.as_str(),
+                        1,
+                        "foreign-claim",
+                        "host/session-a",
+                    ),
+                    (
+                        request.operation_id.as_str(),
+                        1,
+                        "claim-42-generation-1",
+                        "foreign-owner",
+                    ),
+                ];
+                for (operation_id, generation, claim_id, owner) in early_settlements {
+                    let mut refused = monitor.clone();
+                    let before = refused.prefs();
+                    assert!(refused
+                        .settle_pm_control_claim_release(
+                            operation_id,
+                            generation,
+                            claim_id,
+                            owner,
+                            "2026-08-15T00:10:20Z",
+                        )
+                        .is_none());
+                    assert_eq!(refused.prefs(), before);
+                }
+
+                let renewals = monitor.prepare_pending_control_claim_renewals(
+                    "2026-08-15T00:10:30Z",
+                    "2026-08-15T00:40:30Z",
+                );
+                assert_eq!(renewals.len(), 1);
+                assert!(matches!(
+                    &renewals[0].payload,
+                    IssueMonitorEffectPayload::RenewControlClaim {
+                        issue_number: 42,
+                        generation: 1,
+                        claim_id,
+                        owner,
+                        operation_id,
+                        ..
+                    } if claim_id == "claim-42-generation-1"
+                        && owner == "host/session-a"
+                        && operation_id == &request.operation_id
+                ));
+                assert_eq!(
+                    monitor
+                        .pending_effects()
+                        .iter()
+                        .filter(|effect| matches!(
+                            &effect.payload,
+                            IssueMonitorEffectPayload::RenewControlClaim {
+                                issue_number: 42,
+                                generation: 1,
+                                claim_id,
+                                owner,
+                                operation_id,
+                                ..
+                            } if claim_id == "claim-42-generation-1"
+                                && owner == "host/session-a"
+                                && operation_id == &request.operation_id
+                        ))
+                        .count(),
+                    1,
+                    "renewal is a single durable exact pending-control journal effect"
+                );
+                let renew_roundtrip: IssueMonitorPrefs = serde_json::from_str(
+                    &serde_json::to_string(&monitor.prefs()).expect("renew prefs serialize"),
+                )
+                .expect("renew prefs deserialize");
+                assert!(renew_roundtrip
+                    .pending_effects
+                    .iter()
+                    .any(|effect| matches!(
+                        &effect.payload,
+                        IssueMonitorEffectPayload::RenewControlClaim {
+                            issue_number: 42,
+                            generation: 1,
+                            claim_id,
+                            owner,
+                            operation_id,
+                            ..
+                        } if claim_id == "claim-42-generation-1"
+                            && owner == "host/session-a"
+                            && operation_id == &request.operation_id
+                    )));
+
+                let mut foreign = monitor.clone();
+                let before = foreign.prefs();
+                let mut foreign_source = source.clone();
+                foreign_source.materializer_window_id = Some("tab-b::agent-42".to_string());
+                assert_eq!(
+                    foreign.apply_generation_runtime_event(matching_window_closed(&foreign_source)),
+                    IssueMonitorGenerationEventDisposition::Ignored
+                );
+                assert_eq!(foreign.prefs(), before);
+
+                let before_teardown_settlement = monitor.prefs();
+                assert_eq!(
+                    monitor.apply_generation_runtime_event(matching_window_closed(&source)),
+                    IssueMonitorGenerationEventDisposition::TeardownSettled
+                );
+                let after_teardown_settlement = monitor.prefs();
+                assert_pm_control_revision_advanced_and_durable(
+                    &before_teardown_settlement,
+                    &after_teardown_settlement,
+                );
+                let runtime_pending = after_teardown_settlement
+                    .pm_control
+                    .issues
+                    .get(&42)
+                    .unwrap()
+                    .pending_control
+                    .as_ref()
+                    .unwrap();
+                assert_eq!(runtime_pending.teardown_evidence, None);
+                assert_eq!(
+                    after_teardown_settlement
+                        .pm_control
+                        .receipts
+                        .iter()
+                        .find(|receipt| receipt.operation_id == request.operation_id)
+                        .unwrap()
+                        .teardown_evidence,
+                    None
+                );
+                assert_eq!(
+                    retry_budget_snapshot(&monitor, 42),
+                    retry_budget,
+                    "matching control teardown consumes neither an attempt nor backoff"
+                );
+                assert!(monitor
+                    .prepare_pending_control_claim_renewals(
+                        "2026-08-15T00:11:30Z",
+                        "2026-08-15T00:41:30Z",
+                    )
+                    .is_empty());
+                assert!(!monitor.pending_effects().iter().any(|effect| matches!(
+                    &effect.payload,
+                    IssueMonitorEffectPayload::RenewControlClaim {
+                        operation_id,
+                        generation: 1,
+                        ..
+                    } if operation_id == &request.operation_id
+                )));
+                assert_eq!(
+                    release_control_claim_effect_count(
+                        &monitor,
+                        &request.operation_id,
+                        42,
+                        1,
+                        "claim-42-generation-1",
+                        "host/session-a",
+                    ),
+                    1,
+                    "exact teardown prepares exactly one exact release"
+                );
+            }
+
+            assert!(!monitor.queued_issue_numbers().contains(&42));
+            for (operation_id, generation, claim_id, owner) in [
+                (
+                    "foreign-operation",
+                    1,
+                    "claim-42-generation-1",
+                    "host/session-a",
+                ),
+                (
+                    request.operation_id.as_str(),
+                    2,
+                    "claim-42-generation-1",
+                    "host/session-a",
+                ),
+                (
+                    request.operation_id.as_str(),
+                    1,
+                    "foreign-claim",
+                    "host/session-a",
+                ),
+                (
+                    request.operation_id.as_str(),
+                    1,
+                    "claim-42-generation-1",
+                    "foreign-owner",
+                ),
+            ] {
+                let mut refused = monitor.clone();
+                let before = refused.prefs();
+                assert!(refused
+                    .settle_pm_control_claim_release(
+                        operation_id,
+                        generation,
+                        claim_id,
+                        owner,
+                        "2026-08-15T00:11:50Z",
+                    )
+                    .is_none());
+                assert_eq!(refused.prefs(), before);
+            }
+            monitor.record_candidate(issue(77));
+            assert_eq!(
+                monitor.queued_issue_numbers(),
+                vec![77],
+                "the recovery target remains quarantined behind an existing runnable Issue"
+            );
+            let before_release_settlement = monitor.prefs();
+            let settlement = monitor
+                .settle_pm_control_claim_release(
+                    &request.operation_id,
+                    1,
+                    "claim-42-generation-1",
+                    "host/session-a",
+                    "2026-08-15T00:12:00Z",
+                )
+                .expect("exact release settlement is accepted");
+            let after_release_settlement = monitor.prefs();
+            assert_pm_control_revision_advanced_and_durable(
+                &before_release_settlement,
+                &after_release_settlement,
+            );
+            assert_eq!(
+                retry_budget_snapshot(&monitor, 42),
+                retry_budget,
+                "exact claim-release settlement preserves retry accounting"
+            );
+            assert!(settlement.should_scan);
+            assert_eq!(
+                monitor.queued_issue_numbers(),
+                vec![42, 77],
+                "the released restart is inserted at priority head, never the tail"
+            );
+            assert_eq!(
+                monitor.prefs().queued_launch_session_strategies.get(&42),
+                Some(&IssueMonitorLaunchSessionStrategy::FreshRequired)
+            );
+
+            let terminal_before_replay = monitor.prefs();
+            let terminal_receipt = monitor
+                .pm_control_status(42)
+                .latest_receipt
+                .expect("release settlement terminalizes restart receipt");
+            assert_eq!(
+                monitor.admit_pm_control(request.clone()).unwrap(),
+                terminal_receipt
+            );
+            assert_eq!(monitor.prefs(), terminal_before_replay);
+            let mut terminal_conflict = request.clone();
+            terminal_conflict.reason.push_str(" conflicting reuse");
+            let before_conflict = monitor.prefs();
+            assert_eq!(
+                monitor.admit_pm_control(terminal_conflict),
+                Err(IssueMonitorPmControlRefusal::ReceiptConflict)
+            );
+            assert_eq!(monitor.prefs(), before_conflict);
+
+            let before_duplicate = monitor.prefs();
+            let duplicate = monitor.settle_pm_control_claim_release(
+                &request.operation_id,
+                1,
+                "claim-42-generation-1",
+                "host/session-a",
+                "2026-08-15T00:12:01Z",
+            );
+            assert_eq!(duplicate, Some(settlement));
+            assert_eq!(monitor.prefs(), before_duplicate);
+
+            scan_issue_monitor_candidates(&mut monitor, &[issue(42)], "2026-08-15T00:13:00Z");
+            assert!(monitor.apply_confirmed_claim(
+                42,
+                "claim-42-generation-2",
+                "host/session-b",
+                "effect-42-generation-2",
+                "2026-08-15T00:13:01Z",
+            ));
+            let next_prefs = monitor.prefs();
+            let next = &next_prefs.pending_launch_deliveries[0];
+            assert_eq!(next.generation, 2);
+            assert_eq!(next.source_profile.as_ref(), Some(&pinned_profile));
+            assert_ne!(
+                next.source_profile.as_ref(),
+                monitor.prefs().launch_profile.as_ref(),
+                "the global profile edited after recover admission cannot replace the source snapshot"
+            );
+            assert_eq!(
+                next.launch_session_strategy,
+                IssueMonitorLaunchSessionStrategy::FreshRequired
+            );
+            assert!(monitor
+                .prefs()
+                .pm_control
+                .issues
+                .get(&42)
+                .unwrap()
+                .pinned_next_profile
+                .is_none());
+        }
+
+        let mut stop = pm_control_fixture(PmControlFixturePhase::Launched);
+        let request = pm_control_request(&stop, "stop-held", IssueMonitorPmControlAction::Stop);
+        let source = request.target.clone();
+        stop.admit_pm_control(request.clone()).unwrap();
+        stop.apply_generation_runtime_event(matching_window_closed(&source));
+        let settled = stop
+            .settle_pm_control_claim_release(
+                &request.operation_id,
+                1,
+                "claim-42-generation-1",
+                "host/session-a",
+                "2026-08-15T00:12:00Z",
+            )
+            .unwrap();
+        assert!(!settled.should_scan);
+        assert!(!stop.queued_issue_numbers().contains(&42));
+        assert_eq!(
+            stop.pm_control_status(42).latest_receipt.unwrap().state,
+            IssueMonitorPmControlReceiptState::Terminal(IssueMonitorPmControlTerminalOutcome::Held)
+        );
+        let terminal_receipt = stop.pm_control_status(42).latest_receipt.unwrap();
+        let terminal_before_replay = stop.prefs();
+        assert_eq!(
+            stop.admit_pm_control(request.clone()).unwrap(),
+            terminal_receipt
+        );
+        assert_eq!(stop.prefs(), terminal_before_replay);
+        let mut terminal_conflict = request.clone();
+        terminal_conflict.reason.push_str(" conflicting reuse");
+        let before_conflict = stop.prefs();
+        assert_eq!(
+            stop.admit_pm_control(terminal_conflict),
+            Err(IssueMonitorPmControlRefusal::ReceiptConflict)
+        );
+        assert_eq!(stop.prefs(), before_conflict);
+
+        let mut failover = pm_control_fixture(PmControlFixturePhase::Launched);
+        let failover_profile = pm_control_profile("claude", "opus-admission-snapshot");
+        let mut prefs = failover.prefs();
+        prefs.launch_profile = Some(failover_profile.clone());
+        failover = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        let request = pm_control_request(
+            &failover,
+            "failover-profile-once",
+            IssueMonitorPmControlAction::Failover,
+        );
+        let source = request.target.clone();
+        failover.admit_pm_control(request.clone()).unwrap();
+        let mut edited = failover.prefs();
+        edited.launch_profile = Some(pm_control_profile("codex", "edited-after-admission"));
+        failover = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), edited);
+        failover.apply_generation_runtime_event(matching_window_closed(&source));
+        failover
+            .settle_pm_control_claim_release(
+                &request.operation_id,
+                1,
+                "claim-42-generation-1",
+                "host/session-a",
+                "2026-08-15T00:12:00Z",
+            )
+            .unwrap();
+        let terminal_receipt = failover.pm_control_status(42).latest_receipt.unwrap();
+        let terminal_before_replay = failover.prefs();
+        assert_eq!(
+            failover.admit_pm_control(request.clone()).unwrap(),
+            terminal_receipt
+        );
+        assert_eq!(failover.prefs(), terminal_before_replay);
+        let mut terminal_conflict = request.clone();
+        terminal_conflict.reason.push_str(" conflicting reuse");
+        let before_conflict = failover.prefs();
+        assert_eq!(
+            failover.admit_pm_control(terminal_conflict),
+            Err(IssueMonitorPmControlRefusal::ReceiptConflict)
+        );
+        assert_eq!(failover.prefs(), before_conflict);
+        scan_issue_monitor_candidates(&mut failover, &[issue(42)], "2026-08-15T00:13:00Z");
+        assert!(failover.apply_confirmed_claim(
+            42,
+            "claim-42-generation-2",
+            "host/session-b",
+            "effect-42-generation-2",
+            "2026-08-15T00:13:01Z",
+        ));
+        assert_eq!(
+            failover.prefs().pending_launch_deliveries[0]
+                .source_profile
+                .as_ref(),
+            Some(&failover_profile),
+            "a global edit after admission cannot change the pinned failover profile"
+        );
+    }
+
+    #[test]
+    fn phase24_recovery_pending_quarantines_every_queue_ingress_matrix() {
+        let mut pending = pm_control_fixture(PmControlFixturePhase::Launched);
+        let stale_before_control = pending.prefs();
+        let request = pm_control_request(
+            &pending,
+            "recover-quarantine",
+            IssueMonitorPmControlAction::Recover,
+        );
+        pending.admit_pm_control(request).unwrap();
+        let pending_disk = pending.prefs();
+
+        let restarted_prefs: IssueMonitorPrefs = serde_json::from_str(
+            &serde_json::to_string(&pending_disk).expect("pending control prefs serialize"),
+        )
+        .expect("pending control prefs deserialize across process restart");
+        let mut restarted =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), restarted_prefs);
+        for restart_stage in 0..3 {
+            match restart_stage {
+                0 => {}
+                1 => {
+                    restarted.record_candidate(issue(42));
+                }
+                2 => {
+                    scan_issue_monitor_candidates(
+                        &mut restarted,
+                        &[issue(42)],
+                        "2026-08-15T00:19:00Z",
+                    );
+                }
+                _ => unreachable!(),
+            }
+            assert_pm_control_quarantined(&mut restarted, 42);
+            let durable = restarted.prefs();
+            assert_eq!(
+                durable.pm_control.revision,
+                pending_disk.pm_control.revision
+            );
+            let issue_control = durable.pm_control.issues.get(&42).unwrap();
+            assert_eq!(issue_control.revoked_through_generation, 1);
+            assert!(issue_control.pending_control.is_some());
+        }
+
+        for ingress in 0..8 {
+            let mut monitor = if matches!(ingress, 5 | 6) {
+                IssueMonitorState::with_prefs(
+                    IssueMonitorConfig::default(),
+                    stale_before_control.clone(),
+                )
+            } else {
+                pending.clone()
+            };
+            match ingress {
+                0 => monitor.record_candidate(issue(42)),
+                1 => {
+                    scan_issue_monitor_candidates(
+                        &mut monitor,
+                        &[issue(42)],
+                        "2026-08-15T00:20:00Z",
+                    );
+                }
+                2 => {
+                    monitor.set_priority_order(vec![42]);
+                    scan_issue_monitor_candidates(
+                        &mut monitor,
+                        &[issue(42)],
+                        "2026-08-15T00:20:00Z",
+                    );
+                }
+                3 => {
+                    assert!(!monitor.request_launch_now(42));
+                }
+                4 => {
+                    assert!(monitor
+                        .expire_stale_unbound_launches("2026-08-15T02:00:00Z")
+                        .is_empty());
+                }
+                5 => monitor.rebase_daemon_driver_prefs(&pending_disk),
+                6 => monitor.rebase_gui_observer_prefs(&pending_disk),
+                7 => {
+                    monitor.reconcile_runnable_queue("2026-08-15T00:20:00Z");
+                }
+                _ => unreachable!(),
+            }
+            assert_pm_control_quarantined(&mut monitor, 42);
+            assert_eq!(
+                monitor.prefs().pm_control.revision,
+                pending_disk.pm_control.revision
+            );
+            assert_eq!(
+                monitor
+                    .prefs()
+                    .pm_control
+                    .issues
+                    .get(&42)
+                    .unwrap()
+                    .revoked_through_generation,
+                1,
+                "ingress {ingress} retains the permanent revocation fence"
+            );
+        }
+    }
+
+    #[test]
+    fn phase24_late_events_stale_rebase_and_receipt_eviction_cannot_cross_generation_fence() {
+        let mut monitor = pm_control_fixture(PmControlFixturePhase::Launched);
+        let stale_generation_one = monitor.prefs();
+        let request = pm_control_request(
+            &monitor,
+            "recover-generation-1",
+            IssueMonitorPmControlAction::Recover,
+        );
+        let old_source = request.target.clone();
+        monitor.admit_pm_control(request.clone()).unwrap();
+        monitor.apply_generation_runtime_event(matching_window_closed(&old_source));
+        monitor
+            .settle_pm_control_claim_release(
+                &request.operation_id,
+                1,
+                "claim-42-generation-1",
+                "host/session-a",
+                "2026-08-15T00:12:00Z",
+            )
+            .unwrap();
+        scan_issue_monitor_candidates(&mut monitor, &[issue(42)], "2026-08-15T00:13:00Z");
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            "claim-42-generation-2",
+            "host/session-b",
+            "effect-42-generation-2",
+            "2026-08-15T00:13:01Z",
+        ));
+        assert_eq!(pm_control_target(&monitor).generation, 2);
+
+        let mut legacy_source = old_source.clone();
+        legacy_source.generation = 0;
+        legacy_source.claim_id = None;
+        legacy_source.claim_owner = None;
+        legacy_source.delivery_id = None;
+        legacy_source.materializer_id = None;
+        legacy_source.materializer_pid = None;
+        legacy_source.materializer_window_id = None;
+        legacy_source.materialized_window_id = None;
+        legacy_source.workspace_durable_window_id = None;
+        legacy_source.source_profile = None;
+        legacy_source.source_profile_fingerprint = None;
+        for source in [&old_source, &legacy_source] {
+            for event in generation_runtime_events(source) {
+                let before = monitor.prefs();
+                assert_eq!(
+                    monitor.apply_generation_runtime_event(event),
+                    IssueMonitorGenerationEventDisposition::Revoked
+                );
+                assert_eq!(monitor.prefs(), before);
+            }
+        }
+
+        let settled_disk = monitor.prefs();
+        for rebase_entry in 0..2 {
+            let mut stale_resident = IssueMonitorState::with_prefs(
+                IssueMonitorConfig::default(),
+                stale_generation_one.clone(),
+            );
+            if rebase_entry == 0 {
+                stale_resident.rebase_daemon_driver_prefs(&settled_disk);
+            } else {
+                stale_resident.rebase_gui_observer_prefs(&settled_disk);
+            }
+            let rebased = stale_resident.prefs();
+            assert_eq!(
+                rebased.pm_control.revision,
+                settled_disk.pm_control.revision
+            );
+            let issue_control = rebased.pm_control.issues.get(&42).unwrap();
+            assert_eq!(issue_control.revoked_through_generation, 1);
+            assert_eq!(issue_control.generation_counter, 2);
+            assert!(issue_control.pending_control.is_none());
+            assert_eq!(pm_control_target(&stale_resident).generation, 2);
+            assert_ne!(
+                stale_resident.launched_window_id(42).as_deref(),
+                Some("tab-a::agent-42")
+            );
+            assert!(!stale_resident.queued_issue_numbers().contains(&42));
+        }
+
+        let mut evicted_disk = settled_disk;
+        evicted_disk.pm_control.receipts.clear();
+        let reloaded =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), evicted_disk.clone());
+        assert!(reloaded.prefs().pm_control.receipts.is_empty());
+        assert_eq!(pm_control_target(&reloaded).generation, 2);
+        for rebase_entry in 0..2 {
+            let mut stale_resident = IssueMonitorState::with_prefs(
+                IssueMonitorConfig::default(),
+                stale_generation_one.clone(),
+            );
+            if rebase_entry == 0 {
+                stale_resident.rebase_daemon_driver_prefs(&evicted_disk);
+            } else {
+                stale_resident.rebase_gui_observer_prefs(&evicted_disk);
+            }
+            let durable = stale_resident.prefs();
+            assert_eq!(
+                durable.pm_control.revision,
+                evicted_disk.pm_control.revision
+            );
+            let issue_control = durable.pm_control.issues.get(&42).unwrap();
+            assert!(durable.pm_control.receipts.is_empty());
+            assert_eq!(issue_control.revoked_through_generation, 1);
+            assert_eq!(issue_control.generation_counter, 2);
+            assert_eq!(pm_control_target(&stale_resident).generation, 2);
+            assert_ne!(
+                stale_resident.launched_window_id(42).as_deref(),
+                Some("tab-a::agent-42")
+            );
+            assert!(!stale_resident.queued_issue_numbers().contains(&42));
+        }
+
+        let mut held = pm_control_fixture(PmControlFixturePhase::Launched);
+        let held_stale_generation_one = held.prefs();
+        let stop_request = pm_control_request(
+            &held,
+            "stop-generation-1-held",
+            IssueMonitorPmControlAction::Stop,
+        );
+        let held_source = stop_request.target.clone();
+        held.admit_pm_control(stop_request.clone()).unwrap();
+        held.apply_generation_runtime_event(matching_window_closed(&held_source));
+        held.settle_pm_control_claim_release(
+            &stop_request.operation_id,
+            1,
+            "claim-42-generation-1",
+            "host/session-a",
+            "2026-08-15T00:14:00Z",
+        )
+        .unwrap();
+        assert_pm_control_held(&held, 42, 1);
+
+        let mut held_evicted_disk = held.prefs();
+        held_evicted_disk.pm_control.receipts.clear();
+        let held_roundtrip: IssueMonitorPrefs = serde_json::from_str(
+            &serde_json::to_string(&held_evicted_disk).expect("held prefs serialize"),
+        )
+        .expect("held prefs deserialize after terminal receipt eviction");
+        assert!(held_roundtrip.pm_control.receipts.is_empty());
+
+        for ingress in 0..4 {
+            let mut restored = IssueMonitorState::with_prefs(
+                IssueMonitorConfig {
+                    enabled: true,
+                    max_active: 2,
+                    ..IssueMonitorConfig::default()
+                },
+                held_roundtrip.clone(),
+            );
+            match ingress {
+                0 => restored.record_candidate(issue(42)),
+                1 => {
+                    scan_issue_monitor_candidates(
+                        &mut restored,
+                        &[issue(42)],
+                        "2026-08-15T00:15:00Z",
+                    );
+                }
+                2 => assert!(!restored.request_launch_now(42)),
+                3 => assert!(!restored.apply_confirmed_claim(
+                    42,
+                    "claim-42-after-held",
+                    "host/session-b",
+                    "effect-42-after-held",
+                    "2026-08-15T00:15:00Z",
+                )),
+                _ => unreachable!(),
+            }
+            assert!(restored
+                .next_launch_request("2026-08-15T00:15:01Z")
+                .is_none());
+            assert_pm_control_held(&restored, 42, 1);
+        }
+
+        let mut late_event_target = held_source.clone();
+        late_event_target.generation = 0;
+        late_event_target.claim_id = None;
+        late_event_target.claim_owner = None;
+        late_event_target.delivery_id = None;
+        late_event_target.materializer_id = None;
+        late_event_target.materializer_pid = None;
+        late_event_target.materializer_window_id = None;
+        late_event_target.materialized_window_id = None;
+        late_event_target.workspace_durable_window_id = None;
+        late_event_target.source_profile = None;
+        late_event_target.source_profile_fingerprint = None;
+        let mut held_after_late_event =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), held_roundtrip.clone());
+        for event in generation_runtime_events(&late_event_target) {
+            let before = held_after_late_event.prefs();
+            assert_eq!(
+                held_after_late_event.apply_generation_runtime_event(event),
+                IssueMonitorGenerationEventDisposition::Revoked
+            );
+            assert_eq!(held_after_late_event.prefs(), before);
+        }
+        assert_pm_control_held(&held_after_late_event, 42, 1);
+
+        for rebase_entry in 0..2 {
+            let mut stale_resident = IssueMonitorState::with_prefs(
+                IssueMonitorConfig {
+                    enabled: true,
+                    max_active: 2,
+                    ..IssueMonitorConfig::default()
+                },
+                held_stale_generation_one.clone(),
+            );
+            if rebase_entry == 0 {
+                stale_resident.rebase_daemon_driver_prefs(&held_roundtrip);
+            } else {
+                stale_resident.rebase_gui_observer_prefs(&held_roundtrip);
+            }
+            assert!(stale_resident
+                .next_launch_request("2026-08-15T00:15:01Z")
+                .is_none());
+            assert_pm_control_held(&stale_resident, 42, 1);
+            assert!(stale_resident.prefs().pm_control.receipts.is_empty());
+        }
+    }
+
+    #[test]
+    fn phase24r_execution_target_is_durable_in_pending_receipt_and_legacy_default() {
+        let mut monitor = pm_control_fixture(PmControlFixturePhase::Launched);
+        let request = pm_control_request(
+            &monitor,
+            "recover-exact-execution-target",
+            IssueMonitorPmControlAction::Recover,
+        );
+        let session_binding = gwt_agent::SessionExecutionBinding {
+            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+            session_id: "session-exact-target".to_string(),
+            repo_hash: "repo-exact-target".to_string(),
+            owner_kind: "issue".to_string(),
+            owner_number: 42,
+            identity: gwt_agent::ExecutionBindingIdentity {
+                generation_id: "generation-exact-target".to_string(),
+                binding_id: "binding-exact-target".to_string(),
+                ledger_head_hash: "head-exact-target".to_string(),
+            },
+            capability_generation: 7,
+        };
+        let worktree = tempfile::tempdir().unwrap();
+        let worktree_path = worktree.path().to_path_buf();
+        let session_identity = gwt_agent::SessionExecutionIdentity {
+            session_id: session_binding.session_id.clone(),
+            worktree_path: worktree_path.clone(),
+            project_state_root: Some(worktree_path.clone()),
+            repo_hash: Some(session_binding.repo_hash.clone()),
+            branch: "develop".to_string(),
+            agent_id: gwt_agent::AgentId::Codex,
+            linked_issue_number: Some(42),
+            execution_binding: session_binding.clone(),
+        };
+        let execution_target = IssueMonitorPmControlExecutionTarget {
+            worktree_path,
+            owner_kind: "issue".to_string(),
+            owner_number: 42,
+            generation_id: session_binding.identity.generation_id.clone(),
+            session_id: session_binding.session_id.clone(),
+            session_binding,
+            session_identity: Some(session_identity),
+            settlement_operation_id:
+                "issue-monitor-control:recover-exact-execution-target:exact-absence".to_string(),
+        };
+
+        let receipt = monitor
+            .admit_pm_control_with_execution_target(request, Some(execution_target.clone()))
+            .expect("admit durable exact execution target");
+        assert_eq!(receipt.execution_target, Some(execution_target.clone()));
+        let roundtrip: IssueMonitorPrefs =
+            serde_json::from_slice(&serde_json::to_vec(&monitor.prefs()).unwrap()).unwrap();
+        assert_eq!(
+            roundtrip
+                .pm_control
+                .issues
+                .get(&42)
+                .and_then(|state| state.pending_control.as_ref())
+                .and_then(|pending| pending.execution_target.as_ref()),
+            Some(&execution_target)
+        );
+        assert_eq!(
+            roundtrip
+                .pm_control
+                .receipts
+                .iter()
+                .find(|receipt| receipt.operation_id == "recover-exact-execution-target")
+                .and_then(|receipt| receipt.execution_target.as_ref()),
+            Some(&execution_target)
+        );
+
+        let mut legacy_identity = serde_json::to_value(&roundtrip).unwrap();
+        legacy_identity["pm_control"]["receipts"][0]["execution_target"]
+            .as_object_mut()
+            .unwrap()
+            .remove("session_identity");
+        legacy_identity["pm_control"]["issues"]["42"]["pending_control"]["execution_target"]
+            .as_object_mut()
+            .unwrap()
+            .remove("session_identity");
+        let legacy_identity: IssueMonitorPrefs = serde_json::from_value(legacy_identity).unwrap();
+        assert!(legacy_identity.pm_control.receipts[0]
+            .execution_target
+            .as_ref()
+            .is_some_and(|target| target.session_identity.is_none()));
+        assert!(legacy_identity
+            .pm_control
+            .issues
+            .get(&42)
+            .and_then(|state| state.pending_control.as_ref())
+            .and_then(|pending| pending.execution_target.as_ref())
+            .is_some_and(|target| target.session_identity.is_none()));
+
+        let mut legacy = serde_json::to_value(roundtrip).unwrap();
+        legacy["pm_control"]["receipts"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("execution_target");
+        legacy["pm_control"]["issues"]["42"]["pending_control"]
+            .as_object_mut()
+            .unwrap()
+            .remove("execution_target");
+        let legacy: IssueMonitorPrefs = serde_json::from_value(legacy).unwrap();
+        assert!(legacy.pm_control.receipts[0].execution_target.is_none());
+        assert!(legacy
+            .pm_control
+            .issues
+            .get(&42)
+            .and_then(|state| state.pending_control.as_ref())
+            .is_some_and(|pending| pending.execution_target.is_none()));
+    }
+
+    #[test]
+    fn phase24_receipt_capacity_overflow_and_authoritative_absence_matrix() {
+        for phase in [
+            PmControlFixturePhase::Claimed,
+            PmControlFixturePhase::Materialized,
+            PmControlFixturePhase::WorkspaceDurable,
+            PmControlFixturePhase::Launched,
+        ] {
+            let mut pending = pm_control_fixture(phase);
+            let request = pm_control_request(
+                &pending,
+                &format!("absence-{phase:?}"),
+                IssueMonitorPmControlAction::Recover,
+            );
+            let source = request.target.clone();
+            pending.admit_pm_control(request.clone()).unwrap();
+
+            let valid = RuntimeInventoryProof {
+                author: RuntimeInventoryProofAuthor::OwningAppRuntime {
+                    runtime_id: "app-runtime-a".to_string(),
+                },
+                project_key: "project-key-3578".to_string(),
+                inventory_revision: 41,
+                generation: 1,
+                materializer_id: source.materializer_id.clone(),
+                materializer_pid: source.materializer_pid,
+                window_id: teardown_window_id(&source),
+                observation: RuntimeInventoryObservation::Absent,
+                observed_at: "2026-08-15T00:15:00Z".to_string(),
+            };
+            let invalid = [
+                {
+                    let mut proof = valid.clone();
+                    proof.author = RuntimeInventoryProofAuthor::CallerSupplied;
+                    proof
+                },
+                {
+                    let mut proof = valid.clone();
+                    proof.project_key = "foreign-project".to_string();
+                    proof
+                },
+                {
+                    let mut proof = valid.clone();
+                    proof.inventory_revision = 40;
+                    proof
+                },
+                {
+                    let mut proof = valid.clone();
+                    proof.generation = 2;
+                    proof
+                },
+                {
+                    let mut proof = valid.clone();
+                    proof.materializer_id = Some("app-runtime-b".to_string());
+                    proof
+                },
+                {
+                    let mut proof = valid.clone();
+                    proof.materializer_pid = Some(4343);
+                    proof
+                },
+                {
+                    let mut proof = valid.clone();
+                    proof.window_id = Some("tab-b::agent-42".to_string());
+                    proof
+                },
+                {
+                    let mut proof = valid.clone();
+                    proof.observation = RuntimeInventoryObservation::Present;
+                    proof
+                },
+                {
+                    let mut proof = valid.clone();
+                    proof.observation = RuntimeInventoryObservation::Ambiguous;
+                    proof
+                },
+                {
+                    let mut proof = valid.clone();
+                    proof.observation = RuntimeInventoryObservation::Unavailable;
+                    proof
+                },
+            ];
+            for proof in invalid {
+                let mut refused = pending.clone();
+                let before = refused.prefs();
+                assert_eq!(
+                    refused.reconcile_pm_control_absence(&request.operation_id, proof),
+                    IssueMonitorAbsenceReconcileOutcome::Refused,
+                    "{phase:?} accepts only newer exact owning-AppRuntime absence"
+                );
+                assert_eq!(refused.prefs(), before);
+            }
+            let mut replacement = pending.clone();
+            let mut replacement_proof = valid.clone();
+            replacement_proof.author = RuntimeInventoryProofAuthor::OwningAppRuntime {
+                runtime_id: "app-runtime-b".to_string(),
+            };
+            replacement_proof.inventory_revision = 1;
+            let before_replacement = replacement.prefs();
+            assert_eq!(
+                replacement.reconcile_pm_control_absence(
+                    &request.operation_id,
+                    replacement_proof.clone(),
+                ),
+                IssueMonitorAbsenceReconcileOutcome::Refused,
+                "a replacement runtime first establishes its own revision fence"
+            );
+            let after_replacement_fence = replacement.prefs();
+            assert_ne!(after_replacement_fence, before_replacement);
+            assert!(after_replacement_fence
+                .pm_control
+                .issues
+                .get(&42)
+                .and_then(|state| state.pending_control.as_ref())
+                .and_then(|pending| pending.inventory_revision_fence.as_ref())
+                .is_some_and(|fence| {
+                    fence.runtime_id == "app-runtime-b" && fence.inventory_revision == 1
+                }));
+            assert_eq!(
+                replacement.reconcile_pm_control_absence(
+                    &request.operation_id,
+                    replacement_proof.clone(),
+                ),
+                IssueMonitorAbsenceReconcileOutcome::Refused
+            );
+            assert_eq!(replacement.prefs(), after_replacement_fence);
+            replacement_proof.inventory_revision = 2;
+            assert_eq!(
+                replacement.reconcile_pm_control_absence(&request.operation_id, replacement_proof),
+                IssueMonitorAbsenceReconcileOutcome::TeardownSettled,
+                "only a strictly newer replacement-runtime proof settles teardown"
+            );
+            let before_valid = pending.prefs();
+            assert_eq!(
+                pending.reconcile_pm_control_absence(&request.operation_id, valid.clone()),
+                IssueMonitorAbsenceReconcileOutcome::TeardownSettled
+            );
+            let after_valid = pending.prefs();
+            let settled_revision =
+                assert_pm_control_revision_advanced_and_durable(&before_valid, &after_valid);
+            assert_pm_control_teardown_settled_projection(
+                &after_valid,
+                &request.operation_id,
+                42,
+                settled_revision,
+                Some(&valid),
+            );
+            let settled_roundtrip: IssueMonitorPrefs = serde_json::from_str(
+                &serde_json::to_string(&after_valid)
+                    .expect("absence-settled projection serializes"),
+            )
+            .expect("absence-settled projection deserializes");
+            assert_pm_control_teardown_settled_projection(
+                &settled_roundtrip,
+                &request.operation_id,
+                42,
+                settled_revision,
+                Some(&valid),
+            );
+            for rebase_entry in 0..2 {
+                let mut stale = IssueMonitorState::with_prefs(
+                    IssueMonitorConfig::default(),
+                    before_valid.clone(),
+                );
+                if rebase_entry == 0 {
+                    stale.rebase_daemon_driver_prefs(&settled_roundtrip);
+                } else {
+                    stale.rebase_gui_observer_prefs(&settled_roundtrip);
+                }
+                assert_pm_control_teardown_settled_projection(
+                    &stale.prefs(),
+                    &request.operation_id,
+                    42,
+                    settled_revision,
+                    Some(&valid),
+                );
+            }
+            assert_eq!(
+                release_control_claim_effect_count(
+                    &pending,
+                    &request.operation_id,
+                    42,
+                    1,
+                    "claim-42-generation-1",
+                    "host/session-a",
+                ),
+                1
+            );
+            assert_eq!(
+                pending.reconcile_pm_control_absence(&request.operation_id, valid),
+                IssueMonitorAbsenceReconcileOutcome::AlreadySettled
+            );
+            assert_eq!(pending.prefs(), after_valid);
+        }
+
+        assert_eq!(MAX_ISSUE_MONITOR_PM_CONTROL_RECEIPTS, 128);
+        let mut at_capacity = IssueMonitorState::with_prefs(
+            IssueMonitorConfig {
+                enabled: true,
+                max_active: 129,
+                ..IssueMonitorConfig::default()
+            },
+            IssueMonitorPrefs {
+                enabled: true,
+                max_active_agents: 129,
+                launch_profile: Some(pm_control_profile("codex", "capacity-source")),
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        for issue_number in 1_000..1_129 {
+            add_pm_control_fixture_launch(
+                &mut at_capacity,
+                issue_number,
+                PmControlFixturePhase::Launched,
+            );
+        }
+        for issue_number in 1_000..1_128 {
+            let request = pm_control_request_for(
+                &at_capacity,
+                issue_number,
+                &format!("pending-{issue_number}"),
+                IssueMonitorPmControlAction::Stop,
+            );
+            at_capacity.admit_pm_control(request).unwrap();
+        }
+        let capacity_prefs = at_capacity.prefs();
+        assert_eq!(
+            capacity_prefs.pm_control.receipts.len(),
+            MAX_ISSUE_MONITOR_PM_CONTROL_RECEIPTS
+        );
+        assert_eq!(
+            capacity_prefs
+                .pm_control
+                .issues
+                .values()
+                .filter(|issue| issue.pending_control.is_some())
+                .count(),
+            MAX_ISSUE_MONITOR_PM_CONTROL_RECEIPTS,
+            "every non-evictable pending receipt has its matching per-Issue pending control"
+        );
+        let capacity_request = pm_control_request_for(
+            &at_capacity,
+            1_128,
+            "capacity-refused",
+            IssueMonitorPmControlAction::Stop,
+        );
+        let before_capacity = at_capacity.prefs();
+        assert_eq!(
+            at_capacity.admit_pm_control(capacity_request.clone()),
+            Err(IssueMonitorPmControlRefusal::ReceiptCapacity)
+        );
+        assert_eq!(at_capacity.prefs(), before_capacity);
+
+        let oldest = before_capacity.pm_control.receipts[0].operation_id.clone();
+        let first_source = before_capacity
+            .pm_control
+            .issues
+            .get(&1_000)
+            .unwrap()
+            .pending_control
+            .as_ref()
+            .unwrap()
+            .target
+            .clone();
+        at_capacity.apply_generation_runtime_event(matching_window_closed(&first_source));
+        at_capacity
+            .settle_pm_control_claim_release(
+                "pending-1000",
+                1,
+                "claim-1000-generation-1",
+                "host/session-a",
+                "2026-08-15T00:16:00Z",
+            )
+            .unwrap();
+        assert_eq!(
+            at_capacity
+                .pm_control_status(1_000)
+                .latest_receipt
+                .unwrap()
+                .state,
+            IssueMonitorPmControlReceiptState::Terminal(IssueMonitorPmControlTerminalOutcome::Held)
+        );
+        at_capacity.admit_pm_control(capacity_request).unwrap();
+        assert_eq!(
+            at_capacity.prefs().pm_control.receipts.len(),
+            MAX_ISSUE_MONITOR_PM_CONTROL_RECEIPTS
+        );
+        assert!(at_capacity
+            .prefs()
+            .pm_control
+            .receipts
+            .iter()
+            .all(|receipt| receipt.operation_id != oldest));
+
+        for overflow in 0..3 {
+            let monitor = pm_control_fixture(PmControlFixturePhase::Launched);
+            let request = pm_control_request(
+                &monitor,
+                &format!("overflow-{overflow}"),
+                IssueMonitorPmControlAction::Recover,
+            );
+            let mut prefs = monitor.prefs();
+            let expected = match overflow {
+                0 => {
+                    prefs.pm_control.revision = u64::MAX;
+                    IssueMonitorPmControlRefusal::ControlRevisionExhausted
+                }
+                1 => {
+                    prefs
+                        .pm_control
+                        .issues
+                        .get_mut(&42)
+                        .unwrap()
+                        .generation_counter = u64::MAX;
+                    IssueMonitorPmControlRefusal::GenerationExhausted
+                }
+                2 => {
+                    prefs.effect_authority_epoch = u64::MAX;
+                    IssueMonitorPmControlRefusal::EffectAuthorityExhausted
+                }
+                _ => unreachable!(),
+            };
+            let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+            let before = monitor.prefs();
+            assert_eq!(monitor.admit_pm_control(request), Err(expected));
+            assert_eq!(monitor.prefs(), before);
+        }
     }
 }

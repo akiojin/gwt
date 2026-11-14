@@ -1173,6 +1173,11 @@ mod tests {
             "issue.monitor.stop",
             // SPEC-3431 FR-029〜031: failover revokes it and requeues.
             "issue.monitor.failover",
+            // SPEC-3431 Phase 24 FR-130/FR-131: recovery revokes a stalled
+            // generation behind teardown fences; reconciliation asks the
+            // owning runtime for exact absence evidence.
+            "issue.monitor.recover",
+            "issue.monitor.control.reconcile",
         ] {
             assert!(!is_read_only_json_envelope_operation(operation));
         }
@@ -1187,6 +1192,8 @@ mod tests {
             "issue.monitor.launch_now",
             "issue.monitor.stop",
             "issue.monitor.failover",
+            "issue.monitor.recover",
+            "issue.monitor.control.reconcile",
         ] {
             let command = format!(
                 "gwtd <<'JSON'\n{{\"schema_version\":1,\"operation\":\"{operation}\",\"params\":{{}}}}\nJSON"

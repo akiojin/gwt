@@ -784,6 +784,16 @@ pub(crate) enum AgentFrontendRequest {
         text: String,
         responder: Option<AgentPmSendResponder>,
     },
+    IssueMonitorRuntimeInventory {
+        expected_project_scope: String,
+        request_id: String,
+    },
+    IssueMonitorRuntimeInventoryProof {
+        expected_project_scope: String,
+        request_id: String,
+        operation_id: String,
+        revoked_generation: u64,
+    },
 }
 
 impl std::fmt::Debug for AgentFrontendRequest {
@@ -798,6 +808,12 @@ impl std::fmt::Debug for AgentFrontendRequest {
             }
             Self::PmSendInput { .. } => {
                 formatter.write_str("AgentFrontendRequest::PmSendInput(<redacted>)")
+            }
+            Self::IssueMonitorRuntimeInventory { .. } => {
+                formatter.write_str("AgentFrontendRequest::IssueMonitorRuntimeInventory")
+            }
+            Self::IssueMonitorRuntimeInventoryProof { .. } => {
+                formatter.write_str("AgentFrontendRequest::IssueMonitorRuntimeInventoryProof")
             }
         }
     }
@@ -3246,6 +3262,24 @@ impl AgentPaneSessionScope {
                     responder: None,
                 })
             }
+            FrontendEvent::AgentIssueMonitorRuntimeInventory {
+                expected_project_scope,
+                request_id,
+            } => Some(AgentFrontendRequest::IssueMonitorRuntimeInventory {
+                expected_project_scope,
+                request_id,
+            }),
+            FrontendEvent::AgentIssueMonitorRuntimeInventoryProof {
+                expected_project_scope,
+                request_id,
+                operation_id,
+                revoked_generation,
+            } => Some(AgentFrontendRequest::IssueMonitorRuntimeInventoryProof {
+                expected_project_scope,
+                request_id,
+                operation_id,
+                revoked_generation,
+            }),
             _ => None,
         }
     }
@@ -3267,6 +3301,8 @@ impl AgentPaneSessionScope {
                 .and_then(serde_json::Value::as_str)
                 .is_none_or(|id| self.allowed_window_ids.contains(id))
                 .then_some(payload),
+            "issue_monitor_runtime_inventory" => Some(payload),
+            "issue_monitor_runtime_inventory_proof" => Some(payload),
             _ => None,
         }
     }
@@ -3335,6 +3371,30 @@ impl AgentPaneSessionScope {
             .filter(|id| self.allowed_window_ids.contains(id))
             .collect()
     }
+}
+
+#[cfg(test)]
+pub(crate) fn route_agent_pane_request_for_test(
+    principal: AgentSessionPrincipal,
+    event: FrontendEvent,
+) -> Option<AgentFrontendRequest> {
+    AgentPaneSessionScope::new(AgentCapabilityGrant::new(
+        "test-agent-pane-capability".to_string(),
+        principal,
+    ))
+    .filter_inbound(event)
+}
+
+#[cfg(test)]
+pub(crate) fn filter_agent_pane_reply_for_test(
+    principal: AgentSessionPrincipal,
+    payload: String,
+) -> Option<String> {
+    AgentPaneSessionScope::new(AgentCapabilityGrant::new(
+        "test-agent-pane-capability".to_string(),
+        principal,
+    ))
+    .filter_outbound(payload)
 }
 
 enum ClientSessionScope {
@@ -5275,6 +5335,43 @@ mod tests {
             recorded_self_close_commit_ids(&events),
             vec!["send-timeout-ticket"]
         );
+    }
+
+    #[test]
+    fn t496_agent_status_inventory_crosses_only_the_authenticated_agent_route() {
+        let project = tempfile::tempdir().expect("project");
+        let principal =
+            AgentSessionPrincipal::for_test(project.path(), "pm-session").expect("agent principal");
+        let mut scope = super::AgentPaneSessionScope::new(super::AgentCapabilityGrant::new(
+            "capability".to_string(),
+            principal,
+        ));
+        assert!(matches!(
+            scope.filter_inbound(FrontendEvent::AgentIssueMonitorRuntimeInventory {
+                expected_project_scope: "scope-gwt".to_string(),
+                request_id: "inventory-status-3578".to_string(),
+            }),
+            Some(super::AgentFrontendRequest::IssueMonitorRuntimeInventory {
+                expected_project_scope,
+                request_id,
+            }) if expected_project_scope == "scope-gwt"
+                && request_id == "inventory-status-3578"
+        ));
+        assert!(scope
+            .filter_outbound(
+                serde_json::json!({
+                    "kind": "issue_monitor_runtime_inventory",
+                    "request_id": "inventory-status-3578",
+                    "inventory": {
+                        "availability": "unavailable",
+                        "project_scope": "scope-gwt",
+                        "observed_at": "2026-08-29T00:00:00Z",
+                        "reason": "project_scope_mismatch"
+                    }
+                })
+                .to_string(),
+            )
+            .is_some());
     }
 
     #[test]

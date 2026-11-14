@@ -140,6 +140,7 @@ pub fn issue_monitor_daemon_payloads(
                     "branch_name": request.branch_name,
                     "linked_issue_kind": request.linked_issue_kind,
                     "delivery_id": delivery_id,
+                    "launch_profile": request.launch_profile,
                     "launch_session_strategy": request.launch_session_strategy,
                 }),
             });
@@ -1418,6 +1419,8 @@ mod tests {
             launch_plan: None,
             error_message: None,
             exclusion_reason: None,
+            latest_pm_control_receipt: None,
+            latest_pm_control_reason: None,
         });
         monitor.record_attempt(42);
         monitor.escalate_to_needs_human(42, "review rejected");
@@ -1698,6 +1701,52 @@ mod tests {
         assert_eq!(
             monitor.inbox_item(42).expect("inbox item").state,
             MonitorInboxState::Launching
+        );
+    }
+
+    /// SPEC-3431 Phase 24R / T496: the daemon owns the request-time launch
+    /// profile snapshot. The GUI must not need to reconstruct it from prefs
+    /// after this payload has been emitted.
+    #[test]
+    fn t496_daemon_launch_request_payload_carries_the_request_time_profile() {
+        let profile = crate::IssueMonitorLaunchProfile {
+            agent_id: "codex".to_string(),
+            model: Some("gpt-request-time".to_string()),
+            reasoning: Some("high".to_string()),
+            version: Some("request-time".to_string()),
+            session_mode: gwt_agent::SessionMode::Normal,
+            skip_permissions: true,
+            codex_fast_mode: false,
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            docker_service: None,
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+            windows_shell: None,
+        };
+        let client = FakeIssueClient::new();
+        client.seed(github_issue(42));
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig {
+                enabled: true,
+                ..IssueMonitorConfig::default()
+            },
+            crate::IssueMonitorPrefs {
+                enabled: true,
+                launch_profile: Some(profile.clone()),
+                ..crate::IssueMonitorPrefs::default()
+            },
+        );
+        monitor.set_gui_connected(true);
+        monitor.record_candidate(issue(42));
+        monitor.claim_next_launch_requests(&client, "host-a/session-a", "2026-08-29T00:40:00Z");
+
+        let launch = issue_monitor_daemon_payloads(&mut monitor, true)
+            .into_iter()
+            .find(|payload| payload.event == "launch_request")
+            .expect("launch request payload");
+        assert_eq!(
+            launch.payload.get("launch_profile"),
+            Some(&serde_json::to_value(profile).expect("profile serializes")),
+            "the immutable request profile must cross the daemon payload boundary"
         );
     }
 

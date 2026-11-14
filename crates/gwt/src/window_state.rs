@@ -5,6 +5,189 @@ use crate::{
 };
 use gwt_terminal::PaneStatus;
 
+/// Provider family whose current rendered screen can author an exact-window
+/// human-approval wait. Unknown providers deliberately remain unclassified.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalPromptProvider {
+    ClaudeCode,
+    Codex,
+    Unsupported,
+}
+
+/// Return a privacy-safe identity only for a complete approval prompt at the
+/// bottom of the current vt100 screen. Provider-specific title, choices, and
+/// footer are all required; quoted transcript blocks are not live prompts.
+pub fn approval_prompt_fingerprint(provider: ApprovalPromptProvider, screen: &str) -> Option<u64> {
+    if provider == ApprovalPromptProvider::Unsupported {
+        return None;
+    }
+
+    let normalized = normalize_approval_screen(screen);
+    let (titles, accepts, reject, footer): (&[&str], &[&str], &str, &str) = match provider {
+        ApprovalPromptProvider::Codex => (
+            &[
+                "wouldyouliketorunthefollowingcommand?",
+                "wouldyouliketograntthesepermissions?",
+                "wouldyouliketomakethefollowingedits?",
+                "needsyourapproval.",
+            ],
+            &["1.yes,proceed", "yes,proceed"],
+            "no,andtellcodexwhattododifferently",
+            "pressentertoconfirmoresctocancel",
+        ),
+        ApprovalPromptProvider::ClaudeCode => (
+            &[
+                "doyouwanttoproceed?",
+                "doyouwanttomakethiseditto",
+                "doyouwanttoallowclaudetofetchthiscontent?",
+            ],
+            &[
+                "1.yes",
+                "yes,duringthissession",
+                "yes,allow",
+                "yes,anddon'taskagain",
+                "yes,anddon’taskagain",
+            ],
+            "no,andtellclaudewhattododifferently",
+            "entertoconfirm·esctocancel",
+        ),
+        ApprovalPromptProvider::Unsupported => return None,
+    };
+
+    if !normalized.ends_with(footer) {
+        return None;
+    }
+    let (title, title_start, title_end) = titles
+        .iter()
+        .filter_map(|title| {
+            normalized
+                .rfind(title)
+                .map(|start| (*title, start, start + title.len()))
+        })
+        .max_by_key(|(_, start, _)| *start)?;
+    if latest_title_is_quoted(screen, title) {
+        return None;
+    }
+    let accept_end = accepts
+        .iter()
+        .filter_map(|accept| {
+            normalized[title_end..]
+                .find(accept)
+                .map(|start| title_end + start + accept.len())
+        })
+        .min()?;
+    let reject_end = normalized[accept_end..]
+        .find(reject)
+        .map(|start| accept_end + start + reject.len())?;
+    let footer_start = normalized[reject_end..]
+        .find(footer)
+        .map(|start| reject_end + start)?;
+    if footer_start + footer.len() != normalized.len()
+        || !has_selected_choice_in_latest_block(screen, title, &normalized[title_end..footer_start])
+    {
+        return None;
+    }
+
+    Some(fnv1a64(
+        match provider {
+            ApprovalPromptProvider::Codex => b"codex:".as_slice(),
+            ApprovalPromptProvider::ClaudeCode => b"claude-code:".as_slice(),
+            ApprovalPromptProvider::Unsupported => return None,
+        },
+        &normalized.as_bytes()[title_start..],
+    ))
+}
+
+/// Whether an incomplete redraw still carries distinctive approval UI. This
+/// is used only to retain an already-authorized latch, never to create one.
+pub fn has_approval_prompt_evidence(provider: ApprovalPromptProvider, screen: &str) -> bool {
+    let normalized = normalize_approval_screen(screen);
+    let evidence: &[&str] = match provider {
+        ApprovalPromptProvider::Codex => &[
+            "wouldyouliketorunthefollowingcommand?",
+            "wouldyouliketograntthesepermissions?",
+            "wouldyouliketomakethefollowingedits?",
+            "needsyourapproval.",
+            "no,andtellcodexwhattododifferently",
+            "pressentertoconfirmoresctocancel",
+        ],
+        ApprovalPromptProvider::ClaudeCode => &[
+            "doyouwanttoproceed?",
+            "doyouwanttomakethiseditto",
+            "doyouwanttoallowclaudetofetchthiscontent?",
+            "no,andtellclaudewhattododifferently",
+            "entertoconfirm·esctocancel",
+        ],
+        ApprovalPromptProvider::Unsupported => return false,
+    };
+    let prompt_chrome_reaches_bottom = evidence.iter().any(|phrase| normalized.ends_with(phrase))
+        || screen
+            .lines()
+            .rev()
+            .find(|line| !line.trim().is_empty())
+            .and_then(selected_choice_body)
+            .is_some();
+    prompt_chrome_reaches_bottom && evidence.iter().any(|phrase| normalized.contains(phrase))
+}
+
+fn normalize_approval_screen(screen: &str) -> String {
+    screen
+        .lines()
+        .map(|line| selected_choice_body(line).unwrap_or(line))
+        .flat_map(str::chars)
+        .filter(|character| {
+            !character.is_whitespace() && !matches!(character, '›' | '❯' | '▸' | '▶')
+        })
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn latest_title_is_quoted(screen: &str, normalized_title: &str) -> bool {
+    screen
+        .lines()
+        .rev()
+        .find(|line| normalize_approval_screen(line).contains(normalized_title))
+        .is_some_and(|line| line.trim_start().starts_with('>'))
+}
+
+fn has_selected_choice_in_latest_block(
+    screen: &str,
+    normalized_title: &str,
+    normalized_block: &str,
+) -> bool {
+    let lines = screen.lines().collect::<Vec<_>>();
+    let title_line = (0..lines.len()).rev().find(|start| {
+        normalize_approval_screen(&lines[*start..].join("\n")).contains(normalized_title)
+    });
+    let Some(title_line) = title_line else {
+        return false;
+    };
+    lines[title_line..].iter().any(|line| {
+        let Some(rest) = selected_choice_body(line) else {
+            return false;
+        };
+        let normalized_choice = normalize_approval_screen(rest);
+        !normalized_choice.is_empty() && normalized_block.contains(&normalized_choice)
+    })
+}
+
+fn selected_choice_body(line: &str) -> Option<&str> {
+    let rest = line
+        .trim_start()
+        .strip_prefix(['›', '❯', '▸', '▶', '>'])?
+        .trim_start();
+    matches!(rest.as_bytes(), [b'0'..=b'9', b'.', ..]).then_some(rest)
+}
+
+fn fnv1a64(prefix: &[u8], value: &[u8]) -> u64 {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in prefix.iter().chain(value) {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
 pub fn compose_window_state(
     pty_state: WindowState,
     preset: WindowPreset,
@@ -100,8 +283,9 @@ fn parse_runtime_status(status: &str) -> Option<WindowState> {
 #[cfg(test)]
 mod tests {
     use super::{
-        compose_window_state, compose_window_state_with_active_session, runtime_hook_window_state,
-        window_state_from_pane_status,
+        approval_prompt_fingerprint, compose_window_state,
+        compose_window_state_with_active_session, has_approval_prompt_evidence,
+        runtime_hook_window_state, window_state_from_pane_status, ApprovalPromptProvider,
     };
     use crate::{
         daemon_runtime::{RuntimeHookEvent, RuntimeHookEventKind},
@@ -311,5 +495,43 @@ mod tests {
             window_state_from_pane_status(&PaneStatus::Error("boom".to_string())),
             WindowState::Error
         );
+    }
+
+    #[test]
+    fn t496_approval_detector_accepts_only_complete_provider_specific_bottom_prompt() {
+        let codex = "Would you like to run the following command?\n\n  cargo test\n\n\
+            › 1. Yes, proceed\n  2. No, and tell Codex what to do differently\n\n\
+            Press enter to confirm or esc to cancel";
+        let claude = "Bash command\n\n  cargo test\n\nDo you want to proceed?\n\
+            ❯ 1. Yes\n  2. No, and tell Claude what to do differently\n\n\
+            Enter to confirm · Esc to cancel";
+
+        assert!(approval_prompt_fingerprint(ApprovalPromptProvider::Codex, codex).is_some());
+        assert!(approval_prompt_fingerprint(ApprovalPromptProvider::ClaudeCode, claude).is_some());
+        assert!(approval_prompt_fingerprint(ApprovalPromptProvider::ClaudeCode, codex).is_none());
+        assert!(approval_prompt_fingerprint(ApprovalPromptProvider::Unsupported, codex).is_none());
+    }
+
+    #[test]
+    fn t496_approval_detector_rejects_partial_redraw_and_quoted_history() {
+        let partial = "Would you like to run the following command?\n› 1. Yes, proceed";
+        let historical = "Would you like to run the following command?\n\
+            › 1. Yes, proceed\n  2. No, and tell Codex what to do differently\n\
+            Press enter to confirm or esc to cancel\ncommand completed";
+        let quoted = "> Would you like to run the following command?\n\
+            > 1. Yes, proceed\n> 2. No, and tell Codex what to do differently\n\
+            > Press enter to confirm or esc to cancel";
+
+        assert!(approval_prompt_fingerprint(ApprovalPromptProvider::Codex, partial).is_none());
+        assert!(approval_prompt_fingerprint(ApprovalPromptProvider::Codex, historical).is_none());
+        assert!(approval_prompt_fingerprint(ApprovalPromptProvider::Codex, quoted).is_none());
+        assert!(has_approval_prompt_evidence(
+            ApprovalPromptProvider::Codex,
+            partial
+        ));
+        assert!(!has_approval_prompt_evidence(
+            ApprovalPromptProvider::Codex,
+            historical
+        ));
     }
 }

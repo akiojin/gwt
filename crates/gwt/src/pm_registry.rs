@@ -149,10 +149,31 @@ impl Default for PmSettings {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct PmPrefs {
+    /// Durable PM-authority watermark. Only a committed principal change
+    /// advances it; deregistration deliberately retains the fence.
+    #[serde(default)]
+    pub registration_generation: u64,
     #[serde(default)]
     pub registration: Option<PmRegistration>,
     #[serde(default)]
     pub settings: PmSettings,
+}
+
+/// Lock-scoped identity of the project's currently registered PM.
+#[derive(Debug, PartialEq, Eq)]
+pub struct RegisteredPmPrincipal {
+    session_id: String,
+    generation: u64,
+}
+
+impl RegisteredPmPrincipal {
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
 }
 
 /// Outcome of a singleton registration attempt (FR-001).
@@ -735,7 +756,17 @@ pub fn try_register_pm(
             Some(stale) => PmRegisterOutcome::ReplacedStale { previous: stale },
             None => PmRegisterOutcome::Registered,
         };
+        let next_generation = prefs
+            .registration_generation
+            .checked_add(1)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "PM registration generation exhausted",
+                )
+            })?;
         prefs.registration = Some(candidate);
+        prefs.registration_generation = next_generation;
         save_pm_prefs_unlocked(path, &prefs)?;
         Ok((prefs, outcome))
     })
@@ -776,6 +807,32 @@ pub fn session_is_registered_pm(prefs_path: &Path, session_id: &str) -> bool {
         prefs
             .registration
             .is_some_and(|registration| registration.session_id == session_id)
+    })
+}
+
+/// Keep the stable PM lock for the complete privileged operation so a stale
+/// registration replacement cannot overtake an authorized state mutation.
+pub fn with_registered_pm_authority<T>(
+    prefs_path: &Path,
+    ambient_session: &str,
+    operation: impl FnOnce(&RegisteredPmPrincipal) -> io::Result<T>,
+) -> io::Result<Option<T>> {
+    with_pm_prefs_lock(prefs_path, || {
+        if ambient_session.is_empty() {
+            return Ok(None);
+        }
+        let prefs = load_pm_prefs_unlocked(prefs_path)?;
+        let Some(registration) = prefs.registration else {
+            return Ok(None);
+        };
+        if registration.session_id != ambient_session {
+            return Ok(None);
+        }
+        let principal = RegisteredPmPrincipal {
+            session_id: registration.session_id,
+            generation: prefs.registration_generation,
+        };
+        operation(&principal).map(Some)
     })
 }
 
@@ -954,6 +1011,7 @@ mod tests {
     fn save_then_load_roundtrips_and_leaves_no_scratch() {
         let (_dir, path) = temp_prefs_path();
         let prefs = PmPrefs {
+            registration_generation: 1,
             registration: Some(registration("session-a")),
             settings: PmSettings {
                 auto_start: false,
@@ -1183,6 +1241,7 @@ mod tests {
     #[test]
     fn status_report_without_registration_omits_liveness_fields() {
         let prefs = PmPrefs {
+            registration_generation: 0,
             registration: None,
             settings: PmSettings {
                 auto_start: false,
@@ -1315,6 +1374,107 @@ mod tests {
         assert!(
             !session_is_registered_pm(&path, "session-a"),
             "a closed PM loses its privilege immediately"
+        );
+    }
+
+    /// SPEC-3431 Phase 24 T250 (FR-128): PM authority is versioned by a
+    /// checked, project-scoped registration generation.  A refused live
+    /// registration is not a generation change; replacing a stale principal
+    /// is.  Read the durable JSON rather than naming the future Rust field so
+    /// this remains a test-RED instead of blocking unrelated slices at compile
+    /// time.
+    #[test]
+    fn t250_pm_registration_generation_advances_only_on_committed_principal_change() {
+        let (_dir, path) = temp_prefs_path();
+
+        try_register_pm(&path, registration("session-a"), |_| false).expect("register A");
+        let first = serde_json::from_slice::<serde_json::Value>(
+            &fs::read(&path).expect("read first registration"),
+        )
+        .expect("parse first registration");
+
+        let before_refusal = fs::read(&path).expect("bytes before live refusal");
+        let (_, refused) =
+            try_register_pm(&path, registration("session-b"), |_| true).expect("refuse live B");
+        assert!(matches!(refused, PmRegisterOutcome::RejectedLive { .. }));
+        assert_eq!(
+            fs::read(&path).expect("bytes after live refusal"),
+            before_refusal,
+            "a refused registration must be byte-identical and generation-stable"
+        );
+
+        try_register_pm(&path, registration("session-b"), |_| false).expect("replace stale A");
+        let replacement = serde_json::from_slice::<serde_json::Value>(
+            &fs::read(&path).expect("read replacement registration"),
+        )
+        .expect("parse replacement registration");
+
+        assert_eq!(
+            first
+                .get("registration_generation")
+                .and_then(serde_json::Value::as_u64),
+            Some(1),
+            "the first durable PM principal owns generation 1"
+        );
+        assert_eq!(
+            replacement
+                .get("registration_generation")
+                .and_then(serde_json::Value::as_u64),
+            Some(2),
+            "stale-principal replacement must advance the durable generation"
+        );
+    }
+
+    #[test]
+    fn t250_pm_registration_generation_overflow_refuses_without_rewriting_prefs() {
+        let (_dir, path) = temp_prefs_path();
+        fs::create_dir_all(path.parent().expect("prefs parent")).expect("create prefs parent");
+        let seeded = serde_json::json!({
+            "registration": serde_json::to_value(registration("session-old"))
+                .expect("serialize registration"),
+            "registration_generation": u64::MAX,
+            "settings": PmSettings::default(),
+        });
+        fs::write(
+            &path,
+            serde_json::to_vec_pretty(&seeded).expect("serialize max generation prefs"),
+        )
+        .expect("seed max generation prefs");
+        let before = fs::read(&path).expect("prefs bytes before overflow attempt");
+
+        let _error = try_register_pm(&path, registration("session-new"), |_| false)
+            .expect_err("generation overflow must fail closed");
+
+        assert_eq!(
+            fs::read(&path).expect("prefs bytes after overflow attempt"),
+            before,
+            "authority exhaustion must not replace the old principal or rewrite bytes"
+        );
+    }
+
+    /// Canonical and symlink spellings of one project must address one PM
+    /// authority store; a genuinely foreign project must address another.
+    #[cfg(unix)]
+    #[test]
+    fn t250_pm_prefs_resolution_coalesces_symlinks_but_not_foreign_projects() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let canonical = temp.path().join("canonical-project");
+        let foreign = temp.path().join("foreign-project");
+        let alias = temp.path().join("project-alias");
+        fs::create_dir_all(&canonical).expect("canonical project");
+        fs::create_dir_all(&foreign).expect("foreign project");
+        std::os::unix::fs::symlink(&canonical, &alias).expect("project symlink");
+
+        assert_eq!(
+            pm_prefs_path_for_repo_path(&canonical),
+            pm_prefs_path_for_repo_path(&alias),
+            "symlink and canonical spellings must share one durable PM principal"
+        );
+        assert_ne!(
+            pm_prefs_path_for_repo_path(&canonical),
+            pm_prefs_path_for_repo_path(&foreign),
+            "a foreign project must not inherit the caller project's PM principal"
         );
     }
 

@@ -485,6 +485,8 @@ mod monitor_snapshot_cache_tests {
             launch_plan: None,
             error_message: None,
             exclusion_reason: exclusion_reason.map(str::to_string),
+            latest_pm_control_receipt: None,
+            latest_pm_control_reason: None,
         }
     }
 

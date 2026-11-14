@@ -4459,6 +4459,10 @@ pub fn record_workspace_work_events_paths(
     events_path: &Path,
     events: Vec<WorkEvent>,
 ) -> Result<()> {
+    let events = events
+        .into_iter()
+        .map(checkout_portable_tracked_work_event)
+        .collect::<Vec<_>>();
     with_workspace_work_items_lock(work_items_path, || {
         let initial_updated_at = events
             .first()
@@ -6191,9 +6195,32 @@ fn append_workspace_work_events_to_path(path: &Path, events: &[WorkEvent]) -> Re
     let records = events
         .iter()
         .cloned()
+        .map(checkout_portable_tracked_work_event)
         .map(WorkEventLogRecord::from_local_event)
         .collect::<Vec<_>>();
     append_workspace_work_event_records_to_path(path, &records)
+}
+
+fn checkout_portable_tracked_work_event(mut event: WorkEvent) -> WorkEvent {
+    if let Some(container) = event.execution_container.as_mut() {
+        let has_stable_identity = container
+            .branch
+            .as_deref()
+            .is_some_and(|branch| !branch.trim().is_empty())
+            || container.pr_number.is_some()
+            || container
+                .pr_url
+                .as_deref()
+                .is_some_and(|url| !url.trim().is_empty());
+        let has_absolute_checkout_path = container
+            .worktree_path
+            .as_deref()
+            .is_some_and(Path::is_absolute);
+        if has_stable_identity && has_absolute_checkout_path {
+            container.worktree_path = None;
+        }
+    }
+    event
 }
 
 fn append_workspace_work_event_records_to_path(

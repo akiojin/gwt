@@ -110,7 +110,19 @@ pub fn parse_claim_comment(
 }
 
 pub fn claim_is_active(claim: &ClaimComment, now: &str) -> bool {
-    claim.status == ClaimStatus::Active && claim.expires_at.as_str() > now
+    claim.status == ClaimStatus::Active && rfc3339_instant_is_after(&claim.expires_at, now)
+}
+
+/// Compare two RFC3339 timestamps as instants. Invalid input fails closed so
+/// lease/claim callers never preserve ownership from malformed remote state.
+pub fn rfc3339_instant_is_after(candidate: &str, reference: &str) -> bool {
+    let Ok(candidate) = chrono::DateTime::parse_from_rfc3339(candidate) else {
+        return false;
+    };
+    let Ok(reference) = chrono::DateTime::parse_from_rfc3339(reference) else {
+        return false;
+    };
+    candidate > reference
 }
 
 pub fn select_winning_claim<'a>(claims: &'a [ClaimComment], now: &str) -> Option<&'a ClaimComment> {

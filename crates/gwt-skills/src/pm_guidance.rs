@@ -139,11 +139,15 @@ You may watch the agents the Monitor launched. You may not drive them.
 You may also stop one. There are two ways, and they mean different
 things:
 
-- `issue.monitor.stop` is how you say **stop**. Pass `params.number`,
-  a `params.reason`, and the identity of the launch you mean:
-  `params.claim_id`, `params.delivery_id`, and `params.window_id`, all
-  read from that issue's row in `issue.monitor.status`. It revokes the
-  launch's authority, frees its slot, and holds the issue.
+- `issue.monitor.stop` is how you say **stop**. Pass a new replay-safe
+  `params.operation_id`, `params.number`, a `params.reason`, and the exact
+  target from `issue.monitor.status`: `params.launch_generation`,
+  `params.claim_id`, `params.claim_owner`, `params.delivery_id`,
+  `params.materializer_window_id`, `params.window_id`, and
+  `params.launch_profile_fingerprint`. It revokes the launch's authority,
+  frees its local slot, and holds the issue. The old pane and remote claim
+  remain visible as pending cleanup until their exact settlements arrive;
+  stop never makes the issue runnable.
   It spends no retry attempt and puts nothing back in the queue.
 
   Send the identity exactly as the snapshot reports it. Omitting a
@@ -155,8 +159,8 @@ things:
   component that disagreed.
 
   The stop does not close the pane. Close it yourself afterwards with
-  `pane.close`; the launch is already revoked, so that close cannot
-  requeue or relaunch anything.
+  `pane.close`; the launch generation is already revoked, so that exact
+  close settles teardown but cannot requeue or relaunch the held issue.
 
 - `pane.close` on its own says **this attempt failed, try again**.
   Closing a Monitor-launched pane counts as one attempt against that
@@ -166,15 +170,33 @@ things:
   one — you cannot spin an issue by closing it repeatedly, and you
   should still say why you closed it.
 
-- `issue.monitor.failover` says **run this somewhere else**. Same
-  parameters and the same exact-identity rule as the stop, but instead
-  of holding the issue it puts it back at the head of the queue, so the
-  next scan launches it on whatever launch profile is saved at that
-  moment. Switching provider is therefore two steps: change the profile,
-  then call this. It spends no retry attempt either — when a provider is
-  out of quota the work is fine and the account is not, and charging
-  that to the issue's budget would eventually hand healthy work to a
-  human over someone else's billing cycle.
+- `issue.monitor.failover` says **run this somewhere else**. Send the same
+  exact target and a fresh operation ID. Change the saved provider/profile
+  first: failover snapshots that profile when the request is admitted. It
+  then stays teardown/claim-release pending; only exact cleanup queues one
+  fresh Session at the priority head with that pinned profile. A later
+  global profile edit cannot change the accepted failover. It spends no
+  retry attempt either.
+
+- `issue.monitor.recover` says **retry this stalled launch on its source
+  profile**. It requires the same complete target and a caller-chosen
+  replay-safe operation ID. Unlike failover it snapshots the old launch's
+  source profile; if that source profile is not proven, recover is refused.
+  It never immediately relaunches: teardown and exact old-claim release must
+  settle before one fresh Session is queued.
+
+- If a pending stop/failover/recover lost its close acknowledgement, call
+  `issue.monitor.control.reconcile` with the retained `params.operation_id`
+  and `params.revoked_generation`. This asks the owning AppRuntime for a
+  newer exact inventory proof. It settles teardown only when that runtime
+  proves the old target absent; still-present, unavailable, ambiguous,
+  stale, or foreign proof leaves pending cleanup unchanged. Never invent
+  absence or edit the state file.
+
+Re-read status before every control. Replaying the same operation ID with
+the same target is safe; reusing it for different input is refused. If the
+outcome remains pending, close the exact pane when appropriate and observe
+the receipt/prerequisites in status rather than issuing a new operation ID.
 
 Use the stop when the work should not run now. Use the failover when it
 should run on a different provider. Use a bare close when you want the
@@ -360,6 +382,12 @@ mod tests {
             // outcome rather than a different way to stop.
             "`issue.monitor.failover`",
             "run this somewhere else",
+            // FR-128〜131: durable exact-target recovery and reconciliation.
+            "`issue.monitor.recover`",
+            "source profile",
+            "`issue.monitor.control.reconcile`",
+            "replay-safe operation ID",
+            "pending cleanup",
             // FR-068: stalls are observable, and their cause is not.
             "`last_activity_at`",
             "cannot tell you why",

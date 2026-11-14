@@ -22,6 +22,27 @@ use crate::{
     worktree_inventory::WorktreeEntry,
 };
 
+/// Durable identity attached to lifecycle notifications when the producer can
+/// prove which monitored launch generation authored the event. Legacy
+/// producers may omit it (or send `null`), while present identities are
+/// decoded strictly so malformed generation fences cannot be downgraded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IssueMonitorLifecycleSourceIdentity {
+    pub issue_number: u64,
+    pub launch_generation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_owner: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub materializer_window_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FileContentMode {
@@ -212,6 +233,22 @@ pub enum ContinueWorkOutcomeKind {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FrontendEvent {
     FrontendReady,
+    /// Authenticated agent-route request for the owning AppRuntime's full
+    /// project pane inventory. The project scope is a non-secret guard; the
+    /// server-side capability principal remains routing authority.
+    AgentIssueMonitorRuntimeInventory {
+        expected_project_scope: String,
+        request_id: String,
+    },
+    /// Capability-authenticated request for an AppRuntime-authored proof.
+    /// The server-side principal supplies the project root; the wire carries
+    /// only a non-secret scope guard and the exact control identity.
+    AgentIssueMonitorRuntimeInventoryProof {
+        expected_project_scope: String,
+        request_id: String,
+        operation_id: String,
+        revoked_generation: u64,
+    },
     /// Toggle Claude account-usage collection (SPEC-2970 FR-009).
     SetClaudeAccountUsageEnabled {
         enabled: bool,
@@ -1696,6 +1733,18 @@ pub enum BackendEvent {
         message: String,
         issue_number: Option<u64>,
     },
+    /// Origin-client-only reply for one authenticated status inventory query.
+    IssueMonitorRuntimeInventory {
+        request_id: String,
+        inventory: crate::IssueMonitorRuntimeInventory,
+    },
+    IssueMonitorRuntimeInventoryProof {
+        request_id: String,
+        proof: crate::RuntimeInventoryProof,
+    },
+    IssueMonitorSettlementDelivery {
+        result: crate::IssueMonitorSettlementDelivery,
+    },
     AttachmentProgress {
         id: String,
         operation_id: String,
@@ -2447,6 +2496,21 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventDeliveryClass::EphemeralStatus,
         BackendEventBackpressurePolicy::BestEffort,
     ),
+    BackendEventPolicy::new(
+        "issue_monitor_runtime_inventory",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "issue_monitor_runtime_inventory_proof",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
+        "issue_monitor_settlement_delivery",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
     // Issue #3315: attachment progress is a lossless latest-state snapshot
     // coalesced per operation (`operation_id`), not a droppable ephemeral
     // status. This guarantees the terminal `Attached` / `Failed` phase reaches
@@ -2870,6 +2934,13 @@ impl BackendEvent {
             BackendEvent::IssueMonitorInbox { .. } => "issue_monitor_inbox",
             BackendEvent::IssueMonitorLaunchFailed { .. } => "issue_monitor_launch_failed",
             BackendEvent::IssueMonitorToast { .. } => "issue_monitor_toast",
+            BackendEvent::IssueMonitorRuntimeInventory { .. } => "issue_monitor_runtime_inventory",
+            BackendEvent::IssueMonitorRuntimeInventoryProof { .. } => {
+                "issue_monitor_runtime_inventory_proof"
+            }
+            BackendEvent::IssueMonitorSettlementDelivery { .. } => {
+                "issue_monitor_settlement_delivery"
+            }
             BackendEvent::AttachmentProgress { .. } => "attachment_progress",
             BackendEvent::WindowState { .. } => "window_state",
             BackendEvent::FileTreeEntries { .. } => "file_tree_entries",
@@ -5189,5 +5260,167 @@ mod tests {
             event,
             FrontendEvent::RestartWindow { id } if id == "tab-1::agent-1"
         ));
+    }
+
+    /// SPEC-3431 Phase 24 / T252 (FR-131): the authenticated client asks only
+    /// for reconciliation of a durable operation/generation. Presence and
+    /// absence are never request fields; the owning AppRuntime authors the
+    /// proof returned on the same correlation ID.
+    #[test]
+    fn t252_runtime_inventory_wire_keeps_query_identity_separate_from_server_proof() {
+        let baseline_json = serde_json::json!({
+            "kind": "agent_issue_monitor_runtime_inventory_proof",
+            "expected_project_scope": "scope-project-a",
+            "request_id": "inventory-request-42",
+            "operation_id": "recover-op-42",
+            "revoked_generation": 17,
+        });
+        let baseline = serde_json::from_value::<FrontendEvent>(baseline_json.clone())
+            .expect("deserialize runtime inventory query");
+        assert!(matches!(
+            &baseline,
+            FrontendEvent::AgentIssueMonitorRuntimeInventoryProof {
+                expected_project_scope,
+                request_id,
+                operation_id,
+                revoked_generation,
+            } if expected_project_scope == "scope-project-a"
+                && request_id == "inventory-request-42"
+                && operation_id == "recover-op-42"
+                && *revoked_generation == 17
+        ));
+
+        for (field, forged) in [
+            ("project_root", serde_json::json!("/repo/project-b")),
+            ("absent", serde_json::json!(true)),
+            ("observed_absent", serde_json::json!(true)),
+            ("inventory_revision", serde_json::json!(u64::MAX)),
+            ("runtime_id", serde_json::json!("forged-runtime")),
+            ("window_id", serde_json::json!("tab-x::forged")),
+            ("proof", serde_json::json!({"observation": "absent"})),
+        ] {
+            let mut attempted = baseline_json.clone();
+            attempted
+                .as_object_mut()
+                .expect("query object")
+                .insert(field.to_string(), forged);
+            if let Ok(parsed) = serde_json::from_value::<FrontendEvent>(attempted) {
+                assert_eq!(
+                    format!("{parsed:?}"),
+                    format!("{baseline:?}"),
+                    "caller field {field} must not become proof authority"
+                );
+            }
+        }
+
+        let proof = crate::RuntimeInventoryProof {
+            author: crate::RuntimeInventoryProofAuthor::OwningAppRuntime {
+                runtime_id: "app-runtime-a".to_string(),
+            },
+            project_key: "project-key-a".to_string(),
+            inventory_revision: 44,
+            generation: 17,
+            materializer_id: Some("app-runtime-a".to_string()),
+            materializer_pid: Some(4242),
+            window_id: Some("tab-a::agent-42".to_string()),
+            observation: crate::RuntimeInventoryObservation::Absent,
+            observed_at: "2026-08-15T00:15:00Z".to_string(),
+        };
+        let event = BackendEvent::IssueMonitorRuntimeInventoryProof {
+            request_id: "inventory-request-42".to_string(),
+            proof: proof.clone(),
+        };
+        let wire = serde_json::to_value(&event).expect("serialize AppRuntime proof");
+        assert_eq!(wire["kind"], "issue_monitor_runtime_inventory_proof");
+        assert_eq!(wire["request_id"], "inventory-request-42");
+        assert_eq!(wire["proof"]["project_key"], "project-key-a");
+        assert_eq!(wire["proof"]["inventory_revision"], 44);
+        assert_eq!(wire["proof"]["generation"], 17);
+        assert_eq!(wire["proof"]["materializer_id"], "app-runtime-a");
+        assert_eq!(wire["proof"]["materializer_pid"], 4242);
+        assert_eq!(wire["proof"]["window_id"], "tab-a::agent-42");
+        assert_eq!(wire["proof"]["observation"], "absent");
+        assert_eq!(event.event_kind(), "issue_monitor_runtime_inventory_proof");
+        let policy = backend_event_policy("issue_monitor_runtime_inventory_proof")
+            .expect("proof response has an explicit delivery policy");
+        assert_eq!(policy.delivery, BackendEventDeliveryClass::Error);
+        assert_eq!(
+            policy.backpressure,
+            BackendEventBackpressurePolicy::FailOpenError
+        );
+
+        // Portable companion to the Unix live-endpoint integration test: the
+        // public status handler compares the resident projection with the
+        // durable candidate before serializing its response. This contains no
+        // socket/signal/path assumption and therefore runs on Windows too.
+        let resident = serde_json::json!({
+            "pm_control": {
+                "revision": 7,
+                "issues": [{
+                    "issue_number": 42,
+                    "target": { "generation": 1, "claim_id": "stale-claim" }
+                }]
+            }
+        });
+        let disk = serde_json::json!({
+            "pm_control": {
+                "revision": 8,
+                "issues": [{
+                    "issue_number": 42,
+                    "target": {
+                        "generation": 2,
+                        "claim_id": "claim-42-generation-2",
+                        "window_id": "tab-a::agent-42"
+                    }
+                }]
+            }
+        });
+        assert_eq!(
+            crate::cli::issue::merge_issue_monitor_status_projection(resident, disk.clone()),
+            disk,
+            "Windows-safe handler must select the exact newer disk target/revision"
+        );
+    }
+
+    #[test]
+    fn t496_agent_status_inventory_wire_is_correlated_and_strictly_typed() {
+        let request = serde_json::from_value::<FrontendEvent>(serde_json::json!({
+            "kind": "agent_issue_monitor_runtime_inventory",
+            "expected_project_scope": "scope-gwt",
+            "request_id": "inventory-status-3578",
+        }))
+        .expect("typed status inventory request");
+        assert!(matches!(
+            request,
+            FrontendEvent::AgentIssueMonitorRuntimeInventory {
+                expected_project_scope,
+                request_id,
+            } if expected_project_scope == "scope-gwt"
+                && request_id == "inventory-status-3578"
+        ));
+
+        let event = BackendEvent::IssueMonitorRuntimeInventory {
+            request_id: "inventory-status-3578".to_string(),
+            inventory: crate::IssueMonitorRuntimeInventory::Available {
+                project_scope: "scope-gwt".to_string(),
+                runtime_instance_id: "app-runtime-3578".to_string(),
+                revision: 9,
+                observed_at: "2026-08-29T00:00:00Z".to_string(),
+                windows: vec![crate::IssueMonitorRuntimeWindow {
+                    window_id: "tab-a::agent-42".to_string(),
+                    pane_state: crate::IssueMonitorPaneState::Waiting,
+                    wait_signal: Some(crate::IssueMonitorRuntimeWaitSignal::ApprovalRequired),
+                }],
+            },
+        };
+        let wire = serde_json::to_value(&event).expect("serialize inventory response");
+        assert_eq!(wire["kind"], "issue_monitor_runtime_inventory");
+        assert_eq!(wire["request_id"], "inventory-status-3578");
+        assert_eq!(wire["inventory"]["availability"], "available");
+        assert_eq!(wire["inventory"]["windows"][0]["pane_state"], "waiting");
+        assert_eq!(
+            wire["inventory"]["windows"][0]["wait_signal"]["kind"],
+            "approval_required"
+        );
     }
 }

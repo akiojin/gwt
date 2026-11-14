@@ -674,6 +674,179 @@ fn parse_pm_message_send_result(
     Ok(Some(PmMessageSendReply { status, reason }))
 }
 
+fn parse_issue_monitor_runtime_inventory_proof(
+    value: &Value,
+    expected_request_id: &str,
+) -> Result<Option<crate::RuntimeInventoryProof>, String> {
+    if value.get("kind").and_then(Value::as_str) != Some("issue_monitor_runtime_inventory_proof") {
+        return Ok(None);
+    }
+    if value.get("request_id").and_then(Value::as_str) != Some(expected_request_id) {
+        return Ok(None);
+    }
+    let proof = value
+        .get("proof")
+        .cloned()
+        .ok_or_else(|| "issue_monitor_runtime_inventory_proof missing proof".to_string())?;
+    let proof = serde_json::from_value::<crate::RuntimeInventoryProof>(proof)
+        .map_err(|error| format!("issue_monitor_runtime_inventory_proof is invalid: {error}"))?;
+    if !matches!(
+        proof.author,
+        crate::RuntimeInventoryProofAuthor::OwningAppRuntime { .. }
+    ) {
+        return Err("issue_monitor_runtime_inventory_proof is not runtime-authored".to_string());
+    }
+    Ok(Some(proof))
+}
+
+fn parse_issue_monitor_status_runtime_inventory(
+    value: &Value,
+    expected_request_id: &str,
+    expected_project_scope: &str,
+) -> Result<Option<Value>, String> {
+    if value.get("kind").and_then(Value::as_str) != Some("issue_monitor_runtime_inventory") {
+        return Ok(None);
+    }
+    if value.get("request_id").and_then(Value::as_str) != Some(expected_request_id) {
+        return Ok(None);
+    }
+    let inventory = value
+        .get("inventory")
+        .cloned()
+        .ok_or_else(|| "issue_monitor_runtime_inventory missing inventory".to_string())?;
+    let observed_scope = inventory
+        .get("project_scope")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "issue_monitor_runtime_inventory missing project_scope".to_string())?;
+    if observed_scope != expected_project_scope {
+        return Err("issue_monitor_runtime_inventory project scope mismatch".to_string());
+    }
+    Ok(Some(inventory))
+}
+
+/// Ask the authenticated owning AppRuntime for a correlated, exact-project
+/// runtime inventory used by `issue.monitor.status`.
+///
+/// This deliberately does not reuse `frontend_ready` / `workspace_state`:
+/// that compatibility projection is neither correlated nor an authoritative
+/// inventory producer and can contain unrelated project tabs.
+pub(crate) fn request_issue_monitor_status_runtime_inventory(
+    project_root: &Path,
+) -> Result<Value, String> {
+    const UNAVAILABLE: &str = "runtime_inventory_unavailable";
+    let ws_url = pane_websocket_url_from_env().map_err(|error| {
+        tracing::warn!(%error, "Issue Monitor status inventory endpoint is unavailable");
+        UNAVAILABLE.to_string()
+    })?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| {
+            tracing::warn!(%error, "Issue Monitor status inventory runtime initialization failed");
+            UNAVAILABLE.to_string()
+        })?;
+    let expected_project_scope = gwt_core::paths::project_scope_hash(project_root)
+        .as_str()
+        .to_string();
+    runtime.block_on(async move {
+        let mut socket = connect_pane_websocket(&ws_url).await.map_err(|error| {
+            tracing::warn!(%error, "Issue Monitor status inventory connection failed");
+            UNAVAILABLE.to_string()
+        })?;
+        let request_id = uuid::Uuid::new_v4().hyphenated().to_string();
+        send_frontend_event(
+            &mut socket,
+            json!({
+                "kind": "agent_issue_monitor_runtime_inventory",
+                "expected_project_scope": expected_project_scope,
+                "request_id": request_id,
+            }),
+        )
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, "Issue Monitor status inventory request failed");
+            UNAVAILABLE.to_string()
+        })?;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let value = next_backend_json_unbounded(&mut socket)
+                    .await
+                    .map_err(|error| {
+                        tracing::warn!(%error, "Issue Monitor status inventory response failed");
+                        UNAVAILABLE.to_string()
+                    })?;
+                if let Some(inventory) = parse_issue_monitor_status_runtime_inventory(
+                    &value,
+                    &request_id,
+                    &expected_project_scope,
+                )
+                .map_err(|error| {
+                    tracing::warn!(%error, "Issue Monitor status inventory response was invalid");
+                    UNAVAILABLE.to_string()
+                })? {
+                    return Ok(inventory);
+                }
+            }
+        })
+        .await
+        .map_err(|_| UNAVAILABLE.to_string())?
+    })
+}
+
+pub(crate) fn request_issue_monitor_runtime_inventory_proof(
+    project_root: &Path,
+    operation_id: &str,
+    revoked_generation: u64,
+) -> Result<crate::RuntimeInventoryProof, String> {
+    const UNAVAILABLE: &str = "runtime_inventory_unavailable";
+    let ws_url = pane_websocket_url_from_env().map_err(|error| {
+        tracing::warn!(%error, "runtime inventory transport configuration unavailable");
+        UNAVAILABLE.to_string()
+    })?;
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let expected_project_scope = gwt_core::paths::project_scope_hash(project_root)
+        .as_str()
+        .to_string();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| {
+            tracing::warn!(%error, "runtime inventory client initialization failed");
+            UNAVAILABLE.to_string()
+        })?;
+    runtime.block_on(async move {
+        let mut socket = connect_pane_websocket(&ws_url).await.map_err(|error| {
+            tracing::warn!(%error, "runtime inventory websocket connection failed");
+            UNAVAILABLE.to_string()
+        })?;
+        send_frontend_event(
+            &mut socket,
+            json!({
+                "kind": "agent_issue_monitor_runtime_inventory_proof",
+                "expected_project_scope": expected_project_scope,
+                "request_id": request_id,
+                "operation_id": operation_id,
+                "revoked_generation": revoked_generation,
+            }),
+        )
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, "runtime inventory request send failed");
+            UNAVAILABLE.to_string()
+        })?;
+        for _ in 0..128 {
+            let value = next_backend_json(&mut socket).await.map_err(|error| {
+                tracing::warn!(%error, "runtime inventory response transport failed");
+                UNAVAILABLE.to_string()
+            })?;
+            if let Some(proof) = parse_issue_monitor_runtime_inventory_proof(&value, &request_id)? {
+                return Ok(proof);
+            }
+        }
+        Err("runtime inventory proof was not returned".to_string())
+    })
+}
+
 /// The injected text must end with a submit key so the runtime actually
 /// queues the line instead of leaving it in the composer.
 fn ensure_trailing_submit(text: &str) -> String {
@@ -1892,5 +2065,425 @@ mod tests {
                 "non-self close must retain authoritative post-close readback"
             );
         });
+    }
+
+    #[test]
+    fn t496_status_inventory_parser_rejects_generic_uncorrelated_and_foreign_projections() {
+        let exact = serde_json::json!({
+            "kind": "issue_monitor_runtime_inventory",
+            "request_id": "status-inventory-42",
+            "inventory": {
+                "availability": "available",
+                "project_scope": "scope-project-a",
+                "runtime_instance_id": "app-runtime-a",
+                "revision": 73,
+                "observed_at": "2026-08-29T12:00:00Z",
+                "windows": []
+            }
+        });
+        assert_eq!(
+            parse_issue_monitor_status_runtime_inventory(
+                &exact,
+                "status-inventory-42",
+                "scope-project-a"
+            ),
+            Ok(Some(exact["inventory"].clone()))
+        );
+
+        let mut uncorrelated = exact.clone();
+        uncorrelated["request_id"] = serde_json::json!("status-inventory-foreign");
+        for alternative in [
+            serde_json::json!({
+                "kind": "workspace_state",
+                "workspace": { "tabs": [] }
+            }),
+            serde_json::json!({
+                "kind": "window_list",
+                "windows": []
+            }),
+            uncorrelated,
+        ] {
+            assert_eq!(
+                parse_issue_monitor_status_runtime_inventory(
+                    &alternative,
+                    "status-inventory-42",
+                    "scope-project-a"
+                ),
+                Ok(None),
+                "generic or uncorrelated projection was accepted: {alternative}"
+            );
+        }
+
+        let mut foreign = exact;
+        foreign["inventory"]["project_scope"] = serde_json::json!("scope-project-b");
+        assert_eq!(
+            parse_issue_monitor_status_runtime_inventory(
+                &foreign,
+                "status-inventory-42",
+                "scope-project-a"
+            ),
+            Err("issue_monitor_runtime_inventory project scope mismatch".to_string())
+        );
+    }
+
+    /// SPEC-3431 Phase 24 / T252: reconciliation consumes only the dedicated
+    /// owning-AppRuntime proof reply. A generic pane list, persisted workspace
+    /// projection, caller-shaped JSON, timeout, or another request's proof is
+    /// not upgraded into absence evidence by the CLI transport.
+    #[test]
+    fn t252_runtime_inventory_parser_accepts_only_correlated_dedicated_proof() {
+        let exact = serde_json::json!({
+            "kind": "issue_monitor_runtime_inventory_proof",
+            "request_id": "inventory-request-42",
+            "proof": {
+                "author": { "kind": "owning_app_runtime", "runtime_id": "app-runtime-a" },
+                "project_key": "project-key-a",
+                "inventory_revision": 44,
+                "generation": 17,
+                "materializer_id": "app-runtime-a",
+                "materializer_pid": 4242,
+                "window_id": "tab-a::agent-42",
+                "observation": "absent",
+                "observed_at": "2026-08-15T00:15:00Z"
+            }
+        });
+        let proof = parse_issue_monitor_runtime_inventory_proof(&exact, "inventory-request-42")
+            .expect("parse dedicated proof")
+            .expect("matching correlation returns proof");
+        assert_eq!(proof.project_key, "project-key-a");
+        assert_eq!(proof.inventory_revision, 44);
+        assert_eq!(proof.generation, 17);
+        assert_eq!(proof.materializer_id.as_deref(), Some("app-runtime-a"));
+        assert_eq!(proof.materializer_pid, Some(4242));
+        assert_eq!(proof.window_id.as_deref(), Some("tab-a::agent-42"));
+        assert_eq!(
+            proof.observation,
+            crate::RuntimeInventoryObservation::Absent
+        );
+
+        let mut mismatched = exact.clone();
+        mismatched["request_id"] = serde_json::json!("inventory-request-foreign");
+        let alternatives = [
+            serde_json::json!({
+                "kind": "window_list",
+                "windows": []
+            }),
+            serde_json::json!({
+                "kind": "workspace_state",
+                "workspace": { "tabs": [{ "project_root": "/repo/project-a", "workspace": { "windows": [] } }] }
+            }),
+            serde_json::json!({
+                "kind": "issue_monitor_runtime_inventory",
+                "request_id": "inventory-request-42",
+                "absent": true
+            }),
+            serde_json::json!({
+                "kind": "issue_monitor_runtime_inventory_timeout",
+                "request_id": "inventory-request-42"
+            }),
+            mismatched,
+        ];
+        for alternative in alternatives {
+            assert_eq!(
+                parse_issue_monitor_runtime_inventory_proof(&alternative, "inventory-request-42"),
+                Ok(None),
+                "non-authoritative alternative was accepted: {alternative}"
+            );
+        }
+
+        let malformed = serde_json::json!({
+            "kind": "issue_monitor_runtime_inventory_proof",
+            "request_id": "inventory-request-42",
+            "proof": {
+                "project_key": "project-key-a",
+                "inventory_revision": 44,
+                "generation": 17,
+                "observation": "absent"
+            }
+        });
+        assert!(
+            parse_issue_monitor_runtime_inventory_proof(&malformed, "inventory-request-42")
+                .is_err(),
+            "a dedicated but unauthored/incomplete proof must fail closed"
+        );
+    }
+
+    #[test]
+    fn t496_proof_requester_uses_authenticated_scope_wire_without_project_path() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let project = tempfile::tempdir().expect("project root");
+        let expected_project_scope = gwt_core::paths::project_scope_hash(project.path())
+            .as_str()
+            .to_string();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind proof mock");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking proof listener");
+        let address = listener.local_addr().expect("proof mock address");
+        let server = std::thread::spawn({
+            let expected_project_scope = expected_project_scope.clone();
+            move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("proof mock runtime");
+                runtime.block_on(async move {
+                    let listener =
+                        tokio::net::TcpListener::from_std(listener).expect("tokio proof listener");
+                    let (stream, _) = listener.accept().await.expect("accept proof connection");
+                    let mut socket = tokio_tungstenite::accept_async(stream)
+                        .await
+                        .expect("accept proof websocket");
+                    let request = next_frontend_json(&mut socket).await;
+                    let request_id = request["request_id"]
+                        .as_str()
+                        .expect("proof correlation id");
+                    socket
+                        .send(Message::Text(
+                            json!({
+                                "kind": "issue_monitor_runtime_inventory_proof",
+                                "request_id": request_id,
+                                "proof": {
+                                    "author": {
+                                        "kind": "owning_app_runtime",
+                                        "runtime_id": "app-runtime-b"
+                                    },
+                                    "project_key": expected_project_scope,
+                                    "inventory_revision": 2,
+                                    "generation": 7,
+                                    "materializer_id": "app-runtime-a",
+                                    "materializer_pid": 4242,
+                                    "window_id": "tab-a::agent-42",
+                                    "observation": "absent",
+                                    "observed_at": "2026-08-29T00:15:00Z"
+                                }
+                            })
+                            .to_string()
+                            .into(),
+                        ))
+                        .await
+                        .expect("send proof reply");
+                    request
+                })
+            }
+        });
+        let _token = ScopedEnvVar::set(
+            gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV,
+            "runtime-proof-capability",
+        );
+        let _pane_url = ScopedEnvVar::set(
+            GWT_PANE_WS_URL_ENV,
+            format!("ws://{address}/internal/pane-ws"),
+        );
+
+        let proof = request_issue_monitor_runtime_inventory_proof(
+            project.path(),
+            "recover-runtime-inventory",
+            7,
+        )
+        .expect("authenticated proof response");
+        let request = server.join().expect("join proof mock");
+
+        assert_eq!(
+            request["kind"],
+            "agent_issue_monitor_runtime_inventory_proof"
+        );
+        assert_eq!(request["expected_project_scope"], expected_project_scope);
+        assert_eq!(request["operation_id"], "recover-runtime-inventory");
+        assert_eq!(request["revoked_generation"], 7);
+        assert!(request.get("project_root").is_none());
+        assert_eq!(proof.generation, 7);
+        assert_eq!(proof.materializer_id.as_deref(), Some("app-runtime-a"));
+    }
+
+    /// SPEC-3431 Phase 24R / T496: callers branch on one stable fail-closed
+    /// code. Transport details remain diagnostic log data and never leak into
+    /// the state-machine result, regardless of whether the listener refused,
+    /// conflicted, failed, or disappeared before the handshake.
+    #[test]
+    fn t496_runtime_inventory_connection_failures_always_return_runtime_inventory_unavailable() {
+        use std::io::{Read, Write};
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _token = ScopedEnvVar::set(
+            gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV,
+            "runtime-inventory-capability",
+        );
+
+        for status in [
+            "401 Unauthorized",
+            "409 Conflict",
+            "503 Service Unavailable",
+        ] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0")
+                .expect("bind runtime inventory refusal mock");
+            let address = listener
+                .local_addr()
+                .expect("runtime inventory mock address");
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().expect("accept inventory handshake");
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .expect("bound handshake read");
+                let mut request = [0_u8; 8192];
+                let _ = stream.read(&mut request).expect("read websocket handshake");
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+                .expect("write refusal response");
+            });
+            let _pane_url = ScopedEnvVar::set(
+                GWT_PANE_WS_URL_ENV,
+                format!("ws://{address}/internal/pane-ws"),
+            );
+
+            let error = request_issue_monitor_runtime_inventory_proof(
+                Path::new("/repo/project"),
+                "recover-runtime-inventory",
+                7,
+            )
+            .expect_err("handshake refusal must be unavailable");
+            server.join().expect("join inventory refusal mock");
+            assert_eq!(error, "runtime_inventory_unavailable", "HTTP {status}");
+        }
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("bind closed runtime inventory endpoint");
+        let address = listener.local_addr().expect("closed endpoint address");
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept closed handshake");
+            drop(stream);
+        });
+        let _pane_url = ScopedEnvVar::set(
+            GWT_PANE_WS_URL_ENV,
+            format!("ws://{address}/internal/pane-ws"),
+        );
+        let error = request_issue_monitor_runtime_inventory_proof(
+            Path::new("/repo/project"),
+            "recover-runtime-inventory",
+            7,
+        )
+        .expect_err("closed listener must be unavailable");
+        server.join().expect("join closed inventory mock");
+        assert_eq!(error, "runtime_inventory_unavailable", "closed listener");
+    }
+
+    /// SPEC-3431 Phase 24R / T496: the proof request has one deadline for the
+    /// complete connect -> send -> receive exchange. An authenticated peer
+    /// cannot keep reconciliation alive by feeding unrelated text or binary
+    /// JSON often enough to restart a per-frame timeout.
+    #[test]
+    fn t496_runtime_inventory_proof_has_one_end_to_end_deadline_across_connect_send_and_frames() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _token = ScopedEnvVar::set(
+            gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV,
+            "runtime-inventory-deadline-capability",
+        );
+        let project = tempfile::tempdir().expect("project root");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("bind runtime inventory deadline mock");
+        listener
+            .set_nonblocking(true)
+            .expect("make deadline listener nonblocking");
+        let address = listener.local_addr().expect("deadline mock address");
+        let _pane_url = ScopedEnvVar::set(
+            GWT_PANE_WS_URL_ENV,
+            format!("ws://{address}/internal/pane-ws"),
+        );
+
+        let (error, elapsed, emitted_frames) = std::thread::scope(|scope| {
+            let server = scope.spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("deadline mock runtime");
+                runtime.block_on(async move {
+                    let listener = tokio::net::TcpListener::from_std(listener)
+                        .expect("tokio deadline listener");
+                    let (stream, _) =
+                        tokio::time::timeout(Duration::from_secs(3), listener.accept())
+                            .await
+                            .expect("bounded deadline mock accept")
+                            .expect("accept deadline connection");
+
+                    // A connect-only or response-only timeout is insufficient:
+                    // this authenticated handshake delay must consume the same
+                    // end-to-end budget as every later response frame.
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    let mut socket = tokio_tungstenite::accept_hdr_async(
+                        stream,
+                        |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                         response| {
+                            assert_eq!(
+                                request
+                                    .headers()
+                                    .get(AUTHORIZATION)
+                                    .and_then(|value| value.to_str().ok()),
+                                Some("Bearer runtime-inventory-deadline-capability")
+                            );
+                            Ok(response)
+                        },
+                    )
+                    .await
+                    .expect("accept authenticated deadline websocket");
+                    let request = tokio::time::timeout(
+                        Duration::from_secs(2),
+                        next_frontend_json(&mut socket),
+                    )
+                    .await
+                    .expect("bounded proof request read");
+                    assert_eq!(
+                        request["kind"],
+                        "agent_issue_monitor_runtime_inventory_proof"
+                    );
+
+                    for sequence in 0_u16..256 {
+                        tokio::time::sleep(Duration::from_millis(25)).await;
+                        let unrelated = json!({
+                            "kind": "workspace_state",
+                            "sequence": sequence,
+                        })
+                        .to_string();
+                        let frame = if sequence % 2 == 0 {
+                            Message::Text(unrelated.into())
+                        } else {
+                            Message::Binary(unrelated.into_bytes().into())
+                        };
+                        if socket.send(frame).await.is_err() {
+                            return usize::from(sequence);
+                        }
+                    }
+                    256
+                })
+            });
+
+            let started = std::time::Instant::now();
+            let error = request_issue_monitor_runtime_inventory_proof(
+                project.path(),
+                "recover-runtime-inventory-deadline",
+                7,
+            )
+            .expect_err("unrelated frames must exhaust one bounded request deadline");
+            let elapsed = started.elapsed();
+            let emitted_frames = server.join().expect("join bounded deadline mock");
+            (error, elapsed, emitted_frames)
+        });
+
+        assert_eq!(error, "runtime_inventory_unavailable");
+        assert!(
+            elapsed < Duration::from_millis(2_600),
+            "connect and every unrelated frame must share the two-second deadline; elapsed={elapsed:?}, emitted_frames={emitted_frames}"
+        );
+        assert!(
+            emitted_frames < 128,
+            "the request must time out before a per-frame loop consumes its frame cap"
+        );
     }
 }

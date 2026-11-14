@@ -133,6 +133,7 @@ struct SilentIssueMonitorLaunchRequest {
     review_prompt: Option<String>,
     review_model: Option<String>,
     delivery_id: Option<String>,
+    launch_profile: Option<gwt::IssueMonitorLaunchProfile>,
     launch_session_strategy: gwt::IssueMonitorLaunchSessionStrategy,
 }
 
@@ -1941,6 +1942,39 @@ impl AppRuntime {
         profiles.with_repo_local(fallback_profile)
     }
 
+    fn issue_monitor_delivery_launch_profile(
+        &self,
+        project_root: &Path,
+        issue_number: u64,
+        delivery_id: Option<&str>,
+    ) -> Option<gwt::IssueMonitorLaunchProfile> {
+        let prefs = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
+            project_root,
+        ))
+        .ok()?;
+        if let Some(delivery_id) = delivery_id {
+            if let Some(profile) = prefs
+                .pending_launch_deliveries
+                .iter()
+                .find(|delivery| {
+                    delivery.issue_number == issue_number && delivery.delivery_id == delivery_id
+                })
+                .and_then(|delivery| delivery.source_profile.clone())
+            {
+                return Some(profile);
+            }
+        }
+        prefs
+            .launched_issues
+            .iter()
+            .rev()
+            .find(|identity| {
+                identity.issue_number == issue_number
+                    && delivery_id.is_none_or(|delivery_id| identity.delivery_id == delivery_id)
+            })
+            .and_then(|identity| identity.source_profile.clone())
+    }
+
     #[cfg(test)]
     pub(crate) fn auto_launch_issue_monitor_request_events_for_project(
         &mut self,
@@ -1990,7 +2024,33 @@ impl AppRuntime {
         delivery_id: Option<String>,
         launch_session_strategy: gwt::IssueMonitorLaunchSessionStrategy,
     ) -> Vec<OutboundEvent> {
+        self.auto_launch_issue_monitor_delivery_events_for_project_with_profile(
+            project_root,
+            issue_number,
+            linked_issue_kind,
+            delivery_id,
+            launch_session_strategy,
+            None,
+        )
+    }
+
+    pub(crate) fn auto_launch_issue_monitor_delivery_events_for_project_with_profile(
+        &mut self,
+        project_root: &Path,
+        issue_number: u64,
+        linked_issue_kind: gwt::LinkedIssueKind,
+        delivery_id: Option<String>,
+        launch_session_strategy: gwt::IssueMonitorLaunchSessionStrategy,
+        carried_launch_profile: Option<gwt::IssueMonitorLaunchProfile>,
+    ) -> Vec<OutboundEvent> {
         let mut recovery_events = Vec::new();
+        let launch_profile = carried_launch_profile.or_else(|| {
+            self.issue_monitor_delivery_launch_profile(
+                project_root,
+                issue_number,
+                delivery_id.as_deref(),
+            )
+        });
         if let Some(delivery_id) = delivery_id.as_deref() {
             match self
                 .issue_monitor_launch_deliveries
@@ -2107,6 +2167,7 @@ impl AppRuntime {
                 review_prompt: None,
                 review_model: None,
                 delivery_id: delivery_id.clone(),
+                launch_profile,
                 launch_session_strategy,
             },
         ) {
@@ -2224,6 +2285,7 @@ impl AppRuntime {
                 review_prompt: Some(prompt),
                 review_model,
                 delivery_id: None,
+                launch_profile: None,
                 launch_session_strategy: gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
             },
         ) {
@@ -2255,6 +2317,7 @@ impl AppRuntime {
             review_prompt,
             review_model,
             delivery_id,
+            launch_profile,
             launch_session_strategy,
         } = request;
         let Some(tab_id) = self.issue_monitor_tab_id_for_project_root(requested_project_root)
@@ -2304,7 +2367,16 @@ impl AppRuntime {
         }
 
         let base_branch_name = gwt::start_work::resolve_launch_agent_base_branch(&project_root)?;
-        let previous_profiles = self.issue_monitor_previous_profiles(&project_root);
+        let previous_profiles = launch_profile
+            .or_else(|| {
+                self.issue_monitor_delivery_launch_profile(
+                    &project_root,
+                    issue_number,
+                    delivery_id.as_deref(),
+                )
+            })
+            .map(|profile| gwt::LaunchWizardPreviousProfiles::from_profile(Some(profile.into())))
+            .unwrap_or_else(|| self.issue_monitor_previous_profiles(&project_root));
         if previous_profiles.preferred_profile().is_none() {
             return Ok(None);
         }

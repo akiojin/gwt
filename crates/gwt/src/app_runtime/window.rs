@@ -30,6 +30,15 @@ fn shares_work_surface_singleton(preset: WindowPreset) -> bool {
     matches!(preset, WindowPreset::Work | WindowPreset::Branches)
 }
 
+#[derive(Debug, Clone)]
+struct ModernMonitorCloseExecutionTarget {
+    worktree_path: std::path::PathBuf,
+    owner: gwt::cli::execution_state::ExecutionOwnerKey,
+    session: gwt_agent::SessionExecutionIdentity,
+    runtime_incarnation: u64,
+    status: gwt::cli::execution_state::ExecutionControlStatus,
+}
+
 impl AppRuntime {
     pub(crate) fn create_window_events(
         &mut self,
@@ -423,6 +432,180 @@ impl AppRuntime {
         self.close_window_events_with_monitor_notification(id, true)
     }
 
+    fn modern_monitor_close_execution_target(
+        &self,
+        window_id: &str,
+        launched: &gwt::IssueMonitorLaunchedIssue,
+    ) -> Result<ModernMonitorCloseExecutionTarget, String> {
+        let active = self
+            .active_agent_sessions
+            .get(window_id)
+            .ok_or_else(|| "modern Monitor launch has no exact active Session".to_string())?;
+        let runtime_incarnation = self
+            .runtimes
+            .get(window_id)
+            .map(|runtime| runtime.incarnation)
+            .filter(|incarnation| *incarnation > 0)
+            .ok_or_else(|| "modern Monitor launch has no exact local runtime".to_string())?;
+        let session_path = self
+            .sessions_dir
+            .join(format!("{}.toml", active.session_id));
+        let session = gwt_agent::Session::load(&session_path)
+            .map_err(|error| format!("modern Monitor launch Session is unavailable: {error}"))?;
+        let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
+            .map_err(|error| format!("modern Monitor launch Session identity is invalid: {error}"))?
+            .ok_or_else(|| "modern Monitor launch Session has no execution binding".to_string())?;
+        if identity.session_id != active.session_id
+            || identity.execution_binding.session_id != active.session_id
+            || !crate::runtime_support::same_worktree_path(
+                &identity.worktree_path,
+                &active.worktree_path,
+            )
+        {
+            return Err(
+                "modern Monitor launch Session no longer matches the active worktree identity"
+                    .to_string(),
+            );
+        }
+        let owner_kind = match identity.execution_binding.owner_kind.as_str() {
+            "issue" => gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+            "spec" => gwt::cli::execution_state::ExecutionOwnerKind::Spec,
+            other => return Err(format!("execution owner kind is not canonical: {other}")),
+        };
+        let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+            kind: owner_kind,
+            number: identity.execution_binding.owner_number,
+        };
+        if owner.kind != gwt::cli::execution_state::ExecutionOwnerKind::Issue
+            || owner.number != launched.issue_number
+        {
+            return Err("execution owner does not match the Monitor issue".to_string());
+        }
+        let record = gwt::cli::execution_state::load(&identity.worktree_path)
+            .map_err(|error| format!("exact worktree Execution could not be read: {error}"))?
+            .ok_or_else(|| "modern Monitor launch has no worktree Execution".to_string())?;
+        if record.owner_kind != owner.kind
+            || record.owner_number != owner.number
+            || record.primary_session_id != identity.session_id
+        {
+            return Err(
+                "worktree Execution does not match the Monitor Session identity".to_string(),
+            );
+        }
+        let ledger =
+            gwt::cli::execution_state::load_generation_ledger(&identity.worktree_path, owner)
+                .map_err(|error| {
+                    format!("exact worktree execution ledger could not be read: {error}")
+                })?
+                .ok_or_else(|| "modern Monitor launch has no execution ledger".to_string())?;
+        let current = ledger
+            .current_generation()
+            .ok_or_else(|| "execution ledger has no current generation".to_string())?;
+        if current.identity.generation_id != identity.execution_binding.identity.generation_id
+            || current.identity.session_binding_id != identity.execution_binding.identity.binding_id
+            || ledger.current_effective_status() != Some(record.status)
+        {
+            return Err(
+                "modern Monitor Session is not the exact current execution generation".to_string(),
+            );
+        }
+        if ledger.continuation_attempts.iter().any(|attempt| {
+            attempt.predecessor.generation_id == current.identity.generation_id
+                && attempt.status == gwt::cli::execution_state::ContinuationAttemptStatus::Prepared
+        }) || ledger.takeover_attempts.iter().any(|attempt| {
+            attempt.generation_id == current.identity.generation_id
+                && attempt.status
+                    == gwt::cli::execution_state::GenerationTakeoverAttemptStatus::Prepared
+        }) {
+            return Err(
+                "modern Monitor execution has a Prepared successor or takeover".to_string(),
+            );
+        }
+        if !gwt::cli::execution_state::execution_binding_authorizes_current_generation(
+            &identity.worktree_path,
+            owner,
+            &identity.session_id,
+            &identity.execution_binding.identity,
+        )
+        .map_err(|error| format!("exact execution binding could not be verified: {error}"))?
+        {
+            return Err("modern Monitor Session binding is stale".to_string());
+        }
+        let runtime = gwt::cli::execution_state::classify_exact_session_runtime(
+            &self.sessions_dir,
+            &identity,
+        )
+        .map_err(|error| format!("exact runtime proof could not be classified: {error}"))?;
+        match record.status {
+            gwt::cli::execution_state::ExecutionControlStatus::Active => {
+                if runtime != gwt::cli::execution_state::ExactSessionRuntimeDisposition::Live {
+                    return Err(
+                        "modern Monitor Active execution has missing or ambiguous runtime proof"
+                            .to_string(),
+                    );
+                }
+            }
+            gwt::cli::execution_state::ExecutionControlStatus::Completed
+            | gwt::cli::execution_state::ExecutionControlStatus::Blocked => {
+                if !matches!(
+                    runtime,
+                    gwt::cli::execution_state::ExactSessionRuntimeDisposition::Terminal(proof)
+                        if proof.runtime_incarnation == runtime_incarnation
+                ) {
+                    return Err(
+                        "terminal Monitor execution has live or ambiguous runtime proof"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+        Ok(ModernMonitorCloseExecutionTarget {
+            worktree_path: identity.worktree_path.clone(),
+            owner,
+            session: identity,
+            runtime_incarnation,
+            status: record.status,
+        })
+    }
+
+    fn modern_monitor_close_execution_readback_is_exact(
+        &self,
+        target: &ModernMonitorCloseExecutionTarget,
+    ) -> Result<bool, String> {
+        let current_session = gwt_agent::Session::load(
+            &self
+                .sessions_dir
+                .join(format!("{}.toml", target.session.session_id)),
+        )
+        .map_err(|error| format!("exact Session readback failed: {error}"))?;
+        if gwt_agent::SessionExecutionIdentity::from_session(&current_session)
+            .map_err(|error| format!("exact Session readback is invalid: {error}"))?
+            .as_ref()
+            != Some(&target.session)
+        {
+            return Ok(false);
+        }
+        let record = gwt::cli::execution_state::load(&target.worktree_path)
+            .map_err(|error| format!("exact Execution readback failed: {error}"))?;
+        let Some(record) = record else {
+            return Ok(false);
+        };
+        if record.owner_kind != target.owner.kind
+            || record.owner_number != target.owner.number
+            || record.primary_session_id != target.session.session_id
+            || record.status == gwt::cli::execution_state::ExecutionControlStatus::Active
+        {
+            return Ok(false);
+        }
+        gwt::cli::execution_state::execution_binding_authorizes_current_generation(
+            &target.worktree_path,
+            target.owner,
+            &target.session.session_id,
+            &target.session.execution_binding.identity,
+        )
+        .map_err(|error| format!("exact ledger readback failed: {error}"))
+    }
+
     /// Close a window whose Issue Monitor lifecycle transition was already
     /// committed by the daemon or the fail-closed local fallback. Re-entering
     /// the normal window-closed hook here would publish a second control for
@@ -443,12 +626,207 @@ impl AppRuntime {
         // SPEC-3431 FR-013: snapshot the closing window's session while the
         // active entry still exists — an explicit close of the PM pane is an
         // intentional stop and clears the durable PM registration below.
-        let closing_session_id = self
+        // The tab owns Monitor state, but an agent Session may execute from a
+        // distinct managed worktree. Snapshot both identities before runtime
+        // teardown so an ordinary close can fence the exact worktree ECR.
+        let active_execution_target = self
             .active_agent_sessions
             .get(id)
-            .map(|session| session.session_id.clone());
+            .map(|session| (session.session_id.clone(), session.worktree_path.clone()));
+        let closing_session_id = active_execution_target
+            .as_ref()
+            .map(|(session_id, _)| session_id.clone())
+            .or_else(|| {
+                let address = self.window_lookup.get(id)?;
+                self.tab(&address.tab_id)?
+                    .workspace
+                    .window(&address.raw_id)?
+                    .session_id
+                    .clone()
+            });
+        let launched_monitor_identity = issue_monitor_project_root
+            .as_ref()
+            .and_then(|project_root| {
+                gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
+                    project_root,
+                ))
+                .ok()
+            })
+            .and_then(|prefs| {
+                prefs
+                    .launched_issues
+                    .into_iter()
+                    .find(|identity| identity.window_id == id)
+            });
+        let closes_launched_monitor_identity = launched_monitor_identity.is_some();
+        let modern_execution_target = if notify_issue_monitor {
+            match launched_monitor_identity
+                .as_ref()
+                .filter(|identity| identity.generation > 0)
+                .map(|identity| self.modern_monitor_close_execution_target(id, identity))
+                .transpose()
+            {
+                Ok(target) => target,
+                Err(error) => {
+                    tracing::warn!(
+                        window_id = id,
+                        %error,
+                        "modern Monitor pane close retained its exact identity"
+                    );
+                    return Vec::new();
+                }
+            }
+        } else {
+            None
+        };
+        let mut runtime_already_stopped = false;
+        if let Some(target) = modern_execution_target.as_ref() {
+            if target.status == gwt::cli::execution_state::ExecutionControlStatus::Active {
+                if let Err(error) = self.stop_exact_manual_holder_runtime(
+                    id,
+                    target.runtime_incarnation,
+                    &target.session,
+                    false,
+                ) {
+                    tracing::warn!(
+                        window_id = id,
+                        %error,
+                        "modern Monitor pane close retained identity because exact runtime stop failed"
+                    );
+                    return Vec::new();
+                }
+                runtime_already_stopped = true;
+                let terminal = gwt::cli::execution_state::classify_exact_session_runtime(
+                    &self.sessions_dir,
+                    &target.session,
+                );
+                if !matches!(
+                    terminal,
+                    Ok(gwt::cli::execution_state::ExactSessionRuntimeDisposition::Terminal(proof))
+                        if proof.runtime_incarnation == target.runtime_incarnation
+                ) {
+                    tracing::warn!(
+                        window_id = id,
+                        ?terminal,
+                        "modern Monitor pane close retained identity because terminal runtime proof is inconclusive"
+                    );
+                    return Vec::new();
+                }
+                let settlement = gwt::cli::execution_state::settle(
+                    &target.worktree_path,
+                    &target.session.session_id,
+                    gwt::cli::execution_state::ExecutionSettlement::Blocked {
+                        reason: "Issue Monitor window closed".to_string(),
+                        missing_verification: None,
+                    },
+                );
+                if !matches!(
+                    settlement,
+                    Ok(gwt::cli::execution_state::SettleResult::Settled(_))
+                        | Ok(gwt::cli::execution_state::SettleResult::AlreadySettled(_))
+                ) {
+                    tracing::warn!(
+                        window_id = id,
+                        ?settlement,
+                        "modern Monitor pane close retained identity because exact Execution settlement failed"
+                    );
+                    return Vec::new();
+                }
+            } else {
+                // An exact terminal predecessor replay needs no second ECR
+                // mutation, but still tears down the inert local runtime
+                // registry before the Monitor identity can be released.
+                self.stop_window_runtime(id);
+                runtime_already_stopped = true;
+            }
+            match self.modern_monitor_close_execution_readback_is_exact(target) {
+                Ok(true) => {}
+                Ok(false) => {
+                    tracing::warn!(
+                        window_id = id,
+                        "modern Monitor pane close retained identity after exact readback mismatch"
+                    );
+                    return Vec::new();
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        window_id = id,
+                        %error,
+                        "modern Monitor pane close retained identity because exact readback failed"
+                    );
+                    return Vec::new();
+                }
+            }
+        }
+        if notify_issue_monitor
+            && (closing_session_id.is_some() || closes_launched_monitor_identity)
+            && modern_execution_target.is_none()
+        {
+            if let Some(project_root) = issue_monitor_project_root.as_ref() {
+                let execution_root = active_execution_target
+                    .as_ref()
+                    .map(|(_, worktree_path)| worktree_path.as_path())
+                    .unwrap_or(project_root.as_path());
+                let active_execution = match gwt::cli::execution_state::load(execution_root) {
+                    Ok(record) => record.filter(|record| {
+                        record.status == gwt::cli::execution_state::ExecutionControlStatus::Active
+                    }),
+                    Err(error) => {
+                        tracing::warn!(
+                            window_id = id,
+                            project_root = %project_root.display(),
+                            execution_root = %execution_root.display(),
+                            %error,
+                            "agent pane close deferred because Execution snapshot failed"
+                        );
+                        return Vec::new();
+                    }
+                };
+                if let Some(record) = active_execution {
+                    let Some(session_id) = closing_session_id.as_deref() else {
+                        tracing::warn!(
+                            window_id = id,
+                            expected_session_id = %record.primary_session_id,
+                            "agent pane close deferred because its Session identity is missing"
+                        );
+                        return Vec::new();
+                    };
+                    if record.primary_session_id != session_id {
+                        tracing::warn!(
+                            window_id = id,
+                            expected_session_id = %record.primary_session_id,
+                            observed_session_id = session_id,
+                            "agent pane close deferred by Execution session fence"
+                        );
+                        return Vec::new();
+                    }
+                    let settlement = gwt::cli::execution_state::settle(
+                        execution_root,
+                        session_id,
+                        gwt::cli::execution_state::ExecutionSettlement::Blocked {
+                            reason: "Agent pane closed".to_string(),
+                            missing_verification: None,
+                        },
+                    );
+                    if !matches!(
+                        settlement,
+                        Ok(gwt::cli::execution_state::SettleResult::Settled(_))
+                            | Ok(gwt::cli::execution_state::SettleResult::AlreadySettled(_))
+                    ) {
+                        tracing::warn!(
+                            window_id = id,
+                            ?settlement,
+                            "agent pane close deferred until exact Execution settlement succeeds"
+                        );
+                        return Vec::new();
+                    }
+                }
+            }
+        }
         self.clear_agent_window_startup_restore(id);
-        self.stop_window_runtime(id);
+        if !runtime_already_stopped {
+            self.stop_window_runtime(id);
+        }
         self.remove_window_state_tracking(id);
         self.profile_selections.remove(id);
         if !close_window_from_workspace(
