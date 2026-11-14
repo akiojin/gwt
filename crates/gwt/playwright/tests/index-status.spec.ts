@@ -946,7 +946,11 @@ test.describe("Project Index status surface", () => {
         { message: "601px keeps the desktop control sizes" }).toEqual(desktop);
       expect(await root.locator(".index-search-layout").evaluate(node => getComputedStyle(node).gridTemplateColumns.split(" ").length),
         "601px keeps the result list and detail side by side").toBe(2);
-      const assertTargets = async (selector: string, width: number, required: string[]) => {
+      // Opening a panel re-renders it (Health refreshes its table), so a node
+      // measured mid-render can be detached; retry until the DOM settles.
+      const assertTargets = (selector: string, width: number, required: string[]) =>
+        expect(() => assertTargetsOnce(selector, width, required)).toPass({ timeout: 5_000 });
+      const assertTargetsOnce = async (selector: string, width: number, required: string[]) => {
         const viewport = await page.evaluate(() => document.documentElement.clientWidth);
         const measured = await measure(selector);
         expect(measured.map(control => control.name)).toEqual(expect.arrayContaining(required));
