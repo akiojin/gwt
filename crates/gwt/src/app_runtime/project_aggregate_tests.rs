@@ -22,6 +22,7 @@ fn remote_operation_failure_preserves_lifecycle_and_recovers_after_reattach() {
         incarnation: probe.incarnation,
         kind,
         approval_resolution_started: false,
+        attachment_outcome: None,
         input_command_id: None,
         result: Err("project command timed out".into()),
     };

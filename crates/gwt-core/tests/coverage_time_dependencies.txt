@@ -236,7 +236,6 @@ crates/gwt/src/app_runtime/tests/terminal_lifecycle_tests.rs|spawn_work_merge_st
 crates/gwt/src/app_runtime/tests/terminal_lifecycle_tests.rs|spawn_work_merge_status_scan_treats_gwt_runtime_writes_as_clean|wait_for_recorded_event(,&events,|events||1
 crates/gwt/src/app_runtime/tests/terminal_lifecycle_tests.rs|startup_orphan_intake_prune_dispatch_returns_before_inspection_finishes|assert_eq!(started_rx.recv_timeout(Duration::from_secs(1)).expect(),repo)|1
 crates/gwt/src/app_runtime/tests/terminal_lifecycle_tests.rs|stop_window_runtime_records_paused_work_off_the_event_loop|assert!(stop_call<Duration::from_secs(2),)|1
-crates/gwt/src/app_runtime/tests/work_projection_tests.rs|file_attachment_operation_dispatches_failed_progress_without_prompt_on_stage_failure|wait_for_recorded_event(,&recorded_events,|events||1
 crates/gwt/src/app_runtime/tests/workspace_resume_tests.rs|workspace_cleanup_failure_does_not_emit_done_work_item|wait_for_recorded_event(,&events,|events||1
 crates/gwt/src/board_read_receipts.rs|issue_3713_corrupt_receipt_and_expired_prompt_budget_warn_without_false_zero_or_denial|let_deadline=gwt_core::operation_deadline::ScopedOperationDeadline::enter(std::time::Instant::now()-std::time::Duration::from_secs(1),)|1
 crates/gwt/src/board_read_receipts.rs|issue_3713_pm_prompt_child_inherits_deadline_and_preserves_completed_results|letdeadline=Instant::now()+std::time::Duration::from_secs(5)|1

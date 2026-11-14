@@ -1903,7 +1903,55 @@ impl AppRuntime {
         workspace_resume_context: Option<WorkspaceResumeContext>,
         origin: RestoreOrigin,
     ) -> Vec<OutboundEvent> {
-        if self.restore_source_is_reserved(&session) {
+        let source_reserved = self.restore_source_is_reserved(&session);
+        if origin == RestoreOrigin::UserRequested {
+            let active = self
+                .active_agent_sessions
+                .values()
+                .find(|active| active.session_id == session.id);
+            let runtime = active.and_then(|active| self.runtimes.get(&active.window_id));
+            tracing::info!(target: "gwt.restart.diagnostic", stage = "restore_routing",
+                tab_id, source_session_id = %session.id, source_reserved,
+                active_window_id = ?active.map(|active| active.window_id.as_str()),
+                runtime_present = runtime.is_some(), status = ?runtime.map(|runtime| runtime.status),
+                exit_confirmed = ?runtime.map(|runtime| runtime.exit_confirmed),
+                owner_pane_id = ?runtime.map(|runtime| runtime.owner_pane_id.as_str()),
+                incarnation = ?runtime.map(|runtime| runtime.incarnation),
+                owner_pid = ?runtime.map(|runtime| runtime.owner_identity.pid),
+                owner_started_at = ?runtime.map(|runtime| runtime.owner_identity.host_started_at),
+                active_matches = self.active_agent_sessions.values().filter(|active| active.session_id == session.id).count(),
+                pending_startup_matches = self.pending_startup_auto_resume_sessions.iter().filter(|pending| pending.session.id == session.id).count(),
+                pending_source_matches = self.pending_auto_resume_sources.iter().filter(|(window, source)| self.window_lookup.contains_key(*window) && *source == &session.id).count(),
+                "saved Session restart routing");
+        }
+        // Keep the source reservation while an exact terminal restart is
+        // routed to the physical owner, which alone may retire its predecessor.
+        let retained_restart = origin == RestoreOrigin::UserRequested
+            && !self
+                .pending_startup_auto_resume_sessions
+                .iter()
+                .any(|p| p.session.id == session.id)
+            && !self
+                .pending_auto_resume_sources
+                .iter()
+                .any(|(id, source)| self.window_lookup.contains_key(id) && source == &session.id)
+            && {
+                let mut active = self
+                    .active_agent_sessions
+                    .values()
+                    .filter(|active| active.session_id == session.id);
+                active.next().is_some_and(|active| {
+                    active.tab_id == tab_id
+                        && self.runtimes.get(&active.window_id).is_some_and(|runtime| {
+                            runtime.exit_confirmed
+                                && matches!(
+                                    runtime.status,
+                                    WindowProcessStatus::Error | WindowProcessStatus::Stopped
+                                )
+                        })
+                }) && active.next().is_none()
+            };
+        if source_reserved && !retained_restart {
             return Vec::new();
         }
         let Some(context) = self.project_context(tab_id) else {

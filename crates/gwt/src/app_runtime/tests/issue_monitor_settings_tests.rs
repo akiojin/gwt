@@ -1225,6 +1225,79 @@ fn app_runtime_issue_monitor_agent_settings_sets_are_added_reordered_and_saved_i
 }
 
 #[test]
+fn app_runtime_add_settings_set_preserves_unused_same_tool_member_core() {
+    let _lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo(&repo);
+    let (mut runtime, recorded, _) = open_agent_settings_sets(
+        temp.path(),
+        &repo,
+        vec![
+            pool_profile("codex"),
+            pool_profile("claude"),
+            pool_profile("grok"),
+        ],
+    );
+    let sessions = temp.path().join("sessions");
+    let roster = gwt::agent_names::mutate_project_roster(
+        &repo,
+        &sessions,
+        gwt::agent_names::AgentRosterAction::Add {
+            pm_eligible: false,
+            name: None,
+            agent_id: Some("codex".into()),
+        },
+        None,
+    )
+    .unwrap();
+    let id = roster.members.last().unwrap().agent_member_id.clone();
+    let path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let mut b = pool_profile("codex");
+    b.agent_member_id = Some(id.clone());
+    b.model = Some("distinct-model".into());
+    b.reasoning = Some("high".into());
+    b.version = Some("distinct-version".into());
+    b.fast_mode = true;
+    gwt::try_mutate_issue_monitor_prefs(&path, |prefs| {
+        let mut pool = prefs.launch_profile_pool();
+        pool.push(b.clone());
+        prefs.set_launch_profile_pool(pool);
+        Ok(())
+    })
+    .unwrap();
+    gwt::try_mutate_issue_monitor_prefs(&path, |prefs| {
+        let mut pool = prefs.launch_profile_pool();
+        pool.retain(|p| p.agent_member_id.as_deref() != Some(&id));
+        prefs.set_launch_profile_pool(pool);
+        Ok(())
+    })
+    .unwrap();
+    runtime.handle_frontend_event(
+        "client-1".into(),
+        FrontendEvent::IssueMonitorConfigureProfile,
+    );
+    let events = runtime.handle_launch_wizard_action(
+        &runtime.test_context(),
+        LaunchWizardAction::AddAgentSettingsSet,
+    );
+    let view = agent_settings_view(&events);
+    assert_eq!(view.selected_agent_member_id.as_deref(), Some(id.as_str()));
+    let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(Instant::now());
+    save_agent_settings_sets(&mut runtime, &recorded);
+    let prefs = gwt::load_issue_monitor_prefs(&path).unwrap();
+    let saved = gwt::agent_registry::member_profile(&prefs, &id).unwrap();
+    assert_eq!(
+        (saved.model, saved.reasoning, saved.version, saved.fast_mode),
+        (b.model, b.reasoning, b.version, b.fast_mode)
+    );
+}
+
+#[test]
 fn app_runtime_issue_monitor_agent_settings_keeps_a_runtime_the_form_was_not_asked_about() {
     // Issue #4911 AC-5: the form only asks where a set runs in its Runtime
     // step and reads Host before that, so leaving a set for another one must
@@ -1575,8 +1648,10 @@ fn app_runtime_issue_monitor_start_without_saved_profile_opens_global_settings_b
     );
     let mut expected = before_start;
     expected.agent_roster = after_start.agent_roster.clone();
+    expected.schema_version = 2;
     assert_eq!(
-        after_start, expected,
+        serde_json::to_value(&after_start).unwrap(),
+        serde_json::to_value(&expected).unwrap(),
         "settings-open only registers people; queue, profiles, claims and deliveries are unchanged"
     );
 }
@@ -2618,6 +2693,7 @@ fn app_runtime_selected_member_keeps_its_model_when_pool_order_changes() {
         &repo,
         &sessions,
         gwt::agent_names::AgentRosterAction::Add {
+            pm_eligible: false,
             name: None,
             agent_id: Some("codex".into()),
         },

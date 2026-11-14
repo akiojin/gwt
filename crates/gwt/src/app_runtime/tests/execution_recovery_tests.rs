@@ -3054,8 +3054,44 @@ fn owner_monitor_runtime_failure(
             pane.pty.try_wait().unwrap().is_some(),
             "the runtime failure has real exit proof"
         );
+    } else {
+        let live = executor
+            .block_on(owner.probe(&pane.id, pane.incarnation))
+            .unwrap();
+        assert_eq!(
+            live.session.as_ref().unwrap().id,
+            pane.session.as_ref().unwrap().id
+        );
+        assert!(Arc::ptr_eq(&live.pty, &pane.pty));
+        assert!(
+            pane.pty.try_wait().unwrap().is_none(),
+            "a hook error does not prove physical exit"
+        );
     }
-    super::pane_control_tests::control_close(&owner, &pane);
+    match executor.block_on(owner.command(OwnerCommand::Close {
+        id: pane.id.clone(),
+        incarnation: pane.incarnation,
+    })) {
+        Ok(_) => {}
+        Err(error) if !from_hook && error == "pane incarnation mismatch" => {
+            assert!(pane.pty.tree_exit_confirmed());
+            assert!(pane.pty.try_wait().unwrap().is_some());
+            let inventory = executor
+                .block_on(owner.command(OwnerCommand::ListPanes))
+                .expect("fresh owner inventory after exact exit cleanup");
+            for phase in ["panes", "pending", "closing", "reconciliation"] {
+                assert!(
+                    inventory[phase]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .all(|row| row["id"] != pane.id),
+                    "completed exit cleanup still owns the same pane id in {phase}"
+                );
+            }
+        }
+        Err(error) => panic!("exact runtime failure cleanup failed: {error}"),
+    }
     executor.block_on(async {
         // test-hygiene: allow-wall-clock-deadline Join actual tree exit and the exact empty host census before asserting idle; hook failure alone cannot release physical capacity.
         tokio::time::timeout(Duration::from_secs(30), async {
@@ -3124,6 +3160,7 @@ fn app_runtime_runtime_error_marks_issue_monitor_launched_issue_failed() {
         .expect("Issues status");
     assert_eq!(settled_status.state, "idle");
     assert_eq!(settled_status.active_count, 0);
+    assert_eq!(settled_status.last_error, status.last_error);
     assert_eq!(
         status.last_error.as_deref(),
         Some("issue #42: Process exited with status 1 — last output: Stop-block hit an error")
@@ -3180,7 +3217,8 @@ fn app_runtime_hook_error_marks_issue_monitor_launched_issue_failed_with_hook_me
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     let _home = ScopedGwtHome::set(temp.path());
-    let (_, events, _, settled_status) = owner_monitor_runtime_failure(temp.path(), true);
+    let (window_id, events, prefs, settled_status) =
+        owner_monitor_runtime_failure(temp.path(), true);
 
     let status = events
         .iter()
@@ -3189,6 +3227,11 @@ fn app_runtime_hook_error_marks_issue_monitor_launched_issue_failed_with_hook_me
             _ => None,
         })
         .expect("Issues status");
+    assert_eq!(
+        status.state, "active",
+        "the proven live physical pane still consumes capacity"
+    );
+    assert_eq!(status.active_count, 1);
     assert_eq!(settled_status.state, "idle");
     assert_eq!(settled_status.active_count, 0);
     assert_eq!(
@@ -3210,6 +3253,15 @@ fn app_runtime_hook_error_marks_issue_monitor_launched_issue_failed_with_hook_me
     assert_eq!(
         item.error_message.as_deref(),
         Some("Stop-block hit an error")
+    );
+    assert!(prefs.launched_issues.is_empty());
+    assert_eq!(
+        prefs.failed_issues,
+        vec![gwt::IssueMonitorFailedIssue {
+            issue_number: 42,
+            message: "Stop-block hit an error".into(),
+            window_id: Some(window_id),
+        }]
     );
 }
 
@@ -4075,6 +4127,13 @@ fn runtime_hook_agent_failure_enqueue_error_does_not_commit_local_fallback() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // State outcomes use the existing SPEC #4740 worker budget seam.
+    let _prefs_budget = ScopedEnvVar::set(
+        "GWT_TEST_BUDGET_ISSUE_MONITOR_PREFS_MS",
+        gwt_core::deadline_budget::HANG_GUARD
+            .as_millis()
+            .to_string(),
+    );
     let temp = tempdir().expect("tempdir");
     let _home = ScopedGwtHome::set(temp.path());
     let traces = Arc::new(Mutex::new(Vec::new()));
@@ -4090,11 +4149,12 @@ fn runtime_hook_agent_failure_enqueue_error_does_not_commit_local_fallback() {
         let host_pid = std::process::id();
         let host_started_at = gwt::process::host_process_start_time(host_pid).unwrap();
         let host_key = format!("{host_pid}:{host_started_at}");
-        owner_fixture_block_on(async {
-            // test-hygiene: allow-wall-clock-deadline Observe the exact live census before taking the fault baseline; scan idle does not join the independent reconciler.
+        let before = owner_fixture_block_on(async {
+            // test-hygiene: allow-wall-clock-deadline Observe the exact durable census before taking the fault baseline; the registry can precede its JSON mirror.
             tokio::time::timeout(Duration::from_secs(30), async {
                 loop {
-                    let prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+                    let bytes = fs::read(&prefs_path).unwrap();
+                    let prefs: gwt::IssueMonitorPrefs = serde_json::from_slice(&bytes).unwrap();
                     if prefs
                         .monitor_runtime_counts
                         .get(&host_key)
@@ -4107,15 +4167,14 @@ fn runtime_hook_agent_failure_enqueue_error_does_not_commit_local_fallback() {
                                 && census.windows.get(&pane.id) == Some(&42)
                         })
                     {
-                        break;
+                        break bytes;
                     }
                     tokio::task::yield_now().await;
                 }
             })
             .await
-            .expect("the actual live pane census must settle before the fault baseline");
+            .expect("the actual live pane census must settle before the fault baseline")
         });
-        let before = fs::read(&prefs_path).unwrap();
         let endpoint_path = gwt_core::daemon::RuntimeScope::from_project_root(
             &root,
             gwt_core::daemon::RuntimeTarget::Host,

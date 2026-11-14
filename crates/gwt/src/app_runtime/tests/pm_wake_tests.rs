@@ -332,6 +332,11 @@ fn agent_idle_wake_completion_ignores_a_replaced_pm_pane() {
     )
     .expect("retire the actual PM before replacing it at the same GUI id");
     assert!(previous.pty.tree_exit_confirmed());
+    gwt::pm_registry::deregister_pm(
+        &gwt::pm_registry::pm_prefs_path_for_repo_path(&repo),
+        &previous.session.as_ref().unwrap().id,
+    )
+    .expect("intentional stop clears the old PM registration before NEW");
     let _replacement = attach_live_pm_pane(&mut runtime, &pm_id);
     let successor = owner_runtime_probe(&runtime, &pm_id);
     assert_ne!(successor.incarnation, previous.incarnation);

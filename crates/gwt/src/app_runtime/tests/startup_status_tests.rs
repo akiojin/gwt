@@ -31,6 +31,13 @@ fn policy_owner_config(
         .base_branch(selected.base_branch.unwrap())
         .build();
     config.command = temp.join("policy-provider").display().to_string();
+    if config.agent_id == gwt_agent::AgentId::Codex {
+        let codex_home = temp.join(".codex");
+        fs::create_dir_all(&codex_home).unwrap();
+        config
+            .env_vars
+            .insert("CODEX_HOME".into(), codex_home.display().to_string());
+    }
     config.linked_issue_number = Some(issue);
     config.explicit_follow_up = true;
     config.launch_route = gwt_agent::LaunchRoute::Autonomous;
@@ -51,6 +58,7 @@ fn policy_owner_fixture(
     fs::create_dir_all(&project).unwrap();
     init_repo_with_initial_commit(&project);
     seed_owner_fixture_roster(&project, 8);
+    configure_owner_fixture_tools(&project, &[provider.command()]);
     gwt::mutate_issue_monitor_prefs(
         &gwt::issue_monitor_prefs_path_for_repo_path(&project),
         |prefs| {

@@ -2180,9 +2180,8 @@ fn spawn_issue_monitor_worker_with_lease(
                     #[cfg(test)]
                     let revision_before_retry = revision;
                     let Some(accepted) = pending_authority_controls
-                        .as_ref()
-                        .and_then(PendingIssueMonitorAuthorityControls::front_accepted)
-                        .cloned()
+                        .as_mut()
+                        .and_then(PendingIssueMonitorAuthorityControls::front_accepted_mut)
                     else {
                         continue;
                     };
@@ -3490,6 +3489,9 @@ struct AcceptedIssueMonitorControl {
     // recovery; recomputing it changes persisted failure/backoff state.
     processed_at: String,
     control: IssueMonitorControl,
+    // Exact-CAS evidence survives a lost commit confirmation without retaining
+    // an old model that could overwrite newer runtime observations.
+    terminal_delivery_outcome: Option<(crate::IssueMonitorStopTarget, bool)>,
     // Captured once from native authority before the first attempt; pending
     // retries and receipt convergence must never resolve a replacement holder.
     wait_subject: Option<crate::issue_monitor::IssueMonitorWaitSubject>,
@@ -3507,18 +3509,23 @@ impl AcceptedIssueMonitorControl {
                 control_id,
                 processed_at: changed_at,
                 control: IssueMonitorControl::MaxActiveAgents(max_active_agents),
+                terminal_delivery_outcome: None,
                 wait_subject: None,
             };
         }
         Self {
             control_id: uuid::Uuid::new_v4().to_string(),
-            // A measured child sample may arrive within this same second.
-            processed_at: if matches!(&control, IssueMonitorControl::ChildProgress { .. }) {
+            // Samples and launch boundaries retain their subsecond ordering.
+            processed_at: if matches!(
+                &control,
+                IssueMonitorControl::ChildProgress { .. } | IssueMonitorControl::Launched { .. }
+            ) {
                 chrono::Utc::now().to_rfc3339()
             } else {
                 chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
             },
             control,
+            terminal_delivery_outcome: None,
             wait_subject: None,
         }
     }
@@ -3819,6 +3826,10 @@ impl PendingIssueMonitorAuthorityControls {
         self.controls.front().map(|entry| &entry.accepted)
     }
 
+    fn front_accepted_mut(&mut self) -> Option<&mut AcceptedIssueMonitorControl> {
+        self.controls.front_mut().map(|entry| &mut entry.accepted)
+    }
+
     fn front_is_authorizing(&self) -> bool {
         self.controls.front().is_some_and(|entry| entry.authorizing)
     }
@@ -3951,7 +3962,7 @@ fn apply_or_queue_issue_monitor_control(
     let outcome = try_apply_accepted_issue_monitor_control_with_disk_migration(
         prefs_path,
         monitor,
-        accepted.clone(),
+        &mut accepted,
     );
     match outcome {
         IssueMonitorControlCommit::Committed { .. } => {
@@ -4078,6 +4089,9 @@ fn try_apply_issue_monitor_control(
             // The decoder already verified the resident PM's authority to
             // enable monitoring. Rejecting ON again here closes the whole lane.
             if max_active_agents == Some(0)
+                || max_active_agents.is_some_and(|size| {
+                    crate::agent_names::validate_requested_roster_size(size).is_err()
+                })
                 || (allowed_labels.is_none()
                     && enabled.is_none()
                     && autonomous_mode.is_none()
@@ -4467,6 +4481,9 @@ fn apply_routine_issue_monitor_control(
             changed_at,
             ..
         } => {
+            if max_active_agents.is_some_and(|size| size == 0 || crate::agent_names::validate_requested_roster_size(size).is_err()) {
+                return false;
+            }
             monitor.set_max_active_agents_override_with_source(
                 max_active_agents,
                 crate::issue_monitor::IssueMonitorMaxActiveChangeSource::Gui,
@@ -4475,6 +4492,9 @@ fn apply_routine_issue_monitor_control(
             true
         }
         IssueMonitorControl::MaxActiveAgents(max_active_agents) => {
+            if max_active_agents.is_some_and(|size| size == 0 || crate::agent_names::validate_requested_roster_size(size).is_err()) {
+                return false;
+            }
             monitor.set_max_active_agents_override_with_source(
                 max_active_agents,
                 crate::issue_monitor::IssueMonitorMaxActiveChangeSource::Gui,
@@ -4511,7 +4531,12 @@ fn apply_routine_issue_monitor_control(
             window_id,
             delivery_id,
         } => {
-            monitor.complete_active_launch_delivery(issue_number, window_id, delivery_id.as_deref())
+            monitor.complete_active_launch_delivery_at(
+                issue_number,
+                window_id,
+                delivery_id.as_deref(),
+                Some(now),
+            )
         }
         IssueMonitorControl::LaunchFailed {
             issue_number,
@@ -4684,7 +4709,7 @@ fn apply_routine_issue_monitor_control(
                 issue_number, claim_id: monitor.live_claim_id(issue_number),
                 delivery_id: monitor.pending_launch_delivery_id(issue_number), window_id: Some(window_id),
             };
-            monitor.requeue_exact_window_classified(&target, classification).is_some()
+            monitor.requeue_exact_window_classified_at(&target, classification, now).is_some()
         }
         IssueMonitorControl::WindowClosed {
             target,
@@ -4692,7 +4717,7 @@ fn apply_routine_issue_monitor_control(
             ..
         } => match target {
             Some(target) => monitor
-                .requeue_exact_window_classified(&target, classification.unwrap_or_default())
+                .requeue_exact_window_classified_at(&target, classification.unwrap_or_default(), now)
                 .is_some(),
             // Pre-generation publishers can still be decoded for wire
             // compatibility, but a window id alone is not authority to revoke
@@ -4796,7 +4821,7 @@ fn try_apply_issue_monitor_control_with_disk_migration(
     try_apply_accepted_issue_monitor_control_with_disk_migration(
         prefs_path,
         monitor,
-        AcceptedIssueMonitorControl::new(control),
+        &mut AcceptedIssueMonitorControl::new(control),
     )
 }
 
@@ -4811,16 +4836,17 @@ fn try_apply_issue_monitor_control_with_disk_migration_observed(
     try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
         prefs_path,
         monitor,
-        AcceptedIssueMonitorControl::new(control),
+        &mut AcceptedIssueMonitorControl::new(control),
         prefs_timeout,
         on_first_contention,
+        || chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
     )
 }
 
 fn try_apply_accepted_issue_monitor_control_with_disk_migration(
     prefs_path: &Path,
     monitor: &mut crate::IssueMonitorState,
-    accepted: AcceptedIssueMonitorControl,
+    accepted: &mut AcceptedIssueMonitorControl,
 ) -> IssueMonitorControlCommit {
     try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
         prefs_path,
@@ -4831,15 +4857,17 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration(
         // starve the entire control lane before any launch claim commits.
         crate::daemon_publisher::DURABLE_ISSUE_MONITOR_CONTROL_BUDGET.resolve(),
         || {},
+        || chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
     )
 }
 
 fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
     prefs_path: &Path,
     monitor: &mut crate::IssueMonitorState,
-    accepted: AcceptedIssueMonitorControl,
+    accepted: &mut AcceptedIssueMonitorControl,
     prefs_timeout: Duration,
     on_first_contention: impl FnMut(),
+    current_time: impl FnOnce() -> String,
 ) -> IssueMonitorControlCommit {
     let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
         gwt_core::operation_deadline::now() + prefs_timeout,
@@ -4855,9 +4883,13 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
         }
     );
     let wait_declaration = matches!(accepted.control, IssueMonitorControl::WaitDeclared { .. });
-    let failure_control = matches!(
+    let source_consuming_control = matches!(
         accepted.control,
-        IssueMonitorControl::LaunchFailed { .. } | IssueMonitorControl::AgentFailed { .. }
+        IssueMonitorControl::Launched { .. }
+            | IssueMonitorControl::LaunchFailed { .. }
+            | IssueMonitorControl::AgentFailed { .. }
+            | IssueMonitorControl::WindowClosed { .. }
+            | IssueMonitorControl::WindowClosedFromLaunch { .. }
     );
     let replacement_control = matches!(
         accepted.control,
@@ -4924,7 +4956,20 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
                     // then require its complete prefs snapshot to equal the
                     // durable receipt snapshot before ACKing.
                     let mut converged = monitor.clone();
-                    if !failure_control {
+                    if !source_consuming_control {
+                        if matches!(
+                            &accepted.control,
+                            IssueMonitorControl::Enabled(false)
+                                | IssueMonitorControl::ConfigSet {
+                                    enabled: Some(false),
+                                    ..
+                                }
+                        ) {
+                            // The OFF receipt consumed this volatile tracking.
+                            // Reset it before disk OFF makes the revoking setter
+                            // a no-op; full mixed settings are still applied below.
+                            converged.set_enabled(false);
+                        }
                         rebase_daemon_waits(&mut converged, disk, live, retired)?;
                         rebase_issue_monitor_control_candidate(
                             &mut converged,
@@ -4935,21 +4980,67 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
                     let converged_result = converged.with_control_event_context(
                         &accepted.control_id,
                         &accepted.processed_at,
-                        |monitor| {
-                            try_apply_issue_monitor_control(
+                        |monitor| match &accepted.control {
+                            IssueMonitorControl::QuotaHoldClear {
+                                provider,
+                                reason,
+                                released_at,
+                            } if crate::issue_monitor::normalize_issue_monitor_provider(
+                                provider,
+                            )
+                            .is_some_and(|provider| {
+                                !disk.provider_quota_holds.contains_key(&provider)
+                                    && disk
+                                        .provider_quota_hold_releases
+                                        .get(&provider)
+                                        .is_some_and(|release| {
+                                            release.reason == *reason
+                                                && release.released_at == *released_at
+                                        })
+                            }) =>
+                            {
+                                // Reapplying an exact committed clear would erase its
+                                // released reset. Preserve that canonical provenance;
+                                // the current projection must still equal disk below.
+                                Some(true)
+                            }
+                            _ => try_apply_issue_monitor_control(
                                 monitor,
                                 accepted.control.clone(),
-                                &accepted.processed_at,
-                            )
+                                receipt
+                                    .window_close_applied_at
+                                    .as_deref()
+                                    .filter(|_| {
+                                        matches!(
+                                            &accepted.control,
+                                            IssueMonitorControl::WindowClosed { .. }
+                                                | IssueMonitorControl::WindowClosedFromLaunch { .. }
+                                        )
+                                    })
+                                    .unwrap_or(&accepted.processed_at),
+                            ),
                         },
                     );
-                    if failure_control {
-                        // Failure fences restore the committed retry snapshot,
-                        // and exact-source failures consume their source. Apply
-                        // to the pre-commit projection first so receipt recovery
-                        // neither counts a failure twice nor loses its source.
+                    if source_consuming_control {
+                        // Completion and failure consume the accepted launch
+                        // source. Apply to the pre-commit projection before
+                        // rebasing so receipt replay preserves that outcome.
                         rebase_daemon_waits(&mut converged, disk, live, retired)?;
                     }
+                    let converged_result =
+                        match (&accepted.control, &accepted.terminal_delivery_outcome) {
+                            (
+                                IssueMonitorControl::TerminalDelivered { target },
+                                Some((applied_target, result)),
+                            ) => {
+                                // The first exact apply may have learned and consumed
+                                // its source entirely under the prefs lock. Bind its
+                                // historical outcome to that complete accepted target;
+                                // the current projection must still match disk below.
+                                (target == applied_target).then_some(*result)
+                            }
+                            _ => converged_result,
+                        };
                     converged.set_last_control_receipt(receipt.clone());
                     // Authority change is historical receipt evidence; compare
                     // project-owned fields independently of the shared policy.
@@ -5118,6 +5209,15 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
                 }
                 control => control.clone(),
             };
+            // A failed pre-commit attempt must not freeze a retry deadline. Sample
+            // only after acquiring the transaction locks; a committed receipt owns
+            // this timestamp for every later replay.
+            let window_close_applied_at = matches!(
+                &control,
+                IssueMonitorControl::WindowClosed { .. }
+                    | IssueMonitorControl::WindowClosedFromLaunch { .. }
+            )
+            .then(current_time);
             let authority_epoch_before = candidate.effect_authority_epoch();
             applied = Some(
                 if let IssueMonitorControl::TierSet {
@@ -5156,12 +5256,20 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
                             try_apply_issue_monitor_control(
                                 monitor,
                                 control,
-                                &accepted.processed_at,
+                                window_close_applied_at
+                                    .as_deref()
+                                    .unwrap_or(&accepted.processed_at),
                             )
                         },
                     )
                 },
             );
+            if let IssueMonitorControl::TerminalDelivered { target } = &accepted.control {
+                // Refresh on every fresh attempt: a failed transaction does not
+                // freeze the canonical source used by a later admission retry.
+                accepted.terminal_delivery_outcome =
+                    applied.flatten().map(|result| (target.clone(), result));
+            }
             authority_changed = candidate.effect_authority_epoch() != authority_epoch_before;
             let refused_launch_binding = match &accepted.control {
                 IssueMonitorControl::Launched {
@@ -5195,6 +5303,22 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
                 return Ok(());
             }
             if applied.is_some_and(|result| result.is_some()) {
+                // Membership changes require an explicit roster control;
+                // cached state and machine-budget updates cannot resize it.
+                let requested_roster_size = match &accepted.control {
+                    IssueMonitorControl::MaxActiveAgents(Some(size)) => Some(*size),
+                    IssueMonitorControl::ConfigSet {
+                        max_active_agents: Some(size),
+                        ..
+                    } => Some(*size),
+                    _ => None,
+                };
+                if let Some(size) = requested_roster_size {
+                    let mut resized = candidate.prefs();
+                    crate::agent_names::resize_shared_roster(&mut resized, size)
+                        .map_err(io::Error::other)?;
+                    candidate.rebase_gui_observer_prefs(&resized);
+                }
                 let explicit_max_active =
                     matches!(&accepted.control, IssueMonitorControl::MaxActiveAgents(_))
                         || matches!(&accepted.control,
@@ -5242,6 +5366,7 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
                     control_id: accepted.control_id.clone(),
                     should_scan: applied.flatten().unwrap_or(false),
                     authority_changed,
+                    window_close_applied_at,
                 });
                 *disk = candidate.prefs();
             }
@@ -5371,7 +5496,7 @@ mod profiles_patch_contract_tests {
                 let result = try_apply_accepted_issue_monitor_control_with_disk_migration(
                     &path,
                     &mut monitor,
-                    AcceptedIssueMonitorControl::new(control),
+                    &mut AcceptedIssueMonitorControl::new(control),
                 );
                 (result, patches)
             })
@@ -5400,7 +5525,7 @@ mod profiles_patch_contract_tests {
             try_apply_accepted_issue_monitor_control_with_disk_migration(
                 &path,
                 &mut monitor,
-                AcceptedIssueMonitorControl::new(patch_control(&latest, rejected)),
+                &mut AcceptedIssueMonitorControl::new(patch_control(&latest, rejected)),
             ),
             IssueMonitorControlCommit::Committed { .. }
         ));
@@ -5445,7 +5570,7 @@ mod profiles_patch_contract_tests {
                 initial.clone(),
             );
             let mut monitor = stale.clone();
-            let accepted = AcceptedIssueMonitorControl::new(control);
+            let mut accepted = AcceptedIssueMonitorControl::new(control);
             fs::write(path.with_extension("parent-sync-fail-once"), b"fail once")
                 .expect("sync failure trigger");
             let _failure = gwt_core::test_support::ScopedEnvVar::set(
@@ -5456,7 +5581,7 @@ mod profiles_patch_contract_tests {
                 try_apply_accepted_issue_monitor_control_with_disk_migration(
                     &path,
                     &mut monitor,
-                    accepted.clone(),
+                    &mut accepted.clone(),
                 ),
                 IssueMonitorControlCommit::RetryableFailure
             );
@@ -5498,7 +5623,7 @@ mod profiles_patch_contract_tests {
                 try_apply_accepted_issue_monitor_control_with_disk_migration(
                     &path,
                     &mut monitor,
-                    accepted,
+                    &mut accepted,
                 ),
                 IssueMonitorControlCommit::Committed { .. }
             ));
@@ -5536,7 +5661,7 @@ mod max_active_mode_contract_tests {
         let outcome = try_apply_accepted_issue_monitor_control_with_disk_migration(
             &path,
             &mut monitor,
-            AcceptedIssueMonitorControl::new(IssueMonitorControl::AgentFailed {
+            &mut AcceptedIssueMonitorControl::new(IssueMonitorControl::AgentFailed {
                 issue_number: Some(6732),
                 window_id: "tab-1::agent".to_string(),
                 message: "active writer".to_string(),
@@ -5591,7 +5716,7 @@ mod max_active_mode_contract_tests {
                 try_apply_accepted_issue_monitor_control_with_disk_migration(
                     &path,
                     &mut monitor,
-                    AcceptedIssueMonitorControl::new(control),
+                    &mut AcceptedIssueMonitorControl::new(control),
                 ),
                 IssueMonitorControlCommit::Committed { .. }
             ));
@@ -5619,7 +5744,7 @@ mod max_active_mode_contract_tests {
             try_apply_accepted_issue_monitor_control_with_disk_migration(
                 &path,
                 &mut monitor,
-                AcceptedIssueMonitorControl::new(invalid),
+                &mut AcceptedIssueMonitorControl::new(invalid),
             ),
             IssueMonitorControlCommit::Rejected
         ));
@@ -5929,7 +6054,7 @@ fn wait_refresh_preserves_an_accepted_idle_release() {
         try_apply_accepted_issue_monitor_control_with_disk_migration(
             &path,
             &mut monitor,
-            AcceptedIssueMonitorControl::new(IssueMonitorControl::IdleRelease {
+            &mut AcceptedIssueMonitorControl::new(IssueMonitorControl::IdleRelease {
                 number: Some(42),
                 reason: "operator release".into(),
             }),
@@ -5999,7 +6124,7 @@ fn issue_5876_committed_wait_survives_a_stale_daemon_writer() {
             try_apply_accepted_issue_monitor_control_with_disk_migration(
                 &prefs_path,
                 monitor,
-                AcceptedIssueMonitorControl::new(control),
+                &mut AcceptedIssueMonitorControl::new(control),
             ),
             IssueMonitorControlCommit::Committed { .. }
         ));
@@ -6126,7 +6251,7 @@ fn issue_5876_runtime_only_wait_survives_stale_writer_for_exact_native_holder() 
     let mut permit = IssueMonitorEffectPermit::new();
     let mut pending = None;
     let mut unbound_end = monitor.clone();
-    let legacy_clear = AcceptedIssueMonitorControl::new(IssueMonitorControl::WaitCleared {
+    let mut legacy_clear = AcceptedIssueMonitorControl::new(IssueMonitorControl::WaitCleared {
         issue_number: 3809,
         at: now.clone(),
     });
@@ -6185,7 +6310,7 @@ fn issue_5876_runtime_only_wait_survives_stale_writer_for_exact_native_holder() 
         crate::save_issue_monitor_prefs(&receipt_path, &committed).unwrap();
         let stale_before_control = stale.clone();
         let mut receipt_monitor = stale_before_control.clone();
-        let accepted = AcceptedIssueMonitorControl::new(control);
+        let mut accepted = AcceptedIssueMonitorControl::new(control);
         fs::write(
             receipt_path.with_extension("parent-sync-fail-once"),
             b"fail once",
@@ -6199,7 +6324,7 @@ fn issue_5876_runtime_only_wait_survives_stale_writer_for_exact_native_holder() 
             try_apply_accepted_issue_monitor_control_with_disk_migration(
                 &receipt_path,
                 &mut receipt_monitor,
-                accepted.clone(),
+                &mut accepted.clone(),
             ),
             IssueMonitorControlCommit::RetryableFailure
         );
@@ -6243,7 +6368,7 @@ fn issue_5876_runtime_only_wait_survives_stale_writer_for_exact_native_holder() 
         let mut retry = try_apply_accepted_issue_monitor_control_with_disk_migration(
             &receipt_path,
             &mut receipt_monitor,
-            accepted.clone(),
+            &mut accepted.clone(),
         );
         if is_failure {
             assert_eq!(retry, IssueMonitorControlCommit::RetryableFailure);
@@ -6252,7 +6377,7 @@ fn issue_5876_runtime_only_wait_survives_stale_writer_for_exact_native_holder() 
             retry = try_apply_accepted_issue_monitor_control_with_disk_migration(
                 &receipt_path,
                 &mut receipt_monitor,
-                accepted,
+                &mut accepted,
             );
         }
         assert!(
@@ -6305,7 +6430,7 @@ fn issue_5876_runtime_only_wait_survives_stale_writer_for_exact_native_holder() 
         try_apply_accepted_issue_monitor_control_with_disk_migration(
             &prefs_path,
             &mut stale,
-            legacy_clear
+            &mut legacy_clear
         ),
         IssueMonitorControlCommit::WaitNotLaunched
     );
@@ -6316,7 +6441,7 @@ fn issue_5876_runtime_only_wait_survives_stale_writer_for_exact_native_holder() 
     );
 
     let receipt = committed.last_control_receipt.clone().unwrap();
-    let replay = AcceptedIssueMonitorControl {
+    let mut replay = AcceptedIssueMonitorControl {
         control_id: receipt.control_id,
         processed_at: now.clone(),
         control: IssueMonitorControl::WaitDeclared {
@@ -6326,13 +6451,14 @@ fn issue_5876_runtime_only_wait_survives_stale_writer_for_exact_native_holder() 
             at: now.clone(),
         },
         wait_subject: Some(subject.clone()),
+        terminal_delivery_outcome: None,
     };
     stale.set_autonomous_phase(3809, crate::AutonomousPhase::Implementing);
     assert!(matches!(
         try_apply_accepted_issue_monitor_control_with_disk_migration(
             &prefs_path,
             &mut stale,
-            replay
+            &mut replay
         ),
         IssueMonitorControlCommit::Committed { .. }
     ));
@@ -6457,7 +6583,7 @@ fn issue_5616_wait_control_persists_for_an_untracked_active_runtime() {
     crate::save_issue_monitor_prefs(&prefs_path, &before).expect("seed prefs");
 
     let mut stale = monitor.clone();
-    let accepted = AcceptedIssueMonitorControl::new(IssueMonitorControl::WaitDeclared {
+    let mut accepted = AcceptedIssueMonitorControl::new(IssueMonitorControl::WaitDeclared {
         issue_number: 42,
         reason: "verification".to_string(),
         resume_condition: "lease available".to_string(),
@@ -6467,7 +6593,7 @@ fn issue_5616_wait_control_persists_for_an_untracked_active_runtime() {
         try_apply_accepted_issue_monitor_control_with_disk_migration(
             &prefs_path,
             &mut monitor,
-            accepted.clone(),
+            &mut accepted.clone(),
         ),
         IssueMonitorControlCommit::Committed {
             should_scan: false,
@@ -6487,7 +6613,7 @@ fn issue_5616_wait_control_persists_for_an_untracked_active_runtime() {
         try_apply_accepted_issue_monitor_control_with_disk_migration(
             &prefs_path,
             &mut stale,
-            accepted
+            &mut accepted
         ),
         IssueMonitorControlCommit::Committed { .. }
     ));
@@ -6640,6 +6766,9 @@ fn decode_issue_monitor_control_in_repo(
                     });
                 if (!resident_pm && (enabled == Some(true) || autonomous_mode == Some(true)))
                     || max_active_agents == Some(0)
+                    || max_active_agents.is_some_and(|size| {
+                        crate::agent_names::validate_requested_roster_size(size).is_err()
+                    })
                     || (allowed_labels.is_none()
                         && enabled.is_none()
                         && autonomous_mode.is_none()
@@ -6879,11 +7008,10 @@ fn decode_issue_monitor_control_in_repo(
                 let max_active_agents = if value.is_null() {
                     None
                 } else {
-                    Some(
-                        usize::try_from(value.as_u64()?)
-                            .ok()
-                            .filter(|value| *value > 0)?,
-                    )
+                    Some(usize::try_from(value.as_u64()?).ok().filter(|value| {
+                        *value > 0
+                            && crate::agent_names::validate_requested_roster_size(*value).is_ok()
+                    })?)
                 };
                 if payload.get("control_id").is_some() || payload.get("changed_at").is_some() {
                     let control_id = payload.get("control_id")?.as_str()?;
@@ -10272,7 +10400,7 @@ mod agent_failure_source_contract_tests {
             try_apply_accepted_issue_monitor_control_with_disk_migration(
                 &prefs_path,
                 &mut monitor,
-                AcceptedIssueMonitorControl::new(control),
+                &mut AcceptedIssueMonitorControl::new(control),
             ),
             IssueMonitorControlCommit::Committed { .. }
         ));
@@ -10365,7 +10493,7 @@ mod agent_failure_source_contract_tests {
         let result = try_apply_accepted_issue_monitor_control_with_disk_migration(
             &prefs_path,
             &mut volatile,
-            AcceptedIssueMonitorControl::new(IssueMonitorControl::AgentFailed {
+            &mut AcceptedIssueMonitorControl::new(IssueMonitorControl::AgentFailed {
                 issue_number: Some(42),
                 window_id: window_id.to_string(),
                 message: "predecessor failed".to_string(),
@@ -10403,7 +10531,7 @@ mod agent_failure_source_contract_tests {
         let result = try_apply_accepted_issue_monitor_control_with_disk_migration(
             &prefs_path,
             &mut volatile,
-            AcceptedIssueMonitorControl::new(IssueMonitorControl::AgentFailed {
+            &mut AcceptedIssueMonitorControl::new(IssueMonitorControl::AgentFailed {
                 issue_number: None,
                 window_id: window_id.to_string(),
                 message: "unbound predecessor failed".to_string(),
@@ -10420,54 +10548,470 @@ mod agent_failure_source_contract_tests {
     }
 
     #[test]
-    fn agent_failed_from_launch_typed_receipt_replay_keeps_consumed_source_committed() {
-        let temp = TempDir::new().expect("tempdir");
+    fn consumed_launch_source_receipt_replay_converges_stale_volatile_state() {
+        for close_kind in ["agent_failure", "launch_close", "exact_close"] {
+            let window_close = close_kind != "agent_failure";
+            let temp = TempDir::new().expect("tempdir");
+            let _home = ScopedGwtHome::set(temp.path());
+            let _clock = ScopedOperationClock::set(Instant::now());
+            let prefs_path = temp.path().join("monitor.json");
+            let window_id = "tab-1::agent-42";
+            let mut monitor = monitor_with_launch("claim-old", window_id);
+            let mut stale_volatile = monitor.clone();
+            let source = IssueMonitorAgentFailureSource::Bound {
+                issue_number: 42,
+                identity: monitor.launch_identity(42),
+            };
+            let control = match close_kind {
+                "launch_close" => IssueMonitorControl::WindowClosedFromLaunch {
+                    window_id: window_id.to_string(),
+                    source,
+                    classification: crate::IssueMonitorFailureClass::Agent,
+                },
+                "exact_close" => IssueMonitorControl::WindowClosed {
+                    window_id: window_id.to_string(),
+                    target: Some(crate::IssueMonitorStopTarget {
+                        issue_number: 42,
+                        claim_id: monitor.live_claim_id(42),
+                        delivery_id: monitor.pending_launch_delivery_id(42),
+                        window_id: Some(window_id.to_string()),
+                    }),
+                    classification: Some(crate::IssueMonitorFailureClass::Agent),
+                },
+                _ => IssueMonitorControl::AgentFailed {
+                    issue_number: Some(42),
+                    window_id: window_id.to_string(),
+                    message: "active writer".to_string(),
+                    failure: Some(crate::IssueMonitorFailure::ResumeWriterConflict {
+                        holder_window_id: None,
+                    }),
+                    source: Some(source),
+                },
+            };
+            let mut accepted = AcceptedIssueMonitorControl::new(control);
+            if window_close {
+                accepted.processed_at = "2000-01-01T00:00:00Z".to_string();
+            }
+            crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("seed source");
+
+            let first =
+                super::try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
+                    &prefs_path,
+                    &mut monitor,
+                    &mut accepted.clone(),
+                    std::time::Duration::from_secs(30),
+                    || {},
+                    || {
+                        assert!(
+                            window_close,
+                            "other controls retain their admission timestamp"
+                        );
+                        "2026-09-01T00:03:00Z".into()
+                    },
+                );
+            assert!(matches!(first, IssueMonitorControlCommit::Committed { .. }));
+            assert!(
+                !monitor.launch_identity(42).active,
+                "the first control consumes its source"
+            );
+            if window_close {
+                assert_eq!(
+                    monitor
+                        .autonomous_record(42)
+                        .and_then(|record| record.retry_not_before.as_deref()),
+                    Some("2026-09-01T00:04:00Z"),
+                    "a delayed close receives its full backoff after application",
+                );
+                assert!(!monitor.retry_ready(42, "2026-09-01T00:03:59Z"));
+                assert!(monitor.retry_ready(42, "2026-09-01T00:04:00Z"));
+            }
+            let committed = monitor.prefs();
+            assert_eq!(
+                committed
+                    .last_control_receipt
+                    .as_ref()
+                    .unwrap()
+                    .window_close_applied_at
+                    .as_deref(),
+                window_close.then_some("2026-09-01T00:03:00Z"),
+            );
+            let mut legacy_volatile = stale_volatile.clone();
+            let replay =
+                super::try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
+                    &prefs_path,
+                    &mut stale_volatile,
+                    &mut accepted,
+                    std::time::Duration::from_secs(30),
+                    || {},
+                    || panic!("receipt replay must not read the current time"),
+                );
+            assert_eq!(
+                    replay, first,
+                    "a durable receipt remains committed after consuming its source: window_close={window_close}"
+                );
+            assert_eq!(stale_volatile.prefs(), committed);
+            assert_eq!(
+                crate::load_issue_monitor_prefs(&prefs_path).unwrap(),
+                committed
+            );
+            if window_close {
+                let mut legacy = committed;
+                legacy
+                    .last_control_receipt
+                    .as_mut()
+                    .unwrap()
+                    .window_close_applied_at = None;
+                legacy
+                    .autonomous_records
+                    .iter_mut()
+                    .find(|record| record.issue_number == 42)
+                    .unwrap()
+                    .retry_not_before = Some("2000-01-01T00:01:00Z".into());
+                crate::save_issue_monitor_prefs(&prefs_path, &legacy).unwrap();
+                assert_eq!(
+                    super::try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
+                        &prefs_path,
+                        &mut legacy_volatile,
+                        &mut accepted,
+                        std::time::Duration::from_secs(30),
+                        || {},
+                        || panic!("legacy receipt replay must retain its admission timestamp"),
+                    ),
+                    first,
+                );
+                assert_eq!(legacy_volatile.prefs(), legacy);
+                assert_eq!(
+                    crate::load_issue_monitor_prefs(&prefs_path).unwrap(),
+                    legacy
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn consumed_delivery_launched_receipt_replay_converges_stale_volatile_state() {
+        let temp = TempDir::new().unwrap();
         let _home = ScopedGwtHome::set(temp.path());
         let _clock = ScopedOperationClock::set(Instant::now());
         let prefs_path = temp.path().join("monitor.json");
         let window_id = "tab-1::agent-42";
-        let mut monitor = monitor_with_launch("claim-old", window_id);
-        let mut stale_volatile = monitor.clone();
-        let source = IssueMonitorAgentFailureSource::Bound {
-            issue_number: 42,
-            identity: monitor.launch_identity(42),
+        let prefs = crate::IssueMonitorPrefs {
+            enabled: true,
+            pending_launch_deliveries: vec![serde_json::from_value(serde_json::json!({
+                "delivery_id": "delivery-42", "issue_number": 42,
+                "branch_name": "work/issue-42", "linked_issue_kind": "issue",
+                "claim_id": "claim-42", "created_at": "2000-01-01T00:00:00Z",
+                "materialized_window_id": window_id,
+                "workspace_durable_window_id": window_id,
+            }))
+            .unwrap()],
+            ..crate::IssueMonitorPrefs::default()
         };
-        let accepted = AcceptedIssueMonitorControl::new(IssueMonitorControl::AgentFailed {
-            issue_number: Some(42),
-            window_id: window_id.to_string(),
-            message: "active writer".to_string(),
-            failure: Some(crate::IssueMonitorFailure::ResumeWriterConflict {
-                holder_window_id: None,
-            }),
-            source: Some(source),
+        let mut monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        monitor.set_autonomous_phase(42, crate::AutonomousPhase::Implementing);
+        let mut stale = monitor.clone();
+        crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).unwrap();
+        let mut accepted = AcceptedIssueMonitorControl::new(IssueMonitorControl::Launched {
+            issue_number: 42,
+            window_id: window_id.into(),
+            delivery_id: Some("delivery-42".into()),
         });
-        crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("seed source");
-
+        accepted.processed_at = "2000-01-01T00:00:00.123456789Z".into();
+        let processed_at = accepted.processed_at.clone();
         let first = try_apply_accepted_issue_monitor_control_with_disk_migration(
             &prefs_path,
             &mut monitor,
-            accepted.clone(),
+            &mut accepted.clone(),
         );
-        assert!(matches!(first, IssueMonitorControlCommit::Committed { .. }));
-        assert!(
-            !monitor.launch_identity(42).active,
-            "the first failure consumes its source"
-        );
+        assert!(matches!(
+            first,
+            IssueMonitorControlCommit::Committed {
+                should_scan: true,
+                ..
+            }
+        ));
         let committed = monitor.prefs();
+        assert!(committed.pending_launch_deliveries.is_empty());
+        assert_eq!(committed.launched_issues.len(), 1);
         let replay = try_apply_accepted_issue_monitor_control_with_disk_migration(
             &prefs_path,
-            &mut stale_volatile,
-            accepted,
+            &mut stale,
+            &mut accepted,
         );
         assert_eq!(
             replay, first,
-            "a durable receipt remains committed after consuming its source"
+            "the same receipt preserves its committed outcome"
         );
-        assert_eq!(stale_volatile.prefs(), committed);
+        assert_eq!(stale.prefs(), committed);
         assert_eq!(
             crate::load_issue_monitor_prefs(&prefs_path).unwrap(),
             committed
         );
+        assert_eq!(
+            committed.launch_confirmations[&42].confirmed_at,
+            processed_at
+        );
+        assert_eq!(
+            monitor
+                .autonomous_record(42)
+                .unwrap()
+                .last_heartbeat
+                .as_deref(),
+            Some(processed_at.as_str())
+        );
+    }
+
+    #[test]
+    fn off_receipt_replay_clears_stale_launch_tracking_without_masking_mixed_intent() {
+        for config_set in [true, false] {
+            let temp = TempDir::new().unwrap();
+            let _home = ScopedGwtHome::set(temp.path());
+            let _clock = ScopedOperationClock::set(Instant::now());
+            let path = temp.path().join("monitor.json");
+            let window = "tab-1::agent-42";
+            let prefs = crate::IssueMonitorPrefs {
+                enabled: true,
+                launching_issues: vec![crate::IssueMonitorLaunchingIssue {
+                    issue_number: 42,
+                    claimed_at: Some("2000-01-01T00:00:00Z".into()),
+                }],
+                pending_launch_deliveries: vec![serde_json::from_value(serde_json::json!({
+                    "delivery_id":"delivery-42", "issue_number":42,
+                    "branch_name":"work/issue-42", "linked_issue_kind":"issue",
+                    "claim_id":"claim-42", "claim_owner":"owner/session-42",
+                    "created_at":"2000-01-01T00:00:00Z",
+                    "materializer_id":"materializer-42", "materializer_pid":std::process::id(),
+                    "materializer_window_id":window, "materialized_window_id":window,
+                }))
+                .unwrap()],
+                ..crate::IssueMonitorPrefs::default()
+            };
+            let mut monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs);
+            let mut stale = monitor.clone();
+            assert_eq!(monitor.prefs().launching_issues.len(), 1);
+            crate::save_issue_monitor_prefs(&path, &monitor.prefs()).unwrap();
+            let payload = if config_set {
+                serde_json::json!({"config_set":{"enabled":false,"max_active_agents":4}})
+            } else {
+                serde_json::json!({"enabled":false})
+            };
+            let control =
+                decode_issue_monitor_control(crate::runtime_daemon_events::issue_monitor_payload(
+                    "control",
+                    payload,
+                    std::process::id(),
+                ))
+                .unwrap();
+            let mut accepted = AcceptedIssueMonitorControl::new(control);
+            accepted.processed_at = "2000-01-01T00:00:00Z".into();
+            let first = try_apply_accepted_issue_monitor_control_with_disk_migration(
+                &path,
+                &mut monitor,
+                &mut accepted.clone(),
+            );
+            assert_eq!(
+                first,
+                IssueMonitorControlCommit::Committed {
+                    should_scan: true,
+                    authority_changed: true,
+                }
+            );
+            let committed = monitor.prefs();
+            assert!(!committed.enabled);
+            assert!(committed.launching_issues.is_empty());
+            assert!(committed.pending_launch_deliveries.is_empty());
+            assert_eq!(committed.effect_authority_epoch, 1);
+            assert_eq!(
+                committed.last_control_receipt.as_ref().unwrap().control_id,
+                accepted.control_id
+            );
+            let bytes = std::fs::read(&path).unwrap();
+            if config_set {
+                let mut divergent = accepted.clone();
+                if let IssueMonitorControl::ConfigSet {
+                    max_active_agents, ..
+                } = &mut divergent.control
+                {
+                    *max_active_agents = Some(5);
+                }
+                assert_eq!(
+                    try_apply_accepted_issue_monitor_control_with_disk_migration(
+                        &path,
+                        &mut stale.clone(),
+                        &mut divergent,
+                    ),
+                    IssueMonitorControlCommit::RetryableFailure
+                );
+                assert_eq!(std::fs::read(&path).unwrap(), bytes);
+            }
+            let replay = try_apply_accepted_issue_monitor_control_with_disk_migration(
+                &path,
+                &mut stale,
+                &mut accepted,
+            );
+            assert_eq!(
+                replay, first,
+                "same OFF receipt must converge: config_set={config_set}"
+            );
+            assert_eq!(stale.prefs(), committed);
+            assert_eq!(crate::load_issue_monitor_prefs(&path).unwrap(), committed);
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        }
+    }
+
+    #[test]
+    fn terminal_delivery_receipt_replays_a_source_first_seen_on_disk() {
+        let temp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(temp.path());
+        let _clock = ScopedOperationClock::set(Instant::now());
+        let path = temp.path().join("monitor.json");
+        let mut monitor = test_monitor_with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                enabled: true,
+                ..crate::IssueMonitorPrefs::default()
+            },
+        );
+        let mut stale = monitor.clone();
+        let canonical = monitor_with_launch("claim-42", "tab-1::agent-42");
+        crate::save_issue_monitor_prefs(&path, &canonical.prefs()).unwrap();
+        let mut accepted =
+            AcceptedIssueMonitorControl::new(IssueMonitorControl::TerminalDelivered {
+                target: crate::IssueMonitorStopTarget {
+                    issue_number: 42,
+                    claim_id: Some("claim-42".into()),
+                    delivery_id: None,
+                    window_id: Some("tab-1::agent-42".into()),
+                },
+            });
+        let first = try_apply_accepted_issue_monitor_control_with_disk_migration(
+            &path,
+            &mut monitor,
+            &mut accepted,
+        );
+        assert!(matches!(
+            first,
+            IssueMonitorControlCommit::Committed {
+                should_scan: true,
+                ..
+            }
+        ));
+        let committed = monitor.prefs();
+        assert!(committed.launched_issues.is_empty());
+        assert!(committed.launching_issues.is_empty());
+        assert_eq!(monitor.attempt_count(42), 0);
+        let bytes = std::fs::read(&path).unwrap();
+        let mut divergent = accepted.clone();
+        if let IssueMonitorControl::TerminalDelivered { target } = &mut divergent.control {
+            target.claim_id = Some("different-claim".into());
+        }
+        assert_eq!(
+            try_apply_accepted_issue_monitor_control_with_disk_migration(
+                &path,
+                &mut stale.clone(),
+                &mut divergent,
+            ),
+            IssueMonitorControlCommit::RetryableFailure
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        let mut successor = monitor_with_launch("successor-claim", "tab-1::agent-42");
+        let successor_identity = successor.launch_identity(42);
+        assert_eq!(
+            try_apply_accepted_issue_monitor_control_with_disk_migration(
+                &path,
+                &mut successor,
+                &mut accepted.clone(),
+            ),
+            IssueMonitorControlCommit::RetryableFailure,
+            "historical success cannot replace a newer volatile source"
+        );
+        assert_eq!(successor.launch_identity(42), successor_identity);
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        let replay = try_apply_accepted_issue_monitor_control_with_disk_migration(
+            &path,
+            &mut stale,
+            &mut accepted,
+        );
+        assert_eq!(
+            replay, first,
+            "a source learned under the first prefs lock must remain replayable"
+        );
+        assert_eq!(stale.prefs(), committed);
+        assert_eq!(crate::load_issue_monitor_prefs(&path).unwrap(), committed);
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    }
+
+    #[test]
+    fn quota_clear_receipt_preserves_the_reset_first_seen_on_disk() {
+        let temp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(temp.path());
+        let _clock = ScopedOperationClock::set(Instant::now());
+        let path = temp.path().join("monitor.json");
+        let mut monitor = test_monitor_with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                enabled: true,
+                ..crate::IssueMonitorPrefs::default()
+            },
+        );
+        let mut stale = monitor.clone();
+        let reset_at = "2030-01-01T00:00:00Z";
+        let mut canonical = monitor.prefs();
+        canonical
+            .provider_quota_holds
+            .insert("codex".into(), reset_at.into());
+        crate::save_issue_monitor_prefs(&path, &canonical).unwrap();
+        let mut accepted = AcceptedIssueMonitorControl::new(IssueMonitorControl::QuotaHoldClear {
+            provider: "codex".into(),
+            reason: "quota reset".into(),
+            released_at: "2026-11-01T00:00:00Z".into(),
+        });
+        let first = try_apply_accepted_issue_monitor_control_with_disk_migration(
+            &path,
+            &mut monitor,
+            &mut accepted,
+        );
+        assert!(matches!(
+            first,
+            IssueMonitorControlCommit::Committed {
+                should_scan: true,
+                ..
+            }
+        ));
+        let committed = monitor.prefs();
+        assert!(committed.provider_quota_holds.is_empty());
+        assert_eq!(
+            committed.provider_quota_hold_releases["codex"]
+                .released_reset_at
+                .as_deref(),
+            Some(reset_at)
+        );
+        let bytes = std::fs::read(&path).unwrap();
+        let mut divergent = accepted.clone();
+        if let IssueMonitorControl::QuotaHoldClear { reason, .. } = &mut divergent.control {
+            *reason = "different release".into();
+        }
+        assert_eq!(
+            try_apply_accepted_issue_monitor_control_with_disk_migration(
+                &path,
+                &mut stale.clone(),
+                &mut divergent,
+            ),
+            IssueMonitorControlCommit::RetryableFailure
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        let replay = try_apply_accepted_issue_monitor_control_with_disk_migration(
+            &path,
+            &mut stale,
+            &mut accepted,
+        );
+        assert_eq!(
+            replay, first,
+            "receipt replay must retain its released reset provenance"
+        );
+        assert_eq!(stale.prefs(), committed);
+        assert_eq!(crate::load_issue_monitor_prefs(&path).unwrap(), committed);
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
     }
 
     #[test]
@@ -10872,7 +11416,7 @@ mod scan_failure_contract_tests {
         });
         assert!(monitor.apply_confirmed_claim(7016, "claim", "host/session", "effect", &now));
         crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).unwrap();
-        let accepted = super::AcceptedIssueMonitorControl::new(
+        let mut accepted = super::AcceptedIssueMonitorControl::new(
             super::IssueMonitorControl::ClaimLaunchDelivery {
                 issue_number: 7016,
                 delivery_id: "launch:effect".into(),
@@ -10900,7 +11444,7 @@ mod scan_failure_contract_tests {
             super::try_apply_accepted_issue_monitor_control_with_disk_migration(
                 &prefs_path,
                 &mut monitor,
-                accepted.clone(),
+                &mut accepted.clone(),
             ),
             super::IssueMonitorControlCommit::Committed { .. }
         ));
@@ -10921,7 +11465,7 @@ mod scan_failure_contract_tests {
             super::try_apply_accepted_issue_monitor_control_with_disk_migration(
                 &prefs_path,
                 &mut monitor,
-                accepted,
+                &mut accepted,
             ),
             super::IssueMonitorControlCommit::Committed { .. }
         ));
@@ -10960,7 +11504,7 @@ mod scan_failure_contract_tests {
             super::try_apply_accepted_issue_monitor_control_with_disk_migration(
                 &prefs_path,
                 &mut monitor,
-                super::AcceptedIssueMonitorControl::new(
+                &mut super::AcceptedIssueMonitorControl::new(
                     super::IssueMonitorControl::MaxActiveAgents(Some(2)),
                 ),
             ),
@@ -11002,7 +11546,7 @@ mod scan_failure_contract_tests {
             super::try_apply_accepted_issue_monitor_control_with_disk_migration(
                 &prefs_path,
                 &mut monitor,
-                super::AcceptedIssueMonitorControl::new(
+                &mut super::AcceptedIssueMonitorControl::new(
                     super::IssueMonitorControl::MaxActiveAgents(Some(3)),
                 ),
             ),
@@ -12216,11 +12760,13 @@ exit 0
     fn apply_accepted_control_for_test(
         prefs_path: &Path,
         monitor: &mut crate::IssueMonitorState,
-        control: super::AcceptedIssueMonitorControl,
+        mut control: super::AcceptedIssueMonitorControl,
     ) -> super::IssueMonitorControlCommit {
         let _clock = ScopedOperationClock::set(Instant::now());
         let commit = super::try_apply_accepted_issue_monitor_control_with_disk_migration(
-            prefs_path, monitor, control,
+            prefs_path,
+            monitor,
+            &mut control,
         );
         assert!(
             commit != super::IssueMonitorControlCommit::RetryableFailure,
@@ -13806,7 +14352,7 @@ exit 0
         let retry = super::try_apply_accepted_issue_monitor_control_with_disk_migration(
             &prefs_path,
             &mut monitor,
-            pending_controls
+            &mut pending_controls
                 .front_accepted()
                 .expect("pending exact accepted control")
                 .clone(),
@@ -14073,6 +14619,7 @@ exit 0
         crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("seed prefs");
         let mut stale = monitor.clone();
         let accepted = super::AcceptedIssueMonitorControl {
+            terminal_delivery_outcome: None,
             wait_subject: None,
             control_id: "processing-time-replay".to_string(),
             // Deliberately different from wall time, without sleeping.
@@ -14130,6 +14677,7 @@ exit 0
                 .expect("seed limit prefs");
             let mut stale = monitor.clone();
             let accepted = super::AcceptedIssueMonitorControl {
+                terminal_delivery_outcome: None,
                 wait_subject: None,
                 control_id: format!("{source}-limit-replay"),
                 processed_at: "2000-01-01T00:00:00Z".to_string(),
@@ -14234,6 +14782,7 @@ exit 0
                 &b,
                 &mut other,
                 super::AcceptedIssueMonitorControl {
+                    terminal_delivery_outcome: None,
                     wait_subject: None,
                     control_id: "project-b-shared-limit".into(),
                     processed_at: "2026-10-22T00:01:00Z".into(),
@@ -14317,7 +14866,7 @@ exit 0
             control_id: uuid::Uuid::new_v4().to_string(),
             changed_at: "2026-10-22T00:02:00Z".into(),
         };
-        let fresh = super::AcceptedIssueMonitorControl::new(fresh_control.clone());
+        let mut fresh = super::AcceptedIssueMonitorControl::new(fresh_control.clone());
         assert!(matches!(
             super::apply_or_queue_issue_monitor_control(
                 &hub,
@@ -14342,7 +14891,7 @@ exit 0
         fs::remove_file(crate::machine_agent_settings::path()).unwrap();
         assert_eq!(
             super::try_apply_accepted_issue_monitor_control_with_disk_migration(
-                &a, &mut stale, fresh
+                &a, &mut stale, &mut fresh
             ),
             super::IssueMonitorControlCommit::RetryableFailure,
             "a durable project receipt cannot ACK a missing machine policy"
@@ -14410,7 +14959,7 @@ exit 0
             super::try_apply_accepted_issue_monitor_control_with_disk_migration(
                 &a,
                 &mut monitor,
-                first.clone()
+                &mut first.clone()
             ),
             super::IssueMonitorControlCommit::RetryableFailure
         );
@@ -14467,7 +15016,7 @@ exit 0
             super::try_apply_accepted_issue_monitor_control_with_disk_migration(
                 &a,
                 &mut monitor,
-                divergent
+                &mut divergent
             ),
             super::IssueMonitorControlCommit::RetryableFailure
         );
@@ -14501,14 +15050,15 @@ exit 0
         monitor.begin_review(42, 99, "abc123");
         crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("seed prefs");
         let stale_before_control = monitor.clone();
-        let accepted = super::AcceptedIssueMonitorControl::new(IssueMonitorControl::LaunchFailed {
-            retryable: true,
-            issue_number: 42,
-            message: "review launch failed".to_string(),
-            delivery_id: None,
-            materializer_id: None,
-            failure: None,
-        });
+        let mut accepted =
+            super::AcceptedIssueMonitorControl::new(IssueMonitorControl::LaunchFailed {
+                retryable: true,
+                issue_number: 42,
+                message: "review launch failed".to_string(),
+                delivery_id: None,
+                materializer_id: None,
+                failure: None,
+            });
         let fail_once = prefs_path.with_extension("parent-sync-fail-once");
         fs::write(&fail_once, b"fail once").expect("seed parent sync failure trigger");
         let _failure = ScopedEnvVar::set(
@@ -14520,9 +15070,10 @@ exit 0
             super::try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
                 &prefs_path,
                 &mut monitor,
-                accepted.clone(),
+                &mut accepted.clone(),
                 Duration::from_secs(30),
                 || {},
+                || panic!("a non-close control must retain its admission timestamp"),
             ),
             super::IssueMonitorControlCommit::RetryableFailure
         );
@@ -14543,9 +15094,10 @@ exit 0
         let retry = super::try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
             &prefs_path,
             &mut monitor,
-            accepted,
+            &mut accepted,
             Duration::from_secs(30),
             || {},
+            || panic!("receipt replay must not read the current time"),
         );
         assert!(
             matches!(retry, super::IssueMonitorControlCommit::Committed { .. }),
@@ -16180,6 +16732,7 @@ exit 0
         crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("seed prefs");
         let mut stale_volatile_monitor = monitor.clone();
         let accepted = super::AcceptedIssueMonitorControl {
+            terminal_delivery_outcome: None,
             wait_subject: None,
             control_id: "typed-receipt-replay".to_string(),
             processed_at: "2026-08-13T00:00:00Z".to_string(),
@@ -17040,7 +17593,8 @@ exit 0
         let replay = super::try_apply_accepted_issue_monitor_control_with_disk_migration(
             &prefs_path,
             &mut recovered,
-            super::AcceptedIssueMonitorControl {
+            &mut super::AcceptedIssueMonitorControl {
+                terminal_delivery_outcome: None,
                 wait_subject: None,
                 control_id: receipt.control_id.clone(),
                 processed_at: "2026-10-25T00:00:00Z".into(),
@@ -17396,7 +17950,7 @@ exit 0
             super::try_apply_accepted_issue_monitor_control_with_disk_migration(
                 &prefs_path,
                 &mut stale.clone(),
-                divergent,
+                &mut divergent,
             ),
             super::IssueMonitorControlCommit::RetryableFailure,
             "a matching receipt ID cannot acknowledge a divergent full snapshot"
@@ -17478,6 +18032,7 @@ exit 0
     #[test]
     fn issue_monitor_config_set_decoder_refuses_missing_or_ignored_guards() {
         for config in [
+            serde_json::json!({"max_active_agents": 257, "expected_config_token": "valid-token"}),
             serde_json::json!({"max_active_agents": 4}),
             serde_json::json!({"max_active_agents": 4, "expected_config_token": null}),
             serde_json::json!({"max_active_agents": 4, "expected_config_token": ""}),
@@ -17519,6 +18074,16 @@ exit 0
                 "a legacy or mixed frame must never discard its guard: {payload}"
             );
         }
+        let mut monitor = test_monitor_with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs::default(),
+        );
+        let before = monitor.prefs();
+        assert!(!apply_issue_monitor_control(
+            &mut monitor,
+            IssueMonitorControl::MaxActiveAgents(Some(257))
+        ));
+        assert_eq!(monitor.prefs(), before);
     }
 
     #[test]
@@ -21739,6 +22304,8 @@ exit 0
             },
         )
         .expect("seed prefs");
+        crate::agent_registry::ensure_active_for_owner(&scope.project_root)
+            .expect("initialize registry before exercising normal daemon shutdown");
         let shutdown = Arc::new(DaemonShutdown::new());
         let socket_path = temp.path().join("shutdown-daemon.sock");
         let endpoint_path = temp.path().join("shutdown-endpoint.json");
@@ -28460,7 +29027,7 @@ exit 1
         let retry = super::try_apply_accepted_issue_monitor_control_with_disk_migration(
             &prefs_path,
             &mut stale_local,
-            pending.front_accepted().expect("pending OFF").clone(),
+            &mut pending.front_accepted().expect("pending OFF").clone(),
         );
         assert!(
             matches!(retry, super::IssueMonitorControlCommit::Committed { .. }),
@@ -28552,7 +29119,7 @@ exit 1
         let off = super::try_apply_accepted_issue_monitor_control_with_disk_migration(
             &prefs_path,
             &mut monitor,
-            pending.front_accepted().expect("pending OFF").clone(),
+            &mut pending.front_accepted().expect("pending OFF").clone(),
         );
         let super::IssueMonitorControlCommit::Committed {
             authority_changed, ..
@@ -28576,7 +29143,7 @@ exit 1
         let on = super::try_apply_accepted_issue_monitor_control_with_disk_migration(
             &prefs_path,
             &mut monitor,
-            pending.front_accepted().expect("queued ON").clone(),
+            &mut pending.front_accepted().expect("queued ON").clone(),
         );
         assert_eq!(on, super::IssueMonitorControlCommit::TerminalFailure);
         let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");

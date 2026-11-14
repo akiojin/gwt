@@ -7,7 +7,7 @@ test.skip(process.platform === "win32", "the isolated fixture requires POSIX exe
 
 test("no-tray exits after the last browser closes and tolerates reload", async ({ page }, testInfo) => {
   test.setTimeout(120_000);
-  const fixture = await startExactRelaunchFixture(testInfo);
+  const fixture = await startExactRelaunchFixture(testInfo, { page });
   try {
     const pid = fixture.ownedPid!;
     expect(pid, "fresh owned gwt PID").toBeGreaterThan(0);

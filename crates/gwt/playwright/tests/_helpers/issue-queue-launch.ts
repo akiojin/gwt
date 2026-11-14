@@ -10,6 +10,7 @@ import { startExactRelaunchFixture, writeFixtureNodeCommand, type ExactRelaunchS
 
 /** Real monitor, claims, materialization and PTY; GitHub and provider are local recorders. */
 export async function startIssueQueueLaunchFixture(info: TestInfo, options: {
+  page?: ExactRelaunchSetup["page"];
   issueNumber?: number;
   additionalIssueNumbers?: number[];
   monitorPreferences?: Record<string, unknown>;
@@ -164,6 +165,7 @@ export async function startIssueQueueLaunchFixture(info: TestInfo, options: {
   let fixture;
   try {
     fixture = await startExactRelaunchFixture(info, {
+      page: options.page,
       terminalConvergence: options.terminalConvergence,
       freshNativeIds: !!options.switching || !!options.terminalConvergence,
       switching: options.switching ? { sourceIssueNumber: issue.number,
@@ -317,7 +319,7 @@ console.error('Unimplemented fixture gh: '+text);process.exit(64);
   }
   function scheduleOperation(
     operation: "issue.monitor.schedule.read" | "issue.monitor.schedule.reassign" | "issue.monitor.requeue" | "issue.monitor.launch_now"
-      | "issue.monitor.config.set" | "issue.monitor.status",
+      | "issue.monitor.config.set" | "issue.monitor.status" | "issue.monitor.profiles.set",
     params: Record<string, unknown> = {},
     projectRoot = active.project,
   ) {
@@ -412,6 +414,20 @@ console.error('Unimplemented fixture gh: '+text);process.exit(64);
     executionStatus: (cwd: string) => readOperation("execution.status", cwd),
     terminalExecutionStatus: (cwd: string) => readOperation("execution.status", cwd, true),
     startupReport: () => readOperation("perf.startup", active.project).startup,
+    async restartHost() {
+      const current = daemon;
+      if (!current?.pid || current.exitCode !== null || current.signalCode !== null)
+        throw new Error("Fixture Host restart requires its live owned daemon");
+      await active.stop(async () => {
+        await stopDaemon();
+        const exited = current.exitCode !== null || current.signalCode !== null;
+        await info.attach("fixture-owned-host-restart", {
+          body: JSON.stringify({ pid: current.pid, exited }), contentType: "application/json",
+        });
+        if (!exited) throw new Error(`Owned fixture daemon ${current.pid} remained before restart`);
+      });
+      return active.restart();
+    },
     async stop() {
       try { await active.stop(); }
       finally {

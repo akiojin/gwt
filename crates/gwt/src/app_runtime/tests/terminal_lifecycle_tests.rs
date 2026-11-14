@@ -3059,33 +3059,40 @@ fn issue_5351_applied_update_drains_are_cleared_before_cross_project_launch_and_
         fs::create_dir_all(&target_root).unwrap();
         init_repo_with_initial_commit(&drain_root);
         init_repo_with_initial_commit(&target_root);
+        seed_owner_fixture_roster(&target_root, 8);
+        configure_owner_fixture_tools(&target_root, &["codex"]);
+        gwt::agent_registry::ensure_active_for_project(&target_root).unwrap();
+        gwt::agent_registry::ensure_active_for_project(&drain_root).unwrap();
         let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&drain_root);
         let tabs = vec![
             sample_project_tab("drain", "drain", drain_root, ProjectKind::Git, &[]),
             sample_project_tab("target", "target", target_root, ProjectKind::Git, &[]),
         ];
-        let mut prefs = gwt::IssueMonitorPrefs {
-            update_drain: Some(gwt::IssueMonitorUpdateDrain {
-                version: version.into(),
-                since: "2026-10-13T00:00:00Z".into(),
-                reason: gwt::IssueMonitorUpdateDrainReason::Auto,
-                automatic: None,
-                blocking: Vec::new(),
-            }),
-            ..Default::default()
-        };
+        let mut prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+        prefs.update_drain = Some(gwt::IssueMonitorUpdateDrain {
+            version: version.into(),
+            since: "2026-10-13T00:00:00Z".into(),
+            reason: gwt::IssueMonitorUpdateDrainReason::Auto,
+            automatic: None,
+            blocking: Vec::new(),
+        });
         gwt::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+        let mut expected_persisted: gwt::IssueMonitorPrefs =
+            serde_json::from_slice(&fs::read(&prefs_path).unwrap()).unwrap();
         let mut runtime = sample_runtime(&case_root, tabs, Some("target"));
         persist_lifecycle_host_catalog(&runtime);
         let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
             .branch("work/issue-5351-test")
             .build();
         let id = spawn_owner_codex_fixture(&mut runtime, "target", config, None);
-        prefs.update_drain = None;
-        assert_eq!(gwt::load_issue_monitor_prefs(&prefs_path).unwrap(), prefs);
+        expected_persisted.update_drain = None;
+        let actual_persisted: gwt::IssueMonitorPrefs =
+            serde_json::from_slice(&fs::read(&prefs_path).unwrap()).unwrap();
+        assert_eq!(actual_persisted, expected_persisted);
         close_test_owner_runtime(&mut runtime, &id);
 
         // Next-scan reconciliation also works without a resume marker or daemon.
+        prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
         prefs.update_drain = Some(gwt::IssueMonitorUpdateDrain {
             version: version.into(),
             since: "2026-10-13T00:00:00Z".into(),
@@ -3766,6 +3773,7 @@ fn stop_window_runtime_records_paused_work_off_the_event_loop() {
                 incarnation: pane.incarnation,
                 kind: super::super::RemoteRuntimeCommandKind::Resize,
                 approval_resolution_started: false,
+                attachment_outcome: None,
                 input_command_id: None,
                 result: Err("pane incarnation mismatch".into()),
             })
@@ -4646,6 +4654,7 @@ fn issue6096_foreign_prefs_observation_rewrites_keep_spawn_admission_current() {
                 control_id: "control-1".into(),
                 should_scan: true,
                 authority_changed: false,
+                window_close_applied_at: None,
             }),
             last_scan_at: Some("2026-10-24T00:00:00Z".into()),
             ..gwt::IssueMonitorPrefs::default()

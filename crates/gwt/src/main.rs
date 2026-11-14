@@ -1340,6 +1340,17 @@ fn spawn_workspace_projection_watcher(
         {
             watch_dirs.push(status_dir.to_path_buf());
         }
+        for shared_dir in [
+            gwt::agent_registry::path().parent().map(Path::to_path_buf),
+            Some(gwt_core::paths::gwt_sessions_dir()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if !watch_dirs.iter().any(|path| same_worktree_path(path, &shared_dir)) {
+                watch_dirs.push(shared_dir);
+            }
+        }
         // The workspace dir is created lazily by `save_workspace_projection`;
         // the watcher needs the directory to exist before `notify` can attach.
         // Best-effort create — if it fails, the watcher just won't fire until
@@ -1431,9 +1442,11 @@ fn workspace_projection_debounce_config() -> notify_debouncer_mini::Config {
 
 fn workspace_projection_watch_events(project_root: &Path, paths: &[PathBuf]) -> Vec<UserEvent> {
     let mut events = Vec::new();
+    let projection_path =
+        gwt_core::paths::gwt_workspace_projection_path_for_repo_path(project_root);
     if paths
         .iter()
-        .any(|path| path.file_name().is_some_and(|name| name == "current.json"))
+        .any(|path| same_worktree_path(path, &projection_path))
     {
         tracing::info!(project_root = %project_root.display(), "workspace projection watcher detected current.json change");
         events.extend(load_workspace_projection_user_event(project_root));
@@ -1445,6 +1458,21 @@ fn workspace_projection_watch_events(project_root: &Path, paths: &[PathBuf]) -> 
             && same_worktree_path(path, &pm_status_path)
     }) {
         events.push(UserEvent::ActiveWorkProjectionChanged {
+            project_root: project_root.to_path_buf(),
+        });
+    }
+    let registry = gwt::agent_registry::path();
+    let sessions = gwt_core::paths::gwt_sessions_dir();
+    if paths.iter().any(|path| {
+        same_worktree_path(path, &registry)
+            || path
+                .extension()
+                .is_some_and(|extension| extension == "toml")
+                && path
+                    .parent()
+                    .is_some_and(|parent| same_worktree_path(parent, &sessions))
+    }) {
+        events.push(UserEvent::AgentRosterChanged {
             project_root: project_root.to_path_buf(),
         });
     }
@@ -2163,6 +2191,14 @@ enum UserEvent {
     ActiveWorkProjectionChanged {
         project_root: PathBuf,
     },
+    AgentRosterChanged {
+        project_root: PathBuf,
+    },
+    AgentRosterRefreshed {
+        context: app_runtime::ProjectContext,
+        foreground: Arc<()>,
+        event: Box<BackendEvent>,
+    },
     /// Issue #4406: an Active Work rebuild finished off the GUI event loop.
     ActiveWorkProjectionRefreshed {
         project_root: PathBuf,
@@ -2228,6 +2264,11 @@ enum UserEvent {
     ActiveWorkProjectionPrepared(Box<ActiveWorkProjectionPrepared>),
     ProjectDispatch {
         context: app_runtime::ProjectContext,
+        events: Vec<OutboundEvent>,
+    },
+    AgentRosterDispatchPrepared {
+        context: app_runtime::ProjectContext,
+        pm_status_epoch: Option<(app_runtime::ProjectContext, u64)>,
         events: Vec<OutboundEvent>,
     },
     PreparedActiveWorkDispatch {
@@ -2365,12 +2406,8 @@ enum UserEvent {
         data: Vec<u8>,
     },
     AttachmentPromptReady {
-        client_id: ClientId,
-        window_id: String,
-        operation_id: String,
+        operation: Box<app_runtime::AttachmentOperation>,
         prompt: String,
-        file_count: usize,
-        filename: Option<String>,
     },
     LaunchWizardRuntimeResolved {
         wizard_id: String,
@@ -3907,6 +3944,33 @@ mod tests {
     }
 
     #[test]
+    fn workspace_projection_shared_roster_changes_refresh_the_project() {
+        let temp = tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path());
+        let root = temp.path().join("repo");
+        let registry = gwt::agent_registry::path();
+        let session = gwt_core::paths::gwt_sessions_dir().join("session.toml");
+        for paths in [
+            vec![registry.clone()],
+            vec![session.clone()],
+            vec![registry, session],
+        ] {
+            let events = super::workspace_projection_watch_events(&root, &paths);
+            assert!(matches!(events.as_slice(),
+                [UserEvent::AgentRosterChanged { project_root }] if project_root == &root));
+        }
+        let unrelated = [
+            gwt_core::paths::gwt_home().join("machine-state/agent-settings.json"),
+            gwt_core::paths::gwt_home().join("machine-state/current.json"),
+            gwt_core::paths::gwt_sessions_dir().join("runtime/session.toml"),
+            gwt_core::paths::gwt_sessions_dir().join("current.json"),
+            gwt_core::paths::gwt_sessions_dir().join("session.toml.tmp"),
+            temp.path().join("elsewhere/session.toml"),
+        ];
+        assert!(super::workspace_projection_watch_events(&root, &unrelated).is_empty());
+    }
+
+    #[test]
     fn workspace_projection_ten_notifications_trigger_one_reload() {
         struct BurstWatcher(Box<dyn notify::EventHandler>);
         impl notify::Watcher for BurstWatcher {
@@ -4555,6 +4619,17 @@ mod tests {
         );
         let views = queue.begin(&root).expect("the rerun starts");
         assert!(!queue.finish(&root, views), "no change, no rerun");
+        queue.begin(&root).expect("old generation starts");
+        let reopened = refresh_test_context(std::path::PathBuf::from("repo"), 2);
+        let views = queue
+            .begin(&reopened)
+            .expect("new generation starts independently");
+        assert!(
+            !queue.finish(&root, Default::default()),
+            "old completion cannot clear a new generation"
+        );
+        assert!(queue.begin(&reopened).is_none());
+        assert!(queue.finish(&reopened, views));
     }
 
     fn drain_client_payloads(queue: &crate::embedded_server::ClientQueue) -> Vec<String> {
@@ -10875,6 +10950,8 @@ fn main() -> std::io::Result<()> {
     let mut update_apply_admission = update_front_door::UpdateApplyAdmission::default();
     let mut board_refresh_queue = BoardRefreshQueue::default();
     let mut active_work_refresh_queue = ActiveWorkRefreshQueue::default();
+    // Reuse the context-aware queue; roster refreshes do not retain Board views.
+    let mut agent_roster_refresh_queue = BoardRefreshQueue::default();
 
     let mut dispatch_watchdog = dispatch_watchdog::DispatchWatchdog::start();
     let mut dispatch_perf = gwt::perf::dispatch::DispatchCollector::start();
@@ -11147,6 +11224,9 @@ fn main() -> std::io::Result<()> {
                 if let Some(id) = input_window {
                     let owner = app.project_key_for_window(id);
                     if !browser_project_input_allowed(Some(&scope), owner) {
+                        if let Some(events) = app.rejected_attachment_request(&client_id, &event) {
+                            clients.dispatch(events);
+                        }
                         return;
                     }
                 } else if matches!(scope, app_runtime::ClientScope::Hub)
@@ -11301,6 +11381,26 @@ fn main() -> std::io::Result<()> {
                 // clone pipeline for this notification (Issue #5404).
                 clients.dispatch(app.refresh_active_work_projection_for_project_root(&project_root));
             }
+            Event::UserEvent(UserEvent::AgentRosterChanged { project_root }) => {
+                if let Some(context) = app.project_context_for_root(&project_root)
+                    .filter(|context| app.project_state(context).is_some()) {
+                    if agent_roster_refresh_queue.begin(&context).is_some() {
+                        app.refresh_agent_roster_for_project(&context);
+                    }
+                }
+            }
+            Event::UserEvent(UserEvent::AgentRosterRefreshed { context, foreground, event }) => {
+                let rerun = agent_roster_refresh_queue.finish(&context, Default::default());
+                if app.project_context_is_current(&context) && app.project_state(&context).is_some() {
+                    if rerun || !app.agent_roster_refresh_is_current(&context, &foreground) {
+                        if agent_roster_refresh_queue.begin(&context).is_some() {
+                            app.refresh_agent_roster_for_project(&context);
+                        }
+                    } else {
+                        clients.dispatch(app.agent_roster_refreshed_events(&context, &foreground, *event));
+                    }
+                }
+            }
             Event::UserEvent(UserEvent::ActiveWorkProjectionRefreshed {
                 project_root,
                 refreshed,
@@ -11445,7 +11545,11 @@ fn main() -> std::io::Result<()> {
                     );
                 }
             }
+            Event::UserEvent(UserEvent::AgentRosterDispatchPrepared { context, pm_status_epoch, events }) => {
+                clients.dispatch(app.agent_roster_dispatch_prepared_events(&context, pm_status_epoch, events));
+            }
             Event::UserEvent(UserEvent::ProjectDispatch { context, events }) if app.project_context_is_current(&context) => {
+                app.note_agent_roster_response(&context, &events);
                 clients.dispatch(events.into_iter().filter(|event| match &event.event {
                     BackendEvent::LocalAgentActivity { activity } => app
                         .retain_current_local_agent_activity(&context.tab_id, Some(activity.clone()))
@@ -11680,22 +11784,8 @@ fn main() -> std::io::Result<()> {
                     )]);
                 }
             }
-            Event::UserEvent(UserEvent::AttachmentPromptReady {
-                client_id,
-                window_id,
-                operation_id,
-                prompt,
-                file_count,
-                filename,
-            }) => {
-                let events = app.inject_attachment_prompt_events(
-                    client_id,
-                    window_id,
-                    operation_id,
-                    prompt,
-                    file_count,
-                    filename,
-                );
+            Event::UserEvent(UserEvent::AttachmentPromptReady { operation, prompt }) => {
+                let events = app.inject_attachment_prompt_events(*operation, prompt);
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::LaunchWizardRuntimeResolved { wizard_id, result }) => {

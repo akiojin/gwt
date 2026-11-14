@@ -203,7 +203,15 @@ export function createTerminalSnapshotWriteCoordinator({
     return writeInFlight || hasPendingSnapshot();
   }
 
-  return Object.freeze({ shouldDeferOutput, start });
+  function recordUserScroll() {
+    if (!writeInFlight || !viewport || !isRuntimeCurrent()) return;
+    // A wheel/touch gesture can land while xterm is still parsing the
+    // replacement. Its newer intent must win over the pre-write position.
+    const buffer = terminal.buffer.active;
+    viewport = { line: buffer.viewportY, atBottom: buffer.viewportY >= buffer.baseY };
+  }
+
+  return Object.freeze({ shouldDeferOutput, start, recordUserScroll });
 }
 
 /**

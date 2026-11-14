@@ -19,6 +19,10 @@ test("Issue #6933 Codex cache drives both pickers and warns about saved retired 
       .map((row: any) => ({ value: row.slug, label: row.display_name }));
     expect(expected.length).toBeGreaterThan(0);
     const errors: string[] = [];
+    const sent: any[] = [];
+    page.on("websocket", socket => socket.on("framesent", ({ payload }) => {
+      try { sent.push(JSON.parse(String(payload))); } catch { /* Ignore non-JSON transport frames. */ }
+    }));
     page.on("pageerror", error => errors.push(error.message));
     page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
     await gotoLiveGwt(page, base!, { enableTestBridge: true });
@@ -39,26 +43,87 @@ test("Issue #6933 Codex cache drives both pickers and warns about saved retired 
         .filter(report => report.body.startsWith("# Codex model list changed")).length;
     }, { timeout: 60_000, message: "weekly comparison runs even with Issues disabled" }).toBe(1);
 
+    const projectKey = await page.evaluate(() => location.pathname.split("/")[2]);
+    let readSequence = 0;
+    const readRoster = async () => {
+      const requestId = `catalog-${theme}-read-${++readSequence}`;
+      await sendLiveGwtEvent(page, { kind: "agent_roster", project_key: projectKey,
+        request_id: requestId, action: { kind: "read" } });
+      const roster = await page.waitForFunction(({ projectKey, requestId }) => ((window as any).__gwtPlaywrightMessages ?? [])
+        .findLast(({ payload }: any) => payload.kind === "agent_roster" && payload.request_id === requestId
+          && payload.roster.project_key === projectKey)?.payload.roster, { projectKey, requestId })
+        .then(handle => handle.jsonValue());
+      expect(roster.error ?? null).toBeNull();
+      return roster;
+    };
+    await page.locator('.op-rail__surface[data-surface="agents"]').click();
+    const agents = page.locator('.agents-surface:not(.agents-surface--preview)');
+    const name = `Codex catalog ${theme}`;
+    await agents.getByRole("textbox", { name: "Name for new member" }).fill(name);
+    await agents.getByRole("combobox", { name: "Tool for new member" }).selectOption("codex");
+    await agents.locator('.roster-capacity [data-action="add"]').click();
+    const row = agents.locator('.roster-row').filter({ hasText: name });
+    await expect(row).toHaveCount(1);
+    await row.click();
+    const initial = await readRoster();
+    const member = initial.members.find((member: any) => member.name === name);
+    expect(member).toBeTruthy();
+    expect(member.agent_id).toBe("codex");
+    expect(member.saved_implementation_core_revision).toBeTruthy();
+    const memberId = member.agent_member_id;
+    const tuningWrites = () => sent.filter(message => message.kind === "agent_roster"
+      && message.project_key === projectKey && message.action?.kind === "set_tuning"
+      && message.action.member_id === memberId);
+    const detail = agents.locator('.roster-detail');
+    const model = detail.locator('[data-member-tuning-field="model"]');
+    const notice = detail.locator('[data-model-unavailable]');
+    await expect(model).toBeEnabled();
     const retired = "retired-codex-model";
-    await sendLiveGwtEvent(page, { kind: "issue_monitor_profiles_set", request_id: 693301,
-      profiles: [{ agent_id: "codex", model: retired, reasoning: "high" }] });
-    await page.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? [])
-      .some(({ payload }: any) => payload.kind === "issue_monitor_profiles" && payload.request_id === 693301));
-    await page.evaluate(() => document.dispatchEvent(new CustomEvent("settings:open", { detail: { section: "agents" } })));
-    const candidate = page.locator('[data-settings-candidates] fieldset[data-agent-id="codex"]');
-    const model = candidate.locator('[data-profile-field="model"]');
-    const notice = candidate.locator("[data-model-unavailable]");
+    await model.fill(retired);
+    await expect.poll(() => tuningWrites().length).toBe(1);
+    const save = tuningWrites()[0];
+    expect(save.request_id).toBeTruthy();
+    expect(save.action).toMatchObject({ kind: "set_tuning", member_id: memberId,
+      model: retired, expected_core_revision: member.saved_implementation_core_revision });
+    expect(Object.hasOwn(save.action, "reasoning")).toBe(true);
+    await expect(detail.locator('[data-member-tuning-status]')).toHaveText("Saved");
+    const receipt = await page.waitForFunction(({ requestId, projectKey }) => ((window as any).__gwtPlaywrightMessages ?? [])
+      .findLast(({ payload }: any) => payload.kind === "agent_roster" && payload.request_id === requestId
+        && payload.roster.project_key === projectKey)?.payload.roster, { requestId: save.request_id, projectKey })
+      .then(handle => handle.jsonValue());
+    expect(receipt.error ?? null).toBeNull();
+    const saved = (await readRoster()).members.find((member: any) => member.agent_member_id === memberId);
+    expect(saved.saved_implementation_core.model).toBe(retired);
+    expect(saved.saved_implementation_core_revision).not.toBe(member.saved_implementation_core_revision);
+    expect(receipt.members.find((member: any) => member.agent_member_id === memberId).saved_implementation_core_revision)
+      .toBe(saved.saved_implementation_core_revision);
     await expect(model).toHaveValue(retired);
     await expect(notice).toBeVisible();
     await expect(notice).toContainText(retired);
     await expect(notice).toContainText("not replaced");
-    expect(await model.locator("option").evaluateAll(options => options
-      .filter(option => (option as HTMLOptionElement).value !== "retired-codex-model")
-      .map(option => ({ value: (option as HTMLOptionElement).value, label: option.textContent })))).toEqual(expected);
-    // Status updates can replace the row while Playwright waits for stability.
+    expect(await model.evaluate(input => Array.from((input as HTMLInputElement).list!.options)
+      .map(option => ({ value: option.value, label: option.label })))).toEqual(expected);
     await notice.evaluate(node => node.scrollIntoView({ block: "center" }));
     await info.attach(`codex-retired-${theme}`, { body: await page.screenshot({ path: info.outputPath(`codex-retired-${theme}.png`), fullPage: true }), contentType: "image/png" });
-    await model.selectOption(expected[0].value);
+    await model.fill(expected[0].value);
+    await expect.poll(() => tuningWrites().length).toBe(2);
+    const selectionSave = tuningWrites()[1];
+    expect(selectionSave.request_id).toBeTruthy();
+    expect(selectionSave.request_id).not.toBe(save.request_id);
+    expect(selectionSave.action).toMatchObject({ kind: "set_tuning", member_id: memberId,
+      model: expected[0].value, expected_core_revision: saved.saved_implementation_core_revision });
+    expect(Object.hasOwn(selectionSave.action, "reasoning")).toBe(true);
+    const selectionReceipt = await page.waitForFunction(({ requestId, projectKey }) => ((window as any).__gwtPlaywrightMessages ?? [])
+      .findLast(({ payload }: any) => payload.kind === "agent_roster" && payload.request_id === requestId
+        && payload.roster.project_key === projectKey)?.payload.roster, { requestId: selectionSave.request_id, projectKey })
+      .then(handle => handle.jsonValue());
+    expect(selectionReceipt.error ?? null).toBeNull();
+    await expect(detail.locator('[data-member-tuning-status]')).toHaveText("Saved");
+    const selected = (await readRoster()).members.find((member: any) => member.agent_member_id === memberId);
+    expect(selected.saved_implementation_core.model).toBe(expected[0].value);
+    expect(selected.saved_implementation_core_revision).not.toBe(saved.saved_implementation_core_revision);
+    expect(selectionReceipt.members.find((member: any) => member.agent_member_id === memberId).saved_implementation_core_revision)
+      .toBe(selected.saved_implementation_core_revision);
     await expect(notice).toBeHidden();
 
     const wizardEvent = async (event: unknown) => {

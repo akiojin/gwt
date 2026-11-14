@@ -819,6 +819,7 @@ impl AppRuntime {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn handle_runtime_status(
         &mut self,
         id: String,

@@ -225,6 +225,7 @@
 .works-preview-output { flex: 1; min-width: 0; min-height: 0; padding: var(--space-3); overflow: auto; }
 .surface-readonly-note { flex-shrink: 0; margin: 0; padding: var(--space-2); color: var(--color-text-muted); font-size: var(--type-xs); }
 .agents-surface { gap: var(--space-3); padding: var(--space-4) var(--space-5); overflow: auto; }
+.agents-surface .settings-status { overflow-wrap: anywhere; }
 .roster-pm-identity { border: 1px solid var(--color-border); padding: var(--space-3); background: var(--color-surface-elevated); }
 .roster-pm-name { min-width: 0; overflow-wrap: anywhere; font-size: var(--type-base); font-weight: 600; }
 .roster-tabs { display: flex; flex-wrap: wrap; gap: var(--space-1); }
@@ -254,7 +255,10 @@
 .roster-who { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
 .roster-who h3 { margin: 0; max-width: 100%; font-size: var(--type-base); white-space: nowrap; overflow-x: auto; }
 .roster-purpose { color: var(--color-text-muted); max-width: 100%; font-size: var(--type-xs); white-space: nowrap; overflow-x: auto; }
-.agents-surface button.roster-purpose { align-self: flex-start; padding: 0; border: 0; background: transparent; color: var(--color-link); text-align: start; }
+.agents-surface button.roster-purpose,
+.agents-surface button.roster-assignment { align-self: flex-start; padding: 0; border: 0; background: transparent; color: var(--color-link); text-align: start; }
+.roster-assignments { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
+.roster-assignments .roster-assignment { max-width: 100%; font-size: var(--type-xs); white-space: normal; overflow-wrap: anywhere; }
 .roster-state { max-width: 100%; color: var(--color-state-idle); font-family: var(--font-mono); font-size: var(--type-xs); }
 .agents-surface .roster-current { border-radius: var(--radius-pill); border-color: currentColor; color: var(--color-state-active); text-align: start; }
 .roster-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-2); }
@@ -349,7 +353,9 @@
 /* SPEC 6476 T-005g: on a phone the Agents controls kept their 28-32px desktop
    size. Make every control a 44px tap target below 601px. */
 @media (max-width: 600px) {
-  .agents-surface :is(button, input, select, textarea) { min-width: 44px; min-height: 44px; }
+  /* Checkbox inputs also match the shared form's last-child min-width reset. */
+  .agents-surface :is(button, input, select, textarea),
+  :root[data-theme] .agents-surface input.settings-checkbox { min-width: 44px; min-height: 44px; }
   /* T-005wo: each Works row's Open terminal (28px) and member name link
      (24px) kept their desktop text-button size. The full header's name is a
      .work-member too and is meant to get the same target; it already sits in

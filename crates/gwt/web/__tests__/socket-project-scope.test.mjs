@@ -430,6 +430,7 @@ test("ordinary socket reconnect recovers only Knowledge reads sent before discon
     knowledgeBridgeStateMap: knowledge.knowledgeBridgeStateMap,
     resyncKnowledge: knowledge.resyncKnowledge,
     clearAgentActivity() {}, clearAgentSchedule() {}, clearAgentSwitch() {}, clearAgentRosterRename() {},
+    tuningController: { disconnectTuning() {} },
     handleLaunchWizardTransportChange() {}, branchListStateMap: new Map(),
   });
   context.connectionOverlay.setConnected = () => {};

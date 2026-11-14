@@ -6,7 +6,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renam
 import { basename, join, resolve } from 'node:path';
 import { startExactRelaunchFixture } from './_helpers/exact-relaunch';
 import { gotoLiveGwt, installLiveGwtInitScript, readLiveHubCatalog, sendLiveGwtEvent, withLiveGwtBackendLock } from './_helpers/live-gwt';
-import { startManagedBrowserSource } from './_helpers/managed-browser-source';
+import { startManagedBrowserSource, useManagedBrowserSource } from './_helpers/managed-browser-source';
 import { withNativeHiddenPage } from './_helpers/native-chromium';
 
 const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL ?? 'http://127.0.0.1:0/';
@@ -41,6 +41,7 @@ async function refreshPmReports(page: Page) {
 }
 
 test.describe('PM reports', () => {
+  if (process.env.GWT_PLAYWRIGHT_PM_SCROLL_MANAGED_SOURCE === '1') useManagedBrowserSource(test);
   test.skip(!process.env.GWT_PLAYWRIGHT_BASE_URL || !HOME, 'requires isolated checkout fixture');
   test.use({ viewport: { width: 1440, height: 1000 } });
   test.setTimeout(90_000);
@@ -1365,6 +1366,7 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
     let ownedState = '';
     let targetEnv: NodeJS.ProcessEnv = {};
     const target = await startExactRelaunchFixture(info, {
+      page,
       async beforeStart({ home, project, env, preferences }) {
         ownedState = preferences;
         targetEnv = { ...env };
@@ -1741,6 +1743,7 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
     let statePath = '';
     let seed: any;
     const target = await startExactRelaunchFixture(info, {
+      page,
       async beforeStart({ home, project, preferences }) {
         const projectKey = basename(join(preferences, '..'));
         const at = '2026-11-06T00:00:00Z';

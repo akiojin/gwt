@@ -285,11 +285,56 @@ pub(super) fn codex_reasoning_options_for_model(model: &str) -> Vec<ReasoningDis
                 .any(|effort| effort == option.stored_value),
             None => CODEX_FALLBACK_EFFORTS.contains(&option.stored_value),
         })
+        .filter(|option| {
+            gwt_agent::codex_reasoning_effort(Some(model), Some(option.stored_value))
+                == Some(option.stored_value)
+        })
         .map(|option| ReasoningDisplayOption {
             is_default: option.stored_value == default_effort,
             ..*option
         })
         .collect()
+}
+
+pub(super) fn reasoning_options_for_agent_model(
+    agent_id: &str,
+    model: &str,
+    ultracode_supported: bool,
+) -> Vec<ReasoningDisplayOption> {
+    match agent_id {
+        "codex" => codex_reasoning_options_for_model(model),
+        "grok" => GROK_REASONING_OPTIONS.to_vec(),
+        "claude" if is_claude_opus_tier_model(model) => {
+            let mut options = CLAUDE_OPUS_REASONING_OPTIONS.to_vec();
+            if !ultracode_supported {
+                options.retain(|option| option.stored_value != "ultracode");
+            }
+            options
+        }
+        "claude" if model == "sonnet" => CLAUDE_SONNET_REASONING_OPTIONS.to_vec(),
+        _ => Vec::new(),
+    }
+}
+
+/// Project missing saved tuning through the same defaults as a fresh wizard.
+pub(crate) fn default_launch_tuning(
+    agent_id: &str,
+    saved_model: Option<&str>,
+) -> (Option<String>, Option<String>) {
+    let models = current_model_options(agent_id);
+    let model = saved_model.unwrap_or_else(|| models.first().map(String::as_str).unwrap_or(""));
+    // Ultracode is an explicit, non-default capability; default resolution
+    // must neither select it nor infer the installed tool's capability.
+    let options = reasoning_options_for_agent_model(agent_id, model, false);
+    let reasoning = options
+        .iter()
+        .find(|option| option.is_default)
+        .or_else(|| options.first())
+        .map(|option| option.stored_value.to_string());
+    (
+        is_explicit_model_selection(model).then(|| model.to_string()),
+        reasoning,
+    )
 }
 
 pub(super) const EXECUTION_MODE_OPTIONS: [ExecutionModeOption; 3] = [
@@ -1873,11 +1918,10 @@ mod tests {
 
     // SPEC-1921 US-20 / FR-122 + FR-123 + Issue #3962 AC-3: reasoning rows and
     // the initial stop derive from the selected model's capability row. The
-    // expectations below mirror the CLI's own effort picker
-    // (`supported_reasoning_levels` / `default_reasoning_level`), so Astra /
-    // Sol / Terra expose six stops through Ultra, Luna five through Max, and
-    // gpt-5.5 four through Extra high. gpt-6.1-sol and gpt-5.6-sol default
-    // to Low; every other visible model defaults to Medium.
+    // expectations below combine the catalog's effort picker with native
+    // lowering: Sol / Terra expose six stops through Ultra, Astra / Luna five
+    // through Max, and retired gpt-5.5 four through Extra high. gpt-6.1-sol,
+    // gpt-6.1-terra and gpt-5.6-sol default to Low; the other rows use Medium.
     #[test]
     fn codex_reasoning_capability_rows_follow_model() {
         const SIX: [&str; 6] = ["low", "medium", "high", "xhigh", "max", "ultra"];
@@ -1887,7 +1931,7 @@ mod tests {
         assert_eq!(codex_capability_row("gpt-6.1-sol"), (SIX.to_vec(), "low"));
         assert_eq!(
             codex_capability_row("gpt-6-astra"),
-            (SIX.to_vec(), "medium")
+            (FIVE.to_vec(), "medium")
         );
         assert_eq!(codex_capability_row("gpt-5.6-sol"), (SIX.to_vec(), "low"));
         assert_eq!(

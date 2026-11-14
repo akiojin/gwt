@@ -497,6 +497,30 @@ fn read_snapshot(path: &Path) -> io::Result<MachineCapacitySnapshot> {
     serde_json::from_slice(&std::fs::read(path)?).map_err(io::Error::other)
 }
 
+/// Reuse the sampler's exact identities while the registry serializes new slots.
+/// This performs no process scan and takes no machine-policy writer lock.
+pub(crate) fn registry_assignment_census(
+) -> io::Result<Option<(Option<usize>, MachineSessionInventory)>> {
+    let snapshot = match read_snapshot(&snapshot_path()) {
+        Ok(snapshot) => snapshot,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let now = epoch_seconds();
+    if !fresh(snapshot.observed_at, snapshot.expires_at, now)
+        || now.saturating_sub(snapshot.observed_at) >= SNAPSHOT_TTL_SECS
+    {
+        return Ok(None);
+    }
+    if !snapshot.inventory.uncertainties.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "Machine Agent census is uncertain; wait for its next observation",
+        ));
+    }
+    Ok(Some((snapshot.machine_budget, snapshot.inventory)))
+}
+
 fn fresh(observed_at: u64, expires_at: u64, now: u64) -> bool {
     observed_at <= now && now < expires_at
 }

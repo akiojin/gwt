@@ -655,46 +655,60 @@ test("real PTY receives one input and converges with the visible terminal grid",
     // The child observes the actual ConPTY dimensions and bytes, independently
     // from the frontend's own WebSocket message inventory.
     writeFileSync(probe, `
+      const newline = process.platform === 'win32' ? '\\r\\n' : '\\n';
       process.stdin.setRawMode(true);
       let bytes = [], grid = 0, input = 0;
       process.stdin.on('data', chunk => { for (const byte of chunk) {
-        if (byte === 7) process.stdout.write('\\r\\nPTY_GRID_' + (++grid) + ':' + process.stdout.columns + 'x' + process.stdout.rows + '\\r\\n');
-        else if (byte === 4) { process.stdout.write('\\r\\nPTY_INPUT_' + (++input) + ':' + Buffer.from(bytes).toString('hex') + '\\r\\n'); bytes = []; }
+        if (byte === 7) process.stdout.write(newline + 'PTY_GRID_' + (++grid) + ':' + process.stdout.columns + 'x' + process.stdout.rows + newline);
+        else if (byte === 4) { process.stdout.write(newline + 'PTY_INPUT_' + (++input) + ':' + Buffer.from(bytes).toString('hex') + newline); bytes = []; }
         else if (byte === 3) process.exit(0);
         else bytes.push(byte);
       }});
-      process.stdout.write('\\r\\nPTY_PROBE_READY\\r\\n');
+      process.stdout.write(newline + 'PTY_PROBE_READY' + newline);
     `);
     let id: string | undefined;
     try {
       await page.setViewportSize({ width: 1920, height: 1080 });
       await gotoLiveGwt(page, liveBase!, { enableTestBridge: true });
+      const projectKey = new URL(page.url()).pathname.split("/").at(-1);
+      expect(projectKey).toMatch(/^[0-9a-f]{16}$/);
       await expect.poll(async () => {
         await sendLiveGwtEvent(page, { kind: "get_project_execution_status" });
-        return page.evaluate(() => (window as any).__gwtPlaywrightMessages
-          .findLast((entry: any) => entry.payload.kind === "project_execution_status")?.payload.status);
+        return page.evaluate(key => (window as any).__gwtPlaywrightMessages
+        .findLast((entry: any) => entry.payload.kind === "project_execution_status"
+          && entry.payload.status.project_key === key)?.payload.status, projectKey);
       }, { timeout: 60_000 }).toMatchObject({ view_state: "open", degraded: false });
       const windows = () => page.evaluate(() => {
         const state = (window as any).__gwtPlaywrightMessages.findLast((entry: any) => entry.payload.kind === "workspace_state");
         return state?.payload.workspace.tabs.flatMap((tab: any) => tab.workspace.windows) || [];
       });
       const before = new Set((await windows()).map((entry: any) => entry.id));
-      await sendLiveGwtEvent(page, { kind: "create_window", preset: "shell" });
+      await page.locator("#op-palette-button").click();
+      await page.locator("#op-palette-input").fill("Spawn shell window");
+      await page.getByRole("option", { name: "Spawn shell window", exact: true }).click();
       await expect.poll(async () => (await windows()).filter((entry: any) => entry.preset === "shell" && !before.has(entry.id))).toHaveLength(1);
       id = (await windows()).find((entry: any) => entry.preset === "shell" && !before.has(entry.id)).id;
       await expect.poll(() => page.evaluate(id => (window as any).__gwtPlaywrightMessages
         .findLast((entry: any) => entry.payload.kind === "terminal_status" && entry.payload.id === id)?.payload, id),
       { timeout: 60_000 }).toMatchObject({ status: "running" });
+      const shell = page.locator(`.workspace-window[data-id="${id}"]`);
       const showShell = async () => {
-        await sendLiveGwtEvent(page, { kind: "focus_window", id });
-        await expect.poll(async () => (await windows()).reduce((top: any, entry: any) =>
-          !top || (entry.z_index || 0) > (top.z_index || 0) ? entry : top, null)?.id).toBe(id);
-        await page.reload();
-        await expect(page.locator(`.split-pane .workspace-window[data-id="${id}"]`)).toBeVisible();
+        if (!await shell.isVisible()) {
+          await page.locator("#split-view-button").click();
+          await expect(shell).toBeVisible();
+          await page.locator(".split-pane").filter({ has: shell }).locator(".split-pane__header").click();
+          await page.locator("#split-view-button").click();
+        }
+        await expect(shell).toBeVisible();
       };
       await showShell();
-      const shell = page.locator(`.workspace-window[data-id="${id}"]`);
+      const originalShell = await shell.elementHandle();
       await expect.poll(() => page.evaluate(id => (window as any).__gwtTerminalTestApi.metrics(id).isReady, id)).toBe(true);
+      await expect.poll(async () => {
+        const current = (await windows()).find((entry: any) => entry.id === id);
+        return current?.status === "running" && Number.isFinite(current.runtime_started_at_ms)
+          && current.runtime_started_at_ms > 0;
+      }).toBe(true);
       await sendLiveGwtEvent(page, { kind: "terminal_input", id, data: `node "${probe.replace(/\\/g, "/")}"\r` });
       await expect.poll(() => outputs.get(id!) || "", { timeout: 30_000 }).toContain("PTY_PROBE_READY");
       const grid = async (phase: string) => {
@@ -713,10 +727,14 @@ test("real PTY receives one input and converges with the visible terminal grid",
       await grid("initial-1920x1080");
       await page.setViewportSize({ width: 960, height: 800 });
       await grid("resized-960x800");
-      await page.getByRole("button", { name: "Board", exact: true }).click();
+      await page.locator("#split-view-button").click();
+      await page.locator('.split-pane[data-surface="board"] .split-pane__header').click();
+      await page.locator("#split-view-button").click();
+      await expect(shell).toBeHidden();
       await page.setViewportSize({ width: 1280, height: 900 });
       await showShell();
-      await grid("hidden-resize-reconnect");
+      expect(await shell.evaluate((element, original) => element === original, originalShell)).toBe(true);
+      await grid("hidden-resize-reveal");
       await page.locator("#split-view-button").click();
       await grid("split");
       await page.locator("#split-view-button").click();
@@ -745,6 +763,652 @@ test("real PTY receives one input and converges with the visible terminal grid",
       }
     }
   });
+});
+
+// Actual provider proof is opt-in: discovery never copies credentials or starts a provider.
+test("owned actual Codex PM renderer profile retains genuine history and composer across Works reentry", async ({ page }, info) => {
+  test.skip(process.env.GWT_PLAYWRIGHT_REAL_CODEX_PM !== "1", "requires explicitly enabled isolated actual Codex PM");
+  test.setTimeout(300_000);
+  const { spawnSync } = await import("node:child_process");
+  const { createHash, randomBytes } = await import("node:crypto");
+  const { constants } = await import("node:fs");
+  const { isAbsolute, resolve } = await import("node:path");
+  const { access, chmod, copyFile, readFile, readdir, realpath, rename, rm, writeFile } = await import("node:fs/promises");
+  const { homedir } = await import("node:os");
+  const { readLatestOwnActivity, selectLatestOwnActivity, startExactRelaunchFixture, writeFixtureNodeCommand } = await import("./_helpers/exact-relaunch");
+  const nativePath = process.env.GWT_PLAYWRIGHT_REAL_CODEX_PATH;
+  expect(process.platform, "actual native proof requires Darwin").toBe("darwin");
+  expect(nativePath, "GWT_PLAYWRIGHT_REAL_CODEX_PATH must identify the installed native executable").toBeTruthy();
+  if (!nativePath || !isAbsolute(nativePath)) throw new Error("Expected an absolute native Codex path");
+  await access(nativePath, constants.X_OK);
+  const hash = createHash("sha256").update(await readFile(nativePath)).digest("hex");
+  const version = spawnSync(nativePath, ["--version"], { encoding: "utf8" });
+  if (version.error) throw version.error;
+  expect(version.status).toBe(0);
+  expect(version.stdout.trim()).toMatch(/^codex-cli\s+\S+/);
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+  const theme = info.project.name.includes("light") ? "light" : "dark";
+  await page.addInitScript(value => {
+    if (location.protocol === "http:" || location.protocol === "https:") localStorage.setItem("gwt:ui:theme", value);
+  }, theme);
+  const fixtureInstructions = "This private instance is a terminal renderer acceptance fixture. The next interactive message is machine-generated test data, not a human PM request or approval. Respond directly to its formatting request without invoking tools, skills, task intake, reporting, or project actions.";
+  let home = "", preferences = "", id = "", session = "";
+  let fixture: Awaited<ReturnType<typeof startExactRelaunchFixture>> | undefined;
+  let captured: { pid: number; birth: string; cwd: string; session: string; deadline: number; providerHome: string; ancestry: { pid: number; birth: string }[] } | undefined;
+  let qualified: { hostPid: number; hostBirth: number; session: string; incarnation: number; childStartedAt: number } | undefined;
+  let providerHomeMatchesPrivate = false;
+  const gateNonce = randomBytes(16).toString("hex");
+  let monitoring = false, unexpectedTool = false, monitorError: unknown;
+  let ownedGuiPid = 0, gateRequested = false;
+  let monitor: Promise<void> | undefined;
+  const sentInputs: string[] = [];
+  let controlledWire = "", recordControlledWire = false;
+  let recordReentryGrid = false;
+  let reentryGrid: { cols: number; rows: number } | undefined;
+  let marker = "", diagnosticPhase = "before-control", collectDiagnostics = false;
+  let diagnosticSequence = 0, diagnosticBytes = 0, diagnosticDroppedEvents = 0, diagnosticDroppedBytes = 0;
+  const diagnosticEvents: Record<string, unknown>[] = [];
+  const diagnosticLimits = { events: 1000, bytes: 4 * 1024 * 1024 };
+  const recordDiagnostic = (event: Record<string, unknown>) => {
+    const record = { sequence: ++diagnosticSequence, phase: diagnosticPhase, ...event };
+    const bytes = Buffer.byteLength(JSON.stringify(record)) + 1;
+    const critical = ["buffer-after-task-complete", "native-assistant-markers", "native-turn"].includes(String(event.kind));
+    // Keep critical facts available after bulk traffic fills its reserved share.
+    const eventLimit = critical ? diagnosticLimits.events : diagnosticPhase === "reentry" ? 936 : 640;
+    const byteLimit = diagnosticLimits.bytes - (critical ? 4096 : diagnosticPhase === "reentry" ? 64 * 1024 : 512 * 1024);
+    if (diagnosticEvents.length >= eventLimit || diagnosticBytes + bytes > byteLimit) {
+      diagnosticDroppedEvents++;
+      diagnosticDroppedBytes += bytes;
+      return;
+    }
+    diagnosticBytes += bytes;
+    diagnosticEvents.push(record);
+  };
+  page.on("websocket", socket => {
+    socket.on("framereceived", ({ payload }) => {
+      if (!collectDiagnostics) return;
+      try {
+        const packet = JSON.parse(String(payload));
+        if (packet.id === id && (packet.kind === "terminal_output" || packet.kind === "terminal_snapshot")) {
+          recordDiagnostic({ direction: "received", kind: packet.kind, id, data_base64: packet.data_base64 });
+        }
+      } catch { /* Diagnostic parsing never changes terminal traffic. */ }
+    });
+    socket.on("framesent", ({ payload }) => {
+      try {
+        const packet = JSON.parse(String(payload));
+        if (packet.kind === "terminal_input" && packet.id === id && typeof packet.data === "string") {
+          sentInputs.push(packet.data);
+          if (recordControlledWire) controlledWire += packet.data;
+        }
+        if (recordReentryGrid && packet.kind === "update_terminal_grid" && packet.id === id
+          && Number.isFinite(packet.cols) && packet.cols > 0 && Number.isFinite(packet.rows) && packet.rows > 0) {
+          reentryGrid = { cols: packet.cols, rows: packet.rows };
+        }
+        if (collectDiagnostics && packet.kind === "update_terminal_grid" && packet.id === id) {
+          recordDiagnostic({ direction: "sent", kind: packet.kind, id, cols: packet.cols, rows: packet.rows });
+        }
+      } catch { /* Ignore unrelated frames without changing traffic. */ }
+    });
+  });
+  const ps = (pid: number, columns: string) => {
+    const result = spawnSync("ps", ["-p", String(pid), "-o", columns], { encoding: "utf8" });
+    if (result.error) throw result.error;
+    const value = result.stdout.trim();
+    if (result.status === 1 && !value && !result.stderr.trim()) return "";
+    if (result.status !== 0 || !value || (columns === "lstart=" && !Number.isFinite(Date.parse(value)))) {
+      throw new Error(`Cannot inspect owned PID ${pid}: ps status ${result.status}, column ${columns}`);
+    }
+    return value;
+  };
+  const ownedNative = () => !!captured && !!qualified && captured.session === qualified.session
+    && captured.ancestry.some(item => item.pid === qualified!.hostPid && Math.floor(Date.parse(item.birth) / 1000) === qualified!.hostBirth)
+    && captured.cwd.startsWith(home + "/") && /^[0-9a-f-]{36}$/i.test(captured.session)
+    && ps(captured.pid, "lstart=") === captured.birth
+    && (ps(captured.pid, "command=") === nativePath || ps(captured.pid, "command=").startsWith(nativePath + " "));
+  const nativeRows = async (directory: string, strict = false): Promise<any[]> => {
+    const entries = strict ? await readdir(directory, { withFileTypes: true })
+      : await readdir(directory, { withFileTypes: true }).catch(() => []);
+    return (await Promise.all(entries.map(async entry => {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) return nativeRows(path, strict);
+      if (!entry.name.endsWith(".jsonl")) return [];
+      const contents = strict ? await readFile(path, "utf8") : await readFile(path, "utf8").catch(() => "");
+      if (strict && !contents.endsWith("\n")) throw new Error("Incomplete native rollout during final scan");
+      const lines = contents.split("\n");
+      if (!contents.endsWith("\n")) lines.pop();
+      return lines.filter(Boolean).map(line => JSON.parse(line));
+    }))).flat();
+  };
+  const rows = () => nativeRows(join(home, ".codex", "sessions"));
+  let primaryError: unknown;
+  const cleanupErrors: unknown[] = [];
+  try {
+    fixture = await startExactRelaunchFixture(info, {
+      page,
+      async prepare(context) {
+        home = context.home;
+        await writeFile(join(home, ".codex", "config.toml"), `developer_instructions = ${JSON.stringify(fixtureInstructions)}\n`, { flag: "wx", mode: 0o600 });
+        // Probes are argument-shaped: the Session environment may already
+        // exist during preflight, so it cannot distinguish an interactive run.
+        await writeFixtureNodeCommand(context.bin, "codex", `#!/bin/sh
+is_probe() {
+  [ "$#" -eq 1 ] && [ "$1" = "--version" ] && return 0
+  while [ "$#" -gt 2 ]; do
+    case "$1" in
+      --config|-c|--profile|-p|--enable|--disable) [ "$#" -ge 4 ] || return 1; shift 2 ;;
+      --config=*|--profile=*|--enable=*|--disable=*) shift ;;
+      *) return 1 ;;
+    esac
+  done
+  [ "$#" -eq 2 ] && [ "$1" = "features" ] && [ "$2" = "list" ]
+}
+if is_probe "$@"; then exec '${nativePath.replace(/'/g, "'\\''")}' "$@"; fi
+case "$GWT_SESSION_ID" in ????????-????-????-????-????????????) ;; *) exit 64 ;; esac
+umask 077
+child_birth=$(ps -p $$ -o lstart= | sed 's/^ *//;s/ *$//') || exit 65
+[ -n "$child_birth" ] || exit 65
+deadline=$(( $(date +%s) + 120 )) || exit 65
+record="$HOME/native-owner.$$"
+provider_home=\${CODEX_HOME-"$HOME/.codex"}
+printf '%s\n%s\n%s\n%s\n%s\n%s\n' "$$" "$GWT_SESSION_ID" "$PWD" "$child_birth" "$deadline" "$provider_home" > "$record" || exit 65
+ancestor=$$
+while [ "$ancestor" -gt 1 ]; do
+  ancestor=$(ps -p "$ancestor" -o ppid= | tr -d ' ') || exit 65
+  case "$ancestor" in ''|*[!0-9]*) exit 65 ;; esac
+  [ "$ancestor" -gt 0 ] || exit 65
+  birth=$(ps -p "$ancestor" -o lstart= | sed 's/^ *//;s/ *$//') || exit 65
+  [ -n "$birth" ] || exit 65
+  printf '%s|%s\n' "$ancestor" "$birth" >> "$record" || exit 65
+done
+mv "$record" "$HOME/native-owner" || exit 65
+expected="$GWT_SESSION_ID|$$|$child_birth|${gateNonce}"
+while [ "$(date +%s)" -lt "$deadline" ]; do
+  if [ -f "$HOME/native-permission" ]; then
+    permission=$(cat "$HOME/native-permission") || exit 66
+    [ "$permission" = "$expected" ] || exit 66
+    rm "$HOME/native-permission" || exit 66
+    [ "$(date +%s)" -lt "$deadline" ] || exit 67
+    exec '${nativePath.replace(/'/g, "'\\''")}' "$@"
+  fi
+  sleep 0.1
+done
+exit 67
+`);
+      },
+      async beforeStart(context) {
+        preferences = context.preferences;
+        await writeFile(join(preferences, "pm.json"), JSON.stringify({ settings: { auto_start: false, paused: true, launch_profile: { agent_id: "codex" } } }));
+      },
+    });
+    ownedGuiPid = fixture.ownedPid!;
+    expect(ownedGuiPid).toBeGreaterThan(0);
+    await page.setViewportSize({ width: 400, height: 1000 });
+    await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
+    await page.locator('.op-rail__surface[data-surface="agents"]').click();
+    const surface = page.locator(".agents-surface:not(.agents-surface--preview)");
+    await surface.getByRole("textbox", { name: "Name for new member" }).fill("Owned Codex PM");
+    await surface.getByRole("combobox", { name: "Tool for new member" }).selectOption("codex");
+    await surface.getByRole("checkbox", { name: "PM eligible for new member" }).check();
+    await surface.locator('.roster-capacity [data-action="add"]').click();
+    const member = surface.locator(".roster-row").filter({ hasText: "Owned Codex PM" });
+    await expect(member).toHaveCount(1);
+    await member.click();
+    const detail = surface.locator(".roster-detail");
+    await expect(detail.locator('[data-action="select-pm"]')).toBeEnabled();
+    await detail.locator('[data-action="select-pm"]').click();
+    await expect(detail.locator('[data-action="select-pm"]')).toHaveText("Configured Project Manager");
+    expect(JSON.parse(await readFile(join(preferences, "pm.json"), "utf8")).settings.launch_profile.agent_id).toBe("codex");
+    const selectedPmSettings = JSON.parse(await readFile(join(preferences, "pm.json"), "utf8")).settings;
+    await surface.locator('[data-tab="past"]').click();
+    await page.locator("#op-pm-settings-button").click();
+    await expect(surface.locator('[data-tab="team"]')).toHaveAttribute("aria-selected", "true");
+    await expect(surface.locator('[data-role="pm-project-operations"]')).toBeVisible();
+    await expect(detail.locator('[data-action="select-pm"]')).toHaveText("Configured Project Manager");
+    await expect(detail).toContainText("Saved Project Manager profile");
+    expect(JSON.parse(await readFile(join(preferences, "pm.json"), "utf8")).settings).toEqual(selectedPmSettings);
+    expect(selectedPmSettings)
+      .toMatchObject({ auto_start: false, paused: true, launch_profile: { agent_id: "codex" } });
+    gateRequested = true;
+    await page.locator("#op-pm-entry").click();
+    await expect.poll(async () => (await readFile(join(home, "native-owner"), "utf8").catch(() => "")).split("\n").length,
+      { timeout: 60_000 }).toBeGreaterThanOrEqual(8);
+    const [pidText, ownerSession, cwd, birth, deadlineText, providerHome, ...ancestors] = (await readFile(join(home, "native-owner"), "utf8")).trim().split("\n");
+    captured = { pid: Number(pidText), session: ownerSession, cwd, birth, deadline: Number(deadlineText), providerHome,
+      ancestry: ancestors.map(line => { const split = line.indexOf("|"); return { pid: Number(line.slice(0, split)), birth: line.slice(split + 1) }; }) };
+    expect(captured.pid).toBeGreaterThan(0);
+    expect(captured.session).toMatch(/^[0-9a-f-]{36}$/i);
+    expect(captured.cwd.startsWith(home + "/")).toBe(true);
+    expect(Number.isFinite(Date.parse(captured.birth))).toBe(true);
+    expect(ps(captured.pid, "lstart=")).toBe(captured.birth);
+    session = captured.session;
+    const matchesIdentity = (value: any, windowId: string, sessionId: string, incarnation?: number) =>
+      !!value?.host_id && Array.isArray(value.agents) && value.agents.some((agent: any) => agent.window_id === windowId
+        && agent.session_id === sessionId && agent.runtime_incarnation > 0
+        && (incarnation === undefined || agent.runtime_incarnation === incarnation));
+    const matching = { project_key: "probe", host_id: "host", agents: [{ window_id: "w", session_id: "s", runtime_incarnation: 1 }] };
+    for (const agents of [[], null, [{ window_id: "w", session_id: "replacement", runtime_incarnation: 2 }],
+      [{ window_id: "w", session_id: "s", runtime_incarnation: 2 }]]) {
+      expect(matchesIdentity(selectLatestOwnActivity([matching, { ...matching, agents }], "probe"), "w", "s", 1)).toBe(false);
+    }
+    expect(matchesIdentity(selectLatestOwnActivity([matching, { ...matching }], "probe"), "w", "s", 1)).toBe(true);
+    const projectKey = await page.evaluate(() => location.pathname.split("/")[2]);
+    const activity = () => readLatestOwnActivity(page, projectKey);
+    await expect.poll(async () => {
+      const latest = await activity().catch(() => null);
+      return Array.isArray(latest?.agents) && latest.agents.some((agent: any) => agent.session_id === session && agent.runtime_incarnation > 0);
+    }, { timeout: 60_000 }).toBe(true);
+    const initialActivity = await activity();
+    const censusAgent = initialActivity?.agents?.find((agent: any) => agent.session_id === session && agent.runtime_incarnation > 0);
+    expect(censusAgent).toBeTruthy();
+    id = censusAgent.window_id;
+    const incarnation = censusAgent.runtime_incarnation;
+    expect(matchesIdentity(initialActivity, id, session, incarnation)).toBe(true);
+    const host = /^(\d+):(\d+)$/.exec(initialActivity.host_id);
+    expect(host).not.toBeNull();
+    const hostPid = Number(host![1]), hostBirth = Number(host![2]);
+    expect(hostPid).toBeGreaterThan(0);
+    expect(hostBirth).toBeGreaterThan(0);
+    const ownerAncestor = captured.ancestry.find(item => item.pid === hostPid);
+    expect(ownerAncestor).toBeTruthy();
+    expect(Math.floor(Date.parse(ownerAncestor!.birth) / 1000)).toBe(hostBirth);
+    expect(ps(hostPid, "lstart=")).toBe(ownerAncestor!.birth);
+    const runtimePath = join(home, ".gwt", "sessions", "runtime", String(hostPid), `${session}.json`);
+    const runtime = async () => JSON.parse(await readFile(runtimePath, "utf8"));
+    await expect.poll(async () => (await runtime().catch(() => ({}))).child_pid, { timeout: 30_000 }).toBe(captured!.pid);
+    const initialRuntime = await runtime();
+    expect(initialRuntime.runtime_incarnation).toBe(incarnation);
+    expect(initialRuntime.host_started_at).toBe(hostBirth);
+    expect(initialRuntime.child_started_at).toBe(Math.floor(Date.parse(captured.birth) / 1000));
+    expect(matchesIdentity(await activity(), id, session, incarnation)).toBe(true);
+    expect((await activity()).host_id).toBe(initialActivity.host_id);
+    qualified = { hostPid, hostBirth, session, incarnation, childStartedAt: initialRuntime.child_started_at };
+    try {
+      providerHomeMatchesPrivate = await realpath(resolve(captured.cwd, captured.providerHome)) === await realpath(join(home, ".codex"));
+    } catch { providerHomeMatchesPrivate = false; }
+    expect(providerHomeMatchesPrivate, "native provider home must match the private fixture directory").toBe(true);
+    const configPath = join(home, ".codex", "config.toml");
+    let privatePmRuntime = false, exactPrivateConfig = false;
+    try {
+      const privateRoot = await realpath(home), cwd = await realpath(captured.cwd);
+      privatePmRuntime = captured.cwd === cwd && cwd === await realpath(resolve(preferences, "..", "pm/runtime")) && cwd.startsWith(privateRoot + "/");
+      exactPrivateConfig = await realpath(configPath) === join(privateRoot, ".codex", "config.toml");
+    } catch { /* Unavailable identities cannot authorize private project setup. */ }
+    expect(privatePmRuntime, "native cwd must be the canonical private PM runtime").toBe(true);
+    expect(exactPrivateConfig, "native config must be the exact private file").toBe(true);
+    let configBefore: string | undefined;
+    try { configBefore = await readFile(configPath, "utf8"); } catch { /* Fail below without exposing a path. */ }
+    expect(configBefore !== undefined, "private native config must be readable").toBe(true);
+    expect(configBefore!.includes(`developer_instructions = ${JSON.stringify(fixtureInstructions)}`), "format-only renderer instructions must survive native materialization").toBe(true);
+    const hasProjectDecision = /^(?:\s*\[\[?\s*["']?projects["']?\s*(?:\.|\])|\s*["']?projects["']?\s*(?:\.|=)|\s*["']?trust_level["']?\s*=)/m.test(configBefore!);
+    expect(!hasProjectDecision, "private native config must have no existing project trust decision").toBe(true);
+    const hasPasteDecision = /^\s*(?:\[\[?\s*["']?tui["']?\s*(?:\.|\])|["']?(?:tui|disable_paste_burst)["']?\s*(?:\.|=))/m.test(configBefore!);
+    expect(!hasPasteDecision, "private native config must have no existing TUI or paste decision").toBe(true);
+    const trustEntry = `\n[tui]\ndisable_paste_burst = true\n\n[projects.${JSON.stringify(captured.cwd)}]\ntrust_level = "trusted"\n`;
+    let trustReadback = false;
+    try {
+      await writeFile(configPath, trustEntry, { flag: "a", mode: 0o600 });
+      trustReadback = await readFile(configPath, "utf8") === configBefore + trustEntry;
+    } catch { /* Preserve a boolean-only readback failure. */ }
+    expect(trustReadback, "private project trust append must preserve the entire existing config").toBe(true);
+    expect(Math.floor(Date.now() / 1000)).toBeLessThan(captured.deadline);
+    await access(join(homedir(), ".codex", "auth.json"));
+    await copyFile(join(homedir(), ".codex", "auth.json"), join(home, ".codex", "auth.json"));
+    await chmod(join(home, ".codex", "auth.json"), 0o600);
+    expect(Math.floor(Date.now() / 1000)).toBeLessThan(captured.deadline);
+    const releaseActivity = await activity();
+    expect(matchesIdentity(releaseActivity, id, session, incarnation)).toBe(true);
+    expect(releaseActivity.host_id).toBe(initialActivity.host_id);
+    expect(await runtime()).toMatchObject({ host_started_at: hostBirth, child_pid: captured.pid,
+      child_started_at: initialRuntime.child_started_at, runtime_incarnation: incarnation });
+    expect(ps(captured.pid, "lstart=")).toBe(captured.birth);
+    const permission = `${session}|${captured.pid}|${captured.birth}|${gateNonce}`;
+    const permissionTemp = join(home, "native-permission.pending");
+    await writeFile(permissionTemp, permission, { mode: 0o600, flag: "wx" });
+    await rename(permissionTemp, join(home, "native-permission"));
+    await expect.poll(() => ownedNative(), { timeout: 30_000 }).toBe(true);
+    const releasedVersion = spawnSync(nativePath, ["--version"], { encoding: "utf8" });
+    if (releasedVersion.error) throw releasedVersion.error;
+    expect(releasedVersion.status).toBe(0);
+    expect(releasedVersion.stdout.trim()).toBe(version.stdout.trim());
+    expect(createHash("sha256").update(await readFile(nativePath)).digest("hex")).toBe(hash);
+    monitoring = true;
+    monitor = (async () => {
+      while (monitoring) {
+        const events = await rows();
+        if (events.some(row => row.type === "response_item" && typeof row.payload?.type === "string" && row.payload.type.endsWith("_call"))) {
+          unexpectedTool = true;
+          if (ownedNative()) process.kill(captured!.pid, "SIGTERM");
+          return;
+        }
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+    })().catch(error => { monitorError = error; });
+    await expect.poll(async () => {
+      const prefs = JSON.parse(await readFile(join(preferences, "pm.json"), "utf8"));
+      return prefs.registration?.session_id ?? "";
+    }, { timeout: 60_000 }).toBe(session);
+    await page.waitForFunction(({ sessionId, id }) => {
+      const rows = (window as any).__gwtPlaywrightMessages ?? [];
+      const state = rows.findLast((row: any) => row.payload.kind === "workspace_state")?.payload.workspace;
+      const pane = state?.tabs.flatMap((tab: any) => tab.workspace.windows).find((row: any) => row.session_id === sessionId && row.id === id);
+      return !!pane?.is_pm && pane.agent_id === "codex";
+    }, { sessionId: session, id }, { timeout: 60_000 });
+    await page.locator("#op-pm-entry").click();
+    const pm = page.locator(`.workspace-window[data-id="${id}"]`);
+    await pm.getByRole("button", { name: "Execution log", exact: true }).click();
+    const buffer = () => page.evaluate(id => (window as any).__gwtTerminalTestApi.bufferText(id), id);
+    const logicalBuffer = () => page.evaluate(id => (window as any).__gwtTerminalTestApi.logicalBufferLines(id) as {
+      lines: string[]; scrollbackLineCount: number;
+    }, id);
+    const metrics = () => page.evaluate(id => (window as any).__gwtTerminalTestApi.metrics(id), id);
+    await expect.poll(buffer, { timeout: 60_000 }).toContain("Ask Codex");
+    await pm.locator(".terminal-root .xterm").evaluate(node => { (window as any).__ownedPmNative = node; });
+    const input = pm.locator(".xterm-helper-textarea");
+    await input.focus();
+    marker = `GWT4777${randomBytes(8).toString("hex").toUpperCase()}`;
+    const expectedNumbers = Array.from({ length: 64 }, (_, index) => [String(index + 1).padStart(2, "0")]);
+    const numberedLines = (lines: string[]) => lines
+      .map(line => [...line.matchAll(new RegExp(`${marker}(\\d{2})(?!\\d)`, "g"))].map(match => match[1]))
+      .filter(values => values.length);
+    const renderedNumbers = async () => numberedLines((await logicalBuffer()).lines);
+    const preTurnActivity = await activity();
+    expect(matchesIdentity(preTurnActivity, id, session, incarnation)).toBe(true);
+    expect(preTurnActivity.host_id).toBe(initialActivity.host_id);
+    expect(await runtime()).toMatchObject({ host_started_at: hostBirth, child_pid: captured.pid,
+      child_started_at: initialRuntime.child_started_at, runtime_incarnation: incarnation });
+    expect(ownedNative()).toBe(true);
+    // The harness generated this ready renderer control. The complete reserved
+    // notification format classifies it without changing any managed PM hook.
+    const prompt = `<task-notification><task-id>gwt4777-renderer-${marker}</task-id><status>ready</status><summary>Reply with exactly 64 lines numbered 01 through 64. Each line must contain ${marker} immediately followed by its two-digit number without spaces. Do not use tools.</summary></task-notification>`;
+    diagnosticPhase = "controlled-prompt";
+    collectDiagnostics = true;
+    recordControlledWire = true;
+    await page.keyboard.type(prompt);
+    // Submit and leave in one browser task: no asynchronous provider response
+    // can reach the visible PM before the Works surface is selected.
+    diagnosticPhase = "submit-and-hide";
+    await page.evaluate(id => {
+      const textarea = document.querySelector(`.workspace-window[data-id="${id}"] .xterm-helper-textarea:focus`) as HTMLTextAreaElement;
+      if (!textarea) throw new Error("owned PM composer is not focused");
+      textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true }));
+      const works = document.querySelector('[data-surface="works"].op-rail__surface') as HTMLElement;
+      if (!works) throw new Error("Works entry missing");
+      works.click();
+    }, id);
+    diagnosticPhase = "hidden";
+    await expect(page.locator('.works-surface:not(.works-surface--preview)')).toBeVisible();
+    await expect.poll(async () => {
+      expect(unexpectedTool, "unexpected native tool call").toBe(false);
+      if (monitorError) throw monitorError;
+      const rolloutRows = await rows();
+      const response = rolloutRows.filter(row => row.type === "response_item" && row.payload?.type === "message" && row.payload?.role === "assistant")
+        .flatMap(row => row.payload.content ?? []).map((part: any) => part.text ?? "").join("\n");
+      const numbers = await renderedNumbers();
+      return response.includes(`${marker}64`) ? numbers : [];
+    }, { timeout: 180_000 }).toEqual(expectedNumbers);
+    recordControlledWire = false;
+    expect(controlledWire === prompt + "\r", "one exact controlled prompt and submit was sent").toBe(true);
+    expect(await renderedNumbers(), "all numbered lines rendered while PM was hidden").toEqual(expectedNumbers);
+    const rolloutRows = await rows();
+    const prompts = rolloutRows.filter(row => row.type === "response_item" && row.payload?.type === "message" && row.payload?.role === "user"
+      && Array.isArray(row.payload.content) && row.payload.content.some((part: any) => typeof part.text === "string" && part.text.includes(marker)));
+    expect(prompts.length, "one controlled native user input").toBe(1);
+    expect(JSON.stringify(prompts[0].payload.content)).toContain(marker);
+    expect(prompts[0].payload.content.map((part: any) => part.text ?? "").join("\n") === prompt, "native controlled input exactly matches the sent prompt").toBe(true);
+    const response = rolloutRows.filter(row => row.type === "response_item" && row.payload?.type === "message" && row.payload?.role === "assistant")
+      .flatMap(row => row.payload.content ?? []).map((part: any) => part.text ?? "").join("\n");
+    for (let n = 1; n <= 64; n++) expect(response).toContain(`${marker}${String(n).padStart(2, "0")}`);
+    expect(rolloutRows.some(row => row.type === "response_item" && typeof row.payload?.type === "string" && row.payload.type.endsWith("_call"))).toBe(false);
+    await expect.poll(async () => (await rows()).some(row => row.type === "event_msg" && row.payload?.type === "task_complete"), { timeout: 60_000 }).toBe(true);
+    const responseLinePattern = new RegExp(`${marker}\\d{2}(?!\\d)`);
+    const responseHistory = (state: { lines: string[]; scrollbackLineCount: number }) =>
+      state.lines.slice(0, state.scrollbackLineCount).filter(line => responseLinePattern.test(line));
+    const beforeReentry = await logicalBuffer();
+    recordDiagnostic({ kind: "buffer-after-task-complete", id, metrics: await metrics(),
+      scrollbackLineCount: beforeReentry.scrollbackLineCount,
+      markerNumbers: numberedLines(beforeReentry.lines),
+      historyMarkerCount: responseHistory(beforeReentry).length });
+    const readReentryBaseline = () => page.evaluate(id => {
+      const state = (window as any).__gwtTerminalTestApi.metrics(id);
+      const connection = (window as any).__gwtPlaywrightSockets?.at(-1);
+      (window as any).__ownedPmConnection = connection;
+      return {
+        sequence: (window as any).__gwtPlaywrightMessageSequence ?? 0,
+        snapshotsBefore: state.snapshotAccepted,
+        settled: state.isReady === true && !state.outputPending && !state.snapshotPending
+          && state.snapshotAccepted === state.snapshotApplied,
+        connected: connection?.readyState === 1,
+      };
+    }, id);
+    let reentryBaseline = await readReentryBaseline();
+    await expect.poll(async () => {
+      if (!reentryBaseline.settled || !reentryBaseline.connected) reentryBaseline = await readReentryBaseline();
+      return reentryBaseline.settled && reentryBaseline.connected;
+    }, { message: "observe completed terminal writes before capturing the reentry receipt boundary" }).toBe(true);
+    expect(reentryBaseline.settled, "the reentry receipt boundary must start at a settled runtime").toBe(true);
+    expect(reentryBaseline.connected, "the reentry receipt boundary retains an open connection").toBe(true);
+    reentryGrid = undefined;
+    recordReentryGrid = true;
+    diagnosticPhase = "reentry";
+    await page.locator("#op-pm-entry").click();
+    // The owner transport can replace streamed bytes with a snapshot. A fresh
+    // applied snapshot or complete paint establishes the baseline; later
+    // destructive or unfinished output must not be hidden by an older one.
+    await expect.poll(async () => {
+      const rendered = await page.evaluate(({ id, after, snapshotsBefore }) => {
+        const api = (window as any).__gwtTerminalTestApi;
+        const received = ((window as any).__gwtPlaywrightMessages ?? []).filter((row: any) => row.sequence > after);
+        const messages = received.filter((row: any) => row.payload.id === id);
+        const snapshot = messages.findLast((row: any) => row.payload.kind === "terminal_snapshot");
+        const output = messages
+          .filter((row: any) => row.sequence > (snapshot?.sequence ?? after) && row.payload.kind === "terminal_output")
+          .map((row: any) => atob(row.payload.data_base64)).join("");
+        const syncBegin = "\x1b[?2026h", syncEnd = "\x1b[?2026l";
+        const segments = output.split(syncEnd);
+        const pending = segments.pop()!;
+        const paint = segments.findLast((segment: string) => /\x1b\[[0-3]?J/.test(segment));
+        const start = paint?.indexOf(syncBegin) ?? -1;
+        const erase = paint && [...paint.matchAll(/\x1b\[[0-3]?J/g)].at(-1);
+        const completePaint = !!paint && start >= 0 && !!erase
+          && paint.slice(Math.max(start + syncBegin.length, erase.index + erase[0].length)).includes("Ask Codex")
+          && (erase.index >= start + syncBegin.length
+            || /^\x1b\[[23]J(?:\x1b\[[0-?]*[ -/]*[@-~])*$/.test(paint.slice(erase.index, start)));
+        const metrics = api.metrics(id), buffer = api.logicalBufferLines(id);
+        const receipts = messages.filter((row: any) => row.payload.kind === "terminal_snapshot").length;
+        const correlated = received[0]?.sequence === after + 1
+          && metrics.snapshotAccepted - snapshotsBefore === receipts
+          && metrics.snapshotApplied === metrics.snapshotAccepted;
+        const freshSnapshot = !!snapshot && receipts > 0 && correlated;
+        const screen = api.bufferText(id, metrics.rows);
+        return {
+          fresh: metrics.isReady === true && correlated && !pending.includes(syncBegin) && !/\x1b\[[0-3]?J/.test(pending)
+            && !/\x1b(?:\[[0-?]*[ -/]*)?$/.test(pending)
+            && (completePaint || (freshSnapshot && !paint)),
+          metrics,
+          buffer,
+          composer: screen.includes("Ask Codex"),
+          quotaWarning: screen.includes("Approaching rate limits")
+            && /2\.\s+Keep current model/.test(screen) && screen.includes("esc back"),
+          sameTerminal: document.querySelector(`.workspace-window[data-id="${id}"] .xterm`) === (window as any).__ownedPmNative,
+          sameConnection: (window as any).__gwtPlaywrightSockets?.at(-1) === (window as any).__ownedPmConnection
+            && (window as any).__ownedPmConnection?.readyState === 1,
+        };
+      }, { id, after: reentryBaseline.sequence, snapshotsBefore: reentryBaseline.snapshotsBefore });
+      if (rendered.quotaWarning) {
+        throw new Error("Native Codex quota warning: stop verification and report without retry");
+      }
+      return {
+        fresh: rendered.fresh && rendered.sameTerminal && rendered.sameConnection && !!reentryGrid
+          && rendered.metrics.cols === reentryGrid.cols && rendered.metrics.rows === reentryGrid.rows,
+        drained: rendered.metrics.outputPending === false && rendered.metrics.snapshotPending === false,
+        composer: rendered.composer,
+        historyCount: responseHistory(rendered.buffer).length,
+        numbers: numberedLines(rendered.buffer.lines),
+      };
+    }, { timeout: 60_000 }).toEqual({ fresh: true, drained: true, composer: true, historyCount: 64, numbers: expectedNumbers });
+    recordReentryGrid = false;
+    await expect.poll(async () => (await metrics()).baseY).toBeGreaterThan(0);
+    const box = await pm.locator(".terminal-root").boundingBox();
+    expect(box).not.toBeNull();
+    const bottom = await metrics();
+    await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2);
+    await page.mouse.wheel(0, -900);
+    await expect.poll(async () => (await metrics()).viewportY).toBeLessThan(bottom.viewportY);
+    await expect.poll(async () => {
+      const state = await logicalBuffer();
+      return { historyCount: responseHistory(state).length, numbers: numberedLines(state.lines) };
+    }).toEqual({ historyCount: 64, numbers: expectedNumbers });
+    const reading = await metrics(), settled = await logicalBuffer();
+    const history = settled.lines.slice(0, settled.scrollbackLineCount);
+    expect(history.length).toBeGreaterThan(0);
+    const capturedResponseHistory = responseHistory(settled);
+    const nativeResponseLines = response.split("\n").filter(line => responseLinePattern.test(line));
+    expect(nativeResponseLines).toHaveLength(64);
+    expect(capturedResponseHistory).toHaveLength(64);
+    for (let index = 0; index < 64; index++) {
+      expect(capturedResponseHistory[index]).toContain(nativeResponseLines[index]);
+    }
+    const responseState = async () => {
+      const state = await logicalBuffer();
+      return { history: responseHistory(state), numbers: numberedLines(state.lines) };
+    };
+    const expectedResponseState = { history: capturedResponseHistory, numbers: expectedNumbers };
+    await pm.getByRole("button", { name: "Reports", exact: true }).click();
+    await pm.getByRole("button", { name: "Execution log", exact: true }).click();
+    const reentryMetrics = await metrics();
+    expect({ cols: reentryMetrics.cols, rows: reentryMetrics.rows }).toEqual({ cols: reading.cols, rows: reading.rows });
+    expect(reentryMetrics.viewportY).toBe(reading.viewportY);
+    expect((await logicalBuffer()).lines.slice(0, history.length)).toEqual(history);
+    await page.getByRole("button", { name: "Works", exact: true }).click();
+    const row = page.locator('.works-surface:not(.works-surface--preview) .work-row').filter({ hasText: "Owned Codex PM" });
+    await row.getByRole("button", { name: "Open terminal" }).click();
+    await expect(page.locator(".works-full")).toBeVisible();
+    // A real resize lets the native TUI clear and redraw its width-dependent
+    // decorations. Its complete response must remain in scrollback exactly once.
+    await expect.poll(responseState).toEqual(expectedResponseState);
+    await page.locator('.op-rail__surface[data-surface="agents"]').click();
+    await page.getByRole("button", { name: "Works", exact: true }).click();
+    await expect(page.locator(".works-full")).toBeVisible();
+    await expect.poll(responseState).toEqual(expectedResponseState);
+    const sequence = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence ?? 0);
+    await expect.poll(async () => (await metrics()).snapshotPending).toBe(false);
+    const beforeSnapshot = await metrics();
+    await sendLiveGwtEvent(page, { kind: "frontend_ready" });
+    await page.waitForFunction(({ after, id }) => ((window as any).__gwtPlaywrightMessages ?? []).some((row: any) =>
+      row.sequence > after && row.payload.kind === "terminal_snapshot" && row.payload.id === id), { after: sequence, id }, { timeout: 30_000 });
+    await expect.poll(async () => {
+      const state = await metrics();
+      return state.snapshotAccepted > beforeSnapshot.snapshotAccepted
+        && state.snapshotApplied === state.snapshotAccepted && !state.snapshotPending;
+    }, { timeout: 30_000, message: "the newly accepted snapshot finished writing to the current terminal" }).toBe(true);
+    await expect(page.locator(".works-full")).toBeVisible();
+    await expect.poll(responseState).toEqual(expectedResponseState);
+    expect(await page.locator(`.works-terminal[data-window-id="${id}"] .xterm`).evaluate(node => node === (window as any).__ownedPmNative)).toBe(true);
+    await page.locator("#op-pm-entry").click();
+    await page.evaluate(id => (window as any).__gwtTerminalTestApi.scrollToBottom(id), id);
+    await expect.poll(buffer).toContain("Ask Codex");
+    const canary = `UNSENT${theme.toUpperCase()}4777`;
+    await input.focus();
+    const beforeComposer = sentInputs.length;
+    await page.keyboard.type(canary);
+    await expect.poll(buffer).toContain(canary);
+    expect((await buffer()).split(canary)).toHaveLength(2);
+    await expect.poll(() => sentInputs.slice(beforeComposer).join("")).toBe(canary);
+    const beforeUndo = sentInputs.length;
+    for (let i = 0; i < canary.length; i++) await page.keyboard.press("Backspace");
+    await expect.poll(() => sentInputs.slice(beforeUndo).join("")).toBe("\x7f".repeat(canary.length));
+    await expect.poll(buffer).not.toContain(canary);
+    expect(unexpectedTool, "no native tool call during the owned turn").toBe(false);
+    expect((await rows()).filter(row => row.type === "event_msg" && row.payload?.type === "task_started"),
+      "renderer acceptance must retain one native turn").toHaveLength(1);
+    if (monitorError) throw monitorError;
+    const finalActivity = await activity();
+    const finalRuntime = await runtime();
+    expect(finalRuntime).toMatchObject({ child_pid: initialRuntime.child_pid, child_started_at: initialRuntime.child_started_at,
+      host_started_at: initialRuntime.host_started_at, runtime_incarnation: incarnation });
+    expect(matchesIdentity(finalActivity, id, session, incarnation), "latest own-project census retains the exact PM identity").toBe(true);
+    expect(finalActivity.host_id).toBe(initialActivity.host_id);
+    expect(ps(captured.pid, "lstart=")).toBe(captured.birth);
+    expect(ps(captured.pid, "command=")).toContain(nativePath);
+    expect(createHash("sha256").update(await readFile(nativePath)).digest("hex")).toBe(hash);
+    const finalVersion = spawnSync(nativePath, ["--version"], { encoding: "utf8" });
+    if (finalVersion.error) throw finalVersion.error;
+    expect(finalVersion.status).toBe(0);
+    expect(finalVersion.stdout.trim()).toBe(version.stdout.trim());
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+    await info.attach(`actual-pm-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
+    await info.attach("actual-pm-identity", { body: JSON.stringify({ proof_scope: "configured_native_renderer", default_pm_workflow_verified: false, theme, session, id, host: initialActivity.host_id, incarnation, nativePath, hash, version: version.stdout.trim(), pid: captured.pid, birth: captured.birth, ancestry: captured.ancestry, cwd: captured.cwd, childStartedAt: initialRuntime.child_started_at, hostStartedAt: initialRuntime.host_started_at }), contentType: "application/json" });
+  } catch (error) {
+    primaryError = error;
+  } finally {
+    recordControlledWire = false;
+    diagnosticPhase = "cleanup";
+    if (collectDiagnostics) {
+      try {
+        const markerPattern = new RegExp(`${marker}(\\d{2})(?!\\d)`, "g");
+        for (const row of await rows()) {
+          if (row.type === "response_item" && row.payload?.type === "message" && row.payload?.role === "assistant") {
+            const text = (row.payload.content ?? []).map((part: any) => typeof part.text === "string" ? part.text : "").join("\n");
+            const markerNumbers = [...text.matchAll(markerPattern)].map(match => match[1]);
+            if (markerNumbers.length) recordDiagnostic({ kind: "native-assistant-markers", id,
+              timestamp: typeof row.timestamp === "string" ? row.timestamp.slice(0, 128) : null,
+              markerNumbers, markerCount: markerNumbers.length });
+          } else if (row.type === "event_msg" && ["task_started", "task_complete", "turn_started", "turn_complete"].includes(row.payload?.type)) {
+            recordDiagnostic({ kind: "native-turn", id, type: row.payload.type,
+              timestamp: typeof row.timestamp === "string" ? row.timestamp.slice(0, 128) : null,
+              turn_id: typeof row.payload.turn_id === "string" ? row.payload.turn_id.slice(0, 256) : null });
+          }
+        }
+      } catch (error) { cleanupErrors.push(error); }
+      collectDiagnostics = false;
+      try {
+        await info.attach("actual-pm-terminal-diagnostics", { contentType: "application/json",
+          body: JSON.stringify({ theme, id, session, marker, limits: diagnosticLimits, bytes: diagnosticBytes,
+            truncated: diagnosticDroppedEvents > 0, droppedEvents: diagnosticDroppedEvents,
+            droppedBytes: diagnosticDroppedBytes, events: diagnosticEvents }) });
+      } catch (error) { cleanupErrors.push(error); }
+    }
+    await page.goto("about:blank").catch(() => {});
+    try { await fixture?.stop(); } catch (error) { cleanupErrors.push(error); }
+    try {
+      // Never infer ownership from a name alone; an exact birth and executable
+      // must still match the record made before exec before sending a signal.
+      if (!captured && gateRequested) {
+        // No complete pre-exec record means no exact child can be signalled or
+        // declared exited. The wrapper deadline remains fail-closed.
+        cleanupErrors.push(new Error("Gate child identity unavailable; cleanup is unknown"));
+      }
+      if (captured && ownedNative()) {
+        process.kill(captured.pid, "SIGTERM");
+        await expect.poll(() => ps(captured!.pid, "lstart="), { timeout: 10_000 }).not.toBe(captured.birth);
+      }
+      if (captured) expect(ps(captured.pid, "lstart="), "owned native PID must exit").not.toBe(captured.birth);
+    } catch (error) {
+      cleanupErrors.push(error);
+    } finally {
+      monitoring = false;
+      try { await monitor; } catch (error) { cleanupErrors.push(error); }
+      if (monitor) {
+        try {
+          const finalRows = await nativeRows(join(home, ".codex", "sessions"), true);
+          if (!finalRows.length) throw new Error("Native rollout missing during final scan");
+          if (finalRows.some(row => row.type === "response_item" && typeof row.payload?.type === "string" && row.payload.type.endsWith("_call"))) unexpectedTool = true;
+        } catch (error) { cleanupErrors.push(error); }
+      }
+      try { if (home) await rm(join(home, ".codex", "auth.json"), { force: true }); }
+      catch (error) { cleanupErrors.push(error); }
+    }
+    // The watcher remains active through fixture.stop and native cleanup. Check its final state
+    // after joining and cleanup so a late tool call cannot become a pass.
+    if (unexpectedTool) cleanupErrors.push(new Error("Unexpected native tool call observed"));
+    if (monitorError) cleanupErrors.push(monitorError);
+    if (errors.length) cleanupErrors.push(new Error(`Console/page errors including cleanup: ${JSON.stringify(errors)}`));
+  }
+  if (primaryError || cleanupErrors.length) throw new AggregateError(
+    [...(primaryError ? [primaryError] : []), ...cleanupErrors], "Owned PM proof or cleanup failed");
 });
 
 test("ready Works terminal follows model header layout while native hidden", async ({ page, playwright }, info) => {

@@ -331,7 +331,38 @@ test("Issue #6932 Issues notifications group repeated failures and continued/sta
   const errors: string[] = [];
   page.on("pageerror", error => errors.push(error.message));
   page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+  const theme = testInfo.project.name.includes("light") ? "light" : "dark";
+  const catalog = await readLiveHubCatalog(page, base!);
+  const primary = catalog.projects[0];
+  expect(primary).toBeTruthy();
+  const snapshot = { app_version: "playwright", active_tab_id: primary.id, recent_projects: [],
+    tabs: [{ ...primary, kind: "git", workspace: { viewport: { x: 0, y: 0, zoom: 1 }, windows: [] } }] };
+  // Keep the binary-served app connected, but let only this case's injected
+  // notifications reach it; live capacity updates are independent events.
+  await page.addInitScript(({ theme, snapshot }) => {
+    localStorage.setItem("gwt:ui:theme", theme);
+    class SnapshotSocket extends EventTarget {
+      static OPEN = 1;
+      static CLOSED = 3;
+      readyState = 0;
+      constructor() {
+        super();
+        setTimeout(() => { this.readyState = 1; this.dispatchEvent(new Event("open")); }, 0);
+      }
+      send(raw: string) {
+        if (JSON.parse(raw).kind !== "frontend_ready") return;
+        for (const payload of [
+          { kind: "hub_state", hub: { app_version: snapshot.app_version, projects: snapshot.tabs, recent_projects: [] } },
+          { kind: "workspace_state", workspace: snapshot },
+        ]) this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(payload) }));
+      }
+      close() { this.readyState = 3; }
+    }
+    // @ts-ignore - controlled transport, actual checkout-served frontend.
+    window.WebSocket = SnapshotSocket;
+  }, { theme, snapshot });
   await gotoLiveGwt(page, base!);
+  await expect(page.locator("#app-version")).toHaveText("vplaywright");
   expect(await (await page.request.get(new URL("/app.js", base!).href)).text())
     .toContain("issueMonitorNotificationModel.update(() => ({ ...event }))");
   const bell = page.locator("#op-notifications-button");
@@ -381,7 +412,6 @@ test("Issue #6932 Issues notifications group repeated failures and continued/sta
   })));
   await expect(launchRow).toHaveCount(1);
   await expect(rows).toHaveCount(5);
-  const theme = testInfo.project.name.includes("light") ? "light" : "dark";
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
   const screenshot = testInfo.outputPath(`monitor-notifications-${theme}.png`);
   await page.screenshot({ path: screenshot, fullPage: true });

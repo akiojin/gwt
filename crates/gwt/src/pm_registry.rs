@@ -230,6 +230,25 @@ impl PmSettings {
 }
 
 impl PmSettings {
+    /// Resolve NEW tuning identically for the GUI draft and its owner fence.
+    /// The saved PM profile and its CAS revision remain project-specific.
+    pub fn launch_profile_with_agent_defaults(&self, project_root: &Path) -> PmLaunchProfile {
+        let mut profile = self.launch_profile_or_default();
+        if let Some(defaults) = crate::load_issue_monitor_prefs(
+            &crate::issue_monitor_prefs_path_for_repo_path(project_root),
+        )
+        .ok()
+        .and_then(|prefs| {
+            prefs.launch_profile_pool().into_iter().find(|candidate| {
+                gwt_agent::resolve_agent_id(&candidate.agent_id)
+                    == gwt_agent::resolve_agent_id(&profile.agent_id)
+            })
+        }) {
+            profile = profile.with_agent_defaults(&defaults);
+        }
+        profile.normalized()
+    }
+
     /// The profile to launch with: the configured one when it names an agent
     /// that can resolve `$gwt-pm`, the built-in default otherwise. Falling back
     /// rather than refusing keeps FR-002's "opening a project starts the PM"
@@ -5082,6 +5101,78 @@ fn save_pm_prefs_unlocked(path: &Path, prefs: &PmPrefs) -> io::Result<()> {
 
 pub fn load_pm_prefs(path: &Path) -> io::Result<PmPrefs> {
     load_pm_prefs_unlocked(path)
+}
+
+/// Hold the existing PM writer lock while inspecting an exact profile/identity.
+/// Callers that also need the registry always acquire it inside this callback.
+pub fn with_pm_prefs_snapshot<T>(
+    path: &Path,
+    operation: impl FnOnce(&PmPrefs) -> io::Result<T>,
+) -> io::Result<T> {
+    with_pm_prefs_lock(path, || operation(&load_pm_prefs_unlocked(path)?))
+}
+
+/// Content identity of the persisted input, including None and version selectors.
+pub fn pm_profile_revision(prefs: &PmPrefs) -> String {
+    let raw = serde_json::to_vec(&prefs.settings.launch_profile).expect("serializable PM profile");
+    format!("pm-profile-v1:{}", hex::encode(Sha256::digest(raw)))
+}
+
+/// One exact project profile CAS; selection remains fenced until durable save returns.
+pub fn set_selected_pm_profile(
+    root: &Path,
+    member_id: &str,
+    expected_revision: &str,
+    profile: PmLaunchProfile,
+) -> io::Result<PmPrefs> {
+    let path = pm_prefs_path_for_repo_path(root);
+    with_pm_prefs_lock(&path, || {
+        let mut prefs = load_pm_prefs_unlocked(&path)?;
+        crate::agent_registry::with_configured_pm_guard(
+            &gwt_core::paths::project_scope_hash(root),
+            member_id,
+            || {
+                if pm_profile_revision(&prefs) != expected_revision {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "This PM profile changed elsewhere. Reload, review your draft and retry.",
+                    ));
+                }
+                if !pm_agent_is_supported(&profile.agent_id) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Choose a tool that supports the managed PM skill",
+                    ));
+                }
+                let mut profile = profile.normalized();
+                let previous = prefs.settings.launch_profile_or_default();
+                if previous.agent_id == profile.agent_id {
+                    profile.version = previous.version;
+                }
+                gwt_agent::validate_native_tuning(
+                    &profile.agent_id,
+                    profile.model.as_deref(),
+                    profile.reasoning.as_deref(),
+                )
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+                prefs.settings.launch_profile = Some(profile);
+                // A retry of an uncertain prior rename still confirms durability.
+                save_pm_prefs_unlocked(&path, &prefs)?;
+                Ok(prefs.clone())
+            },
+        )
+    })
+}
+
+/// Reliable canonical readback, with the same PM prefs -> registry lock order.
+pub fn selected_pm_profile_snapshot(root: &Path, member_id: &str) -> io::Result<PmPrefs> {
+    with_pm_prefs_snapshot(&pm_prefs_path_for_repo_path(root), |prefs| {
+        crate::agent_registry::with_configured_pm_guard(
+            &gwt_core::paths::project_scope_hash(root),
+            member_id,
+            || Ok(prefs.clone()),
+        )
+    })
 }
 
 pub fn save_pm_prefs(path: &Path, prefs: &PmPrefs) -> io::Result<()> {

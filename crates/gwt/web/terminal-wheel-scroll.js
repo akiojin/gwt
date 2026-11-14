@@ -94,6 +94,7 @@ export function createTerminalWheelScrollController({
   isApplicationScrollFallbackEnabled,
   isRuntimeStopped = () => false,
   sendTerminalInput,
+  onUserScroll = () => {},
   pixelsPerLine = PIXELS_PER_LINE,
   pageLines = PAGE_LINES,
 } = {}) {
@@ -114,6 +115,7 @@ export function createTerminalWheelScrollController({
         event.preventDefault();
         event.stopPropagation();
         terminal.scrollLines(lines);
+        onUserScroll();
       }
       return;
     }
@@ -150,6 +152,7 @@ export function createTerminalWheelScrollController({
     event.preventDefault();
     event.stopPropagation();
     terminal.scrollLines(lines);
+    onUserScroll();
   };
 
   // SPEC #6476 T-005 (FR-002): a phone scrolls with a finger. Retained history
@@ -200,6 +203,7 @@ export function createTerminalWheelScrollController({
         touch.pending -= lines * TOUCH_PIXELS_PER_LINE;
         // A finger moving down reveals earlier output.
         terminal.scrollLines(-lines);
+        onUserScroll();
       }
       return;
     }

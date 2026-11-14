@@ -2116,26 +2116,14 @@ impl LaunchWizardState {
     }
 
     pub(super) fn current_reasoning_options(&self) -> Vec<ReasoningDisplayOption> {
-        if self.agent_is_codex() {
-            codex_reasoning_options_for_model(&self.model)
-        } else if self.effective_agent_id() == "grok" {
-            GROK_REASONING_OPTIONS.to_vec()
-        } else if self.effective_agent_id() == "claude"
-            && is_claude_opus_tier_model(self.model.as_str())
-        {
-            let mut options = CLAUDE_OPUS_REASONING_OPTIONS.to_vec();
-            // `ultracode` is opt-in and only usable on Opus-tier models with
-            // Claude Code >= 2.1.154 and workflows enabled. It is the last
-            // non-default row, so removing it keeps every other index stable.
-            if !self.current_claude_ultracode_supported() {
-                options.retain(|option| option.stored_value != "ultracode");
-            }
-            options
-        } else if self.effective_agent_id() == "claude" && self.model == "sonnet" {
-            CLAUDE_SONNET_REASONING_OPTIONS.to_vec()
-        } else {
-            Vec::new()
+        if self.effective_agent_id() == "codex" && !self.launch_target_is_agent() {
+            return Vec::new();
         }
+        reasoning_options_for_agent_model(
+            self.effective_agent_id(),
+            &self.model,
+            self.current_claude_ultracode_supported(),
+        )
     }
 
     fn current_claude_ultracode_supported(&self) -> bool {

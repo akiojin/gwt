@@ -89,6 +89,9 @@ fn source_roster(raw: &str) -> io::Result<Option<crate::agent_names::AgentRoster
     };
     let roster: crate::agent_names::AgentRoster =
         serde_json::from_value(value.clone()).map_err(io::Error::other)?;
+    if roster.schema_version != 1 {
+        return Err(invalid("Inactive import requires the legacy roster schema"));
+    }
     roster.validate().map_err(invalid)?;
     Ok(Some(roster))
 }
@@ -161,7 +164,60 @@ fn save(stored: &InactiveImports) -> io::Result<()> {
     crate::issue_monitor::durable_atomic_write(&path(), &bytes)
 }
 
+pub(crate) fn lock_for_registry() -> io::Result<gwt_core::operation_deadline::NamedFileLock> {
+    let path = path();
+    gwt_config::home::assert_test_path(&path);
+    fs::create_dir_all(path.parent().expect("machine state parent"))?;
+    gwt_core::operation_deadline::NamedFileLock::acquire(
+        &path.with_extension("lock"),
+        "inactive Agent imports",
+    )
+}
+
+/// Caller holds source -> registry -> inactive locks. Preserve the existing
+/// ledger instead of reentering the public source-locking import operations.
+pub(crate) fn stage_locked(
+    stored: &mut InactiveImports,
+    key: &str,
+    raw: &str,
+    refresh: bool,
+) -> io::Result<ImportedProject> {
+    ProjectKey::parse(key).map_err(|error| invalid(error.to_string()))?;
+    let roster = source_roster(raw)?.ok_or_else(|| invalid("Agent source has no roster"))?;
+    let observed = fingerprint(raw);
+    let mut source = match stored.sources.get(key) {
+        Some(source) if source.preferences_sha256 == observed => return Ok(source.clone()),
+        Some(source) if refresh => {
+            let mut source = source.clone();
+            source.previous_snapshots.push(ImportSourceSnapshot {
+                preferences_json: source.preferences_json.clone(),
+                preferences_sha256: source.preferences_sha256.clone(),
+            });
+            source
+        }
+        Some(source) => return Err(invalid(format!(
+            "Agent import source {key} changed: imported {}, observed {observed}; reconcile before registry cutover",
+            source.preferences_sha256,
+        ))),
+        None => ImportedProject { preferences_json: String::new(), preferences_sha256: String::new(),
+            roster_revision: 0, member_aliases: BTreeMap::new(), previous_snapshots: Vec::new() },
+    };
+    source.preferences_json = raw.into();
+    source.preferences_sha256 = observed;
+    source.roster_revision = roster.revision;
+    for member in roster.members {
+        source
+            .member_aliases
+            .entry(member.agent_member_id)
+            .or_insert_with(|| uuid::Uuid::new_v4().to_string());
+    }
+    stored.sources.insert(key.into(), source.clone());
+    save(stored)?;
+    Ok(source)
+}
+
 fn missing_source(source: &ProjectKey) -> io::Result<Option<ImportedProject>> {
+    let _registry = crate::agent_registry::inactive_import_guard()?;
     if let Some(previous) = load()?.and_then(|mut stored| stored.sources.remove(source.as_str())) {
         return Err(invalid(format!(
             "Agent import source {} missing: imported {}; reconcile before registry cutover",
@@ -197,6 +253,7 @@ pub fn import_project(source: &ProjectKey) -> io::Result<Option<ImportedProject>
         Err(error) => return Err(error),
     };
     let observed_hash = fingerprint(&raw);
+    let _registry = crate::agent_registry::inactive_import_guard()?;
     let import_path = path();
     gwt_config::home::assert_test_path(&import_path);
     fs::create_dir_all(import_path.parent().expect("machine state parent"))?;
@@ -271,6 +328,7 @@ pub fn reconcile_project(
             "Agent source {source} fingerprint changed: expected {expected_source_fingerprint}, observed {observed}; inspect source before reconciling"
         )));
     }
+    let _registry = crate::agent_registry::inactive_import_guard()?;
     let import_path = path();
     gwt_config::home::assert_test_path(&import_path);
     fs::create_dir_all(import_path.parent().expect("machine state parent"))?;

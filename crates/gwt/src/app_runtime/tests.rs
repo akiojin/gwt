@@ -3588,7 +3588,12 @@ fn issue_monitor_final_spawn_reads_fresh_shared_auto_capacity() {
         })
         .collect();
     prefs_before_typed.set_launch_profile_pool(profiles);
-    assert_eq!(after, prefs_before_typed);
+    // First registration advances snapshot metadata; every persisted setting
+    // outside the explicitly asserted roster must still match the original.
+    assert_eq!(
+        serde_json::to_value(&after).unwrap(),
+        serde_json::to_value(&prefs_before_typed).unwrap()
+    );
     assert_eq!(
         gwt::machine_agent_settings::load().unwrap(),
         Some(machine_policy_before)
@@ -3763,7 +3768,12 @@ fn issue_monitor_final_spawn_preserves_live_wait_and_exempts_review() {
                 })
                 .collect();
             prefs_before_typed.set_launch_profile_pool(profiles);
-            assert_eq!(after, prefs_before_typed);
+            // The new common generation is read metadata, while the complete
+            // persisted project settings remain covered by this comparison.
+            assert_eq!(
+                serde_json::to_value(&after).unwrap(),
+                serde_json::to_value(&prefs_before_typed).unwrap()
+            );
         } else {
             assert_eq!(
                 prefs_after, prefs_before,
@@ -4046,6 +4056,7 @@ fn assert_genesis_receipt_cleanup_failure(close_before_enqueue: bool, close_befo
     fs::create_dir_all(&repo).unwrap();
     init_repo_with_initial_commit(&repo);
     seed_owner_fixture_roster(&repo, 8);
+    configure_owner_fixture_tools(&repo, &["pane-contract-fixture"]);
     let executor = tokio::runtime::Runtime::new().unwrap();
     let owner = Arc::new(executor.block_on(production_owner_fixture(&repo)));
     let mut runtime = sample_runtime(
@@ -7300,6 +7311,35 @@ fn spawn_owner_codex_fixture_with_output(
     configure_owner_fixture_tools(&root, &[config.agent_id.command()]);
     let temp = runtime.sessions_dir.parent().unwrap().to_path_buf();
     pin_live_pm_fixture_agents(runtime, &temp);
+    let mut child_config = config.clone();
+    gwt_agent::LaunchEnvironment::from_active_profile(
+        runtime.profile_config_path.as_deref().unwrap(),
+        child_config.runtime_target,
+    )
+    .unwrap()
+    .with_project_root(&root)
+    .apply_to_config(&mut child_config);
+    let semantics = if cfg!(windows) {
+        gwt::project_runtime::launch::HostEnvKeySemantics::WindowsCaseInsensitive
+    } else {
+        gwt::project_runtime::launch::HostEnvKeySemantics::CaseSensitive
+    };
+    let codex_path = gwt::project_runtime::launch::effective_host_codex_config_path(
+        &root,
+        &child_config.env_vars,
+        semantics,
+        dirs::home_dir().as_deref(),
+    );
+    assert!(
+        codex_path.is_ok(),
+        "fake-provider Codex path must resolve before checking isolation"
+    );
+    assert!(
+        codex_path
+            .as_ref()
+            .is_ok_and(|path| path.starts_with(dunce::canonicalize(&temp).unwrap())),
+        "fake-provider child Codex config must be confined to its private fixture home"
+    );
     runtime.sessions_dir = gwt_core::paths::gwt_sessions_dir();
     runtime.launch_wizard_cache =
         LaunchWizardMemoryCache::load_with_agent_options(&runtime.sessions_dir, Vec::new());
@@ -8159,6 +8199,8 @@ pub(super) fn seed_owner_fixture_roster(project: &Path, capacity: usize) {
         .into_iter()
         .take(capacity)
         .map(|name| gwt::agent_names::AgentMember {
+            pm_eligible: false,
+            pm_project_key: None,
             agent_member_id: format!("member-{name}"),
             agent_id: None,
             name: name.into(),
@@ -8167,6 +8209,7 @@ pub(super) fn seed_owner_fixture_roster(project: &Path, capacity: usize) {
             origin_session_id: None,
             last_issue_number: None,
             last_spec_number: None,
+            last_owner_project_key: None,
             assignment: None,
         })
         .collect(),
@@ -10085,6 +10128,7 @@ fn open_agent_settings_sets(
                 repo,
                 &sessions,
                 gwt::agent_names::AgentRosterAction::Add {
+                    pm_eligible: false,
                     name: None,
                     agent_id: Some(tool.into()),
                 },
@@ -10945,6 +10989,16 @@ fn pin_live_pm_fixture_agents(runtime: &AppRuntime, root: &Path) {
     }
     let mut settings = Settings::default();
     pin_launch_agents(&mut settings, &bin);
+    let codex_home = root.join(".codex");
+    fs::create_dir_all(&codex_home).expect("private fake-provider Codex home");
+    settings
+        .profiles
+        .set_env_var(
+            "default",
+            "CODEX_HOME",
+            codex_home.to_str().expect("UTF-8 private Codex home"),
+        )
+        .expect("pin fake-provider Codex home");
     write_profile_config(runtime.profile_config_path.as_deref().unwrap(), &settings);
     settings
         .save(&gwt_core::paths::gwt_config_path())
@@ -11534,7 +11588,67 @@ fn assert_pm_ensure_spawns_from_default_branch(
         }));
         return;
     }
+    let (snapshot, session) = match completion.result.as_ref().unwrap() {
+        super::RemoteOwnerLaunchOutcome::Runtime(snapshot, session) => {
+            (snapshot.clone(), session.clone())
+        }
+        _ => panic!("expected actual PM runtime"),
+    };
+    let client = completion
+        .client_cell
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .clone();
+    runtime.sessions_dir = gwt_core::paths::gwt_sessions_dir();
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    runtime.install_remote_owner_projection(
+        &completion.context,
+        &window_id,
+        client,
+        snapshot.clone(),
+        session,
+    );
+    runtime.sync_pm_session_cache(&repo, None);
     let completion_events = runtime.handle_remote_owner_launch_complete(completion);
+    assert_eq!(
+        runtime.runtimes[&window_id].incarnation,
+        snapshot.incarnation
+    );
+    assert_eq!(
+        runtime.pm_session_for_root(&repo).map(String::as_str),
+        snapshot.session_id.as_deref(),
+        "same-runtime completion must refresh the registered PM cache"
+    );
+    let workspace = completion_events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::WorkspaceState { workspace } => Some(workspace),
+            _ => None,
+        })
+        .expect("same-runtime cache refresh publishes workspace");
+    let pm_window = &workspace.tabs[0].workspace.windows[0];
+    assert!(pm_window.is_pm);
+    assert_eq!(
+        pm_window.session_id.as_deref(),
+        snapshot.session_id.as_deref()
+    );
+    drain_queued_blocking_tasks(&tasks);
+    assert!(recorded_events.lock().unwrap().iter().any(|event| {
+        match recorded_project_payload(event) {
+            UserEvent::ProjectDispatch { events, .. } => events.iter().any(|event| {
+                matches!(&event.event, BackendEvent::LocalAgentActivity { activity }
+                    if activity.agents.as_ref().is_some_and(|agents| agents.iter().any(|agent|
+                        agent.window_id == window_id && agent.session_id == snapshot.session_id.as_deref().unwrap()
+                        && agent.runtime_incarnation == snapshot.incarnation && agent.is_pm)))
+            }),
+            _ => false,
+        }
+    }), "same-runtime cache refresh queues current registered PM activity");
     assert!(
         runtime
             .tab("tab-1")
@@ -12137,10 +12251,15 @@ pub(super) fn attach_live_pm_pane(runtime: &mut AppRuntime, window_id: &str) -> 
         create_detached_pm_worktree_fixture(&root);
     }
     pin_live_pm_fixture_agents(runtime, &root);
-    let config = AppRuntime::pm_launch_config(
-        &worktree,
-        &gwt::pm_registry::PmLaunchProfile::default_profile(),
-    );
+    // Replace pm_wake_fixture's metadata-only placeholder through the normal
+    // intentional-stop writer before asking the owner for an actual NEW PM.
+    gwt::pm_registry::deregister_pm(
+        &gwt::pm_registry::pm_prefs_path_for_repo_path(&root),
+        "pm-session-live",
+    )
+    .expect("retire metadata-only PM wake registration");
+    let config = AppRuntime::pm_new_launch_config(&root, &worktree)
+        .expect("the same readonly NEW draft as the PM launcher");
     let owner = project_owner_fixture(runtime, window_id);
     let owner_id = owner.pane_id(window_id);
     let receipt = owner_fixture_block_on(owner.command(OwnerCommand::LaunchAgent {
@@ -12241,6 +12360,7 @@ pub(super) fn attach_live_pm_pane(runtime: &mut AppRuntime, window_id: &str) -> 
     // The draining native provider has reached its first prompt. Use the
     // managed hook, including its authenticated owner notification, to publish
     // that fact without replacing the launch's physical process proof.
+    let mut status_events = owner.subscribe();
     probe.with_agent_environment(|| {
         let input = serde_json::json!({
             "session_id": format!("pm-fixture-{}", uuid::Uuid::new_v4()),
@@ -12260,6 +12380,25 @@ pub(super) fn attach_live_pm_pane(runtime: &mut AppRuntime, window_id: &str) -> 
         !gwt::project_runtime::pm_delivery::pm_wake_runtime_is_busy(&runtime_path, incarnation),
         "managed native PM readiness must clear the busy gate: {ready:?}"
     );
+    owner_fixture_block_on(async {
+        // test-hygiene: allow-wall-clock-deadline The exact managed hook event establishes owner readiness; this only bounds an IPC hang.
+        tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
+            loop {
+                let event = status_events
+                    .recv()
+                    .await
+                    .expect("actual PM owner status event");
+                if matches!(&event, gwt::project_runtime::events::OwnerEvent::Status {
+                    id, incarnation: event_incarnation, status: WindowProcessStatus::Idle, ..
+                } if id == &owner_id && *event_incarnation == incarnation)
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("owner applied the managed native PM readiness hook");
+    });
     let snapshot = owner_fixture_block_on(owner.command(OwnerCommand::Snapshot {
         id: owner_id.clone(),
         incarnation,
@@ -12617,24 +12756,28 @@ fn assert_pm_delivery_refused(
     other_session: bool,
     pending_refusal: bool,
 ) {
-    use self::pane_control_tests::{control_close, control_launch_config, control_owner_launch};
+    use self::pane_control_tests::control_close;
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let _home = ScopedGwtHome::set(temp.path());
-    let fixture = pm_delivery_tests::pm_delivery_owner_fixture(temp.path());
-    let other = other_session.then(|| {
-        let worktree = create_detached_pm_worktree_fixture(&fixture.repo);
-        let mut config = control_launch_config(&fixture.repo, 44);
-        config.working_dir = Some(worktree);
-        config.branch = None;
-        config.linked_issue_number = None;
-        config.explicit_follow_up = false;
-        config.suppress_execution_control = true;
-        control_owner_launch(&fixture.owner, "other-pm-role", config)
-    });
-    let target = other.as_ref().unwrap_or(&fixture.pm);
+    let fixture =
+        pm_delivery_tests::pm_delivery_owner_fixture_with_target_role(temp.path(), other_session);
+    let target = if other_session {
+        &fixture.target
+    } else {
+        &fixture.pm
+    };
     let target_id = target.id.clone();
+    if other_session {
+        let session = target.session.as_ref().unwrap();
+        assert_ne!(session.id, fixture.pm.session.as_ref().unwrap().id);
+        assert!(gwt::pm_registry::pane_is_pm(
+            &fixture.repo,
+            Some(&session.worktree_path),
+            Some(&session.id),
+        ));
+    }
     let operation_id = uuid::Uuid::new_v4().to_string();
     let pending = pending_refusal.then(|| {
         let path = gwt::pm_registry::pm_delivery_receipts_path_for_repo_path(&fixture.repo);
@@ -12726,8 +12869,8 @@ fn assert_pm_delivery_refused(
         .reason
         .as_ref()
         .is_some_and(|reason| reason.contains("self") && reason.contains(&target_id)));
-    if let Some(other) = other {
-        control_close(&fixture.owner, &other);
+    if other_session {
+        control_close(&fixture.owner, &fixture.target);
     }
 }
 

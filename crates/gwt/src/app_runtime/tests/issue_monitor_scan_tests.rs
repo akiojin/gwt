@@ -395,11 +395,14 @@ fn authenticated_scan_now_reports_unavailable_daemon_without_enqueuing() {
         .expect("the actual census host process start time");
     let census_host_key = format!("{census_host_pid}:{census_host_started_at}");
     owner_fixture_block_on(async {
-        // test-hygiene: allow-wall-clock-deadline Observe the real initial census publication before comparing complete preference bytes; no scheduler delay authorizes the baseline.
+        // test-hygiene: allow-wall-clock-deadline Observe the real initial census mirror publication before comparing complete preference bytes; no scheduler delay authorizes the baseline.
         tokio::time::timeout(Duration::from_secs(30), async {
             loop {
-                if gwt::load_issue_monitor_prefs(&prefs_path)
-                    .unwrap()
+                // The shared snapshot can advance before its raw mirror is
+                // published. This assertion compares that mirror's bytes.
+                let published: gwt::IssueMonitorPrefs =
+                    serde_json::from_slice(&fs::read(&prefs_path).unwrap()).unwrap();
+                if published
                     .monitor_runtime_counts
                     .contains_key(&census_host_key)
                 {

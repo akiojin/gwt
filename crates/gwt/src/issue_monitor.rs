@@ -866,6 +866,8 @@ pub struct IssueMonitorControlReceipt {
     pub should_scan: bool,
     #[serde(default)]
     pub authority_changed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_close_applied_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1028,6 +1030,12 @@ pub struct IssueMonitorPriorityReasonNote {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueMonitorPrefs {
+    #[serde(skip)]
+    pub agent_registry_revision: Option<u64>,
+    #[serde(skip)]
+    pub agent_registry_project_key: Option<String>,
+    #[serde(skip)]
+    pub agent_registry_profiles: BTreeMap<String, crate::agent_registry::AgentProfileCore>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_roster: Option<crate::agent_names::AgentRoster>,
     #[serde(default)]
@@ -1390,6 +1398,9 @@ pub struct IssueMonitorTerminalQueue {
 impl Default for IssueMonitorPrefs {
     fn default() -> Self {
         Self {
+            agent_registry_revision: None,
+            agent_registry_project_key: None,
+            agent_registry_profiles: BTreeMap::new(),
             agent_roster: None,
             agent_issue_schedule: AgentIssueSchedule::default(),
             agent_switch_intents: BTreeMap::new(),
@@ -1516,6 +1527,7 @@ impl IssueMonitorPrefs {
     /// Saved inputs observed by guarded config writes, excluding runtime state.
     pub fn config_observation(&self) -> serde_json::Value {
         serde_json::json!({
+            "agent_registry_revision": self.agent_registry_revision,
             "agent_roster": self.agent_roster.as_ref().map(|roster| serde_json::json!({
                 "revision": roster.revision,
                 "enabled_members": roster.enabled_count(),
@@ -1606,9 +1618,14 @@ impl IssueMonitorPrefs {
                         roster.members.iter().any(|member| {
                             profile.agent_member_id.as_deref()
                                 == Some(member.agent_member_id.as_str())
+                                && member.implementation_eligible()
                                 && (member.enabled
                                     || member.assignment.as_ref().is_some_and(|assignment| {
                                         assignment.issue_number == Some(issue_number)
+                                            && assignment.project_key.as_deref().is_none_or(|key| {
+                                                self.agent_registry_project_key.as_deref()
+                                                    == Some(key)
+                                            })
                                     }))
                                 && member
                                     .agent_id
@@ -1617,6 +1634,9 @@ impl IssueMonitorPrefs {
                                     == tool
                                 && member.assignment.as_ref().is_none_or(|assignment| {
                                     assignment.issue_number == Some(issue_number)
+                                        && assignment.project_key.as_deref().is_none_or(|key| {
+                                            self.agent_registry_project_key.as_deref() == Some(key)
+                                        })
                                 })
                         })
                     })
@@ -2440,6 +2460,8 @@ pub struct IssueMonitorProfilesSetRequest {
     pub patches: Vec<IssueMonitorLaunchProfilePatch>,
     pub expected_pool: Vec<IssueMonitorLaunchProfile>,
     pub expected_head: Option<IssueMonitorLaunchProfile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_agent_registry_revision: Option<u64>,
 }
 
 impl IssueMonitorProfilesSetRequest {
@@ -2455,6 +2477,7 @@ impl IssueMonitorProfilesSetRequest {
             patches,
             expected_pool: prefs.launch_profile_pool(),
             expected_head: prefs.launch_profile.clone(),
+            expected_agent_registry_revision: prefs.agent_registry_revision,
         })
     }
 
@@ -2466,17 +2489,64 @@ impl IssueMonitorProfilesSetRequest {
         Vec<IssueMonitorProfilesSetChange>,
     )> {
         let pool = prefs.launch_profile_pool();
-        if pool != self.expected_pool || prefs.launch_profile != self.expected_head {
+        if pool != self.expected_pool
+            || prefs.launch_profile != self.expected_head
+            || self
+                .expected_agent_registry_revision
+                .is_some_and(|revision| prefs.agent_registry_revision != Some(revision))
+        {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
                 "Issues profiles changed concurrently; reload profiles and retry",
             ));
         }
-        let result = merge_issue_monitor_profiles_set(
+        let mut result = merge_issue_monitor_profiles_set(
             &pool,
             prefs.launch_profile.as_ref().or(pool.first()),
             &self.patches,
         );
+        for (index, (profile, patch)) in result.0.iter_mut().zip(&self.patches).enumerate() {
+            let Some(core) = profile
+                .agent_member_id
+                .as_ref()
+                .and_then(|id| prefs.agent_registry_profiles.get(id))
+                .filter(|core| core.agent_id == profile.agent_id)
+            else {
+                continue;
+            };
+            for field in ["model", "reasoning", "version", "fast_mode"] {
+                if patch.provided.contains(field) {
+                    continue;
+                }
+                match field {
+                    "model" => profile.model.clone_from(&core.model),
+                    "reasoning" => profile.reasoning.clone_from(&core.reasoning),
+                    "version" => profile.version.clone_from(&core.version),
+                    "fast_mode" => profile.fast_mode = core.fast_mode,
+                    _ => unreachable!(),
+                }
+                let value =
+                    serde_json::to_value(&*profile).map_err(io::Error::other)?[field].clone();
+                if let Some(change) = result
+                    .1
+                    .iter_mut()
+                    .find(|change| change.index == index && change.field == field)
+                {
+                    change.action = "inherited".into();
+                    change.source = "agent_registry".into();
+                    change.value = value;
+                } else {
+                    result.1.push(IssueMonitorProfilesSetChange {
+                        index,
+                        agent_id: profile.agent_id.clone(),
+                        field: field.into(),
+                        action: "inherited".into(),
+                        source: "agent_registry".into(),
+                        value,
+                    });
+                }
+            }
+        }
         crate::cli::issue::validate_monitor_profiles_set(&result.0, None)?;
         crate::agent_names::validate_registered_profiles(prefs, &result.0)
             .map_err(io::Error::other)?;
@@ -2551,7 +2621,7 @@ pub struct IssueMonitorProfilesSetChange {
     /// `inherited` when a saved value filled the omitted field, `reset` when
     /// nothing could fill it and the field fell back to its default.
     pub action: String,
-    /// Where the stored value came from: `pool`, `launch_profile`, or `default`.
+    /// Where the stored value came from: `pool`, `launch_profile`, `agent_registry`, or `default`.
     pub source: String,
     pub value: serde_json::Value,
 }
@@ -5296,6 +5366,12 @@ enum IssueMonitorSourceRepository {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueMonitorState {
+    #[serde(skip)]
+    pub(crate) agent_registry_revision: Option<u64>,
+    #[serde(skip)]
+    pub(crate) agent_registry_project_key: Option<String>,
+    #[serde(skip)]
+    agent_registry_profiles: BTreeMap<String, crate::agent_registry::AgentProfileCore>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     agent_roster: Option<crate::agent_names::AgentRoster>,
     #[serde(default)]
@@ -6889,7 +6965,17 @@ fn issue_monitor_prefs_cache(
 }
 
 fn load_issue_monitor_prefs_unlocked(path: &Path) -> io::Result<IssueMonitorPrefs> {
-    let mut prefs = load_issue_monitor_prefs_raw(path)?;
+    let prefs = match crate::agent_registry::read_project(path)? {
+        Some(prefs) => prefs,
+        None => load_issue_monitor_prefs_raw(path)?,
+    };
+    finish_issue_monitor_prefs_load(path, prefs)
+}
+
+fn finish_issue_monitor_prefs_load(
+    path: &Path,
+    mut prefs: IssueMonitorPrefs,
+) -> io::Result<IssueMonitorPrefs> {
     prefs
         .agent_issue_schedule
         .validate()
@@ -6926,12 +7012,10 @@ fn current_issue_monitor_prefs_schema_version() -> u32 {
 }
 
 fn validate_issue_monitor_prefs_schema_version(actual: u32) -> io::Result<()> {
-    if actual != ISSUE_MONITOR_PREFS_SCHEMA_VERSION {
+    if !matches!(actual, 1 | 2) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!(
-                "Issues preferences schema mismatch: actual={actual}, expected={ISSUE_MONITOR_PREFS_SCHEMA_VERSION}"
-            ),
+            format!("Issues preferences schema mismatch: actual={actual}, expected=1|2"),
         ));
     }
     Ok(())
@@ -6971,9 +7055,11 @@ fn validate_existing_issue_monitor_prefs_schema(path: &Path) -> io::Result<()> {
             }
         };
     if let Some(actual) = fields.get("schema_version") {
-        let actual = serde_json::from_str(actual.get())
+        let actual: u32 = serde_json::from_str(actual.get())
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-        validate_issue_monitor_prefs_schema_version(actual)?;
+        if actual != ISSUE_MONITOR_PREFS_SCHEMA_VERSION {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("Issues preferences schema mismatch: actual={actual}, expected=1 for a legacy writer")));
+        }
     }
     Ok(())
 }
@@ -7072,6 +7158,9 @@ fn load_issue_monitor_prefs_raw_with_cache(
             };
             io::Error::new(kind, error)
         })?;
+    if prefs.schema_version != 1 {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("Issues preferences schema mismatch: actual={}, expected=1 without an Active Agent registry", prefs.schema_version)));
+    }
     let after = file.metadata()?;
     if after.len() == size && after.modified()? == modified {
         // Bound retention when a long-running GUI opens many repositories.
@@ -7231,16 +7320,18 @@ pub(crate) fn durable_atomic_write(path: &Path, content: &[u8]) -> io::Result<()
     result
 }
 
-fn save_issue_monitor_prefs_unlocked(path: &Path, prefs: &IssueMonitorPrefs) -> io::Result<()> {
-    save_issue_monitor_prefs_unlocked_with_policy_preservation(path, prefs, false)
-}
-
-fn save_issue_monitor_prefs_unlocked_with_policy_preservation(
+fn save_legacy_issue_monitor_prefs_unlocked(
     path: &Path,
     prefs: &IssueMonitorPrefs,
     preserve_legacy_policy: bool,
 ) -> io::Result<()> {
     let started = std::time::Instant::now();
+    if prefs.schema_version != 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Schema2 preferences require the Active Agent registry writer",
+        ));
+    }
     let mut normalized = prefs.clone();
     crate::agent_names::synchronize_roster_capacity(&mut normalized, path)
         .map_err(io::Error::other)?;
@@ -7333,6 +7424,29 @@ fn save_issue_monitor_prefs_unlocked_with_policy_preservation(
     result
 }
 
+fn load_issue_monitor_prefs_for_registry(
+    path: &Path,
+    registry: &mut crate::agent_registry::RegistryWrite,
+) -> io::Result<IssueMonitorPrefs> {
+    match registry.load(path)? {
+        Some(prefs) => finish_issue_monitor_prefs_load(path, prefs),
+        None => load_issue_monitor_prefs_unlocked(path),
+    }
+}
+
+fn save_issue_monitor_prefs_unlocked(
+    path: &Path,
+    prefs: &IssueMonitorPrefs,
+    registry: &mut crate::agent_registry::RegistryWrite,
+    mutation: bool,
+) -> io::Result<IssueMonitorPrefs> {
+    if let Some(saved) = registry.commit(path, prefs, mutation)? {
+        return Ok(saved);
+    }
+    save_legacy_issue_monitor_prefs_unlocked(path, prefs, false)?;
+    Ok(prefs.clone())
+}
+
 /// Issue #3883 AC-2: the sibling holding the last successfully committed prefs.
 fn committed_prefs_generation_path(path: &Path) -> std::path::PathBuf {
     path.with_extension("committed.json")
@@ -7355,6 +7469,12 @@ fn last_committed_prefs_generation(path: &Path) -> io::Result<Option<IssueMonito
         Err(error) if error.is_syntax() || error.is_eof() => return Ok(None),
         Err(error) => return Err(io::Error::new(io::ErrorKind::InvalidInput, error)),
     };
+    if prefs.schema_version != 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Unproven schema2 committed preferences require Agent registry reconciliation",
+        ));
+    }
     if machine_managed_monitor_prefs(path) {
         if let Some(policy) = crate::machine_agent_settings::load()
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?
@@ -7474,7 +7594,21 @@ pub(crate) fn acquire_issue_monitor_daemon_lease(
     let authority_path = issue_monitor_authority_lock_path(prefs_path);
     let mut stage = "prefs lock acquisition";
     let mut lock_path = &prefs_lock_path;
-    with_issue_monitor_prefs_lock(prefs_path, || {
+    if let Some(parent) = prefs_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)
+            .map_err(|error| daemon_lease_lock_error(stage, lock_path, error))?;
+    }
+    // Reservation does not read or mutate prefs, recovery fences, or the registry.
+    // Keep the stable prefs -> authority lock order for concurrent startup/probes.
+    let prefs_lock = gwt_core::operation_deadline::NamedFileLock::acquire(
+        &prefs_lock_path,
+        "issue_monitor_prefs",
+    )
+    .map_err(|error| daemon_lease_lock_error(stage, lock_path, error))?;
+    let result = (|| {
         stage = "authority lock open";
         lock_path = &authority_path;
         let authority_lock = fs::OpenOptions::new()
@@ -7502,14 +7636,29 @@ pub(crate) fn acquire_issue_monitor_daemon_lease(
         Ok(IssueMonitorAuthorityLease {
             lock: authority_lock,
         })
-    })
+    })();
+    let unlock_result = prefs_lock.unlock();
+    match (result, unlock_result) {
+        (Ok(lease), Ok(())) => Ok(lease),
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+    }
     .map_err(|error| daemon_lease_lock_error(stage, lock_path, error))
 }
 
 /// Probe only the existing lifetime lock, releasing any transient ownership
 /// before the prefs lock permits a daemon startup to acquire it.
 pub(crate) fn issue_monitor_daemon_lease_is_held(prefs_path: &Path) -> io::Result<bool> {
-    with_issue_monitor_prefs_lock(prefs_path, || {
+    // This read-only lease probe must not enroll a project or acquire the
+    // shared registry writer. Only the same stable source lock is needed.
+    if let Some(parent) = prefs_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let _prefs = gwt_core::operation_deadline::NamedFileLock::acquire(
+        &prefs_path.with_extension("lock"),
+        "Issues lease probe",
+    )?;
+    (|| {
         let lock = match fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -7527,7 +7676,7 @@ pub(crate) fn issue_monitor_daemon_lease_is_held(prefs_path: &Path) -> io::Resul
             Err(error) if gwt_core::operation_deadline::is_lock_contended(&error) => Ok(true),
             Err(error) => Err(error),
         }
-    })
+    })()
 }
 
 fn daemon_lease_lock_error(stage: &str, path: &Path, error: io::Error) -> io::Error {
@@ -7593,8 +7742,8 @@ pub(crate) fn establish_issue_monitor_authority_fence_with_lease(
             "current Issues authority fence must use the current schema and a valid identity",
         ));
     }
-    with_issue_monitor_prefs_lock(prefs_path, || {
-        let mut prefs = load_issue_monitor_prefs_unlocked(prefs_path)?;
+    with_issue_monitor_prefs_lock(prefs_path, |registry| {
+        let mut prefs = load_issue_monitor_prefs_for_registry(prefs_path, registry)?;
         match load_issue_monitor_authority_fence(prefs_path)? {
             IssueMonitorAuthorityFenceState::Missing => {
                 persist_issue_monitor_authority_fence(prefs_path, current)?;
@@ -7616,7 +7765,7 @@ pub(crate) fn establish_issue_monitor_authority_fence_with_lease(
                 prefs.advance_effect_authority_epoch().ok_or_else(|| {
                     io::Error::other("Issues authority epoch exhausted during fence replay")
                 })?;
-                save_issue_monitor_prefs_unlocked(prefs_path, &prefs)?;
+                prefs = save_issue_monitor_prefs_unlocked(prefs_path, &prefs, registry, true)?;
                 persist_issue_monitor_authority_fence(prefs_path, current)?;
             }
         }
@@ -7624,7 +7773,7 @@ pub(crate) fn establish_issue_monitor_authority_fence_with_lease(
         // GUI/daemon driver has handed over authority. Its recent heartbeat
         // cannot establish concurrent scanning by this new owner.
         if prefs.last_scan_driver.take().is_some() {
-            save_issue_monitor_prefs_unlocked(prefs_path, &prefs)?;
+            prefs = save_issue_monitor_prefs_unlocked(prefs_path, &prefs, registry, true)?;
         }
         Ok(prefs)
     })
@@ -7642,7 +7791,7 @@ pub(crate) fn establish_issue_monitor_authority_fence_with_lease(
 pub fn try_acquire_issue_monitor_local_fallback_lease(
     prefs_path: &Path,
 ) -> io::Result<IssueMonitorAuthorityLease> {
-    with_issue_monitor_prefs_lock(prefs_path, || {
+    with_issue_monitor_prefs_lock(prefs_path, |registry| {
         let authority_lock = fs::OpenOptions::new()
             .create(true)
             .read(true)
@@ -7666,11 +7815,11 @@ pub fn try_acquire_issue_monitor_local_fallback_lease(
             IssueMonitorAuthorityFenceState::Active(existing)
                 if existing.version == ISSUE_MONITOR_AUTHORITY_FENCE_VERSION =>
             {
-                let mut prefs = load_issue_monitor_prefs_unlocked(prefs_path)?;
+                let mut prefs = load_issue_monitor_prefs_for_registry(prefs_path, registry)?;
                 prefs.advance_effect_authority_epoch().ok_or_else(|| {
                     io::Error::other("Issues authority epoch exhausted during local fence recovery")
                 })?;
-                save_issue_monitor_prefs_unlocked(prefs_path, &prefs)?;
+                save_issue_monitor_prefs_unlocked(prefs_path, &prefs, registry, true)?;
                 let fence_path = issue_monitor_authority_fence_path(prefs_path);
                 fs::remove_file(&fence_path)?;
                 sync_parent_directory(&fence_path)?;
@@ -7689,7 +7838,7 @@ pub fn clear_issue_monitor_authority_fence(
     prefs_path: &Path,
     expected: &IssueMonitorAuthorityFence,
 ) -> io::Result<()> {
-    with_issue_monitor_prefs_lock(prefs_path, || {
+    with_issue_monitor_prefs_lock(prefs_path, |_registry| {
         match load_issue_monitor_authority_fence(prefs_path)? {
             IssueMonitorAuthorityFenceState::Active(current) if current == *expected => {}
             _ => {
@@ -7720,7 +7869,7 @@ pub fn clear_issue_monitor_authority_fence(
 #[track_caller]
 fn with_issue_monitor_prefs_lock<T>(
     path: &Path,
-    operation: impl FnOnce() -> io::Result<T>,
+    operation: impl FnOnce(&mut crate::agent_registry::RegistryWrite) -> io::Result<T>,
 ) -> io::Result<T> {
     with_issue_monitor_prefs_lock_observed(path, || {}, operation)
 }
@@ -7729,8 +7878,9 @@ fn with_issue_monitor_prefs_lock<T>(
 fn with_issue_monitor_prefs_lock_observed<T>(
     path: &Path,
     on_first_contention: impl FnMut(),
-    operation: impl FnOnce() -> io::Result<T>,
+    operation: impl FnOnce(&mut crate::agent_registry::RegistryWrite) -> io::Result<T>,
 ) -> io::Result<T> {
+    crate::agent_registry::preflight_write(path)?;
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent)?;
@@ -7755,7 +7905,8 @@ fn with_issue_monitor_prefs_lock_observed<T>(
     )?;
     let wait_ms = waiting.elapsed().as_secs_f64() * 1000.0;
     let held = std::time::Instant::now();
-    let result = operation();
+    let result = crate::agent_registry::RegistryWrite::acquire(path)
+        .and_then(|mut registry| operation(&mut registry));
     let unlock_result = lock.unlock();
     tracing::info!(
         target: "gwt.issue_monitor.prefs",
@@ -7783,7 +7934,7 @@ pub fn load_issue_monitor_prefs(path: &Path) -> io::Result<IssueMonitorPrefs> {
 /// Ordinary prefs readers and the monitor's explicit hold primitive stay unchanged.
 pub fn load_issue_monitor_prefs_for_running_version(path: &Path) -> io::Result<IssueMonitorPrefs> {
     if machine_managed_monitor_prefs(path) {
-        load_issue_monitor_prefs_raw(path)?;
+        load_issue_monitor_prefs_unlocked(path)?;
         crate::machine_agent_settings::ensure_migrated()?;
     }
     fn applied(prefs: &IssueMonitorPrefs) -> bool {
@@ -7818,7 +7969,9 @@ pub fn load_issue_monitor_prefs_for_running_version(path: &Path) -> io::Result<I
 /// available for deliberately fail-closed callers and tests.
 #[track_caller]
 pub fn save_issue_monitor_prefs(path: &Path, prefs: &IssueMonitorPrefs) -> io::Result<()> {
-    with_issue_monitor_prefs_lock(path, || save_issue_monitor_prefs_unlocked(path, prefs))
+    with_issue_monitor_prefs_lock(path, |registry| {
+        save_issue_monitor_prefs_unlocked(path, prefs, registry, false).map(|_| ())
+    })
 }
 
 /// Serialize one cross-process prefs transaction from latest load through the
@@ -7830,10 +7983,10 @@ pub fn mutate_issue_monitor_prefs<T>(
     path: &Path,
     mutation: impl FnOnce(&mut IssueMonitorPrefs) -> T,
 ) -> io::Result<(IssueMonitorPrefs, T)> {
-    with_issue_monitor_prefs_lock(path, || {
-        let mut prefs = load_issue_monitor_prefs_unlocked(path)?;
+    with_issue_monitor_prefs_lock(path, |registry| {
+        let mut prefs = load_issue_monitor_prefs_for_registry(path, registry)?;
         let result = mutation(&mut prefs);
-        save_issue_monitor_prefs_unlocked(path, &prefs)?;
+        prefs = save_issue_monitor_prefs_unlocked(path, &prefs, registry, true)?;
         Ok((prefs, result))
     })
 }
@@ -7848,14 +8001,14 @@ pub fn try_mutate_issue_monitor_prefs<T>(
     path: &Path,
     mutation: impl FnOnce(&mut IssueMonitorPrefs) -> io::Result<T>,
 ) -> io::Result<(IssueMonitorPrefs, T)> {
-    with_issue_monitor_prefs_lock(path, || {
-        let mut prefs = load_issue_monitor_prefs_unlocked(path)?;
+    with_issue_monitor_prefs_lock(path, |registry| {
+        let mut prefs = load_issue_monitor_prefs_for_registry(path, registry)?;
         let before = prefs.clone();
         let result = mutation(&mut prefs)?;
         crate::agent_names::synchronize_roster_capacity(&mut prefs, path)
             .map_err(io::Error::other)?;
         if prefs != before {
-            save_issue_monitor_prefs_unlocked(path, &prefs)?;
+            prefs = save_issue_monitor_prefs_unlocked(path, &prefs, registry, true)?;
         }
         Ok((prefs, result))
     })
@@ -7869,14 +8022,14 @@ pub(crate) fn disable_issue_monitor_during_recovery(
     expected_config_token: Option<&str>,
     caller_is_registered_pm: impl FnOnce() -> bool,
 ) -> io::Result<IssueMonitorPrefs> {
-    with_issue_monitor_prefs_lock(path, || {
+    with_issue_monitor_prefs_lock(path, |registry| {
         if !caller_is_registered_pm() {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "blocked Issues recovery control requires the registered PM",
             ));
         }
-        let before = load_issue_monitor_prefs_unlocked(path)?;
+        let before = load_issue_monitor_prefs_for_registry(path, registry)?;
         check_expected_issue_monitor_config_token(&before, expected_config_token)?;
         let mut monitor =
             IssueMonitorState::with_prefs(IssueMonitorConfig::default(), before.clone());
@@ -7885,7 +8038,10 @@ pub(crate) fn disable_issue_monitor_during_recovery(
             .ok_or_else(|| io::Error::other("Issues authority epoch overflow"))?;
         let prefs = monitor.prefs();
         if prefs != before {
-            save_issue_monitor_prefs_unlocked_with_policy_preservation(path, &prefs, true)?;
+            if let Some(saved) = registry.commit(path, &prefs, true)? {
+                return Ok(saved);
+            }
+            save_legacy_issue_monitor_prefs_unlocked(path, &prefs, true)?;
         }
         Ok(prefs)
     })
@@ -7901,7 +8057,7 @@ pub fn try_mutate_issue_monitor_prefs_without_authority_fence<T>(
     path: &Path,
     mutation: impl FnOnce(&mut IssueMonitorPrefs) -> io::Result<T>,
 ) -> io::Result<(IssueMonitorPrefs, T)> {
-    with_issue_monitor_prefs_lock(path, || {
+    with_issue_monitor_prefs_lock(path, |registry| {
         match load_issue_monitor_authority_fence(path)? {
             IssueMonitorAuthorityFenceState::Missing => {}
             IssueMonitorAuthorityFenceState::LegacyShutdownRevoke
@@ -7912,11 +8068,11 @@ pub fn try_mutate_issue_monitor_prefs_without_authority_fence<T>(
                 ));
             }
         }
-        let mut prefs = load_issue_monitor_prefs_unlocked(path)?;
+        let mut prefs = load_issue_monitor_prefs_for_registry(path, registry)?;
         let result = mutation(&mut prefs)?;
         crate::agent_names::synchronize_roster_capacity(&mut prefs, path)
             .map_err(io::Error::other)?;
-        save_issue_monitor_prefs_unlocked(path, &prefs)?;
+        prefs = save_issue_monitor_prefs_unlocked(path, &prefs, registry, true)?;
         Ok((prefs, result))
     })
 }
@@ -7961,8 +8117,8 @@ pub(crate) fn try_mutate_issue_monitor_prefs_recovering_observed<T>(
     on_first_contention: impl FnMut(),
     mutation: impl FnOnce(&mut IssueMonitorPrefs) -> io::Result<T>,
 ) -> io::Result<(IssueMonitorPrefs, T)> {
-    with_issue_monitor_prefs_lock_observed(path, on_first_contention, || {
-        let (mut prefs, recovery) = match load_issue_monitor_prefs_unlocked(path) {
+    with_issue_monitor_prefs_lock_observed(path, on_first_contention, |registry| {
+        let (mut prefs, recovery) = match load_issue_monitor_prefs_for_registry(path, registry) {
             Ok(prefs) => (prefs, None),
             Err(error) if error.kind() == io::ErrorKind::InvalidData => {
                 let committed = last_committed_prefs_generation(path)?;
@@ -8009,7 +8165,7 @@ pub(crate) fn try_mutate_issue_monitor_prefs_recovering_observed<T>(
         if recovery.as_ref().is_some_and(|(_, _, restored)| !*restored) {
             crate::update_settings::migrate_before_project_save(path, true)?;
         }
-        save_issue_monitor_prefs_unlocked(path, &prefs)?;
+        prefs = save_issue_monitor_prefs_unlocked(path, &prefs, registry, true)?;
         if let Some((quarantine, error, restored_generation)) = recovery {
             tracing::warn!(
                 path = %path.display(),
@@ -8518,6 +8674,9 @@ impl IssueMonitorState {
 
     pub fn new(config: IssueMonitorConfig) -> Self {
         Self {
+            agent_registry_revision: None,
+            agent_registry_project_key: None,
+            agent_registry_profiles: BTreeMap::new(),
             agent_roster: None,
             agent_issue_schedule: AgentIssueSchedule::default(),
             agent_switch_intents: BTreeMap::new(),
@@ -8639,6 +8798,9 @@ impl IssueMonitorState {
             IssueMonitorMaxActiveMode::Auto => prefs.max_active_agents,
         };
         let mut state = Self::new(config);
+        state.agent_registry_revision = prefs.agent_registry_revision;
+        state.agent_registry_project_key = prefs.agent_registry_project_key.clone();
+        state.agent_registry_profiles = prefs.agent_registry_profiles.clone();
         state.agent_roster = prefs.agent_roster.clone();
         state.agent_issue_schedule = prefs.agent_issue_schedule.clone();
         state.agent_switch_intents = prefs.agent_switch_intents.clone();
@@ -8828,10 +8990,17 @@ impl IssueMonitorState {
 
     pub fn prefs(&self) -> IssueMonitorPrefs {
         IssueMonitorPrefs {
+            agent_registry_revision: self.agent_registry_revision,
+            agent_registry_project_key: self.agent_registry_project_key.clone(),
+            agent_registry_profiles: self.agent_registry_profiles.clone(),
             agent_roster: self.agent_roster.clone(),
             agent_issue_schedule: self.agent_issue_schedule.clone(),
             agent_switch_intents: self.agent_switch_intents.clone(),
-            schema_version: ISSUE_MONITOR_PREFS_SCHEMA_VERSION,
+            schema_version: if self.agent_registry_revision.is_some() {
+                2
+            } else {
+                ISSUE_MONITOR_PREFS_SCHEMA_VERSION
+            },
             enabled: self.config.enabled,
             // Auto persists its accepted limit for incomplete measurements and restarts.
             max_active_agents: if self.agent_roster.is_some() {
@@ -11601,7 +11770,7 @@ impl IssueMonitorState {
     /// Issue #6096: derive the slot limit without applying the capacity sample.
     /// Admission compares this decision because sampler snapshot bytes change.
     pub fn effective_max_active_agents_under(&self, capacity: &AgentCapacity) -> usize {
-        if self.agent_roster.is_some() {
+        if let Some(roster) = self.agent_roster.as_ref() {
             let machine = match self.roster_machine_policy.as_ref() {
                 Some(policy) if policy.mode == IssueMonitorMaxActiveMode::Manual => policy
                     .manual_limit
@@ -11617,7 +11786,11 @@ impl IssueMonitorState {
                 }
                 _ => self.config.max_active,
             };
-            return self.config.max_active.min(machine);
+            return self
+                .config
+                .max_active
+                .min(machine)
+                .min(roster.implementation_enabled_count());
         }
         match self.max_active_agents_mode {
             IssueMonitorMaxActiveMode::Manual => self
@@ -13298,6 +13471,9 @@ impl IssueMonitorState {
         autonomous_policy: AutonomousRecordRebasePolicy,
         typed_wait_controls: &[AutonomousIssueRecord],
     ) {
+        self.agent_registry_revision = disk.agent_registry_revision;
+        self.agent_registry_project_key = disk.agent_registry_project_key.clone();
+        self.agent_registry_profiles = disk.agent_registry_profiles.clone();
         self.merge_event_history(disk.event_history.iter().cloned());
         // Launch reservations are append-only within the rolling window. Merge by
         // reservation identity so stale observers cannot reset the storm budget.
@@ -15431,7 +15607,7 @@ impl IssueMonitorState {
             agent_roster_capacity: self
                 .agent_roster
                 .as_ref()
-                .map(|roster| roster.enabled_count()),
+                .map(|roster| roster.implementation_enabled_count()),
             agent_roster_revision: self.agent_roster.as_ref().map(|roster| roster.revision),
             max_active_agents_scope: machine_max_active_scope(),
             allowed_labels: self.allowed_labels.clone(),
@@ -20908,6 +21084,16 @@ impl IssueMonitorState {
         window_id: impl Into<String>,
         delivery_id: Option<&str>,
     ) -> bool {
+        self.complete_active_launch_delivery_at(issue_number, window_id, delivery_id, None)
+    }
+
+    pub(crate) fn complete_active_launch_delivery_at(
+        &mut self,
+        issue_number: u64,
+        window_id: impl Into<String>,
+        delivery_id: Option<&str>,
+        confirmed_at: Option<&str>,
+    ) -> bool {
         let window_id = window_id.into();
         // A delivery ACK confirms its pane; replacing a running launch first
         // requires the ordinary stop/retry transition to revoke that binding.
@@ -20958,7 +21144,7 @@ impl IssueMonitorState {
             window_id,
             launched_claim_id,
             consumed_delivery_id,
-            None,
+            confirmed_at,
         ) {
             return false;
         }
@@ -21274,7 +21460,9 @@ impl IssueMonitorState {
         // the autonomous path. Every launch needs it — an agent that stalls
         // without autonomous mode stalls just as silently — and this is the
         // one place every launch is confirmed.
-        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let now = confirmed_at.map(str::to_string).unwrap_or_else(|| {
+            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        });
         self.record_autonomous_heartbeat(issue_number, &now);
         true
     }
@@ -24829,12 +25017,21 @@ impl IssueMonitorState {
         target: &IssueMonitorStopTarget,
         classification: IssueMonitorFailureClass,
     ) -> Option<u64> {
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        self.requeue_exact_window_classified_at(target, classification, &now)
+    }
+
+    pub(crate) fn requeue_exact_window_classified_at(
+        &mut self,
+        target: &IssueMonitorStopTarget,
+        classification: IssueMonitorFailureClass,
+        now: &str,
+    ) -> Option<u64> {
         let window_id = self
             .resolve_exact_launch(target, StopIdentityMatch::Exact)
             .ok()
             .flatten()?;
-        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-        self.requeue_window_classified_at(&window_id, classification, &now)
+        self.requeue_window_classified_at(&window_id, classification, now)
             .filter(|issue_number| *issue_number == target.issue_number)
     }
 
@@ -41454,11 +41651,24 @@ mod tests {
         assert_eq!(legacy.last_control_receipt, None);
         assert_eq!(IssueMonitorPrefs::default().last_control_receipt, None);
 
+        let legacy_receipt: IssueMonitorControlReceipt =
+            serde_json::from_value(serde_json::json!({
+                "control_id": "legacy-control", "should_scan": true,
+            }))
+            .expect("pre-application-time receipt deserializes");
+        assert_eq!(legacy_receipt.window_close_applied_at, None);
+        assert!(serde_json::to_value(legacy_receipt)
+            .unwrap()
+            .get("window_close_applied_at")
+            .is_none());
         let receipt = IssueMonitorControlReceipt {
             control_id: uuid::Uuid::new_v4().to_string(),
             should_scan: true,
             authority_changed: false,
+            window_close_applied_at: Some("2026-09-01T00:03:00Z".into()),
         };
+        let receipt: IssueMonitorControlReceipt =
+            serde_json::from_value(serde_json::to_value(receipt).unwrap()).unwrap();
         let restored = test_monitor_with_prefs(
             IssueMonitorConfig::default(),
             IssueMonitorPrefs {
@@ -45208,7 +45418,7 @@ mod tests {
         let clear_fence = fence.clone();
 
         let (clear_thread, completed_while_locked, fence_while_locked) =
-            with_issue_monitor_prefs_lock(&prefs_path, || {
+            with_issue_monitor_prefs_lock(&prefs_path, |_registry| {
                 let clear_thread = std::thread::spawn(move || {
                     started_tx.send(()).expect("signal clear start");
                     let result = clear_issue_monitor_authority_fence(&clear_path, &clear_fence);
@@ -45660,8 +45870,42 @@ mod tests {
     #[test]
     fn current_authority_fence_rejects_a_second_owner_until_the_lease_is_dropped() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let prefs_path = temp.path().join("issue-monitor.json");
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let prefs_path = gwt_core::paths::gwt_projects_dir()
+            .join("0123456789abcdef/project-state/issue-monitor.json");
         save_issue_monitor_prefs(&prefs_path, &IssueMonitorPrefs::default()).expect("seed prefs");
+        {
+            // Reserving this project lease must not depend on the shared writer.
+            let registry_lock_path = crate::agent_registry::path().with_extension("lock");
+            fs::create_dir_all(registry_lock_path.parent().unwrap()).unwrap();
+            let _registry = gwt_core::operation_deadline::NamedFileLock::acquire(
+                &registry_lock_path,
+                "test withheld shared Agent registry",
+            )
+            .unwrap();
+            let start = std::time::Instant::now();
+            let expiry = start + std::time::Duration::from_secs(1);
+            let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(start);
+            let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(expiry);
+            let expired_clock = std::rc::Rc::new(std::cell::RefCell::new(None));
+            let on_contention = expired_clock.clone();
+            let _contention = gwt_core::operation_deadline::ScopedNamedLockContentionObserver::set(
+                &registry_lock_path,
+                move || {
+                    on_contention.replace(Some(
+                        gwt_core::operation_deadline::ScopedOperationClock::set(expiry),
+                    ));
+                },
+            );
+            let reserved = acquire_issue_monitor_daemon_lease(&prefs_path)
+                .expect("lease reservation must not acquire the shared Agent registry writer");
+            assert!(
+                expired_clock.borrow().is_none(),
+                "lease reservation must not contend on the shared Agent registry"
+            );
+            assert!(issue_monitor_daemon_lease_is_held(&prefs_path).unwrap());
+            drop(reserved);
+        }
         let first = IssueMonitorAuthorityFence::current_process();
         let (_, first_lease) =
             establish_issue_monitor_authority_fence(&prefs_path, &first, |_| false)
@@ -45970,6 +46214,179 @@ mod tests {
     }
 
     #[test]
+    fn common_registry_fences_sources_and_projects_latest_core_without_permissions() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let a_root = home.path().join("project-a");
+        let b_root = home.path().join("project-b");
+        fs::create_dir_all(&a_root).unwrap();
+        fs::create_dir_all(&b_root).unwrap();
+        let a_path = issue_monitor_prefs_path_for_repo_path(&a_root);
+        let b_path = issue_monitor_prefs_path_for_repo_path(&b_root);
+        for (path, member, name, model, skip_permissions) in [
+            (
+                &a_path,
+                "44444444-4444-4444-8444-444444444444",
+                "Maple",
+                "model-a",
+                true,
+            ),
+            (
+                &b_path,
+                "55555555-5555-4555-8555-555555555555",
+                "Birch",
+                "model-b",
+                false,
+            ),
+        ] {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let mut raw = serde_json::to_value(IssueMonitorPrefs::default()).unwrap();
+            raw["agent_roster"] = serde_json::json!({
+                "schema_version": 1, "revision": 3, "members": [{
+                    "agent_member_id": member, "agent_id": "codex", "name": name,
+                    "enabled": true, "created_at": "2026-10-01T00:00:00Z"
+                }]
+            });
+            raw["launch_profiles"] = serde_json::json!([{
+                "agent_id": "codex", "agent_member_id": member, "model": model,
+                "reasoning": "high", "skip_permissions": skip_permissions,
+                "prefer_for": ["label:local"]
+            }]);
+            raw["future_extension"] = serde_json::json!({"keep": name});
+            let raw = serde_json::to_vec_pretty(&raw).unwrap();
+            fs::write(path, &raw).unwrap();
+            fs::write(committed_prefs_generation_path(path), raw).unwrap();
+        }
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let roster = crate::agent_names::read_project_roster(&a_root, &sessions).unwrap();
+        assert_eq!(
+            roster.schema_version, 3,
+            "the first roster read activates role-aware common ownership"
+        );
+        assert_eq!(roster.members.len(), 2);
+        let global_member = roster
+            .members
+            .iter()
+            .find(|member| member.name == "Maple")
+            .unwrap()
+            .agent_member_id
+            .clone();
+        assert_ne!(global_member, "44444444-4444-4444-8444-444444444444");
+        for path in [&a_path, &b_path] {
+            for fenced in [path.clone(), committed_prefs_generation_path(path)] {
+                let raw: serde_json::Value =
+                    serde_json::from_slice(&fs::read(&fenced).unwrap()).unwrap();
+                assert_eq!(
+                    raw["schema_version"], 2,
+                    "both canonical and recovery floor fence schema1 writers"
+                );
+                assert!(raw
+                    .get("agent_roster")
+                    .is_none_or(serde_json::Value::is_null));
+                assert!(raw["launch_profiles"][0]
+                    .get("model")
+                    .is_none_or(serde_json::Value::is_null));
+                assert!(raw.get("future_extension").is_some());
+            }
+        }
+        let a = load_issue_monitor_prefs(&a_path).unwrap();
+        let b = load_issue_monitor_prefs(&b_path).unwrap();
+        assert_eq!(a.agent_roster, b.agent_roster);
+        assert!(a.launch_profile_pool()[0].skip_permissions);
+        assert!(!b.launch_profile_pool()[0].skip_permissions);
+        let mut selected = a.launch_profile_pool()[0].clone();
+        selected.skip_permissions = b.launch_profile_pool()[0].skip_permissions;
+        selected.runtime_target = b.launch_profile_pool()[0].runtime_target;
+        selected.docker_service = b.launch_profile_pool()[0].docker_service.clone();
+        selected.prefer_for = vec!["label:project-b".into()];
+        let (mut stale, ()) = try_mutate_issue_monitor_prefs(&b_path, |latest| {
+            latest.set_launch_profile_pool(vec![selected]);
+            Ok(())
+        })
+        .unwrap();
+        let b_before = fs::read(&b_path).unwrap();
+        let token_before = stale.config_token();
+        crate::agent_names::mutate_project_roster(
+            &a_root,
+            &sessions,
+            crate::agent_names::AgentRosterAction::Rename {
+                member_id: global_member.clone(),
+                name: "Maple Grove".into(),
+            },
+            None,
+        )
+        .unwrap();
+        try_mutate_issue_monitor_prefs(&a_path, |latest| {
+            let mut pool = latest.launch_profile_pool();
+            pool[0].model = Some("latest-global-model".into());
+            latest.set_launch_profile_pool(pool);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            fs::read(&b_path).unwrap(),
+            b_before,
+            "another project's global edit does not rewrite this mirror"
+        );
+        let latest_b = load_issue_monitor_prefs(&b_path).unwrap();
+        assert_ne!(latest_b.config_token(), token_before);
+        assert_eq!(
+            latest_b.launch_profile_pool()[0].model.as_deref(),
+            Some("latest-global-model")
+        );
+        assert!(!latest_b.launch_profile_pool()[0].skip_permissions);
+        assert_eq!(
+            latest_b.launch_profile_pool()[0].prefer_for,
+            ["label:project-b"]
+        );
+        // Full snapshots retain project edits without regaining global write authority.
+        stale.enabled = true;
+        stale.max_active_agents = 1;
+        stale.merged_issues.push(77);
+        save_issue_monitor_prefs(&b_path, &stale).unwrap();
+        let after = load_issue_monitor_prefs(&b_path).unwrap();
+        assert!(after.enabled);
+        assert!(after.merged_issues.contains(&77));
+        assert_eq!(after.max_active_agents, 2);
+        assert_eq!(after.agent_roster.as_ref().unwrap().enabled_count(), 2);
+        assert_eq!(
+            after.launch_profile_pool()[0].model.as_deref(),
+            Some("latest-global-model")
+        );
+        assert_eq!(
+            after
+                .agent_roster
+                .as_ref()
+                .unwrap()
+                .members
+                .iter()
+                .find(|member| member.agent_member_id == global_member)
+                .unwrap()
+                .name,
+            "Maple Grove"
+        );
+        assert!(!after.launch_profile_pool()[0].skip_permissions);
+        let dto = serde_json::to_value(&after).unwrap();
+        let roundtrip: IssueMonitorPrefs = serde_json::from_value(dto).unwrap();
+        assert_eq!(
+            roundtrip.agent_roster, after.agent_roster,
+            "known schema2 remains a usable typed DTO"
+        );
+        try_mutate_issue_monitor_prefs(&b_path, |latest| {
+            crate::agent_names::resize_shared_roster(latest, 3).map_err(io::Error::other)
+        })
+        .unwrap();
+        for path in [&a_path, &b_path] {
+            let resized = load_issue_monitor_prefs(path).unwrap();
+            assert_eq!(resized.max_active_agents, 3);
+            assert_eq!(resized.agent_roster.unwrap().enabled_count(), 3);
+        }
+    }
+
+    #[test]
     fn prefs_cache_reuses_snapshots_and_invalidates_on_file_changes() {
         // Parallel tests may legitimately evict entries from the global cache.
         // Exercise the same reader with an isolated retention map.
@@ -46062,7 +46479,7 @@ mod tests {
     fn issue_4193_prefs_schema_rejects_older_and_newer_stores() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("issue-monitor.json");
-        for actual in [0, 2] {
+        for actual in [0, 3] {
             let mut stored = serde_json::to_value(IssueMonitorPrefs::default()).unwrap();
             stored["schema_version"] = serde_json::json!(actual);
             let original = stored.to_string();
@@ -56561,11 +56978,11 @@ mod tests {
             Some(AutonomousPhase::Implementing)
         );
         assert_eq!(review_hold_of(&monitor, 41), Some(hold.reason.clone()));
-        assert!(
-            monitor
-                .stuck_autonomous_issues("2026-09-07T06:00:00Z")
-                .is_empty(),
-            "a held review is a PR waiting for a slot, not a stalled implementation"
+        // Only Issue #41 has a review hold; the independently stale Issue #42 stays detectable.
+        assert_eq!(
+            monitor.stuck_autonomous_issues("2026-09-07T06:00:00Z"),
+            vec![42],
+            "the held review waits for a slot while the other stale implementation remains detectable"
         );
 
         // Raising the cap admits the dispatch and clears the hold.

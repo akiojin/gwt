@@ -1,8 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parseHTML } from "linkedom";
+import { parse } from "acorn";
 import { existsSync, readFileSync } from "node:fs";
 import { createUiStateStore } from "../ui-state-store.js";
+import { createAgentActivityModel } from "../agent-activity-model.js";
 
 const moduleUrl = new URL("../works-surface.js", import.meta.url);
 const source = existsSync(moduleUrl) ? readFileSync(moduleUrl, "utf8") : "";
@@ -14,27 +16,127 @@ const windows = [
 const live = windows.slice(0, 2).map((w, i) => ({ window_id: w.id, session_id: w.session_id, runtime_incarnation: i + 1, is_pm: !!w.is_pm, issue_number: w.is_pm ? null : 4777,
   current_task: w.is_pm ? "Coordinate the current project work" : null }));
 function catalog(wins, version = 1) { return { version, runtimeStates: {}, appState: { active_tab_id: "p", tabs: [{ id: "p", workspace: { windows: wins } }] } }; }
-async function fixture(telemetry = null, initialCatalog = catalog(windows), initialActivity = { agents: live, count: 2 }) {
+async function fixture(telemetry = null, initialCatalog = catalog(windows), previewAvailable = () => true, observed = false, initialActivity = { agents: live, count: 2 }) {
   const { createWorksSurface } = await import(moduleUrl);
   const { document, window } = parseHTML("<main></main>");
   const frames = new Set();
   const options = { scheduleFrame: fn => { frames.add(fn); return () => frames.delete(fn); } };
   const windowCatalogModel = createUiStateStore({ catalog: initialCatalog }, options);
-  const activityModel = createUiStateStore(initialActivity, options);
+  const activity = observed ? createAgentActivityModel("project") : null;
+  if (activity) activity.applyAgentActivitySnapshot(activitySnapshot(live));
+  const activityModel = activity?.model || createUiStateStore(initialActivity, options);
   const rosterModel = createUiStateStore({ members: [{ member_id: "m1", name: "One", enabled: true, assignment: { session_id: "s1" } }] }, options);
+  const revocations = [];
   const runtimes = new Map(), mounts = [], layouts = [], previews = new Set(), previewMounts = [], selected = [], focused = [];
   const systemSettingsModel = createUiStateStore({ worksPreviewLines: 3 }, options);
   const summaryModel = createUiStateStore({ running: 0, block: 0, idle: 0, error: 0 }, options);
-  const surface = createWorksSurface({ document, windowCatalogModel, activityModel, rosterModel, systemSettingsModel, summaryModel,
+  const surface = createWorksSurface({ projectKey: observed ? "project" : undefined, document, windowCatalogModel, activityModel, rosterModel, systemSettingsModel, summaryModel,
     windowDisplayTitle: w => `${w.agent_name || w.title || "Agent"}${w.dynamic_title ? ` — ${w.dynamic_title}` : ""}`,
     mountTerminal(id, root, options) { let input = runtimes.get(id); if (!input) { input = document.createElement("textarea"); input.className = "xterm"; runtimes.set(id, input); } root.appendChild(input); mounts.push({ id, root, readOnly: options?.readOnly }); },
-    mountPreview(id, root, options) { const pre = document.createElement("pre"); pre.textContent = `${id} output`; root.appendChild(pre); previews.add(pre); previewMounts.push({ id, root, lines: options?.tailLines }); return () => { previews.delete(pre); pre.remove(); }; },
+    onRevokeTerminal(id, root) { revocations.push({ id, root }); },
+    mountPreview(id, root, options) { if (!previewAvailable()) return () => {}; const pre = document.createElement("pre"); pre.textContent = `${id} output`; root.appendChild(pre); previews.add(pre); previewMounts.push({ id, root, lines: options?.tailLines }); return () => { previews.delete(pre); pre.remove(); }; },
     onFocus: id => focused.push(id), onLayout() { layouts.push(true); }, onSelectMember: id => selected.push(id), getTelemetry: () => telemetry,
   });
   document.querySelector("main").append(surface.element); surface.sync();
   const flush = () => { for (const frame of [...frames]) { frames.delete(frame); frame(); } };
-  return { surface, document, window, windowCatalogModel, activityModel, rosterModel, summaryModel, frames, flush, runtimes, mounts, layouts, previews, previewMounts, systemSettingsModel, selected, focused };
+  return { activity, revocations, surface, document, window, windowCatalogModel, activityModel, rosterModel, summaryModel, frames, flush, runtimes, mounts, layouts, previews, previewMounts, systemSettingsModel, selected, focused };
 }
+
+
+function activitySnapshot(agents, tick = 0, host_id = "host") {
+  return { project_key: "project", host_id, observed_at: new Date(Date.UTC(2026, 10, 3, 0, 0, tick)).toISOString(), agents };
+}
+function projectCatalog(wins = windows, version = 1) {
+  const value = catalog(wins, version); value.appState.tabs[0].project_key = "project"; return value;
+}
+
+test("Works preserves same-identity full presentation across unavailable activity and clear, revoking input before render", async () => {
+  const f = await fixture(null, projectCatalog(), undefined, true);
+  f.surface.openWork(live[0]);
+  const row = f.surface.element.querySelector('.work-row[data-window-id="one"]');
+  const root = f.surface.element.querySelector('.works-terminal[data-window-id="one"]');
+  const preview = row.querySelector("pre"), input = f.runtimes.get("one");
+  input.value = "draft";
+  const assertRejectedOpenPreservesFull = () => {
+    const mounts = f.mounts.length, focused = f.focused.length;
+    for (const target of [live[0], { ...live[0], hostId: "foreign-host" }]) {
+      assert.equal(f.surface.openWork(target), false);
+      assert.equal(f.surface.element.querySelector(".works-full").hidden, false, "rejected open preserves stale full selection");
+      assert.ok(root.parentElement === f.surface.element.querySelector(".works-terminal-host"));
+      assert.ok(row.querySelector("pre") === preview);
+      assert.equal(input.value, "draft");
+    }
+    assert.equal(f.mounts.length, mounts, "rejected open cannot mount a stale target");
+    assert.equal(f.focused.length, focused, "rejected open cannot focus a stale target");
+  };
+  for (const [index, lose] of [() => f.activity.applyAgentActivitySnapshot(activitySnapshot(null, 1)), () => f.activity.clearAgentActivity()].entries()) {
+    const mounts = f.mounts.length, revocations = f.revocations.length;
+    lose();
+    assert.ok(f.revocations.length > revocations, "all unavailable owned entries are revoked synchronously before a frame");
+    assert.ok(f.revocations.at(-1).root === root);
+    assert.equal(f.surface.contains(live[0]), false);
+    f.surface.sync();
+    assert.ok(f.surface.element.querySelector('.work-row[data-window-id="one"]') === row, "row remains identical");
+    assert.ok(f.surface.element.querySelector('.works-terminal[data-window-id="one"]') === root, "root remains identical");
+    assert.equal(f.surface.element.querySelector(".works-full").hidden, false);
+    assert.match(f.surface.element.querySelector(".works-full-meta").textContent, /Input unavailable/);
+    assert.ok(row.querySelector("pre") === preview, "existing output subscription survives temporary loss");
+    assert.equal(f.mounts.length, mounts, "retained display never mounts a stale terminal");
+    assert.equal(input.value, "draft");
+    assertRejectedOpenPreservesFull();
+    let unsubscribe;
+    const recovered = new Promise(resolve => {
+      let initial = true;
+      unsubscribe = f.activityModel.subscribeFrame(state => state, () => {
+        if (initial) { initial = false; return; }
+        resolve();
+      });
+    });
+    f.activity.applyAgentActivitySnapshot(activitySnapshot(live, index + 2));
+    await recovered; unsubscribe();
+    assert.equal(f.surface.contains(live[0]), true);
+    assert.ok(f.mounts.filter(mount => mount.id === "one").at(-1).root === root);
+    assert.equal(f.mounts.filter(mount => mount.id === "one").at(-1).readOnly, false);
+  }
+  const revocations = f.revocations.length;
+  f.windowCatalogModel.update(() => ({ catalog: projectCatalog([], 2) }));
+  assert.ok(f.revocations.length > revocations, "catalog loss revokes before its frame");
+  f.surface.sync();
+  assert.equal(f.surface.element.querySelector(".works-full").hidden, false);
+  assert.ok(f.surface.element.querySelector('.works-terminal[data-window-id="one"]') === root);
+  assert.ok(row.querySelector("pre") === preview);
+  assertRejectedOpenPreservesFull();
+  f.windowCatalogModel.update(() => ({ catalog: projectCatalog([], 3) }));
+  assert.ok(f.revocations.filter(event => event.id === "one").every(event => event.root === root), "repeated reconciliation targets only the same captured root; binding idempotence is measured by the native fixture");
+  f.windowCatalogModel.update(() => ({ catalog: projectCatalog(windows, 4) })); f.flush();
+  assert.equal(f.surface.element.querySelector(".works-full").hidden, false);
+  assert.ok(f.mounts.filter(mount => mount.id === "one").at(-1).root === root);
+  assert.equal(f.mounts.filter(mount => mount.id === "one").at(-1).readOnly, false);
+  f.activity.applyAgentActivitySnapshot(activitySnapshot([], 4)); f.surface.sync();
+  assert.equal(f.surface.element.querySelectorAll(".work-row").length, 0);
+  assert.equal(f.surface.element.querySelector(".works-full").hidden, true);
+  f.surface.dispose(); f.activityModel.dispose();
+});
+
+test("Works discards the old full root for conflicting catalog and foreign host", async () => {
+  for (const change of [
+    f => f.windowCatalogModel.update(() => ({ catalog: projectCatalog([{ ...windows[0], session_id: "replacement" }], 2) })),
+    f => f.activity.applyAgentActivitySnapshot(activitySnapshot(live, 1, "foreign-host")),
+  ]) {
+    const f = await fixture(null, projectCatalog(), undefined, true);
+    f.surface.openWork(live[0]);
+    const root = f.surface.element.querySelector('.works-terminal[data-window-id="one"]');
+    const mounts = f.mounts.length;
+    change(f);
+    f.surface.element.querySelector('[data-action="next"]').click();
+    assert.equal(f.mounts.length, mounts, "old selection cannot navigate into a conflicting identity");
+    assert.ok(f.revocations.at(-1)?.root === root, "conflict revokes only the old selected root before render");
+    f.surface.sync();
+    assert.equal(root.isConnected, false, "identity conflict cannot retain the old root");
+    assert.equal(f.surface.element.querySelector(".works-full").hidden, true);
+    f.surface.dispose(); f.activityModel.dispose();
+  }
+});
 
 test("Works implements the approved list and native terminal API", () => {
   assert.match(source, /export function createWorksSurface/);
@@ -130,9 +232,9 @@ test("Works retains live rows across partial catalogs without granting terminal 
   const retainedRow = rows()[0], mountsBeforeGap = f.mounts.length;
   f.windowCatalogModel.update(() => ({ catalog: { ...otherTab, appState: { tabs: [] } } })); f.flush();
   assert.equal(rows()[0], retainedRow, "catalog resync must retain the same live row");
-  assert.equal(f.surface.element.querySelector(".works-full").hidden, true);
+  assert.equal(f.surface.element.querySelector(".works-full").hidden, false, "same-identity catalog gap retains full presentation");
   assert.equal(f.mounts.length, mountsBeforeGap);
-  assert.equal(f.previews.size, 0);
+  assert.ok(f.previews.size > 0, "catalog gap retains existing output subscription");
   assert.equal(f.surface.openWork(next), false);
 
   f.windowCatalogModel.update(() => ({ catalog: catalog([{ ...nextWindow, session_id: "newer-session" }], 5) })); f.flush();
@@ -299,12 +401,15 @@ test("Works retains the selected stopped transcript without adding it to live ac
   const input = f.runtimes.get("one"), nativeRoot = input.parentElement;
   const row = f.surface.element.querySelector('.work-row[data-window-id="one"]');
   f.windowCatalogModel.update(() => ({ catalog: catalog([stopped, windows[1]], 2) }));
-  f.activityModel.update(() => ({ agents: [live[1]], count: 1 })); f.flush();
+  f.activityModel.update(() => ({ agents: [live[1]], count: 1 }));
+  assert.ok(f.revocations.some(revocation => revocation.id === "one" && revocation.root === nativeRoot), "STOP revokes native input before its display frame");
+  f.flush();
   assert.equal(f.surface.element.querySelector(".works-full").hidden, false);
   assert.equal(f.surface.element.querySelector('.work-row[data-window-id="one"]'), row);
   assert.equal(input.parentElement, nativeRoot);
   assert.equal(f.runtimes.get("one"), input);
   assert.match(f.surface.element.querySelector(".works-full-meta").textContent, /Stopped/);
+  assert.equal(f.mounts.filter(mount => mount.id === "one").at(-1).readOnly, true);
   assert.equal(f.surface.openWork(live[0]), true, "the same physical transcript keeps its exact assignment");
   assert.equal(f.surface.element.querySelector(".works-active").textContent, "Active 1");
   assert.equal(f.surface.element.querySelector('[data-count="running"]').textContent, "0");
@@ -326,7 +431,7 @@ test("Works opens a fresh retained STOP snapshot until its canonical window is r
   const stopped = { ...windows[0], status: "stopped", persist: false, runtime_started_at_ms: 123 };
   const f = await fixture(null, catalog([stopped,
     { ...stopped, id: "legacy", persist: true }, { ...stopped, id: "shell", preset: "shell" },
-  ]), { agents: [], count: 0 });
+  ]), undefined, false, { agents: [], count: 0 });
   assert.deepEqual([...f.surface.element.querySelectorAll(".work-row")].map(row => row.dataset.windowId), ["one"]);
   assert.equal(f.surface.openWork("one"), true);
   assert.equal(f.surface.openWork(live[0]), false, "a fresh snapshot must not invent a physical incarnation");
@@ -427,11 +532,33 @@ test("Works read-only split preview follows selection and releases its output su
   const f = await fixture(); const host = f.document.createElement("aside"); f.document.querySelector("main").append(host);
   f.surface.setPreviewHost(host);
   assert.equal(host.querySelectorAll(".work-row").length, 2);
+  const output = host.querySelector('[data-window-id="one"] .terminal-text-preview, [data-window-id="one"] pre');
+  const mounts = f.previewMounts.length;
+  for (let index = 0; index < 3; index++) f.surface.sync();
+  assert.ok(host.querySelector('[data-window-id="one"] pre') === output,
+    "same-identity activation must retain the already displayed preview");
+  f.windowCatalogModel.update(() => ({ catalog: catalog(windows.map(window =>
+    window.id === "one" ? { ...window, dynamic_title: "Updated purpose" } : window), 2) })); f.flush();
+  assert.match(host.textContent, /Updated purpose/);
+  assert.ok(host.querySelector('[data-window-id="one"] pre') === output,
+    "metadata updates must preserve the subscribed output node");
+  assert.equal(f.previewMounts.length, mounts, "retained output must keep its existing subscription");
   f.surface.openWork("one");
   assert.match(host.textContent, /Read-only preview/);
   assert.equal(host.querySelector("textarea"), null);
+  const fullOutput = host.querySelector(".works-preview-output pre");
+  f.surface.sync();
+  assert.ok(host.querySelector(".works-preview-output pre") === fullOutput);
   f.surface.setPreviewHost(null); assert.equal(host.childNodes.length, 0);
   f.surface.dispose(); assert.equal(f.previews.size, 0);
+  let ready = false;
+  const cold = await fixture(null, catalog(windows), () => ready);
+  const coldHost = cold.document.createElement("aside"); cold.document.querySelector("main").append(coldHost);
+  cold.surface.setPreviewHost(coldHost);
+  assert.equal(coldHost.querySelectorAll("pre").length, 0);
+  ready = true; cold.surface.sync();
+  assert.match(coldHost.textContent, /one output/, "an unavailable first mount must recover for the same identity");
+  cold.surface.dispose(); assert.equal(cold.previews.size, 0);
 });
 
 test("Works and Agents CSS uses Operator tokens, responsive wrapping and an in-surface full view", () => {
@@ -444,6 +571,7 @@ test("Works and Agents CSS uses Operator tokens, responsive wrapping and an in-s
   assert.match(css, /data-state="waiting"[^}]*\.work-spark[^}]*--color-state-needs-input/s);
   assert.match(css, /\.works-full[\s\S]*min-height:\s*0/);
   assert.match(css, /\.works-availability[^}]*var\(--type-xs\)[^}]*overflow-wrap:\s*anywhere/s);
+  assert.match(css, /\.agents-surface \.settings-status\s*\{[^}]*overflow-wrap:\s*anywhere/s);
 });
 
 
@@ -465,7 +593,7 @@ test("Works output line settings update both lists without replacing the native 
       assert.equal(f.previewMounts.filter(mount => mount.root === tail).at(-1).lines, lines);
       assert.equal(tail.querySelectorAll("pre").length, 1, "old text subscription is disposed");
     }
-    assert.equal(f.surface.element.querySelector('.work-row[data-window-id="one"]'), row);
+    assert.ok(f.surface.element.querySelector('.work-row[data-window-id="one"]') === row, "row remains identical");
     assert.equal(f.runtimes.get("one"), native);
     assert.equal(f.surface.element.querySelectorAll(".work-row").length, 2);
     assert.match(f.surface.element.textContent, /Today.*Input.*Cache.*Output.*Landed PRs/s);
@@ -476,4 +604,257 @@ test("Works output line settings update both lists without replacing the native 
   f.surface.dispose();
   assert.equal(f.previews.size, 0);
   assert.equal(f.frames.size, 0);
+});
+
+test("Works app revocation downgrades only its existing exact-root runtime synchronously", () => {
+  const appSource = readFileSync(new URL("../app.js", import.meta.url), "utf8");
+  const ast = parse(appSource, { ecmaVersion: "latest", sourceType: "module" });
+  const definitions = {};
+  function visit(node) {
+    if (!node || typeof node !== "object") return;
+    if (node.type === "FunctionDeclaration" && ["applyTerminalReadOnly", "reparentTerminalRuntime", "sameNativeSession", "capturedWorksOwner", "revokeWorksTerminal"].includes(node.id?.name)) {
+      definitions[node.id.name] = appSource.slice(node.start, node.end);
+    }
+    if (node.type === "Property" && node.key?.name === "onRevokeTerminal") definitions.callback = appSource.slice(node.value.start, node.value.end);
+    for (const value of Object.values(node)) {
+      if (Array.isArray(value)) value.forEach(visit);
+      else if (value && typeof value === "object") visit(value);
+    }
+  }
+  visit(ast);
+  assert.ok(definitions.callback, "the app must provide the narrow revocation adapter");
+  const { document } = parseHTML('<main><div class="root"><div class="native"></div></div><div class="replacement"></div></main>');
+  const root = document.querySelector(".root"), native = document.querySelector(".native"), replacement = document.querySelector(".replacement");
+  const events = [], frames = [];
+  const runtime = { terminalContainer: root, readOnly: false, terminal: { element: native, options: { disableStdin: false } },
+    containerBindingsCleanup() { events.push("cleanup"); } };
+  const identity = { projectKey: "project", window_id: "one", session_id: "s1", hostId: "host", runtime_incarnation: 1 };
+  runtime.nativeIdentity = identity;
+  const terminalMap = new Map([["one", runtime]]);
+  const previous = new Map([["one", { runtime, root, container: null, identity }]]);
+  const surface = { nativeIdentity: (_id, candidate) => candidate === root ? identity : null };
+  const revoke = new Function("terminalMap", "worksPreviousHosts", "worksSurface", "windowMap", "attachTerminalContainerBindings", "scheduleInitialFitHandshake", "requestAnimationFrame", "scheduleTerminalFit",
+    Object.entries(definitions).filter(([key]) => key !== "callback").map(([, value]) => value).join("\n") + `\nreturn ${definitions.callback};`)(terminalMap, previous, surface, new Map(),
+    (_id, host, _terminal, options) => { assert.ok(host === root); events.push(options.readOnly ? "readonly bindings" : "interactive bindings"); return () => {}; },
+    () => events.push("handshake"), callback => frames.push(callback), () => events.push("fit"));
+  revoke("missing", root, identity);
+  revoke("one", replacement, identity);
+  assert.equal(runtime.readOnly, false, "another root cannot downgrade a replacement runtime");
+  assert.equal(events.length, 0);
+  assert.equal(terminalMap.size, 1, "missing runtimes are never created");
+  revoke("one", root, identity);
+  assert.equal(runtime.readOnly, true);
+  assert.equal(runtime.terminal.options.disableStdin, true);
+  assert.ok(runtime.terminalContainer === root && native.parentElement === root);
+  assert.deepEqual(events, ["cleanup", "readonly bindings", "handshake"]);
+  assert.equal(frames.length, 1, "fit remains scheduled, after synchronous authority revocation");
+  revoke("one", root, identity);
+  assert.deepEqual(events, ["cleanup", "readonly bindings", "handshake"], "repeated revocation is idempotent");
+  assert.equal(frames.length, 1);
+});
+
+async function nativeLifetimeFixture(outputBatcher = null) {
+  const appSource = readFileSync(new URL("../app.js", import.meta.url), "utf8");
+  const definitions = {}, adapters = {};
+  const names = ["renderWorkspace", "renderAppState", "publishWindowCatalog", "allProjectWindowIdSet", "workspaceWindowIdSet", "applyTerminalReadOnly", "reparentTerminalRuntime", "createTerminalRuntime", "disposeTerminalRuntime", "settleWorksTerminal", "nativeSessionIdentity", "sameNativeSession", "currentNativeWindow", "recordWorksPreviousHost", "setWorksHost", "capturedWorksOwner", "revokeWorksTerminal"];
+  function visit(node) {
+    if (!node || typeof node !== "object") return;
+    if (node.type === "FunctionDeclaration" && names.includes(node.id?.name)) definitions[node.id.name] = appSource.slice(node.start, node.end);
+    if (node.type === "Property" && ["onRevokeTerminal", "onReleaseTerminal", "mountTerminal"].includes(node.key?.name)
+      && (node.key.name !== "mountTerminal" || appSource.slice(node.value.start, node.value.end).includes("worksPreviousHosts"))) adapters[node.key.name] = appSource.slice(node.value.start, node.value.end);
+    for (const value of Object.values(node)) if (Array.isArray(value)) value.forEach(visit); else if (value && typeof value === "object") visit(value);
+  }
+  visit(parse(appSource, { ecmaVersion: "latest", sourceType: "module" }));
+  const { createWorksSurface } = await import(moduleUrl);
+  const { createWorkspaceRenderSync } = await import("../issue-render-sync.js");
+  const { classifyProjectWindowVisibility } = await import("../terminal-viewport-reflow.js");
+  const { document } = parseHTML('<main class="surface-area"><article class="shell"><div class="window-body"><div class="terminal-root"></div></div></article></main>');
+  const shell = document.querySelector(".shell"), original = document.querySelector(".terminal-root");
+  const events = [], failures = [], frames = [], previous = new Map();
+  const initial = projectCatalog([windows[0]]).appState;
+  const catalog = createUiStateStore({ catalog: { appState: initial, runtimeStates: {}, version: 1, focusedId: null } });
+  const activity = createAgentActivityModel("project"); activity.applyAgentActivitySnapshot(activitySnapshot([live[0]]));
+  class NativeTerminal {
+    constructor(options = {}) { this.options = options; this.element = document.createElement("div"); this.buffer = { active: { baseY: 30, viewportY: 7 } }; this.disposed = false; }
+    loadAddon() {} open(root) { root.append(this.element); } onData(callback) { this.input = callback; }
+    dispose() { this.disposed = true; this.element.remove(); events.push("dispose"); }
+  }
+  const terminal = new NativeTerminal(); original.append(terminal.element);
+  const runtime = { terminal, terminalContainer: original, readOnly: false, isReady: true, activationFrame: null,
+    nativeIdentity: { projectKey: "project", window_id: "one", session_id: "s1", hostId: "host" }, cleanup() { events.push("cleanup"); } };
+  const terminalMap = new Map([["one", runtime]]), windowMap = new Map([["one", shell]]), noop = () => {};
+  const env = { document, routeProjectKey: "project", appState: initial, worksHost: document.querySelector("main"), worksSurface: null,
+    worksPreviousHosts: previous, terminalMap, windowMap, windowCatalogModel: catalog, agentActivityModel: activity.model, focusedId: null,
+    reconcilingWindowCatalog: false, workspaceRenderSync: createWorkspaceRenderSync({ onDegraded: errors => failures.push(...errors.map(item => String(item.error))) }),
+    traceMeasure: (_kind, _meta, run) => run(), UI_TRACE_EVENT: { renderWorkspace: "workspace", renderAppState: "app" },
+    agentKanbanPendingPlacement: { consumePlacementMessage: () => null }, workspaceWindowsRenderKey: value => JSON.stringify(value),
+    classifyProjectWindowVisibility, send: noop, applyVisibilityTransition: noop, activateTerminalOnReveal: noop,
+    disposePmChat: noop, removePmWindowState: noop, cancelAnimationFrame: noop, terminalViewportRefreshScheduler: { clear: noop },
+    agentAttentionToaster: { forgetWindow: noop }, alertsToasts: { dismiss: noop }, settingsNavigationModel: createUiStateStore({}),
+    terminalOutputBatcher: outputBatcher || { clear: id => events.push(`clear:${id}`) }, disposeProfileWindow: noop, disposeIndexSearchWindow: noop,
+    clearKnowledgeBridgeState: noop, workspaceOverviewSurface: { deleteState: noop }, clearBranchCleanupForWindow: noop,
+    pmSettingsPanel: { unmount: noop }, disposeSettingsBody: noop, ensureWindow: noop, recomputeOperatorTelemetry: noop,
+    cleanupTextPreviews: noop, resumeKnowledgeEventRefresh: noop, attachTerminalContainerBindings: (_id, _root, _terminal, options) => { events.push(options.readOnly ? "readonly" : "interactive"); return noop; },
+    scheduleInitialFitHandshake: noop, requestAnimationFrame: callback => frames.push(callback), scheduleTerminalFit: noop,
+    dismissOperatorBriefing: noop, mergeProjectCatalog: state => state, splitSurfaces: { close: noop }, connectSocket: noop,
+    applyStatus: noop, detailMap: new Map(), setVersionState: noop, versionState: {}, activeProjectTab: () => initial.tabs[0],
+    renderProjectPicker: noop, renderProjectOnboarding: noop, syncCurrentProjectWorkspaceIds: noop, deriveCurrentProjectWorkspaceIds: () => [],
+    requestAgentRoster: noop, activeWorkspace: () => initial.tabs[0].workspace,
+    window: {}, requestSocketSnapshots: () => events.push("resync"), workspaceWindowById: () => windows[0],
+    Terminal: NativeTerminal, FitAddon: class {}, XTERM_THEME_DARK: {}, resolveTerminalFontFamily: () => "mono", isBlinkBrowser: () => false,
+    installTerminalViewportRefreshHandlers: () => noop, createTerminalSnapshotWriteCoordinator: () => ({}),
+  };
+  for (const name of ["renderedTerminalPackets", "decoderMap", "windowRuntimeStateMap", "windowRuntimeStateSinceMap", "renderedWindowElementKeys", "renderedRuntimeStatusKeys", "renderedAgentKanbanBodyKeys", "renderedIssuePreviewBodyKeys", "renderedIssueWindowHeaderKeys", "pendingSnapshotMap", "branchListStateMap", "boardStateMap", "logStateMap"]) env[name] = new Map();
+  const factory = new Function(...Object.keys(env), Object.values(definitions).join("\n") + `\nreturn { adapters: {${Object.entries(adapters).map(([key,value]) => `${key}:${value}`).join(",")}}, bind(surface){worksSurface=surface;}, workspace(next){appState=next;return renderWorkspace(next.tabs[0].workspace);}, create:createTerminalRuntime, leave(){setWorksHost(null);}, enter(){setWorksHost(document.querySelector("main"));} };`);
+  const api = factory(...Object.values(env));
+  const surface = createWorksSurface({ document, projectKey: "project", windowCatalogModel: catalog, activityModel: activity.model,
+    rosterModel: createUiStateStore({ members: [] }), windowDisplayTitle: () => "One", ...api.adapters, mountPreview: () => noop });
+  api.bind(surface); document.querySelector("main").append(surface.element); surface.sync(); surface.openWork(live[0]); events.length = 0;
+  return { surface, api, runtime, terminalMap, windowMap, previous, activity, catalog, initial, original, shell, events, failures, env,
+    dispose() { surface.dispose(); activity.model.dispose(); catalog.dispose(); } };
+}
+
+test("Works owned native preserves its input mode when another host requests the same Session", async () => {
+  const f = await nativeLifetimeFixture();
+  const root = f.runtime.terminalContainer, terminal = f.runtime.terminal;
+  try {
+    assert.ok(f.api.create("one", f.original) === f.runtime);
+    assert.ok(f.runtime.terminalContainer === root && f.runtime.terminal === terminal);
+    assert.equal(f.runtime.readOnly, false, "another host cannot downgrade the current interactive owner");
+    assert.equal(terminal.options.disableStdin, false);
+    f.activity.clearAgentActivity();
+    assert.equal(f.runtime.readOnly, true);
+    assert.ok(f.api.create("one", f.original) === f.runtime);
+    assert.ok(f.runtime.terminalContainer === root && f.runtime.terminal === terminal);
+    assert.equal(f.runtime.readOnly, true, "another host cannot enable an owner after authority loss");
+    assert.equal(terminal.options.disableStdin, true);
+  } finally { f.dispose(); }
+});
+
+test("Works actual native helpers retain an omitted owner and release it on measured removal without a later workspace", async () => {
+  const f = await nativeLifetimeFixture();
+  const root = f.runtime.terminalContainer;
+  const gap = projectCatalog([]).appState;
+  f.api.leave();
+  assert.ok(f.runtime.terminalContainer === f.original, "fresh departure first returns the native normally");
+  for (const name of ["decoderMap", "pendingSnapshotMap", "renderedTerminalPackets"]) f.env[name].set("one", "owned old work");
+  f.api.workspace(gap);
+  assert.deepEqual(f.failures, []);
+  assert.ok(f.terminalMap.get("one") === f.runtime, "temporary catalog omission retains native runtime before coherent publish");
+  assert.equal(f.events.filter(event => event === "clear:one").length, 0, "retained native keeps its bounded output queue");
+  assert.equal(f.runtime.readOnly, true);
+  assert.equal(f.runtime.terminal.disposed, false);
+  for (const name of ["decoderMap", "pendingSnapshotMap", "renderedTerminalPackets"]) assert.equal(f.env[name].get("one"), "owned old work", `${name} follows retained native lifetime`);
+  f.api.enter(); f.surface.sync();
+  assert.ok(f.runtime.terminalContainer === root, "stale reentry displays the same native in the original Works root");
+  assert.equal(f.runtime.terminal.buffer.active.viewportY, 7);
+  f.activity.applyAgentActivitySnapshot(activitySnapshot([], 1));
+  assert.equal(f.terminalMap.has("one"), false, "authoritative census removal releases a shell-less native synchronously");
+  assert.equal(f.runtime.terminal.disposed, true);
+  assert.equal(f.events.filter(event => event === "clear:one").length, 1, "exact native disposal clears its bounded output queue");
+  for (const name of ["decoderMap", "pendingSnapshotMap", "renderedTerminalPackets"]) assert.equal(f.env[name].has("one"), false, `${name} is released with the exact native`);
+  assert.equal(f.events.filter(event => event === "dispose").length, 1);
+  f.dispose(); assert.equal(f.events.filter(event => event === "dispose").length, 1);
+  const unloading = await nativeLifetimeFixture();
+  unloading.api.workspace(gap);
+  unloading.dispose();
+  assert.equal(unloading.terminalMap.has("one"), false, "unload releases a retained native without a windowMap owner");
+  assert.equal(unloading.runtime.terminal.disposed, true);
+});
+
+test("Works actual native release returns a same-Session diagnostic owner readonly and never reuses it for a different Session", async () => {
+  const f = await nativeLifetimeFixture();
+  f.api.leave();
+  f.activity.applyAgentActivitySnapshot(activitySnapshot([], 1));
+  assert.ok(f.runtime.terminalContainer === f.original, "ended Works returns existing native to its exact diagnostic shell");
+  assert.equal(f.runtime.readOnly, true);
+  assert.equal(f.runtime.terminal.disposed, false);
+  const next = projectCatalog([{ ...windows[0], session_id: "new-session" }]).appState;
+  f.api.workspace(next);
+  assert.equal(f.runtime.terminal.disposed, true, "known incoming Session is fenced before any later reuse call");
+  const replacementRoot = f.shell.ownerDocument.createElement("div");
+  const replacement = f.api.create("one", replacementRoot, { nativeHost: true });
+  assert.ok(replacement !== f.runtime, "same window id cannot reuse another Session's native runtime");
+  assert.equal(f.runtime.terminal.disposed, true);
+  assert.ok(f.events.includes("resync"));
+  f.dispose();
+});
+
+
+test("Works ordinary surface departure keeps unavailable native ownership readonly and restores only fresh exact hosts", async () => {
+  const f = await nativeLifetimeFixture();
+  const root = f.runtime.terminalContainer, terminal = f.runtime.terminal;
+  const record = f.previous.get("one");
+  f.activity.clearAgentActivity();
+  f.api.leave();
+  assert.ok(f.runtime.terminalContainer === root, "unknown departure cannot steal the retained root");
+  assert.equal(f.runtime.readOnly, true, "saved previous interactive mode is not current authority");
+  assert.ok(f.previous.get("one") === record, "retained owner keeps its exact return provenance");
+  f.activity.applyAgentActivitySnapshot(activitySnapshot([live[0]], 1));
+  assert.equal(f.runtime.readOnly, true, "hidden recovery cannot enable a retained root");
+  f.api.enter();
+  assert.ok(f.runtime.terminal === terminal && f.runtime.terminalContainer === root);
+  assert.equal(f.runtime.readOnly, false);
+  f.api.leave();
+  assert.ok(f.runtime.terminalContainer === f.original, "fresh exact normal departure returns to the current shell");
+  assert.equal(f.runtime.readOnly, false);
+  assert.ok(f.previous.get("one") === record, "fresh return keeps the surviving entry association");
+  f.api.enter(); f.surface.showList(); f.api.leave();
+  f.activity.clearAgentActivity();
+  assert.ok(f.runtime.terminalContainer === root, "proof loss also reclaims a normally returned list native");
+  assert.equal(f.runtime.readOnly, true);
+  const bindingCount = f.events.filter(event => event === "readonly").length;
+  f.activity.clearAgentActivity();
+  assert.equal(f.events.filter(event => event === "readonly").length, bindingCount, "repeated loss has no binding effects");
+  f.activity.applyAgentActivitySnapshot(activitySnapshot([live[0]], 2));
+  f.api.enter(); f.api.leave();
+  assert.ok(f.runtime.terminalContainer === f.original);
+  f.activity.clearAgentActivity();
+  assert.ok(f.runtime.terminalContainer === root, "an earlier revoked flag cannot suppress reclaim after another fresh list return");
+  assert.equal(f.runtime.readOnly, true);
+  f.dispose();
+});
+
+test("Works departure and old release cannot touch or erase a replacement owner", async () => {
+  const f = await nativeLifetimeFixture();
+  const record = f.previous.get("one");
+  const replacementRoot = f.shell.ownerDocument.createElement("div");
+  const replacement = { ...f.runtime, terminalContainer: replacementRoot, readOnly: false };
+  f.terminalMap.set("one", replacement);
+  f.api.leave();
+  assert.ok(replacement.terminalContainer === replacementRoot);
+  assert.equal(replacement.readOnly, false);
+  assert.ok(f.previous.get("one") === record, "unsettled evidence is never erased by a whole-map clear");
+  replacement.terminalContainer = record.root;
+  f.dispose();
+  assert.ok(f.terminalMap.get("one") === replacement, "captured-runtime mismatch protects even a reused DOM root");
+});
+
+
+test("Works removed shell without a native clears old queued bytes before same-id new Session creation", async () => {
+  const { createTerminalOutputBatcher } = await import("../terminal-output-buffer.js");
+  const writes = [];
+  const batcher = createTerminalOutputBatcher({ schedule() {}, write: (_id, text) => writes.push(text) });
+  const f = await nativeLifetimeFixture(batcher);
+  // Contained/unmounted shells legitimately have no native; seed that boundary
+  // while exercising the actual app remove_window and createRuntime helpers.
+  f.terminalMap.delete("one"); f.previous.clear(); f.runtime.terminal.dispose();
+  f.env.pendingSnapshotMap.set("one", "old snapshot");
+  f.env.decoderMap.set("one", "old decoder");
+  batcher.enqueue("one", "old batched output");
+  f.api.workspace(projectCatalog([]).appState);
+  assert.deepEqual(f.failures, []);
+  for (const name of ["pendingSnapshotMap", "decoderMap"]) {
+    assert.equal(f.env[name].has("one"), false, `${name} must not outlive a removed shell without a native`);
+  }
+  assert.equal(batcher.pendingCount("one"), 0);
+  f.api.workspace(projectCatalog([{ ...windows[0], session_id: "new-session" }]).appState);
+  const root = f.shell.ownerDocument.createElement("div");
+  const fresh = f.api.create("one", root, { nativeHost: true });
+  assert.equal(fresh.nativeIdentity.session_id, "new-session");
+  assert.equal(batcher.pendingCount("one"), 0);
+  assert.equal(f.env.pendingSnapshotMap.has("one"), false);
+  batcher.flushNow();
+  assert.deepEqual(writes, [], "the new Session cannot receive the old id-keyed batch");
+  f.dispose();
 });
