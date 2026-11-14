@@ -8,8 +8,10 @@ trap 'rm -rf "$socket_tmp"' EXIT
 export TMPDIR="$socket_tmp/verification-socket-fixtures-$(printf 'nested-%.0s' {1..16})"
 mkdir -p "$TMPDIR"
 
-cargo test -p gwt-core --lib test_support::tests::socket_
-cargo test -p gwt-core --test test_hygiene_test socket_
-cargo test -p gwt-core --test daemon_socket_path_limit
-cargo test -p gwt --lib daemon -- --test-threads=1
-cargo test -p gwt --test runtime_tests daemon_project_root_test -- --test-threads=1
+# The socket group was built before the execution budget. Keep its shared
+# feature graph instead of asking Cargo to rebuild the narrower core graph.
+node scripts/ci-windows-tests.mjs run-socket gwt-core lib gwt_core test_support::tests::socket_
+node scripts/ci-windows-tests.mjs run-socket gwt-core test test_hygiene_test socket_
+node scripts/ci-windows-tests.mjs run-socket gwt-core test daemon_socket_path_limit
+node scripts/ci-windows-tests.mjs run-socket gwt lib gwt daemon -- --test-threads=1
+node scripts/ci-windows-tests.mjs run-socket gwt test runtime_tests daemon_project_root_test -- --test-threads=1
