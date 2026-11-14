@@ -3166,6 +3166,20 @@ pub fn with_current_active_session_execution_identity_lease<T>(
     expected: &gwt_agent::SessionExecutionIdentity,
     operation: impl FnOnce() -> T,
 ) -> io::Result<Option<T>> {
+    with_current_active_session_execution_identity_lease_wait(
+        sessions_dir,
+        expected,
+        ACTIVE_BINDING_LEASE_WAIT,
+        operation,
+    )
+}
+
+fn with_current_active_session_execution_identity_lease_wait<T>(
+    sessions_dir: &Path,
+    expected: &gwt_agent::SessionExecutionIdentity,
+    session_wait: Duration,
+    operation: impl FnOnce() -> T,
+) -> io::Result<Option<T>> {
     if gwt_agent::current_thread_holds_session_lease() {
         return Err(io::Error::new(
             ErrorKind::WouldBlock,
@@ -3210,7 +3224,11 @@ pub fn with_current_active_session_execution_identity_lease<T>(
     };
 
     with_resolved_generation_owner_lease(&context, |context| {
-        gwt_agent::with_session_lease(sessions_dir, &expected.session_id, |session| {
+        gwt_agent::with_session_lease_wait(
+            sessions_dir,
+            &expected.session_id,
+            session_wait,
+            |session| {
             let canonical_worktree = match dunce::canonicalize(&session.worktree_path) {
                 Ok(path) => path,
                 Err(_) => return Ok(None),
@@ -3230,7 +3248,8 @@ pub fn with_current_active_session_execution_identity_lease<T>(
                 return Ok(None);
             }
             Ok(Some(operation()))
-        })
+        },
+        )
     })
 }
 
@@ -3357,13 +3376,25 @@ pub fn claim_prepared_session_launch(
 /// The callback may suspend the matching process-local capability before it
 /// signals the child, and may persist terminal proof through the under-lease
 /// gwt-agent primitive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExactManualRuntimeLeaseDisposition<T> {
+    Completed(T),
+    Pending(T),
+}
+
+#[derive(Debug)]
+pub struct ExactManualRuntimeLeaseOutcome<T> {
+    pub value: T,
+    pub pending_handoff: Option<gwt_agent::SessionManualHandoffFence>,
+}
+
 pub fn with_exact_active_manual_runtime_lease<T>(
     sessions_dir: &Path,
     expected: &gwt_agent::SessionExecutionIdentity,
     runtime: gwt_agent::ManualLaunchRuntimeProof,
     retain_handoff_after_success: bool,
-    operation: impl FnOnce() -> io::Result<T>,
-) -> io::Result<Option<T>> {
+    operation: impl FnOnce() -> io::Result<ExactManualRuntimeLeaseDisposition<T>>,
+) -> io::Result<Option<ExactManualRuntimeLeaseOutcome<T>>> {
     if runtime.host_pid != std::process::id() || runtime.runtime_incarnation == 0 {
         return Ok(None);
     }
@@ -3405,15 +3436,23 @@ pub fn with_exact_active_manual_runtime_lease<T>(
             )
         })?;
         match operation() {
-            Ok(value) => {
-                if !retain_handoff_after_success
+            Ok(disposition) => {
+                let (value, pending) = match disposition {
+                    ExactManualRuntimeLeaseDisposition::Completed(value) => (value, false),
+                    ExactManualRuntimeLeaseDisposition::Pending(value) => (value, true),
+                };
+                if !pending
+                    && !retain_handoff_after_success
                     && !gwt_agent::clear_session_manual_handoff_under_lease(sessions_dir, &handoff)?
                 {
                     return Err(io::Error::other(
                         "completed Session stop lost its exact manual handoff fence",
                     ));
                 }
-                Ok(value)
+                Ok(ExactManualRuntimeLeaseOutcome {
+                    value,
+                    pending_handoff: pending.then_some(handoff),
+                })
             }
             Err(operation_error) => {
                 if gwt_agent::clear_session_manual_handoff_under_lease(sessions_dir, &handoff)? {
@@ -3427,6 +3466,76 @@ pub fn with_exact_active_manual_runtime_lease<T>(
         }
     })
     .and_then(|result| result.transpose())
+}
+
+/// Complete one delayed PTY terminalization only after reacquiring the exact
+/// owner-generation -> Session lease and matching the durable handoff created
+/// before the child was signalled. Any false/error result leaves the marker in
+/// place for startup recovery or a later retry.
+pub fn finalize_pending_exact_manual_runtime_stop(
+    sessions_dir: &Path,
+    expected: &gwt_agent::SessionExecutionIdentity,
+    runtime: gwt_agent::ManualLaunchRuntimeProof,
+    handoff: &gwt_agent::SessionManualHandoffFence,
+    retain_successor_handoff: bool,
+) -> io::Result<bool> {
+    finalize_pending_exact_manual_runtime_stop_wait(
+        sessions_dir,
+        expected,
+        runtime,
+        handoff,
+        retain_successor_handoff,
+        ACTIVE_BINDING_LEASE_WAIT,
+    )
+}
+
+fn finalize_pending_exact_manual_runtime_stop_wait(
+    sessions_dir: &Path,
+    expected: &gwt_agent::SessionExecutionIdentity,
+    runtime: gwt_agent::ManualLaunchRuntimeProof,
+    handoff: &gwt_agent::SessionManualHandoffFence,
+    retain_successor_handoff: bool,
+    session_wait: Duration,
+) -> io::Result<bool> {
+    if runtime.host_pid == 0 || runtime.runtime_incarnation == 0 {
+        return Ok(false);
+    }
+    let settled = with_current_active_session_execution_identity_lease_wait(
+        sessions_dir,
+        expected,
+        session_wait,
+        || -> io::Result<bool> {
+            if !gwt_agent::session_manual_handoff_matches_under_lease(sessions_dir, handoff)? {
+                #[cfg(test)]
+                eprintln!("delayed finalizer rejected: handoff mismatch");
+                return Ok(false);
+            }
+            if !gwt_agent::persist_session_terminal_status_for_exact_runtime_under_lease(
+                sessions_dir,
+                expected,
+                runtime,
+                gwt_agent::AgentStatus::Stopped,
+            )? {
+                #[cfg(test)]
+                eprintln!("delayed finalizer rejected: exact runtime persistence false");
+                return Ok(false);
+            }
+            if !retain_successor_handoff
+                && !gwt_agent::clear_session_manual_handoff_under_lease(sessions_dir, handoff)?
+            {
+                return Err(io::Error::other(
+                    "delayed Session stop lost its exact manual handoff fence",
+                ));
+            }
+            Ok(true)
+        },
+    )?
+    .transpose()?;
+    #[cfg(test)]
+    if settled.is_none() {
+        eprintln!("delayed finalizer rejected: owner/session identity changed");
+    }
+    Ok(settled.unwrap_or(false))
 }
 
 /// Durably fence an in-place Active Session launch before capability
@@ -16050,6 +16159,119 @@ mod tests {
         )
         .unwrap();
         assert_eq!(retried, Some("retried"));
+    }
+
+    /// Issue #3744 AC-1/2/4: a delayed terminalizer that cannot reacquire the
+    /// exact owner -> Session lease must retain its byte-identical durable
+    /// handoff marker, then settle it only after a successful retry.
+    #[test]
+    fn delayed_manual_runtime_terminalizer_retains_handoff_during_lease_contention() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let owner = generation_owner();
+        let session_id = "session-delayed-terminalizer";
+        let mut active = active_record(session_id);
+        active.owner_number = owner.number;
+        save(dir.path(), &active).unwrap();
+        ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Live).unwrap();
+        let binding = current_execution_binding(dir.path(), owner)
+            .unwrap()
+            .unwrap();
+        persist_generation_session_binding(dir.path(), owner, session_id, binding);
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let session = gwt_agent::Session::load(&sessions_dir.join(format!("{session_id}.toml")))
+            .unwrap();
+        let expected = gwt_agent::SessionExecutionIdentity::from_session(&session)
+            .unwrap()
+            .unwrap();
+        let runtime = gwt_agent::ManualLaunchRuntimeProof {
+            host_pid: std::process::id(),
+            runtime_incarnation: 17,
+        };
+        gwt_agent::SessionRuntimeState::for_execution(
+            gwt_agent::AgentStatus::Running,
+            &expected,
+            runtime.runtime_incarnation,
+        )
+        .save(&gwt_agent::runtime_state_path_for_pid(
+            &sessions_dir,
+            runtime.host_pid,
+            session_id,
+        ))
+        .unwrap();
+
+        let pending = with_exact_active_manual_runtime_lease(
+            &sessions_dir,
+            &expected,
+            runtime,
+            false,
+            || Ok(ExactManualRuntimeLeaseDisposition::Pending(())),
+        )
+        .unwrap()
+        .unwrap();
+        let handoff = pending
+            .pending_handoff
+            .expect("pending stop must retain its exact durable handoff");
+        let handoff_path = gwt_agent::manual_handoff_path(&sessions_dir, session_id);
+        let handoff_before = fs::read(&handoff_path).unwrap();
+
+        let (lease_acquired_tx, lease_acquired_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_lease_tx, release_lease_rx) = std::sync::mpsc::sync_channel(1);
+        let holder_sessions_dir = sessions_dir.clone();
+        let holder = std::thread::spawn(move || {
+            gwt_agent::with_session_lease_wait(
+                &holder_sessions_dir,
+                session_id,
+                std::time::Duration::from_secs(1),
+                |_| {
+                    lease_acquired_tx.send(()).unwrap();
+                    release_lease_rx.recv().unwrap();
+                    Ok(())
+                },
+            )
+            .unwrap()
+        });
+        lease_acquired_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+
+        let error = finalize_pending_exact_manual_runtime_stop_wait(
+            &sessions_dir,
+            &expected,
+            runtime,
+            &handoff,
+            false,
+            std::time::Duration::from_millis(25),
+        )
+        .expect_err("Session contention must not discard the pending stop marker");
+        assert_eq!(error.kind(), ErrorKind::WouldBlock);
+        assert_eq!(fs::read(&handoff_path).unwrap(), handoff_before);
+
+        release_lease_tx.send(()).unwrap();
+        holder.join().unwrap();
+        assert!(finalize_pending_exact_manual_runtime_stop_wait(
+            &sessions_dir,
+            &expected,
+            runtime,
+            &handoff,
+            false,
+            std::time::Duration::from_millis(100),
+        )
+        .unwrap());
+        assert!(!handoff_path.exists());
+        assert_eq!(
+            gwt_agent::Session::load(&sessions_dir.join(format!("{session_id}.toml")))
+                .unwrap()
+                .status,
+            gwt_agent::AgentStatus::Stopped
+        );
     }
 
     #[test]

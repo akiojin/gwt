@@ -137,6 +137,85 @@ pub(crate) fn pane_teardown_stall_message(window_id: &str, stage: &str, elapsed_
     format!("PTY teardown stalled: window_id={window_id} stage={stage} elapsed_ms={elapsed_ms}")
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DeferredTerminalizationOutcome {
+    Persisted,
+    TimedOut,
+    ExitProbeFailed(String),
+    Rejected,
+    PersistenceFailed(String),
+}
+
+fn drive_deferred_terminalization(
+    deadline: Duration,
+    mut elapsed: impl FnMut() -> Duration,
+    mut process_has_exited: impl FnMut() -> std::io::Result<bool>,
+    mut wait: impl FnMut(Duration),
+    persist: impl FnOnce() -> std::io::Result<bool>,
+) -> DeferredTerminalizationOutcome {
+    loop {
+        if elapsed() >= deadline {
+            return DeferredTerminalizationOutcome::TimedOut;
+        }
+        match process_has_exited() {
+            Ok(true) => break,
+            Ok(false) => wait(Duration::from_millis(10)),
+            Err(error) => {
+                return DeferredTerminalizationOutcome::ExitProbeFailed(error.to_string())
+            }
+        }
+    }
+    match persist() {
+        Ok(true) => DeferredTerminalizationOutcome::Persisted,
+        Ok(false) => DeferredTerminalizationOutcome::Rejected,
+        Err(error) => DeferredTerminalizationOutcome::PersistenceFailed(error.to_string()),
+    }
+}
+
+#[derive(Clone)]
+struct PendingExactTerminalization {
+    expected: gwt_agent::SessionExecutionIdentity,
+    runtime: gwt_agent::ManualLaunchRuntimeProof,
+    handoff: gwt_agent::SessionManualHandoffFence,
+    retain_successor_handoff: bool,
+}
+
+fn pending_exact_process_has_exited(
+    pane: &Arc<Mutex<Pane>>,
+    sessions_dir: &std::path::Path,
+    pending: &PendingExactTerminalization,
+) -> std::io::Result<bool> {
+    let runtime_path = gwt_agent::runtime_state_path_for_pid(
+        sessions_dir,
+        pending.runtime.host_pid,
+        &pending.expected.session_id,
+    );
+    if let Ok(runtime) = gwt_agent::SessionRuntimeState::load(&runtime_path) {
+        if runtime.execution_identity.as_ref() != Some(&pending.expected)
+            || runtime.runtime_incarnation != Some(pending.runtime.runtime_incarnation)
+        {
+            return Ok(false);
+        }
+        if let (Some(child_pid), Some(child_started_at)) =
+            (runtime.child_pid, runtime.child_started_at)
+        {
+            return Ok(!gwt::process::exact_pty_process_tree_is_alive(
+                child_pid,
+                child_started_at,
+            ));
+        }
+    }
+    match pane.try_lock() {
+        Ok(guard) => guard
+            .process_has_exited()
+            .map_err(|error| std::io::Error::other(error.to_string())),
+        Err(std::sync::TryLockError::WouldBlock) => Ok(false),
+        Err(std::sync::TryLockError::Poisoned(error)) => {
+            Err(std::io::Error::other(error.to_string()))
+        }
+    }
+}
+
 /// Complete the stop phase for every runtime before any join can block.
 fn stop_all_before_joining<I, T>(
     ids: I,
@@ -402,7 +481,8 @@ impl AppRuntime {
             // process for the user's close request, but retain Running
             // authority bytes so another Host cannot mistake the failure for
             // terminal successor permission.
-            let threads = self.start_window_runtime_stop(window_id, false);
+            let threads =
+                self.start_window_runtime_stop_with_terminalization(window_id, false, None, false);
             Self::detach_runtime_stop_threads(window_id, threads);
             self.mark_agent_session_stopped_with_persistence(window_id, false);
             return;
@@ -469,50 +549,85 @@ impl AppRuntime {
                     .transpose()
                     .map_err(std::io::Error::other)?;
                 let stop_result = (|| {
-                    pane.lock()
+                    let pending_reason = match pane
+                        .lock()
                         .map_err(|error| std::io::Error::other(error.to_string()))?
                         .kill()
-                        .map_err(|error| std::io::Error::other(error.to_string()))?;
+                    {
+                        Ok(()) => None,
+                        Err(error) => Some(format!("PTY kill was ambiguous: {error}")),
+                    };
                     // Issue #3705: never sleep on the GUI event loop waiting
                     // for reap. Persist under lease only when the child is
                     // already gone; otherwise `start_window_runtime_stop`
                     // finishes the proof on a background thread.
-                    let exited = pane
-                        .lock()
-                        .map_err(|error| std::io::Error::other(error.to_string()))?
-                        .process_has_exited()
-                        .map_err(|error| std::io::Error::other(error.to_string()))?;
-                    if exited
-                        && !gwt_agent::persist_session_terminal_status_if_execution_identity_matches_under_lease(
+                    let mut pending_reason = pending_reason;
+                    let exited = if pending_reason.is_none() {
+                        match pane
+                            .lock()
+                            .map_err(|error| std::io::Error::other(error.to_string()))?
+                            .process_has_exited()
+                        {
+                            Ok(exited) => exited,
+                            Err(error) => {
+                                pending_reason =
+                                    Some(format!("PTY exit probe failed after kill: {error}"));
+                                false
+                            }
+                        }
+                    } else {
+                        false
+                    };
+                    if exited {
+                        match gwt_agent::persist_session_terminal_status_if_execution_identity_matches_under_lease(
                             &sessions_dir,
                             expected_session,
                             expected_incarnation,
                             gwt_agent::AgentStatus::Stopped,
-                        )?
-                    {
-                        return Err(std::io::Error::other(
-                            "The holder Session changed before terminal proof persistence",
-                        ));
+                        ) {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                pending_reason = Some(
+                                    "The holder Session changed before terminal proof persistence"
+                                        .to_string(),
+                                );
+                            }
+                            Err(error) => {
+                                pending_reason = Some(format!(
+                                    "Initial terminal proof persistence failed: {error}"
+                                ));
+                            }
+                        }
+                    } else if pending_reason.is_none() {
+                        pending_reason = Some("PTY child is still exiting".to_string());
                     }
-                    Ok(())
+                    Ok(pending_reason)
                 })();
                 match stop_result {
-                    Ok(()) => {
+                    Ok(mut pending_reason) => {
                         if let Some((issuer, reservation)) = reservation.as_ref() {
                             if !issuer.commit_manual_execution_handoff(reservation) {
-                                return Err(std::io::Error::other(
-                                    "The exact holder handoff reservation was lost",
-                                ));
+                                let error = "The exact holder handoff reservation was lost";
+                                if pending_reason.is_none() {
+                                    return Err(std::io::Error::other(error));
+                                }
+                                pending_reason = Some(error.to_string());
                             }
                             if !retain_successor_handoff
                                 && !issuer.release_manual_execution_handoff(reservation)
                             {
-                                return Err(std::io::Error::other(
-                                    "The completed holder capability fence could not be released",
-                                ));
+                                let error =
+                                    "The completed holder capability fence could not be released";
+                                if pending_reason.is_none() {
+                                    return Err(std::io::Error::other(error));
+                                }
+                                pending_reason = Some(error.to_string());
                             }
                         }
-                        Ok(())
+                        Ok(match pending_reason {
+                            Some(reason) => gwt::cli::execution_state::ExactManualRuntimeLeaseDisposition::Pending(Some(reason)),
+                            None => gwt::cli::execution_state::ExactManualRuntimeLeaseDisposition::Completed(None),
+                        })
                     }
                     Err(error) => {
                         if let Some((issuer, reservation)) = reservation.as_ref() {
@@ -533,6 +648,23 @@ impl AppRuntime {
                 "The exact durable holder authority changed before termination".to_string(),
             );
         }
+        let stopped = stopped.expect("checked exact holder stop outcome");
+        if let Some(reason) = stopped.value.as_deref() {
+            tracing::warn!(
+                target: "gwt.pane.teardown",
+                window_id,
+                %reason,
+                "PTY terminalization remains durably pending"
+            );
+        }
+        let pending_terminalization = stopped.pending_handoff.map(|handoff| {
+            PendingExactTerminalization {
+                expected: expected_session.clone(),
+                runtime: proof,
+                handoff,
+                retain_successor_handoff,
+            }
+        });
         if self
             .runtimes
             .get(window_id)
@@ -544,7 +676,12 @@ impl AppRuntime {
         {
             return Err("The holder runtime changed while termination was confirmed".to_string());
         }
-        let threads = self.start_window_runtime_stop(window_id, false);
+        let threads = self.start_window_runtime_stop_with_terminalization(
+            window_id,
+            false,
+            pending_terminalization,
+            false,
+        );
         Self::detach_runtime_stop_threads(window_id, threads);
         self.mark_agent_session_stopped_with_persistence(window_id, false);
         Ok(())
@@ -560,27 +697,45 @@ impl AppRuntime {
         window_id: &str,
         mark_session_stopped: bool,
     ) -> RuntimeStopThreads {
+        self.start_window_runtime_stop_with_terminalization(
+            window_id,
+            mark_session_stopped,
+            None,
+            true,
+        )
+    }
+
+    fn start_window_runtime_stop_with_terminalization(
+        &mut self,
+        window_id: &str,
+        mark_session_stopped: bool,
+        pending_terminalization: Option<PendingExactTerminalization>,
+        discover_exact_terminal: bool,
+    ) -> RuntimeStopThreads {
         tracing::info!(
             target: "gwt.pane.teardown",
             window_id,
             "starting PTY teardown"
         );
-        let exact_terminal = self
-            .active_agent_sessions
-            .get(window_id)
-            .and_then(|active| {
-                let runtime = self.runtimes.get(window_id)?;
-                let session = gwt_agent::Session::load(
-                    &self
-                        .sessions_dir
-                        .join(format!("{}.toml", active.session_id)),
-                )
-                .ok()?;
-                let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
-                    .ok()
-                    .flatten()?;
-                Some((identity, runtime.incarnation))
-            });
+        let exact_terminal = discover_exact_terminal
+            .then(|| {
+                self.active_agent_sessions
+                    .get(window_id)
+                    .and_then(|active| {
+                        let runtime = self.runtimes.get(window_id)?;
+                        let session = gwt_agent::Session::load(
+                            &self
+                                .sessions_dir
+                                .join(format!("{}.toml", active.session_id)),
+                        )
+                        .ok()?;
+                        let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
+                            .ok()
+                            .flatten()?;
+                        Some((identity, runtime.incarnation))
+                    })
+            })
+            .flatten();
         self.remove_window_state_tracking(window_id);
         self.deregister_pty_writer(window_id);
         let mut threads = RuntimeStopThreads {
@@ -600,7 +755,54 @@ impl AppRuntime {
                     pane_teardown_stall_message(window_id, "pane_lock", 0)
                 );
             }
-            if let Some((identity, incarnation)) = exact_terminal.clone() {
+            if let Some(pending) = pending_terminalization {
+                let sessions_dir = self.sessions_dir.clone();
+                let window_id = window_id.to_string();
+                thread::spawn(move || {
+                    let started = Instant::now();
+                    let outcome = drive_deferred_terminalization(
+                        Duration::from_secs(2),
+                        || started.elapsed(),
+                        || pending_exact_process_has_exited(&pane, &sessions_dir, &pending),
+                        thread::sleep,
+                        || {
+                            gwt::cli::execution_state::finalize_pending_exact_manual_runtime_stop(
+                                &sessions_dir,
+                                &pending.expected,
+                                pending.runtime,
+                                &pending.handoff,
+                                pending.retain_successor_handoff,
+                            )
+                        },
+                    );
+                    #[cfg(test)]
+                    eprintln!("delayed terminalization {window_id}: {outcome:?}");
+                    if outcome != DeferredTerminalizationOutcome::Persisted {
+                        let elapsed_ms =
+                            u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                        match outcome {
+                            DeferredTerminalizationOutcome::TimedOut => tracing::warn!(
+                                target: "gwt.pane.teardown",
+                                window_id = %window_id,
+                                elapsed_ms,
+                                "{}",
+                                pane_teardown_stall_message(
+                                    &window_id,
+                                    "process_exit",
+                                    elapsed_ms,
+                                )
+                            ),
+                            other => tracing::warn!(
+                                target: "gwt.pane.teardown",
+                                window_id = %window_id,
+                                elapsed_ms,
+                                outcome = ?other,
+                                "PTY delayed terminalization failed; durable handoff retained"
+                            ),
+                        }
+                    }
+                });
+            } else if let Some((identity, incarnation)) = exact_terminal.clone() {
                 let exited = pane
                     .lock()
                     .ok()
@@ -936,7 +1138,12 @@ impl AppRuntime {
 
 #[cfg(test)]
 mod submit_split_tests {
-    use super::{drive_verified_pane_submit, split_pane_submit, VerifiedPaneSubmitOutcome};
+    use std::{cell::Cell, io, time::Duration};
+
+    use super::{
+        drive_deferred_terminalization, drive_verified_pane_submit, split_pane_submit,
+        DeferredTerminalizationOutcome, VerifiedPaneSubmitOutcome,
+    };
 
     /// SPEC-3431 FR-108c: the body and the submit byte must be separable, so
     /// the writer can put the carriage return in its own PTY write. A single
@@ -1073,6 +1280,77 @@ mod submit_split_tests {
         assert_eq!(
             outcome,
             VerifiedPaneSubmitOutcome::Verified { submit_attempts: 1 }
+        );
+    }
+
+    /// Issue #3744 AC-4: a child observed only after the bounded reap deadline
+    /// must not publish terminal authority. The durable handoff marker remains
+    /// the recovery signal for the still-ambiguous stop.
+    #[test]
+    fn deferred_terminalization_rejects_exit_after_deadline() {
+        let elapsed_calls = Cell::new(0_u8);
+        let probes = Cell::new(0_u8);
+        let persists = Cell::new(0_u8);
+
+        let outcome = drive_deferred_terminalization(
+            Duration::from_secs(2),
+            || {
+                let call = elapsed_calls.get();
+                elapsed_calls.set(call + 1);
+                if call == 0 {
+                    Duration::ZERO
+                } else {
+                    Duration::from_secs(3)
+                }
+            },
+            || {
+                probes.set(probes.get() + 1);
+                Ok(false)
+            },
+            |_| {},
+            || {
+                persists.set(persists.get() + 1);
+                Ok(true)
+            },
+        );
+
+        assert_eq!(outcome, DeferredTerminalizationOutcome::TimedOut);
+        assert_eq!(probes.get(), 1, "the late exit must not be sampled");
+        assert_eq!(persists.get(), 0, "late exit must not publish Stopped");
+    }
+
+    /// Issue #3744 AC-2/4: an exact finalizer's `false` is an authority
+    /// rejection, not success, and must remain visible to the caller.
+    #[test]
+    fn deferred_terminalization_reports_rejected_persistence() {
+        let outcome = drive_deferred_terminalization(
+            Duration::from_secs(2),
+            || Duration::ZERO,
+            || Ok(true),
+            |_| {},
+            || Ok(false),
+        );
+
+        assert_eq!(outcome, DeferredTerminalizationOutcome::Rejected);
+    }
+
+    /// Issue #3744 AC-2: persistence errors must survive the detached worker
+    /// boundary so logs and durable recovery do not claim a successful stop.
+    #[test]
+    fn deferred_terminalization_reports_persistence_error() {
+        let outcome = drive_deferred_terminalization(
+            Duration::from_secs(2),
+            || Duration::ZERO,
+            || Ok(true),
+            |_| {},
+            || Err(io::Error::other("lease reacquisition failed")),
+        );
+
+        assert_eq!(
+            outcome,
+            DeferredTerminalizationOutcome::PersistenceFailed(
+                "lease reacquisition failed".to_string()
+            )
         );
     }
 }

@@ -26759,6 +26759,23 @@ fn ordinary_bound_runtime_stop_publishes_terminal_proof_only_after_process_exit(
         child_pid,
         child_started_at
     ));
+    let terminal_deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let stopped = gwt_agent::Session::load(
+            &runtime.sessions_dir.join(format!("{session_id}.toml")),
+        )
+        .is_ok_and(|session| session.status == gwt_agent::AgentStatus::Stopped);
+        let handoff_cleared =
+            !gwt_agent::manual_handoff_path(&runtime.sessions_dir, session_id).exists();
+        if stopped && handoff_cleared {
+            break;
+        }
+        assert!(
+            Instant::now() < terminal_deadline,
+            "delayed terminalizer must settle Session and handoff after exact child exit"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
     assert_eq!(
         gwt_agent::Session::load(&runtime.sessions_dir.join(format!("{session_id}.toml")))
             .expect("load terminal Session")

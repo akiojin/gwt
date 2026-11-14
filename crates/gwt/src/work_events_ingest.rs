@@ -40,7 +40,7 @@ const SOURCE_LIST: &str = "source-list:v1";
 /// Bump this when projection-time source metadata changes. Older cache entries
 /// used only the raw content/blob fingerprint, which would skip the repair pass.
 const SOURCE_CONTEXT_FINGERPRINT_VERSION: &str =
-    "source-context-v9-bucketed-event-shard-fixed-spawn-metadata-cache";
+    "source-context-v10-portable-worktree-path-resolution";
 
 /// Tree path of the persistent core inside a worktree / commit.
 const EVENTS_TREE_PATH: &str = ".gwt/work/events.jsonl";
@@ -1372,6 +1372,12 @@ mod tests {
             "Remote shard work",
             "2026-08-12T03:00:00Z",
         );
+        let mut event: serde_json::Value = serde_json::from_str(&event).expect("event json");
+        event["execution_container"] = serde_json::json!({
+            "branch": "work/remote-shard",
+            "worktree_path": "work/remote-shard"
+        });
+        let event = serde_json::to_string(&event).expect("portable remote event");
         let hash = format!("{:x}", sha2::Sha256::digest(b"evt-remote-shard"));
         let shard = repo.join(EVENTS_TREE_DIR).join(format!("{hash}.jsonl"));
         std::fs::create_dir_all(shard.parent().unwrap()).expect("event store");
@@ -1413,6 +1419,59 @@ mod tests {
             container.branch.as_deref() == Some("work/remote-shard")
                 && container.worktree_path.is_none()
         }));
+    }
+
+    #[test]
+    fn ingest_resolves_portable_shard_path_to_local_worktree() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        init_repo(&repo);
+        let mut event: serde_json::Value = serde_json::from_str(&event_line(
+            "evt-local-portable-shard",
+            "work-local-portable-shard",
+            "Local portable shard work",
+            "2026-08-25T03:00:00Z",
+        ))
+        .expect("event json");
+        event["execution_container"] = serde_json::json!({
+            "branch": "main",
+            "worktree_path": "repo"
+        });
+        let event = serde_json::to_string(&event).expect("portable local event");
+        let event_id = "evt-local-portable-shard";
+        let digest = format!("{:x}", sha2::Sha256::digest(event_id.as_bytes()));
+        let shard = repo
+            .join(EVENTS_TREE_DIR)
+            .join(&digest[..2])
+            .join(format!("{digest}.jsonl"));
+        std::fs::create_dir_all(shard.parent().expect("bucket")).expect("event bucket");
+        std::fs::write(&shard, format!("{event}\n")).expect("portable local shard");
+
+        let work_items_path = temp.path().join("state/works.json");
+        let state_path = temp.path().join("state/work-events-intake.json");
+        let summary = ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
+
+        assert!(summary.projection_rebuilt, "portable shard rebuild: {summary:?}");
+        let projection =
+            gwt_core::workspace_projection::load_workspace_work_items_from_path(&work_items_path)
+                .unwrap()
+                .unwrap();
+        let item = projection
+            .work_items
+            .iter()
+            .find(|item| item.id == "work-local-portable-shard")
+            .expect("local portable Work restored");
+        let canonical_repo = std::fs::canonicalize(&repo).expect("canonical local repo");
+        assert!(
+            item.execution_containers.iter().any(|container| {
+                container.branch.as_deref() == Some("main")
+                    && container.worktree_path.as_deref() == Some(canonical_repo.as_path())
+            }),
+            "resolved containers: {:?}",
+            item.execution_containers
+        );
     }
 
     #[test]
@@ -2582,6 +2641,9 @@ mod tests {
         let pre_complete_transaction = content_fingerprint(&format!(
             "source-context-v5-durable-chronological-rebuild\n{raw_fingerprint}\n{container_fingerprint}"
         ));
+        let pre_portable_path_resolution = content_fingerprint(&format!(
+            "source-context-v9-bucketed-event-shard-fixed-spawn-metadata-cache\n{raw_fingerprint}\n{container_fingerprint}"
+        ));
 
         assert_ne!(
             source_fingerprint(&raw_fingerprint, Some(&container)),
@@ -2597,6 +2659,11 @@ mod tests {
             source_fingerprint(&raw_fingerprint, Some(&container)),
             pre_complete_transaction,
             "the complete transaction boundary must invalidate the v5 projection once"
+        );
+        assert_ne!(
+            source_fingerprint(&raw_fingerprint, Some(&container)),
+            pre_portable_path_resolution,
+            "portable path resolution must invalidate the v9 projection once"
         );
         assert_ne!(
             source_fingerprint(&raw_fingerprint, None),

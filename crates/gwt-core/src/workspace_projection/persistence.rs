@@ -26,7 +26,7 @@ use crate::{
         gwt_workspace_journal_path_for_repo_path, gwt_workspace_projection_path_for_repo_path,
         gwt_workspace_work_events_closed_path_for_repo_path,
         gwt_workspace_work_events_path_for_repo_path, gwt_workspace_work_items_path_for_repo_path,
-        resolve_current_worktree_root,
+        resolve_current_worktree_root, resolve_main_worktree_root,
     },
 };
 
@@ -2151,6 +2151,7 @@ fn build_workspace_state_transaction_locked<T>(
         }
     }
 
+    let tracked_events = portable_workspace_work_events_for_store(events_path, &events);
     let transaction = PendingWorkspaceStateTransaction {
         version: workspace_state_transaction_version_for_events_path(
             (!events.is_empty()).then_some(events_path),
@@ -2163,7 +2164,7 @@ fn build_workspace_state_transaction_locked<T>(
         projection,
         work_items: (recovered_close_events || !events.is_empty()).then_some(next_work_items),
         events_path: (!events.is_empty()).then(|| events_path.to_path_buf()),
-        events,
+        events: tracked_events,
         journal_path: None,
         journal_entries: Vec::new(),
         external_commit: None,
@@ -2321,7 +2322,10 @@ pub fn update_workspace_projection_with_journal_for_work_event_root(
         // `events_path`/`events` govern only the git-tracked append, which is
         // omitted for a settled worktree (SkipTracked → events_path is None).
         let events = match &events_path {
-            Some(_) => vec![event],
+            Some(events_path) => portable_workspace_work_events_for_store(
+                events_path,
+                std::slice::from_ref(&event),
+            ),
             None => Vec::new(),
         };
         let transaction = PendingWorkspaceStateTransaction {
@@ -2531,7 +2535,9 @@ pub fn update_workspace_projection_with_journal_for_resolved_work_target(
                     .to_string(),
             ));
         }
-        let events = events_path.as_ref().map_or_else(Vec::new, |_| vec![event]);
+        let events = events_path.as_ref().map_or_else(Vec::new, |events_path| {
+            portable_workspace_work_events_for_store(events_path, std::slice::from_ref(&event))
+        });
         // The legacy journal has no Work identity: synthesis attributes every
         // entry to the shared current projection. A foreign target is already
         // durable in works.json and its Work event, so journaling it here would
@@ -4619,7 +4625,8 @@ fn persist_workspace_work_events_to_store_locked(
             return Ok(0);
         }
     }
-    write_workspace_work_event_shards_to_dir(events_dir, &events)?;
+    let tracked_events = portable_workspace_work_events_for_store(events_dir, &events);
+    write_workspace_work_event_shards_to_dir(events_dir, &tracked_events)?;
     *projection = candidate;
     save_workspace_work_items_projection_to_path(work_items_path, projection)?;
     Ok(events.len())
@@ -6691,6 +6698,81 @@ fn write_workspace_work_event_shards_to_dir(events_dir: &Path, events: &[WorkEve
         write_workspace_work_event_shard_bytes(event, events_dir, &shard_path, &canonical)?;
     }
     Ok(())
+}
+
+/// Clone machine-local Work events into their git-tracked wire form. New
+/// shards carry only workspace-layout-relative opaque paths; existing shards
+/// and pending transaction recovery bypass this adapter and therefore retain
+/// their original immutable bytes.
+fn portable_workspace_work_events_for_store(
+    events_dir: &Path,
+    events: &[WorkEvent],
+) -> Vec<WorkEvent> {
+    if !is_workspace_work_event_store_dir(events_dir) {
+        return events.to_vec();
+    }
+    let Some(work_event_root) = events_dir
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+    else {
+        return events.to_vec();
+    };
+    let main_root = resolve_main_worktree_root(work_event_root);
+    let layout_root = main_root.parent().unwrap_or(main_root.as_path());
+    let normalized_layout_root = fs::canonicalize(layout_root)
+        .unwrap_or_else(|_| layout_root.to_path_buf());
+
+    events
+        .iter()
+        .cloned()
+        .map(|mut event| {
+            let shard_path = gwt_work_event_shard_path(events_dir, &event.id);
+            if fs::read(&shard_path).ok().as_deref()
+                == canonical_workspace_work_event_bytes(&event).ok().as_deref()
+            {
+                // Compatibility for a retry of an event whose pre-#3744
+                // absolute bytes were already published immutably.
+                return event;
+            }
+            let Some(container) = event.execution_container.as_mut() else {
+                return event;
+            };
+            let Some(worktree_path) = container.worktree_path.as_deref() else {
+                return event;
+            };
+            if worktree_path.is_relative() {
+                return event;
+            }
+            let normalized_worktree = fs::canonicalize(worktree_path)
+                .unwrap_or_else(|_| worktree_path.to_path_buf());
+            let portable = normalized_worktree
+                .strip_prefix(&normalized_layout_root)
+                .ok()
+                .and_then(portable_workspace_path)
+                .or_else(|| {
+                    container
+                        .branch
+                        .as_deref()
+                        .map(canonical_work_branch_identity)
+                        .filter(|branch| !branch.trim_matches('/').is_empty())
+                        .map(PathBuf::from)
+                });
+            container.worktree_path = portable;
+            event
+        })
+        .collect()
+}
+
+fn portable_workspace_path(path: &Path) -> Option<PathBuf> {
+    let segments = path
+        .components()
+        .map(|component| match component {
+            std::path::Component::Normal(segment) => segment.to_str(),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    (!segments.is_empty()).then(|| PathBuf::from(segments.join("/")))
 }
 
 /// Publish one fully-written canonical event at its immutable shard path.

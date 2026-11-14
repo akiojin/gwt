@@ -632,6 +632,11 @@ where
             };
             if event.execution_container.is_none() {
                 event.execution_container = source.fallback_execution_container.clone();
+            } else {
+                resolve_shared_execution_container_path(
+                    event.execution_container.as_mut().expect("checked container"),
+                    source.fallback_execution_container.as_ref(),
+                );
             }
             if is_close_kind(event.kind) {
                 report.skipped_close_kind += 1;
@@ -644,6 +649,40 @@ where
         }
     }
     Ok(incoming)
+}
+
+fn resolve_shared_execution_container_path(
+    container: &mut WorkspaceExecutionContainerRef,
+    source: Option<&WorkspaceExecutionContainerRef>,
+) {
+    let Some(path) = container.worktree_path.as_deref() else {
+        return;
+    };
+    let branches_match = container.branch.as_deref().zip(
+        source.and_then(|source| source.branch.as_deref()),
+    )
+    .is_some_and(|(event, source)| {
+        canonical_shared_branch(event) == canonical_shared_branch(source)
+    });
+    if path.is_relative() {
+        // Portable tokens are tracked identity only. A local source maps them
+        // to its real worktree; a fetched ref remains a branch-only skeleton.
+        container.worktree_path = branches_match
+            .then(|| source.and_then(|source| source.worktree_path.clone()))
+            .flatten();
+    } else if !path.exists() && branches_match {
+        // Legacy absolute paths remain authoritative while they exist. On a
+        // different machine, same-branch source provenance safely rebinds the
+        // unavailable host path without collapsing distinct local worktrees.
+        container.worktree_path = source.and_then(|source| source.worktree_path.clone());
+    }
+}
+
+fn canonical_shared_branch(branch: &str) -> &str {
+    branch
+        .strip_prefix("refs/remotes/origin/")
+        .or_else(|| branch.strip_prefix("origin/"))
+        .unwrap_or(branch)
 }
 
 fn collect_machine_local_work_events(content: &str) -> Result<Vec<(WorkEvent, String)>> {
@@ -1068,6 +1107,99 @@ mod tests {
                 .as_ref()
                 .and_then(|container| container.branch.as_deref()),
             Some("work/original")
+        );
+    }
+
+    /// Issue #3744 AC-6: old absolute and new portable path encodings both
+    /// resolve at the source-intake boundary. Relative tokens never escape as
+    /// filesystem paths, and unavailable legacy host paths rebind only when
+    /// source branch provenance agrees.
+    #[test]
+    fn contextual_source_resolves_portable_and_legacy_container_paths() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let local_path = tmp.path().join("work").join("portable");
+        std::fs::create_dir_all(&local_path).expect("local worktree path");
+        let existing_legacy_path = tmp.path().join("legacy-host").join("portable");
+        std::fs::create_dir_all(&existing_legacy_path).expect("existing legacy worktree path");
+        let local_fallback = WorkspaceExecutionContainerRef {
+            branch: Some("work/portable".to_string()),
+            worktree_path: Some(local_path.clone()),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        };
+        let remote_fallback = WorkspaceExecutionContainerRef {
+            worktree_path: None,
+            ..local_fallback.clone()
+        };
+
+        let collect_path = |id: &str,
+                            encoded_path: &Path,
+                            fallback: WorkspaceExecutionContainerRef| {
+            let encoded_path = serde_json::to_string(encoded_path).expect("encoded path json");
+            let content: Arc<str> = Arc::from(event_json(
+                id,
+                id,
+                "start",
+                "2026-08-25T10:00:00Z",
+                &format!(
+                    ",\"title\":\"portable\",\"status_category\":\"active\",\"execution_container\":{{\"branch\":\"work/portable\",\"worktree_path\":{encoded_path}}}"
+                ),
+            ));
+            let mut report = WorkEventsIntakeReport::default();
+            let incoming = collect_shared_work_event_sources_with_decoder(
+                [SharedWorkEventsSource::new(content, Some(fallback))],
+                &mut report,
+                decode_workspace_work_event_line,
+            )
+            .expect("collect contextual source");
+            incoming[0]
+                .0
+                .execution_container
+                .as_ref()
+                .and_then(|container| container.worktree_path.clone())
+        };
+
+        assert_eq!(
+            collect_path(
+                "evt-relative-local",
+                Path::new("work/portable"),
+                local_fallback.clone(),
+            ),
+            Some(local_path.clone())
+        );
+        assert_eq!(
+            collect_path(
+                "evt-relative-remote",
+                Path::new("work/portable"),
+                remote_fallback,
+            ),
+            None,
+            "origin-only intake must retain a branch-only remote skeleton"
+        );
+        assert_eq!(
+            collect_path(
+                "evt-legacy-missing",
+                Path::new("/old-host/work/portable"),
+                local_fallback,
+            ),
+            Some(local_path),
+            "a missing legacy host path must rebind to same-branch local provenance"
+        );
+        assert_eq!(
+            collect_path(
+                "evt-legacy-existing",
+                &existing_legacy_path,
+                WorkspaceExecutionContainerRef {
+                    branch: Some("work/portable".to_string()),
+                    worktree_path: Some(tmp.path().join("different-local-view")),
+                    pr_number: None,
+                    pr_url: None,
+                    pr_state: None,
+                },
+            ),
+            Some(existing_legacy_path),
+            "an existing legacy path remains the strongest local identity"
         );
     }
 

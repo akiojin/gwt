@@ -10068,6 +10068,102 @@ fn production_work_event_writer_creates_one_immutable_shard() {
     );
 }
 
+/// Issue #3744 AC-5: tracked event bytes must not capture the checkout's host
+/// path, while the machine-local projection must retain the absolute path that
+/// strict Session/worktree authority checks consume.
+#[test]
+fn tracked_work_event_shard_uses_portable_path_without_rewriting_local_projection() {
+    let _guard = crate::test_support::env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let workspace = tempfile::tempdir().expect("workspace");
+    let (_workspace_home, worktree) =
+        init_test_workspace_home_with_linked_worktree(workspace.path());
+    let now = Utc.with_ymd_and_hms(2026, 8, 25, 9, 0, 0).unwrap();
+    let mut event = start_event("work-portable-container", now);
+    event.id = "event-portable-container".to_string();
+    event.execution_container = Some(WorkspaceExecutionContainerRef {
+        branch: Some("work/issue-3412".to_string()),
+        worktree_path: Some(worktree.clone()),
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+    });
+
+    record_workspace_work_event(&worktree, event.clone()).expect("record portable shard");
+
+    let shard = gwt_repo_local_work_event_shard_path(&worktree, &event.id);
+    let tracked: WorkEvent = serde_json::from_slice(
+        std::fs::read(&shard)
+            .expect("read portable shard")
+            .as_slice(),
+    )
+    .expect("decode portable shard");
+    assert_eq!(
+        tracked
+            .execution_container
+            .as_ref()
+            .and_then(|container| container.worktree_path.as_deref()),
+        Some(Path::new("work/issue-3412")),
+        "tracked bytes must use a workspace-layout-relative opaque identity"
+    );
+
+    let works_path = gwt_workspace_work_items_path_for_repo_path(&worktree);
+    let local = load_workspace_work_items_from_path(&works_path)
+        .expect("load local works")
+        .expect("local works projection");
+    let local_item = local
+        .work_items
+        .iter()
+        .find(|item| item.id == "work-portable-container")
+        .expect("portable Work item");
+    assert!(local_item.execution_containers.iter().any(|container| {
+        container.worktree_path.as_deref() == Some(worktree.as_path())
+    }));
+    assert!(local_item
+        .execution_containers
+        .iter()
+        .all(|container| container.worktree_path.as_deref() != Some(Path::new("work/issue-3412"))));
+}
+
+/// Issue #3744 AC-6: retrying an event whose old absolute bytes already own
+/// the immutable shard must remain byte-identical instead of attempting a
+/// relative rewrite under the same event id.
+#[test]
+fn tracked_work_event_retry_preserves_existing_legacy_absolute_shard() {
+    let _guard = crate::test_support::env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let workspace = tempfile::tempdir().expect("workspace");
+    let (_workspace_home, worktree) =
+        init_test_workspace_home_with_linked_worktree(workspace.path());
+    let now = Utc.with_ymd_and_hms(2026, 8, 25, 9, 30, 0).unwrap();
+    let mut event = start_event("work-legacy-container", now);
+    event.id = "event-legacy-container".to_string();
+    event.execution_container = Some(WorkspaceExecutionContainerRef {
+        branch: Some("work/issue-3412".to_string()),
+        worktree_path: Some(worktree.clone()),
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+    });
+    let shard = gwt_repo_local_work_event_shard_path(&worktree, &event.id);
+    std::fs::create_dir_all(shard.parent().expect("legacy bucket")).expect("legacy bucket");
+    let legacy_bytes = serde_json::to_string(&event).expect("legacy event") + "\n";
+    std::fs::write(&shard, legacy_bytes.as_bytes()).expect("legacy absolute shard");
+
+    record_workspace_work_event(&worktree, event).expect("legacy byte-identical retry");
+
+    assert_eq!(
+        std::fs::read(&shard).expect("read retained legacy shard"),
+        legacy_bytes.as_bytes()
+    );
+}
+
 #[test]
 fn manual_rebuild_reads_legacy_flat_and_canonical_bucketed_shards() {
     let _guard = crate::test_support::env_lock()
