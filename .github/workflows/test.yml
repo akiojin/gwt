@@ -29,7 +29,9 @@ concurrency:
 jobs:
   source-sync:
     name: Classify CI synchronization
-    runs-on: ubuntu-latest
+    # The lightweight gate needs only Git, Python and gh, all in ubuntu-slim.
+    # Keep compilation jobs on their existing runners; concurrency is shared.
+    runs-on: ubuntu-slim
     timeout-minutes: 5
     permissions:
       contents: read

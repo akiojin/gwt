@@ -23558,6 +23558,9 @@ exit 1
             7
         );
 
+        // The replacement must reach the malformed-marker verdict, not expire
+        // its prefs budget. Keep the intentional shutdown lock timeout above.
+        let _replacement_budget = super::pin_prefs_hang_guard();
         let replacement = super::load_issue_monitor_state_for_daemon(
             &prefs_path,
             crate::IssueMonitorConfig::default(),
