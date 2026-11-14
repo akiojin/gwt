@@ -1010,6 +1010,82 @@ test.describe("Issue queue real backend launch", () => {
     expect(errors, "zero console/page errors including fixture cleanup").toEqual([]);
   });
 
+  test("T94415 ordinary provider exit admits the queued Issue without operator rescue", async ({ page }, info) => {
+    const fixture = await startIssueQueueLaunchFixture(info, {
+      additionalIssueNumbers: [44], autonomousMode: true, terminalConvergence: true,
+      monitorPreferences: { max_active_agents: 1 },
+    });
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    const preferences = async () => JSON.parse((await fixture.monitorPreferencesBytes()).toString());
+    const nativeSession = async (id: string) => (await readFile(
+      join(fixture.home, ".gwt", "sessions", `${id}.toml`), "utf8"))
+      .match(/^agent_session_id\s*=\s*"([^"]*)"/m)?.[1];
+    const sourceActivity = (sessionId: string) => page.evaluate(sessionId =>
+      ((window as any).__gwtPlaywrightMessages ?? [])
+        .map(({ payload }: any) => payload.kind === "local_agent_activity" ? payload.activity : payload.projection?.local_agent_activity)
+        .filter((snapshot: any) => snapshot?.project_key === location.pathname.split("/")[2])
+        .at(-1)?.agents?.find((agent: any) => agent.session_id === sessionId), sessionId);
+    try {
+      await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+      await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
+      await page.locator('[data-surface="issues"]').click();
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      const issues = page.locator('.workspace-window[data-preset="issue"] .issue-bridge-root');
+      await sendLiveGwtEvent(page, { kind: "set_issue_monitor_max_active_agents", max_active_agents: 1 });
+      await expect.poll(async () => JSON.parse(await readFile(
+        join(fixture.home, ".gwt/machine-state/agent-settings.json"), "utf8")), { timeout: 30_000 })
+        .toMatchObject({ mode: "manual", manual_limit: 1,
+          last_change: { source: "gui", max_active_agents_override: 1 } });
+      await sendLiveGwtEvent(page, { kind: "issue_monitor_queue_push", issue_numbers: [43, 44] });
+      await expect.poll(() => fixture.launchIssues(), { timeout: 90_000 }).toEqual([43]);
+      const source = (await fixture.launches())[0];
+      await expect(issues.locator('[data-queue-column="active"] [data-issue-number="43"]')).toBeVisible();
+      await expect(issues.locator('[data-queue-column="queued"] [data-issue-number="44"]')).toBeVisible();
+      expect(source.gwt_session_id).toBeTruthy();
+      await expect.poll(() => nativeSession(source.gwt_session_id!), { timeout: 45_000 }).toBe(source.provider_session_id);
+      await expect.poll(() => sourceActivity(source.gwt_session_id!)).toMatchObject({ issue_number: 43 });
+      const sourceWindow = (await sourceActivity(source.gwt_session_id!)).window_id;
+      expect(sourceWindow).toBeTruthy();
+      expect((await preferences()).autonomous_mode).toBe(true);
+      expect(() => process.kill(source.pid, 0)).not.toThrow();
+      expect(await fixture.launchIssues(), "the occupied slot keeps the successor queued").toEqual([43]);
+
+      await sendLiveGwtEvent(page, { kind: "terminal_input", id: sourceWindow, data: "GWT_FIXTURE_EXIT\r" });
+      // Every observation after exit is passive: no refresh, Switch, requeue or launch_now.
+      await expect.poll(() => {
+        try { process.kill(source.pid, 0); return false; } catch { return true; }
+      }, { timeout: 60_000, message: "the exact source process exited and was reaped" }).toBe(true);
+      await expect.poll(() => fixture.launchIssues(), { timeout: 90_000,
+        message: "ordinary exit releases the sole slot and automatically admits Issue 44" }).toEqual([43, 44]);
+      const target = (await fixture.launches())[1];
+      expect(target.pid).not.toBe(source.pid);
+      expect(target.gwt_session_id).toBeTruthy();
+      expect(target.gwt_session_id).not.toBe(source.gwt_session_id);
+      expect(target.provider_session_id).not.toBe(source.provider_session_id);
+      await expect.poll(() => nativeSession(target.gwt_session_id!), { timeout: 45_000 }).toBe(target.provider_session_id);
+      expect(() => process.kill(target.pid, 0)).not.toThrow();
+      await expect(issues.locator('[data-queue-column="active"] [data-issue-number="44"]')).toBeVisible();
+      await expect(issues.locator('[data-queue-column="active"] .knowledge-row')).toHaveCount(1);
+      await expect(issues.locator('[data-metric="active"]')).toHaveText("Active 1 · 1 issue · PM 0");
+      const sourceRow = issues.locator('[data-issue-number="43"]');
+      await expect(sourceRow).toBeVisible();
+      await expect(sourceRow.locator('[data-action="focus-surface-window"]')).toHaveCount(0);
+      await expect(sourceRow).not.toContainText("Shown in Agents");
+      expect(await fixture.launchIssues()).toEqual([43, 44]);
+      await info.attach("ordinary-exit-next-admission", {
+        body: JSON.stringify({ source, target, launches: await fixture.launches() }), contentType: "application/json",
+      });
+      await info.attach(`ordinary-exit-next-admission-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
+      expect(errors).toEqual([]);
+    } finally {
+      try { await page.close(); } finally { await fixture.stop(); }
+    }
+    expect(errors, "zero console/page errors including owned fixture cleanup").toEqual([]);
+  });
+
   test("Backlog drag launches once and Blocked generation stays stopped after app restart", async ({ page }, info) => {
     const fixture = await startIssueQueueLaunchFixture(info, { page });
     const errors: string[] = [];

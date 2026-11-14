@@ -1005,6 +1005,12 @@ status を再読して変更を再判断し、成功後も読み戻して確認�
 Issueのcloseやcancelだけでは数えません。エージェントによる完了宣言を測るため、
 後からPRが失敗すると着地率は楽観的になります。この指標にPRのマージは不要です。
 
+`issue.monitor.status` の `event_history` には、最新100件の Monitor 通知を古い順に保持します。
+各項目は `id`、RFC3339形式の `recorded_at`、`issue_number`、通知種別の `level`
+（`info`/`warn`/`error`/`done`）、`message` を持ちます。試行ごとの失敗・再試行・人間への確認要求・
+マージ・slot解放などの通知は、GUIでの通知消費後や再起動後も読めます。
+上限を超えると最古の項目から削除します。`last_error` などの最新エラー表示とは独立した履歴です。
+
 ホストの空き容量も同じ snapshot に含まれます。`issue.monitor.status` の
 `disk_space` は worktree と verification coordinator が置かれた volume を列挙し、
 空きが 20 GiB または 5% を下回ると `warning` を載せるため、`verify.run` が
@@ -1210,14 +1216,14 @@ Reopen と Cancel は、選択 Task の projection から得た `task_key` を�
 指定し、`request.task_id` を空にする方法でも呼び出せます。空・不明・混在した selector
 は拒否します。この方法では現在の保存済み Task と revision に元の receipt を添えて
 返すため、再実行時に古い receipt の Task 状態を現在状態として扱いません。再開時の
-ユーザー監査・CAS・未完了＋再評価待ちの規則は同じです。Tasks 詳細の再開ボタンは
-別の作業です。
+ユーザー監査・CAS・未完了＋再評価待ちの規則は同じです。完了した Task は、選択した
+詳細画面からも再開できます。
 応答を失ったら、現在の Task と元の receipt を読み直してください。新しい接続は別の
 actor になるため、旧 operation の再実行は競合になります。現在の Task と receipt 内の
 過去状態は、それぞれの revision を保持します。欠測・読取不能は診断と回復用の参照を
 返します。receipt の参照は記録済みの結果の観測であり、新たな永続書込の成功確認では
-ありません。この transport adapter は利用できますが、Tasks 画面と checkbox 操作は
-引き続き未提供です。
+ありません。Tasks の詳細画面では取消と完了 Task の再開を利用できます。
+Task の編集と完了 checkbox 操作は引き続き未提供です。
 
 選択した native 入力を受け付けるには、登録済み PM が `pm.request_tasks.read` の
 `selector:{kind:"native_turns"}` を読みます。現在の `provider`・`conversation_id` と、
@@ -2049,6 +2055,8 @@ criteria** を開くと、目的と先頭 5 件の完了条件を確認できま
 **Reload details** で再取得できます。更新や読取り失敗時は確認済みの詳細を古い情報と明示して残し、
 **Close details** で元のタスクにフォーカスを戻します。
 取消する場合は詳細画面に理由を入力し、**Cancel task** を選びます。
+完了したタスクは理由を入力して **Reopen task** を選ぶと、未完了＋PM の再評価待ちに
+戻せます。関連する Issue の再起動は行いません。
 ブラウザーで操作したユーザーと理由を記録し、原依頼と過去の変更は保持します。
 エージェントの停止や Issue・PR の変更は行いません。保存の確認後に状態を更新します。
 競合や応答未確認では最後に確認できた詳細を残すため、再接続して **Reload details** で

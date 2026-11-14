@@ -1103,6 +1103,14 @@ session; closing or cancelling an Issue alone does not count. It measures
 agent-declared completion, so the rate can be optimistic if the PR fails later.
 PR merge is not required for this metric.
 
+`issue.monitor.status` also exposes `event_history`: the newest 100 Monitor
+notifications, ordered oldest first, with an `id`, RFC3339 `recorded_at`,
+`issue_number`, notification kind `level` (`info`/`warn`/`error`/`done`), and
+`message`. Failed attempts, retry notices, needs-human transitions, merges and
+slot releases remain readable after GUI notifications are consumed and across
+restarts. New entries evict the oldest; display fields such as `last_error`
+continue to report the latest error separately.
+
 Host free space is part of the same snapshot: `disk_space` in
 `issue.monitor.status` lists the volumes the worktrees and the verification
 coordinator live on and carries a `warning` once one of them falls below
@@ -1336,15 +1344,15 @@ projection with an empty `request.task_id`. Empty, unknown or mixed selectors
 are rejected. These keyed operations return the current saved task and revision
 alongside the original receipt, so a retry cannot present an older receipt's
 task state as current. Reopen keeps the same user audit, CAS and pending
-reassessment rules; a Reopen control in the Tasks detail is separate work.
+reassessment rules. Completed Tasks can also be reopened from their selected detail.
 After a connection loss, read the current task and original receipt: a new
 connection has a new actor, so replaying the old operation there is a conflict.
 The current task and the receipt's historical task state retain their own
 revisions. Missing or unreadable data returns a diagnostic and recovery read.
 Reading a receipt observes its recorded outcome; it does not acknowledge a new
 durable write.
-This transport adapter is available; the Tasks screen and checkbox controls
-are still pending.
+The Tasks detail supports cancellation and reopening completed tasks. Task
+editing and completion checkbox controls are still pending.
 
 For selected native intake, the registered PM reads
 `selector:{kind:"native_turns"}` through `pm.request_tasks.read`. The result gives
@@ -2250,6 +2258,8 @@ with a saved change to that task, so this is not a complete operation history.
 **Reload details** refreshes it; changes or read failures retain confirmed detail
 with a stale warning. **Close details** returns focus to its task.
 To cancel tracking, enter a reason in the selected detail and choose **Cancel task**.
+For a completed task, enter a reason and choose **Reopen task** to return it to
+pending tracking and request a fresh PM review. This does not restart its Issue.
 This records the browser user's reason and preserves the original request and past changes;
 it does not stop agents or change Issues or pull requests. The state changes only after
 the host confirms it. A conflict or unconfirmed response keeps the last confirmed detail;

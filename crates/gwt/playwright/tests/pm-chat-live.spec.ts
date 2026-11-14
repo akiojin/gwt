@@ -1728,7 +1728,7 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
     }
   });
 
-  test('T-TASK-KEY-REOPEN T-TASK-CANCEL T-TASK-DETAIL T-TASK-CHILDREN T-TASK-CRITERIA T-CHAT-TASK-LINK T-UTASK-OV and T-UTASK-USER-REOPEN/CANCEL/UPDATE/COMPLETE persist browser authority and show confirmed Tasks after reconnect', async ({ page }, info) => {
+  test('T-TASK-REOPEN-UI T-TASK-KEY-REOPEN T-TASK-CANCEL T-TASK-DETAIL T-TASK-CHILDREN T-TASK-CRITERIA T-CHAT-TASK-LINK T-UTASK-OV and T-UTASK-USER-REOPEN/CANCEL/UPDATE/COMPLETE persist browser authority and show confirmed Tasks after reconnect', async ({ page }, info) => {
     const theme = info.project.name.includes('light') ? 'light' : 'dark';
     const windowId = 'pm-request-task-fixture';
     const taskId = 'synthetic-fixture-task';
@@ -1835,7 +1835,7 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
       expect(completeState.receipts).toEqual(completionReceipts);
       expect(completeState.sources).toEqual(seed.sources);
       expect(completeState.tasks[taskId]).toEqual(completed.task);
-      const request = { operation_id: `browser-reopen-${theme}`, expected_revision: 5,
+      let request = { operation_id: `browser-reopen-${theme}`, expected_revision: 5,
         reason: 'The original outcome needs another review.\nPlease reopen this task.', task_id: '' };
       const taskKey = createHash('sha256').update(taskId).digest('hex');
       const beforeReopen = readFileSync(statePath, 'utf8');
@@ -1848,7 +1848,84 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
           .toMatchObject({ state: 'error', code, recovery_operation: 'load_pm_request_task' });
         expect(readFileSync(statePath, 'utf8')).toBe(beforeReopen);
       }
-      const reopened = await exchange('reopen_pm_request_task', { task_key: taskKey, request });
+      const reopenChat = page.locator('.pm-chat');
+      await reopenChat.getByRole('button', { name: 'Chat', exact: true }).click();
+      const reopenDraft = reopenChat.locator('.pm-chat__draft');
+      const preservedDraft = 'Keep this chat draft while reopening the completed task';
+      await reopenDraft.fill(preservedDraft);
+      await reopenChat.getByRole('button', { name: 'Tasks', exact: true }).click();
+      const reopenTasksView = reopenChat.getByRole('region', { name: 'Request tasks', exact: true });
+      await reopenTasksView.getByRole('button', { name: 'Include completed', exact: true }).focus();
+      await page.keyboard.press('Enter');
+      const reopenRow = reopenTasksView.locator(`[data-task-key="${taskKey}"]`);
+      await reopenRow.getByRole('button', { name: 'View task details', exact: true }).focus();
+      await page.keyboard.press('Enter');
+      const reopenDetail = reopenTasksView.getByRole('region', { name: 'Selected task details', exact: true });
+      await expect(reopenDetail).toContainText('Selected snapshot revision 5.');
+      await expect(reopenDetail).toContainText(original);
+      await expect(reopenDetail).toContainText(completeRequest.evidence[0]);
+      const reopenReason = reopenDetail.getByRole('textbox', { name: 'Reason for this task change', exact: true });
+      const reopenButton = reopenDetail.getByRole('button', { name: 'Reopen task', exact: true });
+      await page.setViewportSize({ width: 404, height: 1000 });
+      const reopenPane = page.locator('.workspace-window').filter({ has: reopenChat });
+      await expect.poll(async () => Math.round((await reopenPane.boundingBox())!.width)).toBe(400);
+      await expect(reopenButton).toBeVisible();
+      await expect(reopenButton).toHaveAttribute('aria-disabled', 'true');
+      // Hold this one real browser mutation, preserving its generated operation
+      // ID and exact bytes while asserting the pending UI never changes storage.
+      await page.evaluate(() => {
+        const host = window as any;
+        for (const socket of new Set<WebSocket>(host.__gwtPlaywrightSockets || [])) {
+          if (socket.readyState !== WebSocket.OPEN || !new URL(socket.url).searchParams.has('repo_hash')) continue;
+          const originalSend = socket.send;
+          socket.send = function(data: string) {
+            const event = JSON.parse(String(data));
+            if (event.kind === 'reopen_pm_request_task') {
+              socket.send = originalSend;
+              host.__heldTaskReopen = event;
+              host.__releaseTaskReopen = () => originalSend.call(socket, data);
+              return;
+            }
+            return originalSend.call(socket, data);
+          };
+        }
+      });
+      await reopenButton.focus();
+      await page.keyboard.press('Enter');
+      expect(await page.evaluate(() => (window as any).__heldTaskReopen ?? null)).toBeNull();
+      expect(readFileSync(statePath, 'utf8')).toBe(beforeReopen, 'blank reopen reason never writes');
+      await reopenReason.fill(request.reason);
+      await expect(reopenButton).toHaveAttribute('aria-disabled', 'false');
+      await reopenButton.focus();
+      await expect(reopenButton).toBeInViewport({ ratio: 1 });
+      expect(await reopenDetail.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+      const reopenImage = info.outputPath(`task-reopen-${theme}-400.png`);
+      await reopenChat.screenshot({ path: reopenImage });
+      await info.attach(`T-TASK-REOPEN-UI ${theme} controls 400px`, { path: reopenImage, contentType: 'image/png' });
+      await page.keyboard.press('Enter');
+      const heldReopen = await page.waitForFunction(() => (window as any).__heldTaskReopen).then(handle => handle.jsonValue());
+      expect(heldReopen).toMatchObject({ kind: 'reopen_pm_request_task', task_key: taskKey,
+        request: { expected_revision: 5, task_id: '', reason: request.reason } });
+      expect(heldReopen.request.operation_id).toEqual(expect.any(String));
+      expect(heldReopen.request.operation_id).not.toBe('');
+      request = { ...request, operation_id: heldReopen.request.operation_id };
+      await expect(reopenButton).toHaveAttribute('aria-disabled', 'true');
+      await expect(reopenReason).toHaveAttribute('readonly', '');
+      await expect(reopenDetail.locator('.pm-chat__task-cancel-status')).toContainText('Reopening task…');
+      await expect(reopenRow.locator('.pm-chat__task-meta').first()).toContainText('Completed');
+      await expect(reopenDetail).toContainText(completeRequest.evidence[0]);
+      await page.keyboard.press('Enter');
+      expect(readFileSync(statePath, 'utf8')).toBe(beforeReopen, 'pending reopen is neither optimistic nor duplicated');
+      await expect(reopenDraft).toHaveValue(preservedDraft);
+      const reopenCursor = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence || 0);
+      await page.evaluate(() => (window as any).__releaseTaskReopen());
+      const reopenReply = await page.waitForFunction(({ cursor, id, requestId }) =>
+        (window as any).__gwtPlaywrightMessages?.findLast((entry: any) => entry.sequence > cursor
+          && entry.payload.kind === 'pm_request_task' && entry.payload.id === id
+          && entry.payload.request_id === requestId)?.payload,
+      { cursor: reopenCursor, id: heldReopen.id, requestId: heldReopen.request_id }).then(handle => handle.jsonValue());
+      exchanges.push({ request: heldReopen, response: reopenReply });
+      const reopened = reopenReply.result;
       expect(reopened).toMatchObject({ state: 'ready', revision: 6, task: {
         ...pendingTask, review_generation: 2, review_required: true,
       }, receipt: { operation_id: request.operation_id, action: 'reopen', revision: 6,
@@ -1862,6 +1939,22 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
       expect(saved.tasks[taskId]).toEqual(reopened.task);
       expect(saved.sources).toEqual(seed.sources);
       expect(saved.sources[pendingTask.source_id].original).toBe(original);
+      await expect(reopenDetail.locator('.pm-chat__task-cancel-status'))
+        .toContainText('Reopen recorded. This action requests a fresh PM review.');
+      await expect(reopenDetail).toContainText('Selected snapshot revision 6.');
+      await expect(reopenDetail).toContainText(request.reason);
+      await expect(reopenDetail).toContainText(original);
+      await expect(reopenRow.locator('.pm-chat__task-meta').first()).toContainText('Pending');
+      await expect(reopenRow).toContainText('PM reassessment required');
+      await expect(reopenButton).not.toBeVisible();
+      await expect(reopenDraft).toHaveValue(preservedDraft);
+      const reloadAfterReopen = reopenDetail.getByRole('button', { name: 'Reload details', exact: true });
+      await expect(reloadAfterReopen).toBeFocused();
+      await expect(reloadAfterReopen).toBeInViewport({ ratio: 1 });
+      const reopenedImage = info.outputPath(`task-reopen-confirmed-${theme}-400.png`);
+      await reopenChat.screenshot({ path: reopenedImage });
+      await info.attach(`T-TASK-REOPEN-UI ${theme} confirmed 400px`, { path: reopenedImage, contentType: 'image/png' });
+      await page.setViewportSize({ width: 1440, height: 1000 });
       expect(await exchange('reopen_pm_request_task', { task_key: taskKey, request })).toEqual(reopened);
       expect(readFileSync(statePath, 'utf8')).toBe(savedBytes);
       expect(await exchange('reopen_pm_request_task', { task_key: taskKey, request: { ...request,
@@ -2266,7 +2359,7 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
       await expect(criteriaSummary).toBeInViewport({ ratio: 1 });
       await info.attach(`T-TASK-CHILDREN ${theme} 400px`, { body: await criteriaPane.screenshot(), contentType: 'image/png' });
       await detailButton.click();
-      const cancelReason = taskDetail.getByRole('textbox', { name: 'Reason for cancelling this task', exact: true });
+      const cancelReason = taskDetail.getByRole('textbox', { name: 'Reason for this task change', exact: true });
       const cancelButton = taskDetail.getByRole('button', { name: 'Cancel task', exact: true });
       await expect(cancelReason).toBeVisible();
       await expect(cancelButton).toHaveAttribute('aria-disabled', 'true');
@@ -2339,6 +2432,7 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
       await page.keyboard.press('Enter');
       await expect(taskDetail.locator('.pm-chat__task-cancel-status')).toContainText('This task is cancelled.');
       await expect(cancelReason).not.toBeVisible();
+      await expect(taskDetail.getByRole('button', { name: 'Reopen task', exact: true })).not.toBeVisible();
       const afterCancel = JSON.parse(readFileSync(statePath, 'utf8'));
       const beforeConfirmedCancel = JSON.parse(competingBytes);
       expect(afterCancel.revision).toBe(competingUpdate.revision + 1);

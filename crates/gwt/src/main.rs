@@ -3556,6 +3556,7 @@ mod tests {
         assert_eq!(wire["notification_transition"], "needs_human");
         assert_eq!(wire["notification_transition_id"], "source-transition");
         let status = gwt::IssueMonitorStatusView {
+            event_history: Vec::new(),
             max_active_agents_scope: "machine".to_string(),
             agent_roster_capacity: None,
             agent_roster_revision: None,

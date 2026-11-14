@@ -21,6 +21,7 @@ function fixture({ tasksDefault = false, onOpenTerminal } = {}) {
   let model;
   const view = createPmChat({ document, root, sessionId: 'session', onOpenTerminal,
     onTaskCancel: reason => { const request = model.requestPmTaskCancel('pm', reason); if (request) sent.push(request); },
+    onTaskReopen: reason => { const request = model.requestPmTaskReopen('pm', reason); if (request) sent.push(request); },
     onDecisionsWaiting: decisions => waiting.push(decisions),
     onReviewAttention: items => reviews.push(items),
     onTaskDetail: key => { const request = model.requestPmTaskDetail('pm', key); if (request) sent.push(request); },
@@ -86,6 +87,69 @@ const selectedDetail = () => ({ status: 'pending', original: bounded('Exact <ori
 const detailReply = (request, extra = {}) => ({ kind: 'pm_request_task', id: 'pm', request_id: request.request_id,
   result: { state: 'detail', key: request.task_key, revision: 4, detail: selectedDetail(), ...extra } });
 
+test('Task Reopen requires fresh completed details and matches its own action receipt', () => {
+  const { model, update } = fixture();
+  assert.equal(typeof model.requestPmTaskReopen, 'function');
+  update([], null, { request_tasks: taskOverview([trackedTask('one', { status: 'completed' })]) });
+  const read = model.requestPmTaskDetail('pm', 'one');
+  assert.equal(model.requestPmTaskReopen('pm', 'Review again'), null);
+  model.applyPmWindowReceiveEvent(detailReply(read));
+  assert.equal(model.requestPmTaskReopen('pm', 'Review again'), null, 'saved pending detail wins over completed overview');
+  const completed = { ...selectedDetail(), status: 'completed' };
+  model.applyPmWindowReceiveEvent(detailReply(model.requestPmTaskDetail('pm', 'one'), { detail: completed }));
+  assert.equal(model.requestPmTaskReopen('pm', '  '), null);
+  const request = model.requestPmTaskReopen('pm', 'Review the original outcome again');
+  assert.equal(request.kind, 'reopen_pm_request_task');
+  assert.equal(request.task_key, 'one');
+  assert.deepEqual(request.request, { operation_id: request.request.operation_id, expected_revision: 4,
+    task_id: '', reason: 'Review the original outcome again' });
+  assert.equal(model.requestPmTaskCancel('pm', 'Cancel instead'), null, 'one shared pending mutation');
+  assert.equal(model.requestPmTaskReopen('pm', 'Duplicate'), null);
+  const reply = { kind: 'pm_request_task', id: 'pm', request_id: request.request_id,
+    result: { state: 'ready', receipt: { action: 'reopen', operation_id: request.request.operation_id, revision: 5 } } };
+  model.applyPmWindowReceiveEvent({ ...reply, result: { ...reply.result, receipt: { ...reply.result.receipt, action: 'cancel' } } });
+  assert.equal(model.readPmWindowState().windows.pm.taskMutation.status, 'pending');
+  assert.equal(model.readPmWindowState().windows.pm.taskDetail.data.status, 'completed', 'never optimistic');
+  model.applyPmWindowReceiveEvent(reply);
+  assert.equal(model.readPmWindowState().windows.pm.taskMutation.status, 'recorded');
+  assert.equal(model.readPmWindowState().windows.pm.taskDetail.stale, true);
+  assert.equal(model.requestPmTaskReopen('pm', 'Old detail'), null);
+  model.applyPmWindowReceiveEvent(detailReply(model.requestPmTaskDetail('pm', 'one'), { revision: 5, detail: completed }));
+  const retry = model.requestPmTaskReopen('pm', 'Reread before retrying');
+  model.markPmTaskMutationUnavailable('pm', retry.request_id);
+  model.applyPmWindowReceiveEvent({ ...reply, request_id: retry.request_id,
+    result: { ...reply.result, receipt: { ...reply.result.receipt, operation_id: retry.request.operation_id, revision: 6 } } });
+  assert.equal(model.readPmWindowState().windows.pm.taskMutation.status, 'error', 'late receipt cannot confirm a timed-out action');
+  model.bindPmWindowState('pm', 'replacement');
+  assert.equal(model.readPmWindowState().windows.pm.taskMutation, null);
+});
+
+test('completed Task Reopen exposes a labelled reason and retains drafts on conflict', () => {
+  const { model, update, root, sent } = fixture();
+  update([], null, { request_tasks: taskOverview([trackedTask('one', { status: 'completed' })]) });
+  const read = model.requestPmTaskDetail('pm', 'one');
+  model.applyPmWindowReceiveEvent(detailReply(read, { detail: { ...selectedDetail(), status: 'completed' } }));
+  const reopen = [...root.querySelectorAll('button')].find(node => node.textContent === 'Reopen task');
+  assert.ok(reopen);
+  assert.equal(reopen.hidden, false);
+  reopen.click();
+  assert.equal(sent.length, 0);
+  const reason = root.querySelector('[aria-label="Reason for this task change"]');
+  reason.value = 'The original outcome is not met';
+  reason.dispatchEvent(new root.ownerDocument.defaultView.Event('input'));
+  root.querySelector('.pm-chat__draft').value = 'Keep my conversation draft';
+  reopen.click();
+  reopen.click();
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].kind, 'reopen_pm_request_task');
+  model.applyPmWindowReceiveEvent({ kind: 'pm_request_task', id: 'pm', request_id: sent[0].request_id,
+    result: { state: 'error', code: 'conflict', message: 'The task changed. Reload details.' } });
+  assert.equal(reason.value, 'The original outcome is not met');
+  assert.equal(root.querySelector('.pm-chat__draft').value, 'Keep my conversation draft');
+  assert.equal(reopen.getAttribute('aria-disabled'), 'true');
+  assert.match(root.querySelector('.pm-chat__task-cancel-status').textContent, /task changed/);
+});
+
 test('Task cancellation requires a fresh selected read and correlates only its own receipt', () => {
   const { model, update } = fixture();
   assert.equal(typeof model.requestPmTaskCancel, 'function');
@@ -106,12 +170,12 @@ test('Task cancellation requires a fresh selected read and correlates only its o
     result: { state: 'ready', revision: 5, task: { status: 'cancelled' },
       receipt: { action: 'cancel', operation_id: request.request.operation_id, revision: 5 } } };
   model.applyPmWindowReceiveEvent({ ...reply, request_id: request.request_id + 1 });
-  assert.equal(model.readPmWindowState().windows.pm.taskCancel.status, 'pending');
+  assert.equal(model.readPmWindowState().windows.pm.taskMutation.status, 'pending');
   model.applyPmWindowReceiveEvent({ ...reply, result: { ...reply.result, receipt: { ...reply.result.receipt, operation_id: 'other' } } });
-  assert.equal(model.readPmWindowState().windows.pm.taskCancel.status, 'pending');
-  model.markPmTaskCancelUnavailable('pm', request.request_id);
+  assert.equal(model.readPmWindowState().windows.pm.taskMutation.status, 'pending');
+  model.markPmTaskMutationUnavailable('pm', request.request_id);
   model.applyPmWindowReceiveEvent(reply);
-  assert.equal(model.readPmWindowState().windows.pm.taskCancel.status, 'error');
+  assert.equal(model.readPmWindowState().windows.pm.taskMutation.status, 'error');
   assert.equal(model.readPmWindowState().windows.pm.taskDetail.stale, true);
   assert.equal(model.readPmWindowState().windows.pm.taskDetail.data.status, 'pending', 'never optimistic');
   assert.equal(model.requestPmTaskCancel('pm', 'Retry'), null);
@@ -123,11 +187,11 @@ test('Task cancellation requires a fresh selected read and correlates only its o
   assert.equal(model.readPmWindowState().windows.pm.requestTasksError, 'The list read failed');
   model.applyPmWindowReceiveEvent({ ...reply, request_id: retry.request_id,
     result: { ...reply.result, revision: 6, receipt: { ...reply.result.receipt, operation_id: retry.request.operation_id, revision: 6 } } });
-  assert.equal(model.readPmWindowState().windows.pm.taskCancel.status, 'recorded');
+  assert.equal(model.readPmWindowState().windows.pm.taskMutation.status, 'recorded');
   assert.equal(model.readPmWindowState().windows.pm.taskDetail.stale, true);
   model.bindPmWindowState('pm', 'replacement');
   model.applyPmWindowReceiveEvent(reply);
-  assert.equal(model.readPmWindowState().windows.pm.taskCancel, null);
+  assert.equal(model.readPmWindowState().windows.pm.taskMutation, null);
 });
 
 test('Task detail cancellation keeps its reason and chat draft while stale and exposes labelled controls', async () => {
@@ -135,7 +199,7 @@ test('Task detail cancellation keeps its reason and chat draft while stale and e
   update([], null, { request_tasks: taskOverview([trackedTask('one')]) });
   const read = model.requestPmTaskDetail('pm', 'one');
   model.applyPmWindowReceiveEvent(detailReply(read));
-  const reason = root.querySelector('[aria-label="Reason for cancelling this task"]');
+  const reason = root.querySelector('[aria-label="Reason for this task change"]');
   assert.ok(reason, 'the selected detail exposes a labelled reason field');
   const cancel = [...root.querySelectorAll('button')].find(node => node.textContent === 'Cancel task');
   cancel.click();
