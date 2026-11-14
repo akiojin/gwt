@@ -1194,7 +1194,6 @@ exit 67
     recordReentryGrid = true;
     diagnosticPhase = "reentry";
     await page.locator("#op-pm-entry").click();
-    let quotaWarningDismissed = false;
     // The owner transport can replace streamed bytes with a snapshot. A fresh
     // applied snapshot or complete paint establishes the baseline; later
     // destructive or unfinished output must not be hidden by an older one.
@@ -1238,15 +1237,8 @@ exit 67
             && (window as any).__ownedPmConnection?.readyState === 1,
         };
       }, { id, after: reentryBaseline.sequence, snapshotsBefore: reentryBaseline.snapshotsBefore });
-      if (rendered.quotaWarning && !quotaWarningDismissed) {
-        // Escape closes this native warning without accepting its model switch.
-        quotaWarningDismissed = true;
-        recordDiagnostic({ kind: "native-quota-dialog", action: "escape", id });
-        const configBeforeDismissal = await readFile(configPath, "utf8");
-        await input.focus();
-        await page.keyboard.press("Escape");
-        expect(await readFile(configPath, "utf8")).toBe(configBeforeDismissal);
-        expect(ownedNative()).toBe(true);
+      if (rendered.quotaWarning) {
+        throw new Error("Native Codex quota warning: stop verification and report without retry");
       }
       return {
         fresh: rendered.fresh && rendered.sameTerminal && rendered.sameConnection && !!reentryGrid
@@ -1331,7 +1323,7 @@ exit 67
     await expect.poll(buffer).not.toContain(canary);
     expect(unexpectedTool, "no native tool call during the owned turn").toBe(false);
     expect((await rows()).filter(row => row.type === "event_msg" && row.payload?.type === "task_started"),
-      "native dialog dismissal must not start another turn").toHaveLength(1);
+      "renderer acceptance must retain one native turn").toHaveLength(1);
     if (monitorError) throw monitorError;
     const finalActivity = await activity();
     const finalRuntime = await runtime();
