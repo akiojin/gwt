@@ -375,9 +375,13 @@ Raw artifacts remain under `.gwt/6979-soak/after-clients-20261114-120` and
 instrumented Python writes and normalized Chroma payload; physical OS writes
 remain unmeasured.
 
-The collector now audits every native rebuild in addition to terminal broker
-claims, because Issue rebuilds can finish outside a terminal broker claim.
-Both boundaries retain the unchanged 5,000ms threshold; no timing is removed.
+The private harness used for these short diagnostics audits every native
+rebuild in addition to terminal broker claims, because Issue rebuilds can
+finish outside a terminal broker claim. That harness checks both boundaries
+against the unchanged 5,000ms threshold; no timing is removed. The committed
+`issue-6979-refresh.py --check-results` still gates terminal broker claims
+only. Its result alone does not prove the whole-owner native refresh timing
+criterion; the matched after-hour still requires the additional native audit.
 
 Deterministic regressions prove three local reductions: empty or entirely
 inherited staging no longer opens unused vector readers; Files/Docs GC readers
