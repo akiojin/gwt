@@ -494,6 +494,66 @@ test.describe("Profile environment variable grid", () => {
       await info.attach("Profiles live", { path: screenshot, contentType: "image/png" });
     });
   });
+
+  // SPEC #6476 T-005pf (AC-1): on a phone the Profile controls kept their
+  // desktop sizes and the five-column environment grid needed ~440px.
+  test.describe("Profile touch targets", () => {
+    test.use({ hasTouch: true });
+    test("Profile controls are 44px tap targets and the editor fits a phone", async ({ page }, info) => {
+      await installEmbeddedRoutes(page);
+      await installProfileBackend(page);
+      await page.goto(APP_URL);
+      const profile = page.locator(".surface-profile");
+      await expect(profile.getByText("Environment Variables")).toBeVisible({ timeout: 10_000 });
+      const controls = ".surface-profile .profile-root :is(button, input, select, textarea):visible";
+      const measure = () => page.locator(controls).evaluateAll(nodes => nodes.map(node => {
+        const box = node.getBoundingClientRect();
+        return { name: node.getAttribute("aria-label") || node.textContent!.trim().slice(0, 24) || node.className,
+          left: box.left, right: box.right, width: box.width, height: box.height, minHeight: getComputedStyle(node).minHeight };
+      }));
+      const desktop = (await measure()).map(control => control.minHeight);
+      expect(desktop).not.toContain("44px");
+      await page.setViewportSize({ width: 601, height: 900 });
+      await expect.poll(async () => (await measure()).map(control => control.minHeight),
+        { message: "601px keeps the desktop control sizes" }).toEqual(desktop);
+      const pathRow = profile.locator(".profile-env-row", { hasText: "PATH" });
+      expect(await pathRow.evaluate(node => getComputedStyle(node).gridTemplateColumns.split(" ").length),
+        "601px keeps the five-column environment grid").toBe(5);
+      const assertOnce = async (width: number) => {
+        const viewport = await page.evaluate(() => document.documentElement.clientWidth);
+        const measured = await measure();
+        expect(measured.map(control => control.name)).toEqual(expect.arrayContaining(
+          ["New profile", "Refresh profiles", "+ Add variable"]));
+        for (const control of measured) {
+          expect(control.height, `${control.name} height at ${width}px`).toBeGreaterThanOrEqual(44);
+          expect(control.width, `${control.name} width at ${width}px`).toBeGreaterThanOrEqual(44);
+          expect(control.left, `${control.name} is on screen at ${width}px`).toBeGreaterThanOrEqual(0);
+          expect(control.right, `${control.name} is on screen at ${width}px`).toBeLessThanOrEqual(viewport);
+        }
+        for (const selector of [".profile-root", ".profile-env-grid"]) {
+          expect(await profile.locator(selector).evaluate(node => node.scrollWidth - node.clientWidth),
+            `${selector} must not scroll sideways at ${width}px`).toBeLessThanOrEqual(0);
+        }
+      };
+      for (const [width, height] of [[320, 568], [390, 844]]) {
+        await page.setViewportSize({ width, height });
+        await expect(() => assertOnce(width)).toPass({ timeout: 5_000 });
+        await page.screenshot({ path: info.outputPath(`profile-${width}.png`) });
+        expect(await profile.locator(".profile-env-grid").evaluate(node => node.scrollHeight > node.clientHeight),
+          `the variable grid keeps its own scroll at ${width}px`).toBe(true);
+        const value = pathRow.locator('input[aria-label^="Profile value"]');
+        await value.scrollIntoViewIfNeeded();
+        const mode = (await pathRow.locator("select").boundingBox())!;
+        const input = (await value.boundingBox())!;
+        expect(Math.abs(mode.y - input.y), `mode and value share a row at ${width}px`).toBeLessThan(2);
+        await value.tap();
+        await value.fill(`/phone/${width}`);
+        await expect(pathRow.locator("select")).toHaveValue("override");
+        await expect(pathRow.locator(".profile-env-result")).toHaveText(`/phone/${width}`);
+        await page.screenshot({ path: info.outputPath(`profile-env-${width}.png`) });
+      }
+    });
+  });
 });
 
 async function waitForProfileIdle(profile) {

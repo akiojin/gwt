@@ -3311,6 +3311,24 @@ body {
   background: color-mix(in oklab, var(--color-state-active) 12%, transparent);
 }
 
+/* SPEC #6476 T-005pf: on a phone the Profile list squeezed the editor to about
+   100px, the five-column environment grid needed 440px, and the controls were
+   24-36px. Stack the list above the editor, lay each variable out as a
+   two-column card, and make the controls 44px tap targets; the surface
+   scrolls vertically while the variable grid keeps its own scroll. */
+@media (max-width: 600px) {
+  .profile-root { overflow-y: auto; }
+  .profile-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto; flex: 0 0 auto; }
+  .profile-list-pane { border-right: 0; border-bottom: 1px solid var(--color-border); }
+  .profile-editor-pane { overflow: visible; }
+  .profile-env-grid { max-height: 60vh; }
+  .profile-env-grid-head { display: none; }
+  .profile-env-grid-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .profile-env-result { grid-column: 1 / -1; }
+  .profile-root :is(button, input, select) { min-height: 44px; }
+  .profile-root .icon-button { min-width: 44px; }
+}
+
 .board-chat-shell {
   flex: 1;
   min-height: 0;
