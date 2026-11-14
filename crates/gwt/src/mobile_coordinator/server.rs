@@ -837,6 +837,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn host_registration_closes_oversized_messages_and_reports_capacity_as_503() {
+        use futures_util::{SinkExt as _, StreamExt as _};
+        use tokio_tungstenite::tungstenite::Message;
+        let mut fixture = Fixture::new();
+        let wall = real_wall();
+        let valid = fixture.issue_token(wall);
+        let server = fixture.start_at(wall).await;
+        let addr = server.local_addr().unwrap();
+        let sessions = Arc::clone(&server.sessions);
+        let (shutdown, signal) = oneshot::channel();
+        let task = tokio::spawn(server.serve_until(async move {
+            let _ = signal.await;
+        }));
+        let auth = [("authorization", format!("Bearer {valid}"))];
+        // A valid renew padded with JSON whitespace to exactly `len` bytes.
+        let padded_renew = |generation: Uuid, nonce: Uuid, len: usize| {
+            let mut text =
+                json!({"type":"renew","generation":generation,"nonce":nonce}).to_string();
+            text.push_str(&" ".repeat(len - text.len()));
+            text
+        };
+
+        let mut socket = open_host(&fixture, addr, &auth).await.unwrap();
+        let registered = next_json(&mut socket).await;
+        let generation: Uuid = serde_json::from_value(registered["generation"].clone()).unwrap();
+        let nonce = Uuid::new_v4();
+        bounded(socket.send(Message::text(padded_renew(generation, nonce, 64 * 1024))))
+            .await
+            .unwrap();
+        let renewed = next_json(&mut socket).await;
+        assert_eq!(
+            (&renewed["type"], &renewed["nonce"]),
+            (&json!("renewed"), &json!(nonce))
+        );
+        assert_eq!(live(&sessions), 1);
+        let _ = bounded(socket.send(Message::text(padded_renew(
+            generation,
+            Uuid::new_v4(),
+            64 * 1024 + 1,
+        ))))
+        .await;
+        assert!(matches!(
+            bounded(socket.next()).await,
+            None | Some(Err(_)) | Some(Ok(Message::Close(_)))
+        ));
+        wait_until_closed(&sessions).await;
+
+        let mut open = Vec::new();
+        for _ in 0..8 {
+            let mut socket = open_host(&fixture, addr, &auth).await.unwrap();
+            assert_eq!(next_json(&mut socket).await["type"], "registered");
+            open.push(socket);
+        }
+        assert_eq!(open_host(&fixture, addr, &auth).await.err(), Some(503));
+        assert_eq!(live(&sessions), 8);
+        bounded(open.pop().unwrap().close(None)).await.unwrap();
+        bounded(async {
+            while live(&sessions) != 7 {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        })
+        .await;
+        let mut socket = open_host(&fixture, addr, &auth).await.unwrap();
+        assert_eq!(next_json(&mut socket).await["type"], "registered");
+        assert_eq!(live(&sessions), 8);
+
+        shutdown.send(()).unwrap();
+        bounded(task).await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
     async fn shutdown_closes_open_host_registrations_and_releases_the_registry() {
         use futures_util::StreamExt as _;
         let mut fixture = Fixture::new();
