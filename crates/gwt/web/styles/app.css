@@ -5161,9 +5161,14 @@ body {
    sizes on a phone. Checkboxes and toggles sit inside a label, so the label is
    the target; 24px icon buttons also need the width. */
 @media (max-width: 600px) {
-  .modal-shell :is(button, select, textarea, summary, [role="button"], input:not([type="checkbox"])),
+  .modal-shell :is(button, select, textarea, [role="button"], input:not([type="checkbox"])),
   .modal-shell label:has(input[type="checkbox"]) {
     min-height: 44px;
+  }
+
+  /* A summary stays a list-item (keeps its marker), so center it by line. */
+  .modal-shell summary {
+    line-height: 44px;
   }
 
   .modal-shell :is(.icon-button, .text-button) {
@@ -6259,7 +6264,6 @@ body {
     flex: 1 1 0;
   }
 }
-
 
 .project-picker,
 .project-onboarding {
