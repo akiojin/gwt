@@ -13,6 +13,7 @@ use sha2::{Digest, Sha256};
 use std::time::{Duration, Instant};
 use subtle::ConstantTimeEq;
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 const MAX_TTL_SECS: u64 = 300;
 const MAX_HOST_PENDING: usize = 8;
@@ -49,15 +50,17 @@ pub enum InviteError {
 /// Host-generated secret. Deliberately not Debug, Clone or serializable.
 /// The Host must generate a fresh value for each pairing attempt. Never put it
 /// in logs or persistent storage. Only its digest is retained by the registry.
-pub struct InviteSecret([u8; 32]);
+/// The bytes are erased when the value is dropped, and are generated in place
+/// so no unzeroized local copy is left behind.
+pub struct InviteSecret(Zeroizing<[u8; 32]>);
 
 impl InviteSecret {
     pub fn generate() -> Result<Self, InviteError> {
-        let mut bytes = [0; 32];
+        let mut secret = Self(Zeroizing::new([0; 32]));
         SystemRandom::new()
-            .fill(&mut bytes)
+            .fill(secret.0.as_mut())
             .map_err(|_| InviteError::Unavailable)?;
-        Ok(Self(bytes))
+        Ok(secret)
     }
 
     pub fn secret_bytes(&self) -> &[u8; 32] {
@@ -416,7 +419,12 @@ mod tests {
             .enumerate()
         {
             registry
-                .register_invite(InviteSecret([n as u8; 32]).secret_bytes(), target, 300, now)
+                .register_invite(
+                    InviteSecret(Zeroizing::new([n as u8; 32])).secret_bytes(),
+                    target,
+                    300,
+                    now,
+                )
                 .unwrap();
         }
         let connection = Uuid::new_v4();
@@ -434,7 +442,12 @@ mod tests {
             Err(InviteError::Unauthorized)
         );
         assert_eq!(
-            registry.register_invite(InviteSecret([1; 32]).secret_bytes(), &scope, 300, now),
+            registry.register_invite(
+                InviteSecret(Zeroizing::new([1; 32])).secret_bytes(),
+                &scope,
+                300,
+                now
+            ),
             Err(InviteError::AlreadyRegistered)
         );
         assert!(registry
@@ -495,7 +508,12 @@ mod tests {
         let scope = invite_scope();
         for n in 0..8 {
             registry
-                .register_invite(InviteSecret([n; 32]).secret_bytes(), &scope, 300, now)
+                .register_invite(
+                    InviteSecret(Zeroizing::new([n; 32])).secret_bytes(),
+                    &scope,
+                    300,
+                    now,
+                )
                 .unwrap();
         }
         let changed = InviteScope {
@@ -505,39 +523,74 @@ mod tests {
             ..scope.clone()
         };
         assert_eq!(
-            registry.register_invite(InviteSecret([8; 32]).secret_bytes(), &changed, 300, now),
+            registry.register_invite(
+                InviteSecret(Zeroizing::new([8; 32])).secret_bytes(),
+                &changed,
+                300,
+                now
+            ),
             Err(InviteError::HostCapacity)
         );
         registry
             .claim_invite(&[0; 32], &scope, Uuid::new_v4(), now)
             .unwrap();
         registry
-            .register_invite(InviteSecret([8; 32]).secret_bytes(), &changed, 300, now)
+            .register_invite(
+                InviteSecret(Zeroizing::new([8; 32])).secret_bytes(),
+                &changed,
+                300,
+                now,
+            )
             .unwrap();
 
         let mut full = InviteRegistry::new(now);
         let scopes: Vec<_> = (0..64).map(|_| invite_scope()).collect();
         for (n, scope) in scopes.iter().enumerate() {
-            full.register_invite(InviteSecret([n as u8; 32]).secret_bytes(), scope, 300, now)
-                .unwrap();
+            full.register_invite(
+                InviteSecret(Zeroizing::new([n as u8; 32])).secret_bytes(),
+                scope,
+                300,
+                now,
+            )
+            .unwrap();
         }
         let connection = Uuid::new_v4();
         full.claim_invite(&[0; 32], &scopes[0], connection, now)
             .unwrap();
         assert_eq!(
-            full.register_invite(InviteSecret([64; 32]).secret_bytes(), &scope, 300, now),
+            full.register_invite(
+                InviteSecret(Zeroizing::new([64; 32])).secret_bytes(),
+                &scope,
+                300,
+                now
+            ),
             Err(InviteError::Capacity)
         );
         full.close_connection(connection, now).unwrap();
         assert_eq!(
-            full.register_invite(InviteSecret([64; 32]).secret_bytes(), &scope, 300, now),
+            full.register_invite(
+                InviteSecret(Zeroizing::new([64; 32])).secret_bytes(),
+                &scope,
+                300,
+                now
+            ),
             Err(InviteError::Capacity)
         );
         let expired = now + Duration::from_secs(300);
-        full.register_invite(InviteSecret([64; 32]).secret_bytes(), &scope, 300, expired)
-            .unwrap();
+        full.register_invite(
+            InviteSecret(Zeroizing::new([64; 32])).secret_bytes(),
+            &scope,
+            300,
+            expired,
+        )
+        .unwrap();
         registry
-            .register_invite(InviteSecret([9; 32]).secret_bytes(), &scope, 300, expired)
+            .register_invite(
+                InviteSecret(Zeroizing::new([9; 32])).secret_bytes(),
+                &scope,
+                300,
+                expired,
+            )
             .unwrap();
     }
 
@@ -597,5 +650,14 @@ mod tests {
                 now + Duration::from_secs(2)
             )
             .is_ok());
+    }
+
+    fn zeroizes_on_drop<T: zeroize::ZeroizeOnDrop>(_: &T) {}
+
+    #[test]
+    fn invite_secret_bytes_are_zeroize_on_drop() {
+        let secret = InviteSecret::generate().unwrap();
+        zeroizes_on_drop(&secret.0);
+        assert_ne!(secret.secret_bytes(), &[0; 32]);
     }
 }
