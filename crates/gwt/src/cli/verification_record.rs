@@ -6207,6 +6207,31 @@ fn verification_caller_authority_error() -> io::Error {
     )
 }
 
+/// Name only the trusted current holder, never caller-supplied binding data.
+pub(crate) fn current_holder_recovery_guidance(
+    worktree: &Path,
+    session_id: Option<&str>,
+) -> String {
+    let Ok(Some(record)) = execution_state::load(worktree) else {
+        return String::new();
+    };
+    if !execution_state::integrity_ok(&record)
+        || session_id == Some(record.primary_session_id.as_str())
+        || record.status == execution_state::ExecutionControlStatus::Completed
+    {
+        return String::new();
+    }
+    format!(
+        " Current holder: Session {} ({} #{}). Inspect execution.status; to transfer ownership, \
+         use execution.adopt with a non-empty params.reason, then run verify.plan / verify.run. \
+         For Blocked records, stop any live holder before adoption and use execution.reopen \
+         after fresh verification. Exact-unbound Host Sessions must use execution.continue instead.",
+        record.primary_session_id,
+        record.owner_kind.as_str(),
+        record.owner_number,
+    )
+}
+
 /// Whether `verify.plan` / `verify.run` would accept `session_id` right now.
 ///
 /// `execution.status` advertises the verification recoveries through this
@@ -6273,7 +6298,6 @@ fn snapshot_verification_caller_authority_with_session_loader(
     if !execution_state::integrity_ok(&execution)
         || !execution_state::generation_ledger_integrity_ok(&ledger)
         || ledger.current_effective_status() != Some(execution.status)
-        || execution.primary_session_id != session_id
         || !matches!(
             execution.status,
             execution_state::ExecutionControlStatus::Active
@@ -6281,6 +6305,16 @@ fn snapshot_verification_caller_authority_with_session_loader(
         )
     {
         return Err(verification_caller_authority_error());
+    }
+    if execution.primary_session_id != session_id {
+        return Err(io::Error::new(
+            ErrorKind::PermissionDenied,
+            format!(
+                "{}{}",
+                verification_caller_authority_error(),
+                current_holder_recovery_guidance(worktree, Some(session_id)),
+            ),
+        ));
     }
     gwt_agent::validate_session_id_path_component(session_id)
         .map_err(|_| verification_caller_authority_error())?;
@@ -6766,8 +6800,8 @@ fn attach_board_decision_for_caller(
 /// current generation, when this worktree has generation authority.
 ///
 /// Legacy flat ECRs and unmanaged worktrees intentionally remain outside this
-/// gate. Callers receive only a boolean-free success/error result so no
-/// Session or binding identity can leak into diagnostics.
+/// gate. Diagnostics name only the trusted holder, never caller-supplied
+/// Session or binding capabilities.
 pub(crate) fn authenticate_current_generation_caller(
     worktree: &Path,
     session_id: Option<&str>,
@@ -13304,6 +13338,15 @@ fn default_integration_test_builds_a_guarded_binary() {
         )
         .expect_err("foreign Session must not stamp the current generation identity");
         assert_verification_authority_denial(&error, "session-foreign-authority-secret");
+        assert!(error.to_string().contains("session-current-authority"));
+        assert!(error.to_string().contains("execution.adopt"));
+        let pr_error = snapshot_current_generation_caller_binding(
+            dir.path(),
+            Some("session-foreign-authority-secret"),
+        )
+        .expect_err("a foreign PR caller must receive the same recovery guidance");
+        assert!(pr_error.to_string().contains("session-current-authority"));
+        assert!(pr_error.to_string().contains("execution.adopt"));
         assert!(
             load_plan(dir.path())
                 .expect("inspect rejected plan")
@@ -13358,6 +13401,8 @@ fn default_integration_test_builds_a_guarded_binary() {
         .expect_err("foreign Session must be rejected before command dispatch");
 
         assert_verification_authority_denial(&error, "session-foreign-run-authority-secret");
+        assert!(error.to_string().contains("session-current-run-authority"));
+        assert!(error.to_string().contains("execution.adopt"));
         assert!(
             !marker.exists(),
             "foreign verification command must never be dispatched"
