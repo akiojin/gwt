@@ -1181,7 +1181,7 @@ test.describe("Issue queue real backend launch", () => {
         expect(() => process.kill(launch.pid, 0)).not.toThrow();
       }
       await expect.poll(async () => (await activity())?.agents?.length).toBe(2);
-      await expect.poll(async () => (await preferences()).agent_roster.members
+      await expect.poll(async () => (await readCanonicalRoster(page)).members
         .filter((member: any) => launches.some(launch => launch.gwt_session_id === member.assignment?.session_id)).length).toBe(2);
       await sendLiveGwtEvent(page, { kind: "issue_monitor_queue_push", issue_numbers: [45] });
       await expect(issues.locator('[data-queue-column="queued"] [data-issue-number="45"]')).toBeVisible();
@@ -1190,7 +1190,7 @@ test.describe("Issue queue real backend launch", () => {
       const schedule = JSON.parse(reply.output);
       const automatic = schedule.members.find((member: any) => member.issues.some((issue: any) => issue.issue_number === 45));
       expect(automatic).toBeTruthy();
-      const selected = (await preferences()).agent_roster.members.find((member: any) =>
+      const selected = (await readCanonicalRoster(page)).members.find((member: any) =>
         member.enabled && member.assignment && member.agent_member_id !== automatic.agent_member_id);
       expect(selected).toBeTruthy();
       const selectedLaunch = launches.find(launch => launch.gwt_session_id === selected.assignment.session_id)!;
@@ -1214,7 +1214,7 @@ test.describe("Issue queue real backend launch", () => {
       await expect.poll(() => exited(otherLaunch.pid), { timeout: 60_000 }).toBe(true);
       await expect.poll(async () => (await activity())?.agents?.map((agent: any) => agent.session_id))
         .toEqual([selectedLaunch.gwt_session_id]);
-      await expect.poll(async () => (await preferences()).agent_roster.members
+      await expect.poll(async () => (await readCanonicalRoster(page)).members
         .find((member: any) => member.agent_member_id === automatic.agent_member_id)?.assignment).toBeNull();
       const previousScan = (await preferences()).last_scan_at;
       await expect.poll(async () => {
@@ -1224,7 +1224,7 @@ test.describe("Issue queue real backend launch", () => {
       expect((await preferences()).enabled).toBe(true);
       expect((await preferences()).autonomous_mode).toBe(true);
       expect(await reservation()).toEqual(fixed);
-      expect((await preferences()).agent_roster.members.find((member: any) =>
+      expect((await readCanonicalRoster(page)).members.find((member: any) =>
         member.agent_member_id === selected.agent_member_id).assignment).toEqual(selected.assignment);
       expect(() => process.kill(selectedLaunch.pid, 0)).not.toThrow();
       const queued = issues.locator('[data-queue-column="queued"] [data-issue-number="45"]');
@@ -1279,8 +1279,8 @@ test.describe("Issue queue real backend launch", () => {
         .filter((snapshot: any) => snapshot?.project_key === location.pathname.split("/")[2])
         .at(-1));
     const exited = (pid: number) => { try { process.kill(pid, 0); return false; } catch { return true; } };
-    const sourceClaims = () => fixture.requests.filter(request => request.method === "POST"
-      && request.url === "/repos/fixture/queue/issues/43/comments").length;
+    const sourceClaims = () => fixture.comments.filter(comment =>
+      comment.body.startsWith("<!-- gwt-auto-improve-claim v1 -->")).length;
     const hold = async () => (await preferences()).failed_issues?.find((entry: any) => entry.issue_number === 43);
     const reason = "T94418 explicit operator hold";
     try {
@@ -1304,6 +1304,14 @@ test.describe("Issue queue real backend launch", () => {
       expect(() => process.kill(source.pid, 0)).not.toThrow();
       const beforeClaims = sourceClaims();
       expect(beforeClaims).toBeGreaterThan(0);
+      const projectKey = await page.evaluate(() => location.pathname.split("/")[2]);
+      await expect.poll(async () => {
+        const confirmation = (await preferences()).launch_confirmations?.[43];
+        const workspace = JSON.parse(await readFile(join(fixture.home, ".gwt", "projects", projectKey, "workspace.json"), "utf8"));
+        const rows = workspace.windows.filter((row: any) => row.session_id === source.gwt_session_id);
+        return !!confirmation?.claim_id && !!confirmation?.delivery_id && rows.length === 1
+          && confirmation.window_id === `${projectKey}::${rows[0].id}`;
+      }, { timeout: 30_000, message: "the exact physical launch has a durable Monitor receipt" }).toBe(true);
       const statusReply = fixture.fixtureOperation("issue.monitor.status");
       expect(statusReply.ok, JSON.stringify(statusReply)).toBe(true);
       const identity = JSON.parse(statusReply.output).inbox.find((row: any) => row.issue_number === 43);
