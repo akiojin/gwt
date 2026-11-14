@@ -8790,6 +8790,20 @@ impl OwnerState {
                     session,
                 )
             });
+            wire.pm_activity = wire.is_pm.then(|| {
+                crate::pm_registry::load_pm_prefs(&crate::pm_registry::pm_prefs_path_for_repo_path(
+                    &self.root,
+                ))
+                .ok()
+                .and_then(|prefs| {
+                    crate::pm_activity::for_window(
+                        &prefs,
+                        wire.session_id.as_deref(),
+                        wire.runtime_started_at_ms,
+                    )
+                })
+                .unwrap_or(crate::pm_activity::PmActivity::Starting)
+            });
             let failed_diagnostic = wire
                 .session_id
                 .as_deref()

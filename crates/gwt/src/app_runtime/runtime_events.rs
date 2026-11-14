@@ -1266,6 +1266,31 @@ impl AppRuntime {
         let Some(window_id) = window_id else {
             return events;
         };
+        if event.kind == gwt::RuntimeHookEventKind::CoordinationEvent
+            && event.source_event.as_deref()
+                == Some(gwt::daemon_runtime::PM_STATUS_CHANGED_SOURCE_EVENT)
+            && self
+                .active_agent_sessions
+                .get(&window_id)
+                .is_some_and(|session| {
+                    event.gwt_session_id.as_deref() == Some(session.session_id.as_str())
+                })
+        {
+            if let Some(context) = self
+                .issue_monitor_project_root_for_window(&window_id)
+                .and_then(|root| self.project_context_for_root(&root))
+            {
+                if event.gwt_session_id.as_deref().is_some_and(|session| {
+                    gwt::pm_registry::session_is_registered_pm(
+                        &gwt::pm_registry::pm_prefs_path_for_repo_path(&context.project_root),
+                        session,
+                    )
+                }) {
+                    events.push(self.workspace_state_broadcast(&context));
+                }
+            }
+            return events;
+        }
         if event.source_event.as_deref() == Some("UserPromptSubmit") {
             // An exact owner ACK can release retained input without a status edge.
             self.flush_pending_pm_wake(&window_id);

@@ -1117,6 +1117,7 @@ mod tests {
                 settings: crate::pm_registry::PmSettings::default(),
                 worktree_freshness: None,
                 start_block: None,
+                title_activity: None,
             },
         )
         .expect("seed PM registration");

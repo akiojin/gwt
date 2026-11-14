@@ -28,6 +28,28 @@ test.describe("Agent title role and worktree badges", () => {
     expect(errors.get(page), "zero console/page errors").toEqual([]);
   });
 
+  test("Issue #3823 PM titles isolate own operations from worker reports", async ({ page }, info) => {
+    if (!liveBase) await installEmbeddedRoutes(page);
+    await installAgentTitleBadgeBackend(page, undefined, false, false, true);
+    await page.goto(appUrl);
+    await page.locator("#op-pm-entry").click();
+    const pane = page.locator('.workspace-window[data-id="agent-1"]');
+    const title = pane.locator(".title-text");
+    await expect(title).toHaveText("Project Manager · Maple — Starting");
+    await expect(pane.locator(".window-role-badge")).toHaveText("PM");
+    await page.evaluate(() => (window as any).__injectPmTitle("driving_pr", "running"));
+    await expect(title).toHaveText("Project Manager · Maple — Driving PRs");
+    await page.evaluate(() => (window as any).__injectPmTitle("driving_pr", "error"));
+    await expect(title).toHaveText("Project Manager · Maple — Driving PRs");
+    await expect(title).toHaveAttribute("title", "Project Manager · Maple — Driving PRs");
+    await page.evaluate(() => (window as any).__injectPmTitle("reconciling", "idle"));
+    await expect(title).toHaveText("Project Manager · Maple — Reconciling");
+    // A restored runtime has no activity wire value until its own operation.
+    await page.evaluate(() => (window as any).__injectPmTitle(null, "idle"));
+    await expect(title).toHaveText("Project Manager · Maple — Starting");
+    await page.screenshot({ path: info.outputPath("pm-operation-title.png") });
+  });
+
   test("Issue #5478 review title stays distinct from its waiting owner", async ({ page }, info) => {
     if (!liveBase) await installEmbeddedRoutes(page);
     await installAgentTitleBadgeBackend(page, undefined, false, true);
@@ -140,8 +162,9 @@ async function installAgentTitleBadgeBackend(
   primaryAgent = { agentId: "codex", color: "cyan", title: "Codex" },
   identityScenario = false,
   reviewScenario = false,
+  pmScenario = false,
 ) {
-  await page.addInitScript(({ primaryAgentFixture, identityScenario, reviewScenario }) => {
+  await page.addInitScript(({ primaryAgentFixture, identityScenario, reviewScenario, pmScenario }) => {
     (window as any).__gwtPlaywrightTestBridge = true;
     const windows = [
       {
@@ -211,6 +234,11 @@ async function installAgentTitleBadgeBackend(
         tab_group_active: false,
       },
     ];
+    if (pmScenario) {
+      Object.assign(windows[0], { is_pm: true, agent_name: "Maple",
+        dynamic_title: "Other agent: workspace.ensure refused",
+        dynamic_title_detail: "Worker's blocked report", purpose_title: "Other agent's work" });
+    }
     if (reviewScenario) {
       windows[0].purpose_title = "Deliver Issue #42";
       windows[1].title = "Review · Issue #42";
@@ -324,9 +352,16 @@ async function installAgentTitleBadgeBackend(
       workspaceState.workspace.tabs[0].workspace.windows[0].dynamic_title = title;
       window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: workspaceState }));
     };
+    (window as any).__injectPmTitle = (activity: string | null, status: string) => {
+      for (const data of [workspaceState.workspace.tabs[0].workspace.windows[0], windowListState.windows[0]]) {
+        Object.assign(data, { pm_activity: activity, status, title: "Another agent failed",
+          dynamic_title: `Board: another agent is ${status}`, dynamic_title_detail: "Other agent's failure" });
+      }
+      window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: workspaceState }));
+    };
     Object.defineProperty(window, "WebSocket", {
       configurable: true,
       value: FixtureWebSocket,
     });
-  }, { primaryAgentFixture: primaryAgent, identityScenario, reviewScenario });
+  }, { primaryAgentFixture: primaryAgent, identityScenario, reviewScenario, pmScenario });
 }

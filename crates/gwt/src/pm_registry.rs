@@ -431,6 +431,8 @@ impl PmStartBlock {
 pub struct PmPrefs {
     #[serde(default)]
     pub registration: Option<PmRegistration>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_activity: Option<crate::pm_activity::PmActivityRecord>,
     #[serde(default)]
     pub settings: PmSettings,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -5088,6 +5090,33 @@ pub fn save_pm_prefs(path: &Path, prefs: &PmPrefs) -> io::Result<()> {
     with_pm_prefs_lock(path, || save_pm_prefs_unlocked(path, prefs))
 }
 
+/// Keep worker operations and retired PM sessions out of PM window chrome.
+pub(crate) fn record_pm_title_activity(
+    path: &Path,
+    session_id: &str,
+    activity: crate::pm_activity::PmActivity,
+    updated_at_ms: u64,
+) -> io::Result<bool> {
+    with_pm_prefs_lock(path, || {
+        let mut prefs = load_pm_prefs_unlocked(path)?;
+        if session_id.is_empty()
+            || !prefs
+                .registration
+                .as_ref()
+                .is_some_and(|registration| registration.session_id == session_id)
+        {
+            return Ok(false);
+        }
+        prefs.title_activity = Some(crate::pm_activity::PmActivityRecord {
+            session_id: session_id.to_string(),
+            activity,
+            updated_at_ms,
+        });
+        save_pm_prefs_unlocked(path, &prefs)?;
+        Ok(true)
+    })
+}
+
 /// One cross-process read-modify-write transaction under the stable sibling
 /// lock, committing through the durable atomic writer.
 pub fn mutate_pm_prefs<T>(
@@ -5165,6 +5194,7 @@ pub fn try_register_pm(
             None => PmRegisterOutcome::Registered,
         };
         prefs.registration = Some(candidate);
+        prefs.title_activity = None;
         save_pm_prefs_unlocked(path, &prefs)?;
         Ok((prefs, outcome))
     })
@@ -5184,6 +5214,7 @@ pub fn deregister_pm(path: &Path, session_id: &str) -> io::Result<(PmPrefs, bool
             return Ok((prefs, false));
         }
         prefs.registration = None;
+        prefs.title_activity = None;
         save_pm_prefs_unlocked(path, &prefs)?;
         Ok((prefs, true))
     })
