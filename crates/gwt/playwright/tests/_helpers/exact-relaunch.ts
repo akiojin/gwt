@@ -6,6 +6,7 @@ import { homedir, tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import type { TestInfo } from "@playwright/test";
+import { inspectLiveFixtureProcess } from "./process-inspection.mjs";
 
 // Rust's bare-command search on Windows requires a PE executable for git/gh;
 // the provider itself uses the production-supported .cmd launch route.
@@ -569,23 +570,27 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     if (failures.length) throw new AggregateError(failures, failures.map(String).join("; "));
   }
   function processCommand(pid: number) {
-    const result = windows
-      ? spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
-        `[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); (Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}').CommandLine`],
-      { encoding: "utf8", windowsHide: true })
-      : spawnSync("ps", ["-p", String(pid), "-o", "command="], { encoding: "utf8" });
-    if (result.error) throw result.error;
-    if (result.status !== 0 && (windows || result.status !== 1)) throw new Error(`Cannot inspect owned fixture PID ${pid}: ${result.stderr}`);
-    return result.stdout.trim();
+    return inspectLiveFixtureProcess(pid, () => {
+      const result = windows
+        ? spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
+          `[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); (Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}').CommandLine`],
+        { encoding: "utf8", windowsHide: true })
+        : spawnSync("ps", ["-p", String(pid), "-o", "command="], { encoding: "utf8" });
+      if (result.error) throw result.error;
+      if (result.status !== 0 && (windows || result.status !== 1)) throw new Error(`Cannot inspect owned fixture PID ${pid}: ${result.stderr}`);
+      return result.stdout.trim();
+    });
   }
   function processBirth(pid: number) {
-    const result = windows
-      ? spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
-        `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().Ticks`],
-      { encoding: "utf8", windowsHide: true })
-      : spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8" });
-    if (result.error) throw result.error;
-    return result.status === 0 ? result.stdout.trim() : "";
+    return inspectLiveFixtureProcess(pid, () => {
+      const result = windows
+        ? spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
+          `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().Ticks`],
+        { encoding: "utf8", windowsHide: true })
+        : spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8" });
+      if (result.error) throw result.error;
+      return result.status === 0 ? result.stdout.trim() : "";
+    });
   }
   async function captureGuiOwner() {
     const directory = join(state, "projects", hash, "runtime/daemon");

@@ -5,6 +5,26 @@ import path from "node:path";
 import test from "node:test";
 import { build, run, runCore, targets } from "./ci-windows-tests.mjs";
 
+test("exited fixture PIDs skip inspection without hiding live or uncertain processes", async (t) => {
+  const { inspectLiveFixtureProcess } = await import("../crates/gwt/playwright/tests/_helpers/process-inspection.mjs");
+  let code;
+  let queries = 0;
+  t.mock.method(process, "kill", (pid, signal) => {
+    assert.equal(pid, 42);
+    assert.equal(signal, 0);
+    if (code) throw Object.assign(new Error("process probe"), { code });
+    return true;
+  });
+  const inspect = () => { queries++; return "fixture identity"; };
+  code = "ESRCH";
+  assert.equal(inspectLiveFixtureProcess(42, inspect), "");
+  assert.equal(queries, 0);
+  for (code of [undefined, "EPERM"]) assert.equal(inspectLiveFixtureProcess(42, inspect), "fixture identity");
+  code = "EIO";
+  assert.throws(() => inspectLiveFixtureProcess(42, inspect), /process probe/);
+  assert.equal(queries, 2);
+});
+
 test("required Windows CI builds and runs the gate lifecycle regressions", () => {
   assert.ok(targets("default").some(([pkg, kind, name]) =>
     pkg === "gwt-terminal" && kind === "test" && name === "pty_start_gate_test"));
