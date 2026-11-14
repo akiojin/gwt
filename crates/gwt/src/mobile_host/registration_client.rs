@@ -9,6 +9,14 @@
 //! disables the authority (new epoch); a later registration needs an explicit
 //! PC enable again. Name resolution, root-store selection and the PC control
 //! wiring belong to the caller, which hands over a connected TCP stream.
+//!
+//! While enabled, the caller may register pairing invites over the same socket
+//! one at a time: each [`InviteRequest`] becomes a `register_invite` for the
+//! current generation and is answered through its reply channel. A request the
+//! registration ends before answering loses its reply (never an inferred
+//! success). The hex secret is built in a wiped buffer; the copy handed to the
+//! WebSocket frame cannot be wiped (as for the bearer). Dropping every invite
+//! sender only ends invite input, not the registration.
 
 use super::credential::LoadedHostCredential;
 use crate::mobile_connection::{AuthorizationError, MobileAuthorization};
@@ -20,7 +28,10 @@ use std::{
     sync::{Arc, RwLock, RwLockWriteGuard},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use tokio::{net::TcpStream, sync::watch};
+use tokio::{
+    net::TcpStream,
+    sync::{mpsc, oneshot, watch},
+};
 use tokio_tungstenite::tungstenite::{
     client::IntoClientRequest, http::HeaderValue, protocol::WebSocketConfig, Message,
 };
@@ -54,6 +65,30 @@ pub enum RegistrationClientError {
     Closed,
 }
 
+/// A pairing invite for the coordinator to admit under this registration.
+pub struct InviteRequest {
+    pub secret: Zeroizing<[u8; 32]>,
+    pub ttl_secs: u64,
+    pub reply: oneshot::Sender<InviteOutcome>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InviteOutcome {
+    Registered,
+    Rejected(InviteRejection),
+}
+
+/// Rejections the Host recovers from by generating another invite (or waiting
+/// for a pending one to expire); the registration stays live.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InviteRejection {
+    InvalidTtl,
+    AlreadyRegistered,
+    HostCapacity,
+    Capacity,
+}
+
 #[derive(Serialize)]
 struct Token<'a> {
     schema_version: u32,
@@ -77,6 +112,15 @@ enum CoordinatorMessage {
         generation: Uuid,
         nonce: Uuid,
         ttl_secs: u64,
+    },
+    InviteRegistered {
+        generation: Uuid,
+        nonce: Uuid,
+    },
+    InviteRejected {
+        generation: Uuid,
+        nonce: Uuid,
+        reason: InviteRejection,
     },
 }
 
@@ -125,14 +169,16 @@ fn write(
 /// sender is dropped (`Ok`, observed during the handshake too) or the
 /// registration fails (`Err`). The authority is disabled on return either way.
 /// `tcp` must already be connected to the credential's coordinator origin.
+/// `invites` is read only while enabled and one request at a time.
 pub async fn run_registration(
     authority: Arc<RwLock<MobileAuthorization>>,
     credential: &LoadedHostCredential,
     tls: Arc<rustls::ClientConfig>,
     tcp: TcpStream,
     stop: watch::Receiver<bool>,
+    invites: mpsc::Receiver<InviteRequest>,
 ) -> Result<(), RegistrationClientError> {
-    let result = register_and_renew(&authority, credential, tls, tcp, stop).await;
+    let result = register_and_renew(&authority, credential, tls, tcp, stop, invites).await;
     authority
         .write()
         .unwrap_or_else(|error| error.into_inner())
@@ -146,6 +192,7 @@ async fn register_and_renew(
     tls: Arc<rustls::ClientConfig>,
     tcp: TcpStream,
     mut stop: watch::Receiver<bool>,
+    mut invites: mpsc::Receiver<InviteRequest>,
 ) -> Result<(), RegistrationClientError> {
     let host_epoch = write(authority)?.prepare_registration(credential)?;
     let origin = reqwest::Url::parse(credential.binding().coordinator_origin())
@@ -194,7 +241,7 @@ async fn register_and_renew(
                 })?;
         match next_message(&mut socket).await? {
             CoordinatorMessage::Registered { generation, .. } => Ok((socket, generation)),
-            CoordinatorMessage::Renewed { .. } => Err(RegistrationClientError::Protocol),
+            _ => Err(RegistrationClientError::Protocol),
         }
     });
     let (mut socket, generation) = tokio::select! {
@@ -211,11 +258,23 @@ async fn register_and_renew(
     )?;
     send_renew(&mut socket, request.generation(), request.nonce()).await?;
     let mut poll = tokio::time::interval(POLL_INTERVAL);
+    let mut invites_open = true;
+    // The one unanswered invite: its nonce and the caller's reply.
+    let mut pending: Option<(Uuid, oneshot::Sender<InviteOutcome>)> = None;
     loop {
         tokio::select! {
             _ = stopped(&mut stop) => {
                 let _ = socket.close(None).await;
                 return Ok(());
+            }
+            request = invites.recv(), if invites_open && pending.is_none() => {
+                let Some(request) = request else {
+                    invites_open = false;
+                    continue;
+                };
+                let nonce = Uuid::new_v4();
+                send_invite(&mut socket, generation, nonce, &request).await?;
+                pending = Some((nonce, request.reply));
             }
             _ = poll.tick() => {
                 let request = write(authority)?.poll_registration(Instant::now(), wall()?)?;
@@ -237,9 +296,35 @@ async fn register_and_renew(
                         Err(error) => return Err(error.into()),
                     }
                 }
+                CoordinatorMessage::InviteRegistered { generation: scoped, nonce }
+                    if scoped == generation =>
+                {
+                    answer(&mut pending, nonce, InviteOutcome::Registered)?;
+                }
+                CoordinatorMessage::InviteRejected { generation: scoped, nonce, reason }
+                    if scoped == generation =>
+                {
+                    answer(&mut pending, nonce, InviteOutcome::Rejected(reason))?;
+                }
                 _ => return Err(RegistrationClientError::Protocol),
             },
         }
+    }
+}
+
+/// Deliver the answer for the pending invite; an unrequested or mismatched
+/// answer is a protocol violation. A caller that stopped waiting is ignored.
+fn answer(
+    pending: &mut Option<(Uuid, oneshot::Sender<InviteOutcome>)>,
+    nonce: Uuid,
+    outcome: InviteOutcome,
+) -> Result<(), RegistrationClientError> {
+    match pending.take() {
+        Some((expected, reply)) if expected == nonce => {
+            let _ = reply.send(outcome);
+            Ok(())
+        }
+        _ => Err(RegistrationClientError::Protocol),
     }
 }
 
@@ -258,6 +343,33 @@ async fn send_renew(
     let text = serde_json::json!({"type": "renew", "generation": generation, "nonce": nonce});
     socket
         .send(Message::text(text.to_string()))
+        .await
+        .map_err(|_| RegistrationClientError::Closed)
+}
+
+/// `register_invite` JSON assembled in a wiped buffer around the hex secret.
+async fn send_invite(
+    socket: &mut Socket,
+    generation: Uuid,
+    nonce: Uuid,
+    request: &InviteRequest,
+) -> Result<(), RegistrationClientError> {
+    let mut text = Zeroizing::new(String::with_capacity(256));
+    let _ = std::fmt::Write::write_fmt(
+        &mut *text,
+        format_args!(
+            r#"{{"type":"register_invite","generation":"{generation}","nonce":"{nonce}","secret":""#
+        ),
+    );
+    for byte in request.secret.iter() {
+        let _ = std::fmt::Write::write_fmt(&mut *text, format_args!("{byte:02x}"));
+    }
+    let _ = std::fmt::Write::write_fmt(
+        &mut *text,
+        format_args!(r#"","ttl_secs":{}}}"#, request.ttl_secs),
+    );
+    socket
+        .send(Message::text(text.as_str()))
         .await
         .map_err(|_| RegistrationClientError::Closed)
 }

@@ -1100,7 +1100,15 @@ mod tests {
             let tls = fixture.client_config();
             tokio::spawn(async move {
                 let tcp = TcpStream::connect(addr).await.unwrap();
-                run_registration(authority, &credential, tls, tcp, stopping).await
+                run_registration(
+                    authority,
+                    &credential,
+                    tls,
+                    tcp,
+                    stopping,
+                    tokio::sync::mpsc::channel(1).1,
+                )
+                .await
             })
         };
         let enabled = |authority: &Arc<RwLock<MobileAuthorization>>| {
@@ -1142,7 +1150,15 @@ mod tests {
             );
             tokio::spawn(async move {
                 let tcp = TcpStream::connect(addr).await.unwrap();
-                run_registration(authority, &credential, tls, tcp, stopping).await
+                run_registration(
+                    authority,
+                    &credential,
+                    tls,
+                    tcp,
+                    stopping,
+                    tokio::sync::mpsc::channel(1).1,
+                )
+                .await
             })
         })
         .await
@@ -1179,5 +1195,80 @@ mod tests {
             "{result:?}"
         );
         assert!(!host.read().unwrap().is_enabled());
+    }
+
+    #[tokio::test]
+    async fn host_client_registers_invites_over_its_live_registration() {
+        use crate::mobile_host::registration_client::{
+            InviteOutcome, InviteRejection, InviteRequest,
+        };
+        use std::sync::RwLock;
+        use tokio::sync::{mpsc, watch};
+        let mut fixture = Fixture::new();
+        let wall = real_wall();
+        let (credential, binding) = fixture.issue_credential(wall);
+        let server = fixture.start_at(wall).await;
+        let addr = server.local_addr().unwrap();
+        let sessions = Arc::clone(&server.sessions);
+        let (shutdown, signal) = oneshot::channel();
+        let task = tokio::spawn(server.serve_until(async move {
+            let _ = signal.await;
+        }));
+        let host = Arc::new(RwLock::new(
+            MobileAuthorization::load_bound(&fixture.home.join("devices.json"), &binding).unwrap(),
+        ));
+        let (stop, stopping) = watch::channel(false);
+        let (invites, requests) = mpsc::channel(1);
+        let client = {
+            let host = Arc::clone(&host);
+            let tls = fixture.client_config();
+            tokio::spawn(async move {
+                let tcp = TcpStream::connect(addr).await.unwrap();
+                run_registration(host, &credential, tls, tcp, stopping, requests).await
+            })
+        };
+        let invite = |byte: u8, ttl_secs: u64| {
+            let (reply, outcome) = oneshot::channel();
+            let request = InviteRequest {
+                secret: zeroize::Zeroizing::new([byte; 32]),
+                ttl_secs,
+                reply,
+            };
+            (request, outcome)
+        };
+        let register = |byte: u8, ttl_secs: u64| {
+            let (request, outcome) = invite(byte, ttl_secs);
+            let invites = invites.clone();
+            bounded(async move {
+                invites.send(request).await.ok().unwrap();
+                outcome.await
+            })
+        };
+
+        assert_eq!(register(1, 300).await, Ok(InviteOutcome::Registered));
+        assert_eq!(
+            register(1, 300).await,
+            Ok(InviteOutcome::Rejected(InviteRejection::AlreadyRegistered))
+        );
+        assert_eq!(
+            register(2, 0).await,
+            Ok(InviteOutcome::Rejected(InviteRejection::InvalidTtl))
+        );
+        assert!(host.read().unwrap().is_enabled());
+        assert_eq!(live(&sessions), 1);
+
+        // Ending the invite input does not end the registration: the client
+        // keeps renewing past the next lease poll.
+        drop(invites);
+        tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
+        assert!(host.read().unwrap().is_enabled());
+        assert_eq!(live(&sessions), 1);
+        stop.send(true).unwrap();
+        assert!(matches!(bounded(client).await.unwrap(), Ok(())));
+        assert!(!host.read().unwrap().is_enabled());
+        wait_until_closed(&sessions).await;
+
+        shutdown.send(()).unwrap();
+        bounded(task).await.unwrap().unwrap();
     }
 }
