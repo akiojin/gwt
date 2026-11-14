@@ -3319,7 +3319,7 @@ body {
 @media (max-width: 600px) {
   .profile-root { overflow-y: auto; }
   .profile-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto; flex: 0 0 auto; }
-  .profile-list-pane { border-right: 0; border-bottom: 1px solid var(--color-border); }
+  .profile-list-pane { max-height: 30vh; border-right: 0; border-bottom: 1px solid var(--color-border); }
   .profile-editor-pane { overflow: visible; }
   .profile-env-grid { max-height: 60vh; }
   .profile-env-grid-head { display: none; }

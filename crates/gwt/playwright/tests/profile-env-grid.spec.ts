@@ -535,9 +535,14 @@ test.describe("Profile environment variable grid", () => {
             `${selector} must not scroll sideways at ${width}px`).toBeLessThanOrEqual(0);
         }
       };
+      // A pending custom row carries a key input instead of key text.
+      await profile.getByRole("button", { name: "+ Add variable" }).click();
+      await expect(profile.locator('input[aria-label^="Environment variable key"]')).toHaveCount(1);
       for (const [width, height] of [[320, 568], [390, 844]]) {
         await page.setViewportSize({ width, height });
         await expect(() => assertOnce(width)).toPass({ timeout: 5_000 });
+        expect((await profile.locator(".profile-list-pane").boundingBox())!.height,
+          `the profile list leaves room for the editor at ${width}x${height}`).toBeLessThanOrEqual(height * 0.3 + 1);
         await page.screenshot({ path: info.outputPath(`profile-${width}.png`) });
         expect(await profile.locator(".profile-env-grid").evaluate(node => node.scrollHeight > node.clientHeight),
           `the variable grid keeps its own scroll at ${width}px`).toBe(true);
