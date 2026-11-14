@@ -1042,6 +1042,9 @@ jobs:
         continue-on-error: true
       # This feature set and isolated measurement do not depend on regressions.
       - name: Build warm latency target once
+        # Omit this test artifact's line tables after restoring the shared cache.
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
         run: node scripts/ci-windows-tests.mjs build warm
         timeout-minutes: 30
       # Issue #3777: measure the warm 250ms acceptance contract without other

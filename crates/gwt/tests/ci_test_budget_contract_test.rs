@@ -601,6 +601,15 @@ fn windows_regression_slices_build_each_harness_once_and_gate_all_filters() {
     assert!(warm.contains("ci-windows-tests.mjs run-warm gwt lib gwt cli::hook::event_dispatcher::tests::warm_four_megabyte_history_user_prompt_submit_p95_stays_within_budget -- --exact --test-threads=1"));
 
     let doc: Value = serde_yaml::from_str(&workflow).expect("Test workflow");
+    let warm_job = &doc["jobs"]["test-windows-warm"];
+    assert!(warm_job["env"]["CARGO_PROFILE_DEV_DEBUG"].is_null());
+    for step in warm_job["steps"].as_sequence().unwrap() {
+        if step["run"].as_str() == Some("node scripts/ci-windows-tests.mjs build warm") {
+            assert_eq!(step["env"]["CARGO_PROFILE_DEV_DEBUG"].as_str(), Some("0"));
+        } else {
+            assert!(step["env"]["CARGO_PROFILE_DEV_DEBUG"].is_null());
+        }
+    }
     let invocation =
         regex::Regex::new(r"node scripts/ci-windows-tests\.mjs (run(?:-lib|-runtime)?) ([^\r\n]+)")
             .expect("default regression invocation");
