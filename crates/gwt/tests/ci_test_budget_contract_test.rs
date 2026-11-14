@@ -550,6 +550,48 @@ fn linux_infrastructure_regressions_run_beside_the_workspace_suite() {
             "main job still runs {script}"
         );
     }
+    // Exercise the actual shell: neither concurrent result may be lost.
+    #[cfg(unix)]
+    {
+        let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+        let step = yaml["jobs"]["test-linux-infrastructure"]["steps"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .find(|step| step["name"] == "Build infrastructure regression artifacts")
+            .unwrap();
+        assert_eq!(step["timeout-minutes"].as_u64(), Some(25));
+        let probe = r#"
+mkfifo "$PROBE_DIR/ready"
+exec 3<>"$PROBE_DIR/ready"
+cargo() {
+    read -r -t 5 -u 3 || return 97
+    touch "$PROBE_DIR/build-finished"
+    return "$BUILD_EXIT"
+}
+node() {
+    test "$*" = scripts/test-nextest-timeout.mjs || return 98
+    printf 'ready\n' >&3
+    return "$TIMEOUT_EXIT"
+}
+"#;
+        for (build_exit, timeout_exit, expected) in [(0, 0, 0), (17, 0, 17), (0, 19, 19)] {
+            let dir = tempfile::tempdir().unwrap();
+            let result = gwt_core::process::resolved_command(
+                gwt_core::process::ProcessPlanRequest::new("bash"),
+            )
+            .unwrap()
+            .args(["-e", "-o", "pipefail", "-c"])
+            .arg(format!("{probe}\n{}", step["run"].as_str().unwrap()))
+            .env("PROBE_DIR", dir.path())
+            .env("BUILD_EXIT", build_exit.to_string())
+            .env("TIMEOUT_EXIT", timeout_exit.to_string())
+            .output()
+            .unwrap();
+            assert_eq!(result.status.code(), Some(expected), "{result:?}");
+            assert!(dir.path().join("build-finished").exists());
+        }
+    }
     let required = job_body(&workflow, "  test-rust-required:");
     assert!(required.contains("name: Test (Rust)\n"));
     assert!(required.contains("needs: [test, test-linux-infrastructure, source-sync]"));
