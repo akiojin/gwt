@@ -2686,6 +2686,18 @@ Replay needs neither GitHub access nor Git history. The saved baseline is:
 python scripts/ci_throughput.py --input scripts/fixtures/ci-throughput-2026-10-08.json
 ```
 
+Merge snapshots also record the current branch-protection context/app IDs and
+each final head's check runs. `required_checks` reports the latest pre-merge
+result for every required check, successful check durations, and the interval
+from the earliest job in their check suites (including prerequisites) to the
+last required completion. `complete_prs` accepts success, neutral, or skipped;
+`all_success_prs` requires literal success for every check. Missing or incomplete
+evidence is reported separately and does not count as a complete sample. This
+uses protection at collection time, not historical protection; old snapshots
+remain replayable but cannot supply these additional measurements.
+Individual check durations exclude dependencies; an aggregator's short duration
+alone does not prove that its underlying test or coverage pipeline is fast.
+
 The JSON reports PR creation-to-merge time, each PR's latest successful final-head
 workflow attempt, base synchronizations per merge, runner waits, and per-job
 durations. Durations are in minutes; p50 is the median and p90 is nearest rank.
