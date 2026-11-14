@@ -282,6 +282,22 @@ fn frontend_event_may_change_project_tabs(event: &FrontendEvent) -> bool {
     )
 }
 
+const FRONTEND_EVENT_SLOW_DISPATCH_THRESHOLD: Duration = Duration::from_millis(30);
+
+fn frontend_event_timing_label(event: &FrontendEvent) -> &'static str {
+    match event {
+        FrontendEvent::FrontendReady => "FrontendReady",
+        FrontendEvent::OpenProjectDialog => "OpenProjectDialog",
+        FrontendEvent::SelectProjectTab { .. } => "SelectProjectTab",
+        FrontendEvent::CloseWindow { .. } => "CloseWindow",
+        FrontendEvent::LoadKnowledgeBridge { .. } => "LoadKnowledgeBridge",
+        FrontendEvent::SelectKnowledgeBridgeEntry { .. } => "SelectKnowledgeBridgeEntry",
+        FrontendEvent::OpenStartWork => "OpenStartWork",
+        FrontendEvent::OpenLaunchWizard { .. } => "OpenLaunchWizard",
+        _ => "FrontendEvent",
+    }
+}
+
 const GUI_SHUTDOWN_BACKSTOP_GRACE: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1008,6 +1024,12 @@ enum UserEvent {
         project_root: PathBuf,
         changed: bool,
     },
+    /// SPEC-3170: restore paused process windows after Open Project returns
+    /// its initial workspace state so native project open does not synchronously
+    /// resume agent panes on the frontend dispatch path.
+    RestoreOpenProjectWindows {
+        tab_id: String,
+    },
     WorkspaceProjectionChanged {
         project_root: PathBuf,
     },
@@ -1441,6 +1463,38 @@ mod tests {
                 broadcast: false,
             }
         ));
+    }
+
+    #[test]
+    fn frontend_timing_labels_hot_path_events() {
+        assert_eq!(
+            super::frontend_event_timing_label(&gwt::FrontendEvent::FrontendReady),
+            "FrontendReady"
+        );
+        assert_eq!(
+            super::frontend_event_timing_label(&gwt::FrontendEvent::CloseWindow {
+                id: "tab-1::shell-1".to_string(),
+            }),
+            "CloseWindow"
+        );
+        assert_eq!(
+            super::frontend_event_timing_label(&gwt::FrontendEvent::LoadKnowledgeBridge {
+                id: "tab-1::issue-1".to_string(),
+                knowledge_kind: gwt::KnowledgeKind::Issue,
+                request_id: Some(1),
+                selected_number: None,
+                refresh: false,
+            }),
+            "LoadKnowledgeBridge"
+        );
+        assert_eq!(
+            super::frontend_event_timing_label(&gwt::FrontendEvent::OpenLaunchWizard {
+                id: "tab-1::branches-1".to_string(),
+                branch_name: "feature/demo".to_string(),
+                linked_issue_number: None,
+            }),
+            "OpenLaunchWizard"
+        );
     }
 
     #[test]
@@ -6946,7 +7000,18 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::Frontend { client_id, event }) => {
                 let refresh_index_status = matches!(event, FrontendEvent::FrontendReady);
                 let sync_board_projection_watchers = frontend_event_may_change_project_tabs(&event);
+                let event_label = frontend_event_timing_label(&event);
+                let dispatch_started = Instant::now();
                 let events = app.handle_frontend_event(client_id, event);
+                let dispatch_elapsed = dispatch_started.elapsed();
+                if dispatch_elapsed >= FRONTEND_EVENT_SLOW_DISPATCH_THRESHOLD {
+                    tracing::warn!(
+                        target: "gwt.frontend.timing",
+                        event = event_label,
+                        elapsed_ms = dispatch_elapsed.as_millis() as u64,
+                        "frontend event handler blocked the GUI event loop"
+                    );
+                }
                 if sync_board_projection_watchers {
                     board_projection_watchers.sync(&app, proxy.clone());
                     workspace_projection_watchers.sync(&app, proxy.clone());
@@ -6999,6 +7064,10 @@ fn main() -> std::io::Result<()> {
                 changed,
             }) => {
                 let events = app.handle_work_events_ingested(project_root, changed);
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::RestoreOpenProjectWindows { tab_id }) => {
+                let events = app.restore_open_project_windows(&tab_id);
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::WorkMergeStatus {

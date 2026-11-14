@@ -1688,7 +1688,7 @@ impl AppRuntime {
                 // immediately after reconnect.
                 let snapshot = runtime
                     .pane
-                    .lock()
+                    .try_lock()
                     .map(|pane| pane.snapshot_bytes())
                     .unwrap_or_default();
                 (!snapshot.is_empty()).then_some((id.clone(), snapshot))

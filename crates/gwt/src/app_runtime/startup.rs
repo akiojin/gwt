@@ -381,7 +381,7 @@ impl AppRuntime {
     /// round-trip is required. The startup `bootstrap` queue only covers tabs
     /// open at launch, so projects opened via Open Project / Reopen Recent were
     /// never restored before this path existed.
-    pub(super) fn restore_open_project_windows(&mut self, tab_id: &str) -> Vec<OutboundEvent> {
+    pub(crate) fn restore_open_project_windows(&mut self, tab_id: &str) -> Vec<OutboundEvent> {
         let windows = match self.tab(tab_id) {
             Some(tab) if tab.kind == gwt::ProjectKind::Git && !tab.migration_pending => tab
                 .workspace

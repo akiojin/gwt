@@ -267,7 +267,9 @@ impl AppRuntime {
                 // path (Open Project / Reopen Recent) were never restored and
                 // their agent panes stayed `Stopped`.
                 if let Some(active_tab_id) = self.active_tab_id.clone() {
-                    events.extend(self.restore_open_project_windows(&active_tab_id));
+                    self.proxy.send(UserEvent::RestoreOpenProjectWindows {
+                        tab_id: active_tab_id,
+                    });
                 }
                 // SPEC-2359 W-16 (FR-387): run the cross-machine intake for
                 // the opened project; its completion event reconciles the
@@ -498,6 +500,9 @@ impl AppRuntime {
         {
             self.spawn_work_events_ingest(project_root, false);
         }
+        self.proxy.send(UserEvent::RestoreOpenProjectWindows {
+            tab_id: tab_id.to_string(),
+        });
         let mut events = vec![self.workspace_state_broadcast()];
         if let Some(event) = self.active_work_projection_broadcast_on_tab_change() {
             events.push(event);

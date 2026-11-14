@@ -2793,6 +2793,56 @@ fn app_runtime_frontend_ready_replays_terminal_snapshot_with_scrollback_history(
 }
 
 #[test]
+fn frontend_sync_events_does_not_wait_for_busy_pane_snapshot_lock() {
+    let temp = tempdir().expect("tempdir");
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        temp.path().to_path_buf(),
+        ProjectKind::Git,
+        &[WindowPreset::Shell],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "shell-1");
+    insert_test_pane_runtime(&mut runtime, &window_id);
+    let pane = runtime
+        .runtimes
+        .get(&window_id)
+        .expect("runtime")
+        .pane
+        .clone();
+    pane.lock()
+        .expect("pane")
+        .process_bytes(b"snapshot should be deferred while pane is busy");
+    let (locked_tx, locked_rx) = mpsc::channel();
+    let holder = thread::spawn(move || {
+        let _guard = pane.lock().expect("holder pane lock");
+        locked_tx.send(()).expect("send locked");
+        thread::sleep(Duration::from_millis(700));
+    });
+    locked_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("holder locked pane");
+
+    let started = Instant::now();
+    let events = runtime.frontend_sync_events("client-1");
+    let elapsed = started.elapsed();
+    holder.join().expect("holder join");
+
+    assert!(
+        elapsed < Duration::from_millis(250),
+        "FrontendReady must not wait for busy pane snapshot generation; elapsed={elapsed:?}"
+    );
+    assert!(
+        events.iter().all(|event| !matches!(
+            &event.event,
+            BackendEvent::TerminalSnapshot { id, .. } if id == &window_id
+        )),
+        "busy pane snapshots should be deferred instead of blocking FrontendReady"
+    );
+}
+
+#[test]
 fn app_runtime_dock_window_tab_resizes_group_runtimes() {
     let temp = tempdir().expect("tempdir");
     let tab = sample_project_tab(
@@ -3462,6 +3512,101 @@ fn app_runtime_select_project_tab_emits_active_work_projection_for_new_active_ta
 }
 
 #[test]
+fn app_runtime_select_project_tab_defers_paused_agent_restore_from_initial_dispatch() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let first = temp.path().join("worktrees").join("switch-from");
+    let second = temp.path().join("worktrees").join("switch-to");
+    run_git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "work/switch-from",
+            first.to_str().expect("first worktree path"),
+        ],
+    );
+    run_git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "work/switch-to",
+            second.to_str().expect("second worktree path"),
+        ],
+    );
+
+    let mut persisted = empty_workspace_state();
+    let mut agent_window =
+        sample_window("agent-1", WindowPreset::Agent, WindowProcessStatus::Stopped);
+    agent_window.agent_id = Some("claude".to_string());
+    agent_window.session_id = Some("session-deferred-switch-restore".to_string());
+    persisted.windows.push(agent_window);
+    persisted.next_z_index = 2;
+    let switch_to = ProjectTabRuntime {
+        id: "tab-switch-to".to_string(),
+        title: "Switch To".to_string(),
+        project_root: second.clone(),
+        kind: ProjectKind::Git,
+        workspace: WindowCanvasState::from_persisted(persisted),
+        migration_pending: false,
+        main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
+    };
+    let switch_from = sample_project_tab(
+        "tab-switch-from",
+        "Switch From",
+        first,
+        ProjectKind::Git,
+        &[],
+    );
+    let (mut runtime, recorded_events) = sample_runtime_with_events(
+        temp.path(),
+        vec![switch_from, switch_to],
+        Some("tab-switch-from"),
+    );
+    let mut session =
+        gwt_agent::Session::new(&second, "work/switch-to", gwt_agent::AgentId::ClaudeCode);
+    session.id = "session-deferred-switch-restore".to_string();
+    session.agent_session_id = Some("native-deferred-switch-restore".to_string());
+    session.restore_window_on_startup = true;
+    session.record_hook_event("Stop");
+    session.record_completed_stop();
+    session.update_status(gwt_agent::AgentStatus::Stopped);
+    session
+        .save(&runtime.sessions_dir)
+        .expect("save resumable session");
+
+    let events = runtime.select_project_tab_events("tab-switch-to");
+
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })),
+        "initial tab switch dispatch should still broadcast the selected workspace"
+    );
+    assert!(
+        runtime.pending_auto_resume_sources.is_empty(),
+        "paused agent restore must be deferred out of the initial SelectProjectTab dispatch"
+    );
+    let recorded_events = recorded_events.lock().expect("recorded events");
+    assert!(
+        recorded_events.iter().any(|event| matches!(
+            event,
+            UserEvent::RestoreOpenProjectWindows { tab_id } if tab_id == "tab-switch-to"
+        )),
+        "SelectProjectTab must enqueue a follow-up restore event for the selected tab"
+    );
+}
+
+#[test]
 fn app_runtime_close_project_tab_emits_active_work_projection_when_active_changes() {
     let temp = tempdir().expect("tempdir");
     let repo = temp.path().join("repo");
@@ -3609,6 +3754,59 @@ fn app_runtime_open_launch_wizard_uses_cached_previous_profile_without_hydrating
     assert_eq!(view.selected_execution_mode, "continue");
     assert!(view.skip_permissions);
     assert!(view.codex_fast_mode);
+}
+
+#[cfg(unix)]
+#[test]
+fn app_runtime_open_launch_wizard_reuses_cached_claude_capability_probe() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let bin_dir = temp.path().join("bin");
+    fs::create_dir_all(&bin_dir).expect("bin dir");
+    let probe_count = temp.path().join("probe-count");
+    let fake_claude = bin_dir.join("claude");
+    fs::write(
+        &fake_claude,
+        format!(
+            "#!/bin/sh\nprintf x >> '{}'\nprintf '2.1.156 (Claude Code)\\n'\n",
+            probe_count.display()
+        ),
+    )
+    .expect("write fake claude");
+    fs::set_permissions(&fake_claude, fs::Permissions::from_mode(0o755))
+        .expect("chmod fake claude");
+    let _path = prepend_tool_parent_to_path(&fake_claude);
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _disable = ScopedEnvVar::set("CLAUDE_CODE_DISABLE_WORKFLOWS", "0");
+
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        repo.clone(),
+        ProjectKind::Git,
+        &[WindowPreset::Branches],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    runtime
+        .open_launch_wizard_for_branch("tab-1", &repo, "feature/demo", None, None)
+        .expect("first open launch wizard");
+    runtime
+        .open_launch_wizard_for_branch("tab-1", &repo, "feature/demo", None, None)
+        .expect("second open launch wizard");
+
+    let count = fs::read_to_string(&probe_count).unwrap_or_default();
+    assert!(
+        count.len() <= 1,
+        "opening Launch Wizard repeatedly must not repeatedly spawn claude --version; count={count:?}"
+    );
 }
 
 #[test]
@@ -8582,6 +8780,77 @@ fn open_project_restore_resumes_paused_agent_even_after_stopped_drift() {
 }
 
 #[test]
+fn open_project_path_events_defers_paused_agent_restore_from_initial_dispatch() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let worktree = temp.path().join("worktrees").join("deferred-open-restore");
+    run_git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "work/deferred-open-restore",
+            worktree.to_str().expect("worktree path"),
+        ],
+    );
+
+    let mut persisted = empty_workspace_state();
+    let mut agent_window =
+        sample_window("agent-1", WindowPreset::Agent, WindowProcessStatus::Stopped);
+    agent_window.agent_id = Some("claude".to_string());
+    agent_window.session_id = Some("session-deferred-open-restore".to_string());
+    persisted.windows.push(agent_window);
+    persisted.next_z_index = 2;
+    gwt::save_workspace_state(&gwt::workspace_state_path(&worktree), &persisted)
+        .expect("save persisted workspace");
+
+    let (mut runtime, recorded_events) = sample_runtime_with_events(temp.path(), Vec::new(), None);
+    let mut session = gwt_agent::Session::new(
+        &worktree,
+        "work/deferred-open-restore",
+        gwt_agent::AgentId::ClaudeCode,
+    );
+    session.id = "session-deferred-open-restore".to_string();
+    session.agent_session_id = Some("native-deferred-open-restore".to_string());
+    session.restore_window_on_startup = true;
+    session.record_hook_event("Stop");
+    session.record_completed_stop();
+    session.update_status(gwt_agent::AgentStatus::Stopped);
+    session
+        .save(&runtime.sessions_dir)
+        .expect("save resumable session");
+
+    let events = runtime.open_project_path_events(worktree.clone());
+
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })),
+        "initial Open Project dispatch should still broadcast the opened workspace"
+    );
+    assert!(
+        runtime.pending_auto_resume_sources.is_empty(),
+        "paused agent restore must be deferred out of the initial Open Project dispatch"
+    );
+    let active_tab_id = runtime.active_tab_id.clone().expect("active tab");
+    let recorded_events = recorded_events.lock().expect("recorded events");
+    assert!(
+        recorded_events.iter().any(|event| matches!(
+            event,
+            UserEvent::RestoreOpenProjectWindows { tab_id } if tab_id == &active_tab_id
+        )),
+        "Open Project must enqueue a follow-up restore event for the opened tab"
+    );
+}
+
+#[test]
 fn app_runtime_startup_auto_resume_uses_centered_stack_bounds() {
     let _env_lock = env_test_lock()
         .lock()
@@ -10493,6 +10762,51 @@ fn close_window_removes_while_stop_window_keeps() {
     );
 }
 
+#[test]
+fn close_window_events_does_not_wait_for_runtime_thread_join() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "shell-1",
+        repo,
+        WindowPreset::Shell,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "shell-1");
+    runtime.register_window("tab-1", "shell-1");
+    runtime.runtimes.insert(
+        window_id.clone(),
+        WindowRuntime {
+            pane: Arc::new(Mutex::new(long_running_test_pane(&window_id))),
+            output_thread: Some(thread::spawn(|| thread::sleep(Duration::from_secs(2)))),
+            status_thread: None,
+        },
+    );
+
+    let started = Instant::now();
+    let events = runtime.close_window_events(&window_id);
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed < Duration::from_millis(250),
+        "CloseWindow must remove the canvas window without waiting for runtime join; elapsed={elapsed:?}"
+    );
+    assert!(
+        runtime.tabs[0].workspace.window("shell-1").is_none(),
+        "CloseWindow must still remove the visible window immediately"
+    );
+    assert!(
+        !runtime.runtimes.contains_key(&window_id),
+        "CloseWindow must still detach the runtime from the active map"
+    );
+    assert!(events
+        .iter()
+        .any(|event| matches!(&event.event, BackendEvent::WindowCanvasState { .. })));
+}
+
 // SPEC-2356 安心 Addendum (FR-042): StopAllWindows stops every running agent
 // window's runtime while keeping all windows on the canvas.
 #[test]
@@ -12153,6 +12467,111 @@ fn app_runtime_knowledge_search_replies_through_async_dispatch() {
             )
         })
     });
+}
+
+#[test]
+fn app_runtime_knowledge_load_and_select_reply_through_async_dispatch() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    Cache::new(issue_cache_root(&repo))
+        .write_snapshot(&sample_issue_snapshot(
+            44,
+            "Async load issue",
+            &["bug"],
+            "Issue body",
+            "2026-04-22T10:00:00Z",
+        ))
+        .expect("write issue snapshot");
+
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "issue-1",
+        repo,
+        WindowPreset::Issue,
+        WindowProcessStatus::Ready,
+    );
+    let (mut runtime, events) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "issue-1");
+
+    let load_events = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::LoadKnowledgeBridge {
+            id: window_id.clone(),
+            knowledge_kind: gwt::KnowledgeKind::Issue,
+            request_id: Some(40),
+            selected_number: Some(44),
+            refresh: false,
+        },
+    );
+    let select_events = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::SelectKnowledgeBridgeEntry {
+            id: window_id.clone(),
+            knowledge_kind: gwt::KnowledgeKind::Issue,
+            request_id: Some(41),
+            number: 44,
+        },
+    );
+
+    assert!(
+        load_events.is_empty(),
+        "request_id-backed knowledge load must not reply on the frontend event loop"
+    );
+    assert!(
+        select_events.is_empty(),
+        "entry selection must not reply on the frontend event loop"
+    );
+    for request_id in [Some(40), Some(41)] {
+        wait_for_recorded_event("knowledge load dispatch", &events, |events| {
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    UserEvent::Dispatch(dispatched)
+                        if dispatched.iter().any(|outbound| {
+                            matches!(
+                                &outbound.target,
+                                DispatchTarget::Client(client_id) if client_id == "client-1"
+                            ) && matches!(
+                                &outbound.event,
+                                BackendEvent::KnowledgeEntries {
+                                    id,
+                                    knowledge_kind,
+                                    request_id: event_request_id,
+                                    entries,
+                                    selected_number,
+                                    ..
+                                } if id == &window_id
+                                    && *knowledge_kind == gwt::KnowledgeKind::Issue
+                                    && event_request_id == &request_id
+                                    && entries.len() == 1
+                                    && entries[0].number == 44
+                                    && *selected_number == Some(44)
+                            )
+                        }) && dispatched.iter().any(|outbound| {
+                            matches!(
+                                &outbound.event,
+                                BackendEvent::KnowledgeDetail {
+                                    id,
+                                    request_id: event_request_id,
+                                    detail,
+                                    ..
+                                } if id == &window_id
+                                    && event_request_id == &request_id
+                                    && detail.number == Some(44)
+                            )
+                        })
+                )
+            })
+        });
+    }
 }
 
 #[test]

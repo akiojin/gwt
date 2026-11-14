@@ -229,6 +229,12 @@ impl AppRuntime {
         self.stop_window_runtime_inner(window_id, true);
     }
 
+    pub(crate) fn stop_window_runtime_detached(&mut self, window_id: &str) {
+        let threads = self.start_window_runtime_stop(window_id, true);
+        self.blocking_tasks
+            .spawn(move || Self::join_runtime_stop_threads(threads));
+    }
+
     fn stop_window_runtime_inner(&mut self, window_id: &str, mark_session_stopped: bool) {
         let threads = self.start_window_runtime_stop(window_id, mark_session_stopped);
         Self::join_runtime_stop_threads(threads);

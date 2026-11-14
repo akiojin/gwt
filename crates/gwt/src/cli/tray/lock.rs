@@ -354,7 +354,7 @@ mod tests {
     fn acquire_creates_lock_file_and_releases_on_drop() {
         let tmp = TempDir::new().expect("tempdir");
         let gwt_home = tmp.path();
-        let handle = acquire(gwt_home).expect("first acquire succeeds");
+        let handle = acquire_inner(gwt_home, false).expect("first acquire succeeds");
         assert!(handle.path().exists(), "lock file must exist after acquire");
         drop(handle);
         // Drop should remove the lock file.
@@ -371,7 +371,7 @@ mod tests {
     fn second_acquire_for_same_user_reports_already_running() {
         let tmp = TempDir::new().expect("tempdir");
         let gwt_home = tmp.path();
-        let mut holder = acquire(gwt_home).expect("first acquire succeeds");
+        let mut holder = acquire_inner(gwt_home, false).expect("first acquire succeeds");
 
         holder.set_url("http://127.0.0.1:55555/").expect("set url");
         let user_id = current_user_id();
@@ -379,7 +379,9 @@ mod tests {
 
         #[cfg(windows)]
         {
-            match acquire(gwt_home).expect_err("second acquire must report the running tray") {
+            match acquire_inner(gwt_home, false)
+                .expect_err("second acquire must report the running tray")
+            {
                 TrayLockError::AlreadyRunning { url, .. } => {
                     assert_eq!(url, "http://127.0.0.1:55555/");
                 }
@@ -447,7 +449,7 @@ mod tests {
     fn set_url_updates_lock_payload_in_place() {
         let tmp = TempDir::new().expect("tempdir");
         let gwt_home = tmp.path();
-        let mut handle = acquire(gwt_home).expect("acquire");
+        let mut handle = acquire_inner(gwt_home, false).expect("acquire");
         handle
             .set_url("http://127.0.0.1:54321/")
             .expect("set_url succeeds");

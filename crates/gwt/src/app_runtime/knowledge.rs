@@ -68,6 +68,17 @@ pub(super) struct KnowledgeRefreshTask {
     pub(super) issue_link_cache_dir: PathBuf,
 }
 
+struct KnowledgeLoadTask {
+    client_id: String,
+    id: String,
+    project_root: PathBuf,
+    kind: KnowledgeKind,
+    request_id: Option<u64>,
+    selected_number: Option<u64>,
+    sessions_dir: PathBuf,
+    issue_link_cache_dir: PathBuf,
+}
+
 struct KnowledgeSearchTask {
     client_id: String,
     id: String,
@@ -747,6 +758,20 @@ impl AppRuntime {
             return Vec::new();
         }
 
+        if request.request_id.is_some() {
+            self.spawn_knowledge_bridge_load(KnowledgeLoadTask {
+                client_id: client_id.to_string(),
+                id: id.to_string(),
+                project_root: tab.project_root.clone(),
+                kind,
+                request_id: request.request_id,
+                selected_number: request.selected_number,
+                sessions_dir: self.sessions_dir.clone(),
+                issue_link_cache_dir: self.issue_link_cache_dir.clone(),
+            });
+            return Vec::new();
+        }
+
         match load_knowledge_bridge(&tab.project_root, kind, request.selected_number, false) {
             Ok(mut view) => {
                 self.augment_knowledge_bridge_related_works(&tab.project_root, &mut view);
@@ -776,6 +801,39 @@ impl AppRuntime {
                 knowledge_error_event(id, kind, error, request.request_id, None),
             )],
         }
+    }
+
+    fn spawn_knowledge_bridge_load(&self, task: KnowledgeLoadTask) {
+        let KnowledgeLoadTask {
+            client_id,
+            id,
+            project_root,
+            kind,
+            request_id,
+            selected_number,
+            sessions_dir,
+            issue_link_cache_dir,
+        } = task;
+        let proxy = self.proxy.clone();
+        self.blocking_tasks.spawn(move || {
+            let event =
+                match gwt::load_knowledge_bridge(&project_root, kind, selected_number, false) {
+                    Ok(mut view) => {
+                        augment_knowledge_bridge_related_works_from_paths(
+                            &project_root,
+                            &sessions_dir,
+                            &issue_link_cache_dir,
+                            &mut view,
+                        );
+                        knowledge_view_events(client_id, id, kind, request_id, view)
+                    }
+                    Err(error) => vec![OutboundEvent::reply(
+                        client_id,
+                        knowledge_error_event(id, kind, error, request_id, None),
+                    )],
+                };
+            proxy.send(UserEvent::Dispatch(event));
+        });
     }
 
     pub(super) fn spawn_knowledge_bridge_refresh(&self, task: KnowledgeRefreshTask) {

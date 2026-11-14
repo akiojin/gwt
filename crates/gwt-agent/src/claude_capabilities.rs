@@ -12,7 +12,11 @@
 //! it is intentionally NOT exported via `CLAUDE_CODE_EFFORT_LEVEL` because
 //! `ultracode` is not a valid effort-level value.
 
-use std::path::PathBuf;
+use std::{
+    ffi::{OsStr, OsString},
+    path::PathBuf,
+    sync::Mutex,
+};
 
 /// Extract a `MAJOR.MINOR.PATCH` semver from a raw `claude --version` string.
 ///
@@ -69,13 +73,92 @@ pub fn claude_user_settings_path() -> Option<PathBuf> {
     home_dir().map(|home| home.join(".claude").join("settings.json"))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ClaudeCapabilitySnapshot {
+    workflows_enabled: bool,
+    ultracode_supported: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ClaudeCapabilityCacheKey {
+    env_disable: Option<OsString>,
+    settings_path: Option<PathBuf>,
+    claude_executable: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ClaudeCapabilityCacheEntry {
+    key: ClaudeCapabilityCacheKey,
+    snapshot: ClaudeCapabilitySnapshot,
+}
+
+static CLAUDE_CAPABILITY_CACHE: Mutex<Option<ClaudeCapabilityCacheEntry>> = Mutex::new(None);
+
+fn claude_capability_cache_key() -> ClaudeCapabilityCacheKey {
+    ClaudeCapabilityCacheKey {
+        env_disable: std::env::var_os("CLAUDE_CODE_DISABLE_WORKFLOWS"),
+        settings_path: claude_user_settings_path(),
+        claude_executable: resolve_claude_executable(),
+    }
+}
+
+fn claude_capability_snapshot() -> ClaudeCapabilitySnapshot {
+    let key = claude_capability_cache_key();
+    claude_capability_snapshot_for_key(key)
+}
+
+fn claude_capability_snapshot_for_key(key: ClaudeCapabilityCacheKey) -> ClaudeCapabilitySnapshot {
+    let mut cache = CLAUDE_CAPABILITY_CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(entry) = cache.as_ref().filter(|entry| entry.key == key) {
+        return entry.snapshot;
+    }
+    let snapshot = detect_claude_capability_snapshot(&key);
+    *cache = Some(ClaudeCapabilityCacheEntry { key, snapshot });
+    snapshot
+}
+
+fn resolve_claude_executable() -> Option<PathBuf> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    match std::env::var_os("PATH") {
+        Some(path) => which::which_in("claude", Some(path), cwd).ok(),
+        None => which::which("claude").ok(),
+    }
+}
+
+#[cfg(test)]
+fn reset_claude_capability_cache_for_tests() {
+    *CLAUDE_CAPABILITY_CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+}
+
+fn detect_claude_capability_snapshot(key: &ClaudeCapabilityCacheKey) -> ClaudeCapabilitySnapshot {
+    let env_disable = key.env_disable.as_ref().and_then(|value| value.to_str());
+    let settings = key
+        .settings_path
+        .as_ref()
+        .and_then(|path| std::fs::read_to_string(path).ok());
+    let workflows_enabled = workflows_enabled_from(env_disable, settings.as_deref());
+    let ultracode_supported = workflows_enabled
+        && key
+            .claude_executable
+            .as_ref()
+            .and_then(detect_claude_version_raw_at)
+            .is_some_and(|raw| supports_ultracode(&raw, true));
+    ClaudeCapabilitySnapshot {
+        workflows_enabled,
+        ultracode_supported,
+    }
+}
+
 /// Detect whether Claude Code dynamic workflows are enabled in the current
 /// environment (env var + user global settings). Defaults to `true` when
-/// nothing can be read.
+/// nothing can be read. The live result is cached for the GUI process because
+/// it is session-stable and is read from Launch Wizard hot paths.
 pub fn claude_workflows_enabled() -> bool {
-    let env_disable = std::env::var("CLAUDE_CODE_DISABLE_WORKFLOWS").ok();
-    let settings = claude_user_settings_path().and_then(|path| std::fs::read_to_string(path).ok());
-    workflows_enabled_from(env_disable.as_deref(), settings.as_deref())
+    claude_capability_snapshot().workflows_enabled
 }
 
 /// Raw `claude --version` output (e.g. `"2.1.156 (Claude Code)"`), or `None`
@@ -83,7 +166,11 @@ pub fn claude_workflows_enabled() -> bool {
 /// spawns a subprocess): the Launch Wizard captures this once at open time,
 /// not on every render.
 pub fn detect_claude_version_raw() -> Option<String> {
-    let output = gwt_core::process::hidden_command("claude")
+    detect_claude_version_raw_at(OsStr::new("claude"))
+}
+
+fn detect_claude_version_raw_at(program: impl AsRef<OsStr>) -> Option<String> {
+    let output = gwt_core::process::hidden_command(program)
         .arg("--version")
         .output()
         .ok()?;
@@ -99,15 +186,10 @@ pub fn detect_claude_version_raw() -> Option<String> {
 /// (tested) pure predicates with live environment detection. Returns `false`
 /// when the version cannot be determined (conservative).
 ///
-/// The Launch Wizard computes this once at open time and stores the result, so
-/// the per-render reasoning-option logic stays free of subprocess/file I/O.
+/// The GUI process computes this once and stores the result, so Launch Wizard
+/// open/render paths stay free of repeated subprocess/file I/O.
 pub fn claude_ultracode_supported() -> bool {
-    // Cheap checks first: skip the `claude --version` subprocess when
-    // workflows are already disabled.
-    if !claude_workflows_enabled() {
-        return false;
-    }
-    detect_claude_version_raw().is_some_and(|raw| supports_ultracode(&raw, true))
+    claude_capability_snapshot().ultracode_supported
 }
 
 fn env_truthy(value: Option<&str>) -> bool {
@@ -127,6 +209,40 @@ fn home_dir() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    fn env_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    #[cfg(unix)]
+    fn write_fake_claude(bin_dir: &std::path::Path, script: String) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::create_dir_all(bin_dir).expect("bin dir");
+        let fake_claude = bin_dir.join("claude");
+        std::fs::write(&fake_claude, script).expect("fake claude");
+        let mut perms = std::fs::metadata(&fake_claude)
+            .expect("fake claude metadata")
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_claude, perms).expect("chmod fake claude");
+        fake_claude
+    }
+
+    #[cfg(unix)]
+    fn test_cache_key(
+        temp: &tempfile::TempDir,
+        claude_executable: PathBuf,
+        env_disable: Option<&str>,
+    ) -> ClaudeCapabilityCacheKey {
+        ClaudeCapabilityCacheKey {
+            env_disable: env_disable.map(OsString::from),
+            settings_path: Some(temp.path().join(".claude").join("settings.json")),
+            claude_executable: Some(claude_executable),
+        }
+    }
 
     #[test]
     fn parses_decorated_version() {
@@ -209,5 +325,94 @@ mod tests {
         assert!(!supports_ultracode("2.1.153", true)); // below minimum
         assert!(!supports_ultracode("2.1.156", false)); // workflows disabled
         assert!(!supports_ultracode("garbage", true)); // unparseable version
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn live_ultracode_detection_reuses_session_probe() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reset_claude_capability_cache_for_tests();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let bin_dir = temp.path().join("bin");
+        let probe_count = temp.path().join("probe-count");
+        let fake_claude = write_fake_claude(
+            &bin_dir,
+            format!(
+                "#!/bin/sh\nprintf x >> '{}'\nprintf '2.1.156 (Claude Code)\\n'\n",
+                probe_count.display()
+            ),
+        );
+        let key = test_cache_key(&temp, fake_claude, None);
+
+        assert!(claude_capability_snapshot_for_key(key.clone()).ultracode_supported);
+        assert!(claude_capability_snapshot_for_key(key).ultracode_supported);
+
+        let count = std::fs::read_to_string(&probe_count).expect("probe count");
+        assert_eq!(
+            count, "x",
+            "live capability detection should spawn claude --version once per GUI process"
+        );
+        reset_claude_capability_cache_for_tests();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn live_capability_cache_skips_version_probe_when_workflows_disabled() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reset_claude_capability_cache_for_tests();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let bin_dir = temp.path().join("bin");
+        let probe_count = temp.path().join("probe-count");
+        let fake_claude = write_fake_claude(
+            &bin_dir,
+            format!(
+                "#!/bin/sh\nprintf x >> '{}'\nprintf '2.1.156 (Claude Code)\\n'\n",
+                probe_count.display()
+            ),
+        );
+        let key = test_cache_key(&temp, fake_claude, Some("1"));
+
+        let snapshot = claude_capability_snapshot_for_key(key.clone());
+        assert!(!snapshot.workflows_enabled);
+        assert!(!snapshot.ultracode_supported);
+        assert!(!claude_capability_snapshot_for_key(key).ultracode_supported);
+        assert!(
+            !probe_count.exists(),
+            "disabled workflows should avoid claude --version entirely"
+        );
+        reset_claude_capability_cache_for_tests();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn live_capability_cache_reuses_failed_version_probe() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reset_claude_capability_cache_for_tests();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let bin_dir = temp.path().join("bin");
+        let probe_count = temp.path().join("probe-count");
+        let fake_claude = write_fake_claude(
+            &bin_dir,
+            format!(
+                "#!/bin/sh\nprintf x >> '{}'\nprintf 'boom\\n' >&2\nexit 42\n",
+                probe_count.display()
+            ),
+        );
+        let key = test_cache_key(&temp, fake_claude, None);
+
+        assert!(!claude_capability_snapshot_for_key(key.clone()).ultracode_supported);
+        assert!(!claude_capability_snapshot_for_key(key).ultracode_supported);
+        let count = std::fs::read_to_string(&probe_count).expect("probe count");
+        assert_eq!(
+            count, "x",
+            "failed version probe should also be cached for the GUI process"
+        );
+        reset_claude_capability_cache_for_tests();
     }
 }

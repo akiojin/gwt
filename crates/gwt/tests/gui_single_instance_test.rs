@@ -1,8 +1,43 @@
 use gwt::gui_single_instance::{acquire_gui_instance_lock, gui_instance_lock_path};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use tempfile::tempdir;
+
+const FORCE_NEW_INSTANCE_ENV: &str = "GWT_FORCE_NEW_INSTANCE";
+
+struct ForceEnvGuard {
+    original: Option<std::ffi::OsString>,
+    _lock: MutexGuard<'static, ()>,
+}
+
+impl Drop for ForceEnvGuard {
+    fn drop(&mut self) {
+        match &self.original {
+            Some(value) => std::env::set_var(FORCE_NEW_INSTANCE_ENV, value),
+            None => std::env::remove_var(FORCE_NEW_INSTANCE_ENV),
+        }
+    }
+}
+
+fn force_env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn disable_force_new_instance() -> ForceEnvGuard {
+    let lock = force_env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let original = std::env::var_os(FORCE_NEW_INSTANCE_ENV);
+    std::env::remove_var(FORCE_NEW_INSTANCE_ENV);
+    ForceEnvGuard {
+        original,
+        _lock: lock,
+    }
+}
 
 #[test]
 fn gui_instance_lock_rejects_second_owner_for_same_worktree() {
+    let _env = disable_force_new_instance();
     let home = tempdir().expect("home");
     let project = tempdir().expect("project");
 
@@ -19,6 +54,7 @@ fn gui_instance_lock_rejects_second_owner_for_same_worktree() {
 
 #[test]
 fn gui_instance_lock_is_scoped_by_worktree_path() {
+    let _env = disable_force_new_instance();
     let home = tempdir().expect("home");
     let project_a = tempdir().expect("project-a");
     let project_b = tempdir().expect("project-b");
@@ -43,6 +79,7 @@ fn gui_instance_lock_is_scoped_by_worktree_path() {
 
 #[test]
 fn gui_instance_lock_released_on_drop_allows_reacquire() {
+    let _env = disable_force_new_instance();
     let home = tempdir().expect("home");
     let project = tempdir().expect("project");
 
