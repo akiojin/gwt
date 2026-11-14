@@ -937,7 +937,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         }
         // These explicit writes belong to this live connection.
         // Never replay an unacknowledged write after reconnect.
-        if (["confirm_close_project", "cancel_close_project", "preview_close_project", "project_view_ready", "restart_wedged_owner", "cancel_pm_request_task", "reopen_pm_request_task"].includes(message.kind) ||
+        if (["confirm_close_project", "cancel_close_project", "preview_close_project", "project_view_ready", "restart_wedged_owner", "cancel_pm_request_task", "reopen_pm_request_task", "complete_pm_request_task"].includes(message.kind) ||
             (message.kind === "agent_switch" && message.action.kind !== "read") ||
             (message.kind === "agent_roster" && message.action.kind === "rename") ||
             (message.kind === "get_hook_doctor" && message.repair === true)) {
@@ -4204,7 +4204,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       }
 
       const pmChatViews = new Map();
-      const { requestPmReports, requestPmConversation, requestPmTaskDetail, markPmTaskDetailUnavailable, requestPmTaskCancel, requestPmTaskReopen, markPmTaskMutationUnavailable, requestPmChatSend, markPmChatSendUnavailable, expirePmChatSend, readPmWindowState, bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, subscribePmWindowState } = createPmWindowModel();
+      const { requestPmReports, requestPmConversation, requestPmTaskDetail, markPmTaskDetailUnavailable, requestPmTaskCancel, requestPmTaskReopen, requestPmTaskComplete, markPmTaskMutationUnavailable, requestPmChatSend, markPmChatSendUnavailable, expirePmChatSend, readPmWindowState, bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, subscribePmWindowState } = createPmWindowModel();
       subscribePmWindowState(state => state.resyncRequest, recovery => {
         if (!recovery) return;
         const request = requestPmReports(recovery.windowId);
@@ -4294,6 +4294,12 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           },
           onTaskReopen: reason => {
             const request = requestPmTaskReopen(windowData.id, reason);
+            if (!request) return;
+            if (send(request) === "unavailable") return markPmTaskMutationUnavailable(windowData.id, request.request_id);
+            window.setTimeout(() => markPmTaskMutationUnavailable(windowData.id, request.request_id), 30000);
+          },
+          onTaskComplete: (reason, evidence) => {
+            const request = requestPmTaskComplete(windowData.id, reason, evidence);
             if (!request) return;
             if (send(request) === "unavailable") return markPmTaskMutationUnavailable(windowData.id, request.request_id);
             window.setTimeout(() => markPmTaskMutationUnavailable(windowData.id, request.request_id), 30000);

@@ -1726,16 +1726,17 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
     }
   });
 
-  test('T-TASK-KEY-COMPLETE T-TASK-REOPEN-UI T-TASK-KEY-REOPEN T-TASK-CANCEL T-TASK-DETAIL T-TASK-CHILDREN T-TASK-CRITERIA T-CHAT-TASK-LINK T-UTASK-OV and T-UTASK-USER-REOPEN/CANCEL/UPDATE/COMPLETE persist browser authority and show confirmed Tasks after reconnect', async ({ page }, info) => {
+  test('T-TASK-COMPLETE-UI T-TASK-KEY-COMPLETE T-TASK-REOPEN-UI T-TASK-KEY-REOPEN T-TASK-CANCEL T-TASK-DETAIL T-TASK-CHILDREN T-TASK-CRITERIA T-CHAT-TASK-LINK T-UTASK-OV and T-UTASK-USER-REOPEN/CANCEL/UPDATE/COMPLETE persist browser authority and show confirmed Tasks after reconnect', async ({ page }, info) => {
     const theme = info.project.name.includes('light') ? 'light' : 'dark';
     const windowId = 'pm-request-task-fixture';
     const taskId = 'synthetic-fixture-task';
     const original = 'Keep this exact fixture request.\n再開しても原文を保存する。';
     const fixturePm = { kind: 'pm', id: 'synthetic-fixture-pm' };
-    const draft = { id: taskId, title: 'Synthetic completed task', purpose: 'Verify the browser reopen adapter',
+    const draft = { id: taskId, title: 'Synthetic tracked task', purpose: 'Verify the browser completion and reopen adapters',
       completion_conditions: ['The original fixture outcome is verified'], issue_numbers: [3431], goal_ids: [], assignee: null };
     const pendingTask = { draft, source_id: 'synthetic-fixture-source', parent_id: null, status: 'pending',
       condition_revision: 1, review_generation: 1, review_required: false, next_action: null, wait_reason: null, completion: null };
+    const inProgressTask = { ...pendingTask, status: 'in_progress', next_action: 'Verify the original fixture outcome' };
     const completedTask = { ...pendingTask, status: 'completed',
       completion: { condition_revision: 1, review_generation: 1, evidence: ['synthetic-fixture: verified outcome'] } };
     let statePath = '';
@@ -1756,14 +1757,14 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
         };
         // This is receipt-consistent TaskStore scaffolding, not native-intake proof.
         seed = { schema_version: 1, project_key: projectKey, revision: 3, sources: { [source.id]: source }, pending: [],
-          tasks: { [taskId]: completedTask }, receipts: [
+          tasks: { [taskId]: inProgressTask }, receipts: [
             receipt({ kind: 'intake', id: 'synthetic-fixture-intake' }, 'synthetic-capture', 0,
               { kind: 'capture', source }, []),
             receipt(fixturePm, 'synthetic-decompose', 1,
               { kind: 'decompose', source_id: source.id, root: draft, children: [] }, [pendingTask]),
-            receipt(fixturePm, 'synthetic-complete', 2,
-              { kind: 'complete', task_id: taskId, condition_revision: 1, review_generation: 1,
-                evidence: completedTask.completion.evidence }, [completedTask]),
+            receipt(fixturePm, 'synthetic-progress', 2,
+              { kind: 'progress', task_id: taskId, status: inProgressTask.status,
+                wait_reason: null, next_action: inProgressTask.next_action }, [inProgressTask]),
           ] };
         const taskDirectory = join(preferences, 'request-tasks');
         mkdirSync(taskDirectory, { recursive: true, mode: 0o700 });
@@ -1812,10 +1813,10 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
         return reply.result;
       };
       const loaded = await exchange('load_pm_request_task', { task_id: taskId });
-      expect(loaded).toMatchObject({ state: 'ready', revision: 3, task: completedTask });
+      expect(loaded).toMatchObject({ state: 'ready', revision: 3, task: inProgressTask });
       expect(loaded.receipt ?? null).toBeNull();
       const taskKey = createHash('sha256').update(taskId).digest('hex');
-      const completeRequest = { operation_id: `browser-complete-${theme}`, expected_revision: 3,
+      let completeRequest = { operation_id: `browser-complete-${theme}`, expected_revision: 3,
         reason: 'The browser user verified the original outcome.', task_id: '',
         condition_revision: 1, review_generation: 1, evidence: ['synthetic:browser-verified-outcome'] };
       const beforeComplete = readFileSync(statePath, 'utf8');
@@ -1828,11 +1829,118 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
           .toMatchObject({ state: 'error', code, recovery_operation: 'load_pm_request_task' });
         expect(readFileSync(statePath, 'utf8')).toBe(beforeComplete);
       }
-      const completed = await exchange('complete_pm_request_task', { task_key: taskKey, request: completeRequest });
+      const completeChat = page.locator('.pm-chat');
+      await completeChat.getByRole('button', { name: 'Chat', exact: true }).click();
+      const completeDraft = completeChat.locator('.pm-chat__draft');
+      const completionDraft = 'Keep this chat draft while completing the tracked task';
+      await completeDraft.fill(completionDraft);
+      await completeChat.getByRole('button', { name: 'Tasks', exact: true }).click();
+      const completeTasksView = completeChat.getByRole('region', { name: 'Request tasks', exact: true });
+      const completeRow = completeTasksView.locator(`[data-task-key="${taskKey}"]`);
+      await expect(completeRow.locator('.pm-chat__task-meta').first()).toContainText('In progress');
+      await completeRow.getByRole('button', { name: 'View task details', exact: true }).focus();
+      await page.keyboard.press('Enter');
+      const completeDetail = completeTasksView.getByRole('region', { name: 'Selected task details', exact: true });
+      await expect(completeDetail).toContainText('Selected snapshot revision 3.');
+      await expect(completeDetail).toContainText(original);
+      const completeReason = completeDetail.getByRole('textbox', { name: 'Reason for this task change', exact: true });
+      const completeEvidence = completeDetail.getByRole('textbox', { name: 'Evidence for completing this task', exact: true });
+      const completeButton = completeDetail.getByRole('button', { name: 'Mark complete', exact: true });
+      await page.setViewportSize({ width: 404, height: 1000 });
+      const completePane = page.locator('.workspace-window').filter({ has: completeChat });
+      await expect.poll(async () => Math.round((await completePane.boundingBox())!.width)).toBe(400);
+      await expect(completeButton).toBeVisible();
+      await expect(completeButton).toHaveAttribute('aria-disabled', 'true');
+      await expect(completeReason).toHaveValue('');
+      await expect(completeEvidence).toHaveValue('');
+      // Hold exactly this user-generated mutation without replaying it through
+      // the test bridge; pending and blank-input checks must not change storage.
+      await page.evaluate(() => {
+        const host = window as any;
+        for (const socket of new Set<WebSocket>(host.__gwtPlaywrightSockets || [])) {
+          if (socket.readyState !== WebSocket.OPEN || !new URL(socket.url).searchParams.has('repo_hash')) continue;
+          const originalSend = socket.send;
+          socket.send = function(data: string) {
+            const event = JSON.parse(String(data));
+            if (event.kind === 'complete_pm_request_task') {
+              socket.send = originalSend;
+              host.__heldTaskComplete = event;
+              host.__releaseTaskComplete = () => originalSend.call(socket, data);
+              return;
+            }
+            return originalSend.call(socket, data);
+          };
+        }
+      });
+      await completeEvidence.fill(completeRequest.evidence[0]);
+      await completeButton.focus();
+      await page.keyboard.press('Enter');
+      expect(await page.evaluate(() => (window as any).__heldTaskComplete ?? null)).toBeNull();
+      expect(readFileSync(statePath, 'utf8')).toBe(beforeComplete, 'blank completion reason never writes');
+      await completeEvidence.fill('');
+      await completeReason.fill(completeRequest.reason);
+      await expect(completeButton).toHaveAttribute('aria-disabled', 'true');
+      await completeButton.focus();
+      await page.keyboard.press('Enter');
+      expect(await page.evaluate(() => (window as any).__heldTaskComplete ?? null)).toBeNull();
+      expect(readFileSync(statePath, 'utf8')).toBe(beforeComplete, 'blank completion evidence never writes');
+      await completeEvidence.fill(completeRequest.evidence[0]);
+      await expect(completeButton).toHaveAttribute('aria-disabled', 'false');
+      await completeButton.focus();
+      await expect(completeButton).toBeInViewport({ ratio: 1 });
+      expect(await completeDetail.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+      const completeImage = info.outputPath(`task-complete-${theme}-400.png`);
+      await completeChat.screenshot({ path: completeImage });
+      await info.attach(`T-TASK-COMPLETE-UI ${theme} controls 400px`, { path: completeImage, contentType: 'image/png' });
+      await page.keyboard.press('Enter');
+      const heldComplete = await page.waitForFunction(() => (window as any).__heldTaskComplete).then(handle => handle.jsonValue());
+      expect(heldComplete).toMatchObject({ kind: 'complete_pm_request_task', task_key: taskKey,
+        request: { ...completeRequest, operation_id: expect.any(String) } });
+      expect(heldComplete.request.operation_id).not.toBe('');
+      completeRequest = { ...completeRequest, operation_id: heldComplete.request.operation_id };
+      await expect(completeButton).toHaveAttribute('aria-disabled', 'true');
+      await expect(completeReason).toHaveAttribute('readonly', '');
+      await expect(completeEvidence).toHaveAttribute('readonly', '');
+      await expect(completeDetail.locator('.pm-chat__task-cancel-status')).toContainText('Saving completion…');
+      await expect(completeRow.locator('.pm-chat__task-meta').first()).toContainText('In progress');
+      await page.keyboard.press('Enter');
+      expect(readFileSync(statePath, 'utf8')).toBe(beforeComplete, 'pending completion is neither optimistic nor duplicated');
+      await expect(completeDraft).toHaveValue(completionDraft);
+      const completeCursor = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence || 0);
+      await page.evaluate(() => (window as any).__releaseTaskComplete());
+      const completeReply = await page.waitForFunction(({ cursor, id, requestId }) =>
+        (window as any).__gwtPlaywrightMessages?.findLast((entry: any) => entry.sequence > cursor
+          && entry.payload.kind === 'pm_request_task' && entry.payload.id === id
+          && entry.payload.request_id === requestId)?.payload,
+      { cursor: completeCursor, id: heldComplete.id, requestId: heldComplete.request_id }).then(handle => handle.jsonValue());
+      exchanges.push({ request: heldComplete, response: completeReply });
+      const completed = completeReply.result;
       expect(completed).toMatchObject({ state: 'ready', revision: 4,
         task: { ...completedTask, completion: { ...completedTask.completion, evidence: completeRequest.evidence } },
-        receipt: { action: 'complete', revision: 4, reason: completeRequest.reason, actor: { kind: 'user' } } });
+        receipt: { operation_id: completeRequest.operation_id, action: 'complete', revision: 4,
+          reason: completeRequest.reason, actor: { kind: 'user' } } });
+      expect(completed.receipt.tasks).toEqual([completed.task]);
       expect(completed.receipt.actor.id).toMatch(/^browser:[0-9a-f-]{36}$/i);
+      expect(completed.receipt.actor.id).not.toBe(fixturePm.id);
+      const firstCompletion = JSON.parse(readFileSync(statePath, 'utf8'));
+      expect(firstCompletion.receipts).toEqual([...seed.receipts, completed.receipt]);
+      expect(firstCompletion.tasks[taskId]).toEqual(completed.task);
+      expect(firstCompletion.sources).toEqual(seed.sources);
+      expect(firstCompletion.sources[pendingTask.source_id].original).toBe(original);
+      await expect(completeDetail).toContainText('Selected snapshot revision 4.');
+      await expect(completeDetail).toContainText(completeRequest.evidence[0]);
+      await expect(completeDetail).toContainText(completeRequest.reason);
+      await expect(completeDetail).toContainText(original);
+      await expect(completeDetail.locator('.pm-chat__task-cancel-status')).toContainText('Completion recorded.');
+      await expect(completeButton).not.toBeVisible();
+      await expect(completeDraft).toHaveValue(completionDraft);
+      const reloadAfterComplete = completeDetail.getByRole('button', { name: 'Reload details', exact: true });
+      await expect(reloadAfterComplete).toBeFocused();
+      await expect(reloadAfterComplete).toBeInViewport({ ratio: 1 });
+      const completedImage = info.outputPath(`task-complete-confirmed-${theme}-400.png`);
+      await completeChat.screenshot({ path: completedImage });
+      await info.attach(`T-TASK-COMPLETE-UI ${theme} confirmed 400px`, { path: completedImage, contentType: 'image/png' });
+      await page.setViewportSize({ width: 1440, height: 1000 });
       expect(await exchange('complete_pm_request_task', { task_key: taskKey, request: completeRequest })).toEqual(completed);
       const completeNoop = await exchange('complete_pm_request_task', { request: { ...completeRequest,
         task_id: taskId, operation_id: `browser-complete-noop-${theme}`, expected_revision: 4 } });
@@ -1872,6 +1980,7 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
       await expect(reopenDetail).toContainText(original);
       await expect(reopenDetail).toContainText(completeRequest.evidence[0]);
       const reopenReason = reopenDetail.getByRole('textbox', { name: 'Reason for this task change', exact: true });
+      await reopenReason.fill(''); // The preceding Complete intentionally retains the selected task's input.
       const reopenButton = reopenDetail.getByRole('button', { name: 'Reopen task', exact: true });
       await page.setViewportSize({ width: 404, height: 1000 });
       const reopenPane = page.locator('.workspace-window').filter({ has: reopenChat });
@@ -1954,6 +2063,10 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
       await expect(reopenRow.locator('.pm-chat__task-meta').first()).toContainText('Pending');
       await expect(reopenRow).toContainText('PM reassessment required');
       await expect(reopenButton).not.toBeVisible();
+      const completeAfterReopen = reopenDetail.getByRole('button', { name: 'Mark complete', exact: true });
+      await expect(completeAfterReopen).toBeVisible();
+      await expect(completeAfterReopen).toHaveAttribute('aria-disabled', 'true');
+      await expect(reopenDetail.locator('.pm-chat__task-cancel-status')).toContainText('PM reassessment required before completion.');
       await expect(reopenDraft).toHaveValue(preservedDraft);
       const reloadAfterReopen = reopenDetail.getByRole('button', { name: 'Reload details', exact: true });
       await expect(reloadAfterReopen).toBeFocused();

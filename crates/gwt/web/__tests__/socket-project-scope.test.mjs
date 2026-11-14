@@ -918,19 +918,19 @@ test("first project connection reads saved Works settings without a Settings hos
 
 test("close choices, Task mutations and view receipts belong to their exact live connection and never queue", () => {
   const { context, sockets } = fixture({ routeProjectKey: projectA.project_key }); context.connectSocket();
-  for (const kind of ['preview_close_project', 'confirm_close_project', 'cancel_close_project', 'project_view_ready', 'restart_wedged_owner', 'cancel_pm_request_task', 'reopen_pm_request_task']) {
+  for (const kind of ['preview_close_project', 'confirm_close_project', 'cancel_close_project', 'project_view_ready', 'restart_wedged_owner', 'cancel_pm_request_task', 'reopen_pm_request_task', 'complete_pm_request_task']) {
     assert.equal(context.send({ kind }), 'unavailable');
   }
   assert.deepEqual(context.pendingMessages, []);
   sockets.at(-1).open();
-  assert.equal(sockets.at(-1).sent.some(event => /close_project|project_view_ready|cancel_pm_request_task|reopen_pm_request_task/.test(event.kind)), false);
-  for (const kind of ['cancel_pm_request_task', 'reopen_pm_request_task']) assert.equal(context.send({ kind }), 'sent');
+  assert.equal(sockets.at(-1).sent.some(event => /close_project|project_view_ready|cancel_pm_request_task|reopen_pm_request_task|complete_pm_request_task/.test(event.kind)), false);
+  for (const kind of ['cancel_pm_request_task', 'reopen_pm_request_task', 'complete_pm_request_task']) assert.equal(context.send({ kind }), 'sent');
   context.socketProjectKey = 'foreign';
-  for (const kind of ['cancel_pm_request_task', 'reopen_pm_request_task']) assert.equal(context.send({ kind }), 'unavailable');
+  for (const kind of ['cancel_pm_request_task', 'reopen_pm_request_task', 'complete_pm_request_task']) assert.equal(context.send({ kind }), 'unavailable');
   assert.deepEqual(context.pendingMessages, []);
   context.socketProjectKey = projectA.project_key;
   sockets.at(-1).send = () => { throw new Error('connection closed during Task send'); };
-  for (const kind of ['cancel_pm_request_task', 'reopen_pm_request_task']) {
+  for (const kind of ['cancel_pm_request_task', 'reopen_pm_request_task', 'complete_pm_request_task']) {
     assert.doesNotThrow(() => assert.equal(context.send({ kind }), 'unavailable'));
   }
   assert.deepEqual(context.pendingMessages, []);
