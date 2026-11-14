@@ -22,8 +22,9 @@
 //! buffer; an escaped secret is refused (after serde has made its own
 //! unescaped copies), and neither the frame buffer nor stack copies left by
 //! moves are erased. Browser claim/signaling and device authority are out of
-//! scope. Closed invites stay as replay fences in the global 64-record bound
-//! until their TTL; per-Host accounting of those fences is a known follow-up.
+//! scope. Closed invites stay as replay fences until their TTL; they count
+//! toward the global 64-record bound and a per-Host 16-record bound, so one
+//! Host's fences cannot exhaust other Hosts' invites (`host_capacity`).
 //!
 //! Each call reads the real wall clock; a backwards step makes the domain gate
 //! terminal (fail closed) until the operator restarts the coordinator.
