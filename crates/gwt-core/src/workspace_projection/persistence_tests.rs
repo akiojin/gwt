@@ -8,6 +8,9 @@ use super::*;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum SyncCall {
     File(PathBuf),
+    /// A file sync that is only an ordering barrier on macOS; the caller's
+    /// following full directory sync makes it durable.
+    FileBeforeRename(PathBuf),
     Directory(PathBuf),
 }
 
@@ -76,10 +79,23 @@ fn atomic_write_records_file_then_directory_sync_requests() {
     assert_eq!(
         policy.calls(),
         vec![
-            SyncCall::File(path),
+            SyncCall::FileBeforeRename(path),
             SyncCall::Directory(temp.path().to_path_buf()),
         ]
     );
+}
+
+#[test]
+fn file_sync_before_rename_succeeds_on_writable_and_read_only_descriptors() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("barrier.json");
+    let mut file = fs::File::create(&path).unwrap();
+    file.write_all(b"ordered").unwrap();
+    sync_file_before_rename(&file, &path).unwrap();
+    let read_only = fs::File::open(&path).unwrap();
+    // A read-only descriptor is accepted too, matching sync_all on the same file.
+    sync_file_before_rename(&read_only, &path).unwrap();
+    assert_eq!(fs::read(&path).unwrap(), b"ordered");
 }
 
 #[test]
@@ -169,13 +185,20 @@ fn external_commit_syncs_receipt_before_committed_markers_and_fold() {
         .cloned()
         .chain([receipt])
         .chain(markers.iter().cloned())
-        .chain([events, transaction.current_path.clone()])
+        .chain([events.clone(), transaction.current_path.clone()])
         .collect();
     let publication: Vec<_> = expected_files
         .iter()
         .flat_map(|path| {
+            // Atomic replacements order the temp file before the rename; the
+            // appended event journal keeps its full file sync.
+            let file = if path == &events {
+                SyncCall::File(path.clone())
+            } else {
+                SyncCall::FileBeforeRename(path.clone())
+            };
             [
-                SyncCall::File(path.clone()),
+                file,
                 SyncCall::Directory(path.parent().unwrap().to_path_buf()),
             ]
         })
@@ -191,7 +214,9 @@ fn external_commit_syncs_receipt_before_committed_markers_and_fold() {
             .iter()
             .map(|call| match call {
                 SyncCall::Directory(path) => path.clone(),
-                SyncCall::File(path) => panic!("unexpected file sync: {}", path.display()),
+                SyncCall::File(path) | SyncCall::FileBeforeRename(path) => {
+                    panic!("unexpected file sync: {}", path.display())
+                }
             })
             .collect::<HashSet<_>>(),
         cleanup

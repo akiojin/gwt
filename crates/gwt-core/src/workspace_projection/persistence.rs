@@ -10967,7 +10967,10 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     {
         let mut file = fs::File::create(&tmp)?;
         file.write_all(bytes)?;
-        sync_file(&file, path)?;
+        match path.parent() {
+            Some(_) => sync_file_before_rename(&file, path)?,
+            None => sync_file(&file, path)?,
+        }
     }
     fs::rename(&tmp, path)?;
     if let Some(parent) = path.parent() {
@@ -11007,6 +11010,29 @@ fn sync_file(file: &fs::File, _path: &Path) -> Result<()> {
     #[cfg(test)]
     if tests::skip_test_sync(tests::SyncCall::File(_path.to_path_buf())) {
         return Ok(());
+    }
+    file.sync_all()?;
+    Ok(())
+}
+
+/// Syncs a temp file that is about to be renamed into the same directory.
+///
+/// On macOS `F_BARRIERFSYNC` orders the data before the rename, and the
+/// caller's following directory `sync_all` (`F_FULLFSYNC`) flushes the drive
+/// cache, so the write is still durable when `write_atomic` returns. Other
+/// platforms, and any barrier failure, keep the full file sync.
+fn sync_file_before_rename(file: &fs::File, _path: &Path) -> Result<()> {
+    #[cfg(test)]
+    if tests::skip_test_sync(tests::SyncCall::FileBeforeRename(_path.to_path_buf())) {
+        return Ok(());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::fd::AsRawFd;
+        // SAFETY: fcntl only reads the open descriptor owned by `file`.
+        if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_BARRIERFSYNC) } != -1 {
+            return Ok(());
+        }
     }
     file.sync_all()?;
     Ok(())
