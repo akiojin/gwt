@@ -1184,7 +1184,6 @@ fn windows_agent_launch_e2e_builds_once_and_runs_installed_providers() {
     let preparation = cargo_steps[0];
     assert_eq!(preparation["shell"], "bash");
     assert_eq!(preparation["timeout-minutes"], 30);
-    let prepare = preparation["run"].as_str().unwrap();
     assert_eq!(
         job.matches("install-playwright-browsers.sh browsers")
             .count(),
@@ -1194,6 +1193,7 @@ fn windows_agent_launch_e2e_builds_once_and_runs_installed_providers() {
     // including when either fails. The FIFO avoids scheduling-time assertions.
     #[cfg(unix)]
     {
+        let prepare = preparation["run"].as_str().unwrap();
         let probe = r#"
 mkfifo "$PROBE_DIR/ready" "$PROBE_DIR/release"
 exec 3<>"$PROBE_DIR/ready"
