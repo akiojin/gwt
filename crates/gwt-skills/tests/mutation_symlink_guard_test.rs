@@ -95,21 +95,71 @@ fn distribution_ignores_unrelated_project_and_hermes_credential_links() {
     let outside = root.path().join("outside");
     fs::create_dir_all(worktree.join(".claude/skills")).unwrap();
     fs::create_dir_all(worktree.join(".gwt/hermes")).unwrap();
+    fs::create_dir_all(worktree.join(".claude/hooks")).unwrap();
+    fs::create_dir_all(worktree.join(".codex/hooks")).unwrap();
     fs::create_dir(&outside).unwrap();
+    let empty = root.path().join("outside-empty");
+    fs::create_dir(&empty).unwrap();
     fs::write(outside.join("sentinel"), "keep").unwrap();
     let project = worktree.join(".claude/skills/project-helper");
     let credential = worktree.join(".gwt/hermes/auth.json");
+    let scripts = worktree.join(".claude/hooks/scripts");
+    let empty_scripts = worktree.join(".codex/hooks/scripts");
     link_dir(&outside, &project);
     link_dir(&outside, &credential);
+    link_dir(&outside, &scripts);
+    link_dir(&empty, &empty_scripts);
 
     distribute_to_worktree(&worktree).unwrap();
     assert!(fs::read_link(project).is_ok());
     assert!(fs::read_link(credential).is_ok());
+    assert!(fs::read_link(&scripts).is_ok());
+    assert!(fs::read_link(empty_scripts).is_ok());
     assert_eq!(
         fs::read_to_string(outside.join("sentinel")).unwrap(),
         "keep"
     );
-    assert_eq!(fs::read_dir(outside).unwrap().count(), 1);
+    assert_eq!(fs::read_dir(&outside).unwrap().count(), 1);
+    assert_eq!(fs::read_dir(empty).unwrap().count(), 0);
+    let retired = outside.join("gwt-retired.sh");
+    fs::write(&retired, "keep retired").unwrap();
+    assert_rejected(
+        prune_stale_gwt_assets(&worktree).unwrap_err(),
+        "delete",
+        &scripts,
+    );
+    assert_eq!(fs::read_to_string(retired).unwrap(), "keep retired");
+}
+
+#[test]
+fn prune_shared_project_root_ignores_user_entries_but_rejects_managed_deletions() {
+    use gwt_skills::{prune_stale_gwt_assets_for_targets, ManagedAssetTarget};
+    let root = tempfile::tempdir().unwrap();
+    let worktree = root.path().join("worktree");
+    let outside = root.path().join("outside");
+    fs::create_dir_all(worktree.join(".claude")).unwrap();
+    fs::create_dir_all(outside.join("project-helper")).unwrap();
+    let sentinel = outside.join("project-helper/SKILL.md");
+    fs::write(&sentinel, "user content").unwrap();
+    let link = worktree.join(".claude/skills");
+    link_dir(&outside, &link);
+
+    assert_eq!(
+        prune_stale_gwt_assets_for_targets(&worktree, &[ManagedAssetTarget::ClaudeCode]).unwrap(),
+        0
+    );
+    fs::create_dir(outside.join("gwt-retired")).unwrap();
+    let retired = outside.join("gwt-retired/SKILL.md");
+    fs::write(&retired, "keep retired").unwrap();
+    assert_rejected(
+        prune_stale_gwt_assets_for_targets(&worktree, &[ManagedAssetTarget::ClaudeCode])
+            .unwrap_err(),
+        "delete",
+        &link,
+    );
+    assert_eq!(fs::read_to_string(sentinel).unwrap(), "user content");
+    assert_eq!(fs::read_to_string(retired).unwrap(), "keep retired");
+    assert!(fs::read_link(link).is_ok());
 }
 
 #[test]
