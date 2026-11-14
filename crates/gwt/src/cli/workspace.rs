@@ -8181,6 +8181,7 @@ pub(crate) mod tests {
 
     #[test]
     fn workspace_ensure_canonicalizes_legacy_work_agent_identity_once() {
+        let _guard = env_guard();
         for durable_agent_id in [
             gwt_agent::AgentId::Codex,
             gwt_agent::AgentId::Custom("codex".to_string()),
@@ -8196,7 +8197,6 @@ pub(crate) mod tests {
     fn assert_workspace_ensure_canonicalizes_legacy_work_agent_identity_once(
         durable_agent_id: gwt_agent::AgentId,
     ) {
-        let _guard = env_guard();
         let gwt_home = tempfile::tempdir().expect("gwt home");
         let _home = ScopedHome::set(gwt_home.path());
         let temp = tempfile::tempdir().expect("tempdir");
@@ -9009,7 +9009,6 @@ pub(crate) mod tests {
         stored_owner: &str,
         session_id: &str,
     ) {
-        let _guard = env_guard();
         let gwt_home = tempfile::tempdir().expect("gwt home");
         let _home = ScopedHome::set(gwt_home.path());
         let temp = tempfile::tempdir().expect("tempdir");
@@ -9169,6 +9168,7 @@ pub(crate) mod tests {
 
     #[test]
     fn workspace_ensure_canonicalizes_legacy_issue_owner_to_durable_spec_once() {
+        let _guard = env_guard();
         assert_workspace_ensure_canonicalizes_legacy_owner_to_durable_spec_once(
             "Issue #3412",
             "session-legacy-issue-owner",
@@ -9179,6 +9179,7 @@ pub(crate) mod tests {
     /// Current, WorkItems, and the tracked claim before continuing execution.
     #[test]
     fn workspace_ensure_canonicalizes_legacy_spec_hash_owner_to_durable_spec_once() {
+        let _guard = env_guard();
         assert_workspace_ensure_canonicalizes_legacy_owner_to_durable_spec_once(
             "SPEC #3412",
             "session-legacy-spec-hash-owner",
