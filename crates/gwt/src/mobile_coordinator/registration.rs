@@ -217,7 +217,7 @@ impl CoordinatorSessions {
             .map(|index| self.registrations[index].deadline)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(super) fn live_registrations(&self) -> usize {
         self.registrations.len()
     }
