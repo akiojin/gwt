@@ -1171,7 +1171,7 @@ exit 67
       scrollbackLineCount: beforeReentry.scrollbackLineCount,
       markerNumbers: numberedLines(beforeReentry.lines),
       historyMarkerCount: responseHistory(beforeReentry).length });
-    const reentryBaseline = await page.evaluate(id => {
+    const readReentryBaseline = () => page.evaluate(id => {
       const state = (window as any).__gwtTerminalTestApi.metrics(id);
       const connection = (window as any).__gwtPlaywrightSockets?.at(-1);
       (window as any).__ownedPmConnection = connection;
@@ -1183,12 +1183,18 @@ exit 67
         connected: connection?.readyState === 1,
       };
     }, id);
+    let reentryBaseline = await readReentryBaseline();
+    await expect.poll(async () => {
+      if (!reentryBaseline.settled || !reentryBaseline.connected) reentryBaseline = await readReentryBaseline();
+      return reentryBaseline.settled && reentryBaseline.connected;
+    }, { message: "observe completed terminal writes before capturing the reentry receipt boundary" }).toBe(true);
     expect(reentryBaseline.settled, "the reentry receipt boundary must start at a settled runtime").toBe(true);
     expect(reentryBaseline.connected, "the reentry receipt boundary retains an open connection").toBe(true);
     reentryGrid = undefined;
     recordReentryGrid = true;
     diagnosticPhase = "reentry";
     await page.locator("#op-pm-entry").click();
+    let quotaWarningDismissed = false;
     // The owner transport can replace streamed bytes with a snapshot. A fresh
     // applied snapshot or complete paint establishes the baseline; later
     // destructive or unfinished output must not be hidden by an older one.
@@ -1217,18 +1223,31 @@ exit 67
           && metrics.snapshotAccepted - snapshotsBefore === receipts
           && metrics.snapshotApplied === metrics.snapshotAccepted;
         const freshSnapshot = !!snapshot && receipts > 0 && correlated;
+        const screen = api.bufferText(id, metrics.rows);
         return {
           fresh: metrics.isReady === true && correlated && !pending.includes(syncBegin) && !/\x1b\[[0-3]?J/.test(pending)
             && !/\x1b(?:\[[0-?]*[ -/]*)?$/.test(pending)
             && (completePaint || (freshSnapshot && !paint)),
           metrics,
           buffer,
-          composer: api.bufferText(id, metrics.rows).includes("Ask Codex"),
+          composer: screen.includes("Ask Codex"),
+          quotaWarning: screen.includes("Approaching rate limits")
+            && /2\.\s+Keep current model/.test(screen) && screen.includes("esc back"),
           sameTerminal: document.querySelector(`.workspace-window[data-id="${id}"] .xterm`) === (window as any).__ownedPmNative,
           sameConnection: (window as any).__gwtPlaywrightSockets?.at(-1) === (window as any).__ownedPmConnection
             && (window as any).__ownedPmConnection?.readyState === 1,
         };
       }, { id, after: reentryBaseline.sequence, snapshotsBefore: reentryBaseline.snapshotsBefore });
+      if (rendered.quotaWarning && !quotaWarningDismissed) {
+        // Escape closes this native warning without accepting its model switch.
+        quotaWarningDismissed = true;
+        recordDiagnostic({ kind: "native-quota-dialog", action: "escape", id });
+        const configBeforeDismissal = await readFile(configPath, "utf8");
+        await input.focus();
+        await page.keyboard.press("Escape");
+        expect(await readFile(configPath, "utf8")).toBe(configBeforeDismissal);
+        expect(ownedNative()).toBe(true);
+      }
       return {
         fresh: rendered.fresh && rendered.sameTerminal && rendered.sameConnection && !!reentryGrid
           && rendered.metrics.cols === reentryGrid.cols && rendered.metrics.rows === reentryGrid.rows,
@@ -1311,6 +1330,8 @@ exit 67
     await expect.poll(() => sentInputs.slice(beforeUndo).join("")).toBe("\x7f".repeat(canary.length));
     await expect.poll(buffer).not.toContain(canary);
     expect(unexpectedTool, "no native tool call during the owned turn").toBe(false);
+    expect((await rows()).filter(row => row.type === "event_msg" && row.payload?.type === "task_started"),
+      "native dialog dismissal must not start another turn").toHaveLength(1);
     if (monitorError) throw monitorError;
     const finalActivity = await activity();
     const finalRuntime = await runtime();
