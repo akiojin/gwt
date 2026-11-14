@@ -66,6 +66,9 @@ pub fn current_thread_holds_session_lease() -> bool {
 /// Environment variable injected into agent PTYs so hooks can identify the
 /// backing gwt session.
 pub const GWT_SESSION_ID_ENV: &str = "GWT_SESSION_ID";
+/// Opaque provider actor claim injected into one terminal Bash operation by
+/// a managed hook. Launch composition must scrub inherited values.
+pub const GWT_PROVIDER_ACTOR_CLAIM_ENV: &str = "GWT_PROVIDER_ACTOR_CLAIM";
 /// One-time challenge injected only for a Prepared Continue work launch.
 ///
 /// The candidate returns it with its authenticated SessionStart event. The

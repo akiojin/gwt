@@ -17,6 +17,41 @@ use gwt_skills::CodexHookDiscoveryMode;
 use serde_json::Value;
 use tempfile::tempdir;
 
+const PRIMARY_FINAL_SEQUENCE: &str = "final Work update -> commit/push -> fresh verification -> PR mutation -> execution/build completion";
+
+fn assert_materialized_delegated_helper_boundary(guidance: &str) {
+    let boundary = guidance
+        .split("\n\n")
+        .find(|paragraph| paragraph.contains("delegated helper") && paragraph.contains("subagent"))
+        .expect(
+            "materialized guidance must give delegated helpers/subagents a result-only boundary",
+        );
+
+    for phrase in [
+        "root",
+        "primary agent",
+        "handoff",
+        "result",
+        "only",
+        "must not",
+        "`workspace.*`",
+        "`execution.*`",
+        "`build.*`",
+        "`pr.*`",
+        "commit",
+        "push",
+    ] {
+        assert!(
+            boundary.contains(phrase),
+            "materialized delegated-helper boundary is missing {phrase:?}: {boundary}"
+        );
+    }
+    assert!(
+        guidance.contains(PRIMARY_FINAL_SEQUENCE),
+        "materialized guidance must preserve the primary agent's terminal delivery sequence"
+    );
+}
+
 /// SPEC #3245 FR-004 / AC-1: the coordination guidance no longer branches by
 /// session kind. Every materialization gets the single guidance including the
 /// `workspace.update` Work-state instruction; the curation framing that told
@@ -58,6 +93,7 @@ fn coordination_guidance_is_identical_for_all_session_kinds() {
         !intake.contains("intake sessions produce no Work"),
         "the curation framing must be gone from the single guidance"
     );
+    assert_materialized_delegated_helper_boundary(&intake);
 }
 
 /// SPEC #3245 FR-003 / AC-1: every session kind receives the full skill set.

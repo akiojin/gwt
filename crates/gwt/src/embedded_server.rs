@@ -28,8 +28,8 @@ use axum::{
 use futures_util::{SinkExt, StreamExt};
 use gwt::{
     AgentBuildAbortTerminalizationRequest, AgentWorkTerminalizationRequest,
-    AgentWorkspaceUpdateError, AgentWorkspaceUpdateErrorCode, AgentWorkspaceUpdateRequest,
-    BackendEvent, FrontendEvent, HookForwardTarget, RuntimeHookEvent,
+    AgentWorkspaceReopenRequest, AgentWorkspaceUpdateError, AgentWorkspaceUpdateErrorCode,
+    AgentWorkspaceUpdateRequest, BackendEvent, FrontendEvent, HookForwardTarget, RuntimeHookEvent,
 };
 use gwt_terminal::PtyHandle;
 use serde::{Deserialize, Serialize};
@@ -2522,6 +2522,7 @@ fn agent_router(state: ServerState, access_log: AccessLogSink) -> Router {
             post(execution_continuation_handler),
         )
         .route("/internal/workspace-update", post(workspace_update_handler))
+        .route("/internal/workspace-reopen", post(workspace_reopen_handler))
         .route(
             "/internal/work-terminalization",
             post(work_terminalization_handler),
@@ -2948,6 +2949,7 @@ async fn workspace_update_handler(
             AgentWorkspaceUpdateError {
                 code: AgentWorkspaceUpdateErrorCode::InvalidRequest,
                 message: "agent capability is missing or invalid".to_string(),
+                terminal: None,
             },
         );
     };
@@ -2987,6 +2989,62 @@ async fn workspace_update_handler(
                 code: AgentWorkspaceUpdateErrorCode::Internal,
                 message: "Host workspace mutation task failed before a response was produced"
                     .to_string(),
+                terminal: None,
+            },
+        ),
+    }
+}
+
+async fn workspace_reopen_handler(
+    headers: HeaderMap,
+    State(state): State<ServerState>,
+    Json(request): Json<AgentWorkspaceReopenRequest>,
+) -> Response {
+    let Some(principal) = agent_capability_principal(&headers, &state) else {
+        return workspace_update_error_response(
+            StatusCode::UNAUTHORIZED,
+            AgentWorkspaceUpdateError {
+                code: AgentWorkspaceUpdateErrorCode::InvalidRequest,
+                message: "agent capability is missing or invalid".to_string(),
+                terminal: None,
+            },
+        );
+    };
+    let Some(execution_binding) = principal.active_execution_binding().cloned() else {
+        return execution_binding_error_response(
+            "workspace_reopen_requires_active_execution_authority",
+        );
+    };
+    let project_root = principal.canonical_project_root().to_path_buf();
+    let session_id = principal.session_id().to_string();
+    let mutation_project_root = project_root.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        gwt::apply_bound_authenticated_workspace_reopen(
+            &mutation_project_root,
+            &session_id,
+            &execution_binding,
+            request,
+        )
+    })
+    .await;
+
+    match result {
+        Ok(Ok(receipt)) => {
+            state
+                .proxy
+                .send(UserEvent::WorkspaceProjectionChanged { project_root });
+            Json(receipt).into_response()
+        }
+        Ok(Err(error)) => {
+            workspace_update_error_response(workspace_update_error_status(error.code), error)
+        }
+        Err(_) => workspace_update_error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            AgentWorkspaceUpdateError {
+                code: AgentWorkspaceUpdateErrorCode::Internal,
+                message: "Host workspace recovery task failed before a response was produced"
+                    .to_string(),
+                terminal: None,
             },
         ),
     }
@@ -3003,6 +3061,7 @@ async fn work_terminalization_handler(
             AgentWorkspaceUpdateError {
                 code: AgentWorkspaceUpdateErrorCode::InvalidRequest,
                 message: "agent capability is missing or invalid".to_string(),
+                terminal: None,
             },
         );
     };
@@ -3042,6 +3101,7 @@ async fn work_terminalization_handler(
                 code: AgentWorkspaceUpdateErrorCode::Internal,
                 message: "Host Work terminalization task failed before a response was produced"
                     .to_string(),
+                terminal: None,
             },
         ),
     }
@@ -3058,6 +3118,7 @@ async fn build_abort_terminalization_handler(
             AgentWorkspaceUpdateError {
                 code: AgentWorkspaceUpdateErrorCode::InvalidRequest,
                 message: "agent capability is missing or invalid".to_string(),
+                terminal: None,
             },
         );
     };
@@ -3097,6 +3158,7 @@ async fn build_abort_terminalization_handler(
                 code: AgentWorkspaceUpdateErrorCode::Internal,
                 message: "Host build abort mutation task failed before a response was produced"
                     .to_string(),
+                terminal: None,
             },
         ),
     }
@@ -3106,6 +3168,8 @@ fn workspace_update_error_status(code: AgentWorkspaceUpdateErrorCode) -> StatusC
     match code {
         AgentWorkspaceUpdateErrorCode::InvalidRequest => StatusCode::BAD_REQUEST,
         AgentWorkspaceUpdateErrorCode::RelaunchRequired
+        | AgentWorkspaceUpdateErrorCode::PrimaryActorRequired
+        | AgentWorkspaceUpdateErrorCode::CanonicalWorkTerminal
         | AgentWorkspaceUpdateErrorCode::ExecutionBindingMismatch
         | AgentWorkspaceUpdateErrorCode::WorkspaceEnsureRequired
         | AgentWorkspaceUpdateErrorCode::ProvenanceMismatch
@@ -3126,6 +3190,7 @@ async fn execution_binding_probe_handler(
             AgentWorkspaceUpdateError {
                 code: AgentWorkspaceUpdateErrorCode::InvalidRequest,
                 message: "agent capability is missing or invalid".to_string(),
+                terminal: None,
             },
         );
     };
@@ -3164,6 +3229,7 @@ async fn execution_binding_probe_handler(
                 code: AgentWorkspaceUpdateErrorCode::Internal,
                 message: "Host execution binding probe failed before a response was produced"
                     .to_string(),
+                terminal: None,
             },
         ),
     }
@@ -3180,6 +3246,7 @@ async fn execution_continuation_handler(
             AgentWorkspaceUpdateError {
                 code: AgentWorkspaceUpdateErrorCode::InvalidRequest,
                 message: "agent capability is missing or invalid".to_string(),
+                terminal: None,
             },
         );
     };
@@ -3205,6 +3272,7 @@ async fn execution_continuation_handler(
                     code: AgentWorkspaceUpdateErrorCode::Internal,
                     message: "Host continuation task failed before a response was produced"
                         .to_string(),
+                    terminal: None,
                 },
             );
         }
@@ -3225,6 +3293,7 @@ async fn execution_continuation_handler(
                 message:
                     "agent capability changed before continuation authority could be published"
                         .to_string(),
+                terminal: None,
             },
         );
     }
@@ -3246,6 +3315,7 @@ fn execution_binding_error_response(diagnostic_reason: &'static str) -> Response
             message:
                 "Execution binding is missing, stale, or no longer current; relaunch the Session before retrying"
                     .to_string(),
+            terminal: None,
         },
     )
 }
@@ -3255,6 +3325,8 @@ struct AgentWorkspaceUpdateErrorResponse {
     code: AgentWorkspaceUpdateErrorCode,
     reason: &'static str,
     message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    terminal: Option<gwt::AgentWorkspaceTerminalDiagnosis>,
 }
 
 fn workspace_update_error_response(
@@ -3263,6 +3335,8 @@ fn workspace_update_error_response(
 ) -> Response {
     let reason = match error.code {
         AgentWorkspaceUpdateErrorCode::InvalidRequest => "invalid_request",
+        AgentWorkspaceUpdateErrorCode::PrimaryActorRequired => "primary_actor_required",
+        AgentWorkspaceUpdateErrorCode::CanonicalWorkTerminal => "canonical_work_terminal",
         AgentWorkspaceUpdateErrorCode::RelaunchRequired => "relaunch_required",
         AgentWorkspaceUpdateErrorCode::ExecutionBindingMismatch => "authority_mismatch",
         AgentWorkspaceUpdateErrorCode::WorkspaceEnsureRequired => "workspace_ensure_required",
@@ -3277,6 +3351,7 @@ fn workspace_update_error_response(
             code: error.code,
             reason,
             message: error.message,
+            terminal: error.terminal.map(|terminal| *terminal),
         }),
     )
         .into_response()
@@ -7523,6 +7598,8 @@ mod tests {
 
     #[test]
     fn blocked_build_abort_route_discards_exact_bound_work_under_terminal_execution() {
+        use sha2::Digest as _;
+
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -7556,6 +7633,8 @@ mod tests {
         let mut session =
             gwt_agent::Session::new(&repo, "work/blocked-build-abort", gwt_agent::AgentId::Codex);
         session.id = "session-blocked-build-abort-http".to_string();
+        let provider_actor = "provider-root-blocked-build-abort-http";
+        session.agent_session_id = Some(provider_actor.to_string());
         session.project_state_root = Some(repo.clone());
         session.linked_issue_number = Some(owner.number);
         session
@@ -7715,6 +7794,7 @@ mod tests {
             .json(&serde_json::json!({
                 "schema_version": gwt::AGENT_BUILD_ABORT_TERMINALIZATION_SCHEMA_VERSION,
                 "claimed_session_id": session.id,
+                "provider_actor_id": format!("sha256:{:x}", sha2::Sha256::digest(provider_actor.as_bytes())),
                 "owner_number": owner.number,
                 "reason": "canonical verification cannot proceed",
                 "observation": gwt::observe_agent_runtime(&repo).expect("observe runtime")
@@ -7722,9 +7802,11 @@ mod tests {
             .send()
             .expect("send dedicated build abort");
 
-        assert_eq!(response.status(), HttpStatusCode::OK);
+        let status = response.status();
+        let response_body = response.text().expect("build abort response body");
+        assert_eq!(status, HttpStatusCode::OK, "{response_body}");
         let receipt: gwt::AgentWorkTerminalizationReceipt =
-            response.json().expect("build abort receipt");
+            serde_json::from_str(&response_body).expect("build abort receipt");
         assert_eq!(
             receipt.outcome,
             gwt::AgentWorkTerminalizationOutcome::Emitted
@@ -9011,6 +9093,8 @@ mod tests {
         let hook = server.hook_forward_target();
         let mut workspace_update_url = reqwest::Url::parse(&hook.url).expect("agent hook URL");
         workspace_update_url.set_path("/internal/workspace-update");
+        let mut workspace_reopen_url = reqwest::Url::parse(&hook.url).expect("agent hook URL");
+        workspace_reopen_url.set_path("/internal/workspace-reopen");
         let mut work_terminalization_url = reqwest::Url::parse(&hook.url).expect("agent hook URL");
         work_terminalization_url.set_path("/internal/work-terminalization");
         let mut build_abort_url = reqwest::Url::parse(&hook.url).expect("agent hook URL");
@@ -9039,6 +9123,18 @@ mod tests {
                 "branch": "work/observed"
             },
             "terminal_kind": "done"
+        });
+        let reopen_request = serde_json::json!({
+            "schema_version": gwt::AGENT_WORKSPACE_REOPEN_SCHEMA_VERSION,
+            "claimed_session_id": "session-1",
+            "observation": {
+                "cwd": "/workspace/repo",
+                "git_toplevel": "/workspace/repo",
+                "repo_hash": "observed-repo-hash",
+                "branch": "work/observed"
+            },
+            "observed_terminal_event_id": "event-done-1",
+            "reason": "recover primary Work"
         });
         let binding_probe_request = serde_json::json!({
             "schema_version": gwt::AGENT_EXECUTION_BINDING_PROBE_SCHEMA_VERSION,
@@ -9075,6 +9171,14 @@ mod tests {
             .expect("unauthorized workspace-update request");
         assert_eq!(workspace_response.status(), HttpStatusCode::UNAUTHORIZED);
 
+        let reopen_response = client
+            .post(workspace_reopen_url)
+            .header(reqwest::header::USER_AGENT, TOKEN_SENTINEL)
+            .json(&reopen_request)
+            .send()
+            .expect("unauthorized workspace-reopen request");
+        assert_eq!(reopen_response.status(), HttpStatusCode::UNAUTHORIZED);
+
         let terminalization_response = client
             .post(work_terminalization_url)
             .header(reqwest::header::USER_AGENT, TOKEN_SENTINEL)
@@ -9110,6 +9214,7 @@ mod tests {
             "/internal/hook-live",
             "/internal/execution-binding-probe",
             "/internal/workspace-update",
+            "/internal/workspace-reopen",
             "/internal/work-terminalization",
             "/internal/build-abort-terminalization",
         ] {

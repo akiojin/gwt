@@ -51,7 +51,7 @@ fn env_lock() -> &'static Mutex<()> {
 }
 
 #[cfg(not(windows))]
-const DIRECT_STOP_TEST_TOTAL_BUDGET: Duration = Duration::from_millis(900);
+const DIRECT_STOP_TEST_TOTAL_BUDGET: Duration = Duration::from_millis(1_800);
 #[cfg(windows)]
 const DIRECT_STOP_TEST_TOTAL_BUDGET: Duration = Duration::from_secs(15);
 #[cfg(not(windows))]
@@ -59,7 +59,9 @@ const DIRECT_STOP_TEST_CONNECT_TIMEOUT: Duration = Duration::from_millis(150);
 #[cfg(windows)]
 const DIRECT_STOP_TEST_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 #[cfg(not(windows))]
-const DIRECT_STOP_TEST_SETTLEMENT_RESERVE: Duration = Duration::from_millis(250);
+// Match the production settlement reserve. The shorter former reserve left
+// too little time for the causal lock-release wakeup plus two durable reads.
+const DIRECT_STOP_TEST_SETTLEMENT_RESERVE: Duration = Duration::from_millis(750);
 #[cfg(windows)]
 const DIRECT_STOP_TEST_SETTLEMENT_RESERVE: Duration = Duration::from_secs(5);
 

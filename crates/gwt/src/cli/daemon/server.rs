@@ -6151,11 +6151,11 @@ exit 0
                 "agent_failed": {
                     "issue_number": 42,
                     "window_id": "tab-1::agent-42",
-                    "message": "Codex usage limit reached — resumes after 2026-08-22T03:46:00Z",
+                    "message": "Codex usage limit reached — resumes after 2099-08-22T03:46:00Z",
                     "failure": {
                         "kind": "provider_usage_limit",
                         "provider": "codex",
-                        "resets_at": "2026-08-22T03:46:00Z",
+                        "resets_at": "2099-08-22T03:46:00Z",
                     },
                 }
             }),
@@ -6178,11 +6178,11 @@ exit 0
         );
         assert_eq!(
             record.retry_not_before.as_deref(),
-            Some("2026-08-22T03:46:00Z")
+            Some("2099-08-22T03:46:00Z")
         );
         assert_eq!(
             record.retry_hold_reason.as_deref(),
-            Some("Codex usage limit reached — resumes after 2026-08-22T03:46:00Z")
+            Some("Codex usage limit reached — resumes after 2099-08-22T03:46:00Z")
         );
         assert_eq!(
             monitor.inbox_item(42).map(|item| item.state),

@@ -3806,6 +3806,7 @@ struct T812Fixture {
     current_path: PathBuf,
     work_items_path: PathBuf,
     events_path: PathBuf,
+    close_events_path: PathBuf,
     journal_path: PathBuf,
 }
 
@@ -3814,6 +3815,8 @@ struct T812WorkspaceStateBytes {
     current: Option<Vec<u8>>,
     work_items: Option<Vec<u8>>,
     events: Option<Vec<u8>>,
+    close_events: Option<Vec<u8>>,
+    tracked_event_shards: std::collections::BTreeMap<String, Vec<u8>>,
     journal: Option<Vec<u8>>,
 }
 
@@ -3823,6 +3826,10 @@ impl T812Fixture {
             current: t812_optional_file_bytes(&self.current_path),
             work_items: t812_optional_file_bytes(&self.work_items_path),
             events: t812_optional_file_bytes(&self.events_path),
+            close_events: t812_optional_file_bytes(&self.close_events_path),
+            tracked_event_shards: read_work_event_shards(&gwt_repo_local_work_events_dir(
+                &self.target.work_event_root,
+            )),
             journal: t812_optional_file_bytes(&self.journal_path),
         }
     }
@@ -3926,6 +3933,8 @@ fn t812_seed_session_bound_fixture(temp: &Path) -> T812Fixture {
         },
     )
     .expect("seed shared-current journal");
+    let close_events_path =
+        gwt_workspace_work_events_closed_path_for_repo_path(&project_state_root);
 
     T812Fixture {
         current_path: gwt_workspace_projection_path_for_repo_path(&project_state_root),
@@ -3941,6 +3950,7 @@ fn t812_seed_session_bound_fixture(temp: &Path) -> T812Fixture {
         },
         work_items_path,
         events_path,
+        close_events_path,
         journal_path,
     }
 }
@@ -4019,6 +4029,57 @@ fn t812_read_events(path: &Path) -> Vec<WorkEvent> {
         .filter(|line| !line.trim().is_empty())
         .map(|line| serde_json::from_str(line).expect("parse Work event"))
         .collect()
+}
+
+fn t812_seed_terminal_event(
+    fixture: &T812Fixture,
+    kind: WorkEventKind,
+    event_id: &str,
+    updated_at: DateTime<Utc>,
+    provenance: Option<(&str, &str)>,
+) -> WorkEvent {
+    assert!(matches!(kind, WorkEventKind::Done | WorkEventKind::Discard));
+    let mut event = WorkEvent::new(kind, T812_TARGET_WORK_ID, updated_at);
+    event.id = event_id.to_string();
+    event.status_category = (kind == WorkEventKind::Done).then_some(WorkspaceStatusCategory::Done);
+    event.owner = Some(T812_TARGET_OWNER.to_string());
+    event.agent_session_id = Some(T812_SESSION_ID.to_string());
+    event.agent_id = Some("codex".to_string());
+    event.execution_container = Some(WorkspaceExecutionContainerRef {
+        branch: Some(T812_TARGET_BRANCH.to_string()),
+        worktree_path: Some(fixture.target.work_event_root.clone()),
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+    });
+    if let Some((source_operation, execution_generation)) = provenance {
+        event.source_operation = Some(source_operation.to_string());
+        event.authority_class = Some(WorkEventAuthorityClass::PrimaryAgent);
+        event.execution_generation = Some(execution_generation.to_string());
+    }
+    record_workspace_work_event_paths(
+        &fixture.work_items_path,
+        &fixture.close_events_path,
+        event.clone(),
+    )
+    .expect("seed terminal Work event");
+    event
+}
+
+fn t812_reopen_request(
+    terminal_event_id: &str,
+    reason: &str,
+    generation: &str,
+    updated_at: DateTime<Utc>,
+) -> WorkspaceReopenRequest {
+    WorkspaceReopenRequest {
+        observed_terminal_event_id: terminal_event_id.to_string(),
+        reason: reason.to_string(),
+        source_operation: "workspace.reopen".to_string(),
+        authority_class: WorkEventAuthorityClass::PrimaryAgent,
+        execution_generation: generation.to_string(),
+        updated_at,
+    }
 }
 
 fn t812_assert_rejected_without_mutation(
@@ -5845,6 +5906,738 @@ fn exact_terminal_confirmation_accepts_repaired_identity_and_unrelated_legacy_cl
     );
 }
 
+// ---------------------------------------------------------------------
+// SPEC-2359 Phase W-36 / Issue #3725 (T-962/T-963): terminal events carry
+// non-secret provenance, and only an exact explicit Done recovery may append
+// the canonical Active Resume transition.
+// ---------------------------------------------------------------------
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct FrozenV1WorkEvent {
+    id: String,
+    work_item_id: String,
+    kind: WorkEventKind,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    intent: Option<String>,
+    #[serde(default)]
+    summary: Option<String>,
+    #[serde(default)]
+    progress_summary: Option<String>,
+    #[serde(default)]
+    status_category: Option<WorkspaceStatusCategory>,
+    #[serde(default)]
+    owner: Option<String>,
+    #[serde(default)]
+    next_action: Option<String>,
+    #[serde(default)]
+    agent_session_id: Option<String>,
+    #[serde(default)]
+    agent_id: Option<String>,
+    #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
+    board_entry_id: Option<String>,
+    #[serde(default)]
+    execution_container: Option<WorkspaceExecutionContainerRef>,
+    #[serde(default)]
+    related_work_item_id: Option<String>,
+    updated_at: chrono::DateTime<Utc>,
+}
+
+fn assert_frozen_v1_item_events(item: &serde_json::Value) {
+    for event in item["events"].as_array().expect("persisted Work events") {
+        serde_json::from_value::<FrozenV1WorkEvent>(event.clone())
+            .expect("frozen v1 WorkEvent reader must accept works.json");
+    }
+    if let Some(snapshot) = item.get("legacy_metadata_snapshot") {
+        assert_frozen_v1_item_events(snapshot);
+    }
+    if let Some(duplicates) = item
+        .get("duplicate_event_containers")
+        .and_then(serde_json::Value::as_object)
+    {
+        for copy in duplicates
+            .values()
+            .flat_map(|copies| copies.as_array().expect("duplicate event copies"))
+            .filter(|copy| copy.get("work_item_id").is_some())
+        {
+            serde_json::from_value::<FrozenV1WorkEvent>(copy.clone())
+                .expect("frozen v1 duplicate WorkEvent reader must accept works.json");
+        }
+    }
+}
+
+fn assert_projection_events_are_frozen_v1_compatible(work_items_path: &Path) {
+    let value: serde_json::Value = serde_json::from_slice(
+        &fs::read(work_items_path).expect("read persisted WorkItems projection"),
+    )
+    .expect("parse persisted WorkItems projection");
+    for item in value["work_items"].as_array().expect("persisted WorkItems") {
+        assert_frozen_v1_item_events(item);
+    }
+}
+
+#[test]
+fn projection_persistence_keeps_frozen_v1_shape_and_recovers_close_log_provenance() {
+    const GENERATION: &str = "generation-w36-projection-close";
+    const REASON: &str = "Recover exact Work after response loss";
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let worktree = temp.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let work_items_path = temp.path().join("works.json");
+    let close_events_path = temp.path().join("work-events-closed.jsonl");
+    let done_at = Utc.with_ymd_and_hms(2026, 8, 21, 1, 0, 0).unwrap();
+    let resume_at = Utc.with_ymd_and_hms(2026, 8, 21, 1, 1, 0).unwrap();
+    let mut projection = WorkItemsProjection::empty(done_at);
+
+    let mut done = WorkEvent::new(WorkEventKind::Done, "work-w36-v1-close", done_at);
+    done.id = "event-w36-v1-close-done".to_string();
+    done.status_category = Some(WorkspaceStatusCategory::Done);
+    done.source_operation = Some("build.complete".to_string());
+    done.authority_class = Some(WorkEventAuthorityClass::PrimaryAgent);
+    done.execution_generation = Some(GENERATION.to_string());
+    assert_eq!(
+        projection.apply_event(done.clone()),
+        WorkEventApplyOutcome::Applied
+    );
+
+    let mut resume = WorkEvent::new(WorkEventKind::Resume, "work-w36-v1-close", resume_at);
+    resume.id = "event-w36-v1-close-resume".to_string();
+    resume.status_category = Some(WorkspaceStatusCategory::Active);
+    resume.source_operation = Some("workspace.reopen".to_string());
+    resume.authority_class = Some(WorkEventAuthorityClass::PrimaryAgent);
+    resume.execution_generation = Some(GENERATION.to_string());
+    resume.recovered_terminal_event_id = Some(done.id.clone());
+    resume.recovery_reason = Some(REASON.to_string());
+    resume.execution_container = Some(WorkspaceExecutionContainerRef {
+        branch: Some("work/issue-3725".to_string()),
+        worktree_path: Some(worktree.clone()),
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+    });
+    assert_eq!(
+        projection.apply_event(resume.clone()),
+        WorkEventApplyOutcome::Applied
+    );
+    let legacy_snapshot = projection.work_items[0].clone();
+    projection.work_items[0].legacy_metadata_snapshot = Some(Box::new(legacy_snapshot));
+    projection.work_items[0].duplicate_event_containers.insert(
+        done.id.clone(),
+        vec![DuplicateWorkEventProvenance::Event(Box::new(done.clone()))],
+    );
+
+    append_workspace_work_events_to_path(&close_events_path, std::slice::from_ref(&done))
+        .expect("persist canonical close events");
+    write_workspace_work_event_shards_to_dir(
+        &gwt_repo_local_work_events_dir(&worktree),
+        std::slice::from_ref(&resume),
+    )
+    .expect("persist canonical immutable Resume event shard");
+    save_workspace_work_items_projection_to_path(&work_items_path, &projection)
+        .expect("persist rolling-compatible WorkItems projection");
+
+    assert_projection_events_are_frozen_v1_compatible(&work_items_path);
+    let loaded = load_workspace_work_items_from_path(&work_items_path)
+        .expect("load current WorkItems projection")
+        .expect("current WorkItems projection");
+    let events = &loaded.work_items[0].events;
+    assert_eq!(
+        events[0].source_operation.as_deref(),
+        Some("build.complete")
+    );
+    assert_eq!(
+        events[0].authority_class,
+        Some(WorkEventAuthorityClass::PrimaryAgent)
+    );
+    assert_eq!(events[0].execution_generation.as_deref(), Some(GENERATION));
+    assert_eq!(
+        events[1].source_operation.as_deref(),
+        Some("workspace.reopen")
+    );
+    assert_eq!(
+        events[1].recovered_terminal_event_id.as_deref(),
+        Some("event-w36-v1-close-done")
+    );
+    assert_eq!(events[1].recovery_reason.as_deref(), Some(REASON));
+    assert_eq!(
+        loaded.work_items[0]
+            .legacy_metadata_snapshot
+            .as_ref()
+            .unwrap()
+            .events[1]
+            .recovered_terminal_event_id
+            .as_deref(),
+        Some("event-w36-v1-close-done")
+    );
+    assert_eq!(
+        loaded.work_items[0].duplicate_event_containers["event-w36-v1-close-done"][0]
+            .event()
+            .unwrap()
+            .source_operation
+            .as_deref(),
+        Some("build.complete")
+    );
+}
+
+#[test]
+fn projection_loader_ignores_only_an_unterminated_concurrent_close_tail() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let work_items_path = temp.path().join("works.json");
+    let close_events_path = temp.path().join("work-events-closed.jsonl");
+    let now = Utc.with_ymd_and_hms(2026, 8, 21, 1, 20, 0).unwrap();
+    let mut projection = WorkItemsProjection::empty(now);
+    let mut done = WorkEvent::new(WorkEventKind::Done, "work-concurrent-tail", now);
+    done.id = "event-concurrent-complete".to_string();
+    done.status_category = Some(WorkspaceStatusCategory::Done);
+    done.source_operation = Some("build.complete".to_string());
+    done.authority_class = Some(WorkEventAuthorityClass::PrimaryAgent);
+    done.execution_generation = Some("generation-concurrent".to_string());
+    projection.apply_event(done.clone());
+    let mut second = done.clone();
+    second.id = "event-concurrent-tail".to_string();
+    second.updated_at = now + chrono::Duration::seconds(1);
+    projection.apply_event(second.clone());
+    save_workspace_work_items_projection_to_path(&work_items_path, &projection)
+        .expect("persist frozen projection");
+
+    let done_line = serde_json::to_vec(&done).expect("serialize complete event");
+    let second_line = serde_json::to_vec(&second).expect("serialize tail event");
+    let split = second_line.len() / 2;
+    let mut partial = done_line;
+    partial.push(b'\n');
+    partial.extend_from_slice(&second_line[..split]);
+    fs::write(&close_events_path, partial).expect("publish partial append snapshot");
+
+    let during_append = load_workspace_work_items_from_path(&work_items_path)
+        .expect("partial dynamic tail must not fail projection load")
+        .expect("projection exists");
+    let events = &during_append.work_items[0].events;
+    assert_eq!(
+        events[0].source_operation.as_deref(),
+        Some("build.complete")
+    );
+    assert_eq!(events[1].source_operation, None);
+
+    let mut writer = fs::OpenOptions::new()
+        .append(true)
+        .open(&close_events_path)
+        .expect("open close append");
+    use std::io::Write as _;
+    writer
+        .write_all(&second_line[split..])
+        .expect("finish close event");
+    writer.write_all(b"\n").expect("commit close newline");
+    let after_append = load_workspace_work_items_from_path(&work_items_path)
+        .expect("complete close ledger")
+        .expect("projection exists");
+    assert_eq!(
+        after_append.work_items[0].events[1]
+            .source_operation
+            .as_deref(),
+        Some("build.complete")
+    );
+}
+
+#[test]
+fn projection_loader_recovers_provenance_from_exact_immutable_event_shard() {
+    const GENERATION: &str = "generation-w36-projection-shard";
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let worktree = temp.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let work_items_path = temp.path().join("works.json");
+    let done_at = Utc.with_ymd_and_hms(2026, 8, 21, 1, 30, 0).unwrap();
+    let mut projection = WorkItemsProjection::empty(done_at);
+    let mut done = WorkEvent::new(WorkEventKind::Done, "work-w36-v1-shard", done_at);
+    done.id = "event-w36-v1-shard-done".to_string();
+    done.status_category = Some(WorkspaceStatusCategory::Done);
+    done.source_operation = Some("workspace.update".to_string());
+    done.authority_class = Some(WorkEventAuthorityClass::PrimaryAgent);
+    done.execution_generation = Some(GENERATION.to_string());
+    done.execution_container = Some(WorkspaceExecutionContainerRef {
+        branch: Some("work/issue-3725".to_string()),
+        worktree_path: Some(worktree.clone()),
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+    });
+    assert_eq!(
+        projection.apply_event(done.clone()),
+        WorkEventApplyOutcome::Applied
+    );
+
+    write_workspace_work_event_shards_to_dir(
+        &gwt_repo_local_work_events_dir(&worktree),
+        std::slice::from_ref(&done),
+    )
+    .expect("persist canonical immutable Work event shard");
+    save_workspace_work_items_projection_to_path(&work_items_path, &projection)
+        .expect("persist rolling-compatible WorkItems projection");
+
+    assert_projection_events_are_frozen_v1_compatible(&work_items_path);
+    let loaded = load_workspace_work_items_from_path(&work_items_path)
+        .expect("load current WorkItems projection")
+        .expect("current WorkItems projection");
+    let terminal = loaded.work_items[0]
+        .current_terminal_event()
+        .expect("terminal event");
+    assert_eq!(
+        terminal.source_operation.as_deref(),
+        Some("workspace.update")
+    );
+    assert_eq!(
+        terminal.authority_class,
+        Some(WorkEventAuthorityClass::PrimaryAgent)
+    );
+    assert_eq!(terminal.execution_generation.as_deref(), Some(GENERATION));
+}
+
+#[test]
+fn terminal_event_reader_accepts_additive_provenance_and_legacy_source_is_unknown() {
+    const RAW_PROVIDER_ACTOR_ID: &str = "provider-thread-private-sentinel-w36-reader";
+
+    let event: WorkEvent = serde_json::from_value(serde_json::json!({
+        "id": "event-w36-provenance",
+        "work_item_id": "work-w36-provenance",
+        "kind": "done",
+        "status_category": "done",
+        "source_operation": "workspace.update",
+        "authority_class": "primary_agent",
+        "execution_generation": "generation-w36-7",
+        "updated_at": "2026-08-21T01:02:03Z"
+    }))
+    .expect("rolling reader accepts additive terminal provenance");
+
+    assert_eq!(event.source_operation.as_deref(), Some("workspace.update"));
+    assert_eq!(
+        event.execution_generation.as_deref(),
+        Some("generation-w36-7")
+    );
+    assert_eq!(event.source_operation_or_unknown(), "workspace.update");
+    let canonical = serde_json::to_value(&event).expect("serialize provenance event");
+    assert_eq!(canonical["authority_class"], "primary_agent");
+    assert_eq!(canonical["updated_at"], "2026-08-21T01:02:03Z");
+    assert!(
+        !canonical.to_string().contains(RAW_PROVIDER_ACTOR_ID),
+        "raw provider actor identity is transient authority, not Work provenance"
+    );
+
+    let legacy: WorkEvent = serde_json::from_value(serde_json::json!({
+        "id": "event-w36-legacy",
+        "work_item_id": "work-w36-legacy",
+        "kind": "done",
+        "status_category": "done",
+        "updated_at": "2026-08-20T23:59:59Z"
+    }))
+    .expect("legacy terminal event remains readable");
+    assert_eq!(legacy.source_operation, None);
+    assert_eq!(legacy.authority_class, None);
+    assert_eq!(legacy.execution_generation, None);
+    assert_eq!(legacy.source_operation_or_unknown(), "unknown");
+    let legacy_canonical = serde_json::to_value(&legacy).expect("serialize legacy terminal event");
+    for additive_field in [
+        "source_operation",
+        "authority_class",
+        "execution_generation",
+        "recovered_terminal_event_id",
+        "recovery_reason",
+    ] {
+        assert!(
+            legacy_canonical.get(additive_field).is_none(),
+            "legacy event must not synthesize {additive_field} into canonical history"
+        );
+    }
+}
+
+#[test]
+fn current_terminal_event_diagnosis_preserves_original_identity_time_and_provenance() {
+    let started_at = Utc.with_ymd_and_hms(2026, 8, 21, 2, 0, 0).unwrap();
+    let terminal_at = Utc.with_ymd_and_hms(2026, 8, 21, 2, 1, 0).unwrap();
+    let refusal_at = Utc.with_ymd_and_hms(2026, 8, 21, 2, 2, 0).unwrap();
+    let mut projection = WorkItemsProjection::empty(started_at);
+    let mut start = WorkEvent::new(WorkEventKind::Start, "work-w36-diagnosis", started_at);
+    start.status_category = Some(WorkspaceStatusCategory::Active);
+    assert_eq!(
+        projection.apply_event(start),
+        WorkEventApplyOutcome::Applied
+    );
+
+    let mut done = WorkEvent::new(WorkEventKind::Done, "work-w36-diagnosis", terminal_at);
+    done.id = "event-w36-original-done".to_string();
+    done.status_category = Some(WorkspaceStatusCategory::Done);
+    done.source_operation = Some("build.complete".to_string());
+    done.authority_class = Some(WorkEventAuthorityClass::PrimaryAgent);
+    done.execution_generation = Some("generation-w36-diagnosis".to_string());
+    assert_eq!(projection.apply_event(done), WorkEventApplyOutcome::Applied);
+
+    let mut later_refusal_heartbeat =
+        WorkEvent::new(WorkEventKind::Update, "work-w36-diagnosis", refusal_at);
+    later_refusal_heartbeat.status_category = Some(WorkspaceStatusCategory::Active);
+    assert_eq!(
+        projection.apply_event(later_refusal_heartbeat),
+        WorkEventApplyOutcome::Applied
+    );
+
+    let item = projection
+        .work_items
+        .iter()
+        .find(|item| item.id == "work-w36-diagnosis")
+        .expect("diagnosed Work");
+    let terminal = item
+        .current_terminal_event()
+        .expect("Done Work retains its exact terminal event");
+    assert_eq!(terminal.id, "event-w36-original-done");
+    assert_eq!(terminal.kind, WorkEventKind::Done);
+    assert_eq!(terminal.updated_at, terminal_at);
+    assert_eq!(terminal.source_operation_or_unknown(), "build.complete");
+    assert_eq!(
+        terminal.execution_generation.as_deref(),
+        Some("generation-w36-diagnosis")
+    );
+}
+
+#[test]
+fn exact_done_reopen_appends_one_linked_resume_and_retry_is_byte_idempotent() {
+    const RAW_PROVIDER_ACTOR_ID: &str = "provider-thread-private-sentinel-w36-reopen";
+    const GENERATION: &str = "generation-w36-active";
+    const REASON: &str = "Recover primary Work after delegated helper terminalization";
+
+    let _guard = lock_test_env();
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let temp = tempfile::tempdir().expect("tempdir");
+    let fixture = t812_seed_session_bound_fixture(temp.path());
+    let mut current = load_workspace_projection_from_path(&fixture.current_path)
+        .expect("load current")
+        .expect("current projection");
+    current.agents[0].window_id = Some(RAW_PROVIDER_ACTOR_ID.to_string());
+    save_workspace_projection_to_path(&fixture.current_path, &current)
+        .expect("seed transient provider actor evidence");
+
+    let done_at = Utc.with_ymd_and_hms(2026, 8, 21, 3, 0, 0).unwrap();
+    let resume_at = Utc.with_ymd_and_hms(2026, 8, 21, 3, 1, 0).unwrap();
+    let done = t812_seed_terminal_event(
+        &fixture,
+        WorkEventKind::Done,
+        "event-w36-recoverable-done",
+        done_at,
+        Some(("workspace.update", GENERATION)),
+    );
+
+    reopen_workspace_done_for_resolved_work_target(
+        &fixture.target,
+        t812_reopen_request(&done.id, REASON, GENERATION, resume_at),
+        |_, _| Ok(()),
+    )
+    .expect("exact current Done is explicitly recoverable");
+
+    let reopened = load_workspace_work_items_from_path(&fixture.work_items_path)
+        .expect("load reopened WorkItems")
+        .expect("reopened WorkItems");
+    let item = reopened
+        .work_items
+        .iter()
+        .find(|item| item.id == T812_TARGET_WORK_ID)
+        .expect("reopened target Work");
+    assert_eq!(item.status_category, WorkspaceStatusCategory::Active);
+    assert!(!item.discarded);
+    assert_eq!(item.completed_at, None);
+    assert_eq!(item.current_terminal_event(), None);
+    let resume = item.events.last().expect("explicit Resume event");
+    assert_eq!(resume.kind, WorkEventKind::Resume);
+    assert_eq!(
+        resume.status_category,
+        Some(WorkspaceStatusCategory::Active)
+    );
+    assert_eq!(
+        resume.recovered_terminal_event_id.as_deref(),
+        Some(done.id.as_str())
+    );
+    assert_eq!(resume.recovery_reason.as_deref(), Some(REASON));
+    assert_eq!(resume.source_operation_or_unknown(), "workspace.reopen");
+    assert_eq!(resume.execution_generation.as_deref(), Some(GENERATION));
+    assert_eq!(
+        serde_json::to_value(resume).expect("serialize Resume")["authority_class"],
+        "primary_agent"
+    );
+    assert!(
+        !serde_json::to_string(resume)
+            .expect("serialize Resume")
+            .contains(RAW_PROVIDER_ACTOR_ID),
+        "raw provider actor identity must not enter the recovery event"
+    );
+
+    let after_first_reopen = fixture.state_bytes();
+    reopen_workspace_done_for_resolved_work_target(
+        &fixture.target,
+        t812_reopen_request(
+            &done.id,
+            REASON,
+            GENERATION,
+            resume_at + chrono::Duration::minutes(1),
+        ),
+        |_, _| Ok(()),
+    )
+    .expect("response-loss retry returns the committed recovery");
+    assert_eq!(
+        fixture.state_bytes(),
+        after_first_reopen,
+        "same terminal/generation/reason retry must not append a duplicate Resume"
+    );
+    let retried = load_workspace_work_items_from_path(&fixture.work_items_path)
+        .expect("load retried WorkItems")
+        .expect("retried WorkItems");
+    assert_eq!(
+        retried
+            .work_items
+            .iter()
+            .find(|item| item.id == T812_TARGET_WORK_ID)
+            .expect("retried target")
+            .events
+            .iter()
+            .filter(|event| {
+                event.kind == WorkEventKind::Resume
+                    && event.recovered_terminal_event_id.as_deref() == Some(done.id.as_str())
+            })
+            .count(),
+        1
+    );
+
+    t812_apply_resolved_workspace_update(
+        &fixture.target,
+        WorkspaceProjectionUpdate {
+            title: None,
+            status_category: Some(WorkspaceStatusCategory::Active),
+            status_text: None,
+            owner: None,
+            next_action: None,
+            summary: Some("Primary Work is reachable after explicit reopen".to_string()),
+            progress_summary: None,
+            agent_session_id: Some(T812_SESSION_ID.to_string()),
+            agent_current_focus: None,
+            agent_title_summary: None,
+        },
+    )
+    .expect("ordinary update is immediately reachable after explicit recovery");
+}
+
+#[test]
+fn exact_done_reopen_rejects_discard_and_changed_event_without_mutation() {
+    const GENERATION: &str = "generation-w36-negative";
+    let _guard = lock_test_env();
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    let discarded = t812_seed_session_bound_fixture(&temp.path().join("discarded"));
+    let discard = t812_seed_terminal_event(
+        &discarded,
+        WorkEventKind::Discard,
+        "event-w36-discard",
+        Utc.with_ymd_and_hms(2026, 8, 21, 4, 0, 0).unwrap(),
+        Some(("build.abort", GENERATION)),
+    );
+    let discarded_before = discarded.state_bytes();
+    reopen_workspace_done_for_resolved_work_target(
+        &discarded.target,
+        t812_reopen_request(
+            &discard.id,
+            "Discard must remain terminal",
+            GENERATION,
+            Utc.with_ymd_and_hms(2026, 8, 21, 4, 1, 0).unwrap(),
+        ),
+        |_, _| Ok(()),
+    )
+    .expect_err("Discarded Work cannot be reopened");
+    assert_eq!(
+        discarded.state_bytes(),
+        discarded_before,
+        "Discard rejection must leave every persistence surface byte-identical"
+    );
+
+    let mut discarded_projection = load_workspace_work_items_from_path(&discarded.work_items_path)
+        .expect("load discarded projection")
+        .expect("discarded projection");
+    let mut forbidden_resume = WorkEvent::new(
+        WorkEventKind::Resume,
+        T812_TARGET_WORK_ID,
+        Utc.with_ymd_and_hms(2026, 8, 21, 4, 2, 0).unwrap(),
+    );
+    forbidden_resume.status_category = Some(WorkspaceStatusCategory::Active);
+    forbidden_resume.recovered_terminal_event_id = Some(discard.id.clone());
+    forbidden_resume.recovery_reason = Some("must remain discarded".to_string());
+    assert_eq!(
+        discarded_projection.apply_event(forbidden_resume),
+        WorkEventApplyOutcome::Applied
+    );
+    let discarded_item = discarded_projection
+        .work_items
+        .iter()
+        .find(|item| item.id == T812_TARGET_WORK_ID)
+        .expect("discarded target");
+    assert!(discarded_item.discarded, "Discard is monotonic");
+    assert_eq!(
+        discarded_item
+            .current_terminal_event()
+            .expect("Discard remains the current terminal")
+            .id,
+        discard.id
+    );
+
+    let changed = t812_seed_session_bound_fixture(&temp.path().join("changed-event"));
+    t812_seed_terminal_event(
+        &changed,
+        WorkEventKind::Done,
+        "event-w36-current-done",
+        Utc.with_ymd_and_hms(2026, 8, 21, 5, 0, 0).unwrap(),
+        Some(("workspace.update", GENERATION)),
+    );
+    let changed_before = changed.state_bytes();
+    reopen_workspace_done_for_resolved_work_target(
+        &changed.target,
+        t812_reopen_request(
+            "event-w36-stale-observation",
+            "Observed event changed",
+            GENERATION,
+            Utc.with_ymd_and_hms(2026, 8, 21, 5, 1, 0).unwrap(),
+        ),
+        |_, _| Ok(()),
+    )
+    .expect_err("stale terminal event observation must fail CAS");
+    assert_eq!(
+        changed.state_bytes(),
+        changed_before,
+        "terminal event mismatch must not append Resume or rewrite projection"
+    );
+}
+
+#[test]
+fn exact_done_reopen_rejects_missing_or_foreign_terminal_generation_without_mutation() {
+    const ACTIVE_GENERATION: &str = "generation-w36-current";
+    let _guard = lock_test_env();
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    for (label, provenance) in [
+        ("missing", None),
+        (
+            "foreign",
+            Some(("workspace.update", "generation-w36-predecessor")),
+        ),
+    ] {
+        let fixture = t812_seed_session_bound_fixture(&temp.path().join(label));
+        let done = t812_seed_terminal_event(
+            &fixture,
+            WorkEventKind::Done,
+            &format!("event-w36-{label}-generation"),
+            Utc.with_ymd_and_hms(2026, 8, 21, 5, 30, 0).unwrap(),
+            provenance,
+        );
+        let before = fixture.state_bytes();
+        reopen_workspace_done_for_resolved_work_target(
+            &fixture.target,
+            t812_reopen_request(
+                &done.id,
+                "Only the exact active generation may recover",
+                ACTIVE_GENERATION,
+                Utc.with_ymd_and_hms(2026, 8, 21, 5, 31, 0).unwrap(),
+            ),
+            |_, _| Ok(()),
+        )
+        .expect_err("missing or predecessor generation must not reopen current Work");
+        assert_eq!(
+            fixture.state_bytes(),
+            before,
+            "{label} generation refusal must be byte-identical"
+        );
+    }
+}
+
+#[test]
+fn exact_done_reopen_revalidates_terminal_event_after_lock_wait() {
+    use fs2::FileExt;
+
+    const GENERATION: &str = "generation-w36-cas";
+    let _guard = lock_test_env();
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let temp = tempfile::tempdir().expect("tempdir");
+    let fixture = t812_seed_session_bound_fixture(temp.path());
+    let observed = t812_seed_terminal_event(
+        &fixture,
+        WorkEventKind::Done,
+        "event-w36-observed-done",
+        Utc.with_ymd_and_hms(2026, 8, 21, 6, 0, 0).unwrap(),
+        Some(("workspace.update", GENERATION)),
+    );
+
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(fixture.work_items_path.with_extension("lock"))
+        .expect("open WorkItems transaction lock");
+    lock.lock_exclusive()
+        .expect("hold WorkItems transaction lock");
+
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let thread_home = home.path().to_path_buf();
+    let target = fixture.target.clone();
+    let request = t812_reopen_request(
+        &observed.id,
+        "CAS must reject a replaced terminal event",
+        GENERATION,
+        Utc.with_ymd_and_hms(2026, 8, 21, 6, 2, 0).unwrap(),
+    );
+    let handle = std::thread::spawn(move || {
+        let _home = ScopedHome::set(&thread_home);
+        started_tx.send(()).expect("signal reopen start");
+        reopen_workspace_done_for_resolved_work_target(&target, request, |_, _| Ok(()))
+    });
+    started_rx.recv().expect("reopen thread started");
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert!(
+        !handle.is_finished(),
+        "reopen must wait for the canonical WorkItems lock"
+    );
+
+    let mut replacement = observed.clone();
+    replacement.id = "event-w36-replacement-done".to_string();
+    replacement.updated_at = Utc.with_ymd_and_hms(2026, 8, 21, 6, 1, 0).unwrap();
+    replacement.source_operation = Some("build.complete".to_string());
+    let mut work_items = load_workspace_work_items_from_path(&fixture.work_items_path)
+        .expect("load WorkItems for competing terminal")
+        .expect("WorkItems for competing terminal");
+    assert_eq!(
+        work_items.apply_event(replacement.clone()),
+        WorkEventApplyOutcome::Applied
+    );
+    append_workspace_work_event_to_path(&fixture.close_events_path, &replacement)
+        .expect("append competing terminal first");
+    save_workspace_work_items_projection_to_path(&fixture.work_items_path, &work_items)
+        .expect("commit competing terminal projection");
+    let after_competing_terminal = fixture.state_bytes();
+
+    FileExt::unlock(&lock).expect("release WorkItems transaction lock");
+    handle
+        .join()
+        .expect("join reopen thread")
+        .expect_err("lock-time terminal replacement must fail CAS");
+    assert_eq!(
+        fixture.state_bytes(),
+        after_competing_terminal,
+        "CAS refusal must preserve the competing terminal as the only new bytes"
+    );
+}
+
 #[test]
 fn session_bound_sparse_update_does_not_inherit_foreign_shared_current_fields() {
     let _guard = lock_test_env();
@@ -6484,6 +7277,77 @@ fn skip_tracked_policy_leaves_committed_events_log_untouched() {
         Some("post-completion focus"),
         "machine-local projection must still reflect the coordination update"
     );
+}
+
+#[test]
+fn skip_tracked_terminal_event_persists_rich_machine_local_provenance() {
+    const GENERATION: &str = "generation-skip-tracked-terminal";
+    const RAW_ACTOR: &str = "provider-private-skip-tracked";
+
+    let _guard = crate::test_support::env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let temp = tempfile::tempdir().expect("tempdir");
+    let fixture = t812_seed_session_bound_fixture(temp.path());
+    let tracked_before = read_work_event_shards(&gwt_repo_local_work_events_dir(
+        &fixture.target.work_event_root,
+    ));
+
+    update_workspace_projection_with_journal_for_resolved_work_target(
+        &fixture.target,
+        WorkspaceProjectionUpdate {
+            title: None,
+            status_category: Some(WorkspaceStatusCategory::Done),
+            status_text: None,
+            owner: None,
+            next_action: None,
+            summary: Some("terminal update after execution completion".to_string()),
+            progress_summary: None,
+            agent_session_id: Some(T812_SESSION_ID.to_string()),
+            agent_current_focus: None,
+            agent_title_summary: None,
+        },
+        TrackedWorkEventPolicy::SkipTracked,
+        |_, _| Ok(()),
+        |event, _| {
+            event.source_operation = Some("workspace.update".to_string());
+            event.authority_class = Some(WorkEventAuthorityClass::PrimaryAgent);
+            event.execution_generation = Some(GENERATION.to_string());
+            Ok(())
+        },
+    )
+    .expect("persist completed-execution terminal update");
+
+    assert_eq!(
+        read_work_event_shards(&gwt_repo_local_work_events_dir(
+            &fixture.target.work_event_root,
+        )),
+        tracked_before,
+        "SkipTracked terminal provenance must not dirty the committed shard store"
+    );
+    let reloaded = load_workspace_work_items_from_path(&fixture.work_items_path)
+        .expect("reload WorkItems")
+        .expect("WorkItems exists");
+    let terminal = reloaded
+        .work_items
+        .iter()
+        .find(|work| work.id == T812_TARGET_WORK_ID)
+        .and_then(WorkItem::current_terminal_event)
+        .expect("reloaded terminal event");
+    assert_eq!(
+        terminal.source_operation.as_deref(),
+        Some("workspace.update")
+    );
+    assert_eq!(
+        terminal.authority_class,
+        Some(WorkEventAuthorityClass::PrimaryAgent)
+    );
+    assert_eq!(terminal.execution_generation.as_deref(), Some(GENERATION));
+    assert!(!serde_json::to_string(&terminal)
+        .unwrap()
+        .contains(RAW_ACTOR));
 }
 
 #[test]
@@ -9918,7 +10782,14 @@ fn read_work_event_shards(events_dir: &Path) -> std::collections::BTreeMap<Strin
     while let Some(directory) = pending.pop() {
         let entries = match fs::read_dir(&directory) {
             Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                continue
+            }
             Err(error) => panic!("read {}: {error}", directory.display()),
         };
         for entry in entries {

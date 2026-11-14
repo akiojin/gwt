@@ -113,6 +113,36 @@ pub enum WorkEventKind {
     Backfill,
 }
 
+/// Non-secret authority class that accepted a lifecycle mutation.
+///
+/// This deliberately records only the authorization class. Provider-native
+/// actor ids are transient credentials and must never enter Work history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkEventAuthorityClass {
+    PrimaryAgent,
+    TrustedHost,
+    User,
+    LegacySession,
+}
+
+/// Provenance supplied by an authority boundary when it creates a Work event.
+/// The fields are flattened onto [`WorkEvent`] for rolling-reader compatibility.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkEventProvenance {
+    pub source_operation: String,
+    pub authority_class: WorkEventAuthorityClass,
+    pub execution_generation: Option<String>,
+}
+
+impl WorkEventProvenance {
+    pub fn apply_to(&self, event: &mut WorkEvent) {
+        event.source_operation = Some(self.source_operation.clone());
+        event.authority_class = Some(self.authority_class);
+        event.execution_generation = self.execution_generation.clone();
+    }
+}
+
 /// One append-only event in a Work item's lifecycle. Events are folded into
 /// [`WorkItem`]s by [`WorkItemsProjection`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -147,6 +177,22 @@ pub struct WorkEvent {
     pub execution_container: Option<WorkspaceExecutionContainerRef>,
     #[serde(default)]
     pub related_work_item_id: Option<String>,
+    /// Machine-readable operation that created this event. `None` denotes a
+    /// legacy event and is rendered as `unknown` only at diagnosis time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_operation: Option<String>,
+    /// Non-secret class of the authority that accepted the operation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority_class: Option<WorkEventAuthorityClass>,
+    /// Execution generation correlated with the accepted operation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_generation: Option<String>,
+    /// Exact Done event recovered by an explicit Resume transition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovered_terminal_event_id: Option<String>,
+    /// Sanitized operator-supplied reason for an explicit recovery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_reason: Option<String>,
     pub updated_at: DateTime<Utc>,
 }
 
@@ -200,8 +246,22 @@ impl WorkEvent {
             board_entry_id: None,
             execution_container: None,
             related_work_item_id: None,
+            source_operation: None,
+            authority_class: None,
+            execution_generation: None,
+            recovered_terminal_event_id: None,
+            recovery_reason: None,
             updated_at,
         }
+    }
+
+    /// Operation name for diagnostics while preserving legacy bytes on disk.
+    pub fn source_operation_or_unknown(&self) -> &str {
+        self.source_operation
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("unknown")
     }
 }
 
@@ -279,6 +339,23 @@ impl WorkItem {
     /// terminal close — either completed (Done) or explicitly discarded.
     pub fn is_terminal(&self) -> bool {
         self.status_category == WorkspaceStatusCategory::Done || self.discarded
+    }
+
+    /// Exact event responsible for the Work's current terminal state.
+    /// Later heartbeats cannot hide this diagnostic boundary, while a valid
+    /// Done Resume makes the Work non-terminal and therefore returns `None`.
+    pub fn current_terminal_event(&self) -> Option<&WorkEvent> {
+        let terminal_kind = if self.discarded {
+            WorkEventKind::Discard
+        } else if self.status_category == WorkspaceStatusCategory::Done {
+            WorkEventKind::Done
+        } else {
+            return None;
+        };
+        self.events
+            .iter()
+            .rev()
+            .find(|event| event.kind == terminal_kind)
     }
 
     /// #3065: the most recent non-empty `next_action` across this Work's

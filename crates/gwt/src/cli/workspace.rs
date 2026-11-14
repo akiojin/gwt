@@ -21,10 +21,29 @@ use gwt_github::{ApiError, SpecOpsError};
 
 use crate::cli::{CliEnv, CliParseError, WorkspaceCommand};
 
+/// Issue #3725 / SPEC-2359 W-36 recovery request carried by the CLI model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceReopenCommand {
+    pub agent_session: Option<String>,
+    pub observed_terminal_event_id: String,
+    pub reason: String,
+}
+
+fn terminal_diagnosis_error(diagnosis: &crate::AgentWorkspaceTerminalDiagnosis) -> String {
+    serde_json::json!({
+        "code": "canonical_work_terminal",
+        "reason": "canonical_work_terminal",
+        "message": format!("canonical Work {} is terminal", diagnosis.work_id),
+        "terminal": diagnosis,
+    })
+    .to_string()
+}
+
 pub fn parse(args: &[String]) -> Result<WorkspaceCommand, CliParseError> {
     let (head, rest) = args.split_first().ok_or(CliParseError::Usage)?;
     match head.as_str() {
         "update" => parse_update(rest),
+        "reopen" => parse_reopen(rest),
         "candidates" => parse_candidates(rest),
         "join" => parse_join(rest),
         "create" => parse_create(rest),
@@ -33,6 +52,33 @@ pub fn parse(args: &[String]) -> Result<WorkspaceCommand, CliParseError> {
         "projection-prune" => parse_projection_prune(rest),
         other => Err(CliParseError::UnknownSubcommand(other.to_string())),
     }
+}
+
+fn parse_reopen(args: &[String]) -> Result<WorkspaceCommand, CliParseError> {
+    let mut agent_session = None;
+    let mut observed_terminal_event_id = None;
+    let mut reason = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--agent-session" => {
+                agent_session = Some(parse_required_value(args, i, "--agent-session")?)
+            }
+            "--terminal-event-id" => {
+                observed_terminal_event_id =
+                    Some(parse_required_value(args, i, "--terminal-event-id")?)
+            }
+            "--reason" => reason = Some(parse_required_value(args, i, "--reason")?),
+            other => return Err(CliParseError::UnknownSubcommand(other.to_string())),
+        }
+        i += 2;
+    }
+    Ok(WorkspaceCommand::Reopen(WorkspaceReopenCommand {
+        agent_session,
+        observed_terminal_event_id: observed_terminal_event_id
+            .ok_or(CliParseError::MissingFlag("--terminal-event-id"))?,
+        reason: reason.ok_or(CliParseError::MissingFlag("--reason"))?,
+    }))
 }
 
 fn parse_projection_list(args: &[String]) -> Result<WorkspaceCommand, CliParseError> {
@@ -335,18 +381,47 @@ struct WorkspaceUpdateBridgeAuthority {
 enum WorkspaceUpdateBridgeAuthoritySnapshot {
     Exact(Box<WorkspaceUpdateBridgeAuthority>),
     NeedsEnsure,
+    LegacyUnbound,
     Unavailable,
+    Refused(String),
 }
 
 fn snapshot_workspace_update_bridge_authority(
     repo_path: &std::path::Path,
     session_id: &str,
 ) -> WorkspaceUpdateBridgeAuthoritySnapshot {
+    if let Err(error) = gwt_agent::validate_session_id_path_component(session_id) {
+        return WorkspaceUpdateBridgeAuthoritySnapshot::Refused(format!(
+            "invalid or unsafe Session id: {error}"
+        ));
+    }
+    let session_path = gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml"));
+    match gwt_agent::Session::load(&session_path) {
+        Ok(session) if session.execution_binding.is_none() => {
+            return WorkspaceUpdateBridgeAuthoritySnapshot::LegacyUnbound;
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return WorkspaceUpdateBridgeAuthoritySnapshot::Unavailable;
+        }
+        Err(_) => {
+            return WorkspaceUpdateBridgeAuthoritySnapshot::Refused(
+                "durable Session execution authority is corrupt or unreadable".to_string(),
+            );
+        }
+    }
     let recovery = match crate::agent_project_state::validated_workspace_recovery_session(
         repo_path, session_id,
     ) {
         Ok(Some(recovery)) => recovery,
-        Ok(None) | Err(_) => return WorkspaceUpdateBridgeAuthoritySnapshot::Unavailable,
+        Ok(None) => {
+            return WorkspaceUpdateBridgeAuthoritySnapshot::Refused(
+                "durable Session execution authority disappeared during validation".to_string(),
+            );
+        }
+        Err(error) => {
+            return WorkspaceUpdateBridgeAuthoritySnapshot::Refused(error.to_string());
+        }
     };
     let (recovery, policy, host_recovery) = match recovery {
         crate::agent_project_state::ValidatedWorkspaceEnsureSession::Host(recovery) => {
@@ -680,7 +755,57 @@ struct LocalWorkspaceUpdateTransaction<'a> {
     session_id: &'a str,
     target: &'a crate::agent_project_state::SessionWorkMutationTarget,
     tracked_event_policy: TrackedWorkEventPolicy,
+    terminal_intent: bool,
+    requires_legacy_unbound_authority: bool,
     opens_work_settlement: bool,
+    provider_actor_id: Option<&'a str>,
+    execution_generation: Option<&'a str>,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static LOCAL_TERMINAL_BEFORE_GLOBAL_LEASE_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn set_local_terminal_before_global_lease_hook(hook: impl FnOnce() + 'static) {
+    LOCAL_TERMINAL_BEFORE_GLOBAL_LEASE_HOOK.with(|slot| {
+        let previous = slot.replace(Some(Box::new(hook)));
+        assert!(
+            previous.is_none(),
+            "local terminal global-lease hook must not be installed recursively"
+        );
+    });
+}
+
+#[cfg(test)]
+fn run_local_terminal_before_global_lease_hook() {
+    LOCAL_TERMINAL_BEFORE_GLOBAL_LEASE_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
+fn with_local_terminal_authority_leases<T>(
+    trusted_dir: &Path,
+    session_id: &str,
+    provider_actor_id: Option<&str>,
+    operation: impl FnOnce() -> T,
+) -> std::io::Result<std::result::Result<T, crate::agent_project_state::AgentWorkspaceUpdateError>>
+{
+    #[cfg(test)]
+    run_local_terminal_before_global_lease_hook();
+    crate::cli::trusted_store::with_write_lease_for_resolved_dir(trusted_dir, || {
+        Ok(
+            crate::agent_project_state::with_primary_actor_authority_lease(
+                session_id,
+                provider_actor_id,
+                operation,
+            ),
+        )
+    })
 }
 
 fn persist_local_workspace_update(
@@ -694,6 +819,13 @@ fn persist_local_workspace_update(
         update,
         transaction.tracked_event_policy,
         |_, _| {
+            if transaction.terminal_intent {
+                crate::agent_project_state::validate_primary_actor_authority(
+                    transaction.session_id,
+                    transaction.provider_actor_id,
+                )
+                .map_err(|error| GwtError::Other(error.to_string()))?;
+            }
             let refreshed = crate::agent_project_state::resolve_session_work_mutation_target(
                 transaction.invocation_repo_path,
                 transaction.session_id,
@@ -706,6 +838,12 @@ fn persist_local_workspace_update(
             Ok(())
         },
         |event, journal_entry| {
+            if transaction.terminal_intent {
+                event.source_operation = Some("workspace.update".to_string());
+                event.authority_class =
+                    Some(gwt_core::workspace_projection::WorkEventAuthorityClass::PrimaryAgent);
+                event.execution_generation = transaction.execution_generation.map(str::to_string);
+            }
             if !transaction.opens_work_settlement {
                 return Ok(());
             }
@@ -731,12 +869,115 @@ fn persist_local_workspace_update(
     )
 }
 
+fn persist_local_terminal_workspace_update_under_actor_lease(
+    transaction: &LocalWorkspaceUpdateTransaction<'_>,
+    update: WorkspaceProjectionUpdate,
+    settlement_trusted_dir: Option<&Path>,
+) -> gwt_core::error::Result<gwt_core::workspace_projection::WorkspaceJournalEntry> {
+    debug_assert!(gwt_agent::current_thread_holds_session_lease());
+    if transaction.requires_legacy_unbound_authority {
+        let session_path =
+            gwt_core::paths::gwt_sessions_dir().join(format!("{}.toml", transaction.session_id));
+        let still_unbound = gwt_agent::Session::load(&session_path)
+            .ok()
+            .is_some_and(|session| {
+                session.id == transaction.session_id && session.execution_binding.is_none()
+            });
+        if !still_unbound {
+            return Err(GwtError::Other(
+                "[relaunch_required] terminal workspace.update legacy authority changed before commit; relaunch before retrying"
+                    .to_string(),
+            ));
+        }
+    }
+    persist_local_workspace_update(transaction, update, settlement_trusted_dir)
+}
+
 pub(super) fn run<E: CliEnv>(
     env: &mut E,
     cmd: WorkspaceCommand,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     match cmd {
+        WorkspaceCommand::Reopen(WorkspaceReopenCommand {
+            agent_session,
+            observed_terminal_event_id,
+            reason,
+        }) => {
+            let session_id = std::env::var(gwt_agent::session::GWT_SESSION_ID_ENV)
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    string_error(
+                        "workspace.reopen requires ambient GWT_SESSION_ID for mutation".to_string(),
+                    )
+                })?;
+            if agent_session
+                .as_deref()
+                .is_some_and(|explicit| explicit != session_id)
+            {
+                return Err(string_error(
+                    "workspace.reopen agent Session must exactly match ambient GWT_SESSION_ID"
+                        .to_string(),
+                ));
+            }
+            let invocation_root = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
+            let observation = crate::observe_agent_runtime(&invocation_root)
+                .map_err(|error| string_error(error.to_string()))?;
+            let request = crate::AgentWorkspaceReopenRequest {
+                schema_version: crate::AGENT_WORKSPACE_REOPEN_SCHEMA_VERSION,
+                claimed_session_id: session_id.clone(),
+                provider_actor_id: crate::agent_project_state::provider_actor_id_from_env(),
+                observation,
+                observed_terminal_event_id,
+                reason,
+            };
+            let receipt = if let Some(target) =
+                crate::daemon_runtime::HookForwardTarget::from_env_strict().map_err(string_error)?
+            {
+                crate::daemon_runtime::send_workspace_reopen_via_agent_bridge(&target, &request)
+                    .map_err(string_error)?
+            } else {
+                if std::env::var_os(gwt_agent::session::GWT_SESSION_RUNTIME_PATH_ENV).is_some() {
+                    return Err(string_error(
+                        "managed workspace.reopen is missing its Host bridge capability; relaunch the Session"
+                            .to_string(),
+                    ));
+                }
+                let session_path =
+                    gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml"));
+                let session = gwt_agent::Session::load(&session_path)
+                    .map_err(|error| string_error(error.to_string()))?;
+                let binding = session.execution_binding.as_ref().ok_or_else(|| {
+                    string_error(
+                        "workspace.reopen requires a current execution binding; relaunch the Session"
+                            .to_string(),
+                    )
+                })?;
+                let project_state_root = session.project_state_root.as_deref().ok_or_else(|| {
+                    string_error(
+                        "workspace.reopen requires a canonical project state root; relaunch the Session"
+                            .to_string(),
+                    )
+                })?;
+                crate::apply_bound_authenticated_workspace_reopen(
+                    project_state_root,
+                    &session_id,
+                    binding,
+                    request,
+                )
+                .map_err(|error| string_error(error.to_string()))?
+            };
+            publish_workspace_change(&invocation_root);
+            out.push_str(&format!(
+                "workspace reopened: work={} terminal_event={} resume_event={} reopened={}\n",
+                receipt.work_id,
+                receipt.observed_terminal_event_id,
+                receipt.resume_event_id,
+                receipt.reopened
+            ));
+            Ok(0)
+        }
         WorkspaceCommand::Update {
             title,
             status,
@@ -783,6 +1024,8 @@ pub(super) fn run<E: CliEnv>(
                 current_focus,
                 title_summary,
             };
+            let terminal_intent = intent.status_category
+                == Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Done);
             if let Some(target) =
                 crate::daemon_runtime::HookForwardTarget::from_env_strict().map_err(string_error)?
             {
@@ -802,6 +1045,11 @@ pub(super) fn run<E: CliEnv>(
                         ));
                     }
                     WorkspaceUpdateBridgeAuthoritySnapshot::Unavailable => None,
+                    WorkspaceUpdateBridgeAuthoritySnapshot::LegacyUnbound => None,
+                    // A container-local Session may be absent, stale, or deliberately poisoned.
+                    // It can never authorize a local continuation, but the authenticated Host
+                    // still revalidates the claimed Session and remains authoritative for 2xx.
+                    WorkspaceUpdateBridgeAuthoritySnapshot::Refused(_) => None,
                 };
                 // A complete bridge capability makes Host the authority boundary. Do not read a
                 // container-local Session ledger to redirect this observation: it may be absent or
@@ -809,9 +1057,17 @@ pub(super) fn run<E: CliEnv>(
                 // exact invocation facts before committing anything.
                 let observation = crate::observe_agent_runtime(&legacy_repo_path)
                     .map_err(|error| string_error(error.to_string()))?;
+                let provider_actor_id = terminal_intent
+                    .then(crate::agent_project_state::provider_actor_id_from_env)
+                    .flatten();
                 let request = crate::AgentWorkspaceUpdateRequest {
-                    schema_version: crate::AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
+                    schema_version: if terminal_intent {
+                        crate::AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION
+                    } else {
+                        1
+                    },
                     claimed_session_id: session_id.clone(),
+                    provider_actor_id,
                     observation,
                     intent,
                 };
@@ -869,6 +1125,76 @@ pub(super) fn run<E: CliEnv>(
                 Some(Ok(gwt_agent::LaunchRuntimeTarget::Docker)) | None => legacy_repo_path,
                 Some(Err(error)) => return Err(core_error(error)),
             };
+            if let Some(diagnosis) = crate::agent_project_state::diagnose_session_terminal_work(
+                &operation_repo_path,
+                &session_id,
+            )
+            .map_err(|error| string_error(error.to_string()))?
+            {
+                return Err(string_error(terminal_diagnosis_error(&diagnosis)));
+            }
+            let legacy_unbound_terminal_authority = if terminal_intent {
+                let provider_actor_id = crate::agent_project_state::provider_actor_id_from_env();
+                crate::agent_project_state::validate_primary_actor_authority(
+                    &session_id,
+                    provider_actor_id.as_deref(),
+                )
+                .map_err(|error| string_error(error.to_string()))?;
+                let requires_legacy_unbound_authority =
+                    match snapshot_workspace_update_bridge_authority(
+                        &operation_repo_path,
+                        &session_id,
+                    ) {
+                        WorkspaceUpdateBridgeAuthoritySnapshot::Exact(authority) => {
+                            let project_state_root = authority.project_state_root.clone();
+                            let request = crate::AgentWorkspaceUpdateRequest {
+                                schema_version: if terminal_intent {
+                                    crate::AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION
+                                } else {
+                                    1
+                                },
+                                claimed_session_id: session_id.clone(),
+                                provider_actor_id,
+                                observation: crate::observe_agent_runtime(&operation_repo_path)
+                                    .map_err(|error| string_error(error.to_string()))?,
+                                intent,
+                            };
+                            let receipt = continue_workspace_update_after_typed_ensure_required(
+                                &session_id,
+                                *authority,
+                                request,
+                            )
+                            .map_err(string_error)?;
+                            publish_workspace_change(&project_state_root);
+                            out.push_str(&format!(
+                                "workspace updated: {}\n",
+                                receipt.journal_entry_id
+                            ));
+                            return Ok(0);
+                        }
+                        WorkspaceUpdateBridgeAuthoritySnapshot::NeedsEnsure => {
+                            return Err(string_error(
+                            "[workspace_ensure_required] terminal workspace.update requires exact current execution authority; run workspace.ensure before retrying"
+                                .to_string(),
+                        ));
+                        }
+                        WorkspaceUpdateBridgeAuthoritySnapshot::LegacyUnbound => true,
+                        WorkspaceUpdateBridgeAuthoritySnapshot::Unavailable => {
+                            return Err(string_error(
+                            "[relaunch_required] terminal workspace.update Session authority disappeared; relaunch before retrying"
+                                .to_string(),
+                        ));
+                        }
+                        WorkspaceUpdateBridgeAuthoritySnapshot::Refused(reason) => {
+                            return Err(string_error(format!(
+                            "[relaunch_required] terminal workspace.update execution authority was refused: {reason}"
+                        )));
+                        }
+                    };
+                requires_legacy_unbound_authority
+            } else {
+                false
+            };
             let target = crate::agent_project_state::resolve_session_work_mutation_target(
                 &operation_repo_path,
                 &session_id,
@@ -880,9 +1206,24 @@ pub(super) fn run<E: CliEnv>(
                 } else {
                     TrackedWorkEventPolicy::Persist
                 };
-            let opens_work_settlement = tracked_event_policy == TrackedWorkEventPolicy::Persist
-                && intent.status_category
-                    == Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Done);
+            let opens_work_settlement =
+                tracked_event_policy == TrackedWorkEventPolicy::Persist && terminal_intent;
+            let provider_actor_id = terminal_intent
+                .then(crate::agent_project_state::provider_actor_id_from_env)
+                .flatten();
+            if terminal_intent {
+                crate::agent_project_state::validate_primary_actor_authority(
+                    &session_id,
+                    provider_actor_id.as_deref(),
+                )
+                .map_err(|error| string_error(error.to_string()))?;
+            }
+            let execution_generation = gwt_agent::Session::load(
+                &gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml")),
+            )
+            .ok()
+            .and_then(|session| session.execution_binding)
+            .map(|binding| binding.identity.generation_id);
             tracing::debug!(
                 session_id = %target.session_id,
                 work_id = %target.work_id,
@@ -909,39 +1250,56 @@ pub(super) fn run<E: CliEnv>(
                 session_id: &session_id,
                 target: &target,
                 tracked_event_policy,
+                terminal_intent,
+                requires_legacy_unbound_authority: legacy_unbound_terminal_authority,
                 opens_work_settlement,
+                provider_actor_id: provider_actor_id.as_deref(),
+                execution_generation: execution_generation.as_deref(),
             };
-            let entry = if !opens_work_settlement {
-                persist_local_workspace_update(&transaction, update, None)
-                    .map_err(|error| string_error(error.to_string()))?
-            } else {
+            let persisted = if terminal_intent && opens_work_settlement {
                 let trusted_dir = crate::cli::trusted_store::trusted_dir_for_worktree(
                     &target.work_event_root,
                 )
                 .ok_or_else(|| {
-                    string_error(
-                        "workspace.update could not resolve the terminal Work event settlement store before mutation"
-                            .to_string(),
-                    )
-                })?;
-                let nested = crate::cli::trusted_store::with_write_lease_for_resolved_dir(
+                    "workspace.update could not resolve the terminal Work event settlement store before mutation"
+                        .to_string()
+                })
+                .map_err(string_error)?;
+                let nested = with_local_terminal_authority_leases(
                     &trusted_dir,
-                    || -> std::io::Result<_> {
-                        Ok(persist_local_workspace_update(
+                    &session_id,
+                    provider_actor_id.as_deref(),
+                    || {
+                        persist_local_terminal_workspace_update_under_actor_lease(
                             &transaction,
                             update,
                             Some(&trusted_dir),
-                        ))
+                        )
                     },
                 )
                 .map_err(|_| {
-                    string_error(
-                        "workspace.update could not acquire the terminal Work event settlement lease before mutation"
-                            .to_string(),
-                    )
-                })?;
+                    "workspace.update could not acquire the terminal Work event settlement lease before mutation"
+                        .to_string()
+                })
+                .map_err(string_error)?;
                 nested.map_err(|error| string_error(error.to_string()))?
+            } else if terminal_intent {
+                crate::agent_project_state::with_primary_actor_authority_lease(
+                    &session_id,
+                    provider_actor_id.as_deref(),
+                    || {
+                        persist_local_terminal_workspace_update_under_actor_lease(
+                            &transaction,
+                            update,
+                            None,
+                        )
+                    },
+                )
+                .map_err(|error| string_error(error.to_string()))?
+            } else {
+                persist_local_workspace_update(&transaction, update, None)
             };
+            let entry = persisted.map_err(|error| string_error(error.to_string()))?;
             if opens_work_settlement {
                 if let Err(error) =
                     crate::cli::verification_record::save_work_event_settlement_record(
@@ -1701,6 +2059,12 @@ pub(super) fn ensure_workspace_for_agent(
     repo_path: &std::path::Path,
     input: WorkspaceEnsureInput,
 ) -> Result<WorkspaceEnsureResult, SpecOpsError> {
+    if let Some(diagnosis) =
+        crate::agent_project_state::diagnose_session_terminal_work(repo_path, &input.agent_session)
+            .map_err(|error| string_error(error.to_string()))?
+    {
+        return Err(string_error(terminal_diagnosis_error(&diagnosis)));
+    }
     let probe = probe_workspace_ensure(repo_path, &input);
     if !probe.executable() {
         let reason = probe.reason.as_deref().unwrap_or("unavailable");
@@ -3673,7 +4037,7 @@ pub(crate) mod tests {
             let stop = Arc::new(AtomicBool::new(false));
             let thread_stop = Arc::clone(&stop);
             let body = serde_json::json!({
-                "schema_version": crate::AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
+                "schema_version": 1,
                 "work_id": work_id,
                 "journal_entry_id": "fake-host-journal"
             })
@@ -4328,6 +4692,18 @@ pub(crate) mod tests {
         save_workspace_projection(repo, &projection).expect("save assigned Session fixture");
     }
 
+    fn seed_primary_actor(session_id: &str) -> String {
+        let actor = format!("provider-root-{session_id}");
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let session_path = sessions_dir.join(format!("{session_id}.toml"));
+        let mut session = gwt_agent::Session::load(&session_path).expect("load Session fixture");
+        session.agent_session_id = Some(actor.clone());
+        session
+            .save(&sessions_dir)
+            .expect("persist primary actor fixture");
+        actor
+    }
+
     fn save_completed_execution_record(worktree: &Path, session_id: &str, owner: u64) {
         use crate::cli::execution_state::{
             ExecutionControlRecord, ExecutionControlStatus, ExecutionOwnerKind,
@@ -4655,10 +5031,12 @@ pub(crate) mod tests {
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo");
         seed_valid_update_target(&repo, "session-terminal");
+        let actor = seed_primary_actor("session-terminal");
         let _session = crate::cli::test_support::ScopedEnvVar::set(
             gwt_agent::session::GWT_SESSION_ID_ENV,
             "session-terminal",
         );
+        let _actor = crate::cli::test_support::ScopedEnvVar::set("CODEX_THREAD_ID", actor);
         let mut env = TestEnv::new(repo.clone());
 
         let mut out = String::new();
@@ -4699,6 +5077,82 @@ pub(crate) mod tests {
             record.status.severity(),
             crate::cli::verification_record::WorkEventSettlementSeverity::Warning
         );
+    }
+
+    #[test]
+    fn completed_execution_done_update_still_requires_primary_actor() {
+        let _guard = env_guard();
+        let gwt_home = tempfile::tempdir().expect("gwt home");
+        let _home = ScopedHome::set(gwt_home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo");
+        let session_id = "session-completed-terminal";
+        seed_valid_update_target(&repo, session_id);
+        let primary_actor = seed_primary_actor(session_id);
+        save_completed_execution_record(&repo, session_id, 3412);
+        let _session = crate::cli::test_support::ScopedEnvVar::set(
+            gwt_agent::session::GWT_SESSION_ID_ENV,
+            session_id,
+        );
+        let surface_paths = [
+            gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&repo),
+            gwt_core::paths::gwt_workspace_journal_path_for_repo_path(&repo),
+            gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&repo),
+            gwt_core::paths::gwt_repo_local_work_events_path(&repo),
+        ];
+        let before = surface_paths
+            .iter()
+            .map(|path| std::fs::read(path).ok())
+            .collect::<Vec<_>>();
+        let command = || WorkspaceCommand::Update {
+            title: None,
+            status: Some("done".to_string()),
+            status_text: Some("Completed Execution compatibility".to_string()),
+            summary: Some("Terminal intent must retain its actor fence".to_string()),
+            progress_summary: None,
+            next_action: None,
+            owner: None,
+            agent_session: None,
+            current_focus: None,
+            title_summary: None,
+        };
+
+        {
+            let _helper = crate::cli::test_support::ScopedEnvVar::set(
+                "CODEX_THREAD_ID",
+                "delegated-helper-actor",
+            );
+            let error = run(
+                &mut TestEnv::new(repo.clone()),
+                command(),
+                &mut String::new(),
+            )
+            .expect_err("delegated helper terminal intent must fail closed");
+            assert!(
+                error.to_string().contains("primary_actor_required"),
+                "{error}"
+            );
+        }
+        let after_refusal = surface_paths
+            .iter()
+            .map(|path| std::fs::read(path).ok())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            after_refusal, before,
+            "actor refusal must be byte-identical"
+        );
+
+        let _primary =
+            crate::cli::test_support::ScopedEnvVar::set("CODEX_THREAD_ID", primary_actor);
+        let mut output = String::new();
+        let code = run(&mut TestEnv::new(repo.clone()), command(), &mut output)
+            .expect("matching primary actor retains legacy completed-Execution compatibility");
+        assert_eq!(code, 0, "{output}");
+        let projection = load_workspace_projection(&repo)
+            .expect("load projection")
+            .expect("projection");
+        assert_eq!(projection.status_category, WorkspaceStatusCategory::Done);
     }
 
     #[test]
@@ -4841,6 +5295,7 @@ pub(crate) mod tests {
             crate::AgentWorkspaceUpdateRequest {
                 schema_version: crate::AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
                 claimed_session_id: session_id.to_string(),
+                provider_actor_id: None,
                 observation: crate::observe_agent_runtime(&repo)
                     .expect("observe exact successor worktree"),
                 intent: crate::AgentWorkspaceUpdateIntent {
@@ -4863,6 +5318,7 @@ pub(crate) mod tests {
         let worktree = project_state_root.join("work").join("issue-3412");
         let session_id = "session-typed-split-root";
         write_bound_projectionless_session(session_id, &worktree, &project_state_root, 3412);
+        let actor = seed_primary_actor(session_id);
 
         let ensured = ensure_workspace_for_agent(
             &worktree,
@@ -4912,6 +5368,7 @@ pub(crate) mod tests {
             crate::AgentWorkspaceUpdateRequest {
                 schema_version: crate::AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
                 claimed_session_id: session_id.to_string(),
+                provider_actor_id: crate::agent_project_state::provider_actor_claim(&actor),
                 observation: crate::observe_agent_runtime(&worktree)
                     .expect("observe exact linked worktree"),
                 intent: crate::AgentWorkspaceUpdateIntent {
@@ -5007,10 +5464,12 @@ pub(crate) mod tests {
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo");
         seed_valid_update_target(&repo, "session-terminal-store-failure");
+        let actor = seed_primary_actor("session-terminal-store-failure");
         let _session = crate::cli::test_support::ScopedEnvVar::set(
             gwt_agent::session::GWT_SESSION_ID_ENV,
             "session-terminal-store-failure",
         );
+        let _actor = crate::cli::test_support::ScopedEnvVar::set("CODEX_THREAD_ID", actor);
         let surface_paths = [
             gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&repo),
             gwt_core::paths::gwt_workspace_journal_path_for_repo_path(&repo),
@@ -5056,6 +5515,346 @@ pub(crate) mod tests {
         assert_eq!(
             after, before,
             "settlement authority must be reserved before any terminal Work surface mutates"
+        );
+    }
+
+    #[test]
+    fn local_terminal_workspace_update_acquires_global_before_session_lease() {
+        let _guard = env_guard();
+        let gwt_home = tempfile::tempdir().expect("gwt home");
+        let _home = ScopedHome::set(gwt_home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo");
+        let session_id = "session-terminal-lease-order";
+        seed_valid_update_target(&repo, session_id);
+        let actor = seed_primary_actor(session_id);
+        let trusted_dir = crate::cli::trusted_store::trusted_dir_for_worktree(&repo)
+            .expect("fixture has a trusted-store path");
+        let surface_paths = [
+            gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&repo),
+            gwt_core::paths::gwt_workspace_journal_path_for_repo_path(&repo),
+            gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&repo),
+            gwt_core::paths::gwt_repo_local_work_events_path(&repo),
+        ];
+        let before = surface_paths
+            .iter()
+            .map(|path| std::fs::read(path).ok())
+            .collect::<Vec<_>>();
+
+        let (global_acquired_tx, global_acquired_rx) = mpsc::channel();
+        let (start_session_tx, start_session_rx) = mpsc::channel();
+        let (canonical_result_tx, canonical_result_rx) = mpsc::channel();
+        let canonical_sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let canonical_session_id = session_id.to_string();
+        let canonical = std::thread::spawn(move || {
+            crate::cli::trusted_store::set_write_lease_acquired_hook(move || {
+                global_acquired_tx
+                    .send(())
+                    .expect("signal canonical global lease");
+                start_session_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("start canonical Session lease");
+            });
+            let result =
+                crate::cli::trusted_store::with_write_lease_for_resolved_dir(&trusted_dir, || {
+                    gwt_agent::with_session_lease_wait(
+                        &canonical_sessions_dir,
+                        &canonical_session_id,
+                        Duration::from_secs(2),
+                        |_| Ok(()),
+                    )
+                });
+            canonical_result_tx
+                .send(result)
+                .expect("report canonical lease result");
+        });
+        global_acquired_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("canonical writer acquires global lease");
+
+        let (terminal_before_global_tx, terminal_before_global_rx) = mpsc::channel();
+        let (start_terminal_global_tx, start_terminal_global_rx) = mpsc::channel();
+        let (terminal_result_tx, terminal_result_rx) = mpsc::channel();
+        let terminal_trusted_dir = crate::cli::trusted_store::trusted_dir_for_worktree(&repo)
+            .expect("resolve terminal trusted-store path");
+        let terminal_session_id = session_id.to_string();
+        let actor_claim = crate::agent_project_state::provider_actor_claim(&actor)
+            .expect("derive primary actor claim");
+        let terminal_home = gwt_home.path().to_path_buf();
+        let operation_called = Arc::new(AtomicBool::new(false));
+        let operation_called_in_thread = Arc::clone(&operation_called);
+        let terminal = std::thread::spawn(move || {
+            let _home = ScopedHome::set(&terminal_home);
+            set_local_terminal_before_global_lease_hook(move || {
+                terminal_before_global_tx
+                    .send(())
+                    .expect("signal terminal global-lease attempt");
+                start_terminal_global_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("start terminal global-lease acquisition");
+            });
+            let result = with_local_terminal_authority_leases(
+                &terminal_trusted_dir,
+                &terminal_session_id,
+                Some(&actor_claim),
+                || {
+                    operation_called_in_thread.store(true, Ordering::SeqCst);
+                },
+            );
+            terminal_result_tx
+                .send(result)
+                .expect("report terminal lease result");
+        });
+
+        terminal_before_global_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("terminal update reaches global-lease boundary");
+        start_terminal_global_tx
+            .send(())
+            .expect("start terminal global-lease acquisition");
+        start_session_tx
+            .send(())
+            .expect("start canonical Session acquisition");
+        let canonical_result = canonical_result_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("canonical lock order must complete within the lease bound");
+        let terminal_result = terminal_result_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("terminal lock order must complete within the lease bound");
+        canonical.join().expect("canonical lease worker");
+        terminal.join().expect("terminal lease worker");
+
+        canonical_result.expect("global -> Session canonical acquisition must not be refused");
+        terminal_result
+            .expect("terminal global lease acquisition")
+            .expect("terminal primary actor lease acquisition");
+        assert!(
+            operation_called.load(Ordering::SeqCst),
+            "terminal operation runs after the canonical global -> Session holder completes"
+        );
+        let after = surface_paths
+            .iter()
+            .map(|path| std::fs::read(path).ok())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            after, before,
+            "lease-order verification itself must not partially mutate Workspace state"
+        );
+    }
+
+    #[test]
+    fn terminal_workspace_update_rejects_stale_execution_binding_without_mutation() {
+        let _guard = env_guard();
+        let gwt_home = tempfile::tempdir().expect("gwt home");
+        let _home = ScopedHome::set(gwt_home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("workspace-home");
+        let worktree = project_root.join("work").join("issue-3412");
+        let session_id = "session-terminal-stale-binding";
+        write_bound_projectionless_session(session_id, &worktree, &project_root, 3412);
+        let actor = seed_primary_actor(session_id);
+        ensure_workspace_for_agent(
+            &worktree,
+            WorkspaceEnsureInput {
+                agent_session: session_id.to_string(),
+                title_summary: "Stale terminal authority".to_string(),
+                current_focus: Some("Materialize the active canonical Work".to_string()),
+                spec: None,
+                issue: Some(3412),
+                topic: None,
+                boundary: None,
+            },
+        )
+        .expect("materialize exact active Work before the binding becomes stale");
+        assert!(matches!(
+            crate::cli::execution_state::settle(
+                &worktree,
+                session_id,
+                crate::cli::execution_state::ExecutionSettlement::Blocked {
+                    reason: "stale binding regression fixture".to_string(),
+                    missing_verification: Some("fresh generation required".to_string()),
+                },
+            )
+            .expect("settle the execution generation"),
+            crate::cli::execution_state::SettleResult::Settled(_)
+        ));
+        let surface_paths = [
+            gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&project_root),
+            gwt_core::paths::gwt_workspace_journal_path_for_repo_path(&project_root),
+            gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&project_root),
+            gwt_core::paths::gwt_repo_local_work_events_path(&worktree),
+            gwt_core::paths::gwt_workspace_work_events_closed_path_for_repo_path(&project_root),
+        ];
+        let before = surface_paths
+            .iter()
+            .map(|path| std::fs::read(path).ok())
+            .collect::<Vec<_>>();
+        let settlement_before =
+            crate::cli::verification_record::load_work_event_settlement_record(&worktree)
+                .expect("load settlement before refusal");
+        let _session = crate::cli::test_support::ScopedEnvVar::set(
+            gwt_agent::session::GWT_SESSION_ID_ENV,
+            session_id,
+        );
+        let _actor = crate::cli::test_support::ScopedEnvVar::set("CODEX_THREAD_ID", actor);
+
+        let error = run(
+            &mut TestEnv::new(worktree.clone()),
+            WorkspaceCommand::Update {
+                title: None,
+                status: Some("done".to_string()),
+                status_text: Some("must remain active".to_string()),
+                summary: Some("stale generation must fail closed".to_string()),
+                progress_summary: None,
+                next_action: None,
+                owner: None,
+                agent_session: None,
+                current_focus: None,
+                title_summary: None,
+            },
+            &mut String::new(),
+        )
+        .expect_err("a stale durable execution binding must never reach the legacy writer");
+
+        assert!(
+            error.to_string().contains("relaunch_required"),
+            "unexpected stale-binding refusal: {error}"
+        );
+        let after = surface_paths
+            .iter()
+            .map(|path| std::fs::read(path).ok())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            after, before,
+            "stale binding refusal must be byte-identical"
+        );
+        assert_eq!(
+            crate::cli::verification_record::load_work_event_settlement_record(&worktree)
+                .expect("load settlement after refusal"),
+            settlement_before,
+            "stale binding refusal must not create a settlement obligation"
+        );
+    }
+
+    #[test]
+    fn terminal_workspace_update_revalidates_legacy_unbound_authority_after_global_wait() {
+        let _guard = env_guard();
+        let gwt_home = tempfile::tempdir().expect("gwt home");
+        let _home = ScopedHome::set(gwt_home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo");
+        let session_id = "session-terminal-binding-race";
+        seed_valid_update_target(&repo, session_id);
+        let actor = seed_primary_actor(session_id);
+        let _session = crate::cli::test_support::ScopedEnvVar::set(
+            gwt_agent::session::GWT_SESSION_ID_ENV,
+            session_id,
+        );
+        let _actor = crate::cli::test_support::ScopedEnvVar::set("CODEX_THREAD_ID", actor);
+        let surface_paths = [
+            gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&repo),
+            gwt_core::paths::gwt_workspace_journal_path_for_repo_path(&repo),
+            gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&repo),
+            gwt_core::paths::gwt_repo_local_work_events_path(&repo),
+            gwt_core::paths::gwt_workspace_work_events_closed_path_for_repo_path(&repo),
+        ];
+        let before = surface_paths
+            .iter()
+            .map(|path| std::fs::read(path).ok())
+            .collect::<Vec<_>>();
+        let settlement_before =
+            crate::cli::verification_record::load_work_event_settlement_record(&repo)
+                .expect("load settlement before race");
+        let trusted_dir = crate::cli::trusted_store::trusted_dir_for_worktree(&repo)
+            .expect("fixture has a trusted-store path");
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let session_path = sessions_dir.join(format!("{session_id}.toml"));
+        let mut rebound_session =
+            gwt_agent::Session::load(&session_path).expect("load unbound Session fixture");
+        rebound_session
+            .set_execution_binding(Some(gwt_agent::SessionExecutionBinding {
+                schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+                session_id: session_id.to_string(),
+                repo_hash: gwt_core::repo_hash::detect_repo_hash(&repo)
+                    .expect("repo hash")
+                    .to_string(),
+                owner_kind: "issue".to_string(),
+                owner_number: 3412,
+                identity: gwt_agent::ExecutionBindingIdentity {
+                    generation_id: "generation-materialized-during-wait".to_string(),
+                    binding_id: "binding-materialized-during-wait".to_string(),
+                    ledger_head_hash: "ledger-materialized-during-wait".to_string(),
+                },
+                capability_generation: 1,
+            }))
+            .expect("prepare rebound Session fixture");
+
+        let (terminal_ready_tx, terminal_ready_rx) = mpsc::channel();
+        let (start_terminal_tx, start_terminal_rx) = mpsc::channel();
+        let (terminal_result_tx, terminal_result_rx) = mpsc::channel();
+        let terminal_repo = repo.clone();
+        let terminal_home = gwt_home.path().to_path_buf();
+        let terminal = std::thread::spawn(move || {
+            let _home = ScopedHome::set(&terminal_home);
+            set_local_terminal_before_global_lease_hook(move || {
+                terminal_ready_tx
+                    .send(())
+                    .expect("signal legacy terminal pre-lease snapshot");
+                start_terminal_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("start legacy terminal global wait");
+            });
+            let result = run(
+                &mut TestEnv::new(terminal_repo),
+                WorkspaceCommand::Update {
+                    title: None,
+                    status: Some("done".to_string()),
+                    status_text: Some("must remain active".to_string()),
+                    summary: Some("binding materialization wins the race".to_string()),
+                    progress_summary: None,
+                    next_action: None,
+                    owner: None,
+                    agent_session: None,
+                    current_focus: None,
+                    title_summary: None,
+                },
+                &mut String::new(),
+            );
+            terminal_result_tx
+                .send(result)
+                .expect("report terminal binding-race result");
+        });
+        terminal_ready_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("terminal snapshots explicit legacy-unbound authority");
+
+        crate::cli::trusted_store::with_write_lease_for_resolved_dir(&trusted_dir, || {
+            start_terminal_tx
+                .send(())
+                .expect("start terminal while binding writer holds global lease");
+            rebound_session.save(&sessions_dir)
+        })
+        .expect("materialize binding under canonical global -> Session order");
+        let terminal_result = terminal_result_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("terminal race completes within the lease bound");
+        terminal.join().expect("terminal binding-race worker");
+
+        let error = terminal_result
+            .expect_err("a newly bound Session must invalidate legacy terminal authority");
+        assert!(error.to_string().contains("relaunch_required"), "{error}");
+        let after = surface_paths
+            .iter()
+            .map(|path| std::fs::read(path).ok())
+            .collect::<Vec<_>>();
+        assert_eq!(after, before, "binding race refusal must be byte-identical");
+        assert_eq!(
+            crate::cli::verification_record::load_work_event_settlement_record(&repo)
+                .expect("load settlement after race"),
+            settlement_before,
+            "binding race refusal must not create a settlement obligation"
         );
     }
 
@@ -6554,6 +7353,7 @@ pub(crate) mod tests {
         let worktree = project_root.join("work").join("issue-3412");
         let session_id = "session-legacy-codex";
         write_bound_projectionless_session(session_id, &worktree, &project_root, 3412);
+        let actor = seed_primary_actor(session_id);
         let work_id = seed_exact_workspace_work(
             &project_root,
             &worktree,
@@ -6779,6 +7579,7 @@ pub(crate) mod tests {
             crate::AgentWorkspaceUpdateRequest {
                 schema_version: crate::AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
                 claimed_session_id: session_id.to_string(),
+                provider_actor_id: crate::agent_project_state::provider_actor_claim(&actor),
                 observation: observation.clone(),
                 intent: crate::AgentWorkspaceUpdateIntent {
                     summary: Some("Canonical Agent identity accepted downstream".to_string()),
@@ -6795,6 +7596,7 @@ pub(crate) mod tests {
             crate::AgentWorkTerminalizationRequest {
                 schema_version: crate::AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION,
                 claimed_session_id: session_id.to_string(),
+                provider_actor_id: crate::agent_project_state::provider_actor_claim(&actor),
                 observation,
                 terminal_kind: crate::AgentWorkTerminalKind::Done,
             },

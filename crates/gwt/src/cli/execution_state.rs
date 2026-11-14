@@ -8822,12 +8822,13 @@ enum ExecutionDiagnosisMode {
     Projection,
 }
 
-const PROTECTED_RECOVERY_OPERATIONS: [&str; 7] = [
+const PROTECTED_RECOVERY_OPERATIONS: [&str; 8] = [
     "build.abort",
     "execution.continue",
     "execution.repair",
     "execution.adopt",
     "execution.reopen",
+    "workspace.reopen",
     "workspace.update",
     "workspace.ensure",
 ];
@@ -9440,6 +9441,7 @@ fn finalize_recovery_probes(
             probe_execution_repair_for_recovery(worktree, session_id, recovery_context),
             probe_execution_adopt_for_recovery(worktree, caller, recovery_context),
             probe_execution_reopen_for_recovery(worktree, caller, recovery_context),
+            probe_workspace_reopen_for_recovery(worktree, caller, recovery_context),
             crate::agent_project_state::probe_session_work_mutation_target(worktree, caller),
             crate::cli::workspace::probe_workspace_ensure(worktree, &ensure_candidate),
         ]
@@ -9450,6 +9452,7 @@ fn finalize_recovery_probes(
             "execution.repair",
             "execution.adopt",
             "execution.reopen",
+            "workspace.reopen",
             "workspace.update",
             "workspace.ensure",
         ]
@@ -9576,6 +9579,64 @@ fn probe_execution_reopen_for_recovery(
         return invalid_execution_recovery_scope_probe("execution.reopen");
     }
     probe_execution_reopen(worktree, session_id)
+}
+
+fn probe_workspace_reopen_for_recovery(
+    worktree: &Path,
+    session_id: &str,
+    recovery_context: Option<
+        &Result<crate::agent_project_state::ExecutionRecoveryContext, gwt_core::GwtError>,
+    >,
+) -> crate::cli::governance::RecoveryProbe {
+    use crate::cli::governance::{GovernanceCause, GovernanceMetadata, RecoveryProbe};
+
+    if recovery_context.is_some_and(Result::is_err) {
+        return invalid_execution_recovery_scope_probe("workspace.reopen");
+    }
+    let metadata = |cause, retryable, execution_generation| GovernanceMetadata {
+        cause,
+        retryable: Some(retryable),
+        execution_generation,
+        ..protected_recovery_metadata(None, retryable)
+    };
+    match crate::agent_project_state::diagnose_session_terminal_work(worktree, session_id) {
+        Ok(Some(diagnosis))
+            if diagnosis.recoverable
+                && diagnosis.recovery_operation.as_deref() == Some("workspace.reopen") =>
+        {
+            RecoveryProbe::available(
+                "workspace.reopen",
+                metadata(None, true, diagnosis.execution_generation),
+            )
+        }
+        Ok(Some(diagnosis)) => {
+            let (cause, reason) = match diagnosis.terminal_kind {
+                crate::AgentWorkTerminalKind::Discarded => (
+                    GovernanceCause::DomainInvalid,
+                    "workspace_reopen_requires_done_terminal",
+                ),
+                crate::AgentWorkTerminalKind::Done => (
+                    GovernanceCause::Authority,
+                    "workspace_reopen_primary_actor_or_active_generation_unavailable",
+                ),
+            };
+            RecoveryProbe::unavailable(
+                "workspace.reopen",
+                metadata(Some(cause), false, diagnosis.execution_generation),
+                reason,
+            )
+        }
+        Ok(None) => RecoveryProbe::unavailable(
+            "workspace.reopen",
+            metadata(Some(GovernanceCause::NotReady), false, None),
+            "workspace_reopen_terminal_work_unavailable",
+        ),
+        Err(error) => RecoveryProbe::unavailable(
+            "workspace.reopen",
+            metadata(Some(GovernanceCause::Authority), false, None),
+            error.to_string(),
+        ),
+    }
 }
 
 fn invalid_execution_recovery_scope_probe(
@@ -17452,6 +17513,55 @@ mod tests {
             .expect("save exact build.abort Work authority");
         }
 
+        fn seed_done_workspace_reopen_authority(
+            repo: &Path,
+            session_id: &str,
+            owner: ExecutionOwnerKey,
+            execution_generation: &str,
+        ) {
+            seed_build_abort_work_authority(repo, session_id, owner);
+            let session = gwt_agent::Session::load(
+                &gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml")),
+            )
+            .expect("load bound workspace.reopen Session fixture");
+            let worktree = dunce::canonicalize(repo).expect("canonical fixture worktree");
+            let work_id = format!("work-build-abort-{}-{}", owner.kind.as_str(), owner.number);
+            let work_items_path =
+                gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(repo);
+            let mut done = gwt_core::workspace_projection::WorkEvent::new(
+                gwt_core::workspace_projection::WorkEventKind::Done,
+                &work_id,
+                Utc::now() + chrono::Duration::seconds(1),
+            );
+            done.owner = Some(match owner.kind {
+                ExecutionOwnerKind::Spec => format!("SPEC-{}", owner.number),
+                ExecutionOwnerKind::Issue => format!("Issue #{}", owner.number),
+            });
+            done.status_category =
+                Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Done);
+            done.agent_session_id = Some(session_id.to_string());
+            done.agent_id = Some(session.agent_id.command().to_string());
+            done.execution_container = Some(
+                gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                    branch: Some(session.branch),
+                    worktree_path: Some(worktree),
+                    pr_number: None,
+                    pr_url: None,
+                    pr_state: None,
+                },
+            );
+            done.source_operation = Some("workspace.update".to_string());
+            done.authority_class =
+                Some(gwt_core::workspace_projection::WorkEventAuthorityClass::PrimaryAgent);
+            done.execution_generation = Some(execution_generation.to_string());
+            gwt_core::workspace_projection::record_workspace_work_event_paths(
+                &work_items_path,
+                &gwt_core::paths::gwt_workspace_work_events_closed_path_for_repo_path(repo),
+                done,
+            )
+            .expect("save terminal workspace.reopen Work authority");
+        }
+
         fn prepare_generation_bound_execution(
             repo: &Path,
             session_id: &str,
@@ -17580,7 +17690,7 @@ exit 1
             let probes = snapshot["recovery_probes"]
                 .as_array()
                 .expect("status recovery probes");
-            assert_eq!(probes.len(), 7);
+            assert_eq!(probes.len(), 8);
             assert!(probes.iter().all(|probe| {
                 probe["state"] == "unavailable"
                     && probe["reason"] == "execution_recovery_scope_invalid"
@@ -17894,6 +18004,7 @@ exit 1
                     "execution.reopen",
                     "execution.repair",
                     "workspace.ensure",
+                    "workspace.reopen",
                     "workspace.update",
                 ],
             );
@@ -18735,7 +18846,7 @@ exit 1
         }
 
         #[test]
-        fn status_always_reports_all_seven_operation_local_probes() {
+        fn status_always_reports_all_eight_operation_local_probes() {
             let _env_lock = crate::env_test_lock()
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -18810,6 +18921,130 @@ exit 1
                 corrupt_repo.path(),
                 Some("corrupt-session"),
             ));
+        }
+
+        #[test]
+        fn status_workspace_reopen_probe_requires_primary_actor_and_active_generation() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().expect("trusted store home");
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let _provider_claim = ScopedEnvVar::unset(gwt_agent::GWT_PROVIDER_ACTOR_CLAIM_ENV);
+            let _codex_actor = ScopedEnvVar::unset("CODEX_THREAD_ID");
+            let repo = tempfile::tempdir().expect("workspace.reopen probe fixture");
+            let session_id = "session-workspace-reopen-probe";
+            let primary_actor = "provider-workspace-reopen-primary";
+            let owner = prepare_generation_bound_execution(
+                repo.path(),
+                session_id,
+                3725,
+                ExecutionControlStatus::Active,
+            );
+            let session_path =
+                gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml"));
+            let mut session =
+                gwt_agent::Session::load(&session_path).expect("load bound probe Session");
+            session.agent_session_id = Some(primary_actor.to_string());
+            let active_generation = session
+                .execution_binding
+                .as_ref()
+                .expect("active probe binding")
+                .identity
+                .generation_id
+                .clone();
+            session
+                .save(&gwt_core::paths::gwt_sessions_dir())
+                .expect("save provider actor authority");
+            seed_done_workspace_reopen_authority(
+                repo.path(),
+                session_id,
+                owner,
+                &active_generation,
+            );
+            let authority_before =
+                recovery_operation_authority_bytes(repo.path(), owner, &[session_id]);
+
+            let primary_claim = crate::agent_project_state::provider_actor_claim(primary_actor)
+                .expect("primary Claude actor claim");
+            let _actor = ScopedEnvVar::set(gwt_agent::GWT_PROVIDER_ACTOR_CLAIM_ENV, &primary_claim);
+            let primary = status_snapshot(repo.path(), session_id);
+            let primary_probe = primary["recovery_probes"]
+                .as_array()
+                .expect("primary recovery probes")
+                .iter()
+                .find(|probe| probe["operation"] == "workspace.reopen")
+                .expect("workspace.reopen primary probe");
+            assert_eq!(primary_probe["state"], "available");
+            assert!(primary["available_recoveries"]
+                .as_array()
+                .expect("primary available recoveries")
+                .iter()
+                .any(|operation| operation == "workspace.reopen"));
+
+            {
+                let helper_claim =
+                    crate::agent_project_state::provider_actor_claim("provider-delegated-helper")
+                        .expect("helper Claude actor claim");
+                let _helper =
+                    ScopedEnvVar::set(gwt_agent::GWT_PROVIDER_ACTOR_CLAIM_ENV, &helper_claim);
+                let helper = status_snapshot(repo.path(), session_id);
+                let helper_probe = helper["recovery_probes"]
+                    .as_array()
+                    .expect("helper recovery probes")
+                    .iter()
+                    .find(|probe| probe["operation"] == "workspace.reopen")
+                    .expect("workspace.reopen helper probe");
+                assert_eq!(helper_probe["state"], "unavailable");
+                assert!(!helper["available_recoveries"]
+                    .as_array()
+                    .expect("helper available recoveries")
+                    .iter()
+                    .any(|operation| operation == "workspace.reopen"));
+            }
+
+            let mut stale_session =
+                gwt_agent::Session::load(&session_path).expect("reload bound probe Session");
+            stale_session
+                .execution_binding
+                .as_mut()
+                .expect("stale probe binding")
+                .identity
+                .generation_id
+                .push_str("-stale");
+            stale_session
+                .save(&gwt_core::paths::gwt_sessions_dir())
+                .expect("save stale probe binding");
+            let stale = status_snapshot(repo.path(), session_id);
+            let stale_probe = stale["recovery_probes"]
+                .as_array()
+                .expect("stale recovery probes")
+                .iter()
+                .find(|probe| probe["operation"] == "workspace.reopen")
+                .expect("workspace.reopen stale probe");
+            assert_eq!(stale_probe["state"], "unavailable");
+            assert!(!stale["available_recoveries"]
+                .as_array()
+                .expect("stale available recoveries")
+                .iter()
+                .any(|operation| operation == "workspace.reopen"));
+
+            let mut expected_after = authority_before;
+            expected_after.sessions =
+                vec![(session_id.to_string(), std::fs::read(&session_path).ok())];
+            expected_after.capabilities = vec![(
+                session_id.to_string(),
+                stale_session
+                    .execution_binding
+                    .as_ref()
+                    .map(|binding| format!("{binding:?}")),
+            )];
+            assert_eq!(
+                recovery_operation_authority_bytes(repo.path(), owner, &[session_id]),
+                expected_after,
+                "execution.status workspace.reopen probes must be read-only"
+            );
         }
 
         #[test]

@@ -10,8 +10,8 @@ use std::{
 use crate::{
     session::{
         GWT_BIN_PATH_ENV, GWT_CONTINUE_WORK_READY_NONCE_ENV, GWT_HOOK_FORWARD_TOKEN_ENV,
-        GWT_HOOK_FORWARD_URL_ENV, GWT_PANE_WS_URL_ENV, GWT_SESSION_ID_ENV,
-        GWT_SESSION_RUNTIME_PATH_ENV,
+        GWT_HOOK_FORWARD_URL_ENV, GWT_PANE_WS_URL_ENV, GWT_PROVIDER_ACTOR_CLAIM_ENV,
+        GWT_SESSION_ID_ENV, GWT_SESSION_RUNTIME_PATH_ENV,
     },
     types::LaunchRuntimeTarget,
 };
@@ -23,6 +23,7 @@ const CODEX_THREAD_ID_ENV: &str = "CODEX_THREAD_ID";
 const INHERITED_TERMINAL_COLOR_SUPPRESSOR_ENV_KEYS: &[&str] = &["NO_COLOR"];
 const INHERITED_LAUNCH_ENV_KEYS: &[&str] = &[
     CODEX_THREAD_ID_ENV,
+    GWT_PROVIDER_ACTOR_CLAIM_ENV,
     GWT_BIN_PATH_ENV,
     GWT_CONTINUE_WORK_READY_NONCE_ENV,
     GWT_HOOK_FORWARD_TOKEN_ENV,
@@ -927,6 +928,10 @@ mod tests {
                 "ws://127.0.0.1:45123/ws".to_string(),
             ),
             (GWT_PROJECT_ROOT_ENV.to_string(), "/old/project".to_string()),
+            (
+                "GWT_PROVIDER_ACTOR_CLAIM".to_string(),
+                "sha256:stale-parent-claim".to_string(),
+            ),
         ]);
 
         let path_entries = env
@@ -940,6 +945,7 @@ mod tests {
         assert!(!env.contains_key(GWT_HOOK_FORWARD_TOKEN_ENV));
         assert!(!env.contains_key(GWT_PANE_WS_URL_ENV));
         assert!(!env.contains_key(GWT_PROJECT_ROOT_ENV));
+        assert!(!env.contains_key("GWT_PROVIDER_ACTOR_CLAIM"));
     }
 
     #[cfg(windows)]

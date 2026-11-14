@@ -53,20 +53,24 @@ impl AgentDetector {
 
     /// Detect a single agent by its command name.
     pub fn detect_by_command(command: &str) -> Option<DetectedAgent> {
+        Self::detect_by_resolved_command(command, command)
+    }
+
+    fn detect_by_resolved_command(command: &str, executable: &str) -> Option<DetectedAgent> {
         let descriptor = builtin_agent_descriptor_for_command(command);
         let (version, resolved_path) = match descriptor {
             Some(descriptor) => Self::fetch_version(
-                command,
+                executable,
                 descriptor.version_flag,
                 descriptor.version_prefix_args,
             ),
-            None => Self::fetch_version(command, "--version", &[]),
+            None => Self::fetch_version(executable, "--version", &[]),
         }
         .ok()?;
         let path = if cfg!(windows) {
             resolved_path
         } else {
-            which::which(command).ok()?
+            which::which(executable).ok()?
         };
         // Map known commands to AgentIds, fall back to Custom
         let agent_id = descriptor
@@ -201,9 +205,6 @@ mod tests {
     fn detect_by_command_maps_grok_build_and_version() {
         use std::os::unix::fs::PermissionsExt;
 
-        let _env = gwt_core::test_support::env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempfile::tempdir().expect("tempdir");
         let executable = temp.path().join("grok");
         std::fs::write(&executable, "#!/bin/sh\nprintf '1.0.3\\n'\n")
@@ -214,10 +215,11 @@ mod tests {
         permissions.set_mode(0o755);
         std::fs::set_permissions(&executable, permissions)
             .expect("make Grok Build fixture executable");
-        let _path = gwt_core::test_support::ScopedEnvVar::set("PATH", temp.path());
-
-        let detected =
-            AgentDetector::detect_by_command("grok").expect("Grok Build fixture must be detected");
+        let detected = AgentDetector::detect_by_resolved_command(
+            "grok",
+            executable.to_str().expect("UTF-8 executable path"),
+        )
+        .expect("Grok Build fixture must be detected");
 
         assert_eq!(detected.agent_id, AgentId::GrokBuild);
         assert_eq!(detected.version.as_deref(), Some("1.0.3"));

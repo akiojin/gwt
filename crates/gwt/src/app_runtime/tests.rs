@@ -32661,16 +32661,28 @@ fn app_runtime_approval_settle_timer_routes_sanitized_token_event() {
         .pending_settle_token
         .expect("settle token");
 
-    thread::sleep(Duration::from_millis(180));
-
-    let events = proxy_events
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    assert!(events.iter().any(|event| matches!(
-        event,
-        UserEvent::RuntimeApprovalSettle { id, token: queued }
-            if id == &window_id && *queued == token
-    )));
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let routed = proxy_events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .any(|event| {
+                matches!(
+                    event,
+                    UserEvent::RuntimeApprovalSettle { id, token: queued }
+                        if id == &window_id && *queued == token
+                )
+            });
+        if routed {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "settle timer did not route the expected window and token before the deadline"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
 }
 
 #[test]
@@ -39565,6 +39577,8 @@ fn app_runtime_agent_failed_rebases_concurrent_daemon_migration_before_fresh_fai
     let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
     let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "fail");
     let _marker = ScopedEnvVar::set("GWT_FAKE_GH_MARKER", &gh_marker);
+    let _commit_timeout =
+        ScopedEnvVar::set("GWT_TEST_ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT_MS", "2000");
 
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
@@ -39596,6 +39610,24 @@ fn app_runtime_agent_failed_rebases_concurrent_daemon_migration_before_fresh_fai
         },
     );
     let failure = legacy_issue_monitor_git_failure(&repo);
+    let profile = sample_issue_monitor_launch_profile();
+    let reviewing = issue_monitor_autonomous_record(42, gwt::AutonomousPhase::Reviewing, 2);
+    let implementing = issue_monitor_autonomous_record(99, gwt::AutonomousPhase::Implementing, 1);
+    let migrated = gwt::IssueMonitorPrefs {
+        enabled: true,
+        max_active_agents: 4,
+        priority_order: vec![99, 42],
+        launch_profile: Some(profile.clone()),
+        merged_issues: vec![88],
+        autonomous_mode: true,
+        autonomous_tuning: gwt::issue_monitor::AutonomousTuning {
+            max_attempts: 9,
+            ..gwt::issue_monitor::AutonomousTuning::default()
+        },
+        autonomous_records: vec![reviewing.clone(), implementing.clone()],
+        ..gwt::IssueMonitorPrefs::default()
+    };
+    let migrated_bytes = serde_json::to_vec_pretty(&migrated).expect("serialize migrated prefs");
 
     let lock = OpenOptions::new()
         .create(true)
@@ -39634,28 +39666,7 @@ fn app_runtime_agent_failed_rebases_concurrent_daemon_migration_before_fresh_fai
         "GUI writer waits at the transaction lock after loading marker 0"
     );
 
-    let profile = sample_issue_monitor_launch_profile();
-    let reviewing = issue_monitor_autonomous_record(42, gwt::AutonomousPhase::Reviewing, 2);
-    let implementing = issue_monitor_autonomous_record(99, gwt::AutonomousPhase::Implementing, 1);
-    let migrated = gwt::IssueMonitorPrefs {
-        enabled: true,
-        max_active_agents: 4,
-        priority_order: vec![99, 42],
-        launch_profile: Some(profile.clone()),
-        merged_issues: vec![88],
-        autonomous_mode: true,
-        autonomous_tuning: gwt::issue_monitor::AutonomousTuning {
-            max_attempts: 9,
-            ..gwt::issue_monitor::AutonomousTuning::default()
-        },
-        autonomous_records: vec![reviewing.clone(), implementing.clone()],
-        ..gwt::IssueMonitorPrefs::default()
-    };
-    fs::write(
-        &prefs_path,
-        serde_json::to_vec_pretty(&migrated).expect("serialize migrated prefs"),
-    )
-    .expect("commit daemon migration while GUI waits");
+    fs::write(&prefs_path, migrated_bytes).expect("commit daemon migration while GUI waits");
     FileExt::unlock(&lock).expect("release issue monitor prefs lock");
 
     let events = done_rx

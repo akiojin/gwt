@@ -88,8 +88,8 @@ pub use session::{
     SessionExecutionIdentity, SessionExitReceipt, SessionManualHandoffFence, SessionPathState,
     SessionRuntimeState, ToolRuntimeProvenance, ToolRuntimeResolutionReason, ToolRuntimeRunnerKind,
     GWT_BIN_PATH_ENV, GWT_CONTINUE_WORK_READY_NONCE_ENV, GWT_HOOK_FORWARD_TOKEN_ENV,
-    GWT_HOOK_FORWARD_URL_ENV, GWT_PANE_WS_URL_ENV, GWT_SESSION_ID_ENV,
-    GWT_SESSION_RUNTIME_PATH_ENV,
+    GWT_HOOK_FORWARD_URL_ENV, GWT_PANE_WS_URL_ENV, GWT_PROVIDER_ACTOR_CLAIM_ENV,
+    GWT_SESSION_ID_ENV, GWT_SESSION_RUNTIME_PATH_ENV,
 };
 pub use store::{
     load_custom_agents_from_path, load_stored_custom_agents_from_path,

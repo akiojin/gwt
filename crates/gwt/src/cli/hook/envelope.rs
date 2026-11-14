@@ -37,6 +37,12 @@ pub enum HookOutput {
         detail: String,
         deny_reason: String,
     },
+    /// Middleware-only PreToolUse output. Omitting `permissionDecision`
+    /// preserves the provider's normal permission pipeline while replacing
+    /// the complete tool input object.
+    PreToolUseUpdatedInput {
+        updated_input: serde_json::Value,
+    },
     HookSpecificAdditionalContext {
         event: IntentBoundaryEvent,
         text: String,
@@ -65,6 +71,20 @@ struct PreToolUsePermissionContent<'a> {
     permission_decision: &'static str,
     #[serde(rename = "permissionDecisionReason")]
     permission_decision_reason: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+struct PreToolUseUpdatedInputPayload<'a> {
+    #[serde(rename = "hookSpecificOutput")]
+    hook_specific_output: PreToolUseUpdatedInputContent<'a>,
+}
+
+#[derive(Debug, Serialize)]
+struct PreToolUseUpdatedInputContent<'a> {
+    #[serde(rename = "hookEventName")]
+    hook_event_name: &'static str,
+    #[serde(rename = "updatedInput")]
+    updated_input: &'a serde_json::Value,
 }
 
 #[derive(Debug, Serialize)]
@@ -119,6 +139,10 @@ impl HookOutput {
         }
     }
 
+    pub fn pre_tool_use_updated_input(updated_input: serde_json::Value) -> Self {
+        Self::PreToolUseUpdatedInput { updated_input }
+    }
+
     pub fn system_message(text: impl Into<String>) -> Self {
         Self::SystemMessage(text.into())
     }
@@ -153,7 +177,8 @@ impl HookOutput {
     pub fn exit_code(&self) -> i32 {
         match self {
             Self::PreToolUsePermission { .. } => 2,
-            Self::HookSpecificAdditionalContext { .. }
+            Self::PreToolUseUpdatedInput { .. }
+            | Self::HookSpecificAdditionalContext { .. }
             | Self::SystemMessage(_)
             | Self::Silent
             | Self::StopBlock { .. } => 0,
@@ -168,6 +193,16 @@ impl HookOutput {
                         hook_event_name: "PreToolUse",
                         permission_decision: "deny",
                         permission_decision_reason: deny_reason,
+                    },
+                };
+                serde_json::to_writer(&mut *writer, &payload)?;
+                writer.write_all(b"\n")?;
+            }
+            Self::PreToolUseUpdatedInput { updated_input } => {
+                let payload = PreToolUseUpdatedInputPayload {
+                    hook_specific_output: PreToolUseUpdatedInputContent {
+                        hook_event_name: "PreToolUse",
+                        updated_input,
                     },
                 };
                 serde_json::to_writer(&mut *writer, &payload)?;

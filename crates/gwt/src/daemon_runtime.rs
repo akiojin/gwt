@@ -78,6 +78,7 @@ pub(crate) enum AgentBridgeFailureReason {
     AuthorityMismatch,
     ReceiptMismatch,
     WorkspaceEnsureRequired,
+    RelaunchRequired,
     OperationRejected,
 }
 
@@ -88,6 +89,7 @@ impl AgentBridgeFailureReason {
             Self::AuthorityMismatch => "authority_mismatch",
             Self::ReceiptMismatch => "receipt_mismatch",
             Self::WorkspaceEnsureRequired => "workspace_ensure_required",
+            Self::RelaunchRequired => "relaunch_required",
             Self::OperationRejected => "operation_rejected",
         }
     }
@@ -100,6 +102,7 @@ pub(crate) struct AgentBridgeFailure {
     error_code: Option<crate::AgentWorkspaceUpdateErrorCode>,
     bridge_code: Option<String>,
     bridge_reason: Option<String>,
+    terminal: Option<Box<crate::AgentWorkspaceTerminalDiagnosis>>,
     exact_workspace_ensure_required: bool,
     message: &'static str,
 }
@@ -112,6 +115,7 @@ impl AgentBridgeFailure {
             error_code: None,
             bridge_code: None,
             bridge_reason: None,
+            terminal: None,
             exact_workspace_ensure_required: false,
             message,
         }
@@ -134,6 +138,9 @@ impl AgentBridgeFailure {
                 .and_then(parse_workspace_update_error_code),
             bridge_code,
             bridge_reason,
+            terminal: response
+                .and_then(|response| response.terminal.clone())
+                .map(Box::new),
             exact_workspace_ensure_required,
             message,
         }
@@ -160,6 +167,17 @@ impl AgentBridgeFailure {
 
 impl std::fmt::Display for AgentBridgeFailure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(terminal) = self.terminal.as_ref() {
+            return formatter.write_str(
+                &serde_json::json!({
+                    "code": self.bridge_code.as_deref().unwrap_or("canonical_work_terminal"),
+                    "reason": self.bridge_reason.as_deref().unwrap_or("canonical_work_terminal"),
+                    "message": self.message,
+                    "terminal": terminal,
+                })
+                .to_string(),
+            );
+        }
         write!(formatter, "[{}] {}", self.reason.as_str(), self.message)?;
         if self.http_status.is_some() || self.bridge_code.is_some() || self.bridge_reason.is_some()
         {
@@ -225,6 +243,12 @@ fn safe_bridge_token(value: &Option<String>) -> Option<String> {
 fn parse_workspace_update_error_code(code: &str) -> Option<crate::AgentWorkspaceUpdateErrorCode> {
     match code {
         "invalid_request" => Some(crate::AgentWorkspaceUpdateErrorCode::InvalidRequest),
+        "primary_actor_required" => {
+            Some(crate::AgentWorkspaceUpdateErrorCode::PrimaryActorRequired)
+        }
+        "canonical_work_terminal" => {
+            Some(crate::AgentWorkspaceUpdateErrorCode::CanonicalWorkTerminal)
+        }
         "relaunch_required" => Some(crate::AgentWorkspaceUpdateErrorCode::RelaunchRequired),
         "execution_binding_mismatch" => {
             Some(crate::AgentWorkspaceUpdateErrorCode::ExecutionBindingMismatch)
@@ -253,6 +277,8 @@ struct WorkspaceBridgeDiagnosticResponse {
     code: Option<String>,
     #[serde(default)]
     reason: Option<String>,
+    #[serde(default)]
+    terminal: Option<crate::AgentWorkspaceTerminalDiagnosis>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -262,6 +288,8 @@ struct WorkspaceBridgeErrorResponse {
     reason: String,
     #[serde(default, rename = "message")]
     _message: Option<String>,
+    #[serde(default, rename = "terminal")]
+    _terminal: Option<crate::AgentWorkspaceTerminalDiagnosis>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -392,6 +420,16 @@ impl HookForwardTarget {
         let mut url =
             Url::parse(&self.url).map_err(|error| format!("invalid agent bridge URL: {error}"))?;
         url.set_path("/internal/workspace-update");
+        url.set_query(None);
+        url.set_fragment(None);
+        Ok(url)
+    }
+
+    pub fn workspace_reopen_url(&self) -> Result<Url, String> {
+        self.validate()?;
+        let mut url =
+            Url::parse(&self.url).map_err(|error| format!("invalid agent bridge URL: {error}"))?;
+        url.set_path("/internal/workspace-reopen");
         url.set_query(None);
         url.set_fragment(None);
         Ok(url)
@@ -559,6 +597,18 @@ pub(crate) fn send_workspace_update_via_agent_bridge_detailed(
             .and_then(|error| safe_bridge_token(&error.reason));
         let reason = if exact_workspace_ensure_required {
             AgentBridgeFailureReason::WorkspaceEnsureRequired
+        } else if diagnostic_code == Some(crate::AgentWorkspaceUpdateErrorCode::RelaunchRequired)
+            || (request.schema_version == crate::AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION
+                && matches!(
+                    status,
+                    reqwest::StatusCode::BAD_REQUEST | reqwest::StatusCode::UNPROCESSABLE_ENTITY
+                )
+                && matches!(
+                    diagnostic_code,
+                    None | Some(crate::AgentWorkspaceUpdateErrorCode::InvalidRequest)
+                ))
+        {
+            AgentBridgeFailureReason::RelaunchRequired
         } else if diagnostic_code
             == Some(crate::AgentWorkspaceUpdateErrorCode::ExecutionBindingMismatch)
             || diagnostic_reason.as_deref() == Some("authority_mismatch")
@@ -583,7 +633,7 @@ pub(crate) fn send_workspace_update_via_agent_bridge_detailed(
                 "Host workspace bridge returned an invalid success response; no local fallback was attempted",
             )
         })?;
-    if receipt.schema_version != crate::AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION
+    if receipt.schema_version != request.schema_version
         || receipt.work_id.trim().is_empty()
         || receipt.journal_entry_id.trim().is_empty()
     {
@@ -601,6 +651,95 @@ pub fn send_workspace_update_via_agent_bridge(
 ) -> Result<crate::AgentWorkspaceUpdateReceipt, String> {
     send_workspace_update_via_agent_bridge_detailed(target, request)
         .map_err(|error| error.to_string())
+}
+
+pub fn send_workspace_reopen_via_agent_bridge(
+    target: &HookForwardTarget,
+    request: &crate::AgentWorkspaceReopenRequest,
+) -> Result<crate::AgentWorkspaceReopenReceipt, String> {
+    let url = target.workspace_reopen_url()?;
+    let client = reqwest::blocking::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|_| "failed to build the Host workspace recovery bridge client".to_string())?;
+    let response = client
+        .post(url)
+        .bearer_auth(&target.token)
+        .json(request)
+        .send()
+        .map_err(|_| "Host workspace recovery bridge is unavailable".to_string())?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = read_bounded_agent_bridge_error_body(
+            response,
+            "Host workspace recovery rejection body could not be read safely",
+        )
+        .map_err(|error| error.to_string())?;
+        if matches!(
+            status,
+            reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::METHOD_NOT_ALLOWED
+        ) {
+            return Err(format!(
+                "[relaunch_required] Host workspace recovery route is unavailable; relaunch the Session with the current Host (http_status={})",
+                status.as_u16()
+            ));
+        }
+        if let Ok(diagnostic) = serde_json::from_slice::<WorkspaceBridgeDiagnosticResponse>(&body) {
+            if let Some(terminal) = diagnostic.terminal {
+                return Err(serde_json::json!({
+                    "code": diagnostic.code.unwrap_or_else(|| "canonical_work_terminal".to_string()),
+                    "reason": diagnostic.reason.unwrap_or_else(|| "canonical_work_terminal".to_string()),
+                    "terminal": terminal,
+                })
+                .to_string());
+            }
+            let code = diagnostic
+                .code
+                .unwrap_or_else(|| "operation_rejected".to_string());
+            let reason = diagnostic
+                .reason
+                .unwrap_or_else(|| "operation_rejected".to_string());
+            if matches!(
+                status,
+                reqwest::StatusCode::BAD_REQUEST | reqwest::StatusCode::UNPROCESSABLE_ENTITY
+            ) && matches!(code.as_str(), "invalid_request" | "operation_rejected")
+            {
+                return Err(format!(
+                    "[relaunch_required] Host workspace recovery requires the current bridge schema; relaunch the Session (http_status={})",
+                    status.as_u16()
+                ));
+            }
+            return Err(format!(
+                "[{reason}] Host workspace recovery was rejected (code={code})"
+            ));
+        }
+        if matches!(
+            status,
+            reqwest::StatusCode::BAD_REQUEST | reqwest::StatusCode::UNPROCESSABLE_ENTITY
+        ) {
+            return Err(format!(
+                "[relaunch_required] Host workspace recovery requires the current bridge schema; relaunch the Session (http_status={})",
+                status.as_u16()
+            ));
+        }
+        return Err(format!(
+            "Host workspace recovery was rejected (http_status={})",
+            status.as_u16()
+        ));
+    }
+    let receipt = response
+        .json::<crate::AgentWorkspaceReopenReceipt>()
+        .map_err(|_| "Host workspace recovery returned an invalid receipt".to_string())?;
+    if receipt.schema_version != crate::AGENT_WORKSPACE_REOPEN_SCHEMA_VERSION
+        || receipt.work_id.trim().is_empty()
+        || receipt.observed_terminal_event_id.trim().is_empty()
+        || receipt.observed_terminal_event_id != request.observed_terminal_event_id
+        || receipt.resume_event_id.trim().is_empty()
+    {
+        return Err("Host workspace recovery returned invalid receipt evidence".to_string());
+    }
+    Ok(receipt)
 }
 
 pub fn send_work_terminalization_via_agent_bridge(
@@ -668,6 +807,16 @@ fn send_terminalization_via_agent_bridge(
             .as_ref()
             .and_then(|error| safe_bridge_token(&error.reason));
         let reason = if diagnostic_code
+            == Some(crate::AgentWorkspaceUpdateErrorCode::RelaunchRequired)
+            || (matches!(
+                status,
+                reqwest::StatusCode::BAD_REQUEST | reqwest::StatusCode::UNPROCESSABLE_ENTITY
+            ) && matches!(
+                diagnostic_code,
+                None | Some(crate::AgentWorkspaceUpdateErrorCode::InvalidRequest)
+            )) {
+            AgentBridgeFailureReason::RelaunchRequired
+        } else if diagnostic_code
             == Some(crate::AgentWorkspaceUpdateErrorCode::ExecutionBindingMismatch)
             || diagnostic_reason.as_deref() == Some("authority_mismatch")
         {
@@ -1309,6 +1458,44 @@ mod tests {
                     ),
                 )
                 .route(
+                    "/internal/workspace-reopen",
+                    post(
+                        |headers: HeaderMap,
+                         State(state): State<BindingProbeState>,
+                         Json(body): Json<serde_json::Value>| async move {
+                            state
+                                .tx
+                                .send((headers, body))
+                                .expect("capture workspace reopen request");
+                            (
+                                state.status,
+                                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                                state.body,
+                            )
+                                .into_response()
+                        },
+                    ),
+                )
+                .route(
+                    "/internal/work-terminalization",
+                    post(
+                        |headers: HeaderMap,
+                         State(state): State<BindingProbeState>,
+                         Json(body): Json<serde_json::Value>| async move {
+                            state
+                                .tx
+                                .send((headers, body))
+                                .expect("capture Work terminalization request");
+                            (
+                                state.status,
+                                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                                state.body,
+                            )
+                                .into_response()
+                        },
+                    ),
+                )
+                .route(
                     "/internal/execution-continuation",
                     post(
                         |headers: HeaderMap,
@@ -1513,6 +1700,13 @@ mod tests {
             );
             assert_eq!(
                 target
+                    .workspace_reopen_url()
+                    .unwrap_or_else(|error| panic!("{host}: {error}"))
+                    .as_str(),
+                format!("http://{host}:45123/internal/workspace-reopen")
+            );
+            assert_eq!(
+                target
                     .work_terminalization_url()
                     .unwrap_or_else(|error| panic!("{host}: {error}"))
                     .as_str(),
@@ -1562,6 +1756,7 @@ mod tests {
         let request = crate::AgentWorkspaceUpdateRequest {
             schema_version: crate::AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
             claimed_session_id: "session-reason-codes".to_string(),
+            provider_actor_id: None,
             observation: crate::AgentRuntimeObservation {
                 cwd: "/workspace/repo".to_string(),
                 git_toplevel: "/workspace/repo".to_string(),
@@ -1578,6 +1773,142 @@ mod tests {
         let transport = send_workspace_update_via_agent_bridge(&unavailable, &request)
             .expect_err("unreachable Host must be typed");
         assert!(transport.contains("transport_failure"), "{transport}");
+
+        let legacy_host = BindingProbeServer::start(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            serde_json::json!({
+                "code": "invalid_request",
+                "reason": "invalid_request"
+            }),
+        );
+        let legacy_target = HookForwardTarget {
+            url: legacy_host.forward_url.clone(),
+            token: "legacy-host-secret".to_string(),
+        };
+        let relaunch = send_workspace_update_via_agent_bridge_detailed(&legacy_target, &request)
+            .expect_err("a strict old Host must produce a relaunch diagnosis");
+        assert_eq!(relaunch.reason, AgentBridgeFailureReason::RelaunchRequired);
+        assert!(relaunch.to_string().contains("relaunch_required"));
+        legacy_host.receive();
+
+        let legacy_terminal_host = BindingProbeServer::start(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            serde_json::json!({
+                "code": "invalid_request",
+                "reason": "invalid_request"
+            }),
+        );
+        let legacy_terminal_target = HookForwardTarget {
+            url: legacy_terminal_host.forward_url.clone(),
+            token: "legacy-terminal-secret".to_string(),
+        };
+        let terminal_relaunch = send_work_terminalization_via_agent_bridge(
+            &legacy_terminal_target,
+            &crate::AgentWorkTerminalizationRequest {
+                schema_version: crate::AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION,
+                claimed_session_id: request.claimed_session_id.clone(),
+                provider_actor_id: None,
+                observation: request.observation.clone(),
+                terminal_kind: crate::AgentWorkTerminalKind::Done,
+            },
+        )
+        .expect_err("a strict old terminal Host must require relaunch");
+        assert!(
+            terminal_relaunch.contains("relaunch_required"),
+            "{terminal_relaunch}"
+        );
+        legacy_terminal_host.receive();
+
+        let legacy_reopen_host = BindingProbeServer::start(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            serde_json::json!({
+                "code": "invalid_request",
+                "reason": "invalid_request"
+            }),
+        );
+        let legacy_reopen_target = HookForwardTarget {
+            url: legacy_reopen_host.forward_url.clone(),
+            token: "legacy-reopen-secret".to_string(),
+        };
+        let reopen_relaunch = send_workspace_reopen_via_agent_bridge(
+            &legacy_reopen_target,
+            &crate::AgentWorkspaceReopenRequest {
+                schema_version: crate::AGENT_WORKSPACE_REOPEN_SCHEMA_VERSION,
+                claimed_session_id: request.claimed_session_id.clone(),
+                provider_actor_id: None,
+                observation: request.observation.clone(),
+                observed_terminal_event_id: "legacy-event".to_string(),
+                reason: "recover after a strict old Host".to_string(),
+            },
+        )
+        .expect_err("a strict old recovery Host must require relaunch");
+        assert!(
+            reopen_relaunch.contains("relaunch_required"),
+            "{reopen_relaunch}"
+        );
+        legacy_reopen_host.receive();
+
+        for missing_status in [StatusCode::NOT_FOUND, StatusCode::METHOD_NOT_ALLOWED] {
+            let missing_reopen_host =
+                BindingProbeServer::start(missing_status, serde_json::json!({}));
+            let missing_reopen_target = HookForwardTarget {
+                url: missing_reopen_host.forward_url.clone(),
+                token: "missing-reopen-secret".to_string(),
+            };
+            let missing_route = send_workspace_reopen_via_agent_bridge(
+                &missing_reopen_target,
+                &crate::AgentWorkspaceReopenRequest {
+                    schema_version: crate::AGENT_WORKSPACE_REOPEN_SCHEMA_VERSION,
+                    claimed_session_id: request.claimed_session_id.clone(),
+                    provider_actor_id: None,
+                    observation: request.observation.clone(),
+                    observed_terminal_event_id: "legacy-event".to_string(),
+                    reason: "recover through current Host".to_string(),
+                },
+            )
+            .expect_err("a missing old-Host recovery route must require relaunch");
+            assert!(
+                missing_route.contains("relaunch_required"),
+                "{missing_route}"
+            );
+            assert!(
+                missing_route.contains(&format!("http_status={}", missing_status.as_u16())),
+                "{missing_route}"
+            );
+            missing_reopen_host.receive();
+        }
+
+        let mismatched_reopen_host = BindingProbeServer::start(
+            StatusCode::OK,
+            serde_json::json!({
+                "schema_version": crate::AGENT_WORKSPACE_REOPEN_SCHEMA_VERSION,
+                "work_id": "work-other",
+                "observed_terminal_event_id": "event-other",
+                "resume_event_id": "resume-other",
+                "reopened": true
+            }),
+        );
+        let mismatched_reopen_target = HookForwardTarget {
+            url: mismatched_reopen_host.forward_url.clone(),
+            token: "mismatched-reopen-secret".to_string(),
+        };
+        let mismatched_receipt = send_workspace_reopen_via_agent_bridge(
+            &mismatched_reopen_target,
+            &crate::AgentWorkspaceReopenRequest {
+                schema_version: crate::AGENT_WORKSPACE_REOPEN_SCHEMA_VERSION,
+                claimed_session_id: request.claimed_session_id.clone(),
+                provider_actor_id: None,
+                observation: request.observation.clone(),
+                observed_terminal_event_id: "event-requested".to_string(),
+                reason: "recover exact event".to_string(),
+            },
+        )
+        .expect_err("a stale or misrouted reopen receipt must fail closed");
+        assert!(
+            mismatched_receipt.contains("invalid receipt"),
+            "{mismatched_receipt}"
+        );
+        mismatched_reopen_host.receive();
 
         let oversized_server = BindingProbeServer::start(
             StatusCode::NOT_FOUND,
@@ -1717,6 +2048,48 @@ mod tests {
             "{future_diagnostic}"
         );
         future_server.receive();
+
+        let future_terminal_server = BindingProbeServer::start(
+            StatusCode::CONFLICT,
+            serde_json::json!({
+                "code": "canonical_work_terminal",
+                "reason": "canonical_work_terminal",
+                "message": "rolling terminal diagnosis",
+                "terminal": {
+                    "work_id": "work-terminal",
+                    "terminal_kind": "done",
+                    "terminal_event_id": "event-terminal",
+                    "source_operation": "workspace.update",
+                    "authority_class": "primary_agent",
+                    "execution_generation": "generation-terminal",
+                    "recoverable": true,
+                    "recovery_operation": "workspace.reopen",
+                    "future_terminal_field": {"release": "next"}
+                }
+            }),
+        );
+        let future_terminal_target = HookForwardTarget {
+            url: future_terminal_server.forward_url.clone(),
+            token: "future-terminal-secret".to_string(),
+        };
+        let future_terminal =
+            send_workspace_update_via_agent_bridge_detailed(&future_terminal_target, &request)
+                .expect_err("additive terminal fields must retain known diagnosis");
+        let future_terminal_json: serde_json::Value =
+            serde_json::from_str(&future_terminal.to_string()).expect("typed terminal JSON");
+        assert_eq!(
+            future_terminal_json["terminal"]["terminal_event_id"],
+            "event-terminal"
+        );
+        assert_eq!(
+            future_terminal_json["terminal"]["execution_generation"],
+            "generation-terminal"
+        );
+        assert_eq!(
+            future_terminal_json["terminal"]["recovery_operation"],
+            "workspace.reopen"
+        );
+        future_terminal_server.receive();
 
         let receipt_server = BindingProbeServer::start(
             StatusCode::OK,

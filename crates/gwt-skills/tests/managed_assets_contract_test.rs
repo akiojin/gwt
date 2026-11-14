@@ -11,9 +11,52 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use gwt_core::process::hidden_command;
-use gwt_skills::coordination_guidance::{generate_coordination_guidance, render_skill_md};
+use gwt_skills::coordination_guidance::{
+    generate_coordination_guidance, render_skill_md, SKILL_BODY_EN, SKILL_BODY_JA,
+};
 use gwt_skills::distribute::distribute_to_worktree;
 use gwt_skills::git_exclude::update_git_exclude;
+
+const PRIMARY_FINAL_SEQUENCE: &str = "final Work update -> commit/push -> fresh verification -> PR mutation -> execution/build completion";
+
+fn assert_delegated_helper_boundary(
+    guidance: &str,
+    label: &str,
+    result_phrase: &str,
+    only_phrase: &str,
+    prohibition_phrase: &str,
+) {
+    let boundary = guidance
+        .split("\n\n")
+        .find(|paragraph| paragraph.contains("delegated helper") && paragraph.contains("subagent"))
+        .unwrap_or_else(|| {
+            panic!("{label} guidance must give delegated helpers/subagents a result-only boundary")
+        });
+
+    for phrase in [
+        "root",
+        "primary agent",
+        "handoff",
+        result_phrase,
+        only_phrase,
+        prohibition_phrase,
+        "`workspace.*`",
+        "`execution.*`",
+        "`build.*`",
+        "`pr.*`",
+        "commit",
+        "push",
+    ] {
+        assert!(
+            boundary.contains(phrase),
+            "{label} delegated-helper boundary is missing {phrase:?}: {boundary}"
+        );
+    }
+    assert!(
+        guidance.contains(PRIMARY_FINAL_SEQUENCE),
+        "{label} guidance must preserve the primary agent's terminal delivery sequence"
+    );
+}
 
 /// Create a real (empty) git repository so asset distribution and
 /// `.git/info/exclude` resolution behave as they do in a gwt worktree.
@@ -614,6 +657,21 @@ fn generate_coordination_guidance_writes_skill_for_claude_and_codex() {
 
     generate_coordination_guidance(dir.path()).expect("generate guidance");
 
+    assert_delegated_helper_boundary(
+        SKILL_BODY_EN,
+        "canonical English",
+        "result",
+        "only",
+        "must not",
+    );
+    assert_delegated_helper_boundary(
+        SKILL_BODY_JA,
+        "canonical Japanese",
+        "結果",
+        "だけ",
+        "実行しません",
+    );
+
     for skill_md in [
         dir.path().join(".claude/skills/gwt-coordination/SKILL.md"),
         dir.path().join(".codex/skills/gwt-coordination/SKILL.md"),
@@ -641,6 +699,13 @@ fn generate_coordination_guidance_writes_skill_for_claude_and_codex() {
         assert!(
             content.contains("git add -f -- .gwt/work/events/<digest-prefix>/<digest>.jsonl"),
             "generated guidance must explain exact force-add recovery beneath broad ignores"
+        );
+        assert_delegated_helper_boundary(
+            &content,
+            &format!("generated {}", skill_md.display()),
+            "result",
+            "only",
+            "must not",
         );
         assert!(
             content

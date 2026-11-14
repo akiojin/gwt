@@ -49,6 +49,7 @@ use gwt_core::{
     },
 };
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tokio::{net::TcpListener, runtime::Runtime, sync::oneshot};
 
@@ -60,6 +61,13 @@ const FORWARD_TOKEN: &str = "workspace-proxy-secret-sentinel";
 const HOST_WORK_ID: &str = "host-work-id";
 const HOST_JOURNAL_ENTRY_ID: &str = "host-journal-entry-id";
 const DOCKER_RUNTIME_WORKTREE: &str = "/workspace/project";
+const PRIMARY_PROVIDER_ACTOR_ID: &str = "provider-root-primary-sentinel-3725";
+const FOREIGN_PROVIDER_ACTOR_ID: &str = "provider-root-helper-sentinel-3725";
+const CODEX_THREAD_ID_ENV: &str = "CODEX_THREAD_ID";
+
+fn provider_actor_claim(actor_id: &str) -> String {
+    format!("sha256:{:x}", Sha256::digest(actor_id.as_bytes()))
+}
 
 /// Serialize only the tests that execute a real Host authority mutation.
 /// Waiting at test entry keeps contention outside the bridge client's fixed
@@ -854,11 +862,25 @@ async fn capture_workspace_update(
             }
         };
         let _home = gwt_core::test_support::ScopedGwtHome::set(&real_host.home);
-        return match gwt::apply_authenticated_workspace_update(
-            &real_host.project_root,
-            &real_host.session_id,
-            request,
-        ) {
+        let session_path = real_host
+            .home
+            .join(".gwt/sessions")
+            .join(format!("{}.toml", real_host.session_id));
+        let session = gwt_agent::Session::load(&session_path).expect("real Host Session ledger");
+        let result = match session.execution_binding.as_ref() {
+            Some(binding) => gwt::apply_bound_authenticated_workspace_update(
+                &real_host.project_root,
+                &real_host.session_id,
+                binding,
+                request,
+            ),
+            None => gwt::apply_authenticated_workspace_update(
+                &real_host.project_root,
+                &real_host.session_id,
+                request,
+            ),
+        };
+        return match result {
             Ok(receipt) => Json(receipt).into_response(),
             Err(error) => (StatusCode::CONFLICT, Json(error)).into_response(),
         };
@@ -916,6 +938,7 @@ fn gwtd_command(fixture: &Fixture, session_id: &str) -> Command {
         .env_remove(GWT_HOOK_FORWARD_URL_ENV)
         .env_remove(GWT_HOOK_FORWARD_TOKEN_ENV)
         .env_remove(GWT_SESSION_RUNTIME_PATH_ENV)
+        .env_remove(CODEX_THREAD_ID_ENV)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -979,6 +1002,37 @@ fn run_ws_raw_with_forward_env(
         command.env(GWT_HOOK_FORWARD_TOKEN_ENV, token);
     }
     let mut child = command.spawn().expect("run gwtd with proxy env");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(json.as_bytes())
+        .expect("write stdin");
+    child.wait_with_output().expect("wait gwtd")
+}
+
+fn run_ws_raw_with_provider_actor_and_forward_env(
+    fixture: &Fixture,
+    json: &str,
+    session_id: &str,
+    provider_actor_id: Option<&str>,
+    forward_url: Option<&str>,
+    forward_token: Option<&str>,
+) -> std::process::Output {
+    let mut command = gwtd_command(fixture, session_id);
+    command.env_remove(CODEX_THREAD_ID_ENV);
+    if let Some(provider_actor_id) = provider_actor_id {
+        command.env(CODEX_THREAD_ID_ENV, provider_actor_id);
+    }
+    if let Some(url) = forward_url {
+        command.env(GWT_HOOK_FORWARD_URL_ENV, url);
+    }
+    if let Some(token) = forward_token {
+        command.env(GWT_HOOK_FORWARD_TOKEN_ENV, token);
+    }
+    let mut child = command
+        .spawn()
+        .expect("run gwtd with provider actor and proxy env");
     child
         .stdin
         .take()
@@ -1336,6 +1390,102 @@ fn mark_bound_session_as_docker(fixture: &Fixture) {
     session
         .save(&fixture.home.path().join(".gwt/sessions"))
         .expect("save bound Docker Session fixture");
+}
+
+fn set_bound_session_provider_actor(fixture: &Fixture, provider_actor_id: &str) {
+    let _env_lock = gwt_core::test_support::env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _home = gwt_core::test_support::ScopedGwtHome::set(fixture.home.path());
+    let session_path = fixture
+        .home
+        .path()
+        .join(".gwt/sessions")
+        .join(format!("{SESSION}.toml"));
+    let mut session = Session::load(&session_path).expect("load bound primary Session fixture");
+    session.agent_session_id = Some(provider_actor_id.to_string());
+    session
+        .save(&fixture.home.path().join(".gwt/sessions"))
+        .expect("save bound primary provider actor fixture");
+}
+
+fn seed_reopenable_primary_done(fixture: &Fixture) -> WorkEvent {
+    let exact = prepare_exact_ensured_host(fixture);
+    set_bound_session_provider_actor(fixture, PRIMARY_PROVIDER_ACTOR_ID);
+    let output = run_ws_raw_with_provider_actor_and_forward_env(
+        fixture,
+        &format!(
+            r#"{{"schema_version":1,"operation":"workspace.update","params":{{"agent_session":"{SESSION}","status":"done","summary":"seed exact Done for workspace.reopen negative coverage"}}}}"#
+        ),
+        SESSION,
+        Some(PRIMARY_PROVIDER_ACTOR_ID),
+        None,
+        None,
+    );
+    assert!(
+        output.status.success(),
+        "seed exact primary Done: {}",
+        output_text(&output)
+    );
+    load_tracked_work_events(fixture.project.path())
+        .into_iter()
+        .find(|event| event.kind == WorkEventKind::Done && event.work_item_id == exact.work_id)
+        .expect("exact primary Done event")
+}
+
+fn run_workspace_reopen(
+    fixture: &Fixture,
+    terminal_event_id: &str,
+    reason: &str,
+    provider_actor_id: Option<&str>,
+) -> std::process::Output {
+    run_ws_raw_with_provider_actor_and_forward_env(
+        fixture,
+        &format!(
+            r#"{{"schema_version":1,"operation":"workspace.reopen","params":{{"agent_session":"{SESSION}","terminal_event_id":"{terminal_event_id}","reason":"{reason}"}}}}"#
+        ),
+        SESSION,
+        provider_actor_id,
+        None,
+        None,
+    )
+}
+
+fn replace_bound_session_generation(fixture: &Fixture, generation_id: &str) {
+    let _env_lock = gwt_core::test_support::env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _home = gwt_core::test_support::ScopedGwtHome::set(fixture.home.path());
+    let session_path = gwt_core::paths::gwt_sessions_dir().join(format!("{SESSION}.toml"));
+    let mut session = Session::load(&session_path).expect("load Session before generation change");
+    session
+        .execution_binding
+        .as_mut()
+        .expect("bound Session execution identity")
+        .identity
+        .generation_id = generation_id.to_string();
+    session
+        .save(&gwt_core::paths::gwt_sessions_dir())
+        .expect("save replaced Session generation");
+}
+
+fn duplicate_bound_session_projection_row(fixture: &Fixture) {
+    let _env_lock = gwt_core::test_support::env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _home = gwt_core::test_support::ScopedGwtHome::set(fixture.home.path());
+    let projection_path =
+        gwt_core::paths::gwt_workspace_projection_path_for_repo_path(fixture.project.path());
+    let mut projection = load_workspace_projection_from_path(&projection_path)
+        .expect("load projection before duplicate")
+        .expect("projection exists before duplicate");
+    let duplicate = projection
+        .latest_agent_for_session(SESSION)
+        .expect("Session projection row before duplicate")
+        .clone();
+    projection.agents.push(duplicate);
+    save_workspace_projection_to_path(&projection_path, &projection)
+        .expect("save ambiguous Session assignment");
 }
 
 fn register_agent_at_home(home: &Path, project: &Path) {
@@ -2685,6 +2835,7 @@ fn workspace_update_exact_ensure_required_rejection_uses_one_bound_continuation(
         .latest_agent_for_session(SESSION)
         .and_then(|agent| agent.workspace_id.clone())
         .expect("workspace.ensure canonical Work assignment");
+    set_bound_session_provider_actor(&fixture, PRIMARY_PROVIDER_ACTOR_ID);
     let events_before = load_tracked_work_events(&project_root);
     let server = CaptureServer::start(
         StatusCode::CONFLICT,
@@ -2695,12 +2846,13 @@ fn workspace_update_exact_ensure_required_rejection_uses_one_bound_continuation(
         })
         .to_string(),
     );
-    let output = run_ws_raw_with_forward_env(
+    let output = run_ws_raw_with_provider_actor_and_forward_env(
         &fixture,
         &format!(
             r#"{{"schema_version":1,"operation":"workspace.update","params":{{"agent_session":"{SESSION}","status":"done","summary":"typed compatibility continuation"}}}}"#
         ),
         SESSION,
+        Some(PRIMARY_PROVIDER_ACTOR_ID),
         Some(&server.forward_url),
         Some(FORWARD_TOKEN),
     );
@@ -2811,6 +2963,579 @@ fn workspace_update_exact_ensure_required_rejection_uses_one_bound_continuation(
         Some(WorkspaceStatusCategory::Done)
     );
     assert_eq!(journal_entry.agent_session_id.as_deref(), Some(SESSION));
+}
+
+/// Issue #3725 / SPEC-2359 W-36 (AS-90.53, FR-632--FR-634): a delegated
+/// helper may inherit the complete gwt Session/cwd/branch/worktree/Host bearer
+/// surface, but missing or foreign provider-root evidence must not authorize a
+/// terminal Work write. The transient actor claim is an additive Host request
+/// field and the same typed refusal applies at the real Host boundary and the
+/// old-Host exact-ensure local continuation boundary.
+#[test]
+fn workspace_update_delegated_helper_terminal_intent_is_typed_zero_mutation_across_host_paths() {
+    let _real_host_mutation = real_host_mutation_test_lock();
+
+    for (actor_case, provider_actor_id) in [
+        ("missing", None),
+        ("foreign", Some(FOREIGN_PROVIDER_ACTOR_ID)),
+    ] {
+        for host_path in ["real-host", "typed-local-continuation", "local"] {
+            let fixture = fixture();
+            let exact = prepare_exact_ensured_host(&fixture);
+            set_bound_session_provider_actor(&fixture, PRIMARY_PROVIDER_ACTOR_ID);
+            let project_root = fixture
+                .project
+                .path()
+                .canonicalize()
+                .expect("canonical project root");
+
+            let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+                kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+                number: 3412,
+            };
+            let active_binding = {
+                let _env_lock = gwt_core::test_support::env_lock()
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let _home = gwt_core::test_support::ScopedGwtHome::set(fixture.home.path());
+                gwt::cli::execution_state::current_execution_binding(&project_root, owner)
+                    .expect("read active ECR binding")
+            };
+            assert_eq!(
+                active_binding.as_ref(),
+                Some(&exact.identity.execution_binding.identity),
+                "{actor_case}/{host_path}: fixture must retain the exact Active ECR"
+            );
+            let state_dir = fixture
+                .home
+                .path()
+                .join(".gwt/projects")
+                .join(project_scope_hash(&project_root).as_str())
+                .join("project-state");
+            let work_items = load_workspace_work_items_from_path(&state_dir.join("works.json"))
+                .expect("load canonical active WorkItems")
+                .expect("canonical active WorkItems exist");
+            assert_eq!(
+                work_items
+                    .work_items
+                    .iter()
+                    .find(|work| work.id == exact.work_id)
+                    .expect("canonical active Work")
+                    .status_category,
+                WorkspaceStatusCategory::Active,
+                "{actor_case}/{host_path}: fixture Work must begin Active"
+            );
+
+            let events_before = load_tracked_work_events(&project_root);
+            let state_before = mutation_state_snapshot(&fixture);
+            let server = match host_path {
+                "real-host" => Some(CaptureServer::real_host(
+                    fixture.home.path(),
+                    &project_root,
+                    SESSION,
+                    FORWARD_TOKEN,
+                )),
+                "typed-local-continuation" => Some(CaptureServer::start(
+                    StatusCode::CONFLICT,
+                    serde_json::json!({
+                        "code": "workspace_ensure_required",
+                        "reason": "workspace_ensure_required",
+                        "message": "old Host delegates the exact ensured update locally",
+                    })
+                    .to_string(),
+                )),
+                "local" => None,
+                other => panic!("unknown Host path fixture: {other}"),
+            };
+            let output = run_ws_raw_with_provider_actor_and_forward_env(
+                &fixture,
+                &format!(
+                    r#"{{"schema_version":1,"operation":"workspace.update","params":{{"agent_session":"{SESSION}","status":"done","summary":"delegated helper must not finish primary Work"}}}}"#
+                ),
+                SESSION,
+                provider_actor_id,
+                server.as_ref().map(|server| server.forward_url.as_str()),
+                server.as_ref().map(|_| FORWARD_TOKEN),
+            );
+
+            if let Some(server) = server.as_ref() {
+                let captured = server.recv();
+                server.assert_no_additional_request();
+                assert_eq!(captured.authorization, format!("Bearer {FORWARD_TOKEN}"));
+                assert_eq!(
+                    captured.body["provider_actor_id"],
+                    provider_actor_id
+                        .map(|value| Value::String(provider_actor_claim(value)))
+                        .unwrap_or(Value::Null),
+                    "{actor_case}/{host_path}: the transient provider actor claim must be explicit in the Host request"
+                );
+            }
+            assert!(
+                !output.status.success(),
+                "{actor_case}/{host_path}: delegated terminal intent must fail closed: {}",
+                output_text(&output)
+            );
+            let diagnostic = output_text(&output);
+            let refusal: Value = serde_json::from_slice(&output.stdout)
+                .expect("delegated helper refusal must remain a JSON envelope");
+            assert_eq!(
+                refusal["error_details"]["code"], "primary_actor_required",
+                "{actor_case}/{host_path}: typed actor code must cross the CLI JSON boundary: {refusal}"
+            );
+            assert_eq!(
+                refusal["error_details"]["reason"], "primary_actor_required",
+                "{actor_case}/{host_path}: typed actor reason must cross the CLI JSON boundary: {refusal}"
+            );
+            assert!(
+                diagnostic.contains("primary_actor_required"),
+                "{actor_case}/{host_path}: refusal must preserve the stable typed code: {diagnostic}"
+            );
+            for raw_actor_id in [PRIMARY_PROVIDER_ACTOR_ID, FOREIGN_PROVIDER_ACTOR_ID] {
+                assert!(
+                    !diagnostic.contains(raw_actor_id),
+                    "{actor_case}/{host_path}: raw provider actor ids must not enter diagnostics: {diagnostic}"
+                );
+            }
+            assert_eq!(
+                mutation_state_snapshot(&fixture),
+                state_before,
+                "{actor_case}/{host_path}: refusal must preserve Work/projection/event/settlement/build/Execution bytes"
+            );
+            assert_eq!(
+                load_tracked_work_events(&project_root),
+                events_before,
+                "{actor_case}/{host_path}: refusal must not append a terminal Work event"
+            );
+        }
+    }
+}
+
+/// The provider-root fence is terminal-only: a foreign helper can still send
+/// a sparse progress update over the rolling-compatible v1 bridge, while the
+/// matching primary actor can finish the exact Active Work once over v2. Only
+/// opaque provider actor digests travel in transient Host requests and they
+/// never become tracked Work provenance or command output.
+#[test]
+fn workspace_update_helper_nonterminal_and_primary_terminal_controls_remain_reachable() {
+    let _real_host_mutation = real_host_mutation_test_lock();
+    let fixture = fixture();
+    let exact = prepare_exact_ensured_host(&fixture);
+    set_bound_session_provider_actor(&fixture, PRIMARY_PROVIDER_ACTOR_ID);
+    let project_root = fixture
+        .project
+        .path()
+        .canonicalize()
+        .expect("canonical project root");
+    let events_before_helper = load_tracked_work_events(&project_root);
+
+    let helper_server =
+        CaptureServer::real_host(fixture.home.path(), &project_root, SESSION, FORWARD_TOKEN);
+    let helper_output = run_ws_raw_with_provider_actor_and_forward_env(
+        &fixture,
+        &format!(
+            r#"{{"schema_version":1,"operation":"workspace.update","params":{{"agent_session":"{SESSION}","summary":"delegated helper progress remains valid","current_focus":"return findings to primary actor"}}}}"#
+        ),
+        SESSION,
+        Some(FOREIGN_PROVIDER_ACTOR_ID),
+        Some(&helper_server.forward_url),
+        Some(FORWARD_TOKEN),
+    );
+    assert!(
+        helper_output.status.success(),
+        "a delegated helper nonterminal update must remain valid: {}",
+        output_text(&helper_output)
+    );
+    let helper_request = helper_server.recv();
+    helper_server.assert_no_additional_request();
+    assert_eq!(
+        helper_request.body["provider_actor_id"],
+        Value::Null,
+        "nonterminal intent must not collect or transmit provider actor identity"
+    );
+    assert_eq!(
+        helper_request.body["schema_version"], 1,
+        "nonterminal updates must remain compatible with a v1 Host bridge"
+    );
+    assert!(
+        !output_text(&helper_output).contains(FOREIGN_PROVIDER_ACTOR_ID),
+        "the helper actor claim must not enter user-visible output"
+    );
+    let events_after_helper = load_tracked_work_events(&project_root);
+    assert_tracked_work_events_preserved(&events_before_helper, &events_after_helper);
+    let helper_additions = newly_persisted_work_events(&events_before_helper, &events_after_helper);
+    assert_eq!(
+        helper_additions.len(),
+        1,
+        "the helper nonterminal request must append exactly one event"
+    );
+    assert_eq!(helper_additions[0].kind, WorkEventKind::Update);
+    assert_eq!(
+        helper_additions[0].summary.as_deref(),
+        Some("delegated helper progress remains valid")
+    );
+
+    let primary_server =
+        CaptureServer::real_host(fixture.home.path(), &project_root, SESSION, FORWARD_TOKEN);
+    let primary_output = run_ws_raw_with_provider_actor_and_forward_env(
+        &fixture,
+        &format!(
+            r#"{{"schema_version":1,"operation":"workspace.update","params":{{"agent_session":"{SESSION}","status":"done","summary":"primary actor terminal delivery"}}}}"#
+        ),
+        SESSION,
+        Some(PRIMARY_PROVIDER_ACTOR_ID),
+        Some(&primary_server.forward_url),
+        Some(FORWARD_TOKEN),
+    );
+    assert!(
+        primary_output.status.success(),
+        "the matching primary actor must retain terminal authority: {}",
+        output_text(&primary_output)
+    );
+    let primary_request = primary_server.recv();
+    primary_server.assert_no_additional_request();
+    assert_eq!(
+        primary_request.body["provider_actor_id"],
+        provider_actor_claim(PRIMARY_PROVIDER_ACTOR_ID),
+        "the Host request must carry the matching transient primary actor claim"
+    );
+    assert_eq!(
+        primary_request.body["schema_version"],
+        gwt::AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
+        "terminal updates must use the actor-fenced bridge schema"
+    );
+    assert!(
+        !output_text(&primary_output).contains(PRIMARY_PROVIDER_ACTOR_ID),
+        "the primary actor claim must not enter user-visible output"
+    );
+
+    let events_after_primary = load_tracked_work_events(&project_root);
+    assert_tracked_work_events_preserved(&events_after_helper, &events_after_primary);
+    let primary_additions =
+        newly_persisted_work_events(&events_after_helper, &events_after_primary);
+    assert_eq!(
+        primary_additions.len(),
+        1,
+        "the primary terminal request must append exactly one event"
+    );
+    assert_eq!(primary_additions[0].kind, WorkEventKind::Done);
+    assert_eq!(primary_additions[0].work_item_id, exact.work_id);
+    assert_eq!(
+        events_after_primary
+            .iter()
+            .filter(|event| event.kind == WorkEventKind::Done)
+            .count(),
+        1,
+        "the matching primary actor must emit exactly one legitimate terminal event"
+    );
+    let tracked_json = serde_json::to_string(&events_after_primary).expect("serialize Work events");
+    for raw_actor_id in [PRIMARY_PROVIDER_ACTOR_ID, FOREIGN_PROVIDER_ACTOR_ID] {
+        assert!(
+            !tracked_json.contains(raw_actor_id),
+            "raw provider actor ids must not become tracked Work provenance: {tracked_json}"
+        );
+    }
+}
+
+/// Issue #3725 / SPEC-2359 W-36 (AS-90.55--57, FR-635--FR-638): a terminal
+/// refusal identifies the exact event and source operation as structured JSON,
+/// and the matching primary actor can explicitly recover that Done generation
+/// without a fresh launch. Recovery is an auditable Resume, never an implicit
+/// side effect of workspace.ensure/update.
+#[test]
+fn workspace_terminal_diagnosis_and_exact_primary_reopen_restore_active_updates() {
+    let _real_host_mutation = real_host_mutation_test_lock();
+    let fixture = fixture();
+    let exact = prepare_exact_ensured_host(&fixture);
+    set_bound_session_provider_actor(&fixture, PRIMARY_PROVIDER_ACTOR_ID);
+    let project_root = fixture
+        .project
+        .path()
+        .canonicalize()
+        .expect("canonical project root");
+
+    let terminal_server =
+        CaptureServer::real_host(fixture.home.path(), &project_root, SESSION, FORWARD_TOKEN);
+    let terminal_output = run_ws_raw_with_provider_actor_and_forward_env(
+        &fixture,
+        &format!(
+            r#"{{"schema_version":1,"operation":"workspace.update","params":{{"agent_session":"{SESSION}","status":"done","summary":"primary completion before recovery"}}}}"#
+        ),
+        SESSION,
+        Some(PRIMARY_PROVIDER_ACTOR_ID),
+        Some(&terminal_server.forward_url),
+        Some(FORWARD_TOKEN),
+    );
+    assert!(
+        terminal_output.status.success(),
+        "seed primary terminal event: {}",
+        output_text(&terminal_output)
+    );
+    terminal_server.recv();
+    terminal_server.assert_no_additional_request();
+    drop(terminal_server);
+
+    let terminal_events = load_tracked_work_events(&project_root);
+    let done = terminal_events
+        .iter()
+        .find(|event| event.kind == WorkEventKind::Done && event.work_item_id == exact.work_id)
+        .expect("exact primary Done event");
+    assert_eq!(done.source_operation.as_deref(), Some("workspace.update"));
+    assert_eq!(
+        done.authority_class,
+        Some(gwt_core::workspace_projection::WorkEventAuthorityClass::PrimaryAgent)
+    );
+
+    let refused_update = run_ws_raw_with_provider_actor_and_forward_env(
+        &fixture,
+        &format!(
+            r#"{{"schema_version":1,"operation":"workspace.update","params":{{"agent_session":"{SESSION}","summary":"must diagnose terminal Work"}}}}"#
+        ),
+        SESSION,
+        Some(PRIMARY_PROVIDER_ACTOR_ID),
+        None,
+        None,
+    );
+    assert!(!refused_update.status.success());
+    let refusal: Value = serde_json::from_slice(&refused_update.stdout).unwrap_or_else(|error| {
+        panic!(
+            "parse structured terminal refusal: {error}: {}",
+            output_text(&refused_update)
+        )
+    });
+    assert_eq!(
+        refusal["error_details"]["code"], "canonical_work_terminal",
+        "{refusal}"
+    );
+    assert!(
+        refusal["error"].is_string(),
+        "legacy error string must remain stable"
+    );
+    assert_eq!(
+        refusal["error_details"]["terminal"]["work_id"],
+        exact.work_id
+    );
+    assert_eq!(
+        refusal["error_details"]["terminal"]["terminal_event_id"],
+        done.id
+    );
+    assert_eq!(
+        refusal["error_details"]["terminal"]["terminal_kind"],
+        "done"
+    );
+    assert_eq!(
+        refusal["error_details"]["terminal"]["source_operation"],
+        "workspace.update"
+    );
+    assert_eq!(
+        refusal["error_details"]["terminal"]["authority_class"],
+        "primary_agent"
+    );
+    assert_eq!(
+        refusal["error_details"]["terminal"]["execution_generation"],
+        done.execution_generation
+            .as_deref()
+            .expect("terminal generation")
+    );
+    assert_eq!(refusal["error_details"]["terminal"]["recoverable"], true);
+    assert_eq!(
+        refusal["error_details"]["terminal"]["recovery_operation"],
+        "workspace.reopen"
+    );
+    let diagnosed_terminal_at = chrono::DateTime::parse_from_rfc3339(
+        refusal["error_details"]["terminal"]["terminal_at"]
+            .as_str()
+            .expect("terminal_at string"),
+    )
+    .expect("terminal_at RFC3339")
+    .with_timezone(&chrono::Utc);
+    assert_eq!(diagnosed_terminal_at, done.updated_at);
+
+    let reason = "Recover primary Work after delegated terminalization";
+    let reopen = run_ws_raw_with_provider_actor_and_forward_env(
+        &fixture,
+        &format!(
+            r#"{{"schema_version":1,"operation":"workspace.reopen","params":{{"agent_session":"{SESSION}","terminal_event_id":"{}","reason":"{reason}"}}}}"#,
+            done.id
+        ),
+        SESSION,
+        Some(PRIMARY_PROVIDER_ACTOR_ID),
+        None,
+        None,
+    );
+    assert!(
+        reopen.status.success(),
+        "exact primary recovery must succeed: {}",
+        output_text(&reopen)
+    );
+
+    let resumed_update = run_ws_raw_with_provider_actor_and_forward_env(
+        &fixture,
+        &format!(
+            r#"{{"schema_version":1,"operation":"workspace.update","params":{{"agent_session":"{SESSION}","summary":"active update after explicit recovery"}}}}"#
+        ),
+        SESSION,
+        Some(PRIMARY_PROVIDER_ACTOR_ID),
+        None,
+        None,
+    );
+    assert!(
+        resumed_update.status.success(),
+        "ordinary update is reachable immediately after recovery: {}",
+        output_text(&resumed_update)
+    );
+
+    let _env_lock = gwt_core::test_support::env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _home = gwt_core::test_support::ScopedGwtHome::set(fixture.home.path());
+    let work_items = load_workspace_work_items_from_path(
+        &gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&project_root),
+    )
+    .expect("load recovered WorkItems")
+    .expect("recovered WorkItems exist");
+    let work = work_items
+        .work_items
+        .iter()
+        .find(|work| work.id == exact.work_id)
+        .expect("recovered canonical Work");
+    assert_eq!(work.status_category, WorkspaceStatusCategory::Active);
+    assert_eq!(work.current_terminal_event(), None);
+    let resume = work
+        .events
+        .iter()
+        .find(|event| {
+            event.kind == WorkEventKind::Resume
+                && event.recovered_terminal_event_id.as_deref() == Some(done.id.as_str())
+        })
+        .expect("linked recovery Resume");
+    assert_eq!(resume.recovery_reason.as_deref(), Some(reason));
+    assert_eq!(resume.source_operation.as_deref(), Some("workspace.reopen"));
+    let persisted = serde_json::to_string(work).expect("serialize recovered Work");
+    assert!(!persisted.contains(PRIMARY_PROVIDER_ACTOR_ID));
+}
+
+#[test]
+fn workspace_reopen_rejects_delegated_helper_with_typed_zero_mutation_error() {
+    let fixture = fixture();
+    let done = seed_reopenable_primary_done(&fixture);
+    let before = mutation_state_snapshot(&fixture);
+
+    let output = run_workspace_reopen(
+        &fixture,
+        &done.id,
+        "delegated helper must return recovery to the primary actor",
+        Some(FOREIGN_PROVIDER_ACTOR_ID),
+    );
+
+    assert!(!output.status.success(), "{}", output_text(&output));
+    let refusal: Value = serde_json::from_slice(&output.stdout)
+        .expect("delegated workspace.reopen refusal JSON envelope");
+    assert_eq!(
+        refusal["error_details"]["code"], "primary_actor_required",
+        "{refusal}"
+    );
+    assert_eq!(
+        refusal["error_details"]["reason"], "primary_actor_required",
+        "{refusal}"
+    );
+    assert_eq!(
+        mutation_state_snapshot(&fixture),
+        before,
+        "delegated workspace.reopen must preserve every durable surface"
+    );
+}
+
+#[test]
+fn workspace_reopen_rejects_stale_and_terminal_generations_without_mutation() {
+    for generation_case in ["stale", "terminal"] {
+        let fixture = fixture();
+        let done = seed_reopenable_primary_done(&fixture);
+        match generation_case {
+            "stale" => {
+                replace_bound_session_generation(&fixture, "generation-replaced-after-done");
+            }
+            "terminal" => {
+                let _env_lock = gwt_core::test_support::env_lock()
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let _home = gwt_core::test_support::ScopedGwtHome::set(fixture.home.path());
+                let outcome = gwt::cli::execution_state::settle(
+                    fixture.project.path(),
+                    SESSION,
+                    gwt::cli::execution_state::ExecutionSettlement::Completed,
+                )
+                .expect("settle execution generation");
+                assert!(matches!(
+                    outcome,
+                    gwt::cli::execution_state::SettleResult::Settled(_)
+                ));
+            }
+            other => panic!("unknown generation case {other}"),
+        }
+        let before = mutation_state_snapshot(&fixture);
+
+        let output = run_workspace_reopen(
+            &fixture,
+            &done.id,
+            "only the exact current Active generation may reopen Work",
+            Some(PRIMARY_PROVIDER_ACTOR_ID),
+        );
+
+        assert!(
+            !output.status.success(),
+            "{generation_case}: {}",
+            output_text(&output)
+        );
+        assert_eq!(
+            mutation_state_snapshot(&fixture),
+            before,
+            "{generation_case} generation refusal must preserve every durable surface"
+        );
+    }
+}
+
+#[test]
+fn workspace_reopen_rejects_ambiguous_assignment_and_empty_reason_without_mutation() {
+    let ambiguous = fixture();
+    let ambiguous_done = seed_reopenable_primary_done(&ambiguous);
+    duplicate_bound_session_projection_row(&ambiguous);
+    let ambiguous_before = mutation_state_snapshot(&ambiguous);
+    let ambiguous_output = run_workspace_reopen(
+        &ambiguous,
+        &ambiguous_done.id,
+        "ambiguous assignment must fail closed",
+        Some(PRIMARY_PROVIDER_ACTOR_ID),
+    );
+    assert!(
+        !ambiguous_output.status.success(),
+        "{}",
+        output_text(&ambiguous_output)
+    );
+    assert_eq!(
+        mutation_state_snapshot(&ambiguous),
+        ambiguous_before,
+        "ambiguous assignment refusal must preserve every durable surface"
+    );
+
+    let empty_reason = fixture();
+    let empty_reason_done = seed_reopenable_primary_done(&empty_reason);
+    let empty_reason_before = mutation_state_snapshot(&empty_reason);
+    let empty_reason_output = run_workspace_reopen(
+        &empty_reason,
+        &empty_reason_done.id,
+        "",
+        Some(PRIMARY_PROVIDER_ACTOR_ID),
+    );
+    assert!(
+        !empty_reason_output.status.success(),
+        "{}",
+        output_text(&empty_reason_output)
+    );
+    assert_eq!(
+        mutation_state_snapshot(&empty_reason),
+        empty_reason_before,
+        "empty reason refusal must preserve every durable surface"
+    );
 }
 
 #[test]

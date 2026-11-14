@@ -69,6 +69,11 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
                 "exit_code": code,
                 "output": output,
             });
+            if code != 0 {
+                if let Some(machine_error) = structured_error_details(&output) {
+                    payload["error_details"] = machine_error;
+                }
+            }
             attach_project_store(&mut payload);
             let _ = writeln!(env.stdout(), "{}", payload);
             match (code, declared_block) {
@@ -84,12 +89,18 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
         // process never answered". The stderr line stays for humans.
         Err(err) => {
             let message = err.to_string();
+            let structured = message
+                .strip_prefix("network error: ")
+                .unwrap_or(message.as_str());
             let mut payload = serde_json::json!({
                 "ok": false,
                 "operation": operation,
                 "exit_code": 1,
                 "error": message,
             });
+            if let Some(machine_error) = structured_error_details(structured) {
+                payload["error_details"] = machine_error;
+            }
             attach_project_store(&mut payload);
             let _ = writeln!(env.stdout(), "{payload}");
             let _ = writeln!(env.stderr(), "{prog} {operation}: {message}");
@@ -101,6 +112,53 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
             1
         }
     }
+}
+
+fn structured_error_details(message: &str) -> Option<Value> {
+    let structured = message
+        .strip_prefix("network error: ")
+        .unwrap_or(message)
+        .trim();
+    if let Some(value) = serde_json::from_str::<Value>(structured)
+        .ok()
+        .filter(Value::is_object)
+    {
+        return Some(value);
+    }
+    const CODES: &[&str] = &[
+        "primary_actor_required",
+        "canonical_work_terminal",
+        "relaunch_required",
+        "execution_binding_mismatch",
+        "workspace_ensure_required",
+        "provenance_mismatch",
+        "identity_conflict",
+        "transaction_conflict",
+        "invalid_request",
+        "internal",
+    ];
+    let code = CODES
+        .iter()
+        .copied()
+        .find(|code| has_typed_error_code_marker(structured, code))?;
+    Some(serde_json::json!({
+        "code": code,
+        "reason": code,
+        "message": structured,
+    }))
+}
+
+fn has_typed_error_code_marker(message: &str, code: &str) -> bool {
+    if message.contains(&format!("[{code}]")) || message.contains(&format!("code={code}")) {
+        return true;
+    }
+    message.match_indices(code).any(|(index, _)| {
+        let before = message[..index].chars().next_back();
+        let after = message[index + code.len()..].chars().next();
+        matches!(after, Some(':'))
+            && before
+                .is_none_or(|character| character.is_whitespace() || matches!(character, '[' | '('))
+    })
 }
 
 /// Issue #3606: name the project store the operation acted on.
@@ -183,6 +241,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
     }
     let command = match envelope.operation.as_str() {
         "workspace.update" => workspace_update(params)?,
+        "workspace.reopen" => workspace_reopen(params)?,
         "workspace.candidates" => workspace_candidates(params)?,
         "workspace.join" => workspace_join(params)?,
         "workspace.create" => workspace_create(params)?,
@@ -685,6 +744,16 @@ fn workspace_update(params: &Map<String, Value>) -> Result<CliCommand, CliParseE
         current_focus,
         title_summary: purpose,
     }))
+}
+
+fn workspace_reopen(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
+    Ok(CliCommand::Workspace(WorkspaceCommand::Reopen(
+        super::WorkspaceReopenCommand {
+            agent_session: Some(workspace_update_session(params)?),
+            observed_terminal_event_id: required_string(params, "terminal_event_id")?,
+            reason: required_string(params, "reason")?,
+        },
+    )))
 }
 
 fn workspace_candidates(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
@@ -1527,9 +1596,9 @@ fn optional_json_array(
 #[cfg(test)]
 mod tests {
     use super::{
-        parse, ActionsCommand, CliCommand, CliParseError, DaemonCommand, HookCommand, IndexCommand,
-        IndexScope, IssueCommand, PaneCommand, PrCommand, SkillStateAction, WorkflowBypassMode,
-        WorkflowCommand, WorkspaceCommand,
+        parse, structured_error_details, ActionsCommand, CliCommand, CliParseError, DaemonCommand,
+        HookCommand, IndexCommand, IndexScope, IssueCommand, PaneCommand, PrCommand,
+        SkillStateAction, WorkflowBypassMode, WorkflowCommand, WorkspaceCommand,
     };
     use crate::cli::verification_lease::VerificationLeaseCommand;
     use crate::cli::IssueMonitorPriorityPosition;
@@ -1703,6 +1772,37 @@ mod tests {
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn workspace_reopen_requires_exact_terminal_event_and_ambient_session() {
+        let _guard = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ambient = gwt_core::test_support::ScopedEnvVar::set(
+            gwt_agent::session::GWT_SESSION_ID_ENV,
+            "session-reopen",
+        );
+        assert!(matches!(
+            ok(
+                "workspace.reopen",
+                json!({
+                    "terminal_event_id": "event-done-1",
+                    "reason": "recover primary Work after delegated close"
+                })
+            ),
+            CliCommand::Workspace(WorkspaceCommand::Reopen(crate::cli::WorkspaceReopenCommand {
+                agent_session: Some(session),
+                observed_terminal_event_id,
+                reason,
+            })) if session == "session-reopen"
+                && observed_terminal_event_id == "event-done-1"
+                && reason == "recover primary Work after delegated close"
+        ));
+        assert!(matches!(
+            err("workspace.reopen", json!({"reason": "missing event"})),
+            CliParseError::MissingFlag("terminal_event_id")
+        ));
     }
 
     #[test]
@@ -3374,5 +3474,32 @@ mod tests {
                 scope: IndexScope::All
             })
         ));
+    }
+
+    #[test]
+    fn structured_error_details_preserves_json_and_recovers_stable_typed_codes() {
+        let terminal = structured_error_details(
+            r#"{"code":"canonical_work_terminal","terminal":{"work_id":"work-1"}}"#,
+        )
+        .expect("terminal JSON details");
+        assert_eq!(terminal["terminal"]["work_id"], "work-1");
+
+        for message in [
+            "primary_actor_required: only the primary actor may close Work",
+            "build: Work lifecycle update failed: primary_actor_required: delegated helper",
+            "network error: [operation_rejected] rejected (code=primary_actor_required)",
+        ] {
+            let details = structured_error_details(message).expect("typed details");
+            assert_eq!(details["code"], "primary_actor_required");
+            assert_eq!(details["reason"], "primary_actor_required");
+        }
+        assert_eq!(structured_error_details("ordinary untyped failure"), None);
+        assert_eq!(
+            structured_error_details(
+                "verification output mentions relaunch_required and internal implementation tests"
+            ),
+            None,
+            "bare prose and test output must not be promoted to a typed operation error"
+        );
     }
 }

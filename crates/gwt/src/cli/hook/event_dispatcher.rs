@@ -161,8 +161,130 @@ fn handle_pre_tool_use(event: &str, input: &str) -> Result<HookOutput, HookError
     if question_guard != HookOutput::Silent {
         return Ok(question_guard);
     }
-    run_step(event, "workflow-policy", || {
+    let policy = run_step(event, "workflow-policy", || {
         workflow_policy::handle_with_input(input)
+    })?;
+    if policy != HookOutput::Silent {
+        return Ok(policy);
+    }
+    Ok(authority_sensitive_actor_claim_updated_input(input).unwrap_or(HookOutput::Silent))
+}
+
+/// Claude Code reports the main/subagent distinction in trusted PreToolUse
+/// metadata, not in the Bash child environment. This is a cooperative provider
+/// boundary, not a same-user process sandbox: helper terminal commands and any
+/// caller-written actor-claim reference are denied before Bash runs, and only
+/// this hook may inject the opaque claim into one recognized command.
+/// Nonterminal operations use the claim only for recovery reachability.
+fn authority_sensitive_actor_claim_updated_input(input: &str) -> Option<HookOutput> {
+    let hook_input = serde_json::from_str::<serde_json::Value>(input).ok()?;
+    if hook_input
+        .get("tool_name")
+        .and_then(serde_json::Value::as_str)
+        != Some("Bash")
+    {
+        return None;
+    }
+    let mut tool_input = hook_input.get("tool_input")?.as_object()?.clone();
+    let command = tool_input
+        .get("command")
+        .and_then(serde_json::Value::as_str)?
+        .to_string();
+
+    let gwt_session_id = super::GwtSessionId::from_env()?;
+    let session_path =
+        gwt_core::paths::gwt_sessions_dir().join(format!("{}.toml", gwt_session_id.as_str()));
+    let session = gwt_agent::Session::load(&session_path).ok()?;
+    if !matches!(session.agent_id, gwt_agent::AgentId::ClaudeCode) {
+        // Codex has a per-agent CODEX_THREAD_ID. Other providers have not
+        // established Claude's updatedInput/agent_id contract, so they fail
+        // closed at the terminal service boundary instead of being guessed.
+        return None;
+    }
+
+    if command_uses_protected_actor_claim(&command) {
+        return Some(HookOutput::pre_tool_use_permission(
+            "Protected actor claim override refused",
+            "Remove the GWT provider actor claim from the command. Managed Claude hooks inject it from trusted PreToolUse metadata.",
+        ));
+    }
+
+    let envelope = workflow_policy::json_envelope(&command)?;
+    let operation = envelope
+        .get("operation")
+        .and_then(serde_json::Value::as_str)?;
+    let needs_actor_claim = matches!(
+        operation,
+        "build.complete"
+            | "build.abort"
+            | "execution.status"
+            | "workspace.reopen"
+            | "workspace.update"
+            | "workspace.ensure"
+    );
+    if !needs_actor_claim {
+        return None;
+    }
+
+    let helper_actor = hook_input.get("agent_id");
+    let terminal_mutation = matches!(
+        operation,
+        "build.complete" | "build.abort" | "workspace.reopen"
+    ) || (operation == "workspace.update"
+        && envelope
+            .get("params")
+            .and_then(|params| params.get("status"))
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|status| status.eq_ignore_ascii_case("done")));
+    if helper_actor.is_some() && terminal_mutation {
+        return Some(HookOutput::pre_tool_use_permission(
+            "Primary agent required",
+            "Delegated Claude agents may update progress and inspect recovery status, but only the primary agent may terminalize or reopen canonical Work.",
+        ));
+    }
+
+    let provider_actor = match helper_actor {
+        Some(agent_id) => agent_id.as_str()?,
+        None => hook_input
+            .get("session_id")
+            .and_then(serde_json::Value::as_str)?,
+    };
+    let claim = crate::agent_project_state::provider_actor_claim(provider_actor)?;
+    let updated_command = format!(
+        "{}='{}' {}",
+        gwt_agent::GWT_PROVIDER_ACTOR_CLAIM_ENV,
+        claim,
+        command
+    );
+    tool_input.insert(
+        "command".to_string(),
+        serde_json::Value::String(updated_command),
+    );
+    Some(HookOutput::pre_tool_use_updated_input(
+        serde_json::Value::Object(tool_input),
+    ))
+}
+
+fn command_uses_protected_actor_claim(command: &str) -> bool {
+    let variable = gwt_agent::GWT_PROVIDER_ACTOR_CLAIM_ENV;
+    if command.contains(&format!("${variable}")) || command.contains(&format!("${{{variable}}}")) {
+        return true;
+    }
+    let tokens = command.split_whitespace().collect::<Vec<_>>();
+    tokens.iter().enumerate().any(|(index, token)| {
+        let token =
+            token.trim_matches(|character: char| matches!(character, '\'' | '"' | ';' | '(' | ')'));
+        if token.starts_with(&format!("{variable}=")) {
+            return true;
+        }
+        token == variable
+            && index.checked_sub(1).is_some_and(|previous| {
+                matches!(
+                    tokens[previous]
+                        .trim_matches(|character: char| { matches!(character, '\'' | '"' | ';') }),
+                    "export" | "unset" | "printenv" | "-u"
+                )
+            })
     })
 }
 
@@ -377,6 +499,7 @@ mod tests {
     use crate::discussion_resume::PendingDiscussionGoal;
     use gwt_agent::{AgentId, Session, GWT_SESSION_ID_ENV, GWT_SESSION_RUNTIME_PATH_ENV};
     use gwt_core::test_support::ScopedEnvVar;
+    use sha2::{Digest, Sha256};
 
     fn write_pending_goal(worktree: &Path) {
         let discussion_path = worktree.join(".gwt/discussion.md");
@@ -400,6 +523,288 @@ mod tests {
             .status()
             .expect("git init");
         assert!(status.success(), "git init failed");
+    }
+
+    fn serialize_hook_output(output: &HookOutput) -> serde_json::Value {
+        let mut bytes = Vec::new();
+        output
+            .serialize_to(&mut bytes)
+            .expect("serialize hook output");
+        serde_json::from_slice(&bytes).expect("hook output JSON")
+    }
+
+    /// SPEC-2359 W-36: Claude Code exposes the main/subagent boundary only in
+    /// PreToolUse input. The managed hook must carry an opaque actor claim into
+    /// each authority-sensitive Bash call without approving it or leaking the
+    /// provider-native ids into hook output.
+    #[test]
+    fn pre_tool_use_uses_trusted_claude_actor_metadata_and_denies_helper_terminalization() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let worktree = tempfile::tempdir().unwrap();
+        init_git_repo(worktree.path());
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let sessions_dir = home.path().join(".gwt").join("sessions");
+        let primary_actor = "claude-primary-private-session";
+        let helper_actor = "claude-helper-private-agent";
+        let mut session = Session::new(worktree.path(), "work/issue-3725", AgentId::ClaudeCode);
+        session.agent_session_id = Some(primary_actor.to_string());
+        let session_id = session.id.clone();
+        session.save(&sessions_dir).unwrap();
+        let _session = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session_id);
+        let _runtime_path = ScopedEnvVar::unset(GWT_SESSION_RUNTIME_PATH_ENV);
+        let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+        let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+        let _codex_thread_id = ScopedEnvVar::unset("CODEX_THREAD_ID");
+        let _inherited_actor_claim = ScopedEnvVar::unset(gwt_agent::GWT_PROVIDER_ACTOR_CLAIM_ENV);
+
+        let terminal_command = "gwtd <<'JSON'\n{\"schema_version\":1,\"operation\":\"workspace.update\",\"params\":{\"status\":\"done\"}}\nJSON";
+        let main_input = serde_json::json!({
+            "session_id": primary_actor,
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": terminal_command,
+                "description": "Finish canonical Work"
+            }
+        });
+        let helper_input = serde_json::json!({
+            "session_id": primary_actor,
+            "agent_id": helper_actor,
+            "agent_type": "general-purpose",
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": terminal_command,
+                "description": "Illegitimate helper finish"
+            }
+        });
+
+        let main = serialize_hook_output(
+            &handle_with_input("PreToolUse", &main_input.to_string(), worktree.path(), None)
+                .expect("main PreToolUse output"),
+        );
+        let helper_terminal = handle_with_input(
+            "PreToolUse",
+            &helper_input.to_string(),
+            worktree.path(),
+            None,
+        )
+        .expect("helper PreToolUse output");
+        let HookOutput::PreToolUsePermission { summary, .. } = &helper_terminal else {
+            panic!("helper terminal command must be denied before Bash: {helper_terminal:?}");
+        };
+        assert_eq!(summary, "Primary agent required");
+
+        let status_command = "gwtd <<'JSON'\n{\"schema_version\":1,\"operation\":\"execution.status\",\"params\":{}}\nJSON";
+        let helper_status_input = serde_json::json!({
+            "session_id": primary_actor,
+            "agent_id": helper_actor,
+            "agent_type": "general-purpose",
+            "tool_name": "Bash",
+            "tool_input": { "command": status_command }
+        });
+        let helper = serialize_hook_output(
+            &handle_with_input(
+                "PreToolUse",
+                &helper_status_input.to_string(),
+                worktree.path(),
+                None,
+            )
+            .expect("helper status PreToolUse output"),
+        );
+        let main_specific = &main["hookSpecificOutput"];
+        let helper_specific = &helper["hookSpecificOutput"];
+        let main_command = main_specific["updatedInput"]["command"]
+            .as_str()
+            .expect("main updated command");
+        let helper_command = helper_specific["updatedInput"]["command"]
+            .as_str()
+            .expect("helper updated command");
+        let main_claim = format!("sha256:{:x}", Sha256::digest(primary_actor.as_bytes()));
+        let helper_claim = format!("sha256:{:x}", Sha256::digest(helper_actor.as_bytes()));
+
+        assert_eq!(main_specific["hookEventName"], "PreToolUse");
+        assert!(main_specific.get("permissionDecision").is_none());
+        assert!(helper_specific.get("permissionDecision").is_none());
+        assert_eq!(
+            main_specific["updatedInput"]["description"],
+            "Finish canonical Work"
+        );
+        assert!(main_command.contains(&main_claim), "{main_command}");
+        assert!(helper_command.contains(&helper_claim), "{helper_command}");
+        assert_ne!(main_command, helper_command);
+        for output in [main.to_string(), helper.to_string()] {
+            assert!(
+                !output.contains(primary_actor),
+                "raw primary id leaked: {output}"
+            );
+            assert!(
+                !output.contains(helper_actor),
+                "raw helper id leaked: {output}"
+            );
+        }
+
+        for (operation, command) in [
+            (
+                "workspace.ensure",
+                "gwtd <<'JSON'\n{\"schema_version\":1,\"operation\":\"workspace.ensure\",\"params\":{\"agent_session\":\"session-1\",\"purpose\":\"diagnose\"}}\nJSON",
+            ),
+            (
+                "workspace.reopen",
+                "gwtd <<'JSON'\n{\"schema_version\":1,\"operation\":\"workspace.reopen\",\"params\":{\"terminal_event_id\":\"event-1\",\"reason\":\"recover\"}}\nJSON",
+            ),
+            (
+                "build.complete",
+                "gwtd <<'JSON'\n{\"schema_version\":1,\"operation\":\"build.complete\",\"params\":{\"spec\":3725}}\nJSON",
+            ),
+            (
+                "build.abort",
+                "gwtd <<'JSON'\n{\"schema_version\":1,\"operation\":\"build.abort\",\"params\":{\"spec\":3725,\"reason\":\"blocked\"}}\nJSON",
+            ),
+        ] {
+            let input = serde_json::json!({
+                "session_id": primary_actor,
+                "tool_name": "Bash",
+                "tool_input": { "command": command }
+            });
+            let output = serialize_hook_output(
+                &handle_with_input("PreToolUse", &input.to_string(), worktree.path(), None)
+                    .unwrap_or_else(|error| panic!("{operation} hook failed: {error}")),
+            );
+            let updated = output["hookSpecificOutput"]["updatedInput"]["command"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{operation} updated command missing: {output}"));
+            assert!(updated.contains(&main_claim), "{operation}: {updated}");
+            assert!(
+                output["hookSpecificOutput"]
+                    .get("permissionDecision")
+                    .is_none(),
+                "{operation}: {output}"
+            );
+        }
+
+        let nonterminal = serde_json::json!({
+            "session_id": primary_actor,
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": "gwtd <<'JSON'\n{\"schema_version\":1,\"operation\":\"workspace.update\",\"params\":{\"summary\":\"progress\"}}\nJSON"
+            }
+        });
+        let output = serialize_hook_output(
+            &handle_with_input(
+                "PreToolUse",
+                &nonterminal.to_string(),
+                worktree.path(),
+                None,
+            )
+            .expect("nonterminal PreToolUse output"),
+        );
+        assert!(
+            output["hookSpecificOutput"]["updatedInput"]["command"]
+                .as_str()
+                .is_some_and(|command| command.contains(&main_claim)),
+            "nonterminal updates carry diagnosis-only actor reachability without changing authorization: {output}"
+        );
+
+        for command in [
+            format!(
+                "{}=sha256:{} {terminal_command}",
+                gwt_agent::GWT_PROVIDER_ACTOR_CLAIM_ENV,
+                "0".repeat(64)
+            ),
+            format!(
+                "env {}=sha256:{} {terminal_command}",
+                gwt_agent::GWT_PROVIDER_ACTOR_CLAIM_ENV,
+                "0".repeat(64)
+            ),
+            format!(
+                "printenv {} && {terminal_command}",
+                gwt_agent::GWT_PROVIDER_ACTOR_CLAIM_ENV
+            ),
+        ] {
+            let input = serde_json::json!({
+                "session_id": primary_actor,
+                "tool_name": "Bash",
+                "tool_input": { "command": command }
+            });
+            let refusal =
+                handle_with_input("PreToolUse", &input.to_string(), worktree.path(), None)
+                    .expect("actor override refusal");
+            let HookOutput::PreToolUsePermission { summary, .. } = refusal else {
+                panic!("caller-written actor claims must be denied");
+            };
+            assert_eq!(summary, "Protected actor claim override refused");
+        }
+        let literal_search = serde_json::json!({
+            "session_id": primary_actor,
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": format!("rg -n {} crates/", gwt_agent::GWT_PROVIDER_ACTOR_CLAIM_ENV)
+            }
+        });
+        assert_eq!(
+            handle_with_input(
+                "PreToolUse",
+                &literal_search.to_string(),
+                worktree.path(),
+                None,
+            )
+            .expect("literal source search"),
+            HookOutput::Silent,
+            "a literal source-code search must not be mistaken for shell actor-claim use"
+        );
+
+        for malformed_agent_id in [
+            serde_json::Value::Null,
+            serde_json::json!(42),
+            serde_json::json!(""),
+        ] {
+            let malformed_subagent = serde_json::json!({
+                "session_id": primary_actor,
+                "agent_id": malformed_agent_id,
+                "tool_name": "Bash",
+                "tool_input": { "command": terminal_command }
+            });
+            let output = handle_with_input(
+                "PreToolUse",
+                &malformed_subagent.to_string(),
+                worktree.path(),
+                None,
+            )
+            .expect("malformed subagent PreToolUse output");
+            assert!(
+                matches!(output, HookOutput::PreToolUsePermission { .. }),
+                "present-but-invalid subagent identity must be denied instead of inheriting main identity"
+            );
+        }
+
+        let mut unsupported = Session::new(worktree.path(), "work/issue-3725", AgentId::OpenCode);
+        unsupported.agent_session_id = Some("unsupported-provider-primary".to_string());
+        let unsupported_session_id = unsupported.id.clone();
+        unsupported.save(&sessions_dir).unwrap();
+        let unsupported_input = serde_json::json!({
+            "session_id": "unsupported-provider-primary",
+            "tool_name": "Bash",
+            "tool_input": { "command": terminal_command }
+        });
+        let output = {
+            let _unsupported_session =
+                ScopedEnvVar::set(GWT_SESSION_ID_ENV, &unsupported_session_id);
+            handle_with_input(
+                "PreToolUse",
+                &unsupported_input.to_string(),
+                worktree.path(),
+                None,
+            )
+            .expect("unsupported provider PreToolUse output")
+        };
+        assert_eq!(
+            output,
+            HookOutput::Silent,
+            "providers without the Claude hook contract must fail closed at the service boundary"
+        );
     }
 
     /// Issue #3478 (AC-3): the question guard runs on PreToolUse, and it must

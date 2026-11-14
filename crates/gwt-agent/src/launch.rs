@@ -401,6 +401,18 @@ fn absolute_launch_cwd(cwd: Option<&Path>) -> PathBuf {
 }
 
 fn effective_launch_path(env: &HashMap<String, String>, remove_env: &[String]) -> Option<String> {
+    let inherited_path = host_process_env()
+        .into_iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("PATH"))
+        .map(|(_, value)| value);
+    effective_launch_path_with_inherited(env, remove_env, inherited_path)
+}
+
+fn effective_launch_path_with_inherited(
+    env: &HashMap<String, String>,
+    remove_env: &[String],
+    inherited_path: Option<String>,
+) -> Option<String> {
     if let Some((_, value)) = env.iter().find(|(key, _)| key.eq_ignore_ascii_case("PATH")) {
         return Some(value.clone());
     }
@@ -410,10 +422,7 @@ fn effective_launch_path(env: &HashMap<String, String>, remove_env: &[String]) -
     {
         return None;
     }
-    host_process_env()
-        .into_iter()
-        .find(|(key, _)| key.eq_ignore_ascii_case("PATH"))
-        .map(|(_, value)| value)
+    inherited_path
 }
 
 fn find_package_runner_in_path(
@@ -512,8 +521,21 @@ pub(crate) fn resolve_host_npx_fallback_executable_with_effective_env(
     remove_env: &[String],
     cwd: Option<&Path>,
 ) -> String {
+    let inherited_path = host_process_env()
+        .into_iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("PATH"))
+        .map(|(_, value)| value);
+    resolve_host_npx_fallback_executable_with_inherited_path(env, remove_env, cwd, inherited_path)
+}
+
+fn resolve_host_npx_fallback_executable_with_inherited_path(
+    env: &HashMap<String, String>,
+    remove_env: &[String],
+    cwd: Option<&Path>,
+    inherited_path: Option<String>,
+) -> String {
     let cwd = absolute_launch_cwd(cwd);
-    effective_launch_path(env, remove_env)
+    effective_launch_path_with_inherited(env, remove_env, inherited_path)
         .as_deref()
         .and_then(|path| find_package_runner_in_path(npx_fallback_candidates(), Some(path), &cwd))
         .map(|(executable, _needs_yes)| executable)
@@ -3825,20 +3847,19 @@ mod tests {
         std::fs::create_dir_all(&explicit_bin).expect("create explicit bin");
         write_test_runner(&inherited_bin.join("npx"));
         write_test_runner(&explicit_bin.join("npx"));
-        let _lock = gwt_core::test_support::env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _path = gwt_core::test_support::ScopedEnvVar::set("PATH", &inherited_bin);
+        let inherited_path = Some(inherited_bin.display().to_string());
 
-        let removed = resolve_host_npx_fallback_executable_with_effective_env(
+        let removed = resolve_host_npx_fallback_executable_with_inherited_path(
             &HashMap::new(),
             &["PATH".to_string()],
             Some(temp.path()),
+            inherited_path.clone(),
         );
-        let overridden = resolve_host_npx_fallback_executable_with_effective_env(
+        let overridden = resolve_host_npx_fallback_executable_with_inherited_path(
             &HashMap::from([("PATH".to_string(), explicit_bin.display().to_string())]),
             &["PATH".to_string()],
             Some(temp.path()),
+            inherited_path,
         );
 
         assert_eq!(removed, "npx", "removed PATH must not inherit parent npx");

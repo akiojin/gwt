@@ -170,6 +170,7 @@ fn record_current_work_terminal_before_finalize<E: CliEnv>(
         let request = crate::AgentWorkTerminalizationRequest {
             schema_version: crate::AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION,
             claimed_session_id: session_id.clone(),
+            provider_actor_id: crate::agent_project_state::provider_actor_id_from_env(),
             observation,
             terminal_kind: match close_kind {
                 WorkTerminalKind::Done => crate::AgentWorkTerminalKind::Done,
@@ -191,6 +192,7 @@ fn record_current_work_terminal_before_finalize<E: CliEnv>(
                 &crate::AgentBuildAbortTerminalizationRequest {
                     schema_version: crate::AGENT_BUILD_ABORT_TERMINALIZATION_SCHEMA_VERSION,
                     claimed_session_id: request.claimed_session_id.clone(),
+                    provider_actor_id: request.provider_actor_id.clone(),
                     owner_number: spec,
                     reason: reason.to_string(),
                     observation: request.observation.clone(),
@@ -248,32 +250,97 @@ fn record_current_work_terminal_before_finalize<E: CliEnv>(
         );
     }
 
-    let (project_state_root, work_event_root) =
+    let session_path = gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml"));
+    let durable_session = match gwt_agent::Session::load(&session_path) {
+        Ok(session) => Some(session),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(format!(
+                "managed build terminalization cannot read its durable Session: {error}"
+            ))
+        }
+    };
+    let provider_actor_id = crate::agent_project_state::provider_actor_id_from_env();
+    if durable_session
+        .as_ref()
+        .is_some_and(|session| session.execution_binding.is_some())
+    {
+        let authority =
+            crate::agent_project_state::snapshot_bound_terminal_compatibility_authority(
+                repo,
+                &session_id,
+                match close_kind {
+                    WorkTerminalKind::Done => crate::AgentWorkTerminalKind::Done,
+                    WorkTerminalKind::Discarded => crate::AgentWorkTerminalKind::Discarded,
+                },
+            )
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| {
+                "local build terminalization requires an exact durable Work authority".to_string()
+            })?;
+        let request = crate::AgentWorkTerminalizationRequest {
+            schema_version: crate::AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION,
+            claimed_session_id: session_id.clone(),
+            provider_actor_id,
+            observation: crate::observe_agent_runtime(repo).map_err(|error| error.to_string())?,
+            terminal_kind: match close_kind {
+                WorkTerminalKind::Done => crate::AgentWorkTerminalKind::Done,
+                WorkTerminalKind::Discarded => crate::AgentWorkTerminalKind::Discarded,
+            },
+        };
+        let receipt =
+            crate::agent_project_state::continue_bound_terminal_compatibility(&authority, request)?;
+        return map_agent_terminal_outcome(receipt.outcome, close_kind);
+    }
+
+    let (project_state_root, _work_event_root) =
         crate::agent_project_state::agent_session_roots_or_fallback(repo, &session_id)
             .map_err(|error| error.to_string())?;
     let legacy_work_id = format!("work-session-{session_id}");
-
-    let now = chrono::Utc::now();
-    let outcome = match close_kind {
-        WorkTerminalKind::Done => {
-            gwt_core::workspace_projection::emit_workspace_done_event_for_session_outcome(
-                &project_state_root,
-                &work_event_root,
-                &session_id,
-                &legacy_work_id,
-                now,
-            )
-        }
-        WorkTerminalKind::Discarded => {
-            gwt_core::workspace_projection::emit_workspace_discard_event_for_session_outcome(
-                &project_state_root,
-                &work_event_root,
-                &session_id,
-                &legacy_work_id,
-                now,
-            )
-        }
+    let has_legacy_target =
+        gwt_core::workspace_projection::load_workspace_work_items(&project_state_root)
+            .map_err(|error| error.to_string())?
+            .is_some_and(|projection| {
+                projection.work_items.iter().any(|work| {
+                    work.id == legacy_work_id
+                        || work
+                            .agents
+                            .iter()
+                            .any(|agent| agent.session_id == session_id)
+                })
+            });
+    if durable_session.is_none() && !has_legacy_target {
+        return Ok(());
     }
+    let outcome = crate::agent_project_state::with_primary_actor_authority_lease(
+        &session_id,
+        provider_actor_id.as_deref(),
+        || {
+            gwt_core::workspace_projection::emit_workspace_terminal_event_for_session_outcome_with_provenance(
+                &project_state_root,
+                &session_id,
+                &legacy_work_id,
+                match close_kind {
+                    WorkTerminalKind::Done => gwt_core::workspace_projection::WorkCloseKind::Done,
+                    WorkTerminalKind::Discarded => {
+                        gwt_core::workspace_projection::WorkCloseKind::Discarded
+                    }
+                },
+                chrono::Utc::now(),
+                gwt_core::workspace_projection::WorkEventProvenance {
+                    source_operation: match close_kind {
+                        WorkTerminalKind::Done => "build.complete",
+                        WorkTerminalKind::Discarded => "build.abort",
+                    }
+                    .to_string(),
+                    authority_class:
+                        gwt_core::workspace_projection::WorkEventAuthorityClass::PrimaryAgent,
+                    execution_generation: None,
+                },
+            )
+        },
+    )
+    .map_err(|error| error.to_string())?
     .map_err(|error| error.to_string())?;
     match outcome {
         gwt_core::workspace_projection::WorkspaceTerminalEventOutcome::Emitted
@@ -729,6 +796,7 @@ mod tests {
             let mut session =
                 gwt_agent::Session::new(&git.repo, &branch, gwt_agent::AgentId::Codex);
             session.id = "terminal-bridge-session".to_string();
+            session.agent_session_id = Some("terminal-bridge-primary-actor".to_string());
             session.project_state_root = Some(git.repo.clone());
             session.linked_issue_number = Some(OWNER_NUMBER);
             session
@@ -863,6 +931,11 @@ mod tests {
                 crate::AgentWorkTerminalizationRequest {
                     schema_version: crate::AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION,
                     claimed_session_id: self.session.id.clone(),
+                    provider_actor_id: self
+                        .session
+                        .agent_session_id
+                        .as_deref()
+                        .and_then(crate::agent_project_state::provider_actor_claim),
                     observation: crate::observe_agent_runtime(&self.git.repo)
                         .expect("observe fixture runtime"),
                     terminal_kind: crate::AgentWorkTerminalKind::Done,
@@ -975,6 +1048,7 @@ mod tests {
                 .expect("split-root execution binding");
             let mut session = gwt_agent::Session::new(&worktree, BRANCH, gwt_agent::AgentId::Codex);
             session.id = session_id.to_string();
+            session.agent_session_id = Some("terminal-split-root-primary-actor".to_string());
             session.project_state_root = Some(project_state_root.clone());
             session.linked_issue_number = Some(OWNER_NUMBER);
             let binding = gwt_agent::SessionExecutionBinding {
@@ -1125,6 +1199,11 @@ mod tests {
                 crate::AgentWorkTerminalizationRequest {
                     schema_version: crate::AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION,
                     claimed_session_id: self.session.id.clone(),
+                    provider_actor_id: self
+                        .session
+                        .agent_session_id
+                        .as_deref()
+                        .and_then(crate::agent_project_state::provider_actor_claim),
                     observation: crate::observe_agent_runtime(&self.worktree)
                         .expect("observe split-root fixture runtime"),
                     terminal_kind: crate::AgentWorkTerminalKind::Done,
@@ -1171,6 +1250,15 @@ mod tests {
         operation: impl FnOnce(&crate::cli::TestEnv) -> T,
     ) -> T {
         let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+        let provider_actor_id = gwt_agent::Session::load(
+            &gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml")),
+        )
+        .ok()
+        .and_then(|session| session.agent_session_id);
+        let _provider_actor = provider_actor_id.map_or_else(
+            || ScopedEnvVar::unset("CODEX_THREAD_ID"),
+            |actor| ScopedEnvVar::set("CODEX_THREAD_ID", actor),
+        );
         let _forward_url = ScopedEnvVar::set(gwt_agent::GWT_HOOK_FORWARD_URL_ENV, forward_url);
         let _forward_token =
             ScopedEnvVar::set(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV, "terminal-secret");
@@ -1179,6 +1267,69 @@ mod tests {
             repo.join("managed-runtime.json"),
         );
         operation(&crate::cli::TestEnv::new(repo.to_path_buf()))
+    }
+
+    #[test]
+    fn bound_local_build_abort_uses_exact_primary_authority_and_provenance() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("trusted store home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = BoundTerminalFixture::new();
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, &fixture.session.id);
+        let _provider_actor = ScopedEnvVar::set(
+            "CODEX_THREAD_ID",
+            fixture
+                .session
+                .agent_session_id
+                .as_deref()
+                .expect("primary actor"),
+        );
+        let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+        let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+        let _runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+        let mut env = crate::cli::TestEnv::new(fixture.git.repo.clone());
+        let mut output = String::new();
+
+        let code = run(
+            &mut env,
+            SkillStateAction::Abort {
+                spec: 3327,
+                reason: Some("local Host bridge unavailable".to_string()),
+            },
+            &mut output,
+        )
+        .expect("run local bound build.abort");
+
+        assert_eq!(code, 0, "{output}");
+        let work = fixture.canonical_work();
+        let terminal = work
+            .events
+            .iter()
+            .find(|event| event.kind == gwt_core::workspace_projection::WorkEventKind::Discard)
+            .expect("Discard event");
+        assert_eq!(terminal.source_operation_or_unknown(), "build.abort");
+        assert_eq!(
+            terminal.authority_class,
+            Some(gwt_core::workspace_projection::WorkEventAuthorityClass::PrimaryAgent)
+        );
+        assert_eq!(
+            terminal.execution_generation.as_deref(),
+            Some(fixture.binding.identity.generation_id.as_str())
+        );
+        assert_eq!(
+            work.events
+                .iter()
+                .filter(|event| {
+                    event.kind == gwt_core::workspace_projection::WorkEventKind::Discard
+                })
+                .count(),
+            1
+        );
+        let persisted = serde_json::to_string(&work).expect("serialize Work");
+        assert!(!persisted.contains("terminal-bridge-primary-actor"));
     }
 
     #[test]
@@ -1768,7 +1919,7 @@ mod tests {
                 "unsupported-receipt",
                 StatusCode::OK,
                 serde_json::json!({
-                    "schema_version": 2,
+                    "schema_version": 1,
                     "outcome": "already_matching"
                 }),
             ),
@@ -2058,6 +2209,11 @@ mod tests {
         let initial_event_count = fixture.canonical_work().events.len();
         let repo = fixture.git.repo.clone();
         let session_id = fixture.session.id.clone();
+        let provider_actor_id = fixture
+            .session
+            .agent_session_id
+            .as_deref()
+            .and_then(crate::agent_project_state::provider_actor_claim);
         let binding = fixture.binding.clone();
         let server = TerminalBridgeServer::start_with_hook(
             StatusCode::OK,
@@ -2070,6 +2226,7 @@ mod tests {
                     crate::AgentWorkTerminalizationRequest {
                         schema_version: crate::AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION,
                         claimed_session_id: session_id.clone(),
+                        provider_actor_id: provider_actor_id.clone(),
                         observation: crate::observe_agent_runtime(&repo)
                             .expect("observe exact Host emission"),
                         terminal_kind: crate::AgentWorkTerminalKind::Done,
@@ -2441,7 +2598,7 @@ mod tests {
                 "invalid-response",
                 StatusCode::OK,
                 serde_json::json!({
-                    "schema_version": 2,
+                    "schema_version": 1,
                     "outcome": "already_matching"
                 }),
             ),
@@ -2508,6 +2665,7 @@ mod tests {
         let request = crate::AgentWorkTerminalizationRequest {
             schema_version: crate::AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION,
             claimed_session_id: "redirect-session".to_string(),
+            provider_actor_id: None,
             observation: crate::AgentRuntimeObservation {
                 cwd: "/workspace/repo".to_string(),
                 git_toplevel: "/workspace/repo".to_string(),

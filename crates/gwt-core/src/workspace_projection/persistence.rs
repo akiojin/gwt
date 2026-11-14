@@ -168,8 +168,7 @@ fn copy_validated_workspace_work_items_if_needed(
     let Some(projection) = load_workspace_work_items_from_path(legacy_path)? else {
         return Ok(());
     };
-    let bytes = serde_json::to_vec_pretty(&projection)
-        .map_err(|error| GwtError::Other(format!("workspace work items json: {error}")))?;
+    let bytes = serialize_workspace_work_items_projection(&projection)?;
     write_workspace_file_if_absent(canonical_path, &bytes)
 }
 
@@ -2366,6 +2365,29 @@ pub struct SessionBoundWorkspaceMutationTarget {
     pub agent_id: String,
 }
 
+/// Exact explicit recovery request for a Done Work.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceReopenRequest {
+    pub observed_terminal_event_id: String,
+    pub reason: String,
+    pub source_operation: String,
+    pub authority_class: WorkEventAuthorityClass,
+    pub execution_generation: String,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Receipt for an explicit Done recovery. A response-loss retry returns the
+/// original Resume id with `reopened == false` and appends no lifecycle event.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceReopenOutcome {
+    pub work_id: String,
+    pub observed_terminal_event_id: String,
+    pub resume_event_id: String,
+    pub reopened: bool,
+}
+
 /// Host-authenticated Session/runtime identity used for terminalization.
 ///
 /// Unlike [`SessionBoundWorkspaceMutationTarget`], this target intentionally
@@ -2435,13 +2457,13 @@ pub fn update_workspace_projection_with_journal_for_resolved_work_target(
     let current_path = gwt_workspace_projection_path_for_repo_path(&target.project_state_root);
     let journal_path = gwt_workspace_journal_path_for_repo_path(&target.project_state_root);
     let work_items_path = gwt_workspace_work_items_path_for_repo_path(&target.project_state_root);
-    let events_path = match tracked_event_policy {
+    let tracked_events_path = match tracked_event_policy {
         TrackedWorkEventPolicy::Persist => {
             Some(gwt_repo_local_work_events_dir(&target.work_event_root))
         }
         TrackedWorkEventPolicy::SkipTracked => None,
     };
-    if let Some(events_dir) = events_path.as_deref() {
+    if let Some(events_dir) = tracked_events_path.as_deref() {
         // The Session-bound pre-persist hook may reserve a terminal delivery
         // identity outside this transaction. Reject an unsafe managed store
         // before that reservation or any recovery marker can be published.
@@ -2515,22 +2537,37 @@ pub fn update_workspace_projection_with_journal_for_resolved_work_target(
         before_persist(&mut event, &mut entry)?;
         let mut event_without_recovered_id = event.clone();
         event_without_recovered_id.id = event_before_identity_recovery.id.clone();
+        event_without_recovered_id.source_operation =
+            event_before_identity_recovery.source_operation.clone();
+        event_without_recovered_id.authority_class = event_before_identity_recovery.authority_class;
+        event_without_recovered_id.execution_generation =
+            event_before_identity_recovery.execution_generation.clone();
         let mut entry_without_recovered_id = entry.clone();
         entry_without_recovered_id.id = entry_before_identity_recovery.id.clone();
         if event_without_recovered_id != event_before_identity_recovery
             || entry_without_recovered_id != entry_before_identity_recovery
         {
             return Err(GwtError::Other(
-                "Session-bound workspace pre-persist recovery may only replace event and journal ids"
+                "Session-bound workspace pre-persist recovery may only replace ids and event provenance"
                     .to_string(),
             ));
         }
+        validate_work_event_provenance(&event)?;
         if work_items.apply_event(event.clone()) == WorkEventApplyOutcome::RejectedSessionConflict {
             return Err(GwtError::Other(
                 "Session-bound workspace transaction rejected a conflicting Session attachment"
                     .to_string(),
             ));
         }
+        // Completed executions skip the git-tracked shard, but a new terminal
+        // event still needs a canonical rich source because works.json keeps
+        // the frozen-v1 event shape. Persist it in the machine-local close log
+        // through the same recoverable transaction.
+        let events_path = tracked_events_path.clone().or_else(|| {
+            (event.kind == WorkEventKind::Done && work_event_has_extensions(&event)).then(|| {
+                gwt_workspace_work_events_closed_path_for_repo_path(&target.project_state_root)
+            })
+        });
         let events = events_path.as_ref().map_or_else(Vec::new, |_| vec![event]);
         // The legacy journal has no Work identity: synthesis attributes every
         // entry to the shared current projection. A foreign target is already
@@ -2561,6 +2598,229 @@ pub fn update_workspace_projection_with_journal_for_resolved_work_target(
     })
 }
 
+/// Reopen one exact current Done event with an explicit Active Resume.
+///
+/// Both the persisted Work authority and the observed terminal event are
+/// checked after the complete split-root lock set is held. `Discard` is
+/// monotonic and is never recoverable through this API. Retrying the same
+/// recovery after losing the response returns the original Resume receipt
+/// without appending another event.
+pub fn reopen_workspace_done_for_resolved_work_target(
+    target: &SessionBoundWorkspaceMutationTarget,
+    request: WorkspaceReopenRequest,
+    revalidate: impl FnOnce(&WorkspaceProjection, &WorkItemsProjection) -> Result<()>,
+) -> Result<WorkspaceReopenOutcome> {
+    validate_session_bound_target_identity_shape(target)?;
+    if target.work_id.trim().is_empty()
+        || session_bound_owner_is_blank(target.owner.as_deref())
+        || target.agent_id.trim().is_empty()
+    {
+        return Err(GwtError::Other(
+            "Session-bound workspace recovery received incomplete Work authority".to_string(),
+        ));
+    }
+    let request = normalize_workspace_reopen_request(request)?;
+    let preflight_request = request.clone();
+    transact_workspace_state_for_work_event_root_with_preflight(
+        &target.project_state_root,
+        &target.work_event_root,
+        |projection, work_items, _| {
+            workspace_reopen_decision(projection, work_items, target, &preflight_request)?;
+            revalidate(projection, work_items)
+        },
+        |projection, work_items, _| {
+            let decision = workspace_reopen_decision(projection, work_items, target, &request)?;
+            match decision {
+                WorkspaceReopenDecision::AlreadyReopened { resume_event_id } => Ok((
+                    WorkspaceReopenOutcome {
+                        work_id: target.work_id.clone(),
+                        observed_terminal_event_id: request.observed_terminal_event_id.clone(),
+                        resume_event_id,
+                        reopened: false,
+                    },
+                    Vec::new(),
+                )),
+                WorkspaceReopenDecision::Reopen {
+                    target_owner,
+                    execution_container,
+                } => {
+                    let mut event =
+                        WorkEvent::new(WorkEventKind::Resume, &target.work_id, request.updated_at);
+                    event.status_category = Some(WorkspaceStatusCategory::Active);
+                    event.owner = target_owner;
+                    event.agent_session_id = Some(target.session_id.clone());
+                    event.agent_id = Some(target.agent_id.clone());
+                    event.execution_container = Some(execution_container);
+                    event.source_operation = Some(request.source_operation.clone());
+                    event.authority_class = Some(request.authority_class);
+                    event.execution_generation = Some(request.execution_generation.clone());
+                    event.recovered_terminal_event_id =
+                        Some(request.observed_terminal_event_id.clone());
+                    event.recovery_reason = Some(request.reason.clone());
+                    validate_work_event_provenance(&event)?;
+
+                    if projection.id == target.work_id {
+                        let mut candidate = work_items.clone();
+                        if candidate.apply_event(event.clone())
+                            == WorkEventApplyOutcome::RejectedSessionConflict
+                        {
+                            return Err(GwtError::Other(
+                                "Session-bound workspace recovery rejected a conflicting Session attachment"
+                                    .to_string(),
+                            ));
+                        }
+                        let reopened = candidate
+                            .work_items
+                            .iter()
+                            .find(|item| item.id == target.work_id)
+                            .ok_or_else(|| {
+                                GwtError::Other(
+                                    "Session-bound workspace recovery lost its target Work"
+                                        .to_string(),
+                                )
+                            })?;
+                        projection.apply_work_item(reopened, request.updated_at);
+                    }
+
+                    Ok((
+                        WorkspaceReopenOutcome {
+                            work_id: target.work_id.clone(),
+                            observed_terminal_event_id: request.observed_terminal_event_id.clone(),
+                            resume_event_id: event.id.clone(),
+                            reopened: true,
+                        },
+                        vec![event],
+                    ))
+                }
+            }
+        },
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WorkspaceReopenDecision {
+    Reopen {
+        target_owner: Option<String>,
+        execution_container: WorkspaceExecutionContainerRef,
+    },
+    AlreadyReopened {
+        resume_event_id: String,
+    },
+}
+
+fn normalize_workspace_reopen_request(
+    mut request: WorkspaceReopenRequest,
+) -> Result<WorkspaceReopenRequest> {
+    request.observed_terminal_event_id = request.observed_terminal_event_id.trim().to_string();
+    request.reason = request.reason.trim().to_string();
+    request.source_operation = request.source_operation.trim().to_string();
+    request.execution_generation = request.execution_generation.trim().to_string();
+    if request.observed_terminal_event_id.is_empty()
+        || request.reason.is_empty()
+        || request.source_operation.is_empty()
+        || request.execution_generation.is_empty()
+    {
+        return Err(GwtError::Other(
+            "workspace recovery requires an observed Done event, reason, source operation, and execution generation"
+                .to_string(),
+        ));
+    }
+    Ok(request)
+}
+
+fn workspace_reopen_decision(
+    projection: &WorkspaceProjection,
+    work_items: &WorkItemsProjection,
+    target: &SessionBoundWorkspaceMutationTarget,
+    request: &WorkspaceReopenRequest,
+) -> Result<WorkspaceReopenDecision> {
+    let locked = validate_session_bound_target_locked(projection, work_items, target, None, true)?;
+    let item = work_items
+        .work_items
+        .iter()
+        .find(|item| item.id == target.work_id)
+        .ok_or_else(|| {
+            GwtError::Other("workspace recovery target disappeared before commit".to_string())
+        })?;
+
+    if let Some(terminal) = item.current_terminal_event() {
+        if terminal.kind == WorkEventKind::Discard {
+            return Err(GwtError::Other(
+                "workspace recovery cannot reopen a discarded Work".to_string(),
+            ));
+        }
+        if terminal.kind != WorkEventKind::Done || terminal.id != request.observed_terminal_event_id
+        {
+            return Err(GwtError::Other(
+                "workspace recovery observed terminal event changed before commit".to_string(),
+            ));
+        }
+        if terminal.execution_generation.as_deref() != Some(request.execution_generation.as_str()) {
+            return Err(GwtError::Other(
+                "workspace recovery terminal generation does not match the active execution"
+                    .to_string(),
+            ));
+        }
+        return Ok(WorkspaceReopenDecision::Reopen {
+            target_owner: locked.target_owner,
+            execution_container: locked.execution_container,
+        });
+    }
+
+    let retry = item.events.iter().rev().find(|event| {
+        event.kind == WorkEventKind::Resume
+            && event.recovered_terminal_event_id.as_deref()
+                == Some(request.observed_terminal_event_id.as_str())
+            && event.recovery_reason.as_deref() == Some(request.reason.as_str())
+            && event.source_operation.as_deref() == Some(request.source_operation.as_str())
+            && event.authority_class == Some(request.authority_class)
+            && event.execution_generation.as_deref() == Some(request.execution_generation.as_str())
+    });
+    retry
+        .map(|event| WorkspaceReopenDecision::AlreadyReopened {
+            resume_event_id: event.id.clone(),
+        })
+        .ok_or_else(|| {
+            GwtError::Other(
+                "workspace recovery target is active without the observed recovery receipt"
+                    .to_string(),
+            )
+        })
+}
+
+fn validate_supplied_work_event_provenance(provenance: &WorkEventProvenance) -> Result<()> {
+    if provenance.source_operation.trim().is_empty()
+        || provenance
+            .execution_generation
+            .as_deref()
+            .is_some_and(|generation| generation.trim().is_empty())
+    {
+        return Err(GwtError::Other(
+            "Work event provenance requires a source operation and a non-empty generation"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_work_event_provenance(event: &WorkEvent) -> Result<()> {
+    match (&event.source_operation, event.authority_class) {
+        (None, None) if event.execution_generation.is_none() => Ok(()),
+        (Some(source_operation), Some(_))
+            if !source_operation.trim().is_empty()
+                && event
+                    .execution_generation
+                    .as_deref()
+                    .is_none_or(|generation| !generation.trim().is_empty()) =>
+        {
+            Ok(())
+        }
+        _ => Err(GwtError::Other(
+            "Work event provenance is incomplete".to_string(),
+        )),
+    }
+}
+
 /// Emit one Done/Discarded close event for a previously resolved
 /// Session-bound Work while preserving the same authority boundary as sparse
 /// workspace updates.
@@ -2582,6 +2842,27 @@ pub fn emit_workspace_terminal_event_for_resolved_work_target(
         close_kind,
         updated_at,
         WorkspaceTerminalTargetSelection::LatestAssigned,
+        None,
+        revalidate,
+    )
+}
+
+/// Provenance-aware variant of
+/// [`emit_workspace_terminal_event_for_resolved_work_target`].
+pub fn emit_workspace_terminal_event_for_resolved_work_target_with_provenance(
+    target: &SessionBoundWorkspaceTerminalTarget,
+    close_kind: WorkCloseKind,
+    updated_at: DateTime<Utc>,
+    provenance: WorkEventProvenance,
+    revalidate: impl FnOnce(&WorkspaceProjection, &WorkItemsProjection) -> Result<()>,
+) -> Result<WorkspaceTerminalEventOutcome> {
+    validate_supplied_work_event_provenance(&provenance)?;
+    emit_workspace_terminal_event_for_resolved_work_target_inner(
+        target,
+        close_kind,
+        updated_at,
+        WorkspaceTerminalTargetSelection::LatestAssigned,
+        Some(&provenance),
         revalidate,
     )
 }
@@ -2618,6 +2899,37 @@ pub fn emit_workspace_terminal_event_for_exact_resolved_work_target(
             work_id: expected_work_id,
             policy,
         },
+        None,
+        revalidate,
+    )
+}
+
+/// Provenance-aware variant of
+/// [`emit_workspace_terminal_event_for_exact_resolved_work_target`].
+pub fn emit_workspace_terminal_event_for_exact_resolved_work_target_with_provenance(
+    target: &SessionBoundWorkspaceTerminalTarget,
+    expected_work_id: &str,
+    close_kind: WorkCloseKind,
+    policy: ExactWorkspaceTerminalPolicy,
+    updated_at: DateTime<Utc>,
+    provenance: WorkEventProvenance,
+    revalidate: impl FnOnce(&WorkspaceProjection, &WorkItemsProjection) -> Result<()>,
+) -> Result<WorkspaceTerminalEventOutcome> {
+    if expected_work_id.trim().is_empty() {
+        return Err(GwtError::Other(
+            "exact Work terminalization received an empty Work id".to_string(),
+        ));
+    }
+    validate_supplied_work_event_provenance(&provenance)?;
+    emit_workspace_terminal_event_for_resolved_work_target_inner(
+        target,
+        close_kind,
+        updated_at,
+        WorkspaceTerminalTargetSelection::Exact {
+            work_id: expected_work_id,
+            policy,
+        },
+        Some(&provenance),
         revalidate,
     )
 }
@@ -2636,6 +2948,7 @@ fn emit_workspace_terminal_event_for_resolved_work_target_inner(
     close_kind: WorkCloseKind,
     updated_at: DateTime<Utc>,
     selection: WorkspaceTerminalTargetSelection<'_>,
+    provenance: Option<&WorkEventProvenance>,
     revalidate: impl FnOnce(&WorkspaceProjection, &WorkItemsProjection) -> Result<()>,
 ) -> Result<WorkspaceTerminalEventOutcome> {
     validate_session_bound_target_identity_shape(target)?;
@@ -2758,6 +3071,9 @@ fn emit_workspace_terminal_event_for_resolved_work_target_inner(
             }
         };
         event.agent_session_id = Some(target.session_id.clone());
+        if let Some(provenance) = provenance {
+            provenance.apply_to(&mut event);
+        }
         emit_workspace_terminal_event_outcome_locked(
             &work_items_path,
             &events_path,
@@ -3462,6 +3778,7 @@ pub fn load_workspace_work_items_from_path(path: &Path) -> Result<Option<WorkIte
         Ok(bytes) => {
             let mut items: WorkItemsProjection = serde_json::from_slice(&bytes)
                 .map_err(|error| classify_json_decode_error("workspace work items json", error))?;
+            recover_work_event_extensions_from_durable_sources(path, &mut items)?;
             for item in &mut items.work_items {
                 if item.title == "Workspace" {
                     item.title = "Work".to_string();
@@ -3604,9 +3921,241 @@ pub fn save_workspace_work_items_projection_to_path(
     path: &Path,
     projection: &WorkItemsProjection,
 ) -> Result<()> {
-    let bytes = serde_json::to_vec_pretty(projection)
-        .map_err(|error| GwtError::Other(format!("workspace work items json: {error}")))?;
+    let bytes = serialize_workspace_work_items_projection(projection)?;
     write_atomic(path, &bytes)
+}
+
+/// Keep the derived WorkItems projection readable by the frozen v1
+/// `WorkEvent` schema. Authority/recovery extensions remain canonical in the
+/// append-only event source and are restored by the current reader.
+fn serialize_workspace_work_items_projection(projection: &WorkItemsProjection) -> Result<Vec<u8>> {
+    let mut compatible = projection.clone();
+    for item in &mut compatible.work_items {
+        clear_work_item_event_extensions(item);
+    }
+    serde_json::to_vec_pretty(&compatible)
+        .map_err(|error| GwtError::Other(format!("workspace work items json: {error}")))
+}
+
+fn clear_work_item_event_extensions(item: &mut WorkItem) {
+    for event in &mut item.events {
+        clear_work_event_extensions(event);
+    }
+    for copies in item.duplicate_event_containers.values_mut() {
+        for copy in copies {
+            if let DuplicateWorkEventProvenance::Event(event) = copy {
+                clear_work_event_extensions(event);
+            }
+        }
+    }
+    if let Some(snapshot) = item.legacy_metadata_snapshot.as_mut() {
+        clear_work_item_event_extensions(snapshot);
+    }
+}
+
+fn clear_work_event_extensions(event: &mut WorkEvent) {
+    event.source_operation = None;
+    event.authority_class = None;
+    event.execution_generation = None;
+    event.recovered_terminal_event_id = None;
+    event.recovery_reason = None;
+}
+
+fn work_event_extensions_are_missing(event: &WorkEvent) -> bool {
+    matches!(
+        event.kind,
+        WorkEventKind::Done | WorkEventKind::Discard | WorkEventKind::Resume
+    ) && event.source_operation.is_none()
+        && event.authority_class.is_none()
+        && event.execution_generation.is_none()
+        && event.recovered_terminal_event_id.is_none()
+        && event.recovery_reason.is_none()
+}
+
+fn work_event_has_extensions(event: &WorkEvent) -> bool {
+    event.source_operation.is_some()
+        || event.authority_class.is_some()
+        || event.execution_generation.is_some()
+        || event.recovered_terminal_event_id.is_some()
+        || event.recovery_reason.is_some()
+}
+
+fn collect_missing_work_event_extension_ids(item: &WorkItem, ids: &mut HashSet<String>) {
+    ids.extend(
+        item.events
+            .iter()
+            .filter(|event| work_event_extensions_are_missing(event))
+            .map(|event| event.id.clone()),
+    );
+    for copy in item.duplicate_event_containers.values().flatten() {
+        if let DuplicateWorkEventProvenance::Event(event) = copy {
+            if work_event_extensions_are_missing(event) {
+                ids.insert(event.id.clone());
+            }
+        }
+    }
+    if let Some(snapshot) = item.legacy_metadata_snapshot.as_deref() {
+        collect_missing_work_event_extension_ids(snapshot, ids);
+    }
+}
+
+fn matching_machine_local_events(
+    path: &Path,
+    event_ids: &HashSet<String>,
+) -> Result<HashMap<String, WorkEvent>> {
+    let content = match fs::read(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(HashMap::new()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut matching = HashMap::new();
+    // The close ledger is append-only and each committed record ends in a
+    // newline. An unlocked reader may snapshot while write_all is publishing
+    // the final record; exclude only that unterminated dynamic tail. Complete
+    // malformed records remain strict errors.
+    let complete_len = if content.ends_with(b"\n") {
+        content.len()
+    } else {
+        content
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map_or(0, |newline| newline + 1)
+    };
+    for line in content[..complete_len]
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !trim_ascii_json_line(line).is_empty())
+    {
+        let line = trim_ascii_json_line(line);
+        let WorkEventLogRecord::Known { event, .. } = decode_workspace_work_event_record(line)
+            .map_err(|error| GwtError::Other(format!("machine-local close event json: {error}")))?
+        else {
+            continue;
+        };
+        let event = *event;
+        let event_id = event.id.clone();
+        if !event_ids.contains(&event_id) {
+            continue;
+        }
+        if matching
+            .insert(event.id.clone(), event.clone())
+            .is_some_and(|existing| existing != event)
+        {
+            return Err(GwtError::Other(format!(
+                "divergent machine-local close event identity {event_id}"
+            )));
+        }
+    }
+    Ok(matching)
+}
+
+fn recover_work_event_extensions_from_durable_sources(
+    work_items_path: &Path,
+    projection: &mut WorkItemsProjection,
+) -> Result<()> {
+    let mut event_ids = HashSet::new();
+    for item in &projection.work_items {
+        collect_missing_work_event_extension_ids(item, &mut event_ids);
+    }
+    if event_ids.is_empty() {
+        return Ok(());
+    }
+    let close_events = matching_machine_local_events(
+        &work_items_path.with_file_name("work-events-closed.jsonl"),
+        &event_ids,
+    )?;
+    for item in &mut projection.work_items {
+        recover_work_item_event_extensions(item, &close_events)?;
+    }
+    Ok(())
+}
+
+fn recover_work_item_event_extensions(
+    item: &mut WorkItem,
+    close_events: &HashMap<String, WorkEvent>,
+) -> Result<()> {
+    for event in &mut item.events {
+        recover_work_event_extensions(event, close_events)?;
+    }
+    for copy in item.duplicate_event_containers.values_mut().flatten() {
+        if let DuplicateWorkEventProvenance::Event(event) = copy {
+            recover_work_event_extensions(event, close_events)?;
+        }
+    }
+    if let Some(snapshot) = item.legacy_metadata_snapshot.as_mut() {
+        recover_work_item_event_extensions(snapshot, close_events)?;
+    }
+    Ok(())
+}
+
+fn recover_work_event_extensions(
+    projected: &mut WorkEvent,
+    close_events: &HashMap<String, WorkEvent>,
+) -> Result<()> {
+    if !work_event_extensions_are_missing(projected) {
+        return Ok(());
+    }
+    if let Some(durable) = close_events.get(&projected.id) {
+        restore_work_event_extensions(projected, durable)?;
+        if !work_event_extensions_are_missing(projected) {
+            return Ok(());
+        }
+    }
+
+    let Some(worktree_path) = projected
+        .execution_container
+        .as_ref()
+        .and_then(|container| container.worktree_path.as_deref())
+    else {
+        return Ok(());
+    };
+    let events_dir = gwt_repo_local_work_events_dir(worktree_path);
+    let shard_path = gwt_work_event_shard_path(&events_dir, &projected.id);
+    match shard_path.try_exists() {
+        Ok(false) => return Ok(()),
+        Err(error) => return Err(error.into()),
+        Ok(true) => {}
+    }
+    let expected_bucket = shard_path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|bucket| bucket.to_str());
+    match read_workspace_work_event_shard_record(&shard_path, expected_bucket)? {
+        WorkEventLogRecord::Known { event, .. } => restore_work_event_extensions(projected, &event),
+        WorkEventLogRecord::Opaque { .. } => Err(GwtError::Other(format!(
+            "Work event {} has an opaque durable shard and cannot restore projection provenance",
+            projected.id
+        ))),
+    }
+}
+
+fn restore_work_event_extensions(projected: &mut WorkEvent, durable: &WorkEvent) -> Result<()> {
+    if !work_event_has_extensions(durable) {
+        return Ok(());
+    }
+    let mut projected_identity = projected.clone();
+    clear_work_event_extensions(&mut projected_identity);
+    let mut durable_identity = durable.clone();
+    clear_work_event_extensions(&mut durable_identity);
+    if projected_identity != durable_identity {
+        return Err(GwtError::Other(format!(
+            "durable Work event {} does not match its derived projection",
+            projected.id
+        )));
+    }
+    projected
+        .source_operation
+        .clone_from(&durable.source_operation);
+    projected.authority_class = durable.authority_class;
+    projected
+        .execution_generation
+        .clone_from(&durable.execution_generation);
+    projected
+        .recovered_terminal_event_id
+        .clone_from(&durable.recovered_terminal_event_id);
+    projected
+        .recovery_reason
+        .clone_from(&durable.recovery_reason);
+    Ok(())
 }
 
 pub(crate) fn with_workspace_work_items_lock<T>(
@@ -5414,6 +5963,46 @@ pub fn emit_workspace_done_event_for_session_outcome(
     )
 }
 
+/// Compatibility writer for a terminal operation that has no managed Host
+/// bridge. Unlike historical events, a new close emitted by the current
+/// binary still records its source and authority class. Managed Sessions with
+/// an execution binding must use the exact bound writer instead.
+pub fn emit_workspace_terminal_event_for_session_outcome_with_provenance(
+    project_state_root: &Path,
+    session_id: &str,
+    legacy_work_item_id: &str,
+    close_kind: WorkCloseKind,
+    updated_at: DateTime<Utc>,
+    provenance: WorkEventProvenance,
+) -> Result<WorkspaceTerminalEventOutcome> {
+    validate_supplied_work_event_provenance(&provenance)?;
+    let current_path = gwt_workspace_projection_path_for_repo_path(project_state_root);
+    let _ = migrate_legacy_workspace_projection(project_state_root, &current_path)?;
+    let work_items_path = gwt_workspace_work_items_path_for_repo_path(project_state_root);
+    let _ = migrate_legacy_workspace_work_items(project_state_root, &work_items_path)?;
+    let mut event = match close_kind {
+        WorkCloseKind::Done => {
+            let mut event = WorkEvent::new(WorkEventKind::Done, legacy_work_item_id, updated_at);
+            event.status_category = Some(WorkspaceStatusCategory::Done);
+            event
+        }
+        WorkCloseKind::Discarded => {
+            WorkEvent::new(WorkEventKind::Discard, legacy_work_item_id, updated_at)
+        }
+    };
+    event.source_operation = Some(provenance.source_operation);
+    event.authority_class = Some(provenance.authority_class);
+    event.execution_generation = provenance.execution_generation;
+    emit_workspace_terminal_event_for_session_paths(
+        &current_path,
+        &work_items_path,
+        &gwt_workspace_work_events_closed_path_for_repo_path(project_state_root),
+        session_id,
+        legacy_work_item_id,
+        event,
+    )
+}
+
 pub fn emit_workspace_discard_event_for_session(
     project_state_root: &Path,
     work_event_root: &Path,
@@ -6215,6 +6804,11 @@ fn work_event_field_is_known(field: &str) -> bool {
             | "board_entry_id"
             | "execution_container"
             | "related_work_item_id"
+            | "source_operation"
+            | "authority_class"
+            | "execution_generation"
+            | "recovered_terminal_event_id"
+            | "recovery_reason"
             | "updated_at"
     )
 }

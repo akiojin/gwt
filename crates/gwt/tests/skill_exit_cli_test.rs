@@ -32,6 +32,19 @@ fn canonical_discussions_path(dir: &TempDir) -> std::path::PathBuf {
 }
 
 fn dispatch_json(env: &mut TestEnv, operation: &str, params: serde_json::Value) -> i32 {
+    dispatch_json_with_provider_actor(env, operation, params, None)
+}
+
+fn primary_actor_for_session(session_id: &str) -> String {
+    format!("provider-root-{session_id}")
+}
+
+fn dispatch_json_with_provider_actor(
+    env: &mut TestEnv,
+    operation: &str,
+    params: serde_json::Value,
+    actor_override: Option<&str>,
+) -> i32 {
     let standalone_build = operation.starts_with("build.");
     let _forward_url =
         standalone_build.then(|| ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV));
@@ -39,6 +52,17 @@ fn dispatch_json(env: &mut TestEnv, operation: &str, params: serde_json::Value) 
         standalone_build.then(|| ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV));
     let _runtime_path =
         standalone_build.then(|| ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV));
+    let _provider_actor = standalone_build.then(|| {
+        let actor = actor_override.map(str::to_string).or_else(|| {
+            std::env::var(gwt_agent::GWT_SESSION_ID_ENV)
+                .ok()
+                .map(|session_id| primary_actor_for_session(&session_id))
+        });
+        actor.map_or_else(
+            || ScopedEnvVar::unset("CODEX_THREAD_ID"),
+            |actor| ScopedEnvVar::set("CODEX_THREAD_ID", actor),
+        )
+    });
     env.stdin = serde_json::json!({
         "schema_version": 1,
         "operation": operation,
@@ -301,6 +325,13 @@ fn build_abort_records_reason_in_phase_field() {
 }
 
 fn seed_session_work(repo: &std::path::Path, session_id: &str) {
+    let mut session = Session::new(repo, "legacy/build-resolution", AgentId::Codex);
+    session.id = session_id.to_string();
+    session.project_state_root = Some(repo.to_path_buf());
+    session.agent_session_id = Some(primary_actor_for_session(session_id));
+    session
+        .save(&gwt_core::paths::gwt_sessions_dir())
+        .expect("save legacy primary Session");
     gwt_core::workspace_projection::record_workspace_work_paused_event(
         repo,
         &format!("work-session-{session_id}"),
@@ -324,6 +355,7 @@ fn seed_assigned_branch_assignment(
     let mut session = Session::new(work_event_root, "feature/build-resolution", AgentId::Codex);
     session.id = session_id.to_string();
     session.project_state_root = Some(project_state_root.to_path_buf());
+    session.agent_session_id = Some(primary_actor_for_session(session_id));
     session
         .save(&gwt_core::paths::gwt_sessions_dir())
         .expect("save agent session");
@@ -1076,6 +1108,83 @@ fn build_complete_marks_current_session_work_done_idempotently() {
         1,
         "build.complete retry must not duplicate Done"
     );
+    let terminal = work
+        .events
+        .iter()
+        .find(|event| event.kind == gwt_core::workspace_projection::WorkEventKind::Done)
+        .expect("Done event");
+    assert_eq!(terminal.source_operation_or_unknown(), "build.complete");
+    assert_eq!(
+        terminal.authority_class,
+        Some(gwt_core::workspace_projection::WorkEventAuthorityClass::PrimaryAgent)
+    );
+    assert_eq!(terminal.execution_generation, None);
+}
+
+#[test]
+fn legacy_build_terminal_operations_reject_delegated_helper_before_mutation() {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for (operation, params) in [
+        ("build.complete", serde_json::json!({"spec": 2359})),
+        (
+            "build.abort",
+            serde_json::json!({"spec": 2359, "reason": "delegated helper exit"}),
+        ),
+    ] {
+        let (mut env, dir) = new_env();
+        let _home = ScopedGwtHome::set(
+            dir.path()
+                .join(format!("home-{}", operation.replace('.', "-"))),
+        );
+        let session_id = format!("session-helper-{}", operation.replace('.', "-"));
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, &session_id);
+        seed_session_work(dir.path(), &session_id);
+        dispatch_json(&mut env, "build.start", serde_json::json!({"spec": 2359}));
+        let before = gwt_core::workspace_projection::load_workspace_work_items(dir.path())
+            .expect("load Work before helper attempt")
+            .expect("Work before helper attempt");
+
+        assert_eq!(
+            dispatch_json_with_provider_actor(
+                &mut env,
+                operation,
+                params,
+                Some("delegated-helper-provider-root"),
+            ),
+            1,
+            "{operation} must reject a foreign provider actor"
+        );
+        let refusal = std::str::from_utf8(&env.stdout)
+            .expect("build refusal stdout UTF-8")
+            .lines()
+            .last()
+            .and_then(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .expect("build refusal JSON envelope");
+        assert_eq!(
+            refusal["error_details"]["code"], "primary_actor_required",
+            "{operation} must retain its typed actor code across the CLI JSON boundary: {refusal}"
+        );
+        assert_eq!(
+            refusal["error_details"]["reason"], "primary_actor_required",
+            "{operation} must retain its typed actor reason across the CLI JSON boundary: {refusal}"
+        );
+        let after = gwt_core::workspace_projection::load_workspace_work_items(dir.path())
+            .expect("load Work after helper attempt")
+            .expect("Work after helper attempt");
+        assert_eq!(
+            after, before,
+            "{operation} actor refusal must be byte-equivalent"
+        );
+        assert!(
+            skill_state::load(dir.path(), "build-spec")
+                .expect("load build state")
+                .expect("active build state")
+                .active,
+            "{operation} actor refusal must not settle build state"
+        );
+    }
 }
 
 #[test]
@@ -1193,6 +1302,17 @@ fn build_abort_discards_only_current_session_work() {
         .find(|item| item.id == "work-session-session-build-abort")
         .expect("current Work");
     assert!(current.discarded);
+    let terminal = current
+        .events
+        .iter()
+        .find(|event| event.kind == gwt_core::workspace_projection::WorkEventKind::Discard)
+        .expect("Discard event");
+    assert_eq!(terminal.source_operation_or_unknown(), "build.abort");
+    assert_eq!(
+        terminal.authority_class,
+        Some(gwt_core::workspace_projection::WorkEventAuthorityClass::PrimaryAgent)
+    );
+    assert_eq!(terminal.execution_generation, None);
     let other = projection
         .work_items
         .iter()

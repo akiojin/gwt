@@ -69,6 +69,7 @@ pub use index::{IndexCommand, IndexScope};
 pub use memory::MemoryCommand;
 pub use search::SearchCommand;
 pub(crate) use title_summary_guard::validate_title_summary_work_name;
+pub use workspace::WorkspaceReopenCommand;
 
 /// Compact linked PR summary used by `issue.linked_prs`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -233,6 +234,8 @@ pub enum WorkspaceCommand {
         current_focus: Option<String>,
         title_summary: Option<String>,
     },
+    /// Recover a mistakenly completed Work from its exact terminal event.
+    Reopen(WorkspaceReopenCommand),
     /// `workspace.candidates` — list join candidates.
     Candidates { agent_session: String },
     /// `workspace.join`.

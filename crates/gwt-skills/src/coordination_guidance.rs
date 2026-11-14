@@ -176,6 +176,11 @@ Board body to convey what the Work is.
 
 ### Terminal Work delivery
 
+A delegated helper or subagent is result-only: its only handoff is its result
+to the root / primary agent. It must not perform terminal lifecycle mutations through
+`workspace.*`, `execution.*`, `build.*`, or `pr.*`, and it must not commit or
+push. The primary agent alone owns the terminal delivery sequence below.
+
 Make the final Work update before terminal operations, then converge in this
 exact order: `final Work update -> commit/push -> fresh verification -> PR mutation -> execution/build completion`. After the final Work update or a
 terminal lifecycle transition, do not issue another `workspace.update`; keep
@@ -418,6 +423,11 @@ Work detail は purpose と status を別レイヤーで表示します — purp
 したりしないでください。
 
 ### Terminal Work delivery
+
+`delegated helper` / `subagent` は result-only lane です。結果だけを root /
+primary agent に handoff し、terminal lifecycle mutation である
+`workspace.*`、`execution.*`、`build.*`、`pr.*` や commit / push は実行しません。
+以下の terminal delivery sequence は primary agent だけが担当します。
 
 terminal operation の前に final Work update を行い、以後は exact
 `final Work update -> commit/push -> fresh verification -> PR mutation -> execution/build completion`
