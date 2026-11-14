@@ -1010,13 +1010,16 @@ test.describe("Issue queue real backend launch", () => {
         .map(({ payload }: any) => payload.kind === "local_agent_activity" ? payload.activity : payload.projection?.local_agent_activity)
         .filter((snapshot: any) => snapshot?.project_key === location.pathname.split("/")[2])
         .at(-1));
+    let rosterRequestSequence = 0;
     const request = async (event: unknown, kind: string) => {
       const after = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence || 0);
-      await sendLiveGwtEvent(page, event);
-      return (await page.waitForFunction(({ after, kind }) =>
+      const requestId = kind === "agent_roster" ? `t94417-${++rosterRequestSequence}` : null;
+      await sendLiveGwtEvent(page, requestId ? { ...(event as object), request_id: requestId } : event);
+      return (await page.waitForFunction(({ after, kind, requestId }) =>
         (window as any).__gwtPlaywrightMessages?.findLast((entry: any) =>
-          entry.sequence > after && [kind, `${kind}_error`].includes(entry.payload.kind))?.payload,
-      { after, kind }, { timeout: 30_000 })).jsonValue();
+          entry.sequence > after && [kind, `${kind}_error`].includes(entry.payload.kind)
+          && (!requestId || entry.payload.request_id === requestId))?.payload,
+      { after, kind, requestId }, { timeout: 30_000 })).jsonValue();
     };
     const exited = (pid: number) => { try { process.kill(pid, 0); return false; } catch { return true; } };
     const reservation = async () => (await preferences()).agent_issue_schedule.reservations
@@ -1130,6 +1133,134 @@ test.describe("Issue queue real backend launch", () => {
         fixed, selected, otherLaunch, selectedLaunch, successor, fixedClaims,
       }, null, 2), contentType: "application/json" });
       await info.attach(`fixed-assignment-admitted-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
+    } finally {
+      try { await page.close(); } finally { await fixture.stop(); }
+    }
+    expect(errors, "zero console/page errors including owned fixture cleanup").toEqual([]);
+  });
+
+  test("T94418 operator hold survives ordinary exit until explicit requeue", async ({ page }, info) => {
+    const fixture = await startIssueQueueLaunchFixture(info, {
+      additionalIssueNumbers: [44], autonomousMode: true, terminalConvergence: true,
+      monitorPreferences: { max_active_agents: 1 },
+    });
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    const preferences = async () => JSON.parse((await fixture.monitorPreferencesBytes()).toString());
+    const nativeSession = async (id: string) => (await readFile(
+      join(fixture.home, ".gwt", "sessions", `${id}.toml`), "utf8"))
+      .match(/^agent_session_id\s*=\s*"([^"]*)"/m)?.[1];
+    const activity = () => page.evaluate(() =>
+      ((window as any).__gwtPlaywrightMessages ?? [])
+        .map(({ payload }: any) => payload.kind === "local_agent_activity" ? payload.activity : payload.projection?.local_agent_activity)
+        .filter((snapshot: any) => snapshot?.project_key === location.pathname.split("/")[2])
+        .at(-1));
+    const exited = (pid: number) => { try { process.kill(pid, 0); return false; } catch { return true; } };
+    const sourceClaims = () => fixture.requests.filter(request => request.method === "POST"
+      && request.url === "/repos/fixture/queue/issues/43/comments").length;
+    const hold = async () => (await preferences()).failed_issues?.find((entry: any) => entry.issue_number === 43);
+    const reason = "T94418 explicit operator hold";
+    try {
+      await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+      await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
+      await page.locator('[data-surface="issues"]').click();
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      const issues = page.locator('.workspace-window[data-preset="issue"] .issue-bridge-root');
+      await sendLiveGwtEvent(page, { kind: "set_issue_monitor_max_active_agents", max_active_agents: 1 });
+      await expect.poll(async () => JSON.parse(await readFile(
+        join(fixture.home, ".gwt/machine-state/agent-settings.json"), "utf8")))
+        .toMatchObject({ mode: "manual", manual_limit: 1 });
+      await sendLiveGwtEvent(page, { kind: "issue_monitor_queue_push", issue_numbers: [43, 44] });
+      await expect.poll(() => fixture.launchIssues(), { timeout: 90_000 }).toEqual([43]);
+      const source = (await fixture.launches())[0];
+      expect(source.gwt_session_id).toBeTruthy();
+      await expect.poll(() => nativeSession(source.gwt_session_id!), { timeout: 45_000 }).toBe(source.provider_session_id);
+      await expect.poll(async () => (await activity())?.agents?.map((agent: any) => agent.session_id))
+        .toEqual([source.gwt_session_id]);
+      const sourceWindow = (await activity()).agents[0].window_id;
+      expect(() => process.kill(source.pid, 0)).not.toThrow();
+      const beforeClaims = sourceClaims();
+      expect(beforeClaims).toBeGreaterThan(0);
+      const statusReply = fixture.fixtureOperation("issue.monitor.status");
+      expect(statusReply.ok, JSON.stringify(statusReply)).toBe(true);
+      const identity = JSON.parse(statusReply.output).inbox.find((row: any) => row.issue_number === 43);
+      expect(identity.claim_id).toBeTruthy();
+      expect(identity.launched_window_id).toBeTruthy();
+      const confirmation = (await preferences()).launch_confirmations[43];
+      expect(confirmation).toMatchObject({ claim_id: identity.claim_id, window_id: identity.launched_window_id });
+      expect(confirmation.delivery_id).toBeTruthy();
+      const stoppedReply = fixture.fixtureOperation("issue.monitor.stop", {
+        number: 43, reason, remove_from_queue: false, claim_id: identity.claim_id,
+        delivery_id: confirmation.delivery_id, window_id: identity.launched_window_id,
+      });
+      expect(stoppedReply.ok, JSON.stringify(stoppedReply)).toBe(true);
+      const stopped = JSON.parse(stoppedReply.output);
+      expect(stopped).toMatchObject({ status: "stopped", removed_from_queue: false, runtime_stop: "requested" });
+      expect(stopped.stopped_window_id).toBe(identity.launched_window_id);
+      await expect.poll(() => exited(source.pid), { timeout: 60_000 }).toBe(true);
+      // Remove the exited diagnostic pane so only the hold can prevent a duplicate launch.
+      const windows = async () => JSON.parse(await readFile(join(fixture.home, ".gwt", "projects",
+        statusReply.project_store.hash, "workspace.json"), "utf8")).windows;
+      expect((await windows()).some((window: any) => window.session_id === source.gwt_session_id)).toBe(true);
+      await sendLiveGwtEvent(page, { kind: "close_window", id: sourceWindow });
+      await expect.poll(async () => (await windows()).some((window: any) =>
+        window.session_id === source.gwt_session_id), { timeout: 30_000 }).toBe(false);
+      await expect.poll(hold).toMatchObject({ message: `stopped: ${reason}` });
+      await expect.poll(() => fixture.launchIssues(), { timeout: 90_000 }).toEqual([43, 44]);
+      const other = (await fixture.launches())[1];
+      expect(other.gwt_session_id).toBeTruthy();
+      expect(other.gwt_session_id).not.toBe(source.gwt_session_id);
+      expect(other.provider_session_id).not.toBe(source.provider_session_id);
+      await expect.poll(() => nativeSession(other.gwt_session_id!), { timeout: 45_000 }).toBe(other.provider_session_id);
+      await expect.poll(async () => (await activity())?.agents?.map((agent: any) => agent.session_id))
+        .toEqual([other.gwt_session_id]);
+      expect(() => process.kill(other.pid, 0)).not.toThrow();
+      const otherWindow = (await activity()).agents[0].window_id;
+      await sendLiveGwtEvent(page, { kind: "terminal_input", id: otherWindow, data: "GWT_FIXTURE_EXIT\r" });
+      await expect.poll(() => exited(other.pid), { timeout: 60_000 }).toBe(true);
+      await expect.poll(async () => (await activity())?.agents, { timeout: 60_000 }).toEqual([]);
+      const previousScan = (await preferences()).last_scan_at;
+      // Observe a real successful scan after physical exit, without driving it with a status read.
+      await expect.poll(async () => {
+        const prefs = await preferences();
+        return !!prefs.last_scan_at && prefs.last_scan_at !== previousScan && !prefs.last_scan_error;
+      }, { timeout: 90_000 }).toBe(true);
+      const held = await hold();
+      expect(held).toMatchObject({ message: `stopped: ${reason}` });
+      const prefs = await preferences();
+      expect(prefs).toMatchObject({ enabled: true, autonomous_mode: true });
+      expect(Object.values(prefs.terminal_queues).flatMap((queue: any) => queue.entries)
+        .some((entry: any) => entry.number === 43)).toBe(true);
+      expect(sourceClaims(), "ordinary exit and rescan must not claim the held Issue").toBe(beforeClaims);
+      expect(await fixture.launchIssues()).toEqual([43, 44]);
+      await expect(issues.locator('[data-metric="active"]')).toHaveText("Active 0 · 0 issues · PM 0");
+      await expect(issues.locator('[data-issue-number="43"]')).toBeVisible();
+      await info.attach(`operator-hold-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
+
+      const requeued = fixture.fixtureOperation("issue.monitor.requeue", { number: 43, reason: "T94418 explicit release" });
+      expect(requeued.ok, JSON.stringify(requeued)).toBe(true);
+      const release = JSON.parse(requeued.output);
+      expect(release.status).toBe("requeued");
+      await info.attach("operator-hold-release", { body: JSON.stringify(release), contentType: "application/json" });
+      await expect.poll(() => fixture.launchIssues(), { timeout: 90_000 }).toEqual([43, 44, 43]);
+      const resumed = (await fixture.launches())[2];
+      expect(resumed.gwt_session_id).toBeTruthy();
+      expect([source.gwt_session_id, other.gwt_session_id]).not.toContain(resumed.gwt_session_id);
+      expect([source.provider_session_id, other.provider_session_id]).not.toContain(resumed.provider_session_id);
+      expect([source.pid, other.pid]).not.toContain(resumed.pid);
+      await expect.poll(() => nativeSession(resumed.gwt_session_id!), { timeout: 45_000 }).toBe(resumed.provider_session_id);
+      expect(() => process.kill(resumed.pid, 0)).not.toThrow();
+      await expect.poll(async () => (await activity())?.agents?.map((agent: any) => agent.session_id))
+        .toEqual([resumed.gwt_session_id]);
+      expect(await hold()).toBeUndefined();
+      await expect(issues.locator('[data-queue-column="active"] [data-issue-number="43"]')).toBeVisible();
+      await expect(issues.locator('[data-metric="active"]')).toHaveText("Active 1 · 1 issue · PM 0");
+      await info.attach("operator-hold-exit-requeue", { body: JSON.stringify({
+        source, other, stopped, held, beforeClaims, resumed, launches: await fixture.launches(),
+      }, null, 2), contentType: "application/json" });
+      await info.attach(`operator-hold-released-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
     } finally {
       try { await page.close(); } finally { await fixture.stop(); }
     }

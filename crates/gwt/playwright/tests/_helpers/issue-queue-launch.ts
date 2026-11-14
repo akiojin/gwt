@@ -317,7 +317,7 @@ console.error('Unimplemented fixture gh: '+text);process.exit(64);
   }
   function scheduleOperation(
     operation: "issue.monitor.schedule.read" | "issue.monitor.schedule.reassign" | "issue.monitor.requeue" | "issue.monitor.launch_now"
-      | "issue.monitor.config.set" | "issue.monitor.status",
+      | "issue.monitor.config.set" | "issue.monitor.status" | "issue.monitor.stop",
     params: Record<string, unknown> = {},
     projectRoot = active.project,
   ) {
