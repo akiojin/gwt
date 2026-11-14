@@ -1829,6 +1829,37 @@ mod tests {
         // (gpt-reserve / codex-auto-review).
     }
 
+    // Issue #3986 AC-2 / AC-5: every model the wizard can launch must resolve
+    // a context window in `gwt_core::usage::model_context`, so adding a row to
+    // this catalog without a matching family entry fails here instead of
+    // silently dropping the context-left estimate. The Claude "Default (...)"
+    // row is not a model name (it launches without `--model`), so only
+    // explicit selections are walked.
+    #[test]
+    fn every_catalog_model_resolves_a_context_limit() {
+        let mut walked = 0usize;
+        let mut missing = Vec::new();
+        for agent in ["claude", "codex"] {
+            for model in current_model_options(agent) {
+                if !is_explicit_model_selection(&model) {
+                    continue;
+                }
+                walked += 1;
+                if gwt_core::usage::model_context::context_limit(&model).is_none() {
+                    missing.push(format!("{agent}:{model}"));
+                }
+            }
+        }
+        assert!(
+            walked > 0,
+            "catalog walk must cover explicit model selections"
+        );
+        assert!(
+            missing.is_empty(),
+            "catalog models without a context_limit entry: {missing:?}"
+        );
+    }
+
     fn codex_capability_row(model: &str) -> (Vec<&'static str>, &'static str) {
         let options = codex_reasoning_options_for_model(model);
         let values: Vec<&'static str> = options.iter().map(|option| option.stored_value).collect();

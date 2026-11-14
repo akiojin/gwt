@@ -244,6 +244,44 @@ test.describe("Provider usage status summary", () => {
     expect(consoleErrors).toEqual([]);
   });
 
+  test("shows Codex model context estimates and clears unknown model context (Issue #3986)", async ({ page }, info) => {
+    const errors = captureUsageErrors(page);
+    if (!liveUrl) await installEmbeddedRoutes(page);
+    await installProviderUsageBackend(page);
+    if (liveUrl) await gotoLiveGwt(page, liveUrl);
+    else await page.goto(APP_URL);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", info.project.name.includes("light") ? "light" : "dark");
+
+    // Rust parser tests cover the rollout fallback; this checks its snapshot
+    // fields remain readable through the shared provider session presentation.
+    const accounts = [{ provider: "codex", windows: [{ kind: "weekly", used_percent: 10 }], state: { kind: "ok" } }];
+    const session = {
+      session_id: "sess-codex-context", provider: "codex", model: "gpt-6-astra",
+      input_tokens: 100000, output_tokens: 1000, total_tokens: 101000,
+      context_used_tokens: 100000, context_limit_tokens: 400000, context_left_pct: 75,
+      eligible: true, state: { kind: "ok" },
+    };
+    await emitProviderUsage(page, accounts, [session]);
+    const strip = page.locator("#op-strip-usage");
+    await expect(strip).toBeVisible();
+    await strip.hover();
+    const popover = page.locator("#provider-usage-popover");
+    await expect(popover).toBeVisible();
+    const row = popover.locator('.op-usage-card[data-provider="codex"] .op-usage-sess__row');
+    await expect(row).toHaveCount(1);
+    await expect(row.locator(".op-usage-sess__model")).toHaveText("gpt-6-astra");
+    await expect(row.locator(".op-usage-sess__ctx")).toHaveText("75% left");
+    await expect(row.locator(".op-usage-sess__ctx")).toHaveAttribute("title", "Context remaining (approx.): 100k / 400k used");
+    await page.screenshot({ path: info.outputPath("codex-model-context.png"), fullPage: true });
+
+    await emitProviderUsage(page, accounts, [{ ...session, model: "some-future-model", context_limit_tokens: null, context_left_pct: null }]);
+    await expect(row.locator(".op-usage-sess__model")).toHaveText("some-future-model");
+    await expect(row.locator(".op-usage-sess__ctx")).toHaveText("—");
+    await expect(row.locator(".op-usage-sess__ctx")).toHaveAttribute("title", "Context limit unknown for this model");
+    await page.screenshot({ path: info.outputPath("codex-unknown-context.png"), fullPage: true });
+    expect(errors, "zero console/page errors").toEqual([]);
+  });
+
   test("labels an unknown-length window by its reported minutes (Issue #3860)", async ({
     page,
   }) => {
