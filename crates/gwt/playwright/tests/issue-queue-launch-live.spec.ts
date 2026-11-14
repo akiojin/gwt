@@ -415,14 +415,35 @@ test.describe("Issue queue real backend launch", () => {
       const source = (await fixture.launches())[0];
       await expect.poll(async () => !!await actor("idle"), { timeout: 60_000 }).toBe(true);
       const idle = await actor("idle");
-      const n1 = await actor("normal_n1");
-      expect(n1.current_hook_event).toMatchObject({ event: "Stop", outcome: "normal" });
-      expect(n1.current_hook_event.correlation_id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+      const initialNormal = await actor("normal_n1");
+      expect(initialNormal.current_hook_event).toMatchObject({ event: "Stop", outcome: "normal" });
+      expect(initialNormal.current_hook_event.correlation_id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
       expect(idle.owner_number).toBe(fixture.issueNumber);
       expect(idle.cwd, "the source waits in its ordinary worktree before checkpoint delivery").toBe(source.cwd);
       expect(idle.tree_child_pid).toBeGreaterThan(0);
       expect(fixture.processAlive(idle.tree_child_pid)).toBe(true);
       expect(fixture.executionStatus(source.cwd).ecr_status).toBe("active");
+      const sourceWindow = () => page.evaluate(sessionId => {
+        const state = (window as any).__gwtPlaywrightMessages?.findLast((entry: any) => entry.payload.kind === "workspace_state");
+        return (state?.payload.workspace.tabs ?? []).flatMap((tab: any) => tab.workspace.windows)
+          .find((window: any) => window.session_id === sessionId);
+      }, source.gwt_session_id);
+      await expect.poll(async () => ["running", "idle"].includes((await sourceWindow())?.status),
+        { timeout: 60_000 }).toBe(true);
+      const projectedSource = await sourceWindow();
+      expect(projectedSource.session_id).toBe(source.gwt_session_id);
+      await sendLiveGwtEvent(page, { kind: "terminal_input", id: projectedSource.id, data: "GWT_RAW_MONITOR_PROBE\r" });
+      await expect.poll(async () => !!await actor("raw_successor"),
+        { timeout: 60_000, message: "real raw input reaches the source before its next genuine Stop" }).toBe(true);
+      const rawAccepted = await actor("raw_accepted");
+      expect(rawAccepted).toMatchObject({ pid: source.pid, gwt_session_id: source.gwt_session_id });
+      expect(rawAccepted.current_hook_event, "raw queue acceptance invalidates the previous Stop").toBeNull();
+      expect(rawAccepted.runtime_without_current_sha256, "raw acceptance preserves history and native identity")
+        .toBe(initialNormal.runtime_without_current_sha256);
+      const n1 = await actor("raw_successor");
+      expect(n1).toMatchObject({ pid: source.pid, gwt_session_id: source.gwt_session_id,
+        current_hook_event: { event: "Stop", outcome: "normal" } });
+      expect(n1.current_hook_event.correlation_id).not.toBe(initialNormal.current_hook_event.correlation_id);
       await request({ kind: "issue_monitor_queue_push", issue_numbers: [fixture.targetIssueNumber] }, "issue_monitor_queue_result");
       const roster = (await request({ kind: "agent_roster", action: { kind: "read" } }, "agent_roster")).roster;
       expect(roster.members.filter((member: any) => member.enabled)).toHaveLength(1);

@@ -205,6 +205,12 @@ const actorReady = (async () => {
 })().catch(error=>{actorEvent('actor_failed',{message:error.message});throw error;});
 // Prevent an unhandled-rejection exit while stdin is waiting for the real Host instruction.
 actorReady.catch(()=>{});
+const rawMonitorProbe = async () => {
+  await actorReady;
+  actorEvent('raw_accepted',observedRuntime());
+  nativeHook('Stop');
+  actorEvent('raw_successor',observedRuntime());
+};
 const checkpointed = new Set();
 const checkpoint = async line => {
   await actorReady;
@@ -399,6 +405,7 @@ ${switchActor}
 ${terminalActor}
 console.log('GWT_FAKE_PROVIDER_READY ' + native);
 readline.createInterface({input:process.stdin}).on('line', line => {
+  ${setup.switching ? "if (line.trim() === 'GWT_RAW_MONITOR_PROBE') { rawMonitorProbe().catch(error=>actorEvent('actor_failed',{message:error.message})); return; }" : ""}
   ${setup.switching ? "if (line.includes('GWT checkpoint request ')) { checkpoint(line).catch(error=>actorEvent('actor_failed',{message:error.message})); return; }" : ""}
   if (line.trim() === 'GWT_FIXTURE_EXIT') {
     ${setup.exitNotice ? `process.stdout.write(${JSON.stringify(setup.exitNotice)}, () => process.exit(0));` : "process.exit(0);"}
