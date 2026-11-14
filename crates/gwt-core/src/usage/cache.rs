@@ -63,6 +63,11 @@ impl CodexTranscript {
                 .and_then(|limits| codex::parse_rate_limits_at(limits, observed_at))
                 .map(|account| (account, observed_at));
             let info = payload.get("info");
+            // Cache only the reported window: a later model-only line must
+            // not inherit an estimate made for an earlier model.
+            self.session.context_limit_tokens = info
+                .and_then(|info| info.get("model_context_window"))
+                .and_then(Value::as_u64);
             let total = info.and_then(|info| info.get("total_token_usage"));
             let last = info.and_then(|info| info.get("last_token_usage"));
             if total.is_some() || last.is_some() {
@@ -211,6 +216,16 @@ impl UsageCache {
             .clone();
         usage.session_id = session_id.to_owned();
         usage.provider_session_id = Some(session_id.to_owned());
+        // Incremental parsing restores the model from a separate line. Apply
+        // the estimate to the returned snapshot, keeping reported windows intact.
+        usage.context_limit_tokens = usage.context_limit_tokens.or_else(|| {
+            usage
+                .model
+                .as_deref()
+                .and_then(model_context::context_limit)
+        });
+        usage.context_left_pct =
+            SessionUsage::context_left_from(usage.context_used_tokens, usage.context_limit_tokens);
         Some(usage)
     }
 
@@ -589,7 +604,10 @@ mod tests {
             bytes,
             "unchanged poll reads no transcript bytes"
         );
-        let cx_tail = "{\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":200,\"output_tokens\":30}}}}\n";
+        let cx_tail = concat!(
+            "{\"payload\":{\"type\":\"token_count\",\"model\":\"gpt-6-astra\",\"info\":{\"total_token_usage\":{\"input_tokens\":200,\"output_tokens\":30}}}}\n",
+            "{\"payload\":{\"model\":\"some-future-model\"}}\n",
+        );
         let cc_tail = "{\"type\":\"assistant\",\"message\":{\"usage\":{\"input_tokens\":20,\"output_tokens\":3}}}\n";
         fs::OpenOptions::new()
             .append(true)
