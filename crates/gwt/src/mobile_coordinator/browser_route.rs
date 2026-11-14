@@ -6,15 +6,19 @@
 //! `{"type":"claim_invite","secret"}` with the 64-hex invite secret (never
 //! escaped). The browser names no Host or Project: the coordinator routes by
 //! the invite's saved scope and claims it once for a connection ID it
-//! generates. It answers `claimed`, or `claim_rejected` without a reason and
-//! closes. A claim is not device approval or read/input authority, and no
-//! later message is defined yet, so any data frame closes the socket.
+//! generates. It answers `claimed` only after queueing `connection_claimed`
+//! for the owning Host registration and reserving room for the matching
+//! `connection_closed`; otherwise (including a Host whose event backlog is
+//! full) it answers `claim_rejected` without a reason and closes. A claim is
+//! not device approval or read/input authority, and no later message is
+//! defined yet, so any data frame closes the socket.
 //!
 //! A claimed socket ends when the server stops, when its Host registration is
 //! logically closed or its lease passes. Every exit after a claim logically
-//! closes that connection once; the invite stays a replay fence until its TTL.
+//! closes that connection once and announces `connection_closed` to the Host;
+//! the invite stays a replay fence until its TTL.
 
-use super::host_route::{call, HostState, SharedSessions};
+use super::host_route::{announce_claim, call, HostEvent, HostState, SharedSessions};
 use super::registration::RegistrationHandle;
 use axum::{
     extract::{
@@ -66,11 +70,14 @@ pub(super) async fn claim(
         .on_upgrade(move |socket| serve_browser(socket, state))
 }
 
-/// One claimed connection; logically closed exactly once on drop.
+/// One claimed connection; logically closed exactly once on drop, and its
+/// Host told of the close through the slot reserved when it was told of the
+/// claim.
 struct Claimed {
     sessions: SharedSessions,
     handle: RegistrationHandle,
     connection_id: Uuid,
+    closed: Option<tokio::sync::mpsc::OwnedPermit<HostEvent>>,
 }
 
 impl Claimed {
@@ -89,6 +96,10 @@ impl Drop for Claimed {
         let _ = call(&self.sessions, |sessions, now, wall| {
             sessions.close_connection(&self.handle, self.connection_id, now, wall)
         });
+        if let Some(closed) = self.closed.take() {
+            // A Host socket that already ended discards it.
+            closed.send(HostEvent::Closed(self.connection_id));
+        }
     }
 }
 
@@ -129,6 +140,7 @@ async fn serve_browser(mut socket: WebSocket, state: HostState) {
         mut stopping,
         alive,
         retired,
+        events,
     } = state;
     // Subscribe before claiming so a registration closed meanwhile is seen.
     let mut retired = retired.subscribe();
@@ -136,20 +148,23 @@ async fn serve_browser(mut socket: WebSocket, state: HostState) {
         let connection_id = Uuid::new_v4();
         let claim_sessions = sessions.clone();
         let claimed = tokio::task::spawn_blocking(move || {
-            call(&claim_sessions, |sessions, now, wall| {
+            let (handle, _) = call(&claim_sessions, |sessions, now, wall| {
                 sessions.claim_invite_by_secret(&*secret, connection_id, now, wall)
             })
-            .map(|(handle, _)| {
-                Arc::new(Claimed {
-                    sessions: claim_sessions,
-                    handle,
-                    connection_id,
-                })
-            })
+            .ok()?;
+            let closed = announce_claim(&events, handle.generation(), connection_id);
+            let claimed = Claimed {
+                sessions: claim_sessions,
+                handle,
+                connection_id,
+                closed,
+            };
+            // An unannounced claim is closed here, on the blocking thread.
+            claimed.closed.is_some().then(|| Arc::new(claimed))
         })
         .await;
         match claimed {
-            Ok(Ok(claimed)) => {
+            Ok(Some(claimed)) => {
                 if send_json(&mut socket, serde_json::json!({"type": "claimed"})).await {
                     hold(&mut socket, &claimed, &mut stopping, &mut retired).await;
                 }
