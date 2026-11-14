@@ -16,6 +16,7 @@ use crate::mobile_coordinator::{
 use gwt_core::repo_hash::ProjectKey;
 use serde::Deserialize;
 use std::{collections::HashSet, path::Path};
+use zeroize::Zeroizing;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CredentialLoadError {
@@ -42,7 +43,8 @@ struct StoredCredential {
     projects: Vec<String>,
     issued_at: u64,
     expires_at: u64,
-    secret: String,
+    #[serde(deserialize_with = "crate::mobile_coordinator::borrowed_hex_secret")]
+    secret: Zeroizing<[u8; 32]>,
 }
 
 /// Deliberately not Debug, Clone or Serialize. Local parsing is not proof that
@@ -53,7 +55,7 @@ pub struct LoadedHostCredential {
     binding: HostBinding,
     project: ProjectKey,
     expires_at: u64,
-    secret: [u8; 32],
+    secret: Zeroizing<[u8; 32]>,
 }
 
 impl LoadedHostCredential {
@@ -111,13 +113,9 @@ pub(super) fn decode_host_credential(
             .iter()
             .any(|p| ProjectKey::parse(p).is_err() || !projects.insert(p))
         || stored.issued_at >= stored.expires_at
-        || stored.secret.len() != 64
     {
         return Err(CredentialLoadError::InvalidCredential);
     }
-    let mut secret = [0; 32];
-    hex::decode_to_slice(&stored.secret, &mut secret)
-        .map_err(|_| CredentialLoadError::InvalidCredential)?;
     if &stored.binding != expected_binding {
         return Err(CredentialLoadError::BindingMismatch);
     }
@@ -139,7 +137,7 @@ pub(super) fn decode_host_credential(
         binding: stored.binding,
         project: expected_project.clone(),
         expires_at: stored.expires_at,
-        secret,
+        secret: stored.secret,
     })
 }
 
@@ -552,6 +550,31 @@ mod tests {
             Err(CredentialError::Unauthorized)
         );
         assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
+
+    fn zeroizes_on_drop<T: zeroize::ZeroizeOnDrop>(_: &T) {}
+
+    #[test]
+    fn loaded_secret_is_zeroize_on_drop_and_escaped_secrets_are_refused() {
+        let (_dir, _store, path, binding) = fixture();
+        let loaded = load_host_credential(&path, &binding, &project(), 100).unwrap();
+        zeroizes_on_drop(&loaded.secret);
+        // An escaped secret cannot be borrowed and would need an owned copy.
+        let original = std::fs::read_to_string(&path).unwrap();
+        let start = original.find("\"secret\":\"").unwrap() + "\"secret\":\"".len();
+        let escaped = format!(
+            "{}\\u{:04x}{}",
+            &original[..start],
+            original.as_bytes()[start],
+            &original[start + 1..]
+        );
+        std::fs::write(&path, &escaped).unwrap();
+        assert!(matches!(
+            load_host_credential(&path, &binding, &project(), 100),
+            Err(CredentialLoadError::InvalidCredential)
+        ));
+        std::fs::write(&path, original).unwrap();
+        assert!(load_host_credential(&path, &binding, &project(), 100).is_ok());
     }
 
     #[test]
