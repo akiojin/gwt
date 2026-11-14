@@ -39,6 +39,7 @@ jobs:
   prepare:
     name: Prepare Release PR
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     steps:
       - name: Checkout develop
         uses: actions/checkout@v7
@@ -49,6 +50,15 @@ jobs:
 
       - name: Fetch tags
         run: git fetch origin --tags --force
+
+      - name: Require PR automation token
+        env:
+          PR_AUTOMATION_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+        run: |
+          if [ -z "$PR_AUTOMATION_TOKEN" ]; then
+            echo "::error::PERSONAL_ACCESS_TOKEN is required to create and merge release pull requests without bypassing develop protection." >&2
+            exit 1
+          fi
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -117,16 +127,99 @@ jobs:
           fi
           echo "Version files validated at ${EXPECTED}."
 
-      - name: Commit and push to develop
+      - name: Commit and push release preparation branch
+        id: preparation
         run: |
           set -euo pipefail
           TAG_NAME="${{ steps.version.outputs.tag_name }}"
+          PREP_BRANCH="release/prepare-${{ github.run_id }}-${{ github.run_attempt }}"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Cargo.toml Cargo.lock CHANGELOG.md
           git commit -m "chore(release): ${TAG_NAME}"
           git pull --rebase origin develop
-          git push origin develop
+          if ! git push origin "HEAD:refs/heads/${PREP_BRANCH}"; then
+            echo "::error::Failed to push release preparation branch ${PREP_BRANCH}. Protected develop is never pushed directly." >&2
+            exit 1
+          fi
+          echo "branch=${PREP_BRANCH}" >> "$GITHUB_OUTPUT"
+
+      - name: Merge release preparation through develop PR
+        id: preparation_pr
+        env:
+          GH_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+          PREP_BRANCH: ${{ steps.preparation.outputs.branch }}
+          TAG_NAME: ${{ steps.version.outputs.tag_name }}
+        run: |
+          set -euo pipefail
+
+          BODY_FILE="$(mktemp)"
+          trap 'rm -f "$BODY_FILE"' EXIT
+          {
+            echo "## Summary"
+            echo ""
+            echo "Move the generated ${TAG_NAME} release commit into protected develop."
+            echo ""
+            echo "This pull request must pass all develop required checks before auto-merge."
+          } > "$BODY_FILE"
+
+          PREP_PR=$(gh pr create --base develop --head "$PREP_BRANCH" \
+            --title "chore(release): prepare ${TAG_NAME}" --body-file "$BODY_FILE")
+          echo "url=${PREP_PR}" >> "$GITHUB_OUTPUT"
+
+          if ! gh pr merge "$PREP_PR" --auto --merge --delete-branch; then
+            echo "::error::Failed to enable auto-merge for release preparation PR ${PREP_PR}." >&2
+            exit 1
+          fi
+
+          for attempt in $(seq 1 360); do
+            PR_DATA=$(gh pr view "$PREP_PR" --json state,mergeStateStatus,url)
+            PR_STATE=$(printf '%s' "$PR_DATA" | jq -r '.state')
+            MERGE_STATE=$(printf '%s' "$PR_DATA" | jq -r '.mergeStateStatus')
+
+            if [ "$PR_STATE" = "MERGED" ]; then
+              echo "Preparation PR merged: ${PREP_PR}"
+              exit 0
+            fi
+            if [ "$PR_STATE" = "CLOSED" ]; then
+              echo "::error::Release preparation PR was closed before merge: ${PREP_PR}." >&2
+              exit 1
+            fi
+            if [ "$MERGE_STATE" = "DIRTY" ]; then
+              echo "::error::Release preparation PR has merge conflicts: ${PREP_PR}." >&2
+              exit 1
+            fi
+
+            CHECK_DATA=$(gh pr checks "$PREP_PR" --required --json name,bucket,state,link || true)
+            FAILED_CHECKS=$(printf '%s' "$CHECK_DATA" \
+              | jq '[.[] | select(.bucket == "fail" or .bucket == "cancel")] | length')
+            if [ "$FAILED_CHECKS" -gt 0 ]; then
+              gh pr checks "$PREP_PR" --required || true
+              echo "::error::Release preparation PR checks failed: ${PREP_PR}." >&2
+              exit 1
+            fi
+
+            if [ "$MERGE_STATE" = "BEHIND" ]; then
+              if ! gh pr update-branch "$PREP_PR"; then
+                echo "::error::Failed to update release preparation PR with the latest develop: ${PREP_PR}." >&2
+                exit 1
+              fi
+            fi
+
+            if [ "$attempt" -eq 360 ]; then
+              gh pr checks "$PREP_PR" --required || true
+              echo "::error::Timed out after 60 minutes waiting for release preparation PR to merge: ${PREP_PR}." >&2
+              exit 1
+            fi
+            sleep 10
+          done
+
+      - name: Checkout merged develop
+        uses: actions/checkout@v7
+        with:
+          ref: develop
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Collect closing issues
         id: issues
@@ -150,7 +243,7 @@ jobs:
 
       - name: Create or update Release PR
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
           BUMP: ${{ inputs.bump }}
           NEW_VERSION: ${{ steps.version.outputs.new_version }}
           TAG_NAME: ${{ steps.version.outputs.tag_name }}
