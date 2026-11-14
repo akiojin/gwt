@@ -2707,6 +2707,14 @@ fn apply_routine_issue_monitor_control(
                         classification,
                         now,
                     );
+                } else if let Some(issue_number) = monitor.review_window_issue(&window_id, now) {
+                    // Review dispatches keep the implementation's binding.
+                    // An exit with no launch hint still belongs to that review.
+                    monitor.record_review_failure(
+                        issue_number,
+                        format!("review launch failure: {message}"),
+                        now,
+                    );
                 }
                 true
             }
@@ -9388,6 +9396,98 @@ exit 0
         assert_eq!(record.attempts, 1);
         assert_eq!(record.non_agent_attempts, 1);
         assert!(record.retry_not_before.is_some());
+    }
+
+    #[test]
+    fn issue_4923_unmapped_review_exit_is_resolved_through_production_control() {
+        let now = "2026-09-07T04:00:00Z";
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+            enabled: true,
+            max_active: 2,
+            ..Default::default()
+        });
+        monitor.set_autonomous_mode(true);
+        monitor.set_gui_connected(true);
+        monitor.terminal_queue_push(&[42], "test", now);
+        monitor.record_claimed(sample_issue_monitor_issue(42), "claim-42");
+        monitor
+            .next_launch_request(now)
+            .expect("implementation launch");
+        monitor.complete_active_launch(42, "tab-1::impl-42");
+        monitor
+            .dispatch_review(
+                crate::AutonomousReviewDispatch {
+                    issue_number: 42,
+                    pr_number: 420,
+                    reviewed_sha: "review-sha".to_string(),
+                    required_criteria: vec!["AC-1".to_string()],
+                    diff: String::new(),
+                    linked_issue_kind: crate::LinkedIssueKind::Issue,
+                },
+                now,
+            )
+            .expect("review dispatched");
+        let snapshot = serde_json::json!({
+            "project_tab_id": "tab-1", "observed_at": now,
+            "windows": [{
+                "window_id": "tab-1::review-42", "issue_number": 42,
+                "status": "running", "review_dispatch": true
+            }]
+        });
+        let decode = |payload| {
+            decode_issue_monitor_control(crate::runtime_daemon_events::issue_monitor_payload(
+                "control",
+                payload,
+                std::process::id() + 1,
+            ))
+            .expect("GUI control decodes")
+        };
+        assert!(super::try_apply_issue_monitor_control(
+            &mut monitor,
+            decode(serde_json::json!({"window_snapshot": snapshot})),
+            now,
+        )
+        .is_some());
+        assert_eq!(monitor.launched_window_issue("tab-1::review-42"), None);
+        let failure = decode(serde_json::json!({"agent_failed": {
+            "window_id": "tab-1::review-42", "message": "Agent entered error state",
+            "failure": {"kind": "termination", "classification": "infrastructure"}
+        }}));
+        assert_eq!(
+            super::try_apply_issue_monitor_control(&mut monitor, failure.clone(), now),
+            Some(true)
+        );
+        let error = monitor
+            .inbox_item(42)
+            .and_then(|item| item.error_message.as_deref())
+            .expect("unmapped GUI failure reaches its inbox row");
+        assert!(
+            error.contains("review launch failure") && error.contains("PR #420"),
+            "{error}"
+        );
+        assert_eq!(monitor.attempt_count(42), 0);
+        assert_eq!(
+            monitor.launched_window_id(42).as_deref(),
+            Some("tab-1::impl-42")
+        );
+        // Replayed exit and subsequent dead snapshot must not spend another
+        // review attempt or fail the implementation after phase changed.
+        super::try_apply_issue_monitor_control(&mut monitor, failure, now);
+        let mut dead = snapshot;
+        dead["windows"][0]["status"] = serde_json::json!("error");
+        super::try_apply_issue_monitor_control(
+            &mut monitor,
+            decode(serde_json::json!({"window_snapshot": dead})),
+            now,
+        );
+        assert_eq!(
+            monitor
+                .autonomous_record(42)
+                .and_then(|record| record.review_attempts.as_ref())
+                .map(|attempts| attempts.count),
+            Some(1)
+        );
+        assert_eq!(monitor.attempt_count(42), 0);
     }
 
     #[test]

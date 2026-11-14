@@ -27,8 +27,8 @@ test.beforeEach(async ({ page }, testInfo) => {
     await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
     return;
   }
-  // The Monitor wiring case always uses deterministic backend events. The
-  // controller case also uses this source fixture in CI without a live URL.
+  // Monitor wiring uses deterministic backend events with isolated checkout
+  // assets when supplied; CI falls back to the embedded source fixture.
   await page.addInitScript(() => {
     class FixtureSocket extends EventTarget {
       static CONNECTING = 0;
@@ -62,10 +62,11 @@ test.beforeEach(async ({ page }, testInfo) => {
     }
     Object.defineProperty(window, "WebSocket", { configurable: true, value: FixtureSocket });
   });
-  await installEmbeddedRoutes(page);
-  await page.goto(APP_URL);
+  if (!liveBase) await installEmbeddedRoutes(page);
+  await page.goto(liveBase ? new URL(new URL(APP_URL).pathname, liveBase).href : APP_URL);
   await expect(page.locator("#op-notifications-button")).toBeVisible();
   await expect(page.locator("#close-project-button")).toBeVisible();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
 });
 
 test.afterEach(({ page }) => {
@@ -96,6 +97,30 @@ test("windowless NeedsHuman uses one notification history entry, never the inbox
   await expect(rows).toHaveCount(1);
   await expect(page.locator(".toast-alerts__item")).toHaveCount(0);
   await page.screenshot({ path: testInfo.outputPath("needs-human-history.png"), fullPage: true });
+});
+
+test("failed independent review keeps its launch diagnostic in one notification history entry", async ({ page }, testInfo) => {
+  const message = "independent review for PR #410 at sha-410 failed (attempt 1/3): review launch failure: window tab-1::review-41 exited without a verdict (Error)";
+  const inject = (detail: Record<string, unknown>) => page.evaluate((payload) => {
+    window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: payload }));
+  }, detail);
+  await inject({ kind: "issue_monitor_toast", level: "warn", issue_number: 41, message });
+  const bell = page.locator("#op-notifications-button");
+  await expect(bell.locator(".op-rail__badge")).toHaveText("1");
+  await bell.click();
+  const rows = page.locator("#notification-center .notification-center__item");
+  await expect(rows).toHaveCount(1);
+  await expect(rows.first()).toHaveAttribute("data-level", "warn");
+  await expect(rows.first()).toContainText(message);
+  await inject({ kind: "issue_monitor_inbox", items: [{
+    issue: { number: 41, title: "Independent review failure", labels: [], state: "open" },
+    state: "launched", error_message: message,
+    launched_window_id: "tab-1::implementation-41",
+  }] });
+  await expect(rows).toHaveCount(1);
+  await expect(rows.first()).toContainText(message);
+  await expect(page.locator(".toast-alerts__item")).toHaveCount(0);
+  await page.screenshot({ path: testInfo.outputPath("review-launch-failure-history.png"), fullPage: true });
 });
 
 test(controllerTestTitle, async ({ page }, testInfo) => {

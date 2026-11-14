@@ -12652,15 +12652,15 @@ impl IssueMonitorState {
     }
 
     /// Issue #4117: keep the review ledger in step with the canvas. A review
-    /// window observed alive for an Issue still awaiting its verdict is adopted
-    /// (the daemon restarted and forgot the dispatch) or bound to its ledger
-    /// entry; an entry whose window left this tab's canvas, or that never
+    /// window for an Issue still awaiting its verdict is bound even if its
+    /// first observation is terminal (Issue #4923). Live windows are adopted
+    /// after a daemon restart; an entry whose window left this tab's canvas, or that never
     /// appeared within [`REVIEW_WINDOW_SPAWN_GRACE_SECS`], is dropped so it
     /// cannot hold a slot for a pane that does not exist.
     fn reconcile_review_windows(&mut self, snapshot: &IssueMonitorWindowSnapshot) {
         let now = snapshot.observed_at.as_str();
         for observed in &snapshot.windows {
-            if !observed.review_dispatch || !idle_window_is_alive(observed.status) {
+            if !observed.review_dispatch {
                 continue;
             }
             let Some(issue_number) = observed.issue_number else {
@@ -12676,7 +12676,11 @@ impl IssueMonitorState {
                     let Some(pr_number) = self
                         .autonomous_records
                         .get(&issue_number)
-                        .filter(|record| record.review_passed.is_none())
+                        .filter(|record| {
+                            record.review_passed.is_none()
+                                && (idle_window_is_alive(observed.status)
+                                    || record.phase == AutonomousPhase::Reviewing)
+                        })
                         .and_then(|record| record.pr_number)
                     else {
                         continue;
@@ -12716,7 +12720,7 @@ impl IssueMonitorState {
                                 Some(observed) => (
                                     false,
                                     Some(format!(
-                                        "review window {window_id} exited without a verdict ({:?})",
+                                        "review launch failure: window {window_id} exited without a verdict ({:?})",
                                         observed.status
                                     )),
                                 ),
@@ -15233,6 +15237,41 @@ impl IssueMonitorState {
                         })
                         .map(|_| item.issue.number)
                 })
+            })
+    }
+
+    /// Issue #4923: review panes intentionally have no implementation launch
+    /// binding. Resolve their exit from the review ledger or fresh GUI canvas,
+    /// only while a verdict is pending so replay cannot fail the implementation.
+    pub(crate) fn review_window_issue(&self, window_id: &str, now: &str) -> Option<u64> {
+        let reviewing = |issue_number: &u64| {
+            self.autonomous_records
+                .get(issue_number)
+                .is_some_and(|record| {
+                    record.phase == AutonomousPhase::Reviewing && record.review_passed.is_none()
+                })
+        };
+        self.review_windows
+            .values()
+            .find(|window| {
+                window
+                    .window_id
+                    .as_deref()
+                    .is_some_and(|bound| issue_monitor_window_ids_match(bound, window_id))
+                    && reviewing(&window.issue_number)
+            })
+            .map(|window| window.issue_number)
+            .or_else(|| {
+                self.fresh_window_snapshot(now)?
+                    .windows
+                    .iter()
+                    .find_map(|observed| {
+                        (observed.review_dispatch
+                            && issue_monitor_window_ids_match(&observed.window_id, window_id))
+                        .then_some(observed.issue_number)
+                        .flatten()
+                        .filter(reviewing)
+                    })
             })
     }
 
@@ -37480,6 +37519,76 @@ mod tests {
             )],
         ));
         assert!(monitor.review_windows().is_empty());
+    }
+
+    #[test]
+    fn issue_4923_first_observation_of_dead_review_records_launch_failure_immediately() {
+        let mut monitor = autonomous_launched_cohort(&[(41, "tab-1::impl-41")]);
+        monitor.set_max_active_agents(2);
+        monitor
+            .dispatch_review(review_dispatch_for(41, 410), IDLE_NOW)
+            .expect("review dispatched");
+        let snapshot = idle_snapshot(
+            "2026-09-07T04:00:10Z",
+            vec![
+                idle_observation("tab-1::impl-41", Some(41), WindowState::Running, false),
+                idle_observation("tab-1::review-41", Some(41), WindowState::Error, true),
+            ],
+        );
+        monitor.record_window_snapshot(snapshot.clone());
+        let error = monitor
+            .inbox_item(41)
+            .and_then(|item| item.error_message.as_deref())
+            .expect("first dead observation records the failure before the 300s grace");
+        assert!(error.contains("review launch failure"), "{error}");
+        assert!(error.contains("tab-1::review-41"), "{error}");
+        assert!(!error.contains("PTY handoff complete") && !error.contains("never appeared"));
+        assert!(monitor.review_windows().is_empty());
+        assert_eq!(
+            monitor.launched_window_id(41).as_deref(),
+            Some("tab-1::impl-41")
+        );
+        assert_eq!(monitor.attempt_count(41), 0);
+
+        monitor.record_window_snapshot(snapshot.clone());
+        assert_eq!(
+            review_attempts_of(&monitor, 41).map(|attempts| attempts.count),
+            Some(1)
+        );
+
+        // A retained diagnostic pane belongs to the failed dispatch, not the
+        // next healthy reviewer admitted after backoff.
+        let retry_at = "2026-09-07T04:01:10Z";
+        monitor
+            .dispatch_review(review_dispatch_for(41, 410), retry_at)
+            .expect("retry admitted after backoff");
+        let mut retry_snapshot = snapshot;
+        retry_snapshot.observed_at = retry_at.to_string();
+        retry_snapshot.windows.push(idle_observation(
+            "tab-1::review-41-retry",
+            Some(41),
+            WindowState::Running,
+            true,
+        ));
+        monitor.record_window_snapshot(retry_snapshot);
+        assert_eq!(
+            monitor
+                .review_windows()
+                .first()
+                .and_then(|window| window.window_id.as_deref()),
+            Some("tab-1::review-41-retry")
+        );
+        assert_eq!(
+            review_attempts_of(&monitor, 41).map(|attempts| attempts.count),
+            Some(1)
+        );
+        monitor.record_review_verdict(41, true);
+        assert_eq!(
+            monitor
+                .autonomous_record(41)
+                .and_then(|record| record.review_passed),
+            Some(true)
+        );
     }
 
     // ---------------------------------------------------------------------
