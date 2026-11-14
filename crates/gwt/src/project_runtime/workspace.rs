@@ -233,22 +233,20 @@ impl WorkspaceLaunchTransition<'_> {
                     .and_then(|context| non_empty_workspace_text(context.owner.as_deref()))
             })
             .or_else(|| {
-                self.linked_issue_number
-                    .map(|number| format!("Issue #{number}"))
+                self.linked_issue_number.map(|number| {
+                    crate::cli::execution_state::ExecutionOwnerKey {
+                        kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+                        number,
+                    }
+                    .canonical_work_owner_label()
+                })
             })
     }
 }
 
 /// Canonical Work owner label for a trusted execution owner key.
 pub fn workspace_owner_label(owner: crate::cli::execution_state::ExecutionOwnerKey) -> String {
-    match owner.kind {
-        crate::cli::execution_state::ExecutionOwnerKind::Spec => {
-            format!("SPEC-{}", owner.number)
-        }
-        crate::cli::execution_state::ExecutionOwnerKind::Issue => {
-            format!("Issue #{}", owner.number)
-        }
-    }
+    owner.canonical_work_owner_label()
 }
 
 impl WorkspaceLaunchProjectionKind {
