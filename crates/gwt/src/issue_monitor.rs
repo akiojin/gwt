@@ -15130,6 +15130,17 @@ impl IssueMonitorState {
         if available == 0 {
             return Some(Reason::MaxActiveSaturated);
         }
+        // Issue #7266 AC-1: a pending claim the driver may attempt now is
+        // launch in flight. Its Issue is no planner candidate, so the gates
+        // below would otherwise report the queue held while it launches.
+        if self.pending_effects.iter().any(|effect| {
+            matches!(
+                effect.payload,
+                IssueMonitorEffectPayload::AcquireClaim { .. }
+            ) && self.effect_attempt_is_ready(effect, now)
+        }) {
+            return None;
+        }
         if candidates.is_empty() {
             return Some(Reason::QueueEmpty);
         }
@@ -15828,6 +15839,22 @@ impl IssueMonitorState {
                             let mut reasons =
                                 item.exclusion_reason.iter().cloned().collect::<Vec<_>>();
                             reasons.extend(self.claim_candidate_exclusions(item.issue.number));
+                            // Issue #7266 AC-2 / AC-3: only the Issue whose own
+                            // floor holds it reads `retry_backoff`, with when it lifts.
+                            if !self.retry_ready_for_saved_profile(item.issue.number, now)
+                                && !self.retry_ready(item.issue.number, now)
+                            {
+                                if let Some(floor) = self
+                                    .autonomous_records
+                                    .get(&item.issue.number)
+                                    .and_then(|record| record.retry_not_before.as_deref())
+                                {
+                                    reasons.push(format!(
+                                        "retry_backoff: until {}",
+                                        provider_quota_reset_label(floor)
+                                    ));
+                                }
+                            }
                             (!reasons.is_empty()).then(|| reasons.join("; "))
                         } else if item.state == MonitorInboxState::Launching
                             && !self.has_observed_monitor_runtime(item.issue.number)
@@ -32493,6 +32520,77 @@ mod tests {
         assert_eq!(
             unauthenticated.agent_status_at(now).stall_reason,
             Some(IssueMonitorStallReason::GithubAuthRequired)
+        );
+    }
+
+    /// Issue #7266 AC-1 / AC-2 / AC-3: a released update drain hands its held
+    /// claim back to the driver, the Monitor does not read as `retry_backoff`
+    /// while that claim is ready, and only the Issue that owns a retry floor
+    /// says `retry_backoff`, with the floor's release time.
+    #[test]
+    fn issue_7266_released_update_drain_resumes_held_claim_without_borrowed_backoff() {
+        let now = "2026-11-14T03:51:00Z";
+        let mut monitor = test_monitor_with_prefs(
+            IssueMonitorConfig {
+                enabled: true,
+                max_active: 8,
+                ..IssueMonitorConfig::default()
+            },
+            IssueMonitorPrefs {
+                enabled: true,
+                max_active_agents: 8,
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
+                launch_profile: Some(test_launch_profile("codex")),
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        monitor.set_gui_connected(true);
+        scan_queued_candidates(&mut monitor, &[issue(7259), issue(44)], now);
+        monitor.autonomous_record_mut(44).retry_not_before =
+            Some("2026-11-14T04:30:00Z".to_string());
+        assert_eq!(
+            monitor.prepare_claim_effects_with_probe("host/session", now, 8, |_| false),
+            1,
+            "only the Issue without a retry floor is claimed"
+        );
+        let held_claim = monitor.pending_effects()[0].clone();
+
+        monitor.set_update_drain(IssueMonitorUpdateDrainReason::Auto, "9.165.0", now);
+        assert!(!monitor.effect_attempt_is_ready(&held_claim, now));
+        assert_eq!(
+            monitor.agent_status_at(now).stall_reason,
+            Some(IssueMonitorStallReason::UpdateDrain)
+        );
+
+        // `pending_refused` releases the drain.
+        monitor.clear_update_drain();
+        let later = "2026-11-14T04:05:00Z";
+        assert!(
+            monitor.effect_attempt_is_ready(&held_claim, later),
+            "the claim held by the drain is attempted on the next scan"
+        );
+        let status = monitor.agent_status_at(later);
+        assert_eq!(
+            status.stall_reason, None,
+            "a ready claim is in flight; the Monitor is not waiting out a backoff"
+        );
+        let reason = |number: u64| {
+            status
+                .inbox
+                .iter()
+                .find(|row| row.issue_number == number)
+                .and_then(|row| row.exclusion_reason.clone())
+                .unwrap_or_default()
+        };
+        assert!(
+            !reason(7259).contains("retry_backoff"),
+            "an Issue with no retry floor is not excluded by retry_backoff: {}",
+            reason(7259)
+        );
+        assert!(
+            reason(44).contains("retry_backoff: until 2026-11-14T04:30:00Z"),
+            "the backoff names when it lifts: {}",
+            reason(44)
         );
     }
 

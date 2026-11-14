@@ -2776,10 +2776,11 @@ fn monitor_admission_exclusions(
     if !status.has_launch_profile {
         add("no_launch_profile");
     }
+    // Issue #7266 AC-2: `retry_backoff` is per-Issue and already on the row
+    // with its release time; the Monitor-wide stall is not copied onto it.
     match status.stall_reason {
         Some(crate::IssueMonitorStallReason::GuiDisconnected) => add("gui_disconnected"),
         Some(crate::IssueMonitorStallReason::GithubAuthRequired) => add("github_auth_required"),
-        Some(crate::IssueMonitorStallReason::RetryBackoff) => add("retry_backoff"),
         _ => {}
     }
     reasons
