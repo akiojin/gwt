@@ -152,7 +152,7 @@ Poll JSON operation `pr.view` to observe progress toward merge:
   progress for ~20 polls (~10 minutes) and nothing is failing, post JSON
   operation `board.post` with `params.kind:"status"` or `params.kind:"handoff"`,
   the PR number, pending check names, and a resume instruction. In an autonomous
-  / Issues launch, declare `issue.monitor.wait` with the explicit owner
+  / Issue Monitor launch, declare `issue.monitor.wait` with the explicit owner
   Issue number in `params.number`, `reason`, and `resume_condition` naming the
   pending CI. Keep the execution Active and auto-merge enabled; resume bounded
   checks when CI progresses and clear the wait with `params.clear:true`. Without
