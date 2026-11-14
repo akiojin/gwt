@@ -128,8 +128,10 @@ impl CoordinatorServer {
     /// Each connection service also retains the registry guard: axum's HTTP
     /// tasks can outlive a cancelled serving future and must still exclude a
     /// second writer until those connections close.
-    /// Graceful shutdown waits for accepted HTTP connections; it has no forced
-    /// drain deadline. Pending TLS handshakes retain their existing deadline.
+    /// Graceful shutdown waits for accepted HTTP connections. A connection whose
+    /// reads and writes stall ends at the listener's idle deadline, and the
+    /// listener caps how many connections exist at once. Pending TLS handshakes
+    /// retain their existing deadline.
     pub async fn serve_until(
         self,
         shutdown: impl Future<Output = ()> + Send + 'static,
