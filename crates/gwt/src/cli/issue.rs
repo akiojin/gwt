@@ -13958,6 +13958,10 @@ mod tests {
             );
         }
         assert_eq!(
+            status.as_object_mut().unwrap().remove("event_history"),
+            Some(serde_json::json!([]))
+        );
+        assert_eq!(
             status
                 .as_object_mut()
                 .unwrap()
