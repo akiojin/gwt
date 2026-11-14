@@ -3327,6 +3327,10 @@ fn manual_successor_early_admission_cancel_requires_actual_cleanup_proof() {
             },
         "cleanup consistency: {summary}"
     );
+    assert!(
+        cleaned_ack,
+        "exact cancellation before Session materialization must finish cleanup: {summary}"
+    );
 }
 
 #[test]
