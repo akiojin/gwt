@@ -27,7 +27,9 @@ fn normalize_launch_config_working_dir(config: &mut gwt_agent::LaunchConfig) {
             "GWT_PROJECT_ROOT".to_string(),
             normalized.display().to_string(),
         );
-    }
+    } // Issue #3910: intake and new-branch launches only learn their worktree
+      // here, after the argument builders ran without one.
+    config.apply_worktree_config_env();
 }
 
 fn normalize_shell_launch_config_working_dir(config: &mut ShellLaunchConfig) {
@@ -1590,6 +1592,129 @@ mod tests {
             assert_eq!(fs::read(&owner_event).unwrap(), before);
             assert_eq!(fs::read(&prefs_path).unwrap(), prefs_before);
             assert!(!review_path.join(".gwt/work/events/owner.jsonl").exists());
+        }
+    }
+
+    /// Issue #3910: the worktree-local provider config env for a resolved
+    /// worktree, keyed by env name.
+    fn worktree_config_env(config: &gwt_agent::LaunchConfig) -> Vec<(String, String)> {
+        let mut env: Vec<(String, String)> = config
+            .env_vars
+            .iter()
+            .filter(|(key, _)| {
+                matches!(
+                    key.as_str(),
+                    "OPENCLAW_CONFIG_PATH"
+                        | "OPENCLAW_INCLUDE_ROOTS"
+                        | "OPENCODE_CONFIG_DIR"
+                        | "OPENCODE_CONFIG"
+                        | "HERMES_HOME"
+                )
+            })
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        env.sort();
+        env
+    }
+
+    fn expected_worktree_config_env(
+        agent_id: &gwt_agent::AgentId,
+        worktree: &Path,
+    ) -> Vec<(String, String)> {
+        let at = |rel: &str| worktree.join(rel).to_string_lossy().into_owned();
+        let mut env = match agent_id {
+            gwt_agent::AgentId::OpenClaw => vec![
+                (
+                    "OPENCLAW_CONFIG_PATH".to_string(),
+                    at(".gwt/openclaw/openclaw.json"),
+                ),
+                ("OPENCLAW_INCLUDE_ROOTS".to_string(), at(".gwt/openclaw")),
+            ],
+            gwt_agent::AgentId::OpenCode => vec![
+                ("OPENCODE_CONFIG_DIR".to_string(), at(".gwt/opencode")),
+                (
+                    "OPENCODE_CONFIG".to_string(),
+                    at(".gwt/opencode/skip-permissions.json"),
+                ),
+            ],
+            gwt_agent::AgentId::Hermes => vec![("HERMES_HOME".to_string(), at(".gwt/hermes"))],
+            other => panic!("no worktree config env for {other:?}"),
+        };
+        env.sort();
+        env
+    }
+
+    fn worktree_config_agents() -> [gwt_agent::AgentId; 3] {
+        [
+            gwt_agent::AgentId::OpenClaw,
+            gwt_agent::AgentId::OpenCode,
+            gwt_agent::AgentId::Hermes,
+        ]
+    }
+
+    #[test]
+    fn ephemeral_launch_applies_worktree_config_env_after_resolution() {
+        let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let repo = init_launch_test_repo(temp.path());
+        for agent_id in worktree_config_agents() {
+            let mut config = gwt_agent::AgentLaunchBuilder::new(agent_id.clone())
+                .skip_permissions(true)
+                .ephemeral(None)
+                .build();
+            assert!(worktree_config_env(&config).is_empty());
+            resolve_launch_worktree(&repo, &mut config).expect("resolve ephemeral worktree");
+            let worktree = config.working_dir.clone().expect("ephemeral worktree");
+            assert_eq!(
+                worktree_config_env(&config),
+                expected_worktree_config_env(&agent_id, &worktree),
+                "{agent_id:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn new_branch_launch_applies_worktree_config_env_after_resolution() {
+        let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let repo = init_launch_test_repo(temp.path());
+        for (index, agent_id) in worktree_config_agents().into_iter().enumerate() {
+            let mut config = gwt_agent::AgentLaunchBuilder::new(agent_id.clone())
+                .skip_permissions(true)
+                .branch(format!("feature/config-env-{index}"))
+                .base_branch("develop")
+                .build();
+            assert!(worktree_config_env(&config).is_empty());
+            resolve_launch_worktree(&repo, &mut config).expect("resolve new branch worktree");
+            let worktree = config.working_dir.clone().expect("new branch worktree");
+            assert!(!same_worktree_path(&worktree, &repo));
+            assert_eq!(
+                worktree_config_env(&config),
+                expected_worktree_config_env(&agent_id, &worktree),
+                "{agent_id:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn existing_branch_launch_keeps_worktree_config_env() {
+        let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let repo = init_launch_test_repo(temp.path());
+        for agent_id in worktree_config_agents() {
+            let mut config = gwt_agent::AgentLaunchBuilder::new(agent_id.clone())
+                .skip_permissions(true)
+                .working_dir(&repo)
+                .branch("develop")
+                .build();
+            let built = worktree_config_env(&config);
+            assert_eq!(
+                built,
+                expected_worktree_config_env(&agent_id, config.working_dir.as_ref().unwrap()),
+                "{agent_id:?}"
+            );
+            resolve_launch_worktree(&repo, &mut config).expect("resolve existing worktree");
+            assert_eq!(worktree_config_env(&config), built, "{agent_id:?}");
         }
     }
 
