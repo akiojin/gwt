@@ -319,6 +319,43 @@ pub(super) fn auto_file_operation_refusal<E: CliEnv>(env: &mut E, operation: &st
     );
 }
 
+/// File an escalation from operation-local refusal facts.
+///
+/// The display text is retained as evidence, but never participates in the
+/// disposition decision. Agent-recoverable refusals have no escalation kind
+/// and therefore stay on the caller's normal retry path.
+pub(super) fn auto_file_structured_operation_refusal<E: CliEnv>(
+    env: &mut E,
+    operation: &str,
+    display: &str,
+    refusal: &super::governance::OperationRefusal,
+) {
+    if operation.starts_with("board.") {
+        return;
+    }
+    if !gwt_core::board_escalation::structured_refusal_eligible_operation(operation) {
+        return;
+    }
+    let Some(kind) = refusal.escalation_kind() else {
+        return;
+    };
+    let Some(cause) = refusal.governance.cause else {
+        return;
+    };
+    file_escalation(
+        env,
+        operation,
+        gwt_core::board_escalation::render_structured_operation_refusal_body(
+            operation,
+            display,
+            kind,
+            &refusal.reason_code,
+            cause.as_str(),
+            refusal.recovery_action.as_deref(),
+        ),
+    );
+}
+
 /// Escalate an agent's own `execution.blocked` declaration (Issue #3655 AC-1).
 ///
 /// `execution.blocked` is the exact moment an agent concludes it cannot
@@ -785,6 +822,20 @@ mod tests {
         value.to_string()
     }
 
+    fn immutable_execution_refusal() -> crate::cli::governance::OperationRefusal {
+        crate::cli::governance::OperationRefusal::human_required(
+            "execution_record_terminal",
+            gwt_core::board_escalation::OperationRefusalKind::Immutability,
+            crate::cli::governance::GovernanceMetadata {
+                effect: Some(crate::cli::governance::GovernanceEffect::Protected),
+                cause: Some(crate::cli::governance::GovernanceCause::DomainInvalid),
+                retryable: Some(false),
+                ..crate::cli::governance::GovernanceMetadata::default()
+            },
+            None,
+        )
+    }
+
     fn workspace_agent(
         session_id: &str,
         agent_id: &str,
@@ -1114,16 +1165,56 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
 
-        auto_file_operation_refusal(
+        auto_file_structured_operation_refusal(
             &mut env,
             "execution.reopen",
             "Completed issue #2338 is immutable; use a fresh launch for new work",
+            &immutable_execution_refusal(),
         );
 
         let open = gwt_core::coordination::load_open_escalations(tmp.path()).unwrap();
         assert_eq!(open.len(), 1);
         assert!(open[0].body.contains("execution.reopen"), "{:?}", open[0]);
         assert!(open[0].body.contains("is immutable"), "{:?}", open[0]);
+    }
+
+    #[test]
+    fn a_typed_authority_refusal_escalates_independently_of_display_wording() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _session_env = ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
+        let tmp = tempfile::tempdir().unwrap();
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+        let refusal = crate::cli::governance::OperationRefusal::human_required(
+            "execution_owner_mismatch",
+            gwt_core::board_escalation::OperationRefusalKind::Authority,
+            crate::cli::governance::GovernanceMetadata {
+                effect: Some(crate::cli::governance::GovernanceEffect::Protected),
+                cause: Some(crate::cli::governance::GovernanceCause::Authority),
+                retryable: Some(false),
+                ..crate::cli::governance::GovernanceMetadata::default()
+            },
+            None,
+        );
+
+        auto_file_structured_operation_refusal(
+            &mut env,
+            "execution.complete",
+            "display wording with no classifier keywords",
+            &refusal,
+        );
+
+        let open = gwt_core::coordination::load_open_escalations(tmp.path()).unwrap();
+        assert_eq!(open.len(), 1);
+        assert!(open[0].body.contains("原因: authority"), "{:?}", open[0]);
+        assert!(
+            open[0]
+                .body
+                .contains("display wording with no classifier keywords"),
+            "the display still travels as evidence without deciding the cause: {:?}",
+            open[0]
+        );
     }
 
     #[test]
@@ -1138,10 +1229,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
         for _ in 0..3 {
-            auto_file_operation_refusal(
+            auto_file_structured_operation_refusal(
                 &mut env,
                 "execution.reopen",
                 "Completed issue #2338 is immutable; use a fresh launch for new work",
+                &immutable_execution_refusal(),
             );
         }
 
@@ -1165,10 +1257,11 @@ mod tests {
         let _session_env = ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
         let tmp = tempfile::tempdir().unwrap();
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
-        auto_file_operation_refusal(
+        auto_file_structured_operation_refusal(
             &mut env,
             "execution.reopen",
             "Completed issue #2338 is immutable",
+            &immutable_execution_refusal(),
         );
         auto_file_operation_refusal(
             &mut env,
@@ -1200,6 +1293,12 @@ mod tests {
             &mut env,
             "execution.blocked",
             "missing required flag: reason",
+        );
+        auto_file_structured_operation_refusal(
+            &mut env,
+            "issue.view",
+            "display wording is irrelevant",
+            &immutable_execution_refusal(),
         );
 
         assert!(gwt_core::coordination::load_open_escalations(tmp.path())

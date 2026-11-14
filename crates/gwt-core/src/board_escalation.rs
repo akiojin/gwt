@@ -311,7 +311,8 @@ fn body_has_section(body: &str, aliases: &[&str]) -> bool {
 
 /// Why an operation was refused in a way the agent cannot work around
 /// (Issue #3655 AC-2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum OperationRefusalKind {
     /// The target is terminal and can never accept this operation again.
     Immutability,
@@ -320,6 +321,8 @@ pub enum OperationRefusalKind {
     /// The operation is not permitted here, or reaches a surface that refuses
     /// to act at all.
     Permission,
+    /// Durable authority or evidence failed its integrity contract.
+    Integrity,
 }
 
 impl OperationRefusalKind {
@@ -328,6 +331,7 @@ impl OperationRefusalKind {
             Self::Immutability => "immutability",
             Self::Authority => "authority",
             Self::Permission => "permission",
+            Self::Integrity => "integrity",
         }
     }
 
@@ -341,6 +345,9 @@ impl OperationRefusalKind {
             }
             Self::Permission => {
                 "この操作はこの surface では拒否されます。PM 側での代行、または設定・ツール側の修正が必要です。"
+            }
+            Self::Integrity => {
+                "durable authority の整合性を回復する必要があります。監査可能な repair 経路を確認してから再実行してください。"
             }
         }
     }
@@ -361,17 +368,18 @@ impl OperationRefusalKind {
 ///   and a refused authority is contractually forbidden from writing anything
 ///   locally — an escalation there would itself be the mutation the refusal
 ///   promises not to make.
-fn refusal_eligible_operation(operation: &str) -> bool {
-    const FAMILIES: &[&str] = &[
-        "execution.",
-        "workspace.ensure",
-        "pane.close",
-        "pane.stop",
-        "pane.send",
-    ];
+fn legacy_refusal_eligible_operation(operation: &str) -> bool {
+    const FAMILIES: &[&str] = &["workspace.ensure", "pane.close", "pane.stop", "pane.send"];
     FAMILIES
         .iter()
         .any(|family| operation.starts_with(family) || operation == family.trim_end_matches('.'))
+}
+
+/// Operations allowed to auto-escalate when their producer supplies a typed
+/// human-required disposition. Scope eligibility is stable operation data; it
+/// does not inspect display prose.
+pub fn structured_refusal_eligible_operation(operation: &str) -> bool {
+    operation.starts_with("execution.") || legacy_refusal_eligible_operation(operation)
 }
 
 /// Decide whether a failed operation is a governance refusal worth escalating.
@@ -382,7 +390,7 @@ fn refusal_eligible_operation(operation: &str) -> bool {
 /// lifecycle operation would raise an alarm, and every unrelated command that
 /// happens to say "unavailable" would too.
 pub fn classify_operation_refusal(operation: &str, error: &str) -> Option<OperationRefusalKind> {
-    if !refusal_eligible_operation(operation) {
+    if !legacy_refusal_eligible_operation(operation) {
         return None;
     }
     let lowered = error.to_lowercase();
@@ -454,6 +462,27 @@ pub fn render_operation_refusal_body(
         kind = kind.as_str(),
         request = kind.request_hint(),
     )
+}
+
+/// Add stable producer facts to the ordinary human-readable refusal body.
+///
+/// The typed cause has already been checked against `kind` by the caller. The
+/// display text remains evidence only; these fields make later audits robust
+/// to wording changes without duplicating the four-section renderer.
+pub fn render_structured_operation_refusal_body(
+    operation: &str,
+    error: &str,
+    kind: OperationRefusalKind,
+    reason_code: &str,
+    cause: &str,
+    recovery_action: Option<&str>,
+) -> String {
+    let mut body = render_operation_refusal_body(operation, error, kind);
+    body.push_str(&format!(
+        "\n\n構造化拒否: reason_code=`{reason_code}`, cause=`{cause}`, recovery_action=`{}`",
+        recovery_action.unwrap_or("none"),
+    ));
+    body
 }
 
 /// Render the four-section body for an agent that declared itself blocked
@@ -873,13 +902,14 @@ mod tests {
     }
 
     #[test]
-    fn the_three_production_refusals_from_the_issue_are_all_classified() {
+    fn legacy_workspace_and_pane_refusals_remain_classified() {
         assert_eq!(
             classify_operation_refusal(
                 "execution.reopen",
                 "Completed issue #2338 is immutable; use a fresh launch for new work"
             ),
-            Some(OperationRefusalKind::Immutability)
+            None,
+            "execution refusals require operation-local typed disposition"
         );
         assert_eq!(
             classify_operation_refusal(

@@ -139,6 +139,10 @@ impl AgentBridgeFailure {
         }
     }
 
+    pub(crate) fn reason(&self) -> AgentBridgeFailureReason {
+        self.reason
+    }
+
     pub(crate) fn is_exact_workspace_ensure_required(&self) -> bool {
         self.exact_workspace_ensure_required
             && self.reason == AgentBridgeFailureReason::WorkspaceEnsureRequired
@@ -432,12 +436,19 @@ pub fn send_execution_continuation_via_agent_bridge(
     target: &HookForwardTarget,
     request: &crate::AgentExecutionContinuationRequest,
 ) -> Result<crate::AgentExecutionContinuationReceipt, String> {
+    send_execution_continuation_via_agent_bridge_detailed(target, request)
+        .map_err(|error| error.to_string())
+}
+
+pub(crate) fn send_execution_continuation_via_agent_bridge_detailed(
+    target: &HookForwardTarget,
+    request: &crate::AgentExecutionContinuationRequest,
+) -> Result<crate::AgentExecutionContinuationReceipt, AgentBridgeFailure> {
     let url = target.execution_continuation_url().map_err(|_| {
         AgentBridgeFailure::new(
             AgentBridgeFailureReason::TransportFailure,
             "Host continuation bridge target is invalid",
         )
-        .to_string()
     })?;
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(30))
@@ -448,7 +459,6 @@ pub fn send_execution_continuation_via_agent_bridge(
                 AgentBridgeFailureReason::TransportFailure,
                 "failed to build the Host continuation bridge client",
             )
-            .to_string()
         })?;
     let response = client
         .post(url)
@@ -460,7 +470,6 @@ pub fn send_execution_continuation_via_agent_bridge(
                 AgentBridgeFailureReason::TransportFailure,
                 "Host continuation bridge is unavailable; no local fallback was attempted",
             )
-            .to_string()
         })?;
     if !response.status().is_success() {
         let reason = response
@@ -478,8 +487,7 @@ pub fn send_execution_continuation_via_agent_bridge(
         return Err(AgentBridgeFailure::new(
             reason,
             "Host continuation bridge rejected the operation; no local fallback was attempted",
-        )
-        .to_string());
+        ));
     }
     let receipt = response
         .json::<crate::AgentExecutionContinuationReceipt>()
@@ -488,7 +496,6 @@ pub fn send_execution_continuation_via_agent_bridge(
                 AgentBridgeFailureReason::ReceiptMismatch,
                 "Host continuation bridge returned an invalid success response",
             )
-            .to_string()
         })?;
     if receipt.schema_version != crate::AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION
         || receipt.operation_id != request.operation_id
@@ -499,8 +506,7 @@ pub fn send_execution_continuation_via_agent_bridge(
         return Err(AgentBridgeFailure::new(
             AgentBridgeFailureReason::ReceiptMismatch,
             "Host continuation bridge returned mismatched authority evidence",
-        )
-        .to_string());
+        ));
     }
     Ok(receipt)
 }
@@ -1734,6 +1740,80 @@ mod tests {
             .expect_err("mismatched receipt must be typed");
         assert!(receipt.contains("receipt_mismatch"), "{receipt}");
         receipt_server.receive();
+
+        let continuation_request = crate::AgentExecutionContinuationRequest {
+            schema_version: crate::AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION,
+            operation_id: "continuation-reason-codes".to_string(),
+        };
+        let continuation_transport = send_execution_continuation_via_agent_bridge_detailed(
+            &unavailable,
+            &continuation_request,
+        )
+        .expect_err("unreachable continuation Host must remain typed");
+        assert_eq!(
+            continuation_transport.reason(),
+            AgentBridgeFailureReason::TransportFailure
+        );
+
+        let continuation_authority_server = BindingProbeServer::start(
+            StatusCode::CONFLICT,
+            serde_json::json!({
+                "code": "execution_binding_mismatch",
+                "reason": "authority_mismatch",
+                "message": "current continuation authority does not match"
+            }),
+        );
+        let continuation_authority = send_execution_continuation_via_agent_bridge_detailed(
+            &HookForwardTarget {
+                url: continuation_authority_server.forward_url.clone(),
+                token: "continuation-authority-secret".to_string(),
+            },
+            &continuation_request,
+        )
+        .expect_err("continuation authority mismatch must remain typed");
+        assert_eq!(
+            continuation_authority.reason(),
+            AgentBridgeFailureReason::AuthorityMismatch
+        );
+        continuation_authority_server.receive();
+
+        let continuation_rejected_server = BindingProbeServer::start(
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({
+                "code": "invalid_request",
+                "reason": "operation_rejected",
+                "message": "continuation request is invalid"
+            }),
+        );
+        let continuation_rejected = send_execution_continuation_via_agent_bridge_detailed(
+            &HookForwardTarget {
+                url: continuation_rejected_server.forward_url.clone(),
+                token: "continuation-rejected-secret".to_string(),
+            },
+            &continuation_request,
+        )
+        .expect_err("continuation rejection must remain typed");
+        assert_eq!(
+            continuation_rejected.reason(),
+            AgentBridgeFailureReason::OperationRejected
+        );
+        continuation_rejected_server.receive();
+
+        let continuation_receipt_server =
+            BindingProbeServer::start(StatusCode::OK, serde_json::json!({"validated": true}));
+        let continuation_receipt = send_execution_continuation_via_agent_bridge_detailed(
+            &HookForwardTarget {
+                url: continuation_receipt_server.forward_url.clone(),
+                token: "continuation-receipt-secret".to_string(),
+            },
+            &continuation_request,
+        )
+        .expect_err("invalid continuation receipt must remain typed");
+        assert_eq!(
+            continuation_receipt.reason(),
+            AgentBridgeFailureReason::ReceiptMismatch
+        );
+        continuation_receipt_server.receive();
     }
 
     #[test]

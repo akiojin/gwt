@@ -44,6 +44,37 @@ pub(crate) struct DeclaredBlock {
     pub missing_verification: Option<String>,
 }
 
+pub(crate) fn run_collect_governed<E: CliEnv>(
+    env: &mut E,
+    cmd: CliCommand,
+) -> Result<super::governance::GovernedCommandOutput, Box<super::governance::GovernedCommandFailure>>
+{
+    match cmd {
+        CliCommand::Execution(inner) => {
+            let mut output = String::new();
+            let result = super::execution_state::run_governed(env, inner, &mut output)?;
+            Ok(super::governance::GovernedCommandOutput {
+                exit_code: result.exit_code,
+                output,
+                refusal: result.refusal,
+            })
+        }
+        other => {
+            let (exit_code, output) = super::run_collect(env, other).map_err(|error| {
+                Box::new(super::governance::GovernedCommandFailure {
+                    error,
+                    refusal: None,
+                })
+            })?;
+            Ok(super::governance::GovernedCommandOutput {
+                exit_code,
+                output,
+                refusal: None,
+            })
+        }
+    }
+}
+
 pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
     let input = match env.read_stdin() {
         Ok(input) => input,
@@ -61,20 +92,37 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
     };
     let operation = parsed.operation.clone();
     let declared_block = parsed.declared_block;
-    match super::run_collect(env, parsed.command) {
-        Ok((code, output)) => {
+    match run_collect_governed(env, parsed.command) {
+        Ok(result) => {
+            let super::governance::GovernedCommandOutput {
+                exit_code: code,
+                output,
+                refusal,
+            } = result;
             let mut payload = serde_json::json!({
                 "ok": code == 0,
                 "operation": operation,
                 "exit_code": code,
                 "output": output,
             });
+            if let Some(refusal) = refusal.as_ref() {
+                payload["refusal"] = serde_json::to_value(refusal)
+                    .expect("operation refusal metadata must serialize");
+            }
             attach_project_store(&mut payload);
             let _ = writeln!(env.stdout(), "{}", payload);
             match (code, declared_block) {
                 (0, Some(block)) => super::board::auto_file_declared_block(env, &block),
                 (0, None) => {}
-                _ => super::board::auto_file_operation_refusal(env, &operation, &output),
+                _ => {
+                    if let Some(refusal) = refusal.as_ref() {
+                        super::board::auto_file_structured_operation_refusal(
+                            env, &operation, &output, refusal,
+                        );
+                    } else if !operation.starts_with("execution.") {
+                        super::board::auto_file_operation_refusal(env, &operation, &output);
+                    }
+                }
             }
             code
         }
@@ -82,14 +130,18 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
         // surface. Without this, stdout stayed empty and a machine caller
         // could not distinguish "the operation failed at stage X" from "the
         // process never answered". The stderr line stays for humans.
-        Err(err) => {
-            let message = err.to_string();
+        Err(failure) => {
+            let message = failure.error.to_string();
             let mut payload = serde_json::json!({
                 "ok": false,
                 "operation": operation,
                 "exit_code": 1,
                 "error": message,
             });
+            if let Some(refusal) = failure.refusal.as_ref() {
+                payload["refusal"] = serde_json::to_value(refusal)
+                    .expect("operation refusal metadata must serialize");
+            }
             attach_project_store(&mut payload);
             let _ = writeln!(env.stdout(), "{payload}");
             let _ = writeln!(env.stderr(), "{prog} {operation}: {message}");
@@ -97,7 +149,13 @@ pub(crate) fn dispatch<E: CliEnv>(env: &mut E, prog: &str) -> i32 {
             // depending on the agent noticing it is stuck. Answering the caller
             // comes first — the escalation must never delay or replace the
             // operation's own reply.
-            super::board::auto_file_operation_refusal(env, &operation, &message);
+            if let Some(refusal) = failure.refusal.as_ref() {
+                super::board::auto_file_structured_operation_refusal(
+                    env, &operation, &message, refusal,
+                );
+            } else if !operation.starts_with("execution.") {
+                super::board::auto_file_operation_refusal(env, &operation, &message);
+            }
             1
         }
     }
