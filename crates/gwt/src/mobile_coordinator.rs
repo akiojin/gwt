@@ -12,6 +12,7 @@ pub mod storage;
 
 pub mod admin;
 
+mod browser_route;
 mod config;
 pub use config::{ConfigError, CoordinatorConfig, CoordinatorLimits, TlsError};
 mod host_route;
