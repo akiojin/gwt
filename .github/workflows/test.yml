@@ -230,7 +230,11 @@ jobs:
         continue-on-error: true
       # Separate compilation from execution in the Actions step timings. This
       # unpartitioned list is the original --workspace --all-features test set.
+      # Omit workspace line tables only after cache restore. Keep all test
+      # Cargo steps on this profile so later steps do not rebuild it.
       - name: Build and inventory workspace tests
+        env:
+          CARGO_PROFILE_TEST_DEBUG: "0"
         run: |
           mkdir -p target/workspace-test-evidence
           cargo nextest list --workspace --all-features --message-format json > target/workspace-test-evidence/inventory.json
@@ -242,6 +246,8 @@ jobs:
       # turn a green suite into a timeout. Pinned by
       # crates/gwt/tests/ci_test_budget_contract_test.rs.
       - name: Run tests
+        env:
+          CARGO_PROFILE_TEST_DEBUG: "0"
         run: cargo nextest run --workspace --all-features --test-threads=1 --profile ci --partition slice:${{ matrix.shard }}/6
         timeout-minutes: 25
       # SPEC #4551 T-050 / AC-5: mechanism (C) -- a child the suite never
@@ -257,6 +263,8 @@ jobs:
       # nextest isolates normal tests; doctests retain rustdoc's own harness.
       - name: Run doctests
         if: matrix.shard == 1
+        env:
+          CARGO_PROFILE_TEST_DEBUG: "0"
         run: cargo test --workspace --all-features --doc
         timeout-minutes: 5
       # Issue #4134 AC-4: four tests cost 226s here and 3.9s on macOS for the
@@ -273,6 +281,8 @@ jobs:
       # session bus. One `gwt` lifetime, so the step budget is unchanged.
       - name: Run real-binary front-door tests (Xvfb)
         if: matrix.shard == 1
+        env:
+          CARGO_PROFILE_TEST_DEBUG: "0"
         run: dbus-run-session -- xvfb-run -a cargo test -p gwt --all-features --test stable_server_port --test project_restore_integration --test open_cli_integration -- --ignored --test-threads=1 --nocapture
         timeout-minutes: 10
       - name: Voice accuracy regression (optional local dataset)
