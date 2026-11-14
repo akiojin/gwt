@@ -3906,6 +3906,7 @@ def _materialize_file_artifact_pair(
     progress_total: Optional[int] = None,
     on_checkpoint: Optional[Callable[[int], None]] = None,
     reuse_entries: Optional[Dict[str, Dict[str, Any]]] = None,
+    invalid_paths: Optional[set[str]] = None,
 ) -> tuple[int, int, bool]:
     """Build one Base or Overlay artifact pair.
 
@@ -3935,7 +3936,11 @@ def _materialize_file_artifact_pair(
                 and not candidate.is_symlink()
             ):
                 shutil.rmtree(candidate, ignore_errors=True)
-        if _artifact_pair_metadata_is_verified(
+        # IDs alone cannot clear payload failures observed by this build.
+        has_invalid_payloads = bool(invalid_paths) and not invalid_paths.isdisjoint(
+            record["path"] for record in records
+        )
+        if not has_invalid_payloads and _artifact_pair_metadata_is_verified(
             artifact_dir, records, descriptor_identity
         ):
             if on_checkpoint is not None:
@@ -5589,11 +5594,7 @@ def _action_index_files_protocol_v2_pinned(
     reuse_inputs = _file_index_v2_reuse_inputs(repo_hash, worktree_hash, descriptor, db_root)
     canonical = _canonical_git_tree(root)
     if canonical is not None and canonical.get("root_tree_oid") is not None:
-        base_reuse = reuse_inputs.get("base")
-        if base_reuse is not None and base_reuse["descriptor"]["root_tree_oid"] != canonical["root_tree_oid"]:
-            base_records = _canonical_base_records(root, canonical, reuse_inputs=base_reuse)
-        else:
-            base_records = _canonical_base_records(root, canonical)
+        base_records = _canonical_base_records(root, canonical, reuse_inputs=reuse_inputs.get("base"))
     else:
         base_records = []
     base_by_path = {record["path"]: record for record in base_records}
@@ -5729,7 +5730,8 @@ def _action_index_files_protocol_v2_pinned(
         progress_total=requested,
         on_checkpoint=lambda done: checkpoint(done, "base"),
         **({"reuse_entries": {path: entry for path, entry in reuse_inputs["base"]["entries"].items()
-                            if path not in reuse_inputs["base"]["invalid_paths"]}} if "base" in reuse_inputs else {}),
+                            if path not in reuse_inputs["base"]["invalid_paths"]},
+            "invalid_paths": reuse_inputs["base"]["invalid_paths"]} if "base" in reuse_inputs else {}),
     )
     if base_yielded:
         return _file_index_v2_yielded_result(
@@ -5765,7 +5767,8 @@ def _action_index_files_protocol_v2_pinned(
         progress_total=requested,
         on_checkpoint=lambda done: checkpoint(len(base_records) + done, "overlay"),
         **({"reuse_entries": {path: entry for path, entry in reuse_inputs["overlay"]["entries"].items()
-                            if path not in reuse_inputs["overlay"]["invalid_paths"]}} if "overlay" in reuse_inputs else {}),
+                            if path not in reuse_inputs["overlay"]["invalid_paths"]},
+            "invalid_paths": reuse_inputs["overlay"]["invalid_paths"]} if "overlay" in reuse_inputs else {}),
     )
     computed = base_computed + overlay_computed
     cache_hits = base_hits + overlay_hits
