@@ -8,10 +8,34 @@ module.exports = class HeadedE2eReporter {
     this.result = { chromium_dark_passed: 0, chromium_light_passed: 0, failed: 0, status: "interrupted" };
     this.tests = [];
     this.workerHeaded = new Map();
+    this.attachmentIndex = 0;
+  }
+
+  onBegin(config) {
+    this.outputDir = config.projects[0]?.outputDir;
   }
 
   onTestEnd(_test, result) {
     if (["failed", "timedOut", "interrupted"].includes(result.status)) this.result.failed += 1;
+    for (const attachment of result.attachments || []) {
+      let artifact;
+      try {
+        if (attachment.path) {
+          artifact = path.resolve(attachment.path);
+          if (!fs.statSync(artifact).isFile()) continue;
+        } else if (this.outputDir && attachment.contentType === "image/png" && attachment.body) {
+          const directory = path.resolve(this.outputDir, "gwt-attachments");
+          fs.mkdirSync(directory, { recursive: true });
+          artifact = path.join(directory, `attachment-${this.attachmentIndex++}.png`);
+          fs.writeFileSync(artifact, attachment.body);
+        } else {
+          continue;
+        }
+      } catch {
+        continue;
+      }
+      (this.result.artifacts ??= []).push(artifact);
+    }
     this.tests.push(result);
   }
 

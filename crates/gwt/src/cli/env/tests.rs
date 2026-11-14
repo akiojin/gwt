@@ -443,7 +443,13 @@ fn test_env_records_io_and_pr_side_effects() {
 
     env.seed_pr(7, sample_pr_status());
     let edited = env
-        .edit_pr(7, Some("Edited"), Some("New body"), &["tested".to_string()])
+        .edit_pr(
+            7,
+            None,
+            Some("Edited"),
+            Some("New body"),
+            &["tested".to_string()],
+        )
         .expect("edit pr");
     assert_eq!(edited.number, 128);
     assert_eq!(env.pr_edit_call_log[0].number, 7);
@@ -1071,6 +1077,193 @@ fn dispatch_json_envelope_pr_create_uses_body_param() {
     assert!(call.draft);
 }
 
+fn issue_3693_transport_env(repo_path: &Path) -> DefaultCliEnv {
+    DefaultCliEnv::new_with_client_factory_and_cache_root(
+        "akiojin",
+        "gwt",
+        repo_path.to_path_buf(),
+        repo_path.join(".cache"),
+        failing_factory(Arc::new(AtomicUsize::new(0))),
+    )
+}
+
+fn issue_3693_recorded_argv(path: &Path) -> Vec<String> {
+    fs::read_to_string(path)
+        .expect("read fake gh argument log")
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+#[test]
+fn issue_3693_base_only_edit_reaches_rest_patch_through_default_env() {
+    crate::cli::test_support::with_fake_gh("issue-3693-success", |repo_path| {
+        let _home = gwt_core::test_support::ScopedGwtHome::set(repo_path.join("home"));
+        let _session = crate::cli::test_support::ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
+        let _sandbox = crate::cli::test_support::ScopedEnvVar::set("GWT_TEST_GH_SANDBOX", "1");
+        let log_path = repo_path.join("gh-argv");
+        fs::write(&log_path, "").expect("initialize argument log");
+        let _log = crate::cli::test_support::ScopedEnvVar::set("GWT_FAKE_GH_ARGV_FILE", &log_path);
+        let state_path = env::var_os("GWT_FAKE_GH_STATE_FILE").expect("fake PR state path");
+        fs::write(&state_path, "main").expect("seed the mistakenly selected base");
+        let command =
+            crate::cli::parse_pr_args(&["edit", "12", "--base", "develop"].map(str::to_string))
+                .expect("a base-only edit is a supported recovery operation");
+        let mut env = issue_3693_transport_env(repo_path);
+
+        let result = crate::cli::json_envelope::run_collect_governed(&mut env, command)
+            .expect("base edit dispatch");
+
+        assert_eq!(result.exit_code, 0, "{}", result.output);
+        assert_eq!(
+            fs::read_to_string(&state_path).expect("read recovered PR base"),
+            "develop",
+            "the existing PR must be retargeted from main to develop"
+        );
+        let calls = issue_3693_recorded_argv(&log_path);
+        assert_eq!(
+            calls.first(),
+            Some(&format!(
+                "{:?}",
+                [
+                    "api",
+                    "--method",
+                    "PATCH",
+                    "repos/akiojin/gwt/pulls/12",
+                    "-f",
+                    "base=develop",
+                ]
+            )),
+            "the recovery must send the requested base to GitHub"
+        );
+        assert!(result.output.contains("#12 [OPEN]"));
+        assert!(!calls
+            .iter()
+            .any(|call| call.starts_with("[\"pr\", \"edit\"")));
+    });
+}
+
+#[test]
+fn issue_3693_close_records_optional_comment_before_rest_close_without_deleting_branch() {
+    crate::cli::test_support::with_fake_gh("issue-3693-success", |repo_path| {
+        let _home = gwt_core::test_support::ScopedGwtHome::set(repo_path.join("home"));
+        let _session = crate::cli::test_support::ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
+        let _sandbox = crate::cli::test_support::ScopedEnvVar::set("GWT_TEST_GH_SANDBOX", "1");
+        let log_path = repo_path.join("gh-argv");
+        let _log = crate::cli::test_support::ScopedEnvVar::set("GWT_FAKE_GH_ARGV_FILE", &log_path);
+        for comment in [None, Some("Wrong base=main.\nRecreate against develop.")] {
+            fs::write(&log_path, "").expect("initialize argument log");
+            let state_path = env::var_os("GWT_FAKE_GH_STATE_FILE").expect("fake PR state path");
+            fs::write(state_path, "open").expect("reset PR state");
+            let mut args = vec!["close".to_string(), "12".to_string()];
+            if let Some(comment) = comment {
+                args.extend(["--comment".to_string(), comment.to_string()]);
+            }
+            let command = crate::cli::parse_pr_args(&args)
+                .expect("close supports an optional closure comment");
+            let mut env = issue_3693_transport_env(repo_path);
+
+            let result = crate::cli::json_envelope::run_collect_governed(&mut env, command)
+                .expect("close dispatch");
+
+            assert_eq!(result.exit_code, 0, "{}", result.output);
+            assert!(result.output.contains("#12 [CLOSED]"), "{}", result.output);
+            let calls = issue_3693_recorded_argv(&log_path);
+            let mut expected_mutations = Vec::new();
+            if let Some(comment) = comment {
+                expected_mutations.push(format!(
+                    "{:?}",
+                    [
+                        "pr",
+                        "comment",
+                        "12",
+                        "--repo",
+                        "akiojin/gwt",
+                        "--body",
+                        comment
+                    ]
+                ));
+            }
+            expected_mutations.push(format!(
+                "{:?}",
+                [
+                    "api",
+                    "--method",
+                    "PATCH",
+                    "repos/akiojin/gwt/pulls/12",
+                    "-f",
+                    "state=closed",
+                ]
+            ));
+            assert_eq!(
+                &calls[..expected_mutations.len()],
+                expected_mutations.as_slice(),
+                "record the comment before closing the PR"
+            );
+            assert!(!calls.iter().any(|call| call.contains("--delete-branch")));
+            assert!(!calls
+                .iter()
+                .any(|call| call.starts_with("[\"pr\", \"close\"")));
+        }
+    });
+}
+
+#[test]
+fn issue_3693_recovery_transport_failures_propagate_without_later_mutations() {
+    crate::cli::test_support::with_fake_gh("issue-3693-success", |repo_path| {
+        let _home = gwt_core::test_support::ScopedGwtHome::set(repo_path.join("home"));
+        let _session = crate::cli::test_support::ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
+        let _sandbox = crate::cli::test_support::ScopedEnvVar::set("GWT_TEST_GH_SANDBOX", "1");
+        let log_path = repo_path.join("gh-argv");
+        let _log = crate::cli::test_support::ScopedEnvVar::set("GWT_FAKE_GH_ARGV_FILE", &log_path);
+        for (mode, args, expected_error) in [
+            (
+                "issue-3693-edit-failure",
+                vec!["edit", "12", "--base", "develop"],
+                "base update failed",
+            ),
+            (
+                "issue-3693-comment-failure",
+                vec!["close", "12", "--comment", "Wrong base"],
+                "closure comment failed",
+            ),
+            (
+                "issue-3693-close-failure",
+                vec!["close", "12"],
+                "PR close failed",
+            ),
+        ] {
+            fs::write(&log_path, "").expect("initialize argument log");
+            let state_path = env::var_os("GWT_FAKE_GH_STATE_FILE").expect("fake PR state path");
+            fs::write(&state_path, "main").expect("seed the mistakenly selected base");
+            let _mode = crate::cli::test_support::ScopedEnvVar::set("GWT_FAKE_GH_MODE", mode);
+            let args: Vec<String> = args.into_iter().map(str::to_string).collect();
+            let command = crate::cli::parse_pr_args(&args).expect("parse recovery operation");
+            let mut env = issue_3693_transport_env(repo_path);
+
+            let failure = crate::cli::json_envelope::run_collect_governed(&mut env, command)
+                .expect_err("a failed GitHub mutation must fail the operation");
+
+            assert!(
+                failure.error.to_string().contains(expected_error),
+                "unexpected {mode} error: {}",
+                failure.error
+            );
+            let calls = issue_3693_recorded_argv(&log_path);
+            assert_eq!(calls.len(), 1, "{mode} must stop after its failed mutation");
+            assert_eq!(
+                fs::read_to_string(&state_path).expect("read PR state after failed recovery"),
+                "main",
+                "{mode} must preserve the original PR state"
+            );
+            if mode == "issue-3693-comment-failure" {
+                assert!(calls[0].starts_with("[\"pr\", \"comment\""));
+                assert!(!calls[0].contains("state=closed"));
+            }
+        }
+    });
+}
+
 #[test]
 fn default_cli_env_routes_gh_backed_methods_and_internal_dispatch() {
     with_fake_gh(|repo_path| {
@@ -1122,7 +1315,13 @@ fn default_cli_env_routes_gh_backed_methods_and_internal_dispatch() {
         assert_eq!(created.number, 12);
 
         let edited = env
-            .edit_pr(12, Some("Edited"), Some("Updated"), &["tested".to_string()])
+            .edit_pr(
+                12,
+                None,
+                Some("Edited"),
+                Some("Updated"),
+                &["tested".to_string()],
+            )
             .expect("edit pr");
         assert_eq!(edited.number, 12);
 

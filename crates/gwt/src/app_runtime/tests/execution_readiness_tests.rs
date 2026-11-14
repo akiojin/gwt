@@ -139,7 +139,7 @@ fn fresh_execution_queued_readiness_cannot_revive_an_exact_rollback() {
         .finalize_fresh_execution_launch_session_start(&fixture.window_id, Some(&nonce));
     fixture.runtime.handle_launch_complete_and_drain(
         fixture.window_id.clone(),
-        Err("spawn failed before readiness worker".to_string()),
+        Err("spawn failed before readiness worker".into()),
     );
     assert_pending_fresh_execution_was_rolled_back(&fixture);
     assert!(!fixture
@@ -1244,6 +1244,21 @@ fn fresh_execution_continue_resends_ready_and_commits_work() {
     assert_eq!(receipt.operation_id, "continue-ready-request");
     assert_eq!(receipt.execution_binding, fixture.binding.identity);
     assert!(receipt.validated);
+    let works = gwt_core::workspace_projection::load_workspace_work_items(&fixture.repo)
+        .unwrap()
+        .unwrap();
+    let work_id = gwt_core::workspace_projection::current_work_id(
+        &works,
+        &fixture.repo,
+        Some("work/issue-2359"),
+        Some(&fixture.repo),
+    )
+    .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&body).unwrap()["work_id"].as_str(),
+        Some(work_id.as_str()),
+        "successor_created must identify the Work committed by the readiness coordinator"
+    );
     assert!(fixture
         .issuer
         .active_token_is_current(&fixture.token, &fixture.binding));
@@ -1627,11 +1642,13 @@ fn fresh_execution_worker_stale_completion_preserves_activated_generation() {
         .handle_launch_complete(fixture.window_id.clone(), Ok(completion));
     drain_queued_blocking_tasks(&tasks);
     let prepared = take_prepared_agent_launch(&recorded);
+    let reader = super::super::launch::drain_prepared_fresh_launch_output_for_test(&prepared);
     gwt::cli::execution_state::activate_successor(&fixture.repo, fixture.owner, &pending.request)
         .expect("activate exact fresh candidate before stale completion");
     fixture.runtime.close_window_events(&fixture.window_id);
     fixture.runtime.handle_agent_launch_prepared(prepared);
     drain_queued_blocking_tasks(&tasks);
+    reader.join().expect("fresh launch output reader");
     assert_eq!(
         gwt::cli::execution_state::current_execution_binding(&fixture.repo, fixture.owner)
             .expect("read activated generation"),
@@ -1671,7 +1688,7 @@ fn fresh_execution_spawn_failure_aborts_candidate_and_preserves_blocked_predeces
 
     let events = fixture.runtime.handle_launch_complete_and_drain(
         fixture.window_id.clone(),
-        Err("candidate spawn failed".to_string()),
+        Err("candidate spawn failed".into()),
     );
 
     assert!(!events.is_empty());
@@ -2478,8 +2495,8 @@ fn production_host_launch_all_runner_failure_leaves_no_session_or_success_dispat
             _ => None,
         })
         .expect("failed LaunchComplete event");
-    assert!(error.contains("OpenClaw"), "{error}");
-    assert!(error.contains("exit status 1"), "{error}");
+    assert!(error.detail.contains("OpenClaw"), "{error}");
+    assert!(error.detail.contains("exit status 1"), "{error}");
     assert!(recorded
         .iter()
         .all(|event| !matches!(recorded_project_payload(event), UserEvent::LaunchComplete { result, .. } if result.is_ok())));
@@ -2643,7 +2660,7 @@ fn failed_precommit_fresh_launch_does_not_orphan_its_persisted_session() {
             _ => None,
         })
         .expect("failed LaunchComplete event");
-    assert!(launch_error.contains("Host capability issuer"));
+    assert!(launch_error.detail.contains("Host capability issuer"));
     let persisted_candidates = fs::read_dir(&sessions_dir)
         .expect("read sessions dir")
         .flatten()
@@ -2714,7 +2731,7 @@ fn genesis_final_runtime_persistence_failure_terminalizes_generation() {
         })
         .expect("failed LaunchComplete event");
     assert!(
-        error.contains("runtime") || error.contains("directory"),
+        error.detail.contains("runtime") || error.detail.contains("directory"),
         "{error}"
     );
     let ledger = gwt::cli::execution_state::load_generation_ledger(&repo, owner)

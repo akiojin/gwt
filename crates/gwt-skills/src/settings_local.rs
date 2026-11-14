@@ -567,11 +567,28 @@ pub fn sanitize_hook_bin_for_config_path(path: &Path, bin: &str) -> String {
 }
 
 /// The checkout root that owns `bin` when `bin` is a gwt build output
-/// (`<root>/target/[<triple>/]{debug,release}/gwt[d][.exe]`), else `None`.
+/// (`<target-dir>/[<triple>/]{debug,release}/gwt[d][.exe]`), else `None`.
+///
+/// #5084: the target directory is recognized by the effective
+/// `CARGO_TARGET_DIR`, by the `CACHEDIR.TAG` cargo writes into every target
+/// directory, or by the conventional `target` name. Its owner is the checkout
+/// around it (`<root>/target`, or a parent holding `Cargo.toml`); a target
+/// directory outside any checkout is owned by nothing but itself.
 ///
 /// Returned in the normalized forward-slash form both platforms can compare;
 /// see the private `path_is_inside` helper.
 pub fn build_output_owner_root(bin: &Path) -> Option<String> {
+    let cargo_target_dir = std::env::var_os("CARGO_TARGET_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .map(|dir| match dir.is_absolute() {
+            true => dir,
+            false => std::env::current_dir().unwrap_or_default().join(dir),
+        });
+    build_output_owner_root_with(bin, cargo_target_dir.as_deref())
+}
+
+fn build_output_owner_root_with(bin: &Path, cargo_target_dir: Option<&Path>) -> Option<String> {
     let normalized = normalize_path_text(bin);
     let segments = normalized
         .split('/')
@@ -582,26 +599,44 @@ pub fn build_output_owner_root(bin: &Path) -> Option<String> {
     if binary_name != "gwt" && binary_name != "gwtd" {
         return None;
     }
-    let target_index = segments
-        .iter()
-        .enumerate()
+    let join = |end: usize| {
+        let mut path = String::new();
+        if normalized.starts_with('/') {
+            path.push('/');
+        }
+        path.push_str(&segments[..end].join("/"));
+        path
+    };
+    let cargo_target_dir = cargo_target_dir.map(normalize_path_text);
+    let is_cargo_target_dir = |dir: &str| {
+        cargo_target_dir.as_deref().is_some_and(|target_dir| {
+            let target_dir = target_dir.trim_end_matches('/');
+            if cfg!(windows) {
+                dir.eq_ignore_ascii_case(target_dir)
+            } else {
+                dir == target_dir
+            }
+        }) || Path::new(dir).join("CACHEDIR.TAG").is_file()
+    };
+    let (target_index, conventional) = (0..segments.len().saturating_sub(2))
         .rev()
-        .find_map(|(index, segment)| {
-            (segment.eq_ignore_ascii_case("target")
-                && segments[index + 1..segments.len().saturating_sub(1)]
-                    .iter()
-                    .any(|segment| {
-                        segment.eq_ignore_ascii_case("debug")
-                            || segment.eq_ignore_ascii_case("release")
-                    }))
-            .then_some(index)
+        .filter(|&index| {
+            segments[index + 1..segments.len() - 1]
+                .iter()
+                .any(|segment| {
+                    segment.eq_ignore_ascii_case("debug") || segment.eq_ignore_ascii_case("release")
+                })
+        })
+        .find_map(|index| {
+            let conventional = segments[index].eq_ignore_ascii_case("target");
+            (conventional || is_cargo_target_dir(&join(index + 1))).then_some((index, conventional))
         })?;
-    let mut root = String::new();
-    if normalized.starts_with('/') {
-        root.push('/');
+    let checkout = join(target_index);
+    if conventional || Path::new(&checkout).join("Cargo.toml").is_file() {
+        Some(checkout)
+    } else {
+        Some(join(target_index + 1))
     }
-    root.push_str(&segments[..target_index].join("/"));
-    Some(root)
 }
 
 fn normalize_path_text(path: &Path) -> String {
@@ -1000,6 +1035,59 @@ mod tests {
         );
         assert!(build_output_owner_root(Path::new("/usr/local/bin/gwtd")).is_none());
         assert!(build_output_owner_root(Path::new("/repo/target/debug/other")).is_none());
+    }
+
+    /// #5084: a `CARGO_TARGET_DIR` without a literal `target` component is
+    /// still a build output directory. Owned by no checkout, it is its own
+    /// owner root, so no worktree config ever pins a binary inside it.
+    #[test]
+    fn build_output_owner_root_recognizes_cargo_target_dir_without_target_component() {
+        assert_eq!(
+            build_output_owner_root_with(
+                Path::new("/tmp/x/debug/gwtd"),
+                Some(Path::new("/tmp/x/"))
+            )
+            .as_deref(),
+            Some("/tmp/x")
+        );
+        assert_eq!(
+            build_output_owner_root_with(
+                Path::new(r"C:\cache\y\x86_64-pc-windows-msvc\release\gwtd.exe"),
+                Some(Path::new(r"c:\Cache\y"))
+            )
+            .as_deref(),
+            if cfg!(windows) {
+                Some("C:/cache/y")
+            } else {
+                None
+            }
+        );
+        assert!(build_output_owner_root_with(
+            Path::new("/opt/gwt/debug/gwtd"),
+            Some(Path::new("/tmp/x"))
+        )
+        .is_none());
+    }
+
+    /// #5084: `build.target-dir` from cargo config never reaches the
+    /// environment, so the marker cargo writes into every target directory
+    /// identifies it as well, for both the generator and the trust collector.
+    #[test]
+    fn build_output_owner_root_recognizes_target_dir_by_cargo_marker() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target_dir = dir.path().join("cache-y");
+        let bin = target_dir.join("debug").join("gwtd");
+        fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        fs::write(target_dir.join("CACHEDIR.TAG"), "Signature: cargo").unwrap();
+        let worktree_config = dir.path().join("work/linked/.codex/hooks.json");
+
+        let owner_root =
+            build_output_owner_root_with(&bin, None).expect("cargo target dir is a build output");
+        assert_eq!(owner_root, normalize_path_text(&target_dir));
+        assert_eq!(
+            sanitize_hook_bin_for_config_path(&worktree_config, &bin.to_string_lossy()),
+            CANONICAL_HOOK_BIN
+        );
     }
 
     #[test]

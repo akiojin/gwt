@@ -347,7 +347,9 @@ fn paired_windows_timings_preserve_both_artifacts_and_gate_delivery() {
     let job = job_body(&workflow, "  test-windows-verify-timings:");
     assert!(job.contains("runs-on: ${{ needs.changes.outputs.verify_timings == 'false' && 'ubuntu-latest' || 'windows-latest' }}"));
     assert!(job.contains("needs: [changes, source-sync]"));
-    assert!(job.contains("if: ${{ !cancelled() }}"));
+    assert!(
+        job.contains("if: ${{ !cancelled() && needs.source-sync.outputs.base_only != 'true' }}")
+    );
     // Unknown/failed classification must measure, not silently skip.
     assert!(job.contains("if: ${{ needs.changes.outputs.verify_timings != 'false' }}"));
     assert!(job.contains("cargo-nextest@0.9.146"));

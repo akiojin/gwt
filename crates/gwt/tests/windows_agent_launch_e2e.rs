@@ -306,6 +306,18 @@ fn assert_public_ws_agent_route_boundary(
             fixture.stderr()
         );
     }
+    let owned_pid = sysinfo::Pid::from_u32(fixture.pid());
+    drop(fixture);
+    let mut processes = sysinfo::System::new();
+    processes.refresh_processes_specifics(
+        sysinfo::ProcessesToUpdate::Some(&[owned_pid]),
+        true,
+        sysinfo::ProcessRefreshKind::nothing(),
+    );
+    assert!(
+        processes.process(owned_pid).is_none(),
+        "WindowsRealGwtFixture leaked its owned gwt process"
+    );
 }
 
 /// Issue #4644: since #4537 the bootstrap `/ws` connection is Hub-only. It

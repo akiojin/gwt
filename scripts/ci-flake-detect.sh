@@ -264,8 +264,18 @@ for entry in $targets; do
       # the runner out of space on 2026-09-21.
       rm -f "$log"
     else
-      unstable=true
       report_finding "FLAKE: $entry differs between runs -- run 1: [$first] vs run $run: [$outcome]"
+      # Show the complete comparison while the runner is still available;
+      # failed-test names alone omit the panic/assertion that explains it.
+      if [ "$unstable" = false ]; then
+        echo "::group::$entry run 1 baseline: $first"
+        cat "$log_dir/$safe-run-1.log"
+        echo "::endgroup::"
+      fi
+      echo "::group::$entry run $run: $outcome"
+      cat "$log"
+      echo "::endgroup::"
+      unstable=true
     fi
   done
 

@@ -941,6 +941,14 @@ pub(crate) fn send_workspace_update_via_agent_bridge_detailed(
     target: &HookForwardTarget,
     request: &crate::AgentWorkspaceUpdateRequest,
 ) -> Result<crate::AgentWorkspaceUpdateReceipt, AgentBridgeFailure> {
+    send_workspace_update_via_agent_bridge_with_operation_id(target, request, None)
+}
+
+pub(crate) fn send_workspace_update_via_agent_bridge_with_operation_id(
+    target: &HookForwardTarget,
+    request: &crate::AgentWorkspaceUpdateRequest,
+    operation_id: Option<&str>,
+) -> Result<crate::AgentWorkspaceUpdateReceipt, AgentBridgeFailure> {
     let observation = HostBridgeObservation::begin(gwt_agent::HostBridgeKind::WorkspaceUpdate);
     let result = (|| {
         let url = target.workspace_update_url().map_err(|_| {
@@ -959,15 +967,15 @@ pub(crate) fn send_workspace_update_via_agent_bridge_detailed(
                     "failed to build the Host workspace bridge client",
                 )
             })?;
-        let response = client
-        .post(url)
-        .bearer_auth(&target.token)
-        .json(request)
-        .send()
+        let mut post = client.post(url).bearer_auth(&target.token).json(request);
+        if let Some(id) = operation_id {
+            post = post.header(crate::workspace_update_receipt::OPERATION_HEADER, id);
+        }
+        let response = post.send()
         .map_err(|_| {
             AgentBridgeFailure::new(
                 AgentBridgeFailureReason::TransportFailure,
-                "Host workspace bridge is unavailable; the update was not retried locally and its outcome may be unknown",
+                "Host workspace bridge response is unavailable; no update retry or local fallback was attempted",
             )
         })?;
         let status = response.status();
@@ -1010,8 +1018,11 @@ pub(crate) fn send_workspace_update_via_agent_bridge_detailed(
                 "Host workspace bridge rejected the update; no local fallback was attempted",
             ));
         }
-        let receipt = response
-        .json::<crate::AgentWorkspaceUpdateReceipt>()
+        let body = response.bytes().map_err(|_| AgentBridgeFailure::new(
+            AgentBridgeFailureReason::TransportFailure,
+            "Host workspace bridge response body was interrupted; no update retry or local fallback was attempted",
+        ))?;
+        let receipt = serde_json::from_slice::<crate::AgentWorkspaceUpdateReceipt>(&body)
         .map_err(|_| {
             AgentBridgeFailure::new(
                 AgentBridgeFailureReason::ReceiptMismatch,
@@ -1035,6 +1046,63 @@ pub(crate) fn send_workspace_update_via_agent_bridge_detailed(
             observation.record(true)
         }
         Err(_) => {}
+    }
+    if let (Some(operation_id), Err(error)) = (operation_id, &result) {
+        use gwt_core::error_ledger::{ErrorKind, ErrorRecord, ErrorTarget};
+        let session = gwt_agent::validate_session_id_path_component(&request.claimed_session_id)
+            .ok()
+            .and_then(|_| {
+                gwt_agent::Session::load(
+                    &gwt_core::paths::gwt_sessions_dir()
+                        .join(format!("{}.toml", request.claimed_session_id)),
+                )
+                .ok()
+            });
+        let endpoint = target.workspace_update_url().ok().map(|mut url| {
+            let _ = url.set_username("");
+            let _ = url.set_password(None);
+            url.set_query(None);
+            url.set_fragment(None);
+            url.to_string()
+        });
+        let mut context = std::collections::BTreeMap::from([
+            ("operation".to_string(), "workspace.update".to_string()),
+            (
+                "bridge_reason".to_string(),
+                error.reason().as_str().to_string(),
+            ),
+        ]);
+        context.insert("operation_id".into(), operation_id.into());
+        if let Some(endpoint) = endpoint {
+            context.insert("endpoint".into(), endpoint);
+        }
+        if let Ok(binary) = std::env::current_exe() {
+            context.insert("binary".into(), binary.display().to_string());
+        }
+        let record = ErrorRecord::new(
+            ErrorKind::DaemonFault,
+            error.to_string(),
+            ErrorTarget {
+                issue: session
+                    .as_ref()
+                    .and_then(|session| session.linked_issue_number),
+                session_id: Some(request.claimed_session_id.clone()),
+                project_root: Some(
+                    session
+                        .as_ref()
+                        .and_then(|session| session.project_state_root.as_ref())
+                        .map_or_else(
+                            || request.observation.git_toplevel.clone(),
+                            |root| root.display().to_string(),
+                        ),
+                ),
+                ..Default::default()
+            },
+        )
+        .with_context(context);
+        if let Err(error) = gwt_core::error_ledger::record(record) {
+            tracing::warn!(%error, "could not record workspace bridge health");
+        }
     }
     result
 }
@@ -2656,6 +2724,7 @@ mod tests {
     fn workspace_bridge_transport_receipt_clears_after_validated_success() {
         let _lock = env_test_lock();
         let dir = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(dir.path());
         let mut session =
             gwt_agent::Session::new(dir.path(), "work/test", gwt_agent::AgentId::Codex);
         session.repo_hash = Some("repo".into());
@@ -2675,6 +2744,7 @@ mod tests {
                 },
             }))
             .unwrap();
+        session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
         let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
             .unwrap()
             .unwrap();
@@ -2703,9 +2773,34 @@ mod tests {
         };
         let unavailable = HookForwardTarget {
             url: "http://127.0.0.1:1/internal/hook-live".into(),
-            token: "test".into(),
+            token: "workspace-ledger-secret-sentinel".into(),
         };
-        assert!(send_workspace_update_via_agent_bridge_detailed(&unavailable, &request).is_err());
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        assert!(send_workspace_update_via_agent_bridge_with_operation_id(
+            &unavailable,
+            &request,
+            Some(&operation_id)
+        )
+        .is_err());
+        let errors = gwt_core::error_ledger::list_since(None).unwrap();
+        let failure = errors
+            .iter()
+            .find(|record| record.context.get("operation_id") == Some(&operation_id))
+            .expect("bridge fault is queryable through errors.list");
+        assert_eq!(failure.context["bridge_reason"], "transport_failure");
+        assert_eq!(
+            failure.target.session_id.as_deref(),
+            Some(session.id.as_str())
+        );
+        assert_eq!(failure.target.issue, Some(4774));
+        assert!(failure.target.project_root.is_some());
+        assert_eq!(
+            failure.context["endpoint"],
+            "http://127.0.0.1:1/internal/workspace-update"
+        );
+        assert!(!serde_json::to_string(failure)
+            .unwrap()
+            .contains(&unavailable.token));
         assert!(gwt_agent::has_unresolved_host_bridge_fault(&path, &runtime).unwrap());
         let success = BindingProbeServer::start(
             StatusCode::OK,

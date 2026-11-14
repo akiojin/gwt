@@ -199,6 +199,11 @@ impl std::str::FromStr for BoardEntryKind {
 }
 
 impl BoardEntryKind {
+    /// SPEC-4833: the remote sharing boundary is fixed, never configurable.
+    pub fn is_remote_shareable(&self) -> bool {
+        matches!(self, Self::Decision | Self::Blocked | Self::Handoff)
+    }
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Request => "request",
@@ -4163,6 +4168,20 @@ mod tests {
     use super::*;
     use crate::paths::gwt_project_dir_for_repo_path;
     use crate::test_support::{env_lock, ScopedEnvVar};
+
+    #[test]
+    fn discussion_sync_kind_allowlist_is_fixed() {
+        for name in [
+            "request", "status", "next", "claim", "impact", "question", "blocked", "handoff",
+            "decision",
+        ] {
+            let kind = BoardEntryKind::from_str(name).unwrap();
+            assert_eq!(
+                kind.is_remote_shareable(),
+                matches!(name, "blocked" | "handoff" | "decision")
+            );
+        }
+    }
 
     /// Issue #3777: on Windows the atomic-replace retry slept a flat 25ms up to
     /// 20 times, so one contended `reminders` write could spend 500ms while

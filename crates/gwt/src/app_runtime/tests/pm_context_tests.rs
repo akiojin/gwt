@@ -1036,6 +1036,7 @@ fn pm_close_completion_stays_with_owner_and_is_dropped_after_owner_closes() {
     let stale_status = BackendEvent::PmStatus {
         available: true,
         auto_start: false,
+        paused: false,
         loop_interval_secs: 10,
         loop_interval_secs_decimal: "10".to_string(),
         configured_agent_id: "codex".to_string(),
@@ -1940,7 +1941,7 @@ fn open_pm_agent_event_routes_to_the_active_tab_ensure() {
 /// effect of unticking a checkbox would destroy a conversation the user never
 /// asked to end.
 #[test]
-fn set_pm_auto_start_persists_and_does_not_stop_a_live_pm() {
+fn set_pm_auto_start_and_pause_resume_preserve_live_pm_and_monitor() {
     let _pm_gate = super::super::pm::test_gate::PmEnsureTestGuard::enable();
     let _env_lock = env_test_lock()
         .lock()
@@ -2013,6 +2014,61 @@ fn set_pm_auto_start_persists_and_does_not_stop_a_live_pm() {
         })
         .expect("the settings write must broadcast pm_status");
     assert_eq!(status, (false, true), "status mirrors prefs + live pane");
+
+    let monitor_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(&monitor_path, &gwt::IssueMonitorPrefs::default())
+        .expect("seed independent Monitor prefs");
+    let monitor_before = fs::read(&monitor_path).expect("read Monitor prefs");
+    let mut resumed_bytes = None;
+    for paused in [true, false, false] {
+        let events = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            FrontendEvent::SetPmPaused { paused },
+        );
+        let current = gwt::pm_registry::load_pm_prefs(&prefs_path).expect("reload PM prefs");
+        let mut expected = prefs.clone();
+        expected.settings.paused = paused;
+        assert_eq!(current, expected, "only the pause setting changes");
+        assert_eq!(
+            fs::read(&monitor_path).expect("read Monitor prefs"),
+            monitor_before
+        );
+        assert_eq!(
+            runtime.live_pm_window_id("pm-session-live").as_deref(),
+            Some(window_id.as_str())
+        );
+        assert!(
+            runtime
+                .project_state(&runtime.test_context())
+                .expect("project state")
+                .pending_pm_launches
+                .is_empty(),
+            "pause/resume must not launch a successor"
+        );
+        assert!(
+            events.iter().any(|outbound| matches!(
+                (&outbound.target, &outbound.event),
+                (DispatchTarget::Project(key), BackendEvent::PmStatus {
+                    paused: actual, is_running: true, ..
+                }) if Some(key) == runtime.project_key_for_tab("tab-1") && *actual == paused
+            )),
+            "every committed pause/resume must broadcast its state to the project"
+        );
+        if !paused {
+            let bytes = (
+                fs::read(&prefs_path).expect("read resumed PM prefs"),
+                fs::read(gwt::pm_registry::pm_loop_state_path_for_repo_path(&repo))
+                    .expect("read resumed loop state"),
+            );
+            if let Some(previous) = &resumed_bytes {
+                assert_eq!(
+                    &bytes, previous,
+                    "repeated Resume must not re-arm the loop again"
+                );
+            }
+            resumed_bytes = Some(bytes);
+        }
+    }
 }
 
 #[test]

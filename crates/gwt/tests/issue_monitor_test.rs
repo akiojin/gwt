@@ -2812,6 +2812,7 @@ fn migration_preserves_windows_needs_human_and_all_unrelated_prefs() {
     let target_message = legacy_3272_failure(repo.path());
     let mut prefs = legacy_failed_prefs(repo.path(), 42);
     prefs.max_active_agents = 4;
+    prefs.max_active_agents_mode = gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual;
     prefs.priority_order = vec![99, 45, 44, 43, 42];
     prefs
         .launching_issues
@@ -3055,6 +3056,7 @@ fn legacy_3272_recovery_respects_priority_capacity_and_idempotency() {
     let repo = init_resolvable_git_repo();
     let mut prefs = legacy_failed_prefs(repo.path(), 42);
     prefs.max_active_agents = 2;
+    prefs.max_active_agents_mode = gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual;
     prefs.priority_order = vec![43, 42];
     let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
     monitor.set_gui_connected(true);
@@ -3171,6 +3173,7 @@ fn newer_disk_failure_adoption_cancels_stale_pending_launch_and_reconciles_inbox
         IssueMonitorPrefs {
             enabled: true,
             max_active_agents: 2,
+            max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
             legacy_git_launch_failure_migration_version: 0,
             ..IssueMonitorPrefs::default()
         },
@@ -3546,6 +3549,186 @@ fn expired_claim_block_requeues_and_launches_on_next_claim_cycle() {
     assert_eq!(
         monitor.inbox_item(42).expect("recovered item").state,
         MonitorInboxState::Launching
+    );
+}
+
+/// Issue #5056 AC-3: a row distinguishes an absent claim from its known
+/// expiry, including while its implementation is still running.
+#[test]
+fn claim_diagnostics_distinguish_unclaimed_active_and_expired() {
+    let client = FakeIssueClient::new();
+    client.seed(github_issue_number(42, vec![]));
+    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        enabled: true,
+        claim_ttl_secs: 30,
+        ..IssueMonitorConfig::default()
+    });
+    monitor.set_gui_connected(true);
+    scan_queued_candidates(&mut monitor, &[issue(42, &["bug"])], "2026-10-08T10:00:00Z");
+    let status = serde_json::to_value(monitor.agent_status_at("2026-10-08T10:00:00Z")).unwrap();
+    assert_eq!(
+        status["inbox"][0]["claim_diagnostics"]["state"],
+        "unclaimed"
+    );
+
+    assert_eq!(
+        monitor
+            .claim_next_launch_requests(&client, "host-a/user/1", "2026-10-08T10:00:00Z")
+            .len(),
+        1
+    );
+    let status = serde_json::to_value(monitor.agent_status_at("2026-10-08T10:00:01Z")).unwrap();
+    assert_eq!(status["inbox"][0]["claim_diagnostics"]["state"], "active");
+    assert_eq!(
+        status["inbox"][0]["claim_expires_at"],
+        "2026-10-08T10:00:30Z"
+    );
+
+    let status = serde_json::to_value(monitor.agent_status_at("2026-10-08T10:00:31Z")).unwrap();
+    assert_eq!(status["inbox"][0]["claim_diagnostics"]["state"], "expired");
+    assert_eq!(
+        status["inbox"][0]["claim_diagnostics"]["last_success_at"],
+        "2026-10-08T10:00:00Z"
+    );
+}
+
+#[test]
+fn claim_identity_rebase_preserves_current_disk_ownership() {
+    use gwt::issue_monitor::IssueMonitorClaimIdentity;
+    let mut observer = IssueMonitorState::new(IssueMonitorConfig::default());
+    let mut disk = IssueMonitorPrefs {
+        enabled: true,
+        claim_identities: vec![IssueMonitorClaimIdentity {
+            issue_number: 42,
+            claim_id: "current-claim".into(),
+            owner: "host-a/user/1".into(),
+        }],
+        ..Default::default()
+    };
+    observer.rebase_gui_observer_prefs(&disk);
+    assert_eq!(
+        observer.prefs().claim_identities,
+        disk.claim_identities,
+        "an observer saved before acquisition must not erase the durable renewal identity"
+    );
+    disk.claim_identities[0].claim_id = "successor-claim".into();
+    observer.rebase_daemon_driver_prefs(&disk);
+    assert_eq!(observer.prefs().claim_identities, disk.claim_identities);
+    disk.claim_identities.clear();
+    observer.rebase_gui_observer_prefs(&disk);
+    assert!(
+        observer.prefs().claim_identities.is_empty(),
+        "a stale observer must not resurrect an already released identity"
+    );
+}
+
+/// Issue #5056: retention bypasses admission and never emits a second launch;
+/// injected timestamps expose both update failure and cross-host collision.
+#[test]
+fn live_claim_renewal_retains_ttl_without_relaunch_and_reports_failures() {
+    use gwt_github::{
+        client::{ApiError, OwnerMutationError},
+        issue_auto_claim::{renew_claim_mutation, ClaimAcquireOutcome, ClaimRenewOutcome},
+    };
+    let client = FakeIssueClient::new();
+    client.seed(github_issue_number(42, vec![]));
+    let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+        enabled: true,
+        claim_ttl_secs: 30,
+        claim_heartbeat_secs: 300,
+        ..Default::default()
+    });
+    monitor.set_gui_connected(true);
+    scan_queued_candidates(&mut monitor, &[issue(42, &["bug"])], "2026-10-08T10:00:00Z");
+    monitor.claim_next_launch_requests(&client, "host-a/user/1", "2026-10-08T10:00:00Z");
+    let launches = monitor.take_pending_launch_requests();
+    let identity = monitor.prefs().claim_identities[0].clone();
+    monitor.set_update_drain(
+        IssueMonitorUpdateDrainReason::Auto,
+        "next-version",
+        "2026-10-08T10:00:01Z",
+    );
+    assert_eq!(monitor.claim_heartbeat_interval_secs(), 10);
+    assert!(monitor
+        .claim_renewal_candidates("2026-10-08T10:00:09Z")
+        .is_empty());
+    let generations = [(42, "current-generation".to_string())]
+        .into_iter()
+        .collect();
+    assert_eq!(
+        monitor.prepare_claim_renewal_effects("2026-10-08T10:00:11Z", &Default::default()),
+        0
+    );
+    assert_eq!(
+        monitor.prepare_claim_renewal_effects("2026-10-08T10:00:11Z", &generations),
+        1
+    );
+    let effect = monitor.pending_effects()[0].clone();
+    let renewed = renew_claim_mutation(
+        &client,
+        IssueNumber(42),
+        &identity.claim_id,
+        &identity.owner,
+        "2026-10-08T10:00:11Z",
+        "2026-10-08T10:00:41Z",
+    );
+    assert!(matches!(&renewed, Ok(ClaimRenewOutcome::Renewed { .. })));
+    monitor.record_claim_renewal_result(&effect.payload, &renewed, "2026-10-08T10:00:11Z");
+    assert_eq!(monitor.take_pending_launch_requests(), launches);
+    let foreign = ClaimComment {
+        comment_id: None,
+        claim_id: "foreign-attempt".into(),
+        owner: "host-b/user/2".into(),
+        issue_number: 42,
+        status: ClaimStatus::Active,
+        heartbeat_at: "2026-10-08T10:00:31Z".into(),
+        expires_at: "2026-10-08T10:01:01Z".into(),
+        launched_work_id: Some("work/issue-42".into()),
+    };
+    assert!(matches!(
+        gwt_github::issue_auto_claim::acquire_claim(
+            &client,
+            IssueNumber(42),
+            foreign.clone(),
+            "2026-10-08T10:00:31Z"
+        ),
+        Ok(ClaimAcquireOutcome::Blocked(_))
+    ));
+    monitor.record_claim_renewal_result(
+        &effect.payload,
+        &Err(OwnerMutationError::PreSubmit(ApiError::Unexpected(
+            "network unavailable".into(),
+        ))),
+        "2026-10-08T10:00:32Z",
+    );
+    let status = serde_json::to_value(monitor.agent_status_at("2026-10-08T10:00:32Z")).unwrap();
+    let diagnostic = &status["inbox"][0]["claim_diagnostics"];
+    assert_eq!(diagnostic["state"], "update_failed");
+    assert!(diagnostic["last_failure"]
+        .as_str()
+        .unwrap()
+        .contains("network unavailable"));
+    assert_eq!(diagnostic["last_success_at"], "2026-10-08T10:00:11Z");
+    monitor.record_claim_renewal_result(
+        &effect.payload,
+        &Ok(ClaimRenewOutcome::NotRenewed {
+            reason: "another host is active".into(),
+            conflicting_claims: vec![foreign],
+        }),
+        "2026-10-08T10:00:42Z",
+    );
+    let status = serde_json::to_value(monitor.agent_status_at("2026-10-08T10:00:42Z")).unwrap();
+    assert_eq!(status["inbox"][0]["claim_diagnostics"]["state"], "conflict");
+    assert_eq!(
+        status["inbox"][0]["claim_diagnostics"]["concurrent_claims"][0]["owner"],
+        "host-b/user/2"
+    );
+    assert_eq!(monitor.prefs().claim_identities, vec![identity]);
+    assert_eq!(monitor.take_pending_launch_requests(), launches);
+    let restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+    assert_eq!(
+        restored.prefs().claim_diagnostics,
+        monitor.prefs().claim_diagnostics
     );
 }
 

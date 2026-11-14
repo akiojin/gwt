@@ -184,16 +184,85 @@ pub fn load_revival_record(
     };
     let record = serde_json::from_str::<ObligationRevivalRecord>(&contents)
         .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
-    if record.session_id != session_id
-        || record.content_hash.is_empty()
-        || record.content_hash != revival_record_hash(&record)
-    {
+    let expected_content_hash = revival_record_hash(&record);
+    let check = if record.session_id != session_id {
+        Some(RevivalRecordCheck::Identity)
+    } else if record.content_hash.is_empty() || record.content_hash != expected_content_hash {
+        Some(RevivalRecordCheck::Integrity)
+    } else {
+        None
+    };
+    if let Some(check) = check {
+        let path = crate::cli::trusted_store::trusted_dir_for_worktree(worktree)
+            .map(|dir| dir.join(ACTION_OBLIGATION_REVIVAL_FILE))
+            .unwrap_or_else(|| worktree.join(ACTION_OBLIGATION_REVIVAL_STATE_RELATIVE));
         return Err(io::Error::new(
             ErrorKind::InvalidData,
-            "action obligation revival record failed identity/integrity validation",
+            RevivalRecordValidationFailure {
+                check,
+                expected_session_id: session_id.to_string(),
+                actual_session_id: record.session_id,
+                expected_content_hash,
+                actual_content_hash: record.content_hash,
+                path: path.display().to_string(),
+            },
         ));
     }
     Ok(Some(record))
+}
+
+/// Which validation rejected a revival record (Issue #5072 AC-1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RevivalRecordCheck {
+    /// The record belongs to another session (for example a continuation
+    /// predecessor); its content may be intact.
+    Identity,
+    /// The stored content hash does not match the record content.
+    Integrity,
+}
+
+/// Structured reason for a rejected revival record, so a reader can tell a
+/// foreign-session record from a corrupted one without opening the file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RevivalRecordValidationFailure {
+    pub check: RevivalRecordCheck,
+    pub expected_session_id: String,
+    pub actual_session_id: String,
+    pub expected_content_hash: String,
+    pub actual_content_hash: String,
+    pub path: String,
+}
+
+impl std::fmt::Display for RevivalRecordValidationFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let check = match self.check {
+            RevivalRecordCheck::Identity => "identity",
+            RevivalRecordCheck::Integrity => "integrity",
+        };
+        write!(
+            f,
+            "action obligation revival record failed {check} validation (session_id expected {} actual {}, content_hash expected {} actual {}, path {})",
+            self.expected_session_id,
+            self.actual_session_id,
+            self.expected_content_hash,
+            self.actual_content_hash,
+            self.path
+        )
+    }
+}
+
+impl std::error::Error for RevivalRecordValidationFailure {}
+
+/// The structured validation failure carried by a [`load_revival_record`]
+/// error, if that is why the record was rejected.
+#[must_use]
+pub fn revival_record_validation_failure(
+    error: &io::Error,
+) -> Option<&RevivalRecordValidationFailure> {
+    error
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<RevivalRecordValidationFailure>())
 }
 
 /// Compute the integrity hash (content with the hash field emptied).
@@ -1226,6 +1295,52 @@ mod tests {
             record.result,
             ObligationRevivalOutcome::PersistFailed { .. }
         ));
+    }
+
+    // Issue #5072 AC-1/AC-4: a rejected revival record names the failed
+    // check, the expected and observed values, and the record path.
+    #[test]
+    fn revival_record_validation_failure_is_structured() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        save_revival_record(
+            dir.path(),
+            "sess-predecessor",
+            &ObligationRevivalOutcome::Deferred {
+                reason: "obligation_state_missing".to_string(),
+            },
+        )
+        .unwrap();
+        assert!(load_revival_record(dir.path(), "sess-predecessor")
+            .unwrap()
+            .is_some());
+
+        let error = load_revival_record(dir.path(), "sess-successor").unwrap_err();
+        let failure = revival_record_validation_failure(&error).expect("structured failure");
+        assert_eq!(failure.check, RevivalRecordCheck::Identity);
+        assert_eq!(failure.expected_session_id, "sess-successor");
+        assert_eq!(failure.actual_session_id, "sess-predecessor");
+        assert_eq!(failure.expected_content_hash, failure.actual_content_hash);
+        let trusted = crate::cli::trusted_store::trusted_dir_for_worktree(dir.path())
+            .unwrap()
+            .join(ACTION_OBLIGATION_REVIVAL_FILE);
+        assert_eq!(failure.path, trusted.display().to_string());
+        assert!(error.to_string().contains("identity"), "{error}");
+
+        let mut record: ObligationRevivalRecord =
+            serde_json::from_str(&fs::read_to_string(&trusted).unwrap()).unwrap();
+        record.content_hash = "0".repeat(64);
+        fs::write(&trusted, serde_json::to_vec(&record).unwrap()).unwrap();
+        let error = load_revival_record(dir.path(), "sess-predecessor").unwrap_err();
+        let failure = revival_record_validation_failure(&error).expect("structured failure");
+        assert_eq!(failure.check, RevivalRecordCheck::Integrity);
+        assert_eq!(failure.actual_content_hash, "0".repeat(64));
+        assert_eq!(failure.expected_content_hash, revival_record_hash(&record));
     }
 
     // No-secrets: raw prompts never persist, only digests.

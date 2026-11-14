@@ -486,6 +486,28 @@ test("AC-28: the Phase 5 CSS uses Operator tokens only", () => {
   assert.doesNotMatch(block, /\bposition:\s*fixed/, "no private overlay shell");
 });
 
+test("Issue #3620: capacity uses native disclosure and Operator tokens without an overlay", async (t) => {
+  const { body, surface } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  const details = body.querySelector("details.knowledge-monitor-capacity");
+  assert.ok(details?.querySelector("summary"), "machine capacity uses native disclosure");
+  const warning = body.querySelector(".knowledge-monitor-capacity-warning");
+  assert.ok(
+    Array.from(warning.parentElement.children).indexOf(warning)
+      < Array.from(details.parentElement.children).indexOf(details),
+    "the override warning precedes expandable measurements in small windows",
+  );
+  assert.equal(warning.getAttribute("role"), "status");
+  assert.equal(warning.getAttribute("aria-live"), "polite");
+  const css = readFileSync(resolve(here, "../styles/app.css"), "utf8");
+  const block = css.split("/* Issue #3620 agent capacity */")[1]?.split("/* /Issue #3620 agent capacity */")[0];
+  assert.ok(block, "capacity styles have a scoped contract boundary");
+  assert.match(block, /var\(--color-state-needs-input\)/);
+  assert.match(block, /var\(--space-/);
+  assert.match(block, /var\(--type-/);
+  assert.doesNotMatch(block, /#[\da-f]{3,8}\b|\brgba?\(|\bposition:\s*(?:fixed|absolute)/i);
+});
+
 test("queue detail provenance follows authoritative terminal queue", async (t) => {
   const { body, surface, state } = await makeFixture();
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));

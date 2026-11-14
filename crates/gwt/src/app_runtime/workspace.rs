@@ -342,7 +342,7 @@ pub(super) fn apply_workspace_launch_for_current_work(
         .work_items
         .iter()
         .find(|item| Some(&item.id) == transition.work_id.as_ref())
-        .filter(|item| item.discarded || Some(&item.id) != canonical_id.as_ref())
+        .filter(|item| item.is_terminal() || Some(&item.id) != canonical_id.as_ref())
     {
         let owner = transition.owner();
         let owner_matches = current.owner == owner
@@ -375,7 +375,7 @@ pub(super) fn apply_workspace_launch_for_current_work(
             )));
         }
         if work_items.work_items.iter().any(|item| {
-            item.discarded
+            item.is_terminal()
                 && Some(workspace_group_key_for_item(project_root, item)) == canonical_id
                 && item
                     .agents
@@ -383,11 +383,11 @@ pub(super) fn apply_workspace_launch_for_current_work(
                     .any(|agent| agent.session_id == session.session_id)
         }) {
             return Err(gwt_core::error::GwtError::Other(format!(
-                "Session {} belongs to a discarded Work; start a new Session for the successor",
+                "Session {} belongs to a terminal Work; start a new Session for the successor",
                 session.session_id
             )));
         }
-        if current.discarded {
+        if current.is_terminal() {
             let successor_id = successor_work_id(&current.id);
             if work_items
                 .work_items

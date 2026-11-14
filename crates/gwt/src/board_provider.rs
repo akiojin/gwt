@@ -504,17 +504,30 @@ pub fn provider() -> Box<dyn BoardProvider> {
     }
 }
 
+fn after_local_operation<T>(root: &Path, result: Result<T>) -> Result<T> {
+    if result.is_ok() {
+        crate::board_discussion_sync::schedule(root);
+    }
+    result
+}
+
 // --- Free-function shims (same signatures as `gwt_core::coordination`) -------
 
 /// Append a Board entry through the active provider.
 pub fn post_entry(worktree_root: &Path, entry: BoardEntry) -> Result<CoordinationSnapshot> {
-    provider_for(worktree_root).post_entry(worktree_root, entry)
+    after_local_operation(
+        worktree_root,
+        provider_for(worktree_root).post_entry(worktree_root, entry),
+    )
 }
 
 /// Append a Board entry while distinguishing a committed post from a failed
 /// snapshot refresh.
 pub fn post_entry_outcome(worktree_root: &Path, entry: BoardEntry) -> Result<BoardPostOutcome> {
-    provider_for(worktree_root).post_entry_outcome(worktree_root, entry)
+    after_local_operation(
+        worktree_root,
+        provider_for(worktree_root).post_entry_outcome(worktree_root, entry),
+    )
 }
 
 /// Append a Board entry under a caller-supplied deterministic identity
@@ -527,7 +540,10 @@ pub fn post_entry_deterministic(
     worktree_root: &Path,
     entry: BoardEntry,
 ) -> Result<BoardDeterministicOutcome> {
-    provider_for(worktree_root).post_entry_deterministic(worktree_root, entry)
+    after_local_operation(
+        worktree_root,
+        provider_for(worktree_root).post_entry_deterministic(worktree_root, entry),
+    )
 }
 
 /// Whether this repo's resolved Board provider can preserve a caller-supplied
@@ -539,7 +555,10 @@ pub fn supports_deterministic_identity(worktree_root: &Path) -> bool {
 
 /// Load the hot projection snapshot through the active provider.
 pub fn load_snapshot(worktree_root: &Path) -> Result<CoordinationSnapshot> {
-    provider_for(worktree_root).load_snapshot(worktree_root)
+    after_local_operation(
+        worktree_root,
+        provider_for(worktree_root).load_snapshot(worktree_root),
+    )
 }
 
 /// Load the snapshot filtered to an audience scope.
@@ -547,7 +566,10 @@ pub fn load_snapshot_for_scope(
     worktree_root: &Path,
     scope: &BoardAudienceScope,
 ) -> Result<CoordinationSnapshot> {
-    provider_for(worktree_root).load_snapshot_for_scope(worktree_root, scope)
+    after_local_operation(
+        worktree_root,
+        provider_for(worktree_root).load_snapshot_for_scope(worktree_root, scope),
+    )
 }
 
 /// Refresh a scoped Board view through the active provider (Issue #4406).
@@ -559,12 +581,18 @@ pub fn refresh_scoped_board_view(
     gwt_core::coordination::ScopedBoardView,
     gwt_core::coordination::ScopedBoardRefresh,
 )> {
-    provider_for(worktree_root).refresh_scoped_board_view(worktree_root, scope, previous)
+    after_local_operation(
+        worktree_root,
+        provider_for(worktree_root).refresh_scoped_board_view(worktree_root, scope, previous),
+    )
 }
 
 /// Load entries updated strictly after `since`.
 pub fn load_entries_since(worktree_root: &Path, since: DateTime<Utc>) -> Result<Vec<BoardEntry>> {
-    provider_for(worktree_root).load_entries_since(worktree_root, since)
+    after_local_operation(
+        worktree_root,
+        provider_for(worktree_root).load_entries_since(worktree_root, since),
+    )
 }
 
 /// Load entries updated strictly after `since`, filtered to a scope.
@@ -573,7 +601,10 @@ pub fn load_entries_since_for_scope(
     since: DateTime<Utc>,
     scope: &BoardAudienceScope,
 ) -> Result<Vec<BoardEntry>> {
-    provider_for(worktree_root).load_entries_since_for_scope(worktree_root, since, scope)
+    after_local_operation(
+        worktree_root,
+        provider_for(worktree_root).load_entries_since_for_scope(worktree_root, since, scope),
+    )
 }
 
 /// Whether `author` posted a message of `kind` within `within`.
@@ -602,10 +633,13 @@ pub fn load_prompt_reminder_for_repo_hash(
     ) {
         return result;
     }
-    provider_for(worktree_root).load_prompt_reminder_for_repo_hash(
+    after_local_operation(
         worktree_root,
-        repo_hash,
-        request,
+        provider_for(worktree_root).load_prompt_reminder_for_repo_hash(
+            worktree_root,
+            repo_hash,
+            request,
+        ),
     )
 }
 
@@ -620,7 +654,10 @@ pub fn load_entries_before(
     before_entry_id: Option<&str>,
     limit: usize,
 ) -> Result<BoardHistoryPage> {
-    provider_for(worktree_root).load_entries_before(worktree_root, before_entry_id, limit)
+    after_local_operation(
+        worktree_root,
+        provider_for(worktree_root).load_entries_before(worktree_root, before_entry_id, limit),
+    )
 }
 
 /// Load a page of older entries before `before_entry_id`, filtered to a scope.
@@ -630,11 +667,14 @@ pub fn load_entries_before_for_scope(
     limit: usize,
     scope: &BoardAudienceScope,
 ) -> Result<BoardHistoryPage> {
-    provider_for(worktree_root).load_entries_before_for_scope(
+    after_local_operation(
         worktree_root,
-        before_entry_id,
-        limit,
-        scope,
+        provider_for(worktree_root).load_entries_before_for_scope(
+            worktree_root,
+            before_entry_id,
+            limit,
+            scope,
+        ),
     )
 }
 
@@ -842,11 +882,13 @@ mod tests {
             provider: Some(BoardProviderKind::Slack),
             channel: Some("C-A".into()),
             tenant: Some("acme".into()),
+            ..Default::default()
         };
         let proj_b = ProjectBoardConfig {
             provider: Some(BoardProviderKind::Slack),
             channel: Some("C-B".into()),
             tenant: Some("beta".into()),
+            ..Default::default()
         };
         let a = resolve_board(&proj_a, &settings, BoardProviderKind::Local);
         let b = resolve_board(&proj_b, &settings, BoardProviderKind::Local);

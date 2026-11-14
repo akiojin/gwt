@@ -151,17 +151,28 @@ Blocking items: <N>
 - Exit code 1 --> issues remain --> go back to step 4.
 - CI pending/queued --> check at most 3 times with JSON operation `pr.checks`, waiting no more than 30 seconds between checks.
 - If checks are still pending after the bounded checks, post JSON operation
-  `board.post` with `params.kind:"blocked"`, the PR number, pending check
-  names, and resume command, then stop instead of sleeping indefinitely.
+  `board.post` with `params.kind:"status"` or `params.kind:"handoff"`, the PR
+  number, pending check names, and resume command. For autonomous / Issue Monitor
+  launches, declare `issue.monitor.wait` with the explicit owner Issue number
+  in `params.number`, `reason`, and `resume_condition`. Keep the execution Active
+  and auto-merge enabled; resume bounded checks when CI progresses and clear
+  the wait with `params.clear:true`. Without a Monitor owner, use the notification
+  only. Do not emit `params.kind:"blocked"` or NeedsHuman or call
+  `execution.blocked` for pending-only CI. The Ready / required CI / auto-merge
+  gates still apply; pending checks do not prove delivery.
 - After fix push, run the same bounded CI check path for the new run.
 
 ## Loop Safety Guard
 
+- CI pending alone never counts toward the failure guard and never requires a
+  human decision to keep waiting in an autonomous launch.
 - Same CI check name fails 3 consecutive iterations:
   1. Report which check, what was tried each iteration, what keeps failing.
   2. Ask user: **continue** / **abort** / **change approach**.
   3. Only proceed after explicit user decision.
 - Different checks failing in different iterations do NOT trigger the guard.
+- A human decision, unsafe operation, or actual tool refusal still follows the
+  existing blocked escalation contract in `gwt-coordination`.
 
 ## Anti-Patterns (Prohibited)
 

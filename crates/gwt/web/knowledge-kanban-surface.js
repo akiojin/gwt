@@ -721,6 +721,8 @@ export function createKnowledgeKanbanSurface({
         queue_len: 0,
         active_count: 0,
         max_active_agents: 1,
+        max_active_agents_override: null,
+        agent_capacity: null,
         total_candidates: 0,
         autonomous_mode: false,
         auto_apply_updates: false,
@@ -828,15 +830,58 @@ export function createKnowledgeKanbanSurface({
         return String(text || "").split(/\r?\n/)[0].trim();
       }
 
+      function renderIssueMonitorCapacity(bar) {
+        const status = issueMonitorModel.read().status;
+        const override = status.max_active_agents_override;
+        const manual = Number.isInteger(override) && override > 0;
+        bar.querySelector('[data-role="monitor-capacity-mode"]').textContent = manual ? "Manual" : "Auto";
+        bar.querySelector('[data-action="monitor-capacity-auto"]').hidden = !manual;
+        bar.querySelector(".knowledge-monitor-max-active input").min = manual ? "1" : "0";
+        const details = bar.querySelector(".knowledge-monitor-capacity");
+        const warning = bar.querySelector(".knowledge-monitor-capacity-warning");
+        const capacity = status.agent_capacity;
+        details.hidden = !capacity;
+        warning.hidden = true;
+        warning.textContent = "";
+        if (!capacity) return;
+        details.querySelector("summary").textContent = `Machine budget · ${capacity.recommended_worker_limit} workers recommended`;
+        details.querySelector('[data-role="capacity-recommendation"]').textContent =
+          `Recommended: ${capacity.recommended_worker_limit} monitor workers · ${capacity.recommended_implementation_count} implementation agents · ${capacity.recommended_total_count} total including PM`;
+        details.querySelector('[data-role="capacity-usage"]').textContent =
+          `Machine budget: ${capacity.machine_budget ?? "unknown"} · Machine live: ${capacity.machine_live_agents} · This project: ${capacity.own_live_agents} (PM: ${capacity.own_pm_agents}) · Other projects: ${capacity.other_live_agents}`;
+        details.querySelector('[data-role="capacity-gui-cpu"]').textContent =
+          `GUI CPU reserved: ${Number(capacity.gui_cpu_millicores) / 1000} cores`;
+        details.querySelector('[data-role="capacity-reason"]').textContent = capacity.reason;
+        const constraints = details.querySelector('[data-role="capacity-constraints"]');
+        constraints.replaceChildren();
+        for (const constraint of capacity.constraints || []) {
+          const resource = constraint.resource === "disk" ? "Disk" : String(constraint.resource).toUpperCase();
+          const row = createNode("li", "", `${resource}: ${constraint.capacity ?? "unknown"} agent slots${constraint.binding ? " · limiting" : ""} · ${constraint.reason}`);
+          constraints.appendChild(row);
+        }
+        const excess = manual ? override - capacity.recommended_worker_limit : 0;
+        let warningText = "";
+        if (!capacity.measurement_complete) {
+          warningText = `Capacity measurement is incomplete.${manual ? ` Manual limit ${override} is unchanged.` : ""} ${capacity.reason}`;
+        } else if (excess > 0) {
+          warningText = `${excess} agents above recommendation (${String(capacity.limiting_constraint).toUpperCase()}). ${capacity.reason}`;
+        }
+        if (warningText) {
+          warning.textContent = `${warningText} Verification may not finish. Timing-dependent test failures may block unrelated PRs.`;
+          warning.hidden = false;
+        }
+      }
+
       function renderIssueMonitorControls(element) {
         renderIssueMonitorPool(element);
         renderIssueMonitorAllowedLabels(element);
         const bar = element?.querySelector(".knowledge-monitor-bar");
         if (!bar) return;
         const maxActive = Math.max(
-          1,
-          Number.parseInt(String(issueMonitorModel.read().status.max_active_agents || 1), 10) || 1,
+          0,
+          Number.parseInt(String(issueMonitorModel.read().status.max_active_agents ?? 1), 10) || 0,
         );
+        renderIssueMonitorCapacity(bar);
         const quotaHold = normalizedIssueMonitorQuotaHold(issueMonitorModel.read().status);
         const state = effectiveIssueMonitorState(issueMonitorModel.read().status, quotaHold);
         const pill = bar.querySelector(".knowledge-monitor-pill");
@@ -1143,6 +1188,8 @@ export function createKnowledgeKanbanSurface({
         issueMonitorModel.update(model => ({ ...model, status: {
           ...model.status,
           ...(nextStatus || {}),
+          max_active_agents_override: nextStatus?.max_active_agents_override ?? null,
+          agent_capacity: nextStatus?.agent_capacity ?? null,
           quota_hold: normalizedIssueMonitorQuotaHold(nextStatus),
           // Issue #4366 AC-6b: omitted once the hold clears, so it must not
           // survive from the previous status the way merged fields do.
@@ -1327,6 +1374,9 @@ export function createKnowledgeKanbanSurface({
             kind: "set_issue_monitor_max_active_agents",
             max_active_agents: value,
           });
+        });
+        bar.querySelector('[data-action="monitor-capacity-auto"]')?.addEventListener("click", () => {
+          send({ kind: "set_issue_monitor_max_active_agents", max_active_agents: null });
         });
         bar
           .querySelector('[data-action="monitor-toggle"]')
@@ -4557,11 +4607,24 @@ export function createKnowledgeKanbanSurface({
                     <span>Max active</span>
                     <input type="number" min="1" step="1" value="1" aria-label="Max active agents" />
                   </label>
+                  <span class="knowledge-monitor-metric" data-role="monitor-capacity-mode">Auto</span>
+                  <button type="button" class="wizard-button is-compact" data-action="monitor-capacity-auto" hidden>Use Auto</button>
                   <button type="button" class="wizard-button is-compact primary" data-action="monitor-toggle">Start monitor</button>
                   <button type="button" class="wizard-button is-compact" data-action="monitor-auto-apply" title="Apply a staged gwt update automatically once no agent is running (default: follows Autonomous)">Auto-apply updates: OFF</button>
                   <button type="button" class="wizard-button is-compact primary" data-action="monitor-setup" hidden>Set up agent</button>
                   <button type="button" class="wizard-button is-compact" data-action="monitor-settings" aria-label="Agent settings">⚙ Settings</button>
                   </div>
+                  <p class="knowledge-monitor-capacity-warning" role="status" aria-live="polite" hidden></p>
+                  <details class="knowledge-monitor-capacity" hidden>
+                    <summary>Machine budget</summary>
+                    <div class="knowledge-monitor-capacity-content">
+                      <p data-role="capacity-recommendation"></p>
+                      <p data-role="capacity-usage"></p>
+                      <p data-role="capacity-gui-cpu"></p>
+                      <p data-role="capacity-reason"></p>
+                      <ul data-role="capacity-constraints"></ul>
+                    </div>
+                  </details>
                 </section>
                 <details class="knowledge-monitor-labels knowledge-monitor-candidate">
                   <summary>Allowed labels · All labels · Excluded 0</summary>

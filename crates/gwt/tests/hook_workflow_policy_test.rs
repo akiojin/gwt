@@ -83,6 +83,11 @@ fn semantic_classifier_distinguishes_json_operation_effects() {
         ),
         ("pr.edit", json!({}), GovernanceEffect::Reversible),
         ("pr.draft", json!({}), GovernanceEffect::Reversible),
+        (
+            "pr.close",
+            json!({"number": 42}),
+            GovernanceEffect::Reversible,
+        ),
         ("workspace.update", json!({}), GovernanceEffect::Reversible),
         (
             "issue.label",

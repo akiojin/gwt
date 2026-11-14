@@ -63,7 +63,7 @@
 
 ### テストの範囲規律
 
-テストは**今回の変更の受け入れ**に仕えるものであり、それ以外の目的で増やさない。TDD（RED を先に作る）・カバレッジ 90% 維持・GUI 変更の headed E2E といった本リポジトリの必須ゲートはそのまま適用した上で、次を守る:
+テストは**今回の変更の受け入れ**に仕えるものであり、それ以外の目的で増やさない。TDD（RED を先に作る）・後述のスコープ付き CI カバレッジ基準・GUI 変更の headed E2E といった本リポジトリの必須ゲートはそのまま適用した上で、次を守る:
 
 1. まず変更に関連する既存テストを走らせる。既存テストで変更の正しさが証明できるなら新規テストは足さない。
 2. 新規テストは「既存テストが覆えない挙動変更」または「ユーザーの明示要求」がある場合に限る。
@@ -146,13 +146,26 @@
 - エラーが発生している状態で完了としないこと。必ずエラーが解消された時点で完了とする。
 - 変更対象に応じた検証（テスト / lint / 型チェック）を実行し、成功を確認してから完了とする。
 - 実行不能な検証がある場合は、未実施理由・代替確認・残リスクを明示する。未検証のまま「完了」と報告しない。
-- gwtプロジェクトでは、単体テスト・結合テスト・E2Eテストを含む全体のテストカバレッジを 90% 以上で維持すること。
+- カバレッジの判定・測定義務・報告は、下記「カバレッジの判定と報告」に従う。
 - **GUI / フロントエンドに影響する変更では、必ず Headed ブラウザ（実 Chromium）による E2E テストを実施すること。** headless・linkedom・unit テストのみの検証で完了としない。`browser-check` skill の隔離起動（checkout の `target/debug/gwt` + fresh HOME）を用い、dark / light 両テーマの表示確認と console / page error が無いことまで確認してから完了とする。
 - **完了報告前のセルフチェックリスト（必須）:**
   - [ ] 対象の SPEC (GitHub Issue `gwt-spec` label) が最新状態に更新されているか
   - [ ] 全テスト通過・lint / 型チェック成功
   - [ ] 未実装・TODO が残っていないか
   - [ ] コミット＆プッシュ済みか
+
+### カバレッジの判定と報告
+
+- 正本は `.github/workflows/coverage.yml`、呼び出し元の `lint.yml`、`scripts/check-coverage-threshold.mjs`。workspace の Rust テストを `--workspace --all-features` で計測し、**行カバレッジをスコープ別に判定する。workspace 全体に一律 90% を要求しない。**
+- CI の gate は次の 2 本。いずれも下記 outer shell を分母から除外する。
+  - `node scripts/check-coverage-threshold.mjs target/coverage-summary.json 90 --scope "crates/(gwt-core|gwt)/"` — `gwt-core` と `gwt` の対象行が 90% 以上。
+  - `node scripts/check-coverage-threshold.mjs target/coverage-summary.json 80 --scope-exclude "crates/(gwt-core|gwt)/"` — 残りの domain crates の対象行が 80% 以上。
+- 除外対象は `crates/gwt/src/` 配下の `main.rs`、`bin/gwtd.rs`、`app_runtime.rs`、`app_runtime/**/*.rs`、`docker_launch.rs`、`index_worker.rs`、`issue_cache.rs`、`launch_runtime.rs`、`native_app.rs`、`update_front_door.rs`、`cli/daemon/mod.rs`、`cli/index.rs`、`cli/index/**/*.rs`。これらの outer shell は専用の contract test 等で検証する。
+- **PR（base: develop / main）では `lint.yml` が `workflow_call` で coverage を実行する。** 対象は PR head SHA。develop push と `merge_group` でも呼び出し、日次（UTC 00:00）は develop、`workflow_dispatch` は選択した ref の SHA を計測する。手動実行も develop 固定ではない。lcov 生成・Codecov upload は日次／手動実行のみ。
+- **PR の着地には必須チェック `coverage / Rust Coverage` の成功が必要。ローカルで別途 workspace 全体 90% を証明する義務はない。** CI 対応を確認した `gwt-verify --mode pre-pr` では必須 CI に閾値判定を委ね、coverage のためだけに追加の full matrix を投入しない。ローカル計測は任意。定期レポートと競合する `coverage.yml` の手動 dispatch は担当 agent が行わず、必要なら PM が実施する。
+- **報告には対象 SHA・スコープ・除外の有無・covered lines / total lines・割合・適用閾値を併記する。** `gate: gwt-core + gwt、outer shell 除外後、900/1000 = 90.00%、閾値 90%` のように書く。workspace 全体の値は `workspace 全体（参考値、gate 判定ではない）` と明記し、outer shell を含む生の集計か除外後かも区別する。
+- `--scope` / `--scope-exclude` を両方省略した script の結果は outer shell 除外後の workspace 集計であり、指定閾値との比較は行うが **CI の 90% / 80% の gate 判定ではない**。その結果を「CI の 90% 未達」と報告しない。
+- **未測定・集計失敗・証跡不足は「未測定（理由）」または「集計失敗（理由）」として報告し、「未達」と報告しない。** 「未達」は対象 SHA の該当 gate スコープを正常に測定し、その閾値を下回った場合に限る。
 
 ### Ready PR Gate（Ready 運用）
 

@@ -1240,9 +1240,9 @@ impl AppRuntime {
                     gwt::IssueMonitorFailureClass::Unknown
                 },
             }));
-        let termination_issue_hint = self
-            .pending_launch_feedback_contexts
-            .get(&id)
+        let termination_issue_hint = issue_monitor_project_root
+            .as_deref()
+            .and_then(|root| self.issue_monitor_pending_feedback_for_window(&id, root))
             .and_then(|context| context.issue_monitor_issue_number);
         if should_auto_close {
             if !close_window_from_workspace(
@@ -1913,10 +1913,10 @@ impl AppRuntime {
         // for a working agent (the watcher thread stays silent until the
         // process exits), so without this the activity clock froze at launch
         // and a rate-limited or hung agent was indistinguishable from a busy
-        // one. Throttled inside `issue_monitor_heartbeat`.
+        // one. Throttled inside `schedule_runtime_hook_heartbeat`.
         if let Some(project_root) = issue_monitor_project_root.clone() {
             stages.measure("issue_monitor_heartbeat", || {
-                self.issue_monitor_heartbeat(&project_root, &window_id)
+                self.schedule_runtime_hook_heartbeat(&project_root, &window_id)
             });
         }
         if event.source_event.as_deref() == Some("SessionStart") {
@@ -1995,7 +1995,7 @@ impl AppRuntime {
                 .to_string();
             if let Some(project_root) = issue_monitor_project_root.as_deref() {
                 events.extend(stages.measure("issue_monitor_agent_failed", || {
-                    self.issue_monitor_agent_failed_events_with_mode(
+                    self.schedule_runtime_hook_agent_failure(
                         project_root,
                         &window_id,
                         &message,

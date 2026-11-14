@@ -18,9 +18,9 @@
 //!   `*.test.*` files through `node --test`.
 //! - **docs** (markdown outside the skill trees): `bunx markdownlint-cli2`
 //!   over the changed files (AGENTS markdown policy).
-//! - **anything else**: the conservative Rust matrix plus an explicit
-//!   `unsupported(path)` diagnostic. Automatic registration refuses unknown
-//!   surfaces; an explicit plan supplies their project-specific commands.
+//! - **anything else**: the full workspace Rust matrix plus an explicit
+//!   `fallback(workspace:path)` diagnostic. Unknown surfaces broaden the
+//!   default instead of refusing automatic registration.
 //!
 //! # Package narrowing, never target narrowing
 //!
@@ -200,21 +200,6 @@ impl TrivialReason {
 }
 
 impl DerivedPlan {
-    pub(crate) fn unsupported_reason(&self) -> Option<String> {
-        let unsupported: Vec<&str> = self
-            .surfaces
-            .iter()
-            .filter(|surface| surface.starts_with("unsupported("))
-            .map(String::as_str)
-            .collect();
-        (!unsupported.is_empty()).then(|| {
-            format!(
-                "verify.plan derive has unsupported changed surfaces [{}]; register an explicit verify.plan with params.commands covering these paths before canonical verification",
-                unsupported.join(", ")
-            )
-        })
-    }
-
     fn trivial(reason: TrivialReason) -> Self {
         Self {
             commands: Vec::new(),
@@ -537,7 +522,10 @@ fn derive_pre_pr_for_host_excluding(
     }
     validate_pre_pr_ci(worktree, required)?;
     let mut packages = BTreeSet::new();
-    let mut workspace = false;
+    let mut workspace = plan
+        .surfaces
+        .iter()
+        .any(|surface| surface.starts_with("fallback(workspace:"));
     for path in changed_paths(worktree).map_err(|reason| reason.as_str().to_string())? {
         if generated_outputs.contains(&path) {
             continue;
@@ -802,7 +790,7 @@ fn derive_for_host_excluding(
     let mut docs_files: Vec<String> = Vec::new();
     let mut other = false;
     let mut node_tests = BTreeSet::new();
-    let mut unsupported = Vec::new();
+    let mut fallbacks = Vec::new();
 
     for path in &paths {
         if is_skills_path(path) {
@@ -813,7 +801,7 @@ fn derive_for_host_excluding(
             let tests = node_test_paths(worktree, path);
             if tests.is_empty() {
                 other = true;
-                unsupported.push(format!("unsupported({path})"));
+                fallbacks.push(format!("fallback(workspace:{path})"));
             } else {
                 node_tests.extend(tests);
             }
@@ -830,7 +818,7 @@ fn derive_for_host_excluding(
         } else {
             other = true;
             if path != ".config/nextest.toml" || !nextest_profile {
-                unsupported.push(format!("unsupported({path})"));
+                fallbacks.push(format!("fallback(workspace:{path})"));
             }
         }
     }
@@ -887,7 +875,29 @@ fn derive_for_host_excluding(
         surfaces.push("other".to_string());
         test_packages.insert("gwt");
     }
-    if workspace_rust {
+    if !fallbacks.is_empty() {
+        if host == VerificationHost::Windows && worktree.join("crates/gwt/Cargo.toml").is_file() {
+            // Only the live controller needs unit-target narrowing. Keep
+            // every other crate's integration tests and doctests in the floor.
+            push_unique(
+                &mut commands,
+                format!(
+                    "{} -- --test-threads=1",
+                    CI_RUST_TEST_GATE.replace("--workspace", "--workspace --exclude gwt")
+                ),
+            );
+            push_unique(
+                &mut commands,
+                package_test_command_for(WINDOWS_CONTROLLER_PACKAGE, host),
+            );
+        } else {
+            let mut command = CI_RUST_TEST_GATE.to_string();
+            if host == VerificationHost::Windows {
+                command.push_str(" -- --test-threads=1");
+            }
+            push_unique(&mut commands, command);
+        }
+    } else if workspace_rust {
         // A workspace manifest change cannot be attributed to any single
         // package, so it takes CI's gate unnarrowed — which subsumes every
         // per-package command the surfaces above would have added.
@@ -933,7 +943,7 @@ fn derive_for_host_excluding(
             ),
         );
     }
-    surfaces.extend(unsupported);
+    surfaces.extend(fallbacks);
 
     // Only lint files that still exist — a deleted path would make
     // markdownlint-cli2 exit 0 on zero matches (a vacuous PASS), and paths
@@ -980,6 +990,12 @@ mod tests {
                 &std::fs::read_to_string(root.join(path)).unwrap(),
             );
         }
+        git(worktree, &["add", "."]);
+        git(worktree, &["commit", "-qm", "test: existing CI baseline"]);
+        git(
+            worktree,
+            &["update-ref", "refs/remotes/origin/develop", "HEAD"],
+        );
         write(worktree, "crates/gwt/src/change.rs", "// changed\n");
     }
 
@@ -1057,6 +1073,17 @@ mod tests {
             .unwrap()
             .commands
             .contains(&CI_CLIPPY_GATE.to_string()));
+        write(dir.path(), "scripts/pull-render-baseline.json", "{}");
+        let fallback = derive_pre_pr_for_host(
+            dir.path(),
+            VerificationHost::Other,
+            &required,
+            std::slice::from_ref(&ac),
+            &[],
+        )
+        .unwrap();
+        assert!(fallback.commands.contains(&CI_CLIPPY_GATE.to_string()));
+        assert!(fallback.commands.contains(&ac));
         std::fs::remove_file(dir.path().join(".github/workflows/test.yml")).unwrap();
         assert!(
             derive_pre_pr_for_host(dir.path(), VerificationHost::Other, &required, &[ac], &[])
@@ -1763,15 +1790,16 @@ mod tests {
             .commands
             .iter()
             .any(|command| command.contains("--test-threads=1")));
-        assert!(plan.unsupported_reason().is_none(), "{plan:?}");
+        assert!(
+            !plan.surfaces.iter().any(|s| s.starts_with("fallback(")),
+            "{plan:?}"
+        );
         let other = derive_for_host(dir.path(), VerificationHost::Other).unwrap();
-        assert!(other
-            .commands
-            .contains(&"cargo test -p gwt --all-features".to_string()));
+        assert!(other.commands.contains(&CI_RUST_TEST_GATE.to_string()));
         assert!(
             other
                 .surfaces
-                .contains(&"unsupported(.config/nextest.toml)".to_string()),
+                .contains(&"fallback(workspace:.config/nextest.toml)".to_string()),
             "{other:?}"
         );
         write(dir.path(), ".config/nextest.toml", "[invalid config\n");
@@ -1779,7 +1807,7 @@ mod tests {
         assert!(
             invalid
                 .surfaces
-                .contains(&"unsupported(.config/nextest.toml)".to_string()),
+                .contains(&"fallback(workspace:.config/nextest.toml)".to_string()),
             "{invalid:?}"
         );
     }
@@ -1791,7 +1819,7 @@ mod tests {
         for files in [
             vec!["crates/gwt/src/main.rs"],
             vec!["Cargo.toml"],
-            vec!["scripts/release.sh"],
+            vec!["scripts/release.sh", "crates/gwt/Cargo.toml"],
         ] {
             for command in cargo_tests(&derive_on(VerificationHost::Windows, &files)) {
                 for target in ["--all-targets", "--tests", "--test "] {
@@ -1802,8 +1830,8 @@ mod tests {
                     );
                 }
                 assert!(
-                    command.contains(" --lib "),
-                    "{files:?}: `{command}` does not explicitly select unit targets"
+                    command.contains(" --lib ") || command.contains("--exclude gwt "),
+                    "{files:?}: `{command}` must narrow or exclude the live controller"
                 );
             }
         }
@@ -2044,8 +2072,7 @@ mod tests {
         );
     }
 
-    // Unknown surfaces retain the fallback matrix for diagnosis, but mark
-    // the uncovered path so automatic registration cannot silently pass.
+    // #5197: unknown paths use the full workspace CI Rust/lint/rustdoc floor.
     #[test]
     fn unknown_surface_gets_conservative_default() {
         let dir = tempfile::tempdir().unwrap();
@@ -2054,18 +2081,61 @@ mod tests {
         write(dir.path(), ".github/workflows/custom.yml", "jobs: {}\n");
 
         let plan = derive_for_host(dir.path(), VerificationHost::Other).unwrap();
-        assert!(plan.commands.contains(&CI_CLIPPY_GATE.to_string()));
-        assert!(plan
-            .commands
-            .contains(&"cargo test -p gwt --all-features".to_string()));
-        assert!(plan.surfaces.contains(&"other".to_string()));
+        assert_eq!(
+            plan.commands,
+            vec![
+                CI_FMT_GATE.to_string(),
+                CI_CLIPPY_GATE.to_string(),
+                CI_RUSTDOC_GATE.to_string(),
+                CI_RUST_TEST_GATE.to_string(),
+            ]
+        );
         assert!(plan
             .surfaces
-            .contains(&"unsupported(scripts/release.sh)".to_string()));
+            .contains(&"fallback(workspace:scripts/release.sh)".to_string()));
         assert!(
             plan.surfaces
-                .contains(&"unsupported(.github/workflows/custom.yml)".to_string()),
+                .contains(&"fallback(workspace:.github/workflows/custom.yml)".to_string()),
             "{plan:?}"
+        );
+    }
+
+    #[test]
+    fn windows_unknown_surface_preserves_non_controller_integration_and_doc_tests() {
+        let dir = tempfile::tempdir().unwrap();
+        fixture(dir.path());
+        write(
+            dir.path(),
+            "crates/gwt/Cargo.toml",
+            "[package]\nname = 'gwt'\n",
+        );
+        write(dir.path(), "crates/gwt-core/src/lib.rs", "");
+        write(dir.path(), "scripts/pull-render-baseline.json", "{}");
+        write(
+            dir.path(),
+            ".config/nextest.toml",
+            "[profile.gwt-verify]\nretries = 0\n",
+        );
+        let plan = derive_for_host(dir.path(), VerificationHost::Windows).unwrap();
+        for command in [
+            "cargo nextest run --workspace --exclude gwt --all-features --profile gwt-verify --retries 0",
+            "cargo test --workspace --exclude gwt --all-features --doc",
+            "cargo nextest run -p gwt --lib --bins --all-features --profile gwt-verify --retries 0",
+        ] {
+            assert!(plan.commands.contains(&command.to_string()), "{plan:?}");
+        }
+        std::fs::remove_file(dir.path().join("crates/gwt/Cargo.toml")).unwrap();
+        let generic = derive_for_host(dir.path(), VerificationHost::Windows).unwrap();
+        assert!(
+            generic.commands.contains(
+                &"cargo nextest run --workspace --all-features --profile gwt-verify --retries 0"
+                    .to_string()
+            ),
+            "{generic:?}"
+        );
+        assert!(
+            !generic.commands.iter().any(|c| c.contains("-p gwt")),
+            "{generic:?}"
         );
     }
 
@@ -2117,15 +2187,13 @@ mod tests {
     }
 
     #[test]
-    fn node_script_without_tests_is_an_unsupported_surface() {
+    fn node_script_without_tests_uses_workspace_fallback() {
         let plan = derive_for(&["scripts/no-tests.mjs", "crates/gwt-core/src/lib.rs"]);
         assert!(
             plan.surfaces
-                .contains(&"unsupported(scripts/no-tests.mjs)".to_string()),
+                .contains(&"fallback(workspace:scripts/no-tests.mjs)".to_string()),
             "{plan:?}"
         );
-        assert!(plan
-            .commands
-            .contains(&"cargo test -p gwt-core --all-features".to_string()));
+        assert!(plan.commands.contains(&CI_RUST_TEST_GATE.to_string()));
     }
 }

@@ -161,17 +161,19 @@ console.error('Unimplemented fixture gh: '+text);process.exit(64);
       },
     });
   } catch (error) {
-    await stopDaemon();
-    await new Promise<void>(resolve => server.close(() => resolve()));
+    try { await stopDaemon(); }
+    finally { await new Promise<void>(resolve => server.close(() => resolve())); }
     throw error;
   }
   const active = fixture;
   return { ...active, issueNumber: issue.number, requests, comments, hookAudits,
     auditHooks: (cwd: string) => auditHooks(cwd, false),
     async stop() {
-      await active.stop();
-      await stopDaemon();
-      await new Promise<void>(resolve => server.close(() => resolve()));
+      try { await active.stop(); }
+      finally {
+        try { await stopDaemon(); }
+        finally { await new Promise<void>(resolve => server.close(() => resolve())); }
+      }
     },
   };
 }

@@ -275,7 +275,10 @@ fn issue_label_is_safety_sensitive(params: Option<&serde_json::Value>) -> bool {
 }
 
 fn is_explicitly_reversible_json_operation(operation: &str) -> bool {
-    matches!(operation, "pr.edit" | "pr.draft" | "workspace.update")
+    matches!(
+        operation,
+        "pr.edit" | "pr.draft" | "pr.close" | "workspace.update"
+    )
 }
 
 fn classify_segment(segment: &str, cwd: &Path, managed_root: &Path) -> Option<EffectObservation> {

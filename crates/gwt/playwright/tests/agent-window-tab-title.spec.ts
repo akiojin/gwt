@@ -54,7 +54,11 @@ test.describe("Agent window navigation without tabs", () => {
     await expect(target).toBeVisible();
     await expect(active).toBeHidden();
     await expect(target.locator(".title-text")).toHaveAttribute("title", "Claude");
+    await expect.poll(() => page.evaluate(() => window.__tabbedAgentsFixture.sent
+      .some(message => message.kind === "startup_terminal_ready" && message.id === "agent-2")))
+      .toBe(true);
     await target.locator(".xterm-helper-textarea").focus();
+    await expect(target.locator(".xterm-helper-textarea")).toBeFocused();
     await page.keyboard.type("hello");
     await expect.poll(() => page.evaluate(() => window.__tabbedAgentsFixture.sent
       .filter(message => message.kind === "terminal_input" && message.id === "agent-2")

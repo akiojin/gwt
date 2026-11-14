@@ -681,6 +681,11 @@ impl WindowsRealGwtFixture {
             + "/ws"
     }
 
+    /// The exact child owned by this fixture, for cleanup assertions.
+    pub fn pid(&self) -> u32 {
+        self.child.as_ref().expect("running gwt child").id()
+    }
+
     pub fn stderr(&self) -> String {
         std::fs::read_to_string(&self.stderr_path)
             .unwrap_or_else(|error| format!("<unreadable: {error}>"))

@@ -8,7 +8,7 @@
  */
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page, type TestInfo } from "@playwright/test";
 import { startExactRelaunchFixture, type ExactRelaunchInvocation } from "./_helpers/exact-relaunch";
 import { gotoLiveGwt, openLiveLaunchWizardForBranch, sendLiveGwtEvent } from "./_helpers/live-gwt";
 
@@ -106,6 +106,25 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
   test.skip(process.platform === "win32", "the argv recorder fixture requires POSIX executables");
   test.setTimeout(420_000);
 
+  test("restart evidence failure reaps the owned process", async ({}, testInfo) => {
+    let starts = 0;
+    const cleanups: { pid: number; ps_status: number }[] = [];
+    const fixture = await startExactRelaunchFixture({
+      async attach(name, attachment) {
+        if (name === "exact-relaunch-fixture" && ++starts === 2) throw new Error("fixture evidence failure");
+        if (name === "fixture-process-cleanup") cleanups.push(JSON.parse(attachment.body!.toString()));
+        await testInfo.attach(name, attachment);
+      },
+    } as TestInfo);
+    try {
+      await expect(fixture.restart()).rejects.toThrow("fixture evidence failure");
+      expect(cleanups).toHaveLength(2);
+      expect(cleanups.every(cleanup => cleanup.pid > 0 && cleanup.ps_status === 1)).toBe(true);
+    } finally {
+      await fixture.stop();
+    }
+  });
+
   test("window restart and app restart rebind the exact provider session", async ({ page }, testInfo) => {
     const fixture = await startExactRelaunchFixture(testInfo);
     const theme = testInfo.project.name.includes("light") ? "light" : "dark";
@@ -185,10 +204,13 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       await testInfo.attach(`app-restarted-${theme}`, { body: await restored.screenshot(), contentType: "image/png" });
       expect(errors, "console/page errors after app restart").toEqual([]);
     } finally {
-      await testInfo.attach("provider-launches", {
-        body: JSON.stringify(await fixture.launches(), null, 2), contentType: "application/json",
-      });
-      await fixture.stop();
+      try {
+        await testInfo.attach("provider-launches", {
+          body: JSON.stringify(await fixture.launches(), null, 2), contentType: "application/json",
+        });
+      } finally {
+        await fixture.stop();
+      }
     }
   });
 });

@@ -192,7 +192,7 @@ test.describe("Update drain CTA", () => {
   // and a way to stop waiting.
   test("a manual update click that lands on running agents drains, names its blockers and can stop waiting", async ({
     page,
-  }) => {
+  }, testInfo) => {
     const consoleErrors: string[] = [];
     const pageErrors: string[] = [];
     page.on("console", (message) => {
@@ -250,18 +250,17 @@ test.describe("Update drain CTA", () => {
           since,
           reason: "auto",
           blocking: [
-            { kind: "active_pane", window_id: "w1", label: "work/issue-4376", state: "running" },
-            { kind: "pending_acquire_claim", issue_number: 42 },
+            { kind: "active_pane", window_id: "llmlb::agent-14", label: "llmlb: SPEC #821 T012c", state: "running" },
           ],
         },
       },
     });
     await expect(modal).toHaveCount(0);
     await expect(cta).toHaveAttribute("data-status", "draining");
-    await expect(cta).toHaveText("Update v9.99.0 pending — draining 2 agents (3 min)");
+    await expect(cta).toHaveText("Update v9.99.0 pending — draining 1 agents (3 min)");
     await expect(cta).toHaveAttribute(
       "title",
-      "Update v9.99.0 pending — draining 2 agents (3 min). Waiting for: work/issue-4376 (running), claim for #42. New launches are held; agents are never stopped. Click to apply now anyway or stop waiting.",
+      "Update v9.99.0 pending — draining 1 agents (3 min). Waiting for: llmlb: SPEC #821 T012c (running). New launches are held; agents are never stopped. Click to apply now anyway or stop waiting.",
     );
     await expect(cta).toBeEnabled();
 
@@ -270,11 +269,12 @@ test.describe("Update drain CTA", () => {
     await cta.click();
     await expect(modal).toHaveAttribute("data-state", "ready");
     await expect(modal).toHaveAttribute("data-variant", "anyway");
-    await expect(modal).toContainText("Waiting for: work/issue-4376 (running), claim for #42");
+    await expect(modal).toContainText("Waiting for: llmlb: SPEC #821 T012c (running)");
     await expect(modal.locator("[data-update-modal-restart-now]")).toHaveText("Apply now anyway");
     await expect(modal.locator("[data-update-modal-later]")).toHaveCount(0);
     const stopWaiting = modal.locator("[data-update-modal-stop-waiting]");
     await expect(stopWaiting).toHaveText("Stop waiting");
+    await page.screenshot({ path: testInfo.outputPath("update-drain-other-project.png") });
 
     await stopWaiting.click();
     await expect(modal).toHaveCount(0);

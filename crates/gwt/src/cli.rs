@@ -12,6 +12,7 @@ mod board;
 pub(crate) mod branch;
 mod build;
 mod commands;
+mod completion_pr;
 mod concern;
 pub mod daemon;
 pub mod delivered_owner;
@@ -158,6 +159,8 @@ pub enum DaemonCommand {
 /// SPEC-2359 command model for `workspace.*` JSON operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkspaceCommand {
+    /// Read the outcome of one update without contacting or mutating the Host.
+    Receipt { operation_id: String },
     /// `workspace.update` — update Workspace current projection and journal.
     Update {
         title: Option<String>,

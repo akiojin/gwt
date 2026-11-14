@@ -1003,11 +1003,13 @@ impl PythonRunnerSpawner {
         // heavy index build through the host-wide coordinator (SPEC #1939
         // Phase 70 FR-379/FR-382) and drains the child while it runs.
         let repo_hash = repo_hash.to_string();
+        let project_root = project_root.to_path_buf();
         std::thread::Builder::new()
             .name("gwt-index-issues".to_string())
             .spawn(move || {
                 run_coordinated_issue_index(
                     &repo_hash,
+                    &project_root,
                     cmd,
                     spawn_id,
                     &label,
@@ -1047,6 +1049,7 @@ const ISSUE_INDEX_HEAVY_YIELD_POLL: Duration = Duration::from_millis(200);
 
 fn run_coordinated_issue_index(
     repo_hash: &str,
+    project_root: &Path,
     mut cmd: std::process::Command,
     spawn_id: u64,
     label: &str,
@@ -1103,7 +1106,7 @@ fn run_coordinated_issue_index(
             // The cap stays the 10-minute one from #4140 rather than the
             // generic `INDEX_HEAVY_LEASE_TTL`: this job is the holder that
             // starved verification, so it gets the tighter bound.
-            let heavy = match guard
+            let mut heavy = match guard
                 .acquire_heavy_with_ttl(ISSUE_INDEX_HEAVY_TIMEOUT, ISSUE_INDEX_HEAVY_MAX_HOLD)
             {
                 Ok(heavy) => heavy,
@@ -1121,6 +1124,7 @@ fn run_coordinated_issue_index(
                     return;
                 }
             };
+            heavy.record_runner_context(project_root, "index-issues", "background");
             // Drain the runner on a worker thread so this thread can keep
             // watching the lease. `wait_with_output` has to own the child to
             // pump both pipes, so polling it here instead would risk filling

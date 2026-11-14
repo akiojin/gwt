@@ -139,6 +139,16 @@ pub fn kill_and_reap(pty: &PtyHandle, window_id: &str) -> std::io::Result<bool> 
             return Ok(true);
         }
         if Instant::now() >= deadline {
+            #[cfg(target_os = "macos")]
+            {
+                let reason = pty.unreaped_child_reason();
+                tracing::warn!(target: "gwt.pane.teardown", %window_id, %reason,
+                    "detached PTY exit could not be proven before the finalizer deadline");
+                return Err(std::io::Error::other(format!(
+                    "detached PTY exit could not be proven: {reason}"
+                )));
+            }
+            #[cfg(not(target_os = "macos"))]
             return Ok(false);
         }
         thread::sleep(Duration::from_millis(10));

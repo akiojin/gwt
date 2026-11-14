@@ -1225,7 +1225,7 @@ fn app_runtime_paused_works_on_same_branch_remain_distinct_children() {
         "branch equality groups a Workspace later; it must not erase a distinct Work"
     );
 
-    super::super::assign_and_merge_workspace_groups(&mut view.active_works, &repo);
+    super::super::assign_and_merge_workspace_groups(&mut view.active_works, &repo, &HashMap::new());
     super::super::attach_registry_sessions_to_active_works(
         &mut view.active_works,
         &[],
@@ -1321,7 +1321,7 @@ fn app_runtime_live_work_keeps_distinct_paused_work_on_same_branch() {
     assert_eq!(live.pr_number, None);
     assert!(live.board_refs.is_empty());
 
-    super::super::assign_and_merge_workspace_groups(&mut view.active_works, &repo);
+    super::super::assign_and_merge_workspace_groups(&mut view.active_works, &repo, &HashMap::new());
     super::super::attach_registry_sessions_to_active_works(
         &mut view.active_works,
         &[],
@@ -1715,7 +1715,7 @@ fn app_runtime_launch_failure_log_redacts_sensitive_error_values() {
     let events = capture_tracing_events(|| {
         let _ = runtime.handle_launch_complete_and_drain(
                 window_id,
-                Err("failed OPENAI_API_KEY=sk-test --api-key sk-other GWT_HOOK_TOKEN=hook-secret --token plain-token".to_string()),
+                Err("failed OPENAI_API_KEY=sk-test --api-key sk-other GWT_HOOK_TOKEN=hook-secret --token plain-token".into()),
             );
     });
 
@@ -1736,6 +1736,54 @@ fn app_runtime_launch_failure_log_redacts_sensitive_error_values() {
     assert!(error.contains("--api-key [REDACTED]"));
     assert!(error.contains("GWT_HOOK_TOKEN=[REDACTED]"));
     assert!(error.contains("--token [REDACTED]"));
+}
+
+#[test]
+fn launch_failure_retains_structured_retry_metadata_in_terminal_status() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "agent-1",
+        WindowPreset::Agent,
+        WindowProcessStatus::Starting,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-1");
+
+    use super::super::launch::AgentLaunchError;
+    for (error, error_code, retryable) in [
+        (
+            AgentLaunchError::from("simulated launch failure"),
+            "launch_failed",
+            true,
+        ),
+        (
+            AgentLaunchError::active_conflict("exact launch conflict"),
+            "active_launch_conflict",
+            true,
+        ),
+        (
+            AgentLaunchError::authority_rejected("exact authority mismatch"),
+            "active_launch_authority_rejected",
+            false,
+        ),
+    ] {
+        let events = runtime.handle_launch_complete_and_drain(window_id.clone(), Err(error));
+        let response = events
+            .iter()
+            .find(|event| {
+                matches!(
+                    &event.event,
+                    BackendEvent::TerminalStatus { id, status: WindowProcessStatus::Error, .. }
+                        if id == &window_id
+                )
+            })
+            .expect("caller launch failure response");
+        let value = serde_json::to_value(&response.event).expect("serialize launch response");
+        assert_eq!(value["error_code"], error_code);
+        assert_eq!(value["retryable"], retryable);
+    }
 }
 
 #[test]
@@ -3089,15 +3137,16 @@ fn agent_hook_arrival_refreshes_the_issue_monitor_activity_clock() {
     );
     tab.project_root = repo.clone();
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
     let window_id = combined_window_id("tab-1", "agent-1");
     runtime.active_agent_sessions.insert(
         window_id.clone(),
         sample_active_agent_session("tab-1", &window_id),
     );
 
-    // The heartbeat itself goes out over the daemon control channel, which a
-    // unit test cannot observe. Assert the decision instead: after a hook
-    // arrival the runtime must have recorded that this window showed activity.
+    // Record activity immediately while deferring the monitor lookup and
+    // daemon control publication to the blocking worker.
     runtime.handle_runtime_hook_event(runtime_hook_state_for_event(
         "Running",
         "PostToolUse",
@@ -3107,6 +3156,11 @@ fn agent_hook_arrival_refreshes_the_issue_monitor_activity_clock() {
     assert!(
         runtime.last_agent_activity_for_test(&window_id).is_some(),
         "a hook arrival must refresh the activity clock for its window"
+    );
+    assert_eq!(
+        tasks.lock().expect("queued tasks").len(),
+        1,
+        "RuntimeHook must defer heartbeat lookup and publication to one blocking worker"
     );
 }
 

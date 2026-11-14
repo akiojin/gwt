@@ -146,6 +146,18 @@ pub enum ClaimReleaseOutcome {
     AlreadyReleased(Option<ClaimComment>),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClaimRenewOutcome {
+    Renewed {
+        claim: ClaimComment,
+        conflicting_claims: Vec<ClaimComment>,
+    },
+    NotRenewed {
+        reason: String,
+        conflicting_claims: Vec<ClaimComment>,
+    },
+}
+
 pub fn extract_claim_comments(comments: &[CommentSnapshot]) -> Vec<ClaimComment> {
     comments
         .iter()
@@ -233,6 +245,91 @@ pub fn acquire_claim_mutation<C: IssueClient + ?Sized>(
     let mut own_claim = claim;
     own_claim.comment_id = Some(created.id);
     resolve_claim_after_mutation(client, issue_number, own_claim, now)
+}
+
+/// Renew an existing Active claim after the caller proves its execution is live.
+/// Expired Active claims remain eligible, but terminal claims are never revived
+/// and a foreign active claim prevents renewal without choosing a winner.
+pub fn renew_claim_mutation<C: IssueClient + ?Sized>(
+    client: &C,
+    issue_number: IssueNumber,
+    claim_id: &str,
+    owner: &str,
+    now: &str,
+    expires_at: &str,
+) -> OwnerMutationResult<ClaimRenewOutcome> {
+    if owner.trim().is_empty() {
+        return Err(OwnerMutationError::PreSubmit(ApiError::Unexpected(
+            "renew claim owner identity is missing".to_string(),
+        )));
+    }
+    let matches_identity = |claim: &ClaimComment| {
+        claim.issue_number == issue_number.0 && claim.claim_id == claim_id && claim.owner == owner
+    };
+    let conflicts = |claims: &[ClaimComment]| {
+        claims
+            .iter()
+            .filter(|claim| claim_is_active(claim, now) && !matches_identity(claim))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let claims = fetch_claims(client, issue_number).map_err(OwnerMutationError::PreSubmit)?;
+    let conflicting_claims = conflicts(&claims);
+    let Some(existing) = claims
+        .iter()
+        .find(|claim| matches_identity(claim) && claim.status == ClaimStatus::Active)
+    else {
+        return Ok(ClaimRenewOutcome::NotRenewed {
+            reason: "the exact claim is missing or no longer Active".to_string(),
+            conflicting_claims,
+        });
+    };
+    if !conflicting_claims.is_empty() {
+        return Ok(ClaimRenewOutcome::NotRenewed {
+            reason: "another active claim exists; renewal requires collision resolution"
+                .to_string(),
+            conflicting_claims,
+        });
+    }
+    if existing.heartbeat_at.as_str() >= now && existing.expires_at.as_str() >= expires_at {
+        return Ok(ClaimRenewOutcome::Renewed {
+            claim: existing.clone(),
+            conflicting_claims,
+        });
+    }
+    let comment_id = existing.comment_id.ok_or_else(|| {
+        OwnerMutationError::PreSubmit(ApiError::Unexpected(
+            "the exact renewal claim has no comment id".to_string(),
+        ))
+    })?;
+    let mut renewed = existing.clone();
+    if renewed.heartbeat_at.as_str() < now {
+        renewed.heartbeat_at = now.to_string();
+    }
+    if renewed.expires_at.as_str() < expires_at {
+        renewed.expires_at = expires_at.to_string();
+    }
+    client.patch_comment_mutation(comment_id, &render_claim_comment(&renewed))?;
+    let readback =
+        fetch_claims(client, issue_number).map_err(OwnerMutationError::RemoteOutcomeUnknown)?;
+    let observed = readback
+        .iter()
+        .find(|claim| {
+            claim.comment_id == Some(comment_id)
+                && matches_identity(claim)
+                && claim.status == ClaimStatus::Active
+                && claim.heartbeat_at >= renewed.heartbeat_at
+                && claim.expires_at >= renewed.expires_at
+        })
+        .ok_or_else(|| {
+            OwnerMutationError::RemoteOutcomeUnknown(ApiError::Unexpected(
+                "renewal readback does not contain the updated exact Active claim".to_string(),
+            ))
+        })?;
+    Ok(ClaimRenewOutcome::Renewed {
+        claim: observed.clone(),
+        conflicting_claims: conflicts(&readback),
+    })
 }
 
 fn resolve_claim_after_mutation<C: IssueClient + ?Sized>(

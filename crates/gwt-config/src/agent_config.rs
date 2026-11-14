@@ -19,6 +19,8 @@ pub struct AgentConfig {
     pub agent_paths: HashMap<String, PathBuf>,
     /// Auto-install agent dependencies before launch.
     pub auto_install_deps: bool,
+    /// Update already installed supported agents at the next application startup.
+    pub auto_update: bool,
     /// Optional override for pre-registering trust of gwt-generated Codex hooks.
     /// `None` and `Some(true)` enable trust; `Some(false)` is the opt-out.
     pub codex_trust_managed_hooks: Option<bool>,
@@ -39,6 +41,7 @@ impl Default for AgentConfig {
             default_agent: None,
             agent_paths: HashMap::new(),
             auto_install_deps: false,
+            auto_update: false,
             codex_trust_managed_hooks: None,
             resource: AgentResourceConfig::default(),
             terminal_close_grace_secs: DEFAULT_TERMINAL_CLOSE_GRACE_SECS,
@@ -200,6 +203,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn automatic_updates_default_off_and_roundtrip_independently() {
+        let defaults: toml::Value =
+            toml::from_str(&toml::to_string(&AgentConfig::default()).unwrap()).unwrap();
+        assert_eq!(
+            defaults.get("auto_update").and_then(toml::Value::as_bool),
+            Some(false)
+        );
+        let loaded: AgentConfig =
+            toml::from_str("auto_update = true\nauto_install_deps = false").unwrap();
+        let saved: toml::Value = toml::from_str(&toml::to_string(&loaded).unwrap()).unwrap();
+        assert_eq!(
+            saved.get("auto_update").and_then(toml::Value::as_bool),
+            Some(true)
+        );
+        assert!(!loaded.auto_install_deps);
+    }
+
+    #[test]
     fn default_has_no_agent() {
         let c = AgentConfig::default();
         assert!(c.default_agent.is_none());
@@ -218,6 +239,7 @@ mod tests {
             default_agent: Some("claude".to_string()),
             agent_paths: paths,
             auto_install_deps: true,
+            auto_update: false,
             codex_trust_managed_hooks: Some(true),
             resource: AgentResourceConfig::default(),
             terminal_close_grace_secs: DEFAULT_TERMINAL_CLOSE_GRACE_SECS,

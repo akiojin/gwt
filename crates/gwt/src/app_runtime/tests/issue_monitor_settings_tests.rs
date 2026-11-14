@@ -845,6 +845,8 @@ fn app_runtime_issue_monitor_auto_launch_prefers_saved_profile() {
     fs::create_dir_all(&repo).expect("create repo");
     init_repo_with_initial_commit(&repo);
     let prefs = gwt::IssueMonitorPrefs {
+        max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
+        max_active_agents: 1,
         launch_profile: Some(sample_issue_monitor_launch_profile()),
         ..Default::default()
     };
@@ -972,6 +974,8 @@ fn app_runtime_issue_monitor_auto_launch_skips_a_held_candidate_and_reports_why(
     fs::create_dir_all(&repo).expect("create repo");
     init_repo_with_initial_commit(&repo);
     let mut prefs = gwt::IssueMonitorPrefs {
+        max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
+        max_active_agents: 1,
         provider_quota_holds: std::collections::BTreeMap::from([(
             "codex".to_string(),
             "2999-01-01T04:00:00Z".to_string(),
@@ -1444,6 +1448,7 @@ fn app_runtime_issue_monitor_launch_now_ignores_auto_max_active_setting() {
     fs::create_dir_all(&repo).expect("create repo");
     init_repo_with_initial_commit(&repo);
     let prefs = gwt::IssueMonitorPrefs {
+        max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
         enabled: true,
         max_active_agents: 1,
         priority_order: Vec::new(),
@@ -1504,6 +1509,7 @@ fn app_runtime_issue_monitor_requeue_releases_a_dead_hold_without_launching() {
     gwt::save_issue_monitor_prefs(
         &prefs_path,
         &gwt::IssueMonitorPrefs {
+            max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
             enabled: true,
             max_active_agents: 2,
             launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
@@ -1595,6 +1601,15 @@ fn app_runtime_issue_monitor_launch_now_wires_launch_feedback_to_issue_row() {
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo_with_initial_commit(&repo);
+    gwt::save_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
+        &gwt::IssueMonitorPrefs {
+            max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
+            max_active_agents: 1,
+            ..Default::default()
+        },
+    )
+    .expect("seed positive Monitor pane capacity");
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
     let (mut runtime, recorded_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));

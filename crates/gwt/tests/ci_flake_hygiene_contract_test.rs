@@ -197,6 +197,42 @@ fn the_flake_detection_job_keeps_its_required_status_check_name() {
     );
 }
 
+/// Issue #4998 AC-4: panic details remain downloadable after a red or cancelled run.
+#[test]
+fn the_flake_detection_job_preserves_diagnostic_logs() {
+    let flake = job(&test_workflow(), FLAKE_JOB);
+    let steps = flake.get("steps").and_then(Value::as_sequence).unwrap();
+    let detector = steps
+        .iter()
+        .position(|step| step.get("run").and_then(Value::as_str) == Some(FLAKE_SCRIPT))
+        .unwrap();
+    let log_dir = steps[detector]
+        .get("env")
+        .and_then(|env| env.get("GWT_FLAKE_LOG_DIR"))
+        .and_then(Value::as_str)
+        .expect("the detector must use a known directory for retained logs");
+    let upload = steps
+        .iter()
+        .position(|step| {
+            step.get("uses").and_then(Value::as_str) == Some("actions/upload-artifact@v7")
+        })
+        .expect("flake diagnostics must be uploaded as an artifact");
+    assert!(upload > detector);
+    assert_eq!(
+        steps[upload].get("if").and_then(Value::as_str),
+        Some("${{ always() }}"),
+        "upload retained logs after failure or cancellation too"
+    );
+    assert_eq!(
+        steps[upload]
+            .get("with")
+            .and_then(|with| with.get("path"))
+            .and_then(Value::as_str),
+        Some(log_dir),
+        "upload the exact directory the detector wrote"
+    );
+}
+
 /// AC-6 fixes N. A default the workflow does not override is the value that
 /// actually runs, so the number lives in one place and is pinned here.
 #[test]

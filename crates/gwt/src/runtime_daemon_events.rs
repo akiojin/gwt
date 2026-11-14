@@ -23,6 +23,34 @@ pub const ISSUE_MONITOR_CONTROL_REJECTED_ERROR: &str =
     "issue monitor control rejected before commit";
 pub const ISSUE_MONITOR_CONTROL_BUSY_ERROR: &str =
     "issue monitor control rejected: admission is full";
+/// Captured source for the private `agent_failed_from_launch` notification.
+/// Its discriminator makes an older daemon reject the fenced notification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum IssueMonitorAgentFailureSource {
+    Unbound,
+    Bound {
+        issue_number: u64,
+        identity: crate::IssueMonitorLaunchIdentity,
+    },
+}
+
+impl IssueMonitorAgentFailureSource {
+    pub fn matches(&self, monitor: &crate::IssueMonitorState, window_id: &str) -> bool {
+        match self {
+            Self::Unbound => monitor.launched_window_issue(window_id).is_none(),
+            Self::Bound {
+                issue_number,
+                identity,
+            } => {
+                identity.active
+                    && monitor.launch_identity(*issue_number) == *identity
+                    && monitor.launched_window_issue(window_id) == Some(*issue_number)
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IssueMonitorControlPublishError {
     TransportUnavailable(String),

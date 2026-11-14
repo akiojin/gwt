@@ -141,6 +141,11 @@ pub struct PendingUpdateManifest {
     pub payload: PreparedPayload,
     /// RFC3339 timestamp of when the download finished.
     pub downloaded_at: String,
+    /// Explicit host-wide hold on automatic apply of this staged version.
+    /// The payload stays available for a manual apply. Older manifests keep
+    /// their existing automatic-apply behavior.
+    #[serde(default)]
+    pub auto_apply_deferred: bool,
 }
 
 /// `~/.gwt/pending-update/`. Created on demand by
@@ -163,19 +168,87 @@ pub fn persist_pending_update_manifest(manifest: &PendingUpdateManifest) -> Resu
 
 /// Test-friendly variant: write the manifest into an explicit directory. The
 /// production path uses [`persist_pending_update_manifest`] which targets
-/// [`pending_update_dir`].
+/// [`pending_update_dir`]. Staging workers wait for brief manifest mutations
+/// rather than reporting a completed download as failed.
 pub fn persist_pending_update_manifest_in(
     dir: &Path,
     manifest: &PendingUpdateManifest,
 ) -> Result<(), String> {
+    let lock = open_pending_update_manifest_lock(dir)?;
+    fs2::FileExt::lock_exclusive(&lock)
+        .map_err(|e| format!("Failed to lock pending-update manifest for staging: {e}"))?;
+    write_pending_update_manifest_in(dir, manifest)
+}
+
+/// Acquire without waiting for a concurrent manifest writer. Defer, cleanup,
+/// and apply-start callers fail closed when busy. Apply-start callers retain
+/// the guard through the authoritative check and resume marker publication,
+/// then release it before cleanup acquires the lock again.
+pub fn pending_update_manifest_lock(dir: &Path) -> Result<fs::File, String> {
+    let lock = open_pending_update_manifest_lock(dir)?;
+    fs2::FileExt::try_lock_exclusive(&lock)
+        .map_err(|e| format!("Pending-update manifest is busy or cannot be locked: {e}"))?;
+    Ok(lock)
+}
+
+fn open_pending_update_manifest_lock(dir: &Path) -> Result<fs::File, String> {
     fs::create_dir_all(dir).map_err(|e| format!("Failed to create pending-update dir: {e}"))?;
-    let path = dir.join("manifest.json");
-    let tmp = dir.join("manifest.json.tmp");
-    let json = serde_json::to_string_pretty(manifest)
+    fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(dir.join("manifest.lock"))
+        .map_err(|e| format!("Failed to open pending-update manifest lock: {e}"))
+}
+
+fn write_pending_update_manifest_in(
+    dir: &Path,
+    manifest: &PendingUpdateManifest,
+) -> Result<(), String> {
+    let json = serde_json::to_vec_pretty(manifest)
         .map_err(|e| format!("Failed to serialize pending manifest: {e}"))?;
-    fs::write(&tmp, json).map_err(|e| format!("Failed to write pending manifest: {e}"))?;
-    fs::rename(&tmp, &path).map_err(|e| format!("Failed to commit pending manifest: {e}"))?;
-    Ok(())
+    crate::atomic_file::write_atomic(&dir.join("manifest.json"), &json)
+        .map_err(|e| format!("Failed to commit pending manifest: {e}"))
+}
+
+/// Explicitly defer automatic apply of one staged version without removing
+/// its payload. An already committed apply is irreversible.
+pub fn defer_pending_update(version: &str) -> Result<PendingUpdateManifest, String> {
+    let dir = pending_update_dir();
+    let _lock = pending_update_manifest_lock(&dir)?;
+    if load_update_resume_marker().is_some_and(|marker| marker.to_version == version) {
+        return Err(format!(
+            "Update v{version} apply has already started; it cannot be deferred."
+        ));
+    }
+    defer_pending_update_unlocked_in(&dir, version)
+}
+
+/// Test-friendly variant of [`defer_pending_update`]. Stage and defer share
+/// the same lock so a stale caller cannot overwrite a newly staged version.
+pub fn defer_pending_update_in(dir: &Path, version: &str) -> Result<PendingUpdateManifest, String> {
+    let _lock = pending_update_manifest_lock(dir)?;
+    defer_pending_update_unlocked_in(dir, version)
+}
+
+fn defer_pending_update_unlocked_in(
+    dir: &Path,
+    version: &str,
+) -> Result<PendingUpdateManifest, String> {
+    let mut manifest = load_pending_update_manifest_in(dir)
+        .ok_or_else(|| "No pending update with a valid payload is staged.".to_string())?;
+    if manifest.version != version {
+        return Err(format!(
+            "Pending update is v{}; refusing to defer requested version v{version}.",
+            manifest.version,
+        ));
+    }
+    if !manifest.auto_apply_deferred {
+        manifest.auto_apply_deferred = true;
+        write_pending_update_manifest_in(dir, &manifest)?;
+    }
+    Ok(manifest)
 }
 
 /// SPEC-2041 Phase 19 (FR-062): load the manifest if it exists. Returns `None`
@@ -208,12 +281,34 @@ pub fn clear_pending_update_manifest() -> Result<(), String> {
 
 /// Test-friendly variant: clear from an explicit directory.
 pub fn clear_pending_update_manifest_in(dir: &Path) -> Result<(), String> {
+    if !dir.exists() {
+        return Ok(());
+    }
+    let _lock = pending_update_manifest_lock(dir)?;
     let path = dir.join("manifest.json");
     match fs::remove_file(&path) {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(err) => Err(format!("Failed to remove pending manifest: {err}")),
     }
+}
+
+/// Remove only the manifest a cleanup caller actually observed. The shared
+/// lock makes a newer stage or defer take precedence over a stale snapshot.
+pub fn clear_pending_update_manifest_if_unchanged_in(
+    dir: &Path,
+    expected: &PendingUpdateManifest,
+) -> Result<bool, String> {
+    if !dir.exists() {
+        return Ok(false);
+    }
+    let _lock = pending_update_manifest_lock(dir)?;
+    if load_pending_update_manifest_in(dir).as_ref() != Some(expected) {
+        return Ok(false);
+    }
+    fs::remove_file(dir.join("manifest.json"))
+        .map(|()| true)
+        .map_err(|err| format!("Failed to remove pending manifest: {err}"))
 }
 
 /// Issue #4038 (AC-3): one project the GUI had open when the update apply
@@ -4442,6 +4537,7 @@ mod tests {
                 path: payload_path.clone(),
             },
             downloaded_at: "2026-05-10T13:00:00Z".to_string(),
+            auto_apply_deferred: false,
         };
 
         // Persist + load returns the same manifest.
@@ -4458,6 +4554,90 @@ mod tests {
     }
 
     #[test]
+    fn pending_manifest_staging_waits_for_writer_while_defer_and_clear_refuse() {
+        let dir = tempfile::tempdir().unwrap();
+        let payload_path = dir.path().join("prepared-binary");
+        fs::write(&payload_path, "prepared payload").unwrap();
+        let manifest = PendingUpdateManifest {
+            version: "9.200.0".into(),
+            asset_url: "https://example.invalid/update".into(),
+            payload: PreparedPayload::PortableBinary { path: payload_path },
+            downloaded_at: "2026-10-01T00:00:00Z".into(),
+            auto_apply_deferred: false,
+        };
+        persist_pending_update_manifest_in(dir.path(), &manifest).unwrap();
+        let before = fs::read(dir.path().join("manifest.json")).unwrap();
+        let lock = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(dir.path().join("manifest.lock"))
+            .unwrap();
+        fs2::FileExt::lock_exclusive(&lock).unwrap();
+        let mut replacement = manifest;
+        replacement.version = "9.201.0".into();
+        assert!(defer_pending_update_in(dir.path(), "9.200.0").is_err());
+        assert!(clear_pending_update_manifest_in(dir.path()).is_err());
+        assert_eq!(fs::read(dir.path().join("manifest.json")).unwrap(), before);
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        let staging_dir = dir.path().to_path_buf();
+        let staging = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            finished_tx
+                .send(persist_pending_update_manifest_in(
+                    &staging_dir,
+                    &replacement,
+                ))
+                .unwrap();
+        });
+        started_rx.recv().unwrap();
+        assert!(matches!(
+            finished_rx.recv_timeout(std::time::Duration::from_secs(1)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+        drop(lock);
+        finished_rx
+            .recv()
+            .unwrap()
+            .expect("staging resumes after the writer releases its lock");
+        staging.join().unwrap();
+        assert_eq!(
+            load_pending_update_manifest_in(dir.path()).unwrap().version,
+            "9.201.0"
+        );
+    }
+
+    #[test]
+    fn pending_manifest_conditional_clear_preserves_a_newly_deferred_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let payload = dir.path().join("prepared-binary");
+        fs::write(&payload, "prepared payload").unwrap();
+        let stale = PendingUpdateManifest {
+            version: "9.200.0".into(),
+            asset_url: "https://example.invalid/update".into(),
+            payload: PreparedPayload::PortableBinary {
+                path: payload.clone(),
+            },
+            downloaded_at: "2026-10-01T00:00:00Z".into(),
+            auto_apply_deferred: false,
+        };
+        persist_pending_update_manifest_in(dir.path(), &stale).unwrap();
+        let snapshot = load_pending_update_manifest_in(dir.path()).unwrap();
+        let mut replacement = stale;
+        replacement.version = "9.201.0".into();
+        persist_pending_update_manifest_in(dir.path(), &replacement).unwrap();
+        let deferred = defer_pending_update_in(dir.path(), "9.201.0").unwrap();
+        let before = fs::read(dir.path().join("manifest.json")).unwrap();
+        assert!(!clear_pending_update_manifest_if_unchanged_in(dir.path(), &snapshot).unwrap());
+        assert_eq!(fs::read(dir.path().join("manifest.json")).unwrap(), before);
+        assert_eq!(fs::read_to_string(payload).unwrap(), "prepared payload");
+        assert!(clear_pending_update_manifest_if_unchanged_in(dir.path(), &deferred).unwrap());
+        assert!(load_pending_update_manifest_in(dir.path()).is_none());
+    }
+
+    #[test]
     fn pending_manifest_load_returns_none_when_payload_missing() {
         let dir = tempfile::tempdir().expect("tempdir");
         let missing_payload = dir.path().join("missing").join("gwt");
@@ -4468,6 +4648,7 @@ mod tests {
                 path: missing_payload,
             },
             downloaded_at: "2026-05-10T13:00:00Z".to_string(),
+            auto_apply_deferred: false,
         };
         persist_pending_update_manifest_in(dir.path(), &manifest).expect("persist");
         // Stale manifest (payload not on disk) is treated as absent so the

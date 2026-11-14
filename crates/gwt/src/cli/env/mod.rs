@@ -57,6 +57,10 @@ pub trait CliEnv {
     ) -> io::Result<IssueSnapshot>;
     fn fetch_linked_prs(&mut self, number: IssueNumber) -> io::Result<Vec<LinkedPrSummary>>;
     fn fetch_current_pr(&mut self) -> io::Result<Option<PrStatus>>;
+    fn fetch_completion_pr(
+        &mut self,
+        number: u64,
+    ) -> io::Result<gwt_git::pr_status::PrCompletionSnapshot>;
     fn list_open_prs(
         &mut self,
         options: &gwt_git::PrInventoryOptions,
@@ -89,10 +93,12 @@ pub trait CliEnv {
     fn edit_pr(
         &mut self,
         number: u64,
+        base: Option<&str>,
         title: Option<&str>,
         body: Option<&str>,
         add_labels: &[String],
     ) -> io::Result<PrStatus>;
+    fn close_pr(&mut self, number: u64, comment: Option<&str>) -> io::Result<PrStatus>;
     fn fetch_pr(&mut self, number: u64) -> io::Result<PrStatus>;
     fn fetch_pr_quarantine_context(
         &mut self,
@@ -117,6 +123,10 @@ pub trait CliEnv {
     fn fetch_actions_job_log(&mut self, job_id: u64) -> io::Result<String>;
     /// Issue #3515: re-run a failed run or job. Returns the outcome line.
     fn rerun_actions(&mut self, target: crate::cli::ActionsRerunTarget) -> io::Result<String>;
+    /// Issue #4188: cancel an active run in the current repository.
+    fn cancel_actions(&mut self, run_id: u64) -> io::Result<String>;
+    /// Issue #4188: list queued runs, including runs without jobs.
+    fn fetch_queued_actions(&mut self) -> io::Result<String>;
     fn run_internal_command(
         &mut self,
         args: &[String],

@@ -15,6 +15,7 @@ import { dirname, resolve } from "node:path";
 import { parseHTML } from "linkedom";
 
 import { shouldShowWindowWorktreeBadge } from "../window-worktree-form.js";
+import { createUiStateStore } from "../ui-state-store.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const html = readFileSync(resolve(here, "../index.html"), "utf8");
@@ -162,6 +163,42 @@ test("FR-021: rail の PM 状態は running / stopped / absent を持つ", () =>
     componentsCss,
     /\[data-pm-state="running"\]\s+\.op-rail__pm-dot\s*\{[^}]*background:\s*var\(--color-role-pm\)/,
   );
+});
+
+test("#3812 AC-5: paused autonomy remains separate from PM residency", () => {
+  const document = doc();
+  const start = appJs.indexOf("      const pmLauncherModel = createUiStateStore(");
+  const end = appJs.indexOf("      // True when the window's rectangle", start);
+  assert.ok(start >= 0 && end > start);
+  const { update, setPaused } = new Function("document", "createUiStateStore", "isWindowWithinViewport", `
+    let pmWindowId;
+    ${appJs.slice(start, end)}
+    return {
+      update: updatePmLauncher,
+      setPaused: paused => pmLauncherModel.update(state => ({ ...state, paused })),
+    };
+  `)(document, createUiStateStore, () => true);
+  const entry = document.getElementById("op-pm-entry");
+
+  setPaused(true);
+  update({ windows: [] });
+  assert.equal(entry.dataset.pmState, "absent");
+  assert.equal(entry.dataset.pmPaused, "true");
+  assert.match(entry.title, /autonomous loop paused/i);
+
+  update({ windows: [{ id: "pm", is_pm: true, status: "running" }] });
+  assert.equal(entry.dataset.pmState, "running");
+  assert.equal(entry.dataset.pmPaused, "true");
+  assert.equal(document.getElementById("canvas-pm-launcher").hidden, true);
+  setPaused(false);
+  assert.equal(entry.dataset.pmState, "running");
+  assert.equal(entry.dataset.pmPaused, "false");
+  assert.doesNotMatch(entry.title, /autonomous loop paused/i);
+  assert.match(
+    componentsCss,
+    /\[data-pm-paused="true"\]\s+\.op-rail__pm-dot\s*\{[^}]*background:\s*var\(--color-state-idle\)/,
+  );
+  assert.match(appJs, /case "pm_status":[\s\S]{0,420}pmLauncherModel\.update\(state => \(\{ \.\.\.state, paused: Boolean\(event\.paused\) \}\)\)/);
 });
 
 test("FR-019: PM クリックはローカルの camera-focus 経路を使う", () => {

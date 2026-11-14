@@ -403,9 +403,17 @@ impl CliEnv for DefaultCliEnv {
             number,
         )
     }
+    fn fetch_completion_pr(
+        &mut self,
+        number: u64,
+    ) -> io::Result<gwt_git::pr_status::PrCompletionSnapshot> {
+        gwt_git::pr_status::fetch_pr_completion_snapshot(&self.repo_path, number)
+            .map_err(io::Error::other)
+    }
     fn edit_pr(
         &mut self,
         number: u64,
+        base: Option<&str>,
         title: Option<&str>,
         body: Option<&str>,
         add_labels: &[String],
@@ -415,9 +423,19 @@ impl CliEnv for DefaultCliEnv {
             &format!("{}/{}", self.owner, self.repo),
             &self.repo_path,
             number,
+            base,
             title,
             body,
             add_labels,
+        )
+    }
+    fn close_pr(&mut self, number: u64, comment: Option<&str>) -> io::Result<PrStatus> {
+        crate::cli::pr::edit_or_create_repo_guard(&self.owner, &self.repo)?;
+        crate::cli::pr::close_pr_via_gh(
+            &format!("{}/{}", self.owner, self.repo),
+            &self.repo_path,
+            number,
+            comment,
         )
     }
     fn fetch_pr(&mut self, number: u64) -> io::Result<PrStatus> {
@@ -530,6 +548,13 @@ impl CliEnv for DefaultCliEnv {
     fn rerun_actions(&mut self, target: crate::cli::ActionsRerunTarget) -> io::Result<String> {
         crate::cli::pr::edit_or_create_repo_guard(&self.owner, &self.repo)?;
         crate::cli::actions::rerun_actions_via_gh(&self.owner, &self.repo, &self.repo_path, &target)
+    }
+    fn cancel_actions(&mut self, run_id: u64) -> io::Result<String> {
+        crate::cli::pr::edit_or_create_repo_guard(&self.owner, &self.repo)?;
+        crate::cli::actions::cancel_actions_via_gh(&self.owner, &self.repo, &self.repo_path, run_id)
+    }
+    fn fetch_queued_actions(&mut self) -> io::Result<String> {
+        crate::cli::actions::fetch_queued_actions_via_gh(&self.owner, &self.repo, &self.repo_path)
     }
     fn run_internal_command(
         &mut self,

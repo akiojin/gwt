@@ -228,6 +228,11 @@ fn run_coordinated_action(
         action.label,
         coordinator_worktree.as_deref(),
         gwt_core::index_coordinator::JobPriority::ManualRebuild,
+        Some(&gwt_core::index_coordinator::HeavyHolderContext {
+            project_root: context.project_root.clone(),
+            action: action.action.to_string(),
+            qos: "interactive".to_string(),
+        }),
         || {
             let output = if repair {
                 run_runner_rebuild_with_repair(context, action, "interactive", true)
@@ -816,13 +821,14 @@ not json
         run_git_at(&repo, &["commit", "-m", "init"]);
 
         let log = tmp.path().join("runner-log.txt");
+        let ticket_record = tmp.path().join("runner-ticket.json");
         let python = gwt_core::runtime::project_index_python_path();
         std::fs::create_dir_all(python.parent().expect("venv dir")).expect("create venv dir");
         std::fs::write(
             &python,
             format!(
-                "#!/bin/sh\necho \"$@\" >> \"{}\"\nprintf '{{\"ok\": true}}\\n'\n",
-                log.display()
+                "#!/bin/sh\nif [ -f \"$HOME/.gwt/runtime/index-coordinator/heavy.ticket.json\" ]; then cp \"$HOME/.gwt/runtime/index-coordinator/heavy.ticket.json\" \"{}\"; fi\necho \"$@\" >> \"{}\"\nprintf '{{\"ok\": true}}\\n'\n",
+                ticket_record.display(), log.display()
             ),
         )
         .expect("fake python");
@@ -848,5 +854,14 @@ not json
             calls.contains("--qos interactive"),
             "manual rebuild runs at interactive QoS: {calls}"
         );
+        let ticket: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(ticket_record).expect("holder ticket recorded"))
+                .unwrap();
+        assert_eq!(
+            ticket["holder_context"]["project_root"],
+            repo.canonicalize().unwrap().to_string_lossy().as_ref()
+        );
+        assert_eq!(ticket["holder_context"]["action"], "index-issues");
+        assert_eq!(ticket["holder_context"]["qos"], "interactive");
     }
 }

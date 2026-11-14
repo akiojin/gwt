@@ -368,6 +368,216 @@ fn recover_restored_window_protects_replacement_and_normal_launches() {
     assert!(!runtime.window_lookup.contains_key(window_id));
 }
 
+/// Issue #5248 AC-2/AC-3: stop has already removed the Monitor binding, so
+/// successful pane close must still publish the complete surviving canvas.
+#[cfg(unix)]
+#[test]
+fn stopped_monitor_pane_close_publishes_complete_own_project_canvas() {
+    use std::{
+        collections::BTreeSet,
+        io::BufRead,
+        os::unix::net::{UnixListener, UnixStream},
+    };
+
+    use gwt_core::daemon::{
+        persist_endpoint, ClientFrame, DaemonEndpoint, DaemonFrame, IpcHandshakeRequest,
+        IpcHandshakeResponse, RuntimeScope, RuntimeTarget, DAEMON_PROTOCOL_VERSION,
+    };
+
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempfile::Builder::new()
+        .prefix("gwt-close-")
+        .tempdir_in("/tmp")
+        .expect("short socket tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let project = temp.path().join("project");
+    let foreign_project = temp.path().join("foreign-project");
+    fs::create_dir_all(&project).expect("project");
+    fs::create_dir_all(&foreign_project).expect("foreign project");
+    init_repo(&project);
+    init_repo(&foreign_project);
+    let closed_id = "tab-owner::agent-closed";
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig::default());
+    monitor.complete_active_launch_at(5248, closed_id, &now);
+    let target = gwt::IssueMonitorStopTarget {
+        issue_number: 5248,
+        claim_id: monitor.live_claim_id(5248),
+        delivery_id: monitor.pending_launch_delivery_id(5248),
+        window_id: Some(closed_id.to_string()),
+    };
+    assert!(matches!(
+        monitor.stop_only(&target, "fresh launch", &now),
+        gwt::IssueMonitorStopOutcome::Stopped { .. }
+    ));
+    assert_eq!(monitor.launched_window_issue(closed_id), None);
+    gwt::save_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&project),
+        &monitor.prefs(),
+    )
+    .expect("persist stopped Monitor binding");
+
+    let tabs = vec![
+        sample_project_tab_with_window_at(
+            "tab-foreign",
+            "agent-foreign",
+            foreign_project,
+            WindowPreset::Agent,
+            WindowProcessStatus::Running,
+        ),
+        sample_project_tab_with_window_at(
+            "tab-owner",
+            "agent-closed",
+            project.clone(),
+            WindowPreset::Agent,
+            WindowProcessStatus::Running,
+        ),
+        sample_project_tab_with_window_at(
+            "tab-sibling",
+            "agent-live",
+            project.clone(),
+            WindowPreset::Agent,
+            WindowProcessStatus::Running,
+        ),
+    ];
+    let mut runtime = sample_runtime(temp.path(), tabs, Some("tab-foreign"));
+    let mut survivor_session =
+        gwt_agent::Session::new(&project, "work/survivor", gwt_agent::AgentId::Codex);
+    survivor_session.launch_route = gwt_agent::LaunchRoute::Autonomous;
+    assert!(runtime
+        .tab_mut("tab-sibling")
+        .expect("own sibling")
+        .workspace
+        .set_session_id("agent-live", Some(survivor_session.id.clone())));
+    // The queued finalizer resolves this survivor without loading the ledger on Tao.
+    survivor_session
+        .save(&runtime.sessions_dir)
+        .expect("save survivor");
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let scope =
+        RuntimeScope::from_project_root(&project, RuntimeTarget::Host).expect("own project scope");
+    let socket_path = temp.path().join("close.sock");
+    let listener = UnixListener::bind(&socket_path).expect("bind fake daemon");
+    let endpoint = DaemonEndpoint::new(
+        scope.clone(),
+        std::process::id(),
+        socket_path.to_string_lossy().to_string(),
+        "close-token".to_string(),
+        "test-daemon".to_string(),
+    );
+    persist_endpoint(
+        &scope.endpoint_path(&gwt_core::paths::gwt_home()),
+        &endpoint,
+    )
+    .expect("persist own project daemon endpoint");
+    let principal =
+        AgentSessionPrincipal::for_test(&project, "session-pm").expect("own project principal");
+    let events = runtime.handle_agent_frontend_event(
+        "pane-client".to_string(),
+        principal,
+        AgentFrontendRequest::CloseWindow {
+            id: closed_id.to_string(),
+            request_id: None,
+            responder: None,
+        },
+    );
+    assert!(matches!(
+        events.first(),
+        Some(OutboundEvent {
+            event: BackendEvent::PaneCloseResult { ok: true, .. },
+            ..
+        })
+    ));
+    assert!(!runtime.window_lookup.contains_key(closed_id));
+
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept close snapshot");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("set fixture hang guard");
+        let mut reader = std::io::BufReader::new(stream.try_clone().expect("clone stream"));
+        let mut line = String::new();
+        if reader.read_line(&mut line).expect("read handshake") == 0 {
+            return None;
+        }
+        let handshake: IpcHandshakeRequest =
+            serde_json::from_str(line.trim_end()).expect("parse handshake");
+        assert_eq!(handshake.scope, scope);
+        writeln!(
+            stream,
+            "{}",
+            serde_json::to_string(&IpcHandshakeResponse {
+                protocol_version: DAEMON_PROTOCOL_VERSION,
+                daemon_version: "test-daemon".to_string(),
+                accepted: true,
+                rejection_reason: None,
+            })
+            .expect("serialize handshake")
+        )
+        .expect("accept handshake");
+        line.clear();
+        reader.read_line(&mut line).expect("read close snapshot");
+        let ClientFrame::Publish { channel, payload } =
+            serde_json::from_str(line.trim_end()).expect("parse close snapshot")
+        else {
+            panic!("expected close snapshot publication");
+        };
+        assert_eq!(
+            channel,
+            gwt::runtime_daemon_events::ISSUE_MONITOR_CONTROL_CHANNEL
+        );
+        writeln!(
+            stream,
+            "{}",
+            serde_json::to_string(&DaemonFrame::Ack).expect("serialize ack")
+        )
+        .expect("ack close snapshot");
+        Some(payload)
+    });
+    let queued = std::mem::take(
+        &mut *tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    );
+    for task in queued {
+        task();
+    }
+    // An empty connection releases accept on RED without leaving a fixture
+    // thread behind when the close did not publish anything.
+    drop(UnixStream::connect(&socket_path));
+    let publication = server
+        .join()
+        .expect("fake daemon joins")
+        .expect("successful close must publish a canvas even after stop removed its binding");
+    let control = &publication["payload"];
+    let snapshot: gwt::IssueMonitorWindowSnapshot =
+        serde_json::from_value(control["window_snapshot"].clone())
+            .expect("complete canvas snapshot");
+    assert_eq!(snapshot.project_tab_id, "tab-owner");
+    assert!(
+        snapshot.windows[0].monitor_owned,
+        "retain survivor Monitor ownership"
+    );
+    assert_eq!(
+        snapshot
+            .windows
+            .iter()
+            .map(|window| window.window_id.as_str())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["tab-sibling::agent-live"]),
+        "the closed pane and foreign project leave the canvas; the own sibling survives"
+    );
+    assert_eq!(
+        serde_json::from_value::<BTreeSet<String>>(control["window_snapshot_project_tabs"].clone())
+            .expect("complete project tab scope"),
+        BTreeSet::from(["tab-owner".to_string(), "tab-sibling".to_string()])
+    );
+}
+
 /// Issue #3705 AC-1/AC-2: consecutive close of live-PTY panes must keep the
 /// agent pane route answering. The hang was the GUI event loop joining PTY
 /// reader threads and waiting for child exit on each close; `pane.list` then
@@ -870,13 +1080,7 @@ fn queued_close_finalizer_preserves_same_window_successor_writer_generation() {
         .expect("predecessor runtime")
         .pty
         .clone();
-    let predecessor_pane = runtime
-        .runtimes
-        .get(&window_id)
-        .expect("predecessor runtime")
-        .pane
-        .clone();
-    runtime.register_pty_writer(&window_id, &predecessor_pane);
+    runtime.register_pty_writer(&window_id, None);
 
     assert!(runtime.close_window_outcome(&window_id).closed);
     assert_eq!(
@@ -892,8 +1096,7 @@ fn queued_close_finalizer_preserves_same_window_successor_writer_generation() {
     let successor_runtime = runtime.runtimes.get(&window_id).expect("successor runtime");
     let successor_incarnation = successor_runtime.incarnation;
     let successor = successor_runtime.pty.clone();
-    let successor_pane = successor_runtime.pane.clone();
-    runtime.register_pty_writer(&window_id, &successor_pane);
+    runtime.register_pty_writer(&window_id, None);
 
     let finalizer = finalizers
         .lock()
@@ -2332,7 +2535,7 @@ fn real_agent_pane_websocket_stays_responsive_after_peer_close() {
         .expect("caller child pid");
     let caller_child_started_at = gwt::process::host_process_start_time(caller_child_pid)
         .expect("caller child process start time");
-    app.register_pty_writer(&caller_window_id, &caller_pane);
+    app.register_pty_writer(&caller_window_id, None);
 
     let mut caller_session = sample_active_agent_session("tab-project", &caller_window_id);
     caller_session.session_id = caller_session_id.to_string();

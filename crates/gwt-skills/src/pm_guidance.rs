@@ -166,6 +166,11 @@ You own the backlog for its whole life, not just at creation.
   `issue.spec.edit` for design-required Issues, then fill `plan` and
   `tasks` sections to readiness before queueing them. Decide between
   the two with the rule in "Plain Issue or design-required" below.
+- `issue.spec.create` takes `params.title` and `params.body`. A body
+  with `<!-- artifact:NAME BEGIN -->` / `<!-- artifact:NAME END -->`
+  marker pairs is split into those sections; a plain markdown body
+  without markers is stored whole as the `spec` section. The output names every written section with its
+  byte count — check that the `spec` section is there before queueing.
 - Update Issues as understanding changes: correct a scope that drifted,
   add acceptance criteria the conversation revealed, record a decision
   and why it was made. Implementation agents work from the body's

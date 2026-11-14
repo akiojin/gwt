@@ -1572,11 +1572,14 @@ fn push_status_fields(out: &mut String, status: &LeaseStatusSnapshot, current_pr
     // it has been waiting, in the order the lease will be handed over.
     for (position, entry) in status.queue.iter().enumerate() {
         out.push_str(&format!(
-            "queue[{position}]: target={} priority={} queued_at_ms={} waiting_ms={}\n",
+            "queue[{position}]: target={} priority={} queued_at_ms={} waiting_ms={} resident={} attempt_id={} job_status={}\n",
             entry.target.as_deref().unwrap_or("unknown"),
             entry.priority.as_str(),
             entry.queued_at_ms,
             entry.waiting_ms,
+            entry.resident,
+            entry.attempt_id.as_deref().unwrap_or("unknown"),
+            entry.job_status.map(|status| status.as_str()).unwrap_or("unknown"),
         ));
     }
 }
@@ -2098,12 +2101,18 @@ mod tests {
                         priority: JobPriority::ManualRebuild,
                         queued_at_ms: 500,
                         waiting_ms: 90_000,
+                        resident: true,
+                        attempt_id: None,
+                        job_status: None,
                     },
                     HeavyQueueEntry {
                         target: Some("repo--verification--late".to_string()),
                         priority: JobPriority::ManualRebuild,
                         queued_at_ms: 900,
                         waiting_ms: 89_600,
+                        resident: true,
+                        attempt_id: None,
+                        job_status: None,
                     },
                 ],
                 holder_kind: Some("verification".to_string()),
@@ -2152,9 +2161,9 @@ mod tests {
              waiter_action: wait\n\
              waiter_reason: waiting for canonical admission is expected; queue position does not authorize reclaiming or stopping the holder\n\
              queue[0]: target=repo--verification--early priority=manual-rebuild \
-             queued_at_ms=500 waiting_ms=90000\n\
+             queued_at_ms=500 waiting_ms=90000 resident=true attempt_id=unknown job_status=unknown\n\
              queue[1]: target=repo--verification--late priority=manual-rebuild \
-             queued_at_ms=900 waiting_ms=89600\n"
+             queued_at_ms=900 waiting_ms=89600 resident=true attempt_id=unknown job_status=unknown\n"
         );
     }
 

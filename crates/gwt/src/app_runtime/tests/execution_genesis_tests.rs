@@ -16,7 +16,7 @@ fn app_runtime_agent_launch_completion_failure_emits_structured_error_log() {
     let events = capture_tracing_events(|| {
         let _ = runtime.handle_launch_complete_and_drain(
             window_id.clone(),
-            Err("launch failed before process spawn".to_string()),
+            Err("launch failed before process spawn".into()),
         );
     });
 
@@ -56,13 +56,13 @@ fn app_runtime_agent_launch_completion_failure_writes_diagnostic_to_terminal() {
     let window_id = combined_window_id("tab-1", "agent-1");
     let events = runtime.handle_launch_complete_and_drain(
         window_id.clone(),
-        Err("launch failed before process spawn".to_string()),
+        Err("launch failed before process spawn".into()),
     );
 
     assert!(events.iter().any(|event| {
         matches!(
             &event.event,
-            BackendEvent::TerminalStatus { id, status, detail }
+            BackendEvent::TerminalStatus { id, status, detail, .. }
                 if id == &window_id
                     && *status == WindowProcessStatus::Error
                     && detail.as_deref() == Some("launch failed before process spawn")
@@ -136,7 +136,7 @@ fn stale_pre_pty_launch_failure_preserves_live_agent_and_monitor_delivery() {
 
     let events = runtime.handle_launch_complete_and_drain(
         window_id.clone(),
-        Err("stale preparation failure".to_string()),
+        Err("stale preparation failure".into()),
     );
 
     let feedback_retained = runtime
@@ -1469,7 +1469,7 @@ fn continue_work_launch_failure_aborts_without_pausing_candidate_work() {
 
     let rejected = runtime.handle_launch_complete_and_drain(
         window_id.clone(),
-        Err("candidate replacement race".to_string()),
+        Err("candidate replacement race".into()),
     );
 
     assert!(rejected.iter().any(|event| matches!(
@@ -1502,7 +1502,7 @@ fn continue_work_launch_failure_aborts_without_pausing_candidate_work() {
 
         let dangling = runtime.handle_launch_complete_and_drain(
             window_id.clone(),
-            Err("dangling candidate replacement race".to_string()),
+            Err("dangling candidate replacement race".into()),
         );
 
         assert!(
@@ -1535,10 +1535,8 @@ fn continue_work_launch_failure_aborts_without_pausing_candidate_work() {
         .save(&runtime.sessions_dir)
         .expect("restore exact candidate after race");
 
-    let events = runtime.handle_launch_complete_and_drain(
-        window_id.clone(),
-        Err("candidate spawn failed".to_string()),
-    );
+    let events = runtime
+        .handle_launch_complete_and_drain(window_id.clone(), Err("candidate spawn failed".into()));
 
     assert!(
         events.iter().any(|event| matches!(
@@ -2037,6 +2035,42 @@ fn readiness_pane_evidence_separates_live_dead_and_foreign_panes() {
             .runtime
             .readiness_pane_evidence(&window_id, &session_id),
         ReadinessPaneEvidence::Dead,
+    );
+}
+
+/// Issue #5194 AC-2: an unready handoff is not silent. It lands in the error
+/// ledger with the hook configuration the agent should have discovered, so a
+/// missing `.codex/hooks.json` is visible from `errors.list`.
+#[test]
+fn continue_work_ready_timeout_handoff_records_the_missing_hook_config() {
+    let _env_guard = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let mut fixture = pending_fresh_execution_fixture(temp.path(), "readiness-handoff-ledger");
+    insert_test_pane_runtime(&mut fixture.runtime, &fixture.window_id);
+    fixture
+        .runtime
+        .window_pty_statuses
+        .insert(fixture.window_id.clone(), WindowProcessStatus::Running);
+
+    fixture.runtime.handle_continue_work_ready_timeout(
+        &fixture.window_id,
+        &readiness_watch_at_last_extension(&fixture.operation_id, 0),
+    );
+
+    let rows = gwt_core::error_ledger::list_since(None).expect("read error ledger");
+    let row = rows
+        .iter()
+        .find(|row| row.target.window_id.as_deref() == Some(fixture.window_id.as_str()))
+        .unwrap_or_else(|| panic!("the handoff must be recorded: {rows:#?}"));
+    assert_eq!(row.kind, gwt_core::error_ledger::ErrorKind::LaunchFailure);
+    assert!(row.message.contains("SessionStart"), "{}", row.message);
+    assert!(
+        row.message.contains(".codex") && row.message.contains("hooks.json missing"),
+        "the ledger row must name the undiscovered hook config: {}",
+        row.message
     );
 }
 

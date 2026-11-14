@@ -737,6 +737,7 @@ fn write_stale_ticket(path: &Path, target: &TargetKey, pid: u32, start_id: &str)
         ttl_renewed: None,
         holder_nice: None,
         holder_spawn_host: None,
+        holder_context: None,
     };
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).expect("create ticket dir");
@@ -1816,6 +1817,7 @@ fn write_verification_ticket(
         ttl_renewed: None,
         holder_nice: None,
         holder_spawn_host: None,
+        holder_context: None,
     };
     fs::write(path, serde_json::to_vec(&ticket).expect("ticket json")).expect("write ticket");
 }
@@ -2161,7 +2163,7 @@ fn background_index_job_yields_the_heavy_lease_to_an_interactive_search() {
     wait_for_file(&ready, Duration::from_secs(30));
 
     let coordinator = IndexCoordinator::open(&arena.coord_root).expect("open coordinator");
-    let key = TargetKey::search("repo-a", Some("wt-1"));
+    let key = TargetKey::search("repo-b", Some("wt-2"));
     let started = Instant::now();
     let lease = coordinator
         .acquire_interactive_search_heavy(&key, INTERACTIVE_SEARCH_ADMISSION_DEADLINE)
@@ -2935,6 +2937,151 @@ fn refresh_broker_two_processes_cannot_claim_the_same_target_concurrently() {
     for helper in helpers {
         wait_success(helper, Duration::from_secs(20));
     }
+}
+
+#[test]
+fn refresh_broker_two_processes_cannot_claim_different_repositories_concurrently() {
+    let arena = TestArena::new();
+    let root = arena.path("refresh-host-cap");
+    let broker = RefreshBroker::open(&root, Duration::ZERO).expect("open broker");
+    broker
+        .submit(dirty_refresh_intent(base_refresh_target("repo-a"), 1))
+        .expect("submit first repo");
+    let first = broker.claim_next().expect("claim").expect("first repo");
+    broker
+        .submit(dirty_refresh_intent(base_refresh_target("repo-b"), 1))
+        .expect("submit second repo");
+    let ready = arena.path("refresh-ready");
+    let start = arena.path("refresh-start");
+    let attempted = arena.path("refresh-attempted");
+    let complete = arena.path("refresh-complete");
+    let result = arena.path("refresh-result");
+    let helper = spawn_helper(
+        "foreign-refresh-claim",
+        &[
+            ("GWT_COORD_ROLE", "claim-refresh-broker".to_string()),
+            ("GWT_COORD_ROOT", root.to_string_lossy().into_owned()),
+            ("GWT_COORD_MARKER", ready.to_string_lossy().into_owned()),
+            ("GWT_COORD_SIGNAL", start.to_string_lossy().into_owned()),
+            (
+                "GWT_COORD_MARKER2",
+                attempted.to_string_lossy().into_owned(),
+            ),
+            ("GWT_COORD_SIGNAL2", complete.to_string_lossy().into_owned()),
+            ("GWT_COORD_RESULT", result.to_string_lossy().into_owned()),
+        ],
+    );
+    wait_for_file(&ready, Duration::from_secs(20));
+    fs::write(&start, b"claim").expect("start helper");
+    wait_for_file(&attempted, Duration::from_secs(20));
+    let outcome = read_when_published(&result, Duration::from_secs(20));
+    fs::write(&complete, b"complete").expect("release helper");
+    wait_success(helper, Duration::from_secs(20));
+    first.complete().expect("complete first repo");
+    assert_eq!(outcome, "idle", "refresh claim cap applies across repos");
+}
+
+#[test]
+fn refresh_broker_background_claim_rest_matches_elapsed_time_across_repositories() {
+    let arena = TestArena::new();
+    let clock = Arc::new(ManualRefreshBrokerClock::new(10_000));
+    let root = arena.path("refresh-duty-budget");
+    let broker =
+        RefreshBroker::open_with_clock(&root, Duration::ZERO, clock.clone()).expect("open broker");
+    for repo in ["repo-a", "repo-b"] {
+        broker
+            .submit(dirty_refresh_intent(base_refresh_target(repo), 1))
+            .expect("submit repo");
+    }
+    let first = broker.claim_next().expect("claim").expect("first repo");
+    clock.advance(Duration::from_secs(46));
+    first.complete().expect("complete first repo");
+    let reopened =
+        RefreshBroker::open_with_clock(root, Duration::ZERO, clock.clone()).expect("reopen broker");
+    assert!(reopened.claim_next().expect("immediate claim").is_none());
+    clock.advance(Duration::from_secs(45));
+    assert!(reopened.claim_next().expect("claim before rest").is_none());
+    clock.advance(Duration::from_secs(1));
+    reopened
+        .claim_next()
+        .expect("claim after rest")
+        .expect("second repo");
+}
+
+#[test]
+fn refresh_broker_manual_and_interactive_claims_bypass_background_rest() {
+    let arena = TestArena::new();
+    let clock = Arc::new(ManualRefreshBrokerClock::new(10_000));
+    let broker =
+        RefreshBroker::open_with_clock(arena.path("refresh-urgent"), Duration::ZERO, clock.clone())
+            .expect("open broker");
+    let target = base_refresh_target("repo-a");
+    broker
+        .submit(dirty_refresh_intent(target.clone(), 1))
+        .expect("submit");
+    let first = broker.claim_next().expect("claim").expect("background");
+    clock.advance(Duration::from_secs(60));
+    first.complete().expect("complete background");
+    for priority in [JobPriority::ManualRebuild, JobPriority::InteractiveSearch] {
+        broker
+            .submit(refresh_intent(
+                target.clone(),
+                1,
+                "snapshot-1",
+                priority,
+                RefreshReason::Manual,
+            ))
+            .expect("promote");
+        broker
+            .claim_next()
+            .expect("claim urgent")
+            .expect("urgent bypasses rest")
+            .complete()
+            .expect("complete urgent");
+    }
+}
+
+#[test]
+fn refresh_broker_sustained_background_work_occupies_half_the_observation_window() {
+    let arena = TestArena::new();
+    let clock = Arc::new(ManualRefreshBrokerClock::new(10_000));
+    let broker = RefreshBroker::open_with_clock(
+        arena.path("refresh-duty-measurement"),
+        Duration::ZERO,
+        clock.clone(),
+    )
+    .expect("open broker");
+    let observation_started = clock.now_millis();
+    let mut active_millis = 0;
+    for epoch in 1..=10 {
+        let target = base_refresh_target(if epoch % 2 == 0 { "repo-a" } else { "repo-b" });
+        broker
+            .submit(dirty_refresh_intent(target, epoch))
+            .expect("submit required work");
+        let claim = broker
+            .claim_next()
+            .expect("claim")
+            .expect("work admitted after rest");
+        clock.advance(Duration::from_secs(30));
+        active_millis += 30_000;
+        claim.complete().expect("complete quantum");
+        // Leave another repository runnable throughout the rest, so this is
+        // admission throttling rather than an empty queue's incidental idle.
+        broker
+            .submit(dirty_refresh_intent(
+                base_refresh_target("repo-pending"),
+                epoch,
+            ))
+            .expect("submit during rest");
+        assert!(broker.claim_next().expect("probe during rest").is_none());
+        clock.advance(Duration::from_secs(30));
+    }
+    let observation_millis = clock.now_millis() - observation_started;
+    assert_eq!(observation_millis, 600_000);
+    assert_eq!(active_millis, 300_000);
+    println!(
+        "refresh occupation: {active_millis}/{observation_millis} ms = 50%; max claim = 30000 ms"
+    );
 }
 
 #[test]

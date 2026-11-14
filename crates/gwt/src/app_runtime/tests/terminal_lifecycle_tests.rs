@@ -732,6 +732,7 @@ fn workspace_execution_diagnosis_view_preserves_backend_classification() {
                     gwt::cli::verification_record::WorkEventSettlementBlocker::MissingUpstream,
                 ),
             ),
+            settlement_dirty_paths: Vec::new(),
             settlement_severity: "warning".to_string(),
             settlement_obligation_open: true,
             open_obligations: vec!["user_verification".to_string()],
@@ -2745,6 +2746,130 @@ fn pane_snapshot_never_replays_spinner_redraw_chunks_it_already_contains() {
 // while the first launch is still materializing (window registered, agent
 // session not yet live) must focus the pending window, not spawn a duplicate.
 #[test]
+fn issue_5062_update_drain_prevents_new_agent_windows_in_other_projects() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let drain_root = temp.path().join("drain");
+    let target_root = temp.path().join("target");
+    fs::create_dir_all(&drain_root).expect("drain project");
+    fs::create_dir_all(&target_root).expect("target project");
+    init_repo(&drain_root);
+    init_repo(&target_root);
+    let mut prefs = gwt::IssueMonitorPrefs {
+        update_drain: Some(gwt::IssueMonitorUpdateDrain {
+            version: "9.110.0".to_string(),
+            since: "2026-10-10T08:21:17Z".to_string(),
+            reason: gwt::IssueMonitorUpdateDrainReason::Auto,
+            blocking: Vec::new(),
+        }),
+        ..Default::default()
+    };
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&drain_root);
+    gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed drain");
+    let tabs = vec![
+        sample_project_tab("drain", "gwt", drain_root, ProjectKind::Git, &[]),
+        sample_project_tab("target", "llmlb", target_root, ProjectKind::Git, &[]),
+    ];
+    let mut runtime = sample_runtime(temp.path(), tabs, Some("target"));
+    let config = || {
+        gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .branch("work/issue-5062-test")
+            .build()
+    };
+    let result = runtime.spawn_agent_window("target", config(), canvas_bounds(), None);
+    assert!(
+        result
+            .as_ref()
+            .is_err_and(|error| error.contains("update_drain")),
+        "{result:?}"
+    );
+    assert!(runtime
+        .tab("target")
+        .expect("tab")
+        .workspace
+        .persisted()
+        .windows
+        .is_empty());
+
+    prefs.update_drain = None;
+    gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("release drain");
+    runtime
+        .spawn_agent_window("target", config(), canvas_bounds(), None)
+        .expect("spawn after release");
+    assert_eq!(
+        runtime
+            .tab("target")
+            .expect("tab")
+            .workspace
+            .persisted()
+            .windows
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn issue_5062_update_drain_holds_direct_agent_presets_in_other_projects() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let drain_root = temp.path().join("drain");
+    let target_root = temp.path().join("target");
+    fs::create_dir_all(&drain_root).unwrap();
+    fs::create_dir_all(&target_root).unwrap();
+    init_repo(&drain_root);
+    init_repo(&target_root);
+    gwt::save_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&drain_root),
+        &gwt::IssueMonitorPrefs {
+            update_drain: Some(gwt::IssueMonitorUpdateDrain {
+                version: "9.110.0".into(),
+                since: "2026-10-10T08:21:17Z".into(),
+                reason: gwt::IssueMonitorUpdateDrainReason::Auto,
+                blocking: Vec::new(),
+            }),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let tabs = vec![
+        sample_project_tab("drain", "gwt", drain_root, ProjectKind::Git, &[]),
+        sample_project_tab(
+            "target",
+            "llmlb",
+            target_root,
+            ProjectKind::Git,
+            &[WindowPreset::Claude, WindowPreset::Codex],
+        ),
+    ];
+    let mut runtime = sample_runtime(temp.path(), tabs, Some("target"));
+    // A pre-fix launch must stop before spawning a real installed provider.
+    let invalid_profile = temp.path().join("invalid-profile.toml");
+    fs::write(&invalid_profile, "[").unwrap();
+    runtime.profile_config_path = Some(invalid_profile);
+    let windows = runtime
+        .tab("target")
+        .unwrap()
+        .workspace
+        .persisted()
+        .windows
+        .clone();
+    for window in windows {
+        let events = runtime.start_window("target", &window.id, window.preset, window.geometry);
+        assert!(
+            events.iter().any(|event| matches!(
+                &event.event,
+                BackendEvent::TerminalStatus { detail: Some(detail), .. }
+                    if detail.contains("update_drain")
+            )),
+            "direct {:?} must explain the host hold",
+            window.preset
+        );
+    }
+    assert!(runtime.runtimes.is_empty());
+    assert!(runtime.active_agent_sessions.is_empty());
+}
+
+#[test]
 fn app_runtime_spawn_agent_window_dedupes_inflight_launch_for_same_work() {
     let _env_lock = env_test_lock()
         .lock()
@@ -3049,4 +3174,150 @@ fn terminal_preview_remote_reconnect_retains_only_received_values() {
     assert!(cleared.iter().any(|event| matches!(&event.event, BackendEvent::TerminalPreview { text, .. } if text.is_empty())));
     runtime.remove_window_state_tracking(&id);
     assert!(!runtime.remote_terminal_previews.contains_key(&id));
+}
+
+#[test]
+fn issue_monitor_delivery_claim_publishes_current_canvas_before_daemon_claim() {
+    use std::{
+        cell::{Cell, RefCell},
+        collections::BTreeSet,
+    };
+
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let now = chrono::Utc::now().to_rfc3339();
+    let window_id = "tab-1::agent-1";
+    let host_pid = std::process::id();
+    let host_started_at = gwt::process::host_process_start_time(host_pid).expect("host start time");
+    let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig {
+        enabled: true,
+        max_active: 1,
+        ..gwt::IssueMonitorConfig::default()
+    });
+    monitor.terminal_queue_push(&[42], "operator", &now);
+    monitor.record_candidate(gwt::IssueMonitorIssue {
+        number: 42,
+        title: "Current canvas adoption".to_string(),
+        labels: Vec::new(),
+        state: gwt::IssueMonitorIssueState::Open,
+        body: None,
+        url: None,
+        readiness: gwt::IssueMonitorReadiness::NotApplicable,
+        updated_at: None,
+    });
+    assert!(monitor.apply_confirmed_claim(42, "claim-42", "host/session", "effect-42", &now));
+    assert!(monitor.record_monitor_runtime_windows(
+        host_pid,
+        host_started_at,
+        BTreeMap::from([(42, 1)]),
+        BTreeMap::from([(window_id.to_string(), 42)]),
+        &now,
+    ));
+    assert_eq!(
+        monitor.active_count(),
+        2,
+        "the daemon has no canvas binding yet"
+    );
+    assert!(!monitor.has_capacity_for_monitor_spawn(42, false));
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("seed unassigned delivery");
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Starting,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let mut feedback = issue_monitor_feedback(42);
+    feedback.issue_monitor_project_root = Some(repo.clone());
+    runtime
+        .pending_launch_feedback_contexts
+        .insert(window_id.to_string(), feedback);
+    assert_eq!(
+        runtime.window_status(window_id),
+        Some(WindowProcessStatus::Starting)
+    );
+
+    // This tests canvas/claim ordering and durable readback, not the IPC budget.
+    // Synchronous publishers keep those assertions independent of fsync and
+    // thread scheduling inside the production 200ms deadline.
+    let monitor = RefCell::new(monitor);
+    let received = RefCell::new(Vec::new());
+    let daemon_accepted = Cell::new(false);
+    let accepted = runtime
+        .claim_issue_monitor_launch_delivery_with_publishers(
+            &repo,
+            42,
+            "launch:effect-42",
+            window_id,
+            |snapshot, tabs| {
+                received.borrow_mut().push("snapshot");
+                assert_eq!(snapshot.windows[0].window_id, window_id);
+                assert!(snapshot.windows[0].monitor_owned);
+                assert_eq!(tabs, &BTreeSet::from(["tab-1".to_string()]));
+                monitor.borrow_mut().record_window_snapshot_from_host(
+                    snapshot.clone(),
+                    host_pid,
+                    host_started_at,
+                    tabs.clone(),
+                );
+                Ok(())
+            },
+            |control| {
+                received.borrow_mut().push("claim");
+                let claim = &control["claim_launch_delivery"];
+                let mut monitor = monitor.borrow_mut();
+                daemon_accepted.set(
+                    monitor.claim_launch_delivery(
+                        claim["issue_number"].as_u64().expect("issue number"),
+                        claim["delivery_id"].as_str().expect("delivery identity"),
+                        claim["materializer_id"]
+                            .as_str()
+                            .expect("materializer identity"),
+                        claim["materializer_pid"]
+                            .as_u64()
+                            .expect("materializer pid") as u32,
+                        claim["materializer_window_id"]
+                            .as_str()
+                            .expect("pane identity"),
+                        gwt::process::is_host_process_alive,
+                    ),
+                );
+                gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs())
+                    .expect("commit daemon prefs");
+                Ok(())
+            },
+        )
+        .expect("daemon claim outcome");
+    assert_eq!(
+        received.into_inner(),
+        ["snapshot", "claim"],
+        "the same fresh canvas must precede the claim"
+    );
+    assert!(
+        daemon_accepted.get(),
+        "the daemon must adopt the exact existing pane at max_active=1"
+    );
+    assert!(
+        accepted,
+        "readback must confirm the exact materializer tuple"
+    );
+    assert_eq!(runtime.tabs[0].workspace.persisted().windows.len(), 1);
+    let prefs = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo))
+        .expect("reload daemon claim");
+    let delivery = &prefs.pending_launch_deliveries[0];
+    assert_eq!(
+        delivery.materializer_id.as_deref(),
+        Some(runtime.issue_monitor_materializer_id.as_str())
+    );
+    assert_eq!(delivery.materializer_pid, Some(host_pid));
+    assert_eq!(delivery.materializer_window_id.as_deref(), Some(window_id));
 }

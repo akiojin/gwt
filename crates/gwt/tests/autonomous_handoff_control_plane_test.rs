@@ -201,6 +201,7 @@ fn handoffs_are_not_applied_when_autonomous_mode_is_off() {
 #[test]
 fn answering_a_handoff_resumes_the_same_session_without_a_duplicate_launch() {
     let mut monitor = autonomous_monitor();
+    monitor.set_max_active_agents(1);
     let issue = auto_issue(42);
     launch_autonomous(&mut monitor, &issue);
     monitor.absorb_autonomous_handoffs(vec![handoff(42, "session-abc")]);
@@ -256,6 +257,7 @@ fn answering_a_handoff_resumes_the_same_session_without_a_duplicate_launch() {
 #[test]
 fn parking_a_question_lets_the_next_ready_issue_launch_immediately() {
     let mut monitor = autonomous_monitor();
+    monitor.set_max_active_agents(1);
     monitor.set_gui_connected(true);
     let blocked = auto_issue(42);
     let next_ready = auto_issue(43);
@@ -434,6 +436,7 @@ fn early_receipt_does_not_complete_an_undurable_launch() {
     let dir = tempfile::tempdir().expect("tempdir");
     let prefs_path = dir.path().join("issue-monitor.json");
     let mut monitor = autonomous_monitor();
+    monitor.set_max_active_agents(1);
     let issue = auto_issue(42);
     launch_autonomous(&mut monitor, &issue);
     monitor.absorb_autonomous_handoffs(vec![handoff(42, "session-abc")]);

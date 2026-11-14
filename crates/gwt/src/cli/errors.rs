@@ -1,5 +1,7 @@
 //! `errors.list` JSON operation (Issue #3778).
 
+use std::{collections::HashMap, path::Path};
+
 use chrono::{DateTime, Utc};
 use gwt_core::error_ledger::{ErrorRecord, ErrorScope};
 use gwt_github::{client::ApiError, SpecOpsError};
@@ -16,7 +18,7 @@ pub enum ErrorsCommand {
     },
 }
 
-/// Explicit ledger selection; the default query excludes shared and unowned faults.
+/// Explicit ledger selection; the default query selects the calling project.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ErrorListScope {
     #[default]
@@ -67,7 +69,6 @@ pub fn run<E: CliEnv>(
     command: ErrorsCommand,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
-    let _ = env;
     match command {
         ErrorsCommand::List {
             since,
@@ -81,9 +82,26 @@ pub fn run<E: CliEnv>(
                 .map_err(|err| SpecOpsError::from(ApiError::Network(err.to_string())))?;
             let errors = gwt_core::error_ledger::list_since(cutoff)
                 .map_err(|err| SpecOpsError::from(ApiError::Network(err.to_string())))?;
+            let caller_project =
+                (scope == ErrorListScope::Project && project_root.is_none()).then(|| {
+                    let root = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
+                    gwt_core::paths::project_scope_hash(&root)
+                });
+            let mut matching_roots = HashMap::new();
             let errors: Vec<_> = errors
                 .into_iter()
                 .filter(|record| scope.includes(record, project_root.as_deref()))
+                .filter(|record| {
+                    caller_project.as_ref().is_none_or(|caller_project| {
+                        record.target.project_root.as_deref().is_some_and(|root| {
+                            *matching_roots.entry(root.to_owned()).or_insert_with(|| {
+                                let root =
+                                    gwt_core::paths::resolve_current_worktree_root(Path::new(root));
+                                gwt_core::paths::project_scope_hash(&root) == *caller_project
+                            })
+                        })
+                    })
+                })
                 .collect();
             let payload = ErrorsListPayload {
                 schema_version: gwt_core::error_ledger::SCHEMA_VERSION,
@@ -115,7 +133,61 @@ mod tests {
     use crate::cli::TestEnv;
     use chrono::TimeZone;
     use gwt_core::error_ledger::{ErrorKind, ErrorRecord, ErrorTarget};
+    use gwt_core::process::{resolved_command, ProcessPlanRequest};
     use gwt_core::test_support::ScopedGwtHome;
+
+    #[test]
+    fn errors_list_defaults_to_repository_from_subdirectory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _home = ScopedGwtHome::set(dir.path().join("gwt-home"));
+        let repo = dir.path().join("repo");
+        let cwd = repo.join("crates/gwt");
+        std::fs::create_dir_all(&cwd).expect("subdirectory");
+        assert!(resolved_command(ProcessPlanRequest::new("git"))
+            .expect("resolve git")
+            .current_dir(&repo)
+            .args(["init", "-q"])
+            .status()
+            .expect("git init")
+            .success());
+        let record = ErrorRecord::new(
+            ErrorKind::HookFailure,
+            "project fault",
+            ErrorTarget {
+                project_root: Some(repo.display().to_string()),
+                ..Default::default()
+            },
+        );
+        gwt_core::error_ledger::record(record.clone()).expect("record");
+        let nested_record = ErrorRecord::new(
+            ErrorKind::HookFailure,
+            "nested project fault",
+            ErrorTarget {
+                project_root: Some(cwd.display().to_string()),
+                ..Default::default()
+            },
+        );
+        gwt_core::error_ledger::record(nested_record.clone()).expect("nested record");
+        for caller in [&repo, &cwd] {
+            let mut env = TestEnv::new(caller.clone());
+            let mut out = String::new();
+            run(
+                &mut env,
+                ErrorsCommand::List {
+                    since: None,
+                    scope: ErrorListScope::Project,
+                    project_root: None,
+                },
+                &mut out,
+            )
+            .expect("run");
+            let payload: serde_json::Value = serde_json::from_str(out.trim()).expect("json");
+            assert_eq!(payload["count"], 2, "{}", caller.display());
+            let errors = payload["errors"].as_array().expect("errors");
+            assert!(errors.iter().any(|row| row["id"] == record.id));
+            assert!(errors.iter().any(|row| row["id"] == nested_record.id));
+        }
+    }
 
     #[test]
     fn errors_list_returns_rows_recorded_since_cutoff() {
@@ -137,6 +209,13 @@ mod tests {
         );
         gwt_core::error_ledger::record(older).expect("older");
         gwt_core::error_ledger::record(newer.clone()).expect("newer");
+        let ledger_path = gwt_core::paths::gwt_error_ledger_dir()
+            .join(format!("errors.{}.jsonl", newer.recorded_at.date_naive()));
+        let mut ledger = std::fs::OpenOptions::new()
+            .append(true)
+            .open(ledger_path)
+            .expect("ledger");
+        std::io::Write::write_all(&mut ledger, b"{malformed\n").expect("malformed row");
 
         let mut env = TestEnv::new(dir.path().to_path_buf());
         let mut out = String::new();
@@ -152,10 +231,16 @@ mod tests {
         .expect("run");
         assert_eq!(code, 0);
         let payload: serde_json::Value = serde_json::from_str(out.trim()).expect("json");
-        assert_eq!(payload["count"], 1);
-        assert_eq!(payload["errors"][0]["id"], newer.id);
-        assert_eq!(payload["errors"][0]["kind"], "operation_refusal");
-        assert_eq!(payload["errors"][0]["message"], "board.post refused");
-        assert_eq!(payload["errors"][0]["target"]["issue"], 3778);
+        assert_eq!(payload["count"], 2);
+        let errors = payload["errors"].as_array().expect("errors");
+        assert_eq!(errors.len(), 2);
+        let valid = errors
+            .iter()
+            .find(|row| row["id"] == newer.id)
+            .expect("valid newer row");
+        assert_eq!(valid["kind"], "operation_refusal");
+        assert_eq!(valid["message"], "board.post refused");
+        assert_eq!(valid["target"]["issue"], 3778);
+        assert!(errors.iter().any(|row| row["kind"] == "ledger_corruption"));
     }
 }

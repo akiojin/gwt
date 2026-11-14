@@ -326,7 +326,8 @@ fn failover_fresh_strategy_survives_disk_reload_until_delivery_ack() {
     let temp = TempDir::new().expect("tempdir");
     let prefs_path = temp.path().join("issue-monitor.json");
 
-    let monitor = launched_monitor();
+    let mut monitor = launched_monitor();
+    monitor.set_max_active_agents(2);
     let attempts_before = monitor.attempt_count(42);
     gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("seed prefs");
 

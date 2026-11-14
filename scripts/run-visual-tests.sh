@@ -97,11 +97,16 @@ export GWT_PLAYWRIGHT_PROJECT_ROOT="${GWT_PLAYWRIGHT_PROJECT_ROOT:-$ROOT}"
 export NODE_PATH="${PLAYWRIGHT_NODE_MODULES}${NODE_PATH:+:${NODE_PATH}}"
 export NODE_OPTIONS="--require ${PLAYWRIGHT_RESOLVER}${NODE_OPTIONS:+ ${NODE_OPTIONS}}"
 
-mkdir -p "$RUN_DIR/crates/gwt"
-cp -R "$ROOT/crates/gwt/playwright" "$RUN_DIR/crates/gwt/playwright"
+mkdir -p "$RUN_DIR/crates/gwt/playwright"
+for source in "$ROOT/crates/gwt/playwright/"*; do
+  [[ "$source" == */test-results ]] && continue
+  cp -R "$source" "$RUN_DIR/crates/gwt/playwright/"
+done
 ln -s "$ROOT/crates/gwt/web" "$RUN_DIR/crates/gwt/web"
-rm -rf "$RUN_DIR/crates/gwt/playwright/test-results"
-ln -s "$ROOT/crates/gwt/playwright/test-results" "$RUN_DIR/crates/gwt/playwright/test-results"
+# Playwright replaces outputDir before running. Keep it outside the disposable
+# runner, and isolate each run so later runs do not erase recorded attachments.
+mkdir -p "$ROOT/crates/gwt/playwright/test-results"
+ARTIFACT_DIR="$(mktemp -d "$ROOT/crates/gwt/playwright/test-results/run.XXXXXX")"
 
 cd "$RUN_DIR"
-"${PLAYWRIGHT_BIN}" test --config crates/gwt/playwright/playwright.config.ts "$@"
+"${PLAYWRIGHT_BIN}" test --config crates/gwt/playwright/playwright.config.ts --output "$ARTIFACT_DIR" "$@"

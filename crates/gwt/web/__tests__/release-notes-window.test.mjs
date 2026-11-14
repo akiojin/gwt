@@ -41,10 +41,12 @@ function sampleEntries() {
             "**gui:** Keep tao::Window alive for the event_loop lifetime",
             "**installer:** Pin gwt.exe Name",
           ],
+          body_html: "<ul><li><strong>gui:</strong> Keep tao::Window alive for the event_loop lifetime</li><li><strong>installer:</strong> Pin gwt.exe Name</li></ul>",
         },
         {
           heading: "Features",
           items: ["**serve:** Open default browser unless --no-open is passed"],
+          body_html: "<ul><li><strong>serve:</strong> Open default browser unless --no-open is passed</li></ul>",
         },
       ],
     },
@@ -52,7 +54,11 @@ function sampleEntries() {
       version: "9.37.0",
       date: "2026-05-19",
       sections: [
-        { heading: "Bug Fixes", items: ["Stabilize terminal resize"] },
+        {
+          heading: "Bug Fixes",
+          items: ["Stabilize terminal resize"],
+          body_html: "<ul><li>Stabilize terminal resize</li></ul>",
+        },
       ],
     },
     {
@@ -62,6 +68,7 @@ function sampleEntries() {
         {
           heading: "Features",
           items: ["**file-tree:** Add file content read domain"],
+          body_html: "<ul><li><strong>file-tree:</strong> Add file content read domain</li></ul>",
         },
       ],
     },
@@ -217,6 +224,7 @@ test("does not interpret HTML-like text inside items", () => {
         {
           heading: "Notes",
           items: ["payload <script>alert(1)</script> end"],
+          body_html: "<ul><li>payload &lt;script&gt;alert(1)&lt;/script&gt; end</li></ul>",
         },
       ],
     },
@@ -226,6 +234,42 @@ test("does not interpret HTML-like text inside items", () => {
   const li = content.querySelector("li");
   assert.equal(li.querySelectorAll("script").length, 0);
   assert.ok(li.textContent.includes("<script>"));
+});
+
+test("renders backend Markdown through the shared content renderer", () => {
+  const { document, controller } = makeFixture();
+  controller.handlePayload({
+    id: "rn-test-1",
+    entries: [{
+      version: "1.0.0",
+      sections: [{
+        heading: "Notes",
+        items: ["Use `gwt` and [docs](https://example.com)"],
+        body_html: '<ul><li>Use <code>gwt</code> and <a href="https://example.com" rel="noopener noreferrer">docs</a></li></ul>',
+      }],
+    }],
+  });
+
+  const body = document.querySelector(".release-notes-section .knowledge-markdown-body");
+  assert.ok(body, "release notes should use the shared Markdown content renderer");
+  assert.equal(body.querySelector("li code").textContent, "gwt");
+  assert.equal(body.querySelector("li a").getAttribute("href"), "https://example.com");
+  assert.equal(body.querySelectorAll("ul > li").length, 1);
+});
+
+test("payload without body_html keeps list items as plain text", () => {
+  const { document, controller } = makeFixture();
+  controller.handlePayload({
+    id: "rn-test-1",
+    entries: [{
+      version: "1.0.0",
+      sections: [{ heading: "Notes", items: ["**literal** <script>text</script>"] }],
+    }],
+  });
+
+  const item = document.querySelector(".release-notes-section li");
+  assert.equal(item.textContent, "**literal** <script>text</script>");
+  assert.equal(item.children.length, 0);
 });
 
 test("sidebar click selects a different version", () => {
