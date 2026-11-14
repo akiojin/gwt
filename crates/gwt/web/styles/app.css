@@ -4338,6 +4338,21 @@ body {
   .logs-timeline { border-right: 0; border-bottom: 1px solid var(--color-border); }
 }
 
+/* SPEC #6476 T-005ix: on a phone the Index search controls were 24-32px,
+   the filters squeezed into one row pushed the worktree select off screen,
+   and the result list and detail needed 580px side by side. Make the controls
+   44px tap targets, wrap the filters, and stack the detail below the list. */
+@media (max-width: 600px) {
+  .index-search-root { overflow-y: auto; }
+  .index-search-panel :is(input, select, button),
+  .index-health-panel button { min-height: 44px; }
+  .index-health-panel .icon-button { min-width: 44px; }
+  .index-filter-bar { flex-wrap: wrap; }
+  .index-scope-list { flex: 1 1 100%; }
+  .index-search-layout { grid-template-columns: minmax(0, 1fr); grid-auto-rows: minmax(120px, 1fr); }
+  .index-result-list { border-right: 0; border-bottom: 1px solid var(--color-border); }
+}
+
 .branch-list-root {
   container-type: inline-size;
 }

@@ -4775,7 +4775,8 @@ button.workspace-board-ref:focus-visible {
     max-width: 100%;
   }
 
-  :root[data-theme] .settings-tabs .settings-tab {
+  :root[data-theme] .settings-tabs .settings-tab,
+  :root[data-theme] .index-window-tabs .settings-tab {
     min-width: 44px;
     min-height: 44px;
   }
