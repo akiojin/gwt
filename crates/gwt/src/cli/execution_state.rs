@@ -3336,10 +3336,17 @@ pub fn diagnose_owner(worktree: &Path, owner: ExecutionOwnerKey) -> OwnerExecuti
     diagnosis.generation_id = Some(current.identity.generation_id.clone());
     diagnosis.generation_entrypoint = Some(current.identity.entrypoint.clone());
     diagnosis.generation_activated_at = Some(current.identity.activated_at);
-    let holder_session_id = current.identity.initial_session_id.clone();
+    let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+    let Some(hold) = owner_generation_hold_from_ledger(&sessions_dir, &ledger) else {
+        diagnosis.recommended_recovery = "execution.repair".to_string();
+        diagnosis.recommended_recovery_reason =
+            "The current generation's effective execution projection could not be read."
+                .to_string();
+        return diagnosis;
+    };
+    let holder_session_id = hold.holder_session_id;
     diagnosis.holder_session_id = Some(holder_session_id.clone());
 
-    let sessions_dir = gwt_core::paths::gwt_sessions_dir();
     let holder = match gwt_agent::inspect_session_path(
         &sessions_dir.join(format!("{holder_session_id}.toml")),
     ) {
@@ -12856,10 +12863,13 @@ fn evaluate_pr_handoff(
         }
     };
     if caller_authenticated.is_err() {
-        return Err(
-            "PR mutation refused: current execution authority requires the exact durable owning Session and generation binding; relaunch or continue the owning Session before retrying."
-                .to_string(),
-        );
+        return Err(format!(
+            "PR mutation refused: current execution authority requires the exact durable owning Session and generation binding; relaunch or continue the owning Session before retrying.{}",
+            crate::cli::verification_record::current_holder_recovery_guidance(
+                &worktree,
+                session_id.as_deref(),
+            ),
+        ));
     }
     let Some(session_id) = session_id else {
         return Ok(Vec::new());
@@ -28331,6 +28341,13 @@ mod tests {
         );
         let record = load(dir.path()).unwrap().unwrap();
         assert_eq!(record.primary_session_id, "session-adopting");
+        assert_eq!(
+            diagnose_owner(dir.path(), owner)
+                .holder_session_id
+                .as_deref(),
+            Some("session-adopting"),
+            "owner status must name the effective holder after adoption"
+        );
         assert!(integrity_ok(&record));
         assert_eq!(record.transfers.len(), 1);
         let stop = crate::cli::hook::execution_control_stop_check::handle_with_input(
