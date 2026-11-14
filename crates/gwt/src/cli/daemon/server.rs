@@ -2159,6 +2159,7 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
                         // identity and misclassify receipt recovery as stale.
                         converged.rebase_daemon_driver_prefs(disk);
                     }
+                    converged.restore_recent_events_from_matched_receipt(disk);
                     converged.set_last_control_receipt(receipt.clone());
                     if converged_result != Some(receipt.should_scan)
                         || converged_authority_changed != receipt.authority_changed
@@ -5182,14 +5183,16 @@ exit 0
             ),
             super::IssueMonitorControlCommit::RetryableFailure
         );
+        let visible_receipt_snapshot =
+            crate::load_issue_monitor_prefs(&prefs_path).expect("visible receipt snapshot");
         assert_eq!(
-            crate::load_issue_monitor_prefs(&prefs_path)
-                .expect("visible receipt snapshot")
+            visible_receipt_snapshot
                 .last_control_receipt
                 .as_ref()
                 .map(|receipt| receipt.control_id.as_str()),
             Some(accepted.control_id.as_str())
         );
+        assert_eq!(visible_receipt_snapshot.recent_events.len(), 1);
 
         // Model the confirmation reread being unavailable: the pending retry
         // still has the exact admission ID, but the volatile projection is the
@@ -5217,6 +5220,11 @@ exit 0
         assert_eq!(
             monitor.prefs(),
             crate::load_issue_monitor_prefs(&prefs_path).expect("reload converged receipt")
+        );
+        assert_eq!(
+            monitor.agent_status().recent_events,
+            visible_receipt_snapshot.recent_events,
+            "receipt replay must retain the committed event identity without a duplicate"
         );
     }
 

@@ -3933,6 +3933,17 @@ impl IssueMonitorState {
         self.merge_recent_events([event], false);
     }
 
+    /// Restore the exact event ledger from a snapshot whose durable control
+    /// receipt has already been matched. Ordinary daemon rebases must union
+    /// concurrent writers; receipt replay is different because re-applying
+    /// the same accepted control can mint a second event ID before the full
+    /// durable snapshot is compared. In that narrow path the matched snapshot
+    /// is the committed truth, so convergence must replace rather than merge.
+    pub(crate) fn restore_recent_events_from_matched_receipt(&mut self, prefs: &IssueMonitorPrefs) {
+        self.recent_events = prefs.recent_events.iter().cloned().collect();
+        self.recent_events_truncated = prefs.recent_events_truncated;
+    }
+
     /// Rebase a stale process-local state on the latest committed prefs before
     /// applying this transaction's explicit lifecycle mutation. Real launches,
     /// merged completions, and failures are reconciled before the caller's
