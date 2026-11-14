@@ -1203,7 +1203,7 @@ operation で確認することも有効で、Task 差分が空の receipt を�
 同じ Update や Complete を再実行しても元の receipt は変わらず、現在の Task は
 後続の変更や再開を反映する場合があります。
 生 ID を使う Reopen と Cancel は引き続き receipt の適用時点の Task 状態を返します。
-Reopen と Cancel は、選択 Task の projection から得た `task_key` をトップレベルに
+Reopen・Cancel・Complete は、選択 Task の projection から得た `task_key` をトップレベルに
 指定し、`request.task_id` を空にする方法でも呼び出せます。空・不明・混在した selector
 は拒否します。この方法では現在の保存済み Task と revision に元の receipt を添えて
 返すため、再実行時に古い receipt の Task 状態を現在状態として扱いません。再開時の

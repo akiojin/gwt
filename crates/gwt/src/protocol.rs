@@ -786,6 +786,8 @@ pub enum FrontendEvent {
     CompletePmRequestTask {
         id: String,
         request_id: u64,
+        #[serde(default)]
+        task_key: Option<String>,
         request: PmRequestTaskCompleteRequest,
     },
     /// Inject one line of input into the pane bound to the given agent
@@ -4385,6 +4387,17 @@ mod tests {
                 "reason":"Verified the original outcome","task_id":"task",
                 "condition_revision":1,"review_generation":1,"evidence":["fixture:outcome"]}});
         let _: FrontendEvent = serde_json::from_value(complete.clone()).expect("user complete");
+        let mut keyed = complete.clone();
+        keyed["task_key"] = serde_json::json!("opaque-task-key");
+        keyed["request"]["task_id"] = serde_json::json!("");
+        let parsed: FrontendEvent =
+            serde_json::from_value(keyed.clone()).expect("keyed user complete");
+        assert!(
+            matches!(parsed, FrontendEvent::CompletePmRequestTask { task_key: Some(key), .. }
+            if key == "opaque-task-key")
+        );
+        keyed["request"]["actor"] = serde_json::json!({"kind":"pm","id":"claimed"});
+        assert!(serde_json::from_value::<FrontendEvent>(keyed).is_err());
         for field in ["actor", "source", "project_key", "authority"] {
             let mut forged = complete.clone();
             forged["request"][field] = serde_json::json!("claimed");

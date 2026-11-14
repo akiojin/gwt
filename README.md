@@ -1328,7 +1328,7 @@ Replaying Update or Complete preserves
 the original receipt while the current task may reflect later changes, including
 a subsequent reopen. Raw-ID Reopen and Cancel
 continue to return their receipt's applied task state.
-Reopen and Cancel also accept a top-level `task_key` from the selected Task
+Reopen, Cancel and Complete also accept a top-level `task_key` from the selected Task
 projection with an empty `request.task_id`. Empty, unknown or mixed selectors
 are rejected. These keyed operations return the current saved task and revision
 alongside the original receipt, so a retry cannot present an older receipt's

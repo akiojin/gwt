@@ -1726,7 +1726,7 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
     }
   });
 
-  test('T-TASK-REOPEN-UI T-TASK-KEY-REOPEN T-TASK-CANCEL T-TASK-DETAIL T-TASK-CHILDREN T-TASK-CRITERIA T-CHAT-TASK-LINK T-UTASK-OV and T-UTASK-USER-REOPEN/CANCEL/UPDATE/COMPLETE persist browser authority and show confirmed Tasks after reconnect', async ({ page }, info) => {
+  test('T-TASK-KEY-COMPLETE T-TASK-REOPEN-UI T-TASK-KEY-REOPEN T-TASK-CANCEL T-TASK-DETAIL T-TASK-CHILDREN T-TASK-CRITERIA T-CHAT-TASK-LINK T-UTASK-OV and T-UTASK-USER-REOPEN/CANCEL/UPDATE/COMPLETE persist browser authority and show confirmed Tasks after reconnect', async ({ page }, info) => {
     const theme = info.project.name.includes('light') ? 'light' : 'dark';
     const windowId = 'pm-request-task-fixture';
     const taskId = 'synthetic-fixture-task';
@@ -1814,17 +1814,28 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
       const loaded = await exchange('load_pm_request_task', { task_id: taskId });
       expect(loaded).toMatchObject({ state: 'ready', revision: 3, task: completedTask });
       expect(loaded.receipt ?? null).toBeNull();
+      const taskKey = createHash('sha256').update(taskId).digest('hex');
       const completeRequest = { operation_id: `browser-complete-${theme}`, expected_revision: 3,
-        reason: 'The browser user verified the original outcome.', task_id: taskId,
+        reason: 'The browser user verified the original outcome.', task_id: '',
         condition_revision: 1, review_generation: 1, evidence: ['synthetic:browser-verified-outcome'] };
-      const completed = await exchange('complete_pm_request_task', { request: completeRequest });
+      const beforeComplete = readFileSync(statePath, 'utf8');
+      for (const [task_key, request, code] of [
+        ['', completeRequest, 'invalid_request'],
+        [taskKey, { ...completeRequest, task_id: taskId }, 'invalid_request'],
+        ['unknown', completeRequest, 'missing_task'],
+      ] as const) {
+        expect(await exchange('complete_pm_request_task', { task_key, request }))
+          .toMatchObject({ state: 'error', code, recovery_operation: 'load_pm_request_task' });
+        expect(readFileSync(statePath, 'utf8')).toBe(beforeComplete);
+      }
+      const completed = await exchange('complete_pm_request_task', { task_key: taskKey, request: completeRequest });
       expect(completed).toMatchObject({ state: 'ready', revision: 4,
         task: { ...completedTask, completion: { ...completedTask.completion, evidence: completeRequest.evidence } },
         receipt: { action: 'complete', revision: 4, reason: completeRequest.reason, actor: { kind: 'user' } } });
       expect(completed.receipt.actor.id).toMatch(/^browser:[0-9a-f-]{36}$/i);
-      expect(await exchange('complete_pm_request_task', { request: completeRequest })).toEqual(completed);
+      expect(await exchange('complete_pm_request_task', { task_key: taskKey, request: completeRequest })).toEqual(completed);
       const completeNoop = await exchange('complete_pm_request_task', { request: { ...completeRequest,
-        operation_id: `browser-complete-noop-${theme}`, expected_revision: 4 } });
+        task_id: taskId, operation_id: `browser-complete-noop-${theme}`, expected_revision: 4 } });
       expect(completeNoop).toMatchObject({ state: 'ready', revision: 5, task: completed.task,
         receipt: { action: 'complete', revision: 5, tasks: [], actor: completed.receipt.actor } });
       const completeState = JSON.parse(readFileSync(statePath, 'utf8'));
@@ -1834,7 +1845,6 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
       expect(completeState.tasks[taskId]).toEqual(completed.task);
       let request = { operation_id: `browser-reopen-${theme}`, expected_revision: 5,
         reason: 'The original outcome needs another review.\nPlease reopen this task.', task_id: '' };
-      const taskKey = createHash('sha256').update(taskId).digest('hex');
       const beforeReopen = readFileSync(statePath, 'utf8');
       for (const [task_key, selectedRequest, code] of [
         ['', request, 'invalid_request'],
@@ -1958,12 +1968,12 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
         operation_id: `${request.operation_id}-stale` } })).toMatchObject({ state: 'error', code: 'conflict',
         current_revision: 6, recovery_operation: 'load_pm_request_task' });
       expect(readFileSync(statePath, 'utf8')).toBe(savedBytes);
-      expect(await exchange('complete_pm_request_task', { request: completeRequest }))
+      expect(await exchange('complete_pm_request_task', { task_key: taskKey, request: completeRequest }))
         .toEqual({ ...reopened, receipt: completed.receipt });
-      expect(await exchange('complete_pm_request_task', { request: { ...completeRequest,
+      expect(await exchange('complete_pm_request_task', { task_key: taskKey, request: { ...completeRequest,
         operation_id: `browser-complete-stale-${theme}`, expected_revision: 6 } }))
         .toMatchObject({ state: 'error', code: 'stale_review' });
-      expect(await exchange('complete_pm_request_task', { request: { ...completeRequest,
+      expect(await exchange('complete_pm_request_task', { task_key: taskKey, request: { ...completeRequest,
         operation_id: `browser-complete-reassessment-${theme}`, expected_revision: 6, review_generation: 2 } }))
         .toMatchObject({ state: 'error', code: 'reassessment_required' });
       expect(readFileSync(statePath, 'utf8')).toBe(savedBytes);
@@ -1978,7 +1988,7 @@ test.describe('RPT-F Reports (isolated checkout)', () => {
       expect(await exchange('load_pm_request_task', { task_id: taskId,
         receipt_operation_id: request.operation_id })).toEqual(reopened);
       expect(readFileSync(statePath, 'utf8')).toBe(savedBytes);
-      expect(await exchange('complete_pm_request_task', { request: completeRequest })).toMatchObject({ state: 'error',
+      expect(await exchange('complete_pm_request_task', { task_key: taskKey, request: completeRequest })).toMatchObject({ state: 'error',
         code: 'operation_conflict', recovery_operation: 'load_pm_request_task' });
       expect(await exchange('load_pm_request_task', { task_id: taskId,
         receipt_operation_id: completeRequest.operation_id })).toEqual({ ...reopened, receipt: completed.receipt });
