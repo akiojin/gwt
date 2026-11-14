@@ -375,13 +375,15 @@ test.describe("Issue queue real backend launch", () => {
     expect(errors).toEqual([]);
   });
 
-  for (const afterAck of ["unchanged", "input", "source edit", "cancel"] as const) test(afterAck === "input"
+  for (const afterAck of ["unchanged", "input", "source edit", "cancel", "target removed"] as const) test(afterAck === "input"
     ? "T94421 input after checkpoint ACK preserves the source without switching"
     : afterAck === "source edit"
       ? "T94422 source edit after checkpoint ACK preserves unsaved work without switching"
       : afterAck === "cancel"
         ? "T94423 cancellation after checkpoint ACK survives the delayed Normal Stop"
-        : "T20b saved checkpoint switches through the real Host and Issues", async ({ page }, info) => {
+        : afterAck === "target removed"
+          ? "T94424 target removal after checkpoint ACK preserves the source after delayed Stop"
+          : "T20b saved checkpoint switches through the real Host and Issues", async ({ page }, info) => {
     test.skip(process.platform !== "linux" || process.env.GWT_PLAYWRIGHT_SWITCH_POSITIVE !== "1",
       "positive proof requires the isolated Linux root process namespace");
     const fixture = await startIssueQueueLaunchFixture(info, {
@@ -589,15 +591,32 @@ test.describe("Issue queue real backend launch", () => {
         await info.attach("post-ack-source-edit-preserved", { body: JSON.stringify({ acknowledged, failed, saved }),
           contentType: "application/json" });
         await info.attach(`post-ack-source-edit-preserved-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
-      } else if (afterAck === "cancel") {
+      } else if (afterAck === "cancel" || afterAck === "target removed") {
         const acknowledged = (await preferences()).agent_switch_intents[waiting.operation];
         expect(acknowledged.stage).toBe("checkpoint_verified");
         const checkpoint = fixture.savedSource(source.cwd);
         expect(checkpoint.porcelain).toBe("");
-        await plans.getByRole("button", { name: "Cancel switch", exact: true }).click();
-        await expect.poll(async () => (await preferences()).agent_switch_intents[waiting.operation]?.stage)
-          .toBe("cancelled");
-        await expect(plans.locator(".roster-switch-status")).toContainText("Switch cancelled");
+        const targetRemoved = afterAck === "target removed";
+        const stage = targetRemoved ? "failed" : "cancelled";
+        const reason = targetRemoved
+          ? "The current assignment or next plan changed. Current work is kept; refresh plans."
+          : "Cancelled before stopping the current Session";
+        const visibleReason = targetRemoved ? reason : "Switch cancelled";
+        if (targetRemoved) {
+          await request({ kind: "issue_monitor_queue_remove", issue_numbers: [fixture.targetIssueNumber] },
+            "issue_monitor_queue_result");
+          await expect.poll(async () => {
+            const prefs = await preferences();
+            const host = acknowledged.source.assignment.host_id;
+            return { queued: prefs.terminal_queues[host].entries.some((entry: any) => entry.number === 44),
+              excluded: prefs.terminal_queue_exclusions[host].includes(44) };
+          }).toEqual({ queued: false, excluded: true });
+        } else {
+          await plans.getByRole("button", { name: "Cancel switch", exact: true }).click();
+        }
+        await expect.poll(async () => (await preferences()).agent_switch_intents[waiting.operation])
+          .toMatchObject({ stage, reason });
+        await expect(plans.locator(".roster-switch-status")).toContainText(visibleReason);
         await writeFile(join(fixture.home, `normal-n2-${waiting.operation}.json`), JSON.stringify({ operation: waiting.operation }));
         await expect.poll(async () => (await fixture.actorEvents()).some((entry: any) =>
           entry.stage === "normal_n2_hook_returned" && entry.operation === waiting.operation
@@ -605,9 +624,14 @@ test.describe("Issue queue real backend launch", () => {
         { timeout: Math.max(1, handoffDeadline - Date.now()) }).toBe(true);
         const prefs = await preferences();
         const cancelled = prefs.agent_switch_intents[waiting.operation];
-        expect(cancelled).toMatchObject({ stage: "cancelled", source: acknowledged.source,
-          checkpoint: acknowledged.checkpoint, reason: "Cancelled before stopping the current Session" });
+        expect(cancelled).toMatchObject({ stage, source: acknowledged.source,
+          checkpoint: acknowledged.checkpoint, reason });
         expect(cancelled.runtime_exit_confirmed).not.toBe(true);
+        if (targetRemoved) {
+          const host = acknowledged.source.assignment.host_id;
+          expect(prefs.terminal_queues[host].entries.some((entry: any) => entry.number === 44)).toBe(false);
+          expect(prefs.terminal_queue_exclusions[host]).toContain(44);
+        }
         expect(prefs.monitor_runtime_stop_requests || []).toEqual([]);
         expect(prefs.agent_roster.members.find((value: any) => value.agent_member_id === member.agent_member_id)
           .assignment).toEqual(acknowledged.source.assignment);
@@ -629,11 +653,11 @@ test.describe("Issue queue real backend launch", () => {
           summary: `Saved source checkpoint ${waiting.operation}`, status_category: "idle",
         })]));
         expect(work.board_refs).toContain(acknowledged.checkpoint.board_entry_id);
-        await expect(plans.locator(".roster-switch-status")).toContainText("Switch cancelled");
+        await expect(plans.locator(".roster-switch-status")).toContainText(visibleReason);
         expect((await fixture.actorEvents()).filter((entry: any) => entry.stage === "actor_failed")).toEqual([]);
-        await info.attach("post-ack-cancellation-preserved-source", { body: JSON.stringify({ acknowledged, cancelled, saved }),
+        await info.attach(targetRemoved ? "post-ack-target-removal-preserved-source" : "post-ack-cancellation-preserved-source", { body: JSON.stringify({ acknowledged, cancelled, saved }),
           contentType: "application/json" });
-        await info.attach(`post-ack-cancellation-preserved-source-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
+        await info.attach(`post-ack-${targetRemoved ? "target-removal" : "cancellation"}-preserved-source-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
       } else {
         await writeFile(join(fixture.home, `normal-n2-${waiting.operation}.json`), JSON.stringify({ operation: waiting.operation }));
         await expect.poll(async () => (await fixture.launches()).length === 2
