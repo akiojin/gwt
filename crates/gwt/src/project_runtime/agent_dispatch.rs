@@ -2621,8 +2621,50 @@ pub fn write_current_raw_input(
     entry: &Arc<PtyWriterEntry>,
     bytes: &[u8],
 ) -> Result<(), String> {
+    write_current_raw_input_with_session(writers, id, entry, bytes, None)
+}
+
+fn write_current_raw_input_with_session(
+    writers: &PtyWriterRegistry,
+    id: &str,
+    entry: &Arc<PtyWriterEntry>,
+    bytes: &[u8],
+    held_session: Option<HeldMonitorPromptSession<'_>>,
+) -> Result<(), String> {
     with_current_writer(writers, id, entry, |handle| {
-        handle.write_input(bytes).map_err(|error| error.to_string())
+        if entry
+            .monitor_runtime
+            .as_ref()
+            .is_none_or(|registration| registration.review_dispatch)
+        {
+            return handle.write_input(bytes).map_err(|error| error.to_string());
+        }
+        handle
+            .write_input_with_acceptance(bytes, |confirms, commit| {
+                let mut accept = || {
+                    let registered = writers.read().map_err(|error| TerminalError::PtyIoError {
+                        details: error.to_string(),
+                    })?;
+                    if !registered
+                        .get(id)
+                        .is_some_and(|current| Arc::ptr_eq(current, entry))
+                        || !entry.current.load(std::sync::atomic::Ordering::Acquire)
+                    {
+                        return Err(TerminalError::PtyIoError {
+                            details: "pane runtime changed before raw input acceptance".into(),
+                        });
+                    }
+                    // Keep this exact entry registered through the short queue
+                    // commit, never through runtime I/O or physical writer waits.
+                    commit()
+                };
+                if confirms {
+                    with_current_monitor_prompt_input(entry, held_session, accept)
+                } else {
+                    accept()
+                }
+            })
+            .map_err(|error| error.to_string())
     })
 }
 
@@ -2640,7 +2682,7 @@ pub fn write_current_pane_input(
         return if body.is_empty() {
             Ok(())
         } else {
-            write_current_raw_input(writers, id, entry, body.as_bytes())
+            write_current_raw_input_with_session(writers, id, entry, body.as_bytes(), held_session)
         };
     };
     let reservation = with_current_writer(writers, id, entry, |handle| {

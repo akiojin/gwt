@@ -34,6 +34,73 @@ def distribution(values):
             "max": max(ordered) if ordered else None}
 
 
+def summarize_required_checks(snapshot):
+    policy = snapshot.get("required_status_checks", {})
+    required = {row["context"]: row.get("app_id") for row in policy.get("checks", [])}
+    for name in policy.get("contexts", []):
+        required.setdefault(name, None)
+    rows, completion = [], []
+    durations = {name: [] for name in sorted(required)}
+    for pr in snapshot["pull_requests"]:
+        unavailable, selected = {}, []
+        checks = [check for check in pr.get("check_runs", [])
+                  if check["head_sha"] == pr.get("head_sha")
+                  and (not check.get("started_at") or
+                       timestamp(pr["created_at"]) <= timestamp(check["started_at"]) <= timestamp(pr["merged_at"]))]
+        if not required:
+            unavailable["policy"] = "not collected"
+        elif "check_runs" not in pr:
+            unavailable["check_runs"] = "not collected"
+        for name, app_id in required.items():
+            candidates = [check for check in checks if check["name"] == name
+                          and (app_id in (None, -1) or check["app"]["id"] == app_id)]
+            if not candidates:
+                unavailable[name] = "missing"
+                continue
+            check = max(candidates, key=lambda check: check["id"])
+            selected.append(check)
+            if (check["status"] != "completed" or not check.get("completed_at") or
+                    timestamp(check["completed_at"]) > timestamp(pr["merged_at"])):
+                unavailable[name] = "not completed before merge"
+            elif check["conclusion"] not in ("success", "neutral", "skipped"):
+                unavailable[name] = check["conclusion"] or "unknown conclusion"
+            if (check["conclusion"] == "success" and name not in unavailable and
+                    check.get("started_at") and
+                    timestamp(check["started_at"]) <= timestamp(check["completed_at"])):
+                durations[name].append(minutes(check["started_at"], check["completed_at"]))
+        complete = bool(required) and not unavailable
+        suites = {check["check_suite"]["id"] for check in selected}
+        # Include prerequisite jobs, but do not mix in an earlier rerun of a job.
+        latest = {}
+        for check in sorted(checks, key=lambda check: check["id"]):
+            if check["check_suite"]["id"] in suites:
+                latest[(check["name"], check["app"]["id"], check["check_suite"]["id"])] = check
+        starts = [check["started_at"] for check in latest.values()
+                  if check.get("started_at") and check["conclusion"] not in ("skipped", "cancelled")]
+        elapsed = None
+        if complete and starts and all(check.get("started_at") and
+                                      timestamp(check["started_at"]) <= timestamp(check["completed_at"])
+                                      for check in selected):
+            elapsed = minutes(min(starts, key=timestamp),
+                              max((check["completed_at"] for check in selected), key=timestamp))
+            completion.append(elapsed)
+        rows.append({"pr": pr["number"], "head_sha": pr.get("head_sha"),
+                     "check_ids": [check["id"] for check in selected],
+                     "complete": complete,
+                     "all_success": complete and all(check["conclusion"] == "success" for check in selected),
+                     "conclusions": {check["name"]: check["conclusion"] for check in selected},
+                     "unavailable": unavailable, "completion_minutes": elapsed})
+    return {"policy": policy, "complete_prs": [row["pr"] for row in rows if row["complete"]],
+            "all_success_prs": [row["pr"] for row in rows if row["all_success"]],
+            "completion_minutes": distribution(completion),
+            "duration_minutes": {name: distribution(values) for name, values in durations.items()},
+            "prs": rows,
+            "method": "Current protection context/app IDs; latest check ID on each final head started before merge; "
+                      "complete accepts success/neutral/skipped, all_success accepts only success. "
+                      "Window: earliest job start in matching check suites to last required completion; "
+                      "individual durations include successful checks only. This does not reconstruct historical protection."}
+
+
 def summarize(snapshot):
     if snapshot["schema_version"] != 1:
         raise ValueError("unsupported snapshot schema_version")
@@ -104,6 +171,7 @@ def summarize(snapshot):
                         "runner_wait_minutes": distribution(job_waits[name])}
                  for name, values in sorted(durations.items())},
         "excluded_runs": dict(sorted(excluded.items())), "missing_workflow_prs": missing,
+        "required_checks": summarize_required_checks(snapshot),
     }
 
 
@@ -172,6 +240,7 @@ def collect(repo, base, limit, before, root, workflow):
                 "collected_at": datetime.now(timezone.utc).isoformat(), "pull_requests": []}
     protection = api(repo, f"branches/{base}/protection")
     checks = protection["required_status_checks"] or {}
+    snapshot["required_status_checks"] = checks
     snapshot["required_check_names"] = sorted(set(checks.get("contexts", [])) |
                                               {check["context"] for check in checks.get("checks", [])})
     for pr in merged_prs(repo, base, limit, before):
@@ -200,6 +269,8 @@ def collect(repo, base, limit, before, root, workflow):
             "conventional_sync_commits": [row["sha"] for row in syncs
                                           if row["subject"].startswith("Merge ") and base in row["subject"]],
             "sync_commit_evidence": evidence, "runs": runs})
+        snapshot["pull_requests"][-1]["check_runs"] = paged(
+            repo, f"commits/{head}/check-runs", "check_runs", filter="all")
     return snapshot
 
 

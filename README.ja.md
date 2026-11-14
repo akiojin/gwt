@@ -2453,6 +2453,16 @@ python scripts/ci_throughput.py --input target/ci-throughput.json
 python scripts/ci_throughput.py --input scripts/fixtures/ci-throughput-2026-10-08.json
 ```
 
+マージの収集データには、収集時点の branch protection の context / app ID と、
+各最終 head の check run も保存します。`required_checks` は各必須 check のマージ前の
+最新結果、成功した check の所要時間、対応する check suite の最初の job（前提 job を含む）
+から最後の必須 check 完了までの時間を示します。`complete_prs` は success・neutral・skipped、
+`all_success_prs` は全件 success のみを数えます。欠測・未完了は区別して表示し、完全な
+標本には数えません。過去の保護設定を復元するものではありません。従来の保存データも
+再計算できますが、追加した測定値は証跡不足として扱います。
+check 単体の所要時間には依存処理を含みません。集約 check の短い値だけでは、
+配下のテストや coverage 全体が速いことは証明できません。
+
 JSON は PR 作成からマージまでの時間、各 PR の最終 head に対する最新成功
 workflow attempt、マージあたりの base 同期回数、runner 待ち、job ごとの所要時間を
 出力します。時間は分単位で、p50 は中央値、p90 は nearest-rank です。
