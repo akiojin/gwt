@@ -1106,13 +1106,6 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/develop' }}
           shared-key: windows-workspace
         continue-on-error: true
-      - name: Build checkout binaries for Windows cold restart
-        env:
-          CARGO_PROFILE_DEV_DEBUG: "0"
-        run: |
-          cargo build -p gwt --example exact_relaunch_capacity
-          cargo build -p gwt --bin gwt --bin gwtd
-        timeout-minutes: 30
       # Build once, then exercise both installed provider commands through
       # the same direct probe, Session persistence, and ConPTY launch routes.
       - name: Build the deterministic Windows agent launch E2E
@@ -1160,6 +1153,15 @@ jobs:
           done
           exit "$status"
         timeout-minutes: 60
+      # Tests and the example enable test-only features. Restore the ordinary
+      # checkout binaries last so the browser exercises the production path.
+      - name: Build checkout binaries for Windows cold restart
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
+        run: |
+          cargo build -p gwt --example exact_relaunch_capacity
+          cargo build -p gwt --bin gwt --bin gwtd
+        timeout-minutes: 30
       - name: Install pinned Chromium for Windows cold restart
         shell: bash
         run: bash scripts/install-playwright-browsers.sh browsers
