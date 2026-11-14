@@ -2,13 +2,17 @@ name: Auto Merge PR
 
 on:
   pull_request_target:
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [opened, synchronize, reopened, ready_for_review, auto_merge_enabled, closed]
     branches:
       - main
       - develop
+  workflow_dispatch:
+  schedule:
+    - cron: "17 * * * *"
 
 permissions:
   contents: write
+  issues: read
   pull-requests: write
 
 jobs:
@@ -16,20 +20,133 @@ jobs:
     name: Enable auto-merge
     runs-on: ubuntu-latest
     if: >
+      github.event_name == 'pull_request_target' &&
+      github.event.action != 'closed' &&
       github.event.pull_request.draft == false &&
       (github.event.pull_request.user.login == 'akiojin' ||
        github.event.pull_request.user.login == 'dependabot[bot]')
     steps:
-      - name: Enable auto-merge
+      - name: Check out trusted base revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: Resolve auto-merge eligibility
+        id: eligibility
+        env:
+          GH_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          REPO: ${{ github.repository }}
+        run: scripts/auto-merge-eligibility.sh
+
+      - name: Disarm opted-out auto-merge
+        if: steps.eligibility.outputs.eligible == 'false'
         env:
           GH_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
-          HEAD_REF: ${{ github.event.pull_request.head.ref }}
-          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          REASON: ${{ steps.eligibility.outputs.reason }}
+        run: |
+          set -euo pipefail
+          ARMED="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json autoMergeRequest --jq '.autoMergeRequest != null')"
+          if [ "$ARMED" = "true" ]; then
+            gh pr merge "$PR_NUMBER" --disable-auto --repo "$REPO"
+          fi
+          echo "::notice title=Auto-merge opt-out::PR #$PR_NUMBER remains human-gated ($REASON)"
+
+      - name: Refuse an unknown Issue label state
+        if: steps.eligibility.outputs.lookup_ok == 'false'
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          ISSUE_NUMBER: ${{ steps.eligibility.outputs.issue_number }}
+        run: |
+          echo "::error title=Auto-merge eligibility unavailable::Could not read Issue #$ISSUE_NUMBER for PR #$PR_NUMBER; auto-merge was not armed"
+          exit 1
+
+      - name: Enable auto-merge
+        if: >
+          steps.eligibility.outputs.eligible == 'true' &&
+          github.event.action != 'auto_merge_enabled'
+        env:
+          GH_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
         run: |
           if [ -z "$GH_TOKEN" ]; then
             echo "PERSONAL_ACCESS_TOKEN not provided, skipping auto-merge"
             exit 0
           fi
           gh pr merge "$PR_NUMBER" --auto --merge --repo "$REPO"
+
+  audit-opt-out:
+    name: Audit auto-merged opt-outs
+    runs-on: ubuntu-latest
+    if: >
+      github.event_name == 'pull_request_target' &&
+      github.event.action == 'closed' &&
+      github.event.pull_request.merged == true &&
+      (github.event.pull_request.user.login == 'akiojin' ||
+       github.event.pull_request.user.login == 'dependabot[bot]')
+    steps:
+      - name: Check out trusted base revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: Resolve auto-merge eligibility
+        id: eligibility
+        env:
+          GH_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          REPO: ${{ github.repository }}
+        run: scripts/auto-merge-eligibility.sh
+
+      - name: Detect an auto-merged opt-out
+        env:
+          GH_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          ELIGIBLE: ${{ steps.eligibility.outputs.eligible }}
+          LOOKUP_OK: ${{ steps.eligibility.outputs.lookup_ok }}
+          REASON: ${{ steps.eligibility.outputs.reason }}
+        run: |
+          set -euo pipefail
+          AUTO_MERGED="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json autoMergeRequest --jq '.autoMergeRequest != null')"
+          if [ "$AUTO_MERGED" != "true" ]; then
+            exit 0
+          fi
+          if [ "$LOOKUP_OK" != "true" ]; then
+            echo "::error title=Auto-merge audit unavailable::Could not verify the opt-in for auto-merged PR #$PR_NUMBER"
+            exit 1
+          fi
+          if [ "$ELIGIBLE" != "true" ]; then
+            echo "::error title=Auto-merge opt-out violation::PR #$PR_NUMBER was auto-merged without an eligible Issue ($REASON)"
+            exit 1
+          fi
+
+  sweep-open-opt-outs:
+    name: Disarm open auto-merge opt-outs
+    runs-on: ubuntu-latest
+    if: >
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Check out trusted default branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: Audit armed open PRs
+        env:
+          GH_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: scripts/audit-auto-merge-opt-outs.sh

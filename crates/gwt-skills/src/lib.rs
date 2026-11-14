@@ -752,6 +752,12 @@ mod tests {
                 issue_skill.contains("Issue Monitor"),
                 "expected the Issue Monitor eligibility alignment note: {relative}"
             );
+            assert!(
+                issue_skill.contains(
+                    "The PR auto-merge workflow reads this Issue label for `work/issue-N` branches"
+                ),
+                "expected the Issue label to be documented as the PR workflow source of truth: {relative}"
+            );
         }
     }
 

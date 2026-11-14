@@ -88,6 +88,9 @@ plus the `auto-merge` label):
   boundaries). State the opt-out reason in the Issue body `## Notes`.
 - Alignment: the Issue Monitor treats `auto-merge` + AC checkboxes as the
   autonomous-eligibility signal; an opted-out Issue stays on the human gate.
+- The PR auto-merge workflow reads this Issue label for `work/issue-N` branches.
+  Dependabot PRs and the exact `develop` to `main` Release PR are narrow
+  exceptions; other owner branches fail closed instead of guessing an Issue.
 - The `issue.create` operation itself stays neutral: `labels` is optional and
   no label is applied unconditionally. The default lives in this template.
 
