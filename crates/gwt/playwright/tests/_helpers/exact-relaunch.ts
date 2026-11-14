@@ -126,7 +126,21 @@ const sourceEnvelope = (operation, params = {}) => {
   let envelope;
   try { envelope = JSON.parse(result.stdout); } catch {}
   if (result.status !== 0 || !envelope?.ok) {
-    actorEvent('operation_refused', {operation,exit_status:result.status});
+    const diagnosticCode = value => typeof value === 'string' && /^[a-z0-9_]{1,80}$/i.test(value) ? value : null;
+    const diagnosticText = value => {
+      if (typeof value !== 'string') return null;
+      const text = value.replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]+/gi, '[URL]');
+      // Prefer codes to retaining any credential-shaped detail; never copy output or stderr.
+      if (/[\u001b\u009b]|\b(?:authorization|bearer|[a-z0-9_]*(?:token|secret|password|api_key|capability|grant)[a-z0-9_]*)\b|\b(?:gh[pous]_[a-z0-9]{16,}|github_pat_[a-z0-9_]{16,}|sk-(?:proj-)?[a-z0-9_-]{16,})\b/i.test(text)) {
+        return '[REDACTED: credential-shaped detail]';
+      }
+      return text.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').replace(/\s+/g, ' ').slice(0, 400);
+    };
+    actorEvent('operation_refused', {operation,exit_status:result.status,
+      exit_signal:diagnosticCode(result.signal),spawn_error_code:diagnosticCode(result.error?.code),
+      envelope_error_code:diagnosticCode(envelope?.error_code),envelope_error_message:diagnosticText(envelope?.error),
+      refusal_reason_code:diagnosticCode(envelope?.refusal?.reason_code),
+      refusal_recovery:diagnosticText(envelope?.refusal?.recovery_action)});
     throw new Error('Source operation refused: '+operation);
   }
   return envelope;

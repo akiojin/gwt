@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { spawn, type ChildProcess } from "node:child_process";
 import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
@@ -104,6 +105,10 @@ test.describe("Issue queue real backend launch", () => {
     const errors: string[] = [];
     const theme = info.project.name.includes("light") ? "light" : "dark";
     let current = page;
+    let censusChild: ChildProcess | undefined;
+    let censusReady: { pid: number; cwd: string } | undefined;
+    let censusError: Error | undefined;
+    let censusClosed = false;
     const capture = (target: typeof page) => {
       target.on("pageerror", error => errors.push(error.message));
       target.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
@@ -139,6 +144,24 @@ test.describe("Issue queue real backend launch", () => {
       const source = (await fixture.launches())[0];
       await expect.poll(async () => (await fixture.actorEvents()).some((entry: any) =>
         entry.stage === "idle" && entry.gwt_session_id === source.gwt_session_id), { timeout: 60_000 }).toBe(true);
+      // The exact idle source is exempt from census. Own a separate, real
+      // worktree process so this negative does not depend on unrelated PIDs.
+      censusChild = spawn(process.execPath, ["-e",
+        "process.send({pid:process.pid,cwd:process.cwd()});setInterval(()=>{},1000)",
+        "GWT_SWITCH_CENSUS_CHILD", fixture.home], {
+        cwd: source.cwd, env: { PATH: process.env.PATH, HOME: fixture.home, USERPROFILE: fixture.home },
+        stdio: ["ignore", "ignore", "ignore", "ipc"],
+      });
+      censusChild.on("message", message => { censusReady = message as { pid: number; cwd: string }; });
+      censusChild.on("error", error => { censusError = error; });
+      censusChild.once("close", () => { censusClosed = true; });
+      await expect.poll(() => {
+        if (censusError) throw censusError;
+        return censusReady;
+      }, { timeout: 45_000 }).toMatchObject({ pid: censusChild.pid });
+      expect(censusChild.pid).toBeGreaterThan(0);
+      expect(await realpath(censusReady!.cwd)).toBe(await realpath(source.cwd));
+      expect(censusClosed).toBe(false);
       await request({ kind: "issue_monitor_queue_push", issue_numbers: [fixture.targetIssueNumber] }, "issue_monitor_queue_result");
       const roster = (await request({ kind: "agent_roster", action: { kind: "read" } }, "agent_roster")).roster;
       const member = roster.members.find((member: any) => member.assignment?.session_id === source.gwt_session_id);
@@ -155,6 +178,13 @@ test.describe("Issue queue real backend launch", () => {
       const saved = await intent(operation);
       expect(saved.stage).toBe("requested");
       expect(saved.reason).toMatch(/Observed worktree PIDs: \[[\d, ]*\] \(\d+ total\); unknown cwd PIDs: \[[\d, ]*\] \(\d+ total\); census complete: (?:true|false)\./);
+      const matchingPids = /Observed worktree PIDs: \[([\d, ]*)\]/.exec(saved.reason)![1]
+        .split(",").map(value => Number(value.trim()));
+      expect(matchingPids).toContain(censusChild.pid);
+      await info.attach("agent-switch-worktree-blocker-" + theme, {
+        body: JSON.stringify({ pid: censusChild.pid, cwd: censusReady!.cwd, reason: saved.reason }),
+        contentType: "application/json",
+      });
       await expect(plans.locator(".roster-switch-status")).toContainText("Observed worktree PIDs:");
       const duplicate = await request({ kind: "agent_switch", action: { kind: "request", ...saved.request } }, "agent_switch");
       expect(duplicate.snapshot.intents.filter((value: any) => value.operation_id === operation)).toHaveLength(1);
@@ -178,6 +208,8 @@ test.describe("Issue queue real backend launch", () => {
       expect(fixture.executionStatus(source.cwd).ecr_status).toBe("active");
       await current.close();
       await fixture.restartRuntime(saved.runtime_stop.host_pid);
+      expect(censusClosed).toBe(false);
+      expect(fixture.processAlive(censusChild.pid!)).toBe(true);
       current = await page.context().newPage();
       capture(current);
       await current.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
@@ -207,9 +239,30 @@ test.describe("Issue queue real backend launch", () => {
       expect(errors).toEqual([]);
     } finally {
       try {
-        await info.attach("agent-switch-actor-events", { body: JSON.stringify(await fixture.actorEvents()), contentType: "application/json" });
+        try {
+          await info.attach("agent-switch-actor-events", { body: JSON.stringify(await fixture.actorEvents()), contentType: "application/json" });
+        } finally {
+          try { await current.close(); } finally { await fixture.stop(); }
+        }
       } finally {
-        try { await current.close(); } finally { await fixture.stop(); }
+        if (censusChild) {
+          const running = () => censusChild!.exitCode === null && censusChild!.signalCode === null;
+          if (running()) censusChild.kill("SIGTERM");
+          try {
+            await expect.poll(() => censusClosed, { timeout: 5_000 }).toBe(true);
+          } finally {
+            if (running()) censusChild.kill("SIGKILL");
+            try {
+              if (!censusClosed) await expect.poll(() => censusClosed, { timeout: 5_000 }).toBe(true);
+            } finally {
+              await info.attach("agent-switch-worktree-blocker-cleanup-" + theme, {
+                body: JSON.stringify({ pid: censusChild.pid, closed: censusClosed,
+                  exit_code: censusChild.exitCode, signal: censusChild.signalCode }),
+                contentType: "application/json",
+              });
+            }
+          }
+        }
       }
     }
     expect(errors).toEqual([]);

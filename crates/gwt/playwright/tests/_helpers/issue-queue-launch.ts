@@ -3,7 +3,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { createServer } from "node:http";
 import { existsSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, readdir, realpath, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, readdir, realpath, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join } from "node:path";
 import type { TestInfo } from "@playwright/test";
 import { startExactRelaunchFixture, writeFixtureNodeCommand, type ExactRelaunchSetup } from "./exact-relaunch";
@@ -401,7 +401,76 @@ console.error('Unimplemented fixture gh: '+text);process.exit(64);
     scheduleOperation,
     fixtureOperation: scheduleOperation,
     closeIssue,
-    monitorPreferencesBytes: () => readFile(join(projectState, "issue-monitor.json")),
+    monitorPreferencesBytes: async () => {
+      const handle = await open(join(projectState, "issue-monitor.json"), "r");
+      const snapshot = await (async () => {
+        try {
+          const stamp = async () => {
+            const stat = await handle.stat({ bigint: true });
+            return { dev: stat.dev.toString(), ino: stat.ino.toString(), size: stat.size.toString(),
+              mtime_ns: stat.mtimeNs.toString(), ctime_ns: stat.ctimeNs.toString() };
+          };
+          const before = await stamp();
+          const bytes = await handle.readFile();
+          const after = await stamp();
+          return { before, bytes, after };
+        } finally {
+          await handle.close();
+        }
+      })();
+      const text = snapshot.bytes.toString();
+      try {
+        JSON.parse(text);
+      } catch (error) {
+        // Inspect the message only for offsets: Node may include input in its text.
+        const message = error instanceof Error ? error.message : "";
+        const positionMatch = /\bposition (\d+)/.exec(message);
+        const lineMatch = /\bline (\d+) column (\d+)/.exec(message);
+        const position = positionMatch ? Number(positionMatch[1]) : null;
+        const start = Math.max(0, (position ?? text.length) - 32);
+        const end = Math.min(text.length, (position ?? text.length) + 32);
+        let quoted = false;
+        let escaped = false;
+        let context = "";
+        // Keep JSON delimiters outside strings; mask keys, values and escapes.
+        // Scan the prefix so a window beginning inside a string stays masked.
+        for (let index = 0; index < end; index++) {
+          const char = text[index];
+          let masked = "x";
+          if (quoted) {
+            if (!escaped && char === '"') {
+              quoted = false;
+              masked = '"';
+            }
+            escaped = !escaped && char === "\\";
+          } else if (char === '"') {
+            quoted = true;
+            masked = '"';
+          } else if (" \t\r\n{}[]:,".includes(char)) {
+            masked = char;
+          }
+          if (index >= start) context += masked;
+        }
+        try {
+          await info.attach("issue-monitor-invalid-json-read", {
+            body: JSON.stringify({ buffer_bytes: snapshot.bytes.length,
+              buffer_sha256: createHash("sha256").update(snapshot.bytes).digest("hex"),
+              same_fd_before: snapshot.before, same_fd_after: snapshot.after,
+              error_class: error instanceof SyntaxError ? "SyntaxError" : "Error",
+              position_utf16: position,
+              line: lineMatch ? Number(lineMatch[1]) : null,
+              column: lineMatch ? Number(lineMatch[2]) : null,
+              structural_context: { start_utf16: start, end_utf16: end, masked: context },
+              raw_bytes_saved: false }, null, 2),
+            contentType: "application/json",
+          });
+        } finally {
+          // An attachment failure must not replace the original parse error.
+          throw error;
+        }
+      }
+      return snapshot.bytes;
+    },
     auditHooks: (cwd: string) => auditHooks(cwd, false),
     executionStatus: (cwd: string) => readOperation("execution.status", cwd),
     terminalExecutionStatus: (cwd: string) => readOperation("execution.status", cwd, true),
