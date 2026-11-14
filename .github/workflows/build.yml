@@ -161,6 +161,9 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
       - name: Reset broken pre-installed Rust on macOS runners
         shell: bash
         run: |
@@ -179,9 +182,9 @@ jobs:
         run: |
           cargo check -p gwt-core -p gwt
           # Cold linking belongs to preparation, outside the socket execution budget.
-          # Test line tables are omitted only here; keep default checks and cache keys.
-          CARGO_PROFILE_TEST_DEBUG=0 cargo test -p gwt-core --lib --test test_hygiene_test --test daemon_socket_path_limit --no-run
-          CARGO_PROFILE_TEST_DEBUG=0 cargo test -p gwt --lib --test runtime_tests --no-run
+          # Share the gwt/core feature graph and reuse the exact test artifacts.
+          # Omit test line tables here; keep default checks and cache keys.
+          CARGO_PROFILE_TEST_DEBUG=0 node scripts/ci-windows-tests.mjs build socket
       - name: Test short socket fixtures with a long native TMPDIR
         env:
           CARGO_PROFILE_TEST_DEBUG: "0"
