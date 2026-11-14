@@ -431,6 +431,10 @@ fn startup_git_budget_is_required_on_linux_and_windows() {
 fn workspace_shards_preserve_the_complete_serial_test_selection() {
     let workflow: serde_yaml::Value =
         serde_yaml::from_str(&read(TEST_WORKFLOW)).expect("test workflow");
+    assert_eq!(
+        workflow["jobs"]["test-rust-required"]["runs-on"].as_str(),
+        Some("ubuntu-slim")
+    );
     let job = &workflow["jobs"]["test"];
     assert_eq!(job["strategy"]["fail-fast"].as_bool(), Some(false));
     let shards: Vec<_> = job["strategy"]["matrix"]["shard"]
