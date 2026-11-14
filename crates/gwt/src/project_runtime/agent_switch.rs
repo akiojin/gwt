@@ -29,29 +29,23 @@ pub(super) fn drive_pending(
     sessions: &Path,
     entries: &[Arc<PtyWriterEntry>],
     writers: &Arc<RwLock<HashMap<String, Arc<PtyWriterEntry>>>>,
+    target_waited: &mut bool,
     retire: impl Fn(AgentSwitchSourceExited),
 ) -> Result<gwt::issue_monitor::AgentSwitchSnapshot, String> {
     let path = gwt::issue_monitor_prefs_path_for_repo_path(root);
     if let Some(_guard) = SwitchTickGuard::claim(root) {
         recover_previous_host_intents(root).map_err(|error| error.to_string())?;
         let prefs = gwt::load_issue_monitor_prefs(&path).map_err(|error| error.to_string())?;
-        let host = gwt::process::current_hostname();
-        let host_pid = std::process::id();
-        let host_started_at = gwt::process::host_process_start_time(host_pid);
-        for intent in prefs.agent_switch_intents.values().filter(|intent| {
-            intent.source.assignment.host_id == host
-                && intent.runtime_stop.as_ref().is_some_and(|proof| {
-                    proof.host_pid == host_pid && Some(proof.host_started_at) == host_started_at
-                })
-                && !matches!(
-                    intent.stage,
-                    AgentSwitchStage::Completed
-                        | AgentSwitchStage::Cancelled
-                        | AgentSwitchStage::Failed
-                        | AgentSwitchStage::Unknown
-                )
-        }) {
-            if let Err(error) = drive_switch(root, sessions, intent, entries, writers, &retire) {
+        for intent in local_pending_switches(&prefs) {
+            if let Err(error) = drive_switch(
+                root,
+                sessions,
+                intent,
+                entries,
+                writers,
+                target_waited,
+                &retire,
+            ) {
                 gwt::try_mutate_issue_monitor_prefs(&path, |prefs| {
                     if let Some(current) =
                         prefs.agent_switch_intents.get(&intent.request.operation_id)
@@ -106,6 +100,33 @@ pub(super) fn drive_pending(
             prefs.agent_switch_snapshot(gwt_core::paths::project_scope_hash(root).as_str())
         })
         .map_err(|error| error.to_string())
+}
+
+pub(super) fn has_pending_local_switch(root: &Path) -> io::Result<bool> {
+    let prefs = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(root))?;
+    let pending = local_pending_switches(&prefs).next().is_some();
+    Ok(pending)
+}
+
+fn local_pending_switches(
+    prefs: &gwt::IssueMonitorPrefs,
+) -> impl Iterator<Item = &AgentSwitchIntent> {
+    let host = gwt::process::current_hostname();
+    let host_pid = std::process::id();
+    let host_started_at = gwt::process::host_process_start_time(host_pid);
+    prefs.agent_switch_intents.values().filter(move |intent| {
+        intent.source.assignment.host_id == host
+            && intent.runtime_stop.as_ref().is_some_and(|proof| {
+                proof.host_pid == host_pid && Some(proof.host_started_at) == host_started_at
+            })
+            && !matches!(
+                intent.stage,
+                AgentSwitchStage::Completed
+                    | AgentSwitchStage::Cancelled
+                    | AgentSwitchStage::Failed
+                    | AgentSwitchStage::Unknown
+            )
+    })
 }
 
 fn switch_io(error: impl ToString) -> io::Error {
@@ -399,6 +420,7 @@ fn drive_switch(
     intent: &AgentSwitchIntent,
     entries: &[Arc<PtyWriterEntry>],
     writers: &Arc<RwLock<HashMap<String, Arc<PtyWriterEntry>>>>,
+    target_waited: &mut bool,
     retire: impl Fn(AgentSwitchSourceExited),
 ) -> io::Result<bool> {
     use AgentSwitchStage::*;
@@ -469,7 +491,8 @@ fn drive_switch(
             set_switch_reason(root, intent, &checkpoint_activity_reason(&activity))?;
             return Ok(false);
         }
-        let (target_planning, target_dependencies) = prepare_switch_target(root, intent)?;
+        let (target_planning, target_dependencies) =
+            prepare_switch_target(root, intent).inspect_err(|_| *target_waited = true)?;
         let reservation = match Arc::clone(&entry.handle).reserve_input_transaction() {
             Ok(reservation) => reservation,
             Err(_) => {

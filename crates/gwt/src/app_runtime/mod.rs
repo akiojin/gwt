@@ -15485,6 +15485,10 @@ impl AppRuntime {
                     retryable,
                 },
             )],
+            OwnerEvent::AgentSwitch { snapshot } => vec![OutboundEvent::project(
+                context.project_key.clone(),
+                BackendEvent::AgentSwitch { snapshot },
+            )],
             OwnerEvent::Invalidated | OwnerEvent::AgentStarted { .. } => {
                 self.invalidate_project_caches(&context.project_root);
                 if let Some(state) = self.project_state(context) {
