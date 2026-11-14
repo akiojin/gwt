@@ -4971,10 +4971,8 @@ pub fn provider_auth_state(agent_id: &str, probe: &ProviderAuthProbe) -> Provide
             };
             match fs::read_to_string(home.join("auth.json")) {
                 Ok(body) => codex_auth_state_from_body(&body),
-                // A Codex CLI without auth.json boots into its login screen.
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                    ProviderAuthState::Unauthenticated
-                }
+                // Codex may store credentials in the OS keyring, so a missing
+                // or unreadable auth.json cannot prove it is unauthenticated.
                 Err(_) => ProviderAuthState::Unknown,
             }
         }
@@ -28142,7 +28140,7 @@ mod tests {
         ));
     }
 
-    /// Issue #3676 AC-2: the auth verdict must be definitive before it may
+    /// Issue #3676 AC-2 / Issue #3695: only a definitive auth verdict may
     /// block a launch — every ambiguous shape stays fail-open (`Unknown`).
     #[test]
     fn provider_auth_state_codex_verdicts() {
@@ -28161,20 +28159,20 @@ mod tests {
             }
         }
 
-        // No auth.json: the CLI would boot into its login screen.
+        // No auth.json: Codex may hold credentials in the OS keyring.
         assert_eq!(
             provider_auth_state("codex", &probe(Some(&codex_home), None)),
-            ProviderAuthState::Unauthenticated,
+            ProviderAuthState::Unknown,
         );
         // An API key in the environment authenticates without auth.json.
         assert_eq!(
             provider_auth_state("codex", &probe(Some(&codex_home), Some("sk-test"))),
             ProviderAuthState::Authenticated,
         );
-        // Whitespace-only keys are not credentials.
+        // Whitespace-only keys give no evidence about keyring credentials.
         assert_eq!(
             provider_auth_state("codex", &probe(Some(&codex_home), Some("  "))),
-            ProviderAuthState::Unauthenticated,
+            ProviderAuthState::Unknown,
         );
         // Unknown home: nothing definitive to say.
         assert_eq!(
