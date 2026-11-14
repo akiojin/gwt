@@ -95,6 +95,39 @@ fn real_model_step_only_runs_index_runner_ignored_tests() {
 }
 
 #[test]
+fn python_runner_installs_cpu_torch_and_preserves_the_full_suite() {
+    let workflow: serde_yaml::Value = serde_yaml::from_str(&read(TEST_WORKFLOW)).unwrap();
+    let job = &workflow["jobs"]["test-python-runner"];
+    let steps = job["steps"].as_sequence().unwrap();
+    let install = steps
+        .iter()
+        .find(|step| step["name"] == "Install runtime deps")
+        .unwrap();
+    let commands = install["run"].as_str().unwrap();
+    let cpu = commands
+        .find("pip install torch --index-url https://download.pytorch.org/whl/cpu")
+        .expect("CPU-only Python CI must not download the CUDA stack");
+    let runtime = commands
+        .find("pip install -r crates/gwt-core/runtime/project_index_requirements.txt")
+        .unwrap();
+    assert!(cpu < runtime);
+    assert!(commands.contains("pip install pytest"));
+    assert!(commands.contains("pip check"));
+    assert!(commands.contains("assert torch.version.cuda is None"));
+    assert!(install["continue-on-error"].is_null());
+    let tests = steps
+        .iter()
+        .find(|step| step["name"] == "Run Phase 8 runner tests")
+        .unwrap();
+    assert_eq!(
+        tests["run"],
+        "pytest -q crates/gwt-core/runtime/tests crates/gwt-core/runtime/test_chroma_index_runner.py"
+    );
+    assert_eq!(tests["env"]["GWT_INDEX_FAKE_EMBEDDING"], "1");
+    assert!(tests["continue-on-error"].is_null());
+}
+
+#[test]
 fn real_model_bootstrap_installs_cpu_torch_before_runtime_dependencies() {
     let workflow = read(TEST_WORKFLOW);
     let steps = named_steps(&workflow);
