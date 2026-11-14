@@ -4932,10 +4932,16 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
                             &accepted.control,
                         );
                     }
-                    let converged_result = try_apply_issue_monitor_control(
-                        &mut converged,
-                        accepted.control.clone(),
+                    let converged_result = converged.with_control_event_context(
+                        &accepted.control_id,
                         &accepted.processed_at,
+                        |monitor| {
+                            try_apply_issue_monitor_control(
+                                monitor,
+                                accepted.control.clone(),
+                                &accepted.processed_at,
+                            )
+                        },
                     );
                     if failure_control {
                         // Failure fences restore the committed retry snapshot,
@@ -4975,12 +4981,19 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
                         // Project comparisons omit machine-owned fields. Bind
                         // those fields to the original durable change as well.
                         let mut intent = candidate.clone();
-                        if try_apply_issue_monitor_control(
-                            &mut intent,
-                            accepted.control.clone(),
-                            &accepted.processed_at,
-                        )
-                        .is_none()
+                        if intent
+                            .with_control_event_context(
+                                &accepted.control_id,
+                                &accepted.processed_at,
+                                |monitor| {
+                                    try_apply_issue_monitor_control(
+                                        monitor,
+                                        accepted.control.clone(),
+                                        &accepted.processed_at,
+                                    )
+                                },
+                            )
+                            .is_none()
                         {
                             return Err(io::Error::new(
                                 io::ErrorKind::InvalidInput,
@@ -5136,7 +5149,17 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
                         }
                     }
                 } else {
-                    try_apply_issue_monitor_control(&mut candidate, control, &accepted.processed_at)
+                    candidate.with_control_event_context(
+                        &accepted.control_id,
+                        &accepted.processed_at,
+                        |monitor| {
+                            try_apply_issue_monitor_control(
+                                monitor,
+                                control,
+                                &accepted.processed_at,
+                            )
+                        },
+                    )
                 },
             );
             authority_changed = candidate.effect_authority_epoch() != authority_epoch_before;
@@ -14079,6 +14102,9 @@ exit 0
             review_attempts(&monitor).not_before.as_deref(),
             Some("2000-01-01T00:01:00Z")
         );
+        let history = monitor.prefs().event_history;
+        assert_eq!(history.len(), 1, "the accepted failure retains its notice");
+        assert_eq!(history[0].recorded_at, "2000-01-01T00:00:00.000000000Z");
         assert!(matches!(
             apply_accepted_control_for_test(&prefs_path, &mut stale, accepted),
             super::IssueMonitorControlCommit::Committed { .. }

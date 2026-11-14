@@ -1228,6 +1228,9 @@ pub struct IssueMonitorPrefs {
     /// remaining bounded for long-running repositories.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub requeue_audit: Vec<IssueMonitorReleasedFailure>,
+    /// Issue #3747: notification history independent of display errors and GUI drain.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub event_history: Vec<IssueMonitorEvent>,
     /// Monotonic counter for the releases above. A process adopts only releases
     /// issued after the snapshot it already observed, so a release cannot erase
     /// a failure that was recorded later.
@@ -1442,6 +1445,7 @@ impl Default for IssueMonitorPrefs {
             failed_launch_started_at: BTreeMap::new(),
             released_failures: Vec::new(),
             requeue_audit: Vec::new(),
+            event_history: Vec::new(),
             failure_release_version: 0,
             merged_issues: Vec::new(),
             issue_completion_migration_version: ISSUE_COMPLETION_MIGRATION_VERSION,
@@ -4066,6 +4070,9 @@ pub struct IssueMonitorStatusView {
     pub active_issue_number: Option<u64>,
     pub last_scan_at: Option<String>,
     pub last_error: Option<String>,
+    /// Oldest-to-newest notifications, retained independently of GUI consumption.
+    #[serde(default)]
+    pub event_history: Vec<IssueMonitorEvent>,
     pub launch_profile_source: IssueMonitorLaunchProfileSource,
     pub launch_profile_summary: String,
     /// SPEC #3200 T-048/FR-001: whether unattended autonomous mode is enabled.
@@ -4331,6 +4338,9 @@ pub struct IssueMonitorAgentStatus {
     pub closure_held: Vec<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
+    /// Bounded PM-readable history; `last_error` remains a display projection.
+    #[serde(default)]
+    pub event_history: Vec<IssueMonitorEvent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_scan_at: Option<String>,
     /// Issue #3924: durable evidence of an aborted scan, including offline reads.
@@ -5513,6 +5523,11 @@ pub struct IssueMonitorState {
     /// version and capped by [`REQUEUE_AUDIT_CAP`].
     #[serde(default)]
     requeue_audit: Vec<IssueMonitorReleasedFailure>,
+    #[serde(default)]
+    event_history: Vec<IssueMonitorEvent>,
+    /// Transient identity/time/sequence while applying one accepted control.
+    #[serde(skip)]
+    event_control_context: Option<(String, String, usize)>,
     /// Highest release version this process has issued or observed.
     #[serde(default)]
     failure_release_version: u64,
@@ -6545,6 +6560,19 @@ pub struct AutonomousNotice {
     pub issue_number: u64,
     pub message: String,
 }
+
+/// One durable copy of the GUI notification stream. `notice.level` identifies
+/// its kind (info/warn/error/done); draining GUI notices never consumes this copy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorEvent {
+    pub id: String,
+    pub recorded_at: String,
+    #[serde(flatten)]
+    pub notice: AutonomousNotice,
+}
+
+/// Retain the newest notifications across append, restart and process rebasing.
+pub const ISSUE_MONITOR_EVENT_HISTORY_CAP: usize = 100;
 
 /// Bound for [`IssueMonitorState::pending_autonomous_notices`]: unattended
 /// operation with no GUI connected must not grow the queue without limit.
@@ -8578,6 +8606,8 @@ impl IssueMonitorState {
             failed_windows: BTreeMap::new(),
             released_failures: BTreeMap::new(),
             requeue_audit: Vec::new(),
+            event_history: Vec::new(),
+            event_control_context: None,
             failure_release_version: 0,
             queue: VecDeque::new(),
             pending_launches: VecDeque::new(),
@@ -8741,6 +8771,7 @@ impl IssueMonitorState {
                 .insert(release.issue_number, release);
         }
         state.merge_requeue_audit(prefs.requeue_audit);
+        state.merge_event_history(prefs.event_history);
         state.issue_completion_migration_version = prefs.issue_completion_migration_version;
         for record in prefs.completion_records {
             state.merge_completion_record(record);
@@ -8918,6 +8949,7 @@ impl IssueMonitorState {
                 .map(|(number, at)| (*number, at.clone()))
                 .collect(),
             requeue_audit: self.requeue_audit.clone(),
+            event_history: self.event_history.clone(),
             failure_release_version: self.failure_release_version,
             merged_issues: self.merged_issues.iter().copied().collect(),
             issue_completion_migration_version: self.issue_completion_migration_version,
@@ -13263,6 +13295,7 @@ impl IssueMonitorState {
         autonomous_policy: AutonomousRecordRebasePolicy,
         typed_wait_controls: &[AutonomousIssueRecord],
     ) {
+        self.merge_event_history(disk.event_history.iter().cloned());
         // Launch reservations are append-only within the rolling window. Merge by
         // reservation identity so stale observers cannot reset the storm budget.
         for (number, launches) in &disk.recent_launches {
@@ -15446,6 +15479,7 @@ impl IssueMonitorState {
             active_issue_number: self.active_issue_number(),
             last_scan_at: self.last_scan_at.clone(),
             last_error,
+            event_history: self.event_history.clone(),
             launch_profile_source: if !self.has_launch_profile() {
                 IssueMonitorLaunchProfileSource::Default
             } else {
@@ -15975,6 +16009,7 @@ impl IssueMonitorState {
                 .selected_status_error()
                 .map(|(_, source)| source.to_string()),
             last_error: status.last_error,
+            event_history: status.event_history,
             last_scan_at: status.last_scan_at,
             last_scan_error: self.last_scan_error.clone(),
             scan_aborted: self.last_scan_error.is_some(),
@@ -20519,10 +20554,7 @@ impl IssueMonitorState {
         if !self.autonomous_mode {
             return;
         }
-        while self.pending_autonomous_notices.len() >= AUTONOMOUS_NOTICE_CAP {
-            self.pending_autonomous_notices.pop_front();
-        }
-        self.pending_autonomous_notices.push_back(AutonomousNotice {
+        self.enqueue_autonomous_notice(AutonomousNotice {
             notification_transition,
             notification_transition_id: notification_transition
                 .map(|_| uuid::Uuid::new_v4().to_string()),
@@ -20546,16 +20578,74 @@ impl IssueMonitorState {
     /// dead-binding recovery of Issue #4131, which by construction runs only
     /// while the mode is off.
     fn push_unconditional_notice(&mut self, level: &str, issue_number: u64, message: String) {
-        while self.pending_autonomous_notices.len() >= AUTONOMOUS_NOTICE_CAP {
-            self.pending_autonomous_notices.pop_front();
-        }
-        self.pending_autonomous_notices.push_back(AutonomousNotice {
+        self.enqueue_autonomous_notice(AutonomousNotice {
             notification_transition: None,
             notification_transition_id: None,
             level: level.to_string(),
             issue_number,
             message,
         });
+    }
+
+    /// A receipt retry must reproduce the events of its first application.
+    pub(crate) fn with_control_event_context<T>(
+        &mut self,
+        control_id: &str,
+        processed_at: &str,
+        apply: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let recorded_at = parse_rfc3339_utc(processed_at)
+            .map(|time| time.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true))
+            .unwrap_or_else(|| processed_at.to_string());
+        let previous = self
+            .event_control_context
+            .replace((control_id.to_string(), recorded_at, 0));
+        let result = apply(self);
+        self.event_control_context = previous;
+        result
+    }
+
+    fn enqueue_autonomous_notice(&mut self, mut notice: AutonomousNotice) {
+        let (id, recorded_at) = match self.event_control_context.as_mut() {
+            Some((control_id, recorded_at, sequence)) => {
+                let id = format!("control:{control_id}:{sequence:010}");
+                *sequence += 1;
+                if notice.notification_transition.is_some() {
+                    notice.notification_transition_id = Some(id.clone());
+                }
+                (id, recorded_at.clone())
+            }
+            None => (
+                uuid::Uuid::new_v4().to_string(),
+                chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
+            ),
+        };
+        self.merge_event_history(std::iter::once(IssueMonitorEvent {
+            id,
+            recorded_at,
+            notice: notice.clone(),
+        }));
+        while self.pending_autonomous_notices.len() >= AUTONOMOUS_NOTICE_CAP {
+            self.pending_autonomous_notices.pop_front();
+        }
+        self.pending_autonomous_notices.push_back(notice);
+    }
+
+    fn merge_event_history(&mut self, incoming: impl IntoIterator<Item = IssueMonitorEvent>) {
+        let mut by_id = self
+            .event_history
+            .drain(..)
+            .map(|event| (event.id.clone(), event))
+            .collect::<BTreeMap<_, _>>();
+        for event in incoming {
+            by_id.entry(event.id.clone()).or_insert(event);
+        }
+        let mut history = by_id.into_values().collect::<Vec<_>>();
+        history.sort_by(|a, b| (&a.recorded_at, &a.id).cmp(&(&b.recorded_at, &b.id)));
+        let drop_count = history
+            .len()
+            .saturating_sub(ISSUE_MONITOR_EVENT_HISTORY_CAP);
+        self.event_history = history.into_iter().skip(drop_count).collect();
     }
 
     /// SPEC #3200 kill switch (codex #3217/#3219 review): with autonomous mode
@@ -28578,6 +28668,7 @@ mod tests {
                 scan_aborted: false,
                 last_error_source: None,
                 last_error: None,
+                event_history: Vec::new(),
                 last_scan_at: Some("2026-08-03T00:00:00Z".to_string()),
                 // `agent_status` reports the queue; the scan-cadence and
                 // fleet-outage checks are applied by `agent_status_at`, which
@@ -50280,6 +50371,147 @@ mod tests {
         );
         // Drained: a second take returns nothing.
         assert!(monitor.take_autonomous_notices().is_empty());
+        let status = serde_json::to_value(monitor.agent_status()).unwrap();
+        let history = status["event_history"]
+            .as_array()
+            .expect("PM event history");
+        assert_eq!(history.len(), notices.len());
+        for (event, notice) in history.iter().zip(&notices) {
+            assert_eq!(event["issue_number"], notice.issue_number);
+            assert_eq!(event["level"], notice.level);
+            assert_eq!(event["message"], notice.message);
+            assert!(event["id"].as_str().is_some_and(|id| !id.is_empty()));
+            assert!(chrono::DateTime::parse_from_rfc3339(
+                event["recorded_at"].as_str().expect("recording time")
+            )
+            .is_ok());
+        }
+        let restarted = test_monitor_with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        assert_eq!(
+            serde_json::to_value(restarted.agent_status()).unwrap()["event_history"],
+            status["event_history"]
+        );
+        assert_eq!(
+            serde_json::to_value(restarted.status_view()).unwrap()["event_history"],
+            status["event_history"]
+        );
+    }
+
+    #[test]
+    fn monitor_event_history_preserves_each_attempt_and_exhaustion() {
+        let mut monitor = autonomous_state();
+        for attempt in 1..=3 {
+            monitor.record_autonomous_failure(
+                7,
+                format!("failure {attempt}"),
+                &format!("2026-07-02T00:0{attempt}:00Z"),
+            );
+            monitor.take_autonomous_notices();
+        }
+        monitor.record_autonomous_failure(8, "another launch", "2026-07-02T00:04:00Z");
+        monitor.last_error = Some("unrelated display error".to_string());
+        let status = serde_json::to_value(monitor.agent_status()).unwrap();
+        let history = status["event_history"]
+            .as_array()
+            .expect("PM event history");
+        let failures = history
+            .iter()
+            .filter(|event| event["issue_number"] == 7)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            failures.len(),
+            4,
+            "three failed attempts and exhaustion steering"
+        );
+        for (event, attempt) in failures.iter().zip(1..=3) {
+            assert!(event["message"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("attempt {attempt}/3 failed")));
+        }
+        assert!(failures[3]["message"]
+            .as_str()
+            .unwrap()
+            .contains("autonomous attempts exhausted (3/3)"));
+        assert_eq!(history.last().unwrap()["issue_number"], 8);
+    }
+
+    #[test]
+    fn monitor_event_history_control_replay_preserves_identity_and_order() {
+        let now = "2000-01-01T00:00:00Z";
+        let mut committed = autonomous_state();
+        committed.record_attempt(7);
+        committed.record_attempt(7);
+        let mut replay = committed.clone();
+        let apply = |monitor: &mut IssueMonitorState| {
+            monitor.record_autonomous_failure(7, "retry", now);
+            monitor.escalate_to_needs_human(7, NeedsHumanKind::UserChoiceRequired, "choice");
+        };
+        committed.with_control_event_context("control-7", now, apply);
+        replay.with_control_event_context("control-7", now, apply);
+        replay.rebase_gui_observer_prefs(&committed.prefs());
+        let history = committed.prefs().event_history;
+        assert_eq!(history.len(), 3);
+        assert_eq!(replay.prefs().event_history, history);
+        assert!(history[0].notice.message.contains("attempt 3/3 failed"));
+        assert!(history[1].notice.message.contains("steering requested"));
+        assert!(history[2].notice.message.contains("needs human"));
+        assert!(history
+            .iter()
+            .all(|event| event.recorded_at == "2000-01-01T00:00:00.000000000Z"));
+        assert_eq!(
+            history[2].notice.notification_transition_id.as_deref(),
+            Some(history[2].id.as_str())
+        );
+        replay.with_control_event_context("another-control", now, |monitor| {
+            monitor.push_unconditional_notice("warn", 7, "another admission".to_string());
+        });
+        assert_eq!(replay.prefs().event_history.len(), 4);
+        assert_eq!(replay.event_control_context, None);
+    }
+
+    #[test]
+    fn monitor_event_history_restoration_and_cross_process_merge_are_bounded() {
+        let prefs_with_events = |start, end| {
+            let events = (start..=end)
+                .map(|n| {
+                    serde_json::json!({
+                        "id": format!("event-{n}"),
+                        "recorded_at": format!("2026-07-02T00:{:02}:{:02}Z", n / 60, n % 60),
+                        "level": "warn",
+                        "issue_number": n,
+                        "message": "repeated failure"
+                    })
+                })
+                .collect::<Vec<_>>();
+            let mut prefs = serde_json::to_value(IssueMonitorPrefs::default()).unwrap();
+            prefs["event_history"] = serde_json::json!(events);
+            serde_json::from_value(prefs).unwrap()
+        };
+        let mut observer =
+            test_monitor_with_prefs(IssueMonitorConfig::default(), prefs_with_events(1, 100));
+        let disk = prefs_with_events(51, 150);
+        observer.rebase_gui_observer_prefs(&disk);
+        observer.rebase_gui_observer_prefs(&disk);
+        let restored =
+            test_monitor_with_prefs(IssueMonitorConfig::default(), prefs_with_events(1, 150));
+        for monitor in [&observer, &restored] {
+            let prefs = serde_json::to_value(monitor.prefs()).unwrap();
+            let history = prefs["event_history"]
+                .as_array()
+                .expect("persisted event history");
+            assert_eq!(history.len(), 100);
+            assert_eq!(history.first().unwrap()["issue_number"], 51);
+            assert_eq!(history.last().unwrap()["issue_number"], 150);
+            assert_eq!(
+                history
+                    .iter()
+                    .map(|event| event["id"].as_str().unwrap())
+                    .collect::<BTreeSet<_>>()
+                    .len(),
+                100
+            );
+        }
     }
 
     #[test]
@@ -50383,6 +50615,13 @@ mod tests {
             Some(199),
             "newest notice retained when the cap drops oldest"
         );
+        let status = serde_json::to_value(monitor.agent_status()).unwrap();
+        let history = status["event_history"]
+            .as_array()
+            .expect("PM event history");
+        assert_eq!(history.len(), 100);
+        assert_eq!(history.first().unwrap()["issue_number"], 100);
+        assert_eq!(history.last().unwrap()["issue_number"], 199);
     }
 
     #[test]

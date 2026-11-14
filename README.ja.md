@@ -996,6 +996,12 @@ status を再読して変更を再判断し、成功後も読み戻して確認�
 Issueのcloseやcancelだけでは数えません。エージェントによる完了宣言を測るため、
 後からPRが失敗すると着地率は楽観的になります。この指標にPRのマージは不要です。
 
+`issue.monitor.status` の `event_history` には、最新100件の Monitor 通知を古い順に保持します。
+各項目は `id`、RFC3339形式の `recorded_at`、`issue_number`、通知種別の `level`
+（`info`/`warn`/`error`/`done`）、`message` を持ちます。試行ごとの失敗・再試行・人間への確認要求・
+マージ・slot解放などの通知は、GUIでの通知消費後や再起動後も読めます。
+上限を超えると最古の項目から削除します。`last_error` などの最新エラー表示とは独立した履歴です。
+
 ホストの空き容量も同じ snapshot に含まれます。`issue.monitor.status` の
 `disk_space` は worktree と verification coordinator が置かれた volume を列挙し、
 空きが 20 GiB または 5% を下回ると `warning` を載せるため、`verify.run` が

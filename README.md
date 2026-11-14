@@ -1091,6 +1091,14 @@ session; closing or cancelling an Issue alone does not count. It measures
 agent-declared completion, so the rate can be optimistic if the PR fails later.
 PR merge is not required for this metric.
 
+`issue.monitor.status` also exposes `event_history`: the newest 100 Monitor
+notifications, ordered oldest first, with an `id`, RFC3339 `recorded_at`,
+`issue_number`, notification kind `level` (`info`/`warn`/`error`/`done`), and
+`message`. Failed attempts, retry notices, needs-human transitions, merges and
+slot releases remain readable after GUI notifications are consumed and across
+restarts. New entries evict the oldest; display fields such as `last_error`
+continue to report the latest error separately.
+
 Host free space is part of the same snapshot: `disk_space` in
 `issue.monitor.status` lists the volumes the worktrees and the verification
 coordinator live on and carries a `warning` once one of them falls below

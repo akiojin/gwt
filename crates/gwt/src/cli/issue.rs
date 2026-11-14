@@ -13244,6 +13244,7 @@ mod tests {
             .expect("write closed cache entry");
 
         let mut published = crate::IssueMonitorAgentStatus {
+            event_history: Vec::new(),
             max_active_agents_scope: "machine".to_string(),
             agent_capacity: Default::default(),
             max_active_agents_override: Some(1),
@@ -13308,6 +13309,7 @@ mod tests {
         assert_eq!(published.last_error, None);
 
         let mut live_open = crate::IssueMonitorAgentStatus {
+            event_history: Vec::new(),
             max_active_agents_scope: "machine".to_string(),
             agent_capacity: Default::default(),
             max_active_agents_override: Some(1),
@@ -13462,6 +13464,7 @@ mod tests {
 
         for issue_updated_at in [None, Some("not-a-timestamp".to_string())] {
             let mut status = crate::IssueMonitorAgentStatus {
+                event_history: Vec::new(),
                 max_active_agents_scope: "machine".to_string(),
                 agent_capacity: Default::default(),
                 max_active_agents_override: Some(1),
@@ -13590,6 +13593,7 @@ mod tests {
         let escalation_path = gwt_core::coordination::coordination_escalations_path(&repo);
         std::fs::create_dir_all(&escalation_path).expect("make escalation index unreadable");
         let mut published = crate::IssueMonitorAgentStatus {
+            event_history: Vec::new(),
             max_active_agents_scope: "machine".to_string(),
             agent_capacity: Default::default(),
             max_active_agents_override: Some(1),
@@ -13953,6 +13957,10 @@ mod tests {
                 "legacy preferences must explicitly report {field} as null"
             );
         }
+        assert_eq!(
+            status.as_object_mut().unwrap().remove("event_history"),
+            Some(serde_json::json!([]))
+        );
         assert_eq!(
             status
                 .as_object_mut()
@@ -18323,6 +18331,7 @@ command = "my-agent-cli"
     #[test]
     fn a_live_foreign_claim_is_reported_instead_of_a_queue_position() {
         let status = crate::IssueMonitorAgentStatus {
+            event_history: Vec::new(),
             max_active_agents_scope: "machine".to_string(),
             agent_capacity: Default::default(),
             max_active_agents_override: Some(1),
