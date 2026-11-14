@@ -375,9 +375,11 @@ test.describe("Issue queue real backend launch", () => {
     expect(errors).toEqual([]);
   });
 
-  for (const inputAfterAck of [false, true]) test(inputAfterAck
+  for (const afterAck of ["unchanged", "input", "source edit"] as const) test(afterAck === "input"
     ? "T94421 input after checkpoint ACK preserves the source without switching"
-    : "T20b saved checkpoint switches through the real Host and Issues", async ({ page }, info) => {
+    : afterAck === "source edit"
+      ? "T94422 source edit after checkpoint ACK preserves unsaved work without switching"
+      : "T20b saved checkpoint switches through the real Host and Issues", async ({ page }, info) => {
     test.skip(process.platform !== "linux" || process.env.GWT_PLAYWRIGHT_SWITCH_POSITIVE !== "1",
       "positive proof requires the isolated Linux root process namespace");
     const fixture = await startIssueQueueLaunchFixture(info, {
@@ -479,7 +481,7 @@ test.describe("Issue queue real backend launch", () => {
       expect(fixture.processAlive(source.pid)).toBe(true);
       expect(fixture.processAlive(idle.tree_child_pid)).toBe(true);
       expect(await fixture.launches()).toHaveLength(1);
-      if (inputAfterAck) {
+      if (afterAck === "input") {
         const acknowledged = (await preferences()).agent_switch_intents[waiting.operation];
         expect(acknowledged.stage).toBe("checkpoint_verified");
         const checkpoint = fixture.savedSource(source.cwd);
@@ -539,6 +541,52 @@ test.describe("Issue queue real backend launch", () => {
           accepted, subsequentStop, failed: (await preferences()).agent_switch_intents[waiting.operation], checkpoint }),
         contentType: "application/json" });
         await info.attach(`post-ack-input-preserved-source-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
+      } else if (afterAck === "source edit") {
+        const acknowledged = (await preferences()).agent_switch_intents[waiting.operation];
+        expect(acknowledged.stage).toBe("checkpoint_verified");
+        const checkpoint = fixture.savedSource(source.cwd);
+        expect(checkpoint.porcelain).toBe("");
+        const editedPath = join(source.cwd, "checkpoint-source.txt");
+        const editedBytes = "Unsaved work after checkpoint ACK must survive the switch request.\n";
+        await writeFile(editedPath, editedBytes);
+        expect(fixture.savedSource(source.cwd).porcelain).toMatch(/^M checkpoint-source\.txt$/);
+        await writeFile(join(fixture.home, `normal-n2-${waiting.operation}.json`), JSON.stringify({ operation: waiting.operation }));
+        await expect.poll(async () => (await fixture.actorEvents()).some((entry: any) =>
+          entry.stage === "normal_n2_hook_returned" && entry.operation === waiting.operation
+            && entry.pid === source.pid && entry.gwt_session_id === source.gwt_session_id),
+        { timeout: Math.max(1, handoffDeadline - Date.now()) }).toBe(true);
+        const reason = "checkpoint requires a clean worktree, including untracked files";
+        await expect.poll(async () => (await preferences()).agent_switch_intents[waiting.operation],
+          { timeout: Math.max(1, handoffDeadline - Date.now()) }).toMatchObject({ stage: "failed", reason });
+        const prefs = await preferences();
+        const failed = prefs.agent_switch_intents[waiting.operation];
+        expect(failed).toMatchObject({ source: acknowledged.source, checkpoint: acknowledged.checkpoint });
+        expect(failed.runtime_exit_confirmed).not.toBe(true);
+        expect(prefs.monitor_runtime_stop_requests || []).toEqual([]);
+        expect(prefs.agent_roster.members.find((value: any) => value.agent_member_id === member.agent_member_id)
+          .assignment).toEqual(acknowledged.source.assignment);
+        expect(prefs.launched_claims[43]).toBe(acknowledged.source.claim_id);
+        expect(fixture.processAlive(source.pid)).toBe(true);
+        expect(fixture.processAlive(idle.tree_child_pid)).toBe(true);
+        expect(await fixture.launchIssues()).toEqual([43]);
+        expect(fixture.requests.filter(request => request.method === "POST"
+          && request.url === "/repos/fixture/queue/issues/44/comments")).toEqual([]);
+        expect(fixture.executionStatus(source.cwd).ecr_status).toBe("active");
+        const saved = fixture.savedSource(source.cwd);
+        expect(saved).toMatchObject({ branch: checkpoint.branch, head: checkpoint.head, remoteHead: checkpoint.remoteHead });
+        expect(saved.porcelain).toMatch(/^\s*M checkpoint-source\.txt$/m);
+        expect(await readFile(editedPath, "utf8")).toBe(editedBytes);
+        const work = (await fixture.workItems()).work_items.find((value: any) => value.id === acknowledged.checkpoint.work_id);
+        expect(work).toMatchObject({ owner: "Issue #43" });
+        expect(work.events).toEqual(expect.arrayContaining([expect.objectContaining({
+          summary: `Saved source checkpoint ${waiting.operation}`, status_category: "idle",
+        })]));
+        expect(work.board_refs).toContain(acknowledged.checkpoint.board_entry_id);
+        await expect(plans.locator(".roster-switch-status")).toContainText(reason);
+        expect((await fixture.actorEvents()).filter((entry: any) => entry.stage === "actor_failed")).toEqual([]);
+        await info.attach("post-ack-source-edit-preserved", { body: JSON.stringify({ acknowledged, failed, saved }),
+          contentType: "application/json" });
+        await info.attach(`post-ack-source-edit-preserved-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
       } else {
         await writeFile(join(fixture.home, `normal-n2-${waiting.operation}.json`), JSON.stringify({ operation: waiting.operation }));
         await expect.poll(async () => (await fixture.launches()).length === 2
