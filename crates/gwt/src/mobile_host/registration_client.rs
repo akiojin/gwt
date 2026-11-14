@@ -17,6 +17,11 @@
 //! success). The hex secret is built in a wiped buffer; the copy handed to the
 //! WebSocket frame cannot be wiped (as for the bearer). Dropping every invite
 //! sender only ends invite input, not the registration.
+//!
+//! The coordinator announces browser connections that claimed this
+//! registration's invites; each becomes a [`ConnectionEvent`] for the caller.
+//! A caller that stopped receiving is ignored, but a full event channel ends
+//! the registration (`EventBacklog`) rather than lose a connection's state.
 
 use super::credential::LoadedHostCredential;
 use crate::mobile_connection::{AuthorizationError, MobileAuthorization};
@@ -63,6 +68,15 @@ pub enum RegistrationClientError {
     Protocol,
     #[error("the coordinator registration connection closed; explicitly enable again")]
     Closed,
+    #[error("the Host fell behind on coordinator connection events; explicitly enable again")]
+    EventBacklog,
+}
+
+/// A browser connection that claimed one of this registration's invites.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionEvent {
+    Claimed { connection_id: Uuid },
+    Closed { connection_id: Uuid },
 }
 
 /// A pairing invite for the coordinator to admit under this registration.
@@ -122,6 +136,14 @@ enum CoordinatorMessage {
         nonce: Uuid,
         reason: InviteRejection,
     },
+    ConnectionClaimed {
+        generation: Uuid,
+        connection_id: Uuid,
+    },
+    ConnectionClosed {
+        generation: Uuid,
+        connection_id: Uuid,
+    },
 }
 
 /// `Bearer <base64url JSON>` built in pre-sized, wiped buffers. The copy the
@@ -169,7 +191,8 @@ fn write(
 /// sender is dropped (`Ok`, observed during the handshake too) or the
 /// registration fails (`Err`). The authority is disabled on return either way.
 /// `tcp` must already be connected to the credential's coordinator origin.
-/// `invites` is read only while enabled and one request at a time.
+/// `invites` is read only while enabled and one request at a time; claimed
+/// connections are reported on `events`.
 pub async fn run_registration(
     authority: Arc<RwLock<MobileAuthorization>>,
     credential: &LoadedHostCredential,
@@ -177,8 +200,9 @@ pub async fn run_registration(
     tcp: TcpStream,
     stop: watch::Receiver<bool>,
     invites: mpsc::Receiver<InviteRequest>,
+    events: mpsc::Sender<ConnectionEvent>,
 ) -> Result<(), RegistrationClientError> {
-    let result = register_and_renew(&authority, credential, tls, tcp, stop, invites).await;
+    let result = register_and_renew(&authority, credential, tls, tcp, stop, invites, events).await;
     authority
         .write()
         .unwrap_or_else(|error| error.into_inner())
@@ -193,6 +217,7 @@ async fn register_and_renew(
     tcp: TcpStream,
     mut stop: watch::Receiver<bool>,
     mut invites: mpsc::Receiver<InviteRequest>,
+    events: mpsc::Sender<ConnectionEvent>,
 ) -> Result<(), RegistrationClientError> {
     let host_epoch = write(authority)?.prepare_registration(credential)?;
     let origin = reqwest::Url::parse(credential.binding().coordinator_origin())
@@ -306,6 +331,16 @@ async fn register_and_renew(
                 {
                     answer(&mut pending, nonce, InviteOutcome::Rejected(reason))?;
                 }
+                CoordinatorMessage::ConnectionClaimed { generation: scoped, connection_id }
+                    if scoped == generation =>
+                {
+                    report(&events, ConnectionEvent::Claimed { connection_id })?;
+                }
+                CoordinatorMessage::ConnectionClosed { generation: scoped, connection_id }
+                    if scoped == generation =>
+                {
+                    report(&events, ConnectionEvent::Closed { connection_id })?;
+                }
                 _ => return Err(RegistrationClientError::Protocol),
             },
         }
@@ -325,6 +360,17 @@ fn answer(
             Ok(())
         }
         _ => Err(RegistrationClientError::Protocol),
+    }
+}
+
+/// Hand a connection event to the caller without stalling renewals.
+fn report(
+    events: &mpsc::Sender<ConnectionEvent>,
+    event: ConnectionEvent,
+) -> Result<(), RegistrationClientError> {
+    match events.try_send(event) {
+        Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => Ok(()),
+        Err(mpsc::error::TrySendError::Full(_)) => Err(RegistrationClientError::EventBacklog),
     }
 }
 

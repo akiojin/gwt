@@ -188,6 +188,7 @@ impl CoordinatorServer {
             stopping,
             alive,
             retired: Arc::new(tokio::sync::watch::Sender::new(())),
+            events: Default::default(),
         };
         let router = with_http_boundary(
             axum::Router::new()
@@ -1120,6 +1121,7 @@ mod tests {
                     tcp,
                     stopping,
                     tokio::sync::mpsc::channel(1).1,
+                    tokio::sync::mpsc::channel(1).0,
                 )
                 .await
             })
@@ -1170,6 +1172,7 @@ mod tests {
                     tcp,
                     stopping,
                     tokio::sync::mpsc::channel(1).1,
+                    tokio::sync::mpsc::channel(1).0,
                 )
                 .await
             })
@@ -1213,7 +1216,7 @@ mod tests {
     #[tokio::test]
     async fn host_client_registers_invites_over_its_live_registration() {
         use crate::mobile_host::registration_client::{
-            InviteOutcome, InviteRejection, InviteRequest,
+            ConnectionEvent, InviteOutcome, InviteRejection, InviteRequest,
         };
         use std::sync::RwLock;
         use tokio::sync::{mpsc, watch};
@@ -1232,12 +1235,13 @@ mod tests {
         ));
         let (stop, stopping) = watch::channel(false);
         let (invites, requests) = mpsc::channel(1);
+        let (events, mut connections) = mpsc::channel(32);
         let client = {
             let host = Arc::clone(&host);
             let tls = fixture.client_config();
             tokio::spawn(async move {
                 let tcp = TcpStream::connect(addr).await.unwrap();
-                run_registration(host, &credential, tls, tcp, stopping, requests).await
+                run_registration(host, &credential, tls, tcp, stopping, requests, events).await
             })
         };
         let invite = |byte: u8, ttl_secs: u64| {
@@ -1267,6 +1271,32 @@ mod tests {
             register(2, 0).await,
             Ok(InviteOutcome::Rejected(InviteRejection::InvalidTtl))
         );
+        assert!(host.read().unwrap().is_enabled());
+        assert_eq!(live(&sessions), 1);
+
+        // A browser claim and its close reach the Host as connection events,
+        // and the registration stays live.
+        {
+            use futures_util::SinkExt as _;
+            use tokio_tungstenite::tungstenite::Message;
+            let origin = [("origin", "https://coordinator.example".to_string())];
+            let mut browser = open_path(&fixture, addr, BROWSER_CLAIM_PATH, &origin)
+                .await
+                .unwrap();
+            let claim = json!({"type":"claim_invite","secret":"01".repeat(32)}).to_string();
+            bounded(browser.send(Message::text(claim))).await.unwrap();
+            assert_eq!(next_json(&mut browser).await, json!({"type":"claimed"}));
+            let ConnectionEvent::Claimed { connection_id } =
+                bounded(connections.recv()).await.unwrap()
+            else {
+                panic!("the first connection event must be the claim");
+            };
+            bounded(browser.close(None)).await.unwrap();
+            assert_eq!(
+                bounded(connections.recv()).await,
+                Some(ConnectionEvent::Closed { connection_id })
+            );
+        }
         assert!(host.read().unwrap().is_enabled());
         assert_eq!(live(&sessions), 1);
 
@@ -1350,6 +1380,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(next_json(&mut first).await, json!({"type":"claimed"}));
+        // The claim is announced only to its own Host registration.
+        let claimed = next_json(&mut host).await;
+        assert_eq!(claimed["type"], "connection_claimed");
+        assert_eq!(claimed["generation"], json!(generation));
+        let connection: Uuid = serde_json::from_value(claimed["connection_id"].clone()).unwrap();
 
         // A consumed or unknown secret is refused without saying why.
         for byte in [0x21, 0x99] {
@@ -1377,6 +1412,11 @@ mod tests {
 
         // Closing the claimed browser leaves a replay fence for its secret.
         bounded(first.close(None)).await.unwrap();
+        // Rejected claims announced nothing; the next Host message is the close.
+        assert_eq!(
+            next_json(&mut host).await,
+            json!({"type":"connection_closed","generation":generation,"connection_id":connection})
+        );
         let mut socket = open_path(&fixture, addr, BROWSER_CLAIM_PATH, &origin)
             .await
             .unwrap();
@@ -1406,6 +1446,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(next_json(&mut second).await, json!({"type":"claimed"}));
+        let claimed = next_json(&mut host).await;
+        assert_eq!(claimed["type"], "connection_claimed");
+        assert_ne!(claimed["connection_id"], json!(connection));
         bounded(host.close(None)).await.unwrap();
         wait_until_closed(&sessions).await;
         assert!(closed(&mut second).await);
