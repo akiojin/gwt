@@ -2318,7 +2318,9 @@ mod tests {
             TargetMeasurement {
                 bytes: 8,
                 observed_at: now - TARGET_TTL_SECS - 1,
-                refreshed_until: now + 1,
+                // Issue #6071: a lease that outlives a slow test run. With
+                // `now + 1` a second-boundary crossing let the entry lapse.
+                refreshed_until: now + 10 * SNAPSHOT_TTL_SECS,
             },
         );
         std::fs::create_dir_all(capacity_directory()).unwrap();
@@ -2335,7 +2337,7 @@ mod tests {
         let next = read_snapshot(&snapshot_path()).unwrap();
         assert_eq!(
             next.targets[&target].refreshed_until,
-            now + 1,
+            now + 10 * SNAPSHOT_TTL_SECS,
             "a walk started after expiry must not extend the lease"
         );
     }

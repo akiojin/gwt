@@ -514,6 +514,48 @@ test.describe("toast-host alerts region (real browser, SPEC #3206 P1)", () => {
     expect(layout.alertsPosition).not.toBe("fixed");
   });
 
+  // SPEC #6476 T-005c (AC-1): the dismiss control was a 20x19px target on a
+  // phone. Below 601px it is a 44px tap target; wider layouts keep 20px.
+  test.describe("on a phone", () => {
+    test.use({ hasTouch: true });
+    test("the dismiss control is a 44px tap target that dismisses only its toast", async ({ page }) => {
+      const errors: string[] = [];
+      page.on("pageerror", error => errors.push(String(error)));
+      page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+      const push = (id: string) => page.evaluate(toastId => (window as any).__alerts.push({
+        id: toastId, level: "error", title: `Alert ${toastId}`, message: "detail", timeoutMs: 0, dismissible: true,
+      }), id);
+      const dismiss = (id: string) => page.locator(`.toast-alerts__item[data-toast-id="${id}"] .toast-alerts__dismiss`);
+      await page.setViewportSize({ width: 601, height: 900 });
+      await push("desktop");
+      expect((await dismiss("desktop").boundingBox())!.width, "601px keeps the desktop width").toBe(20);
+      const layout = (id: string) => page.locator(`.toast-alerts__item[data-toast-id="${id}"]`).evaluate(item => {
+        const box = (selector: string) => item.querySelector(selector)!.getBoundingClientRect();
+        const outer = item.getBoundingClientRect();
+        const close = box(".toast-alerts__dismiss");
+        return { gap: box(".toast-alerts__message").top - box(".toast-alerts__title").bottom,
+          inside: close.top >= outer.top && close.bottom <= outer.bottom && close.right <= outer.right };
+      });
+      const desktopGap = (await layout("desktop")).gap;
+      for (const width of [320, 390]) {
+        await page.setViewportSize({ width, height: 844 });
+        await push(`keep-${width}`);
+        await push(`phone-${width}`);
+        const box = (await dismiss(`phone-${width}`).boundingBox())!;
+        expect(box.width, `dismiss width at ${width}px`).toBeGreaterThanOrEqual(44);
+        expect(box.height, `dismiss height at ${width}px`).toBeGreaterThanOrEqual(44);
+        await expect(dismiss(`phone-${width}`)).toBeInViewport({ ratio: 1 });
+        const phone = await layout(`phone-${width}`);
+        expect(phone.inside, "the whole 44px target stays inside its toast").toBe(true);
+        expect(phone.gap, "the message stays as close to the title as on desktop").toBeLessThanOrEqual(desktopGap + 1);
+        await dismiss(`phone-${width}`).tap();
+        await expect(page.locator(`.toast-alerts__item[data-toast-id="phone-${width}"]`)).toHaveCount(0);
+        await expect(page.locator(`.toast-alerts__item[data-toast-id="keep-${width}"]`)).toHaveCount(1);
+      }
+      expect(errors, "zero console/page errors").toEqual([]);
+    });
+  });
+
   test("sticky alerts and the update CTA remain visible and operable without overlap", async ({
     page,
   }) => {

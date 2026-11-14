@@ -1009,6 +1009,7 @@ fn compact_work_item(item: &mut WorkItem) -> usize {
         return 0;
     }
     item.events.sort_by_key(|event| event.updated_at);
+    let terminal = item.current_terminal_event().cloned();
     let dropped_events = item.events.len().saturating_sub(MAX_INLINE_WORK_EVENTS);
 
     // The boundary must cover everything the folded state already reflects,
@@ -1044,6 +1045,23 @@ fn compact_work_item(item: &mut WorkItem) -> usize {
         // Keep one provenance anchor and the newest remaining events; the
         // history bound and folded-state watermark stay unchanged.
         item.events[0] = start;
+    }
+    if let Some(terminal) =
+        terminal.filter(|close| !item.events.iter().any(|event| event.id == close.id))
+    {
+        // Reopen and terminal diagnosis need the accepted current close, even
+        // after later metadata updates push it beyond the retained tail.
+        let lineage = item
+            .events
+            .iter()
+            .position(WorkEvent::is_successor_supersession)
+            .or_else(|| {
+                item.events
+                    .iter()
+                    .position(WorkEvent::is_successor_lineage_anchor)
+            });
+        item.events[usize::from(lineage == Some(0))] = terminal;
+        item.events.sort_by_key(|event| event.updated_at);
     }
     let retained_ids = item
         .events
@@ -1565,6 +1583,18 @@ mod tests {
         .apply_to(&mut second);
         projection.apply_event(second.clone());
         projection.apply_event(WorkEvent::new(WorkEventKind::Done, "work", at));
+        for index in 0..=MAX_INLINE_WORK_EVENTS {
+            projection.apply_event(WorkEvent::new(
+                WorkEventKind::Update,
+                "work",
+                at + chrono::Duration::seconds(index as i64 + 1),
+            ));
+        }
+        projection.compact_inline_events();
+        assert_eq!(
+            projection.work_items[0].events.len(),
+            MAX_INLINE_WORK_EVENTS
+        );
         assert_eq!(
             projection.work_items[0].current_terminal_event(),
             Some(&second)

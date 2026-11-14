@@ -12,6 +12,35 @@ import {
   mergeActiveWorkProjectionPatch,
 } from "../issue-other-surface.js";
 
+test("project attention summarizes current Workspaces once and retires stale reasons", () => {
+  const { model, applyActiveWorkProjectionReceiveEvent: receive } = createActiveWorkProjectionModel();
+  const work = { id: "w", title: "Ship change", blocked_agents: 1, next_action: "Await token" };
+  const snapshot = active_works => ({ id: "project", active_works,
+    works: [work], journal_entries: [work], attentionSummary: { count: 99, summary: "Untrusted" } });
+  receive({ kind: "active_work_projection", projection: snapshot([
+    { ...work, next_action: "Old reason" }, work,
+    { ...work, id: "closed", lifecycle_state: "done" }, { ...work, id: "remote", remote_only: true },
+  ]) });
+  const previous = model.read().projection.attentionSummary;
+  assert.deepEqual(previous, { count: 1, items: [{ id: "w", label: "Ship change", reason: "Await token" }],
+    summary: "Workspaces needing attention 1\nShip change: Await token" });
+  assert.equal(Object.isFrozen(previous.items[0]), true);
+  receive({ kind: "active_work_projection_patch", projection: snapshot([{ ...work, next_action: "Await review" }]) });
+  assert.match(model.read().projection.attentionSummary.summary, /Ship change: Await review/);
+  assert.equal(previous.items[0].reason, "Await token", "prior summaries remain immutable");
+  receive({ kind: "active_work_projection_patch", projection: snapshot([]) });
+  assert.deepEqual(model.read().projection.attentionSummary, { count: 0, items: [], summary: "Workspaces needing attention 0" },
+    "an empty current membership never resurrects retained history");
+  receive({ kind: "active_work_projection_patch", projection: { id: "project" } });
+  assert.deepEqual(model.read().projection.attentionSummary, { count: null, items: [], summary: "" },
+    "missing membership stays unknown even when the patch merger supplies an empty array");
+  receive({ kind: "active_work_projection", projection: { id: "other", active_works: [] } });
+  assert.equal(model.read().projection.attentionSummary.count, 0);
+  receive({ kind: "active_work_projection", projection: null });
+  assert.equal(model.read().projection, null);
+  model.dispose();
+});
+
 test("Work attention is shared before view normalization and recomputed after a patch", () => {
   const { model, applyActiveWorkProjectionReceiveEvent: receive } = createActiveWorkProjectionModel();
   const fixture = createFixture();

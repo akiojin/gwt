@@ -155,7 +155,10 @@ pub fn process_stable_codex_config_path_with(
             home.join(".codex")
         }
     };
-    Some(gwt_core::paths::normalize_windows_child_process_path(&codex_home).join("config.toml"))
+    Some(gwt_config::home::test_isolated_config_path(
+        gwt_core::paths::normalize_windows_child_process_path(&codex_home).join("config.toml"),
+        Path::new(".codex/config.toml"),
+    ))
 }
 
 /// Resolve the shared Host Codex config for one managed worktree.

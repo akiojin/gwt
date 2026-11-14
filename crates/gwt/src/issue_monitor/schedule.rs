@@ -104,7 +104,7 @@ impl IssueMonitorPrefs {
                 (
                     host,
                     self.urgent_queue
-                        .projection(queue)
+                        .projection(queue, &self.priority_order, self.priority_launch_now)
                         .entries
                         .into_iter()
                         .map(|entry| entry.number)
@@ -225,11 +225,12 @@ fn automatic_member_ineligibility(
 
 /// Build preferences only; reservations never acquire claims or authorize launches.
 /// Returns the idle local members that could not be planned, with reasons.
-fn reconcile(
+fn reconcile_with_health(
     prefs: &mut IssueMonitorPrefs,
     specs: &BTreeMap<u64, u64>,
     historical: &BTreeMap<u64, String>,
     host: &str,
+    runner_health: &BTreeMap<String, String>,
 ) -> io::Result<BTreeMap<String, String>> {
     let Some(roster) = prefs.agent_roster.as_ref() else {
         return Ok(BTreeMap::new());
@@ -241,7 +242,12 @@ fn reconcile(
     let queue = prefs
         .terminal_queues
         .get(host)
-        .map(|queue| prefs.urgent_queue.projection(queue).entries)
+        .map(|queue| {
+            prefs
+                .urgent_queue
+                .projection(queue, &prefs.priority_order, prefs.priority_launch_now)
+                .entries
+        })
         .unwrap_or_default();
     let pool = prefs.launch_profile_pool();
     let bound = pool
@@ -256,10 +262,14 @@ fn reconcile(
                 assignment.host_id.is_empty() || assignment.host_id == host
             })
     }) {
-        match bound
-            .then(|| automatic_member_ineligibility(&pool, member))
-            .flatten()
-        {
+        match runner_health
+            .get(&member.agent_member_id)
+            .cloned()
+            .or_else(|| {
+                bound
+                    .then(|| automatic_member_ineligibility(&pool, member))
+                    .flatten()
+            }) {
             Some(reason) if member.assignment.is_none() => {
                 ineligible.insert(member.agent_member_id.clone(), reason);
             }
@@ -432,7 +442,7 @@ fn reconcile(
         .map(|queue| {
             prefs
                 .urgent_queue
-                .projection(queue)
+                .projection(queue, &prefs.priority_order, prefs.priority_launch_now)
                 .entries
                 .into_iter()
                 .map(|entry| entry.number)
@@ -490,16 +500,82 @@ pub fn mutate_project_agent_schedule(
     sessions_dir: &Path,
     action: AgentScheduleAction,
 ) -> Result<AgentScheduleSnapshot, String> {
+    mutate_project_agent_schedule_with_probe(root, sessions_dir, action, |profile| {
+        check_member_runner(root, profile)
+    })
+}
+
+// Run probes outside the preferences transaction: a slow runner must not hold
+// the shared queue/roster lock. No health failure expires into a successful probe.
+fn check_member_runner(root: &Path, profile: &IssueMonitorLaunchProfile) -> Result<(), String> {
+    let Some(descriptor) = gwt_agent::builtin_agent_descriptor_for_command(&profile.agent_id)
+    else {
+        return Ok(());
+    };
+    let mut config = gwt_agent::AgentLaunchBuilder::new(descriptor.id.clone())
+        .working_dir(root)
+        .runtime_target(profile.runtime_target)
+        .build();
+    gwt_agent::LaunchEnvironment::from_active_profile(
+        &gwt_core::paths::gwt_config_path(),
+        config.runtime_target,
+    )?
+    .with_project_root(root)
+    .apply_to_config(&mut config);
+    gwt_agent::resolve_host_runner_health_checked(&mut config).map(|_| ())
+}
+
+fn member_runner_health(
+    prefs: &IssueMonitorPrefs,
+    mut probe: impl FnMut(&IssueMonitorLaunchProfile) -> Result<(), String>,
+) -> BTreeMap<String, String> {
+    let mut failures = BTreeMap::new();
+    let mut probes = BTreeMap::new();
+    let pool = prefs.launch_profile_pool();
+    for profile in &pool {
+        let Some(id) = profile.agent_member_id.as_ref() else {
+            continue;
+        };
+        let eligible = prefs.agent_roster.as_ref().is_some_and(|roster| {
+            roster.members.iter().any(|member| {
+                member.agent_member_id == *id
+                    && member.enabled
+                    && member.assignment.is_none()
+                    && automatic_member_ineligibility(&pool, member).is_none()
+            })
+        });
+        // An existing assignment (including one on another host) retains its
+        // delivery authority; only future local automatic work is inspected.
+        if !eligible {
+            continue;
+        }
+        // Members of the same tool/runtime share this installed runner. Retry
+        // a failed probe next snapshot, rather than once per member this pass.
+        let key = format!("{}:{:?}", profile.agent_id, profile.runtime_target);
+        if let Err(error) = probes.entry(key).or_insert_with(|| probe(profile)) {
+            failures.insert(id.clone(), format!("runner_health_check_failed: {error}"));
+        }
+    }
+    failures
+}
+
+fn mutate_project_agent_schedule_with_probe(
+    root: &Path,
+    sessions_dir: &Path,
+    action: AgentScheduleAction,
+    probe: impl FnMut(&IssueMonitorLaunchProfile) -> Result<(), String>,
+) -> Result<AgentScheduleSnapshot, String> {
     let path = crate::issue_monitor_prefs_path_for_repo_path(root);
     if matches!(action, AgentScheduleAction::Read) {
         crate::agent_names::read_project_roster(root, sessions_dir)?;
     }
     let host = crate::process::current_hostname();
-    let (specs, historical) = if matches!(action, AgentScheduleAction::Read) {
+    let (specs, historical, runner_health) = if matches!(action, AgentScheduleAction::Read) {
         let observed = load_issue_monitor_prefs(&path).map_err(|error| error.to_string())?;
-        context(root, &observed, sessions_dir)
+        let (specs, historical) = context(root, &observed, sessions_dir);
+        (specs, historical, member_runner_health(&observed, probe))
     } else {
-        (BTreeMap::new(), BTreeMap::new())
+        (BTreeMap::new(), BTreeMap::new(), BTreeMap::new())
     };
     let (saved, _) = crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
         if let AgentScheduleAction::Reassign {issue_number, source_member_id, target_member_id, expected_roster_revision, expected_queue_revision, expected_schedule_revision} = &action {
@@ -531,7 +607,7 @@ pub fn mutate_project_agent_schedule(
                 prefs.agent_issue_schedule.advance()?;
             }
         } else {
-            reconcile(prefs, &specs, &historical, &host)?;
+            reconcile_with_health(prefs, &specs, &historical, &host, &runner_health)?;
         }
         Ok(())
     }).map_err(|error| error.to_string())?;
@@ -583,6 +659,16 @@ fn selected_member_tool_exclusion(
 
 impl IssueMonitorState {
     pub fn synchronize_agent_issue_schedule(&mut self, root: &Path) -> io::Result<()> {
+        self.synchronize_agent_issue_schedule_with_probe(root, |profile| {
+            check_member_runner(root, profile)
+        })
+    }
+
+    fn synchronize_agent_issue_schedule_with_probe(
+        &mut self,
+        root: &Path,
+        probe: impl FnMut(&IssueMonitorLaunchProfile) -> Result<(), String>,
+    ) -> io::Result<()> {
         if self.agent_roster.is_none() {
             return Ok(());
         }
@@ -610,12 +696,10 @@ impl IssueMonitorState {
                 .revision,
         ));
         let (specs, historical) = context(root, &prefs, &sessions);
-        self.agent_schedule_ineligible = reconcile(
-            &mut prefs,
-            &specs,
-            &historical,
-            &crate::process::current_hostname(),
-        )?;
+        let host = crate::process::current_hostname();
+        let runner_health = member_runner_health(&prefs, probe);
+        self.agent_schedule_ineligible =
+            reconcile_with_health(&mut prefs, &specs, &historical, &host, &runner_health)?;
         self.agent_issue_schedule = prefs.agent_issue_schedule;
         Ok(())
     }
@@ -692,8 +776,13 @@ impl IssueMonitorState {
         let id = match self.scheduled_agent_member_id(number) {
             Some(id) => id,
             None if legacy => return None,
-            None => return Some("agent_plan_missing: expected a local member reservation, current plan is absent; read issue.monitor.schedule.read or wait for the next Monitor scan".into()),
+            None => return Some(format!("agent_plan_missing: expected a local member reservation, current plan is absent; read issue.monitor.schedule.read or wait for the next Monitor scan; member exclusions: {:?}", self.agent_schedule_ineligible)),
         };
+        if let Some(reason) = self.agent_schedule_ineligible.get(id) {
+            return Some(format!(
+                "scheduled_member_unavailable: scheduled member {id} not eligible: {reason}"
+            ));
+        }
         let member = self.agent_roster.as_ref().and_then(|roster| {
             roster
                 .members
@@ -765,6 +854,21 @@ impl IssueMonitorState {
 mod tests {
     use super::*;
     use crate::agent_names::AgentRoster;
+    fn mutate_project_agent_schedule(
+        root: &Path,
+        sessions: &Path,
+        action: AgentScheduleAction,
+    ) -> Result<AgentScheduleSnapshot, String> {
+        super::mutate_project_agent_schedule_with_probe(root, sessions, action, |_| Ok(()))
+    }
+    fn reconcile(
+        prefs: &mut IssueMonitorPrefs,
+        specs: &BTreeMap<u64, u64>,
+        historical: &BTreeMap<u64, String>,
+        host: &str,
+    ) -> io::Result<BTreeMap<String, String>> {
+        reconcile_with_health(prefs, specs, historical, host, &BTreeMap::new())
+    }
     fn fixture() -> (
         tempfile::TempDir,
         gwt_core::test_support::ScopedGwtHome,
@@ -1336,7 +1440,9 @@ mod tests {
             IssueMonitorConfig::default(),
             load_issue_monitor_prefs(&path).unwrap(),
         );
-        monitor.synchronize_agent_issue_schedule(&root).unwrap();
+        monitor
+            .synchronize_agent_issue_schedule_with_probe(&root, |_| Ok(()))
+            .unwrap();
         assert!(monitor
             .agent_schedule_launch_exclusion(41)
             .unwrap()
@@ -1346,16 +1452,22 @@ mod tests {
         let handshake = gwt_agent::active_launch_handshake_path(&sessions, &session.id);
         fs::create_dir_all(handshake.parent().unwrap()).unwrap();
         fs::write(&handshake, b"preparing or unreadable").unwrap();
-        monitor.synchronize_agent_issue_schedule(&root).unwrap();
+        monitor
+            .synchronize_agent_issue_schedule_with_probe(&root, |_| Ok(()))
+            .unwrap();
         assert!(monitor.agent_schedule_launch_exclusion(41).is_some());
         fs::remove_file(handshake).unwrap();
         let runtime = gwt_agent::runtime_state_path(&sessions, &session.id);
         fs::create_dir_all(runtime.parent().unwrap()).unwrap();
         fs::write(&runtime, b"unreadable runtime still fences reuse").unwrap();
-        monitor.synchronize_agent_issue_schedule(&root).unwrap();
+        monitor
+            .synchronize_agent_issue_schedule_with_probe(&root, |_| Ok(()))
+            .unwrap();
         assert!(monitor.agent_schedule_launch_exclusion(41).is_some());
         fs::remove_file(runtime).unwrap();
-        monitor.synchronize_agent_issue_schedule(&root).unwrap();
+        monitor
+            .synchronize_agent_issue_schedule_with_probe(&root, |_| Ok(()))
+            .unwrap();
         assert!(
             monitor.agent_schedule_launch_exclusion(41).is_none(),
             "a removed Session without runtime or launch evidence must not strand the queue head"
@@ -1417,7 +1529,9 @@ mod tests {
             IssueMonitorConfig::default(),
             load_issue_monitor_prefs(&path).unwrap(),
         );
-        monitor.synchronize_agent_issue_schedule(&root).unwrap();
+        monitor
+            .synchronize_agent_issue_schedule_with_probe(&root, |_| Ok(()))
+            .unwrap();
         let member = &monitor.agent_roster.as_ref().unwrap().members[1];
         assert!(member.enabled && member.assignment.is_none());
         assert_eq!(monitor.agent_schedule_launch_exclusion(41), None);
@@ -2276,6 +2390,170 @@ mod tests {
                 "scheduled member {grok} not eligible: not_in_launch_profiles"
             )),
             "{reason}"
+        );
+    }
+
+    #[test]
+    fn issue_7181_runner_health_uses_active_profile_path() {
+        let (_temp, _home, root, _sessions, _roster) = fixture();
+        let bin = root.join("profile-bin");
+        fs::create_dir_all(&bin).unwrap();
+        let runner = bin.join(if cfg!(windows) {
+            "hermes.cmd"
+        } else {
+            "hermes"
+        });
+        fs::write(
+            &runner,
+            if cfg!(windows) {
+                "@echo off\r\necho 1.2.3\r\necho profile>profile-probe\r\nexit /b 0\r\n"
+            } else {
+                "#!/bin/sh\nprintf '1.2.3\\n'\nprintf profile > profile-probe\n"
+            },
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&runner, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let mut settings = gwt_config::Settings::default();
+        settings
+            .profiles
+            .set_env_var("default", "PATH", bin.to_str().unwrap())
+            .unwrap();
+        settings.save(&gwt_core::paths::gwt_config_path()).unwrap();
+        let profile = serde_json::from_value(serde_json::json!({"agent_id":"hermes"})).unwrap();
+        // test-hygiene: allow-production-probe-deadline Verify the scheduler probes the real fixture runner selected only by the active profile PATH.
+        check_member_runner(&root, &profile).unwrap();
+        assert!(root.join("profile-probe").is_file());
+    }
+
+    #[test]
+    fn issue_7181_new_work_and_retry_skip_failed_runner_until_probe_succeeds() {
+        let (_temp, _home, roster, mut prefs) = issue_7027_busy_plan();
+        let host = crate::process::current_hostname();
+        let unhealthy = roster.members[1].agent_member_id.clone();
+        let other_unhealthy = roster.members[2].agent_member_id.clone();
+        let mut pool = prefs.launch_profile_pool();
+        for index in [1, 2] {
+            prefs.agent_roster.as_mut().unwrap().members[index].agent_id = Some("hermes".into());
+            pool[index].agent_id = "hermes".into();
+        }
+        prefs.set_launch_profile_pool(pool);
+        let mut hermes_probes = 0;
+        let health = member_runner_health(&prefs, |profile| {
+            if profile.agent_id == "hermes" {
+                hermes_probes += 1;
+                Err("installed runner failed its health check".into())
+            } else {
+                Ok(())
+            }
+        });
+        assert_eq!(health.len(), 2);
+        assert_eq!(hermes_probes, 1);
+        assert_eq!(health.get(&unhealthy), health.get(&other_unhealthy));
+        let excluded = reconcile_with_health(
+            &mut prefs,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &host,
+            &health,
+        )
+        .unwrap();
+        assert_eq!(excluded.get(&unhealthy), health.get(&unhealthy));
+        assert!(prefs
+            .agent_issue_schedule
+            .reservations
+            .iter()
+            .all(|entry| !health.contains_key(&entry.agent_member_id)));
+
+        // Launch consumes the PM's healthy reservation. Its unrelated startup
+        // failure leaves the Issue queued, so retry must choose a fresh member.
+        prefs.agent_issue_schedule.reservations[0].reason = AgentScheduleReason::AssignedByYou;
+        prefs.agent_issue_schedule.consume(&host, 41).unwrap();
+        reconcile_with_health(
+            &mut prefs,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &host,
+            &health,
+        )
+        .unwrap();
+        assert!(prefs
+            .agent_issue_schedule
+            .reservations
+            .iter()
+            .all(|entry| !health.contains_key(&entry.agent_member_id)));
+
+        // A successful recheck, rather than elapsed time, makes it eligible.
+        let healthy = member_runner_health(&prefs, |_| Ok(()));
+        assert!(healthy.is_empty());
+        prefs.agent_issue_schedule.reservations.clear();
+        for member in &mut prefs.agent_roster.as_mut().unwrap().members[2..] {
+            member.enabled = false;
+        }
+        reconcile_with_health(
+            &mut prefs,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &host,
+            &healthy,
+        )
+        .unwrap();
+        assert!(prefs
+            .agent_issue_schedule
+            .reservations
+            .iter()
+            .any(|entry| entry.agent_member_id == unhealthy));
+    }
+
+    #[test]
+    fn issue_7181_unhealthy_scheduled_member_cannot_launch() {
+        let (_temp, _home, roster, mut prefs) = issue_7027_busy_plan();
+        let unhealthy = roster.members[1].agent_member_id.clone();
+        prefs.agent_issue_schedule.reservations[0].agent_member_id = unhealthy.clone();
+        prefs.agent_issue_schedule.reservations[0].reason = AgentScheduleReason::AssignedByYou;
+        let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        monitor.agent_schedule_ineligible.insert(
+            unhealthy,
+            "runner_health_check_failed: broken installed runner".into(),
+        );
+        let reason = monitor
+            .agent_schedule_launch_exclusion(41)
+            .expect("a manual reservation must not bypass an observed runner health failure");
+        assert!(reason.contains("runner_health_check_failed"), "{reason}");
+
+        monitor.agent_issue_schedule.reservations.clear();
+        let reason = monitor.agent_schedule_launch_exclusion(41).unwrap();
+        assert!(reason.starts_with("agent_plan_missing:"), "{reason}");
+        assert!(reason.contains("runner_health_check_failed"), "{reason}");
+    }
+
+    /// Issue #7171 AC-1/AC-3: one provider's quota hold only gates Issues
+    /// planned for that provider's members; the queue is held only when every
+    /// pooled member tool is held.
+    #[test]
+    fn issue_7171_head_provider_hold_does_not_hold_other_tool_members() {
+        let (_temp, _home, _roster, mut prefs) = issue_7027_busy_plan();
+        let host = crate::process::current_hostname();
+        reconcile(&mut prefs, &BTreeMap::new(), &BTreeMap::new(), &host).unwrap();
+        let mut monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        let now = "2026-11-13T03:00:00Z";
+        monitor
+            .provider_quota_holds
+            .insert("claude".into(), "2026-11-19T03:15:00Z".into());
+        assert_eq!(monitor.launch_admission_hold_at(now), None);
+        assert!(monitor.provider_quota_hold_at(now).is_none());
+        for number in [41, 42] {
+            assert!(monitor.retry_ready_for_saved_profile(number, now));
+        }
+        monitor
+            .provider_quota_holds
+            .insert("codex".into(), "2026-11-19T03:15:00Z".into());
+        assert_eq!(
+            monitor.launch_admission_hold_at(now),
+            Some(IssueMonitorStallReason::QuotaHold)
         );
     }
 

@@ -31,6 +31,10 @@ fn issue_3852_stop_close_requeue_launch_now_materializes_an_active_successor() {
             missing_verification: None,
         },
     );
+    // The Monitor's health probe and this runtime must use the same profile.
+    let settings =
+        Settings::load_from_path(fixture.runtime.profile_config_path.as_deref().unwrap()).unwrap();
+    write_profile_config(&gwt_core::paths::gwt_config_path(), &settings);
     let raw_id = fixture.runtime.tabs[0]
         .workspace
         .add_window(WindowPreset::Agent)
@@ -5014,10 +5018,11 @@ fn app_runtime_monitor_launch_preflight_refuses_unauthenticated_provider() {
         // test-hygiene: allow-wall-clock-deadline Observe the real initial census publication before comparing complete preference bytes; no scheduler delay authorizes the baseline.
         tokio::time::timeout(Duration::from_secs(30), async {
             loop {
-                if gwt::load_issue_monitor_prefs(&prefs_path)
-                    .unwrap()
-                    .monitor_runtime_counts
-                    .contains_key(&census_host_key)
+                let persisted: serde_json::Value =
+                    serde_json::from_slice(&fs::read(&prefs_path).unwrap()).unwrap();
+                if persisted["monitor_runtime_counts"]
+                    .get(&census_host_key)
+                    .is_some()
                 {
                     break;
                 }
@@ -6509,7 +6514,6 @@ fn app_runtime_monitor_quota_hold_clear_resumes_the_same_conversation() {
     for exit_code in [0, 1] {
         let temp = tempdir().unwrap();
         let _home = ScopedGwtHome::set(temp.path());
-        let (root, owner, _) = owner_monitor_fixture(temp.path(), 3165, false, &["codex"]);
         let runner = write_fake_codex(temp.path());
         #[cfg(unix)]
         fs::write(&runner, format!("#!/bin/sh\ncase \"$*\" in *--version*) printf '1.2.3\\n'; exit 0;; *'features list'*) exit 0;; esac\nprintf 'quota-fixture-ready\\n'\nread value\nprintf '%s\\n' \"{}\"\nexit {exit_code}\n", CODEX_USAGE_LIMIT_SCREEN)).unwrap();
@@ -6545,6 +6549,8 @@ fn app_runtime_monitor_quota_hold_clear_resumes_the_same_conversation() {
         };
         pin_launch_agents(&mut settings, temp.path());
         write_profile_config(&profile, &settings);
+        // The fixture performs its first schedule scan during initialization.
+        let (root, owner, _) = owner_monitor_fixture(temp.path(), 3165, false, &["codex"]);
         let mut selected = super::pane_control_tests::control_launch_config(&root, 3165);
         run_git(
             selected.working_dir.as_ref().unwrap(),

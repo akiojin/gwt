@@ -47,6 +47,21 @@ pub fn user_home() -> Option<PathBuf> {
     home
 }
 
+/// Keep a derived third-party config path, such as Codex's, in test storage.
+///
+/// Cargo test processes redirect an unisolated path to the same relative
+/// location under [`user_home`], as `user_home` does for HOME, so fixtures and
+/// their worker threads cannot write the real account config. Production
+/// returns the path unchanged (SPEC #5082 AC-22).
+pub fn test_isolated_config_path(path: PathBuf, home_relative: &Path) -> PathBuf {
+    if (is_test_process() || gwt_home_override().is_some()) && !is_isolated(&path) {
+        if let Some(home) = user_home() {
+            return home.join(home_relative);
+        }
+    }
+    path
+}
+
 pub(crate) fn resolve_config_home_dir(
     home: Option<OsString>,
     userprofile: Option<OsString>,
@@ -230,7 +245,13 @@ fn resolved_path(path: &Path) -> Option<PathBuf> {
                 resolved.push(component.as_os_str());
                 match std::fs::symlink_metadata(&resolved) {
                     Ok(_) => resolved = resolved.canonicalize().ok()?,
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    // Below a regular file nothing can be created, so keep
+                    // the lexical remainder like a missing path.
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                        ) => {}
                     Err(_) => return None,
                 }
             }

@@ -146,7 +146,11 @@ Codex の警告が端末に表示されます。[Codex の速度要件](https://
 
   Grok Build は xAI 公式の `grok` command で提供されます。
   `npm install -g @xai-official/grok` でインストールし、初回起動時に認証するか、
-  API-key workflow では `XAI_API_KEY` を設定してください。
+  API-key workflow では `XAI_API_KEY` を設定してください。ホスト起動では、gwt が
+  Grok 公式の `--trust` を付け、対象 Git リポジトリ（main checkout と全 worktree）
+  の hook・MCP/LSP・instructions・skills を許可します。この許可は
+  `trusted_folders.toml` に保存され、同じ trust store と repo key を使う後続の手動起動
+  にも適用されます。CLI 全体の既定設定や他のリポジトリの許可は変更しません。
 - エージェント利用時は必要な API キーを設定すること
   - `ANTHROPIC_API_KEY` または `ANTHROPIC_AUTH_TOKEN`
   - `OPENAI_API_KEY`
@@ -1026,9 +1030,18 @@ Issueのcloseやcancelだけでは数えません。エージェントによる�
 
 Workspace パネルの `Clean Up Ready` 件数も、worktree 単位で同じ考え方を使います。
 マージ済みまたは差分の無い Workspace は、未コミットの差分が gwt 自身の書き込み
-（`.gwt/` namespace、materialize された `gwt-*` skill / command、手書きの内容を含まない
+（`.gwt/` namespace、agent の作業メモ `tasks/todo.md`、materialize された `gwt-*` skill / command、手書きの内容を含まない
 `.codex/hooks.json` / `.claude/settings.local.json`）だけであれば cleanup-ready のまま
 数えられます。それ以外の未コミット変更があれば、その Workspace は件数から外れます。
+`tasks/` 内のほかのファイルもローカルの作業として扱います。ブランチは canonical base と
+直接比較するため、リモートの作業ブランチが削除済みでもマージ済み Workspace は整理候補になります。
+
+堆積した worktree を整理するには、`Issues` の `Other` を展開し、Workspace の
+`Clean Up` または候補をまとめる `Clean Up Ready` を使います。既存の Issue worktree は
+Work を閉じた後も一覧に残り、Work 履歴は閉じたまま、稼働中の owner を持ちません。
+削除前に確認画面を表示し、worktree 全体の
+自動 prune は行いません。稼働中の agent / process や製品ファイルの変更がある
+Workspace は整理可能なグループから除外します。
 
 ### プロバイダの無料リセット
 
@@ -2003,12 +2016,20 @@ gwt が対処メッセージを表示）。
 
 PM ウィンドウの **Tasks** では、保存済みの依頼タスクを閲覧できます。未完了を優先し、
 親子関係・担当・待ち理由・次の対応・PM の再評価待ちを表示します。**Include completed**
-で完了・取消も表示できます。プレビューは最大 50 件で、全件数と分類待ちの依頼数を明示します。
+で完了・取消も表示できます。親には、表示範囲外も含む保存済みの直接の子タスクについて、
+完了・取消・未完了・全件数を表示します。取消は達成完了と区別し、子がすべて完了しても親は自動完了しません。
+プレビューは最大 50 件で、全件数と分類待ちの依頼数を明示します。
 長い概要は短縮しますが、保存済みの内容は保持します。各タスクの **Purpose and completion
 criteria** を開くと、目的と先頭 5 件の完了条件を確認できます。条件の全件数を明示し、
 各項目は 240 文字まで（短縮時は省略記号付き）のプレビューとして表示します。
-読取り失敗時は最後に確認できた一覧を
-警告付きで残します。このプレビューではタスク編集・自動受付・過去履歴の取込みには対応していません。
+読取り失敗時は最後に確認できた一覧を警告付きで残します。Tasks または Chat の
+**View task details** では、選んだタスクだけの原依頼・目的・完了条件・完了証拠・最近の変更を読み取ります。
+読取り専用プレビューの上限は原文 4,000 文字、条件 20 件、証拠 10 件、変更 20 件（新しい順）です。
+その他の文は各 1,000 文字、actor ID は 240 文字までで、件数と短縮を明示します。
+変更はそのタスクの保存済み差分を含む記録だけを対象とし、全操作の履歴ではありません。
+**Reload details** で再取得できます。更新や読取り失敗時は確認済みの詳細を古い情報と明示して残し、
+**Close details** で元のタスクにフォーカスを戻します。
+このプレビューではタスク編集・自動受付・過去履歴の取込みには対応していません。
 同じツールバーから **Reports** と **Execution log** に切り替えられます。
 
 PM ウィンドウは **Home** で開きます。ツールバーの **Chat** を選ぶ 1 操作で PM との会話を開けます。自分の発言は右、PM の応答は

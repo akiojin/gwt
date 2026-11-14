@@ -800,16 +800,17 @@ impl Grid {
         }
     }
 
-    pub fn scroll_up(&mut self, count: u16) {
-        self.scroll_up_with_history(count, !self.scroll_region_active());
-    }
-
-    fn scroll_up_with_history(&mut self, count: u16, record_history: bool) {
+    pub fn scroll_up(&mut self, count: u16, allow_partial_scrollback: bool) {
         for _ in 0..(count.min(self.size.rows - self.scroll_top)) {
             self.rows
                 .insert(usize::from(self.scroll_bottom) + 1, self.new_row());
             let removed = self.rows.remove(usize::from(self.scroll_top));
-            if self.scrollback_len > 0 && record_history {
+            // Line feeds in a top-anchored region enter xterm history even
+            // with a composer below it. Keep explicit CSI S behavior unchanged.
+            if self.scrollback_len > 0
+                && self.scroll_top == 0
+                && (allow_partial_scrollback || self.scroll_bottom == self.size.rows - 1)
+            {
                 self.scrollback.push_back(removed);
                 while self.scrollback.len() > self.scrollback_len {
                     self.scrollback.pop_front();
@@ -849,10 +850,6 @@ impl Grid {
         self.pos.row >= self.scroll_top && self.pos.row <= self.scroll_bottom
     }
 
-    fn scroll_region_active(&self) -> bool {
-        self.scroll_top != 0 || self.scroll_bottom != self.size.rows - 1
-    }
-
     pub fn set_origin_mode(&mut self, mode: bool) {
         self.origin_mode = mode;
         self.set_pos(Pos { row: 0, col: 0 });
@@ -869,9 +866,7 @@ impl Grid {
         self.pos.row = self.pos.row.saturating_add(count);
         let lines = self.row_clamp_bottom(in_scroll_region);
         if in_scroll_region {
-            // Like xterm, line advances at the screen top enter history even
-            // when a partial scroll region keeps a footer fixed.
-            self.scroll_up_with_history(lines, self.scroll_top == 0);
+            self.scroll_up(lines, true);
             lines
         } else {
             0

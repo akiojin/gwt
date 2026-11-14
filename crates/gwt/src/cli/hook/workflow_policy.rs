@@ -255,7 +255,7 @@ Good example: \"purpose\":\"Agent title improvement\"\n\
 Bad example: \"purpose\":\"Agent title improvement complete\"\n\n\
 Use the configured narrative language for the purpose. Keep progress, completion, blocker state, and long detail in current_focus, summary, or Board body.\n\n\
 workspace.ensure accepts purpose alone; include current_focus to describe the current activity. If it is refused on authority grounds, inspect execution.status and follow its available recovery before retrying ensure. Run each operation as a single-segment gwtd command.\n\n\
-While the gate is closed you may also run execution.adopt, execution.repair, execution.reopen, workspace.reopen, execution.release_prepared, and memory.add, and escalate with board.post kind:\"blocked\" or issue.comment. If recovery cannot proceed, record execution.blocked with params.reason. Completion, shell commits and pushes stay blocked until the gate is lifted.",
+While the gate is closed you may also run execution.adopt, execution.repair, execution.reopen, workspace.reopen, workspace.repair_close_proof, execution.release_prepared, and memory.add, and escalate with board.post kind:\"blocked\" or issue.comment. If recovery cannot proceed, record execution.blocked with params.reason. Completion, shell commits and pushes stay blocked until the gate is lifted.",
         ));
     }
 
@@ -676,6 +676,7 @@ pub(crate) fn is_identity_gate_exempt_operation(operation: &str) -> bool {
             // Work-only recovery authenticates the current primary actor and
             // exact Done event; it must remain reachable before identity repair.
             | "workspace.reopen"
+            | "workspace.repair_close_proof"
             | "execution.reopen"
             | "execution.release_prepared"
             | "execution.release-prepared"
@@ -2425,6 +2426,10 @@ mod tests {
             envelope_command(
                 "workspace.reopen",
                 r#"{"reason":"resume premature completion","observed_done_event_id":"done-event"}"#,
+            ),
+            envelope_command(
+                "workspace.repair_close_proof",
+                r#"{"reason":"restore durable close proof"}"#,
             ),
         ] {
             assert_eq!(

@@ -13,13 +13,23 @@ export function createActiveWorkProjectionModel() {
       // including fields that their display normalization does not retain.
       const derive = item => ({ ...item,
         attention: deriveWorkspaceAttention({ ...item, ...workspaceAttentionFields(item) }) });
-      return { projection: { ...derive(projection),
+      const derived = { ...derive(projection),
         ...Object.fromEntries(["active_works", "works", "workspaces", "work_items", "journal_entries"]
           .filter(key => Array.isArray(projection[key]))
           // A patch retains owned, frozen history; do not re-derive it.
           .map(key => [key, projection[key] === state?.projection?.[key]
             ? projection[key] : projection[key].map(derive)])),
-      } };
+      };
+      // Only current Workspace membership is evidence. Patches retain history
+      // and synthesize an empty active_works even when that input was missing.
+      const items = Array.isArray(event.projection?.active_works)
+        ? Object.values(Object.fromEntries(derived.active_works.filter(item => item.id).map(item => [item.id, item])))
+          .filter(item => item.attention.lane === "needs_attention")
+          .map(item => ({ id: item.id, label: compactText(item.work_summary || item.title || item.branch, item.id),
+            reason: item.attention.reason })) : null;
+      return { projection: { ...derived, attentionSummary: { count: items?.length ?? null, items: items || [],
+        summary: items ? [`Workspaces needing attention ${items.length}`,
+          ...items.map(item => `${item.label}: ${item.reason}`)].join("\n") : "" } } };
     });
   }
   return { model, applyActiveWorkProjectionReceiveEvent };

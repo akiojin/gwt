@@ -12360,6 +12360,7 @@ pub(super) fn attach_live_pm_pane(runtime: &mut AppRuntime, window_id: &str) -> 
     // The draining native provider has reached its first prompt. Use the
     // managed hook, including its authenticated owner notification, to publish
     // that fact without replacing the launch's physical process proof.
+    let mut status_events = owner.subscribe();
     probe.with_agent_environment(|| {
         let input = serde_json::json!({
             "session_id": format!("pm-fixture-{}", uuid::Uuid::new_v4()),
@@ -12379,6 +12380,25 @@ pub(super) fn attach_live_pm_pane(runtime: &mut AppRuntime, window_id: &str) -> 
         !gwt::project_runtime::pm_delivery::pm_wake_runtime_is_busy(&runtime_path, incarnation),
         "managed native PM readiness must clear the busy gate: {ready:?}"
     );
+    owner_fixture_block_on(async {
+        // test-hygiene: allow-wall-clock-deadline The exact managed hook event establishes owner readiness; this only bounds an IPC hang.
+        tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
+            loop {
+                let event = status_events
+                    .recv()
+                    .await
+                    .expect("actual PM owner status event");
+                if matches!(&event, gwt::project_runtime::events::OwnerEvent::Status {
+                    id, incarnation: event_incarnation, status: WindowProcessStatus::Idle, ..
+                } if id == &owner_id && *event_incarnation == incarnation)
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("owner applied the managed native PM readiness hook");
+    });
     let snapshot = owner_fixture_block_on(owner.command(OwnerCommand::Snapshot {
         id: owner_id.clone(),
         incarnation,

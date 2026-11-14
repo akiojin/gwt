@@ -512,10 +512,15 @@ pub struct PmRequestTaskCompleteRequest {
     pub evidence: Vec<String>,
 }
 
-/// Selected tracking data only; originals remain outside this browser adapter.
+/// Raw tracking reads retain their shape; selected previews omit provenance.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum PmRequestTaskResult {
+    Detail {
+        revision: u64,
+        key: String,
+        detail: Box<crate::pm_current::PmTaskDetail>,
+    },
     Ready {
         revision: u64,
         task: Box<gwt_core::pm_request_tasks::Task>,
@@ -794,7 +799,10 @@ pub enum FrontendEvent {
     LoadPmRequestTask {
         id: String,
         request_id: u64,
+        #[serde(default)]
         task_id: String,
+        #[serde(default)]
+        task_key: Option<String>,
         #[serde(default)]
         receipt_operation_id: Option<String>,
     },

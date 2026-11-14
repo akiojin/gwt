@@ -81,7 +81,7 @@ function drawSpark(document, svg, input, maximum) {
 const summaryCells = [["running", "RUNNING"], ["block", "BLOCK"], ["idle", "IDLE"], ["error", "ERROR"]];
 
 export function createWorksSurface({ projectKey, document, windowCatalogModel, activityModel, rosterModel, windowDisplayTitle, systemSettingsModel,
-  summaryModel, mountTerminal, mountPreview, onRevokeTerminal = () => {}, onReleaseTerminal = () => {}, onLayout = () => {}, onFocus = () => {}, onSelectMember = () => {}, getTelemetry = () => null }) {
+  summaryModel, workProjectionModel, mountTerminal, mountPreview, onRevokeTerminal = () => {}, onReleaseTerminal = () => {}, onLayout = () => {}, onFocus = () => {}, onSelectMember = () => {}, getTelemetry = () => null }) {
   const element = document.createElement("section");
   element.className = "works-surface"; element.setAttribute("aria-label", "Works");
   element.innerHTML = `<div class="works-overview"><header class="works-heading"><h2>Works</h2><div class="works-counts">
@@ -408,6 +408,9 @@ export function createWorksSurface({ projectKey, document, windowCatalogModel, a
     rosterModel.subscribeFrame(state => state, value => { if (value !== renderedRoster) render(false); }),
     systemSettingsModel?.subscribeFrame(state => state.worksPreviewLines, () => render(false)),
     summaryModel?.subscribeFrame(state => state, () => { if (!disposed) renderSummary(); }),
+    workProjectionModel?.subscribeFrame(state => state?.projection?.attentionSummary?.summary ?? "", summary => {
+      element.querySelector('[data-count="block"]').parentElement.title = summary;
+    }),
   ];
   return { element, prepareWorkspaceReconciliation,
     nativeIdentity: (id, root) => { const entry = entries.get(id); return entry?.terminal === root ? targetFor(entry.work) : null; },

@@ -17,9 +17,12 @@ const structuredReport = (id = 'typed') => ({ ...report(id),
 function fixture({ tasksDefault = false, onOpenTerminal } = {}) {
   const { document } = parseHTML('<html><body><div id="host"></div></body></html>');
   const root = document.getElementById('host');
-  const visibility = [], copied = [], sent = [];
+  const visibility = [], copied = [], sent = [], waiting = [], reviews = [];
   let model;
   const view = createPmChat({ document, root, sessionId: 'session', onOpenTerminal,
+    onDecisionsWaiting: decisions => waiting.push(decisions),
+    onReviewAttention: items => reviews.push(items),
+    onTaskDetail: key => { const request = model.requestPmTaskDetail('pm', key); if (request) sent.push(request); },
     onLogVisibility: visible => visibility.push(visible), copyText: async text => copied.push(text),
     onSend: text => { const request = model.requestPmChatSend('pm', text); if (request) sent.push(request); } });
   if (!tasksDefault) view.showReports();
@@ -36,7 +39,7 @@ function fixture({ tasksDefault = false, onOpenTerminal } = {}) {
     model.applyPmWindowReceiveEvent(event);
     return event;
   };
-  return { root, model, view, visibility, copied, sent, update };
+  return { root, model, view, visibility, copied, sent, waiting, reviews, update };
 }
 
 test('Chat opens its bound PM terminal in Works without losing the draft', () => {
@@ -72,6 +75,96 @@ const taskOverview = (tasks = [], pending_intake = 2) => ({ state: 'ready', revi
 const trackedTask = (key, extra = {}) => ({ key, parent_key: null, title: `Task ${key}`,
   status: 'pending', assignee: 'PM', wait_reason: null, next_action: 'Check the original outcome',
   review_required: false, ...extra });
+
+const bounded = text => ({ text, total_chars: [...text].length });
+const selectedDetail = () => ({ original: bounded('Exact <original>\nrequest'), purpose: bounded('Original purpose'),
+  completion_conditions: [bounded('Verify <criterion>')], completion_condition_total: 2,
+  evidence: [bounded('proof:<literal>')], evidence_total: 2, history_total: 2,
+  history: [{ revision: 4, action: 'complete', actor_kind: 'pm', actor_id: bounded('PM reviewer'),
+    at: '2026-11-13T00:00:00Z', reason: bounded('Verified <outcome>') }] });
+const detailReply = (request, extra = {}) => ({ kind: 'pm_request_task', id: 'pm', request_id: request.request_id,
+  result: { state: 'detail', key: request.task_key, revision: 4, detail: selectedDetail(), ...extra } });
+
+test('selected Task reads correlate key, request and Session and retain confirmed stale data', () => {
+  const { model, update } = fixture();
+  update([], null, { request_tasks: taskOverview([trackedTask('one'), trackedTask('two')]) });
+  assert.equal(typeof model.requestPmTaskDetail, 'function');
+  const first = model.requestPmTaskDetail('pm', 'one');
+  assert.deepEqual(first, { kind: 'load_pm_request_task', id: 'pm', request_id: first.request_id, task_key: 'one' });
+  const second = model.requestPmTaskDetail('pm', 'two');
+  model.applyPmWindowReceiveEvent(detailReply(first));
+  assert.equal(model.readPmWindowState().windows.pm.taskDetail.status, 'loading');
+  model.applyPmWindowReceiveEvent(detailReply(second, { key: 'one' }));
+  assert.equal(model.readPmWindowState().windows.pm.taskDetail.status, 'loading');
+  model.applyPmWindowReceiveEvent(detailReply(second));
+  const confirmed = model.readPmWindowState().windows.pm.taskDetail.data;
+  assert.equal(confirmed.original.text, 'Exact <original>\nrequest');
+  update([], null, { request_tasks: { ...taskOverview([]), revision: 5 } });
+  assert.equal(model.readPmWindowState().windows.pm.taskDetail.stale, true);
+  const reload = model.requestPmTaskDetail('pm', 'two');
+  model.applyPmWindowReceiveEvent(detailReply(reload));
+  assert.equal(model.readPmWindowState().windows.pm.taskDetail.status, 'error', 'older revision cannot refresh detail');
+  assert.equal(model.readPmWindowState().windows.pm.taskDetail.data, confirmed);
+  const retry = model.requestPmTaskDetail('pm', 'two');
+  model.applyPmWindowReceiveEvent({ ...detailReply(retry), result: { state: 'error', message: 'Restore saved data.' } });
+  assert.equal(model.readPmWindowState().windows.pm.taskDetail.data, confirmed);
+  const pending = model.requestPmTaskDetail('pm', 'two');
+  model.bindPmWindowState('pm', 'replacement');
+  model.applyPmWindowReceiveEvent(detailReply(pending));
+  assert.equal(model.readPmWindowState().windows.pm.taskDetail, null);
+});
+
+test('Tasks and Chat expose literal bounded selected detail with reload, Close and retained draft', () => {
+  const { root, view, model, sent, update } = fixture();
+  update([], null, { request_tasks: taskOverview([trackedTask('one')]) });
+  view.showChat();
+  const draft = root.querySelector('.pm-chat__draft');
+  draft.value = 'Keep my draft';
+  const button = [...root.querySelectorAll('.pm-chat__task button')].find(node => node.textContent === 'View task details');
+  assert.ok(button, 'selected details are reachable from the shared row');
+  button.click();
+  const request = sent.at(-1);
+  model.applyPmWindowReceiveEvent(detailReply(request));
+  const detail = root.querySelector('.pm-chat__task-detail');
+  assert.equal(detail.getAttribute('aria-label'), 'Selected task details');
+  assert.match(detail.textContent, /Exact <original>\nrequest/);
+  assert.match(detail.textContent, /Showing 1 of 2 completion criteria/);
+  assert.match(detail.textContent, /Showing 1 of 2 evidence references/);
+  assert.match(detail.textContent, /Showing 1 of 2 recorded changes/);
+  assert.match(detail.textContent, /Verified <outcome>/);
+  assert.equal(detail.querySelectorAll('original,criterion,literal,outcome').length, 0);
+  assert.equal(draft.value, 'Keep my draft');
+  const tasks = [...root.querySelectorAll('.pm-chat__toolbar button')].find(node => node.textContent === 'Tasks');
+  tasks.click();
+  assert.equal(detail.hidden, false);
+  const reload = [...detail.querySelectorAll('button')].find(node => node.textContent === 'Reload details');
+  reload.click();
+  model.markPmTaskDetailUnavailable('pm');
+  assert.match(detail.textContent, /last confirmed|stale/i);
+  assert.match(detail.textContent, /Exact <original>/);
+  [...detail.querySelectorAll('button')].find(node => node.textContent === 'Close details').click();
+  assert.equal(detail.hidden, true);
+  assert.equal(draft.value, 'Keep my draft');
+});
+
+test('selected detail reload cannot roll back a confirmed revision ahead of the overview', () => {
+  const { model, update } = fixture();
+  update([], null, { request_tasks: taskOverview([trackedTask('one')]) });
+  const first = model.requestPmTaskDetail('pm', 'one');
+  model.applyPmWindowReceiveEvent(detailReply(first, { revision: 6 }));
+  const confirmed = model.readPmWindowState().windows.pm.taskDetail.data;
+  const reload = model.requestPmTaskDetail('pm', 'one');
+  model.applyPmWindowReceiveEvent(detailReply(reload, { revision: 5 }));
+  assert.equal(model.readPmWindowState().windows.pm.taskDetail.status, 'error');
+  assert.equal(model.readPmWindowState().windows.pm.taskDetail.revision, 6);
+  assert.equal(model.readPmWindowState().windows.pm.taskDetail.data, confirmed);
+});
+
+test('selected Task detail styles use Operator tokens and preserve literal whitespace', async () => {
+  const css = await readFile(new URL('../styles/components.css', import.meta.url), 'utf8');
+  assert.match(css, /\.pm-chat__task-detail\s*\{[^}]*var\(--color-border\)/);
+  assert.match(css, /\.pm-chat__task-detail-text\s*\{[^}]*white-space:\s*pre-wrap/);
+});
 
 test('Home opens Chat in one action and rebinds without showing the previous conversation (AC-3431-CHAT-1)', () => {
   const { root, model, view } = fixture({ tasksDefault: true });
@@ -137,6 +230,30 @@ test('Home is the default PM view; Tasks preserves the unfinished filter and sta
   view.showTasks();
   assert.equal(filter.getAttribute('aria-pressed'), 'true');
   assert.equal(root.querySelectorAll('.pm-chat__task').length, 4);
+});
+
+test('Tasks and Chat show direct-child progress from the full projection independently of filters', () => {
+  const { root, update, view } = fixture();
+  const parent = trackedTask('parent', { child_progress: { total: 55, completed: 2, cancelled: 1 } });
+  const publish = task => update([], null, { request_tasks: taskOverview([
+    task, trackedTask('child', { parent_key: 'parent' }), trackedTask('legacy'),
+  ]) });
+  publish(parent);
+  view.showTasks();
+  const row = root.querySelector('[data-task-key="parent"]');
+  const label = 'Direct subtasks: 2 completed · 1 cancelled · 52 unfinished (55 total)';
+  assert.match(row.textContent, /Pending/);
+  assert.ok(row.textContent.includes(label), 'counts include children outside the preview');
+  assert.equal(root.querySelector('[data-task-key="legacy"]').textContent.includes('Direct subtasks'), false);
+  [...root.querySelectorAll('button')].find(node => node.textContent === 'Include completed').click();
+  assert.ok(row.textContent.includes(label), 'filtering does not recalculate from visible rows');
+  view.showChat();
+  assert.ok(row.textContent.includes(label), 'Chat uses the same progress projection');
+  publish(parent);
+  assert.equal(root.querySelector('[data-task-key="parent"]'), row, 'unchanged polls retain the row');
+  publish({ ...parent, child_progress: { total: 55, completed: 55, cancelled: 0 } });
+  assert.ok(row.textContent.includes('Direct subtasks: 55 completed · 0 cancelled · 0 unfinished (55 total)'));
+  assert.match(row.textContent, /Pending/, 'finishing children does not complete their parent');
 });
 
 test('Task criteria disclose bounded literal previews and retain the same Task disclosure', () => {
@@ -321,7 +438,7 @@ test('Reports has a single scroll body and compact token-based history', async (
 });
 
 test('current card stays above history and distinguishes PM explanation from automatic facts', () => {
-  const { root, model, update } = fixture();
+  const { root, model, view, update } = fixture();
   const card = root.querySelector('[aria-label="PM status"]');
   assert.ok(card, 'current card exists before any PM post');
   assert.match(card.textContent, /No current status reported yet/);
@@ -335,6 +452,7 @@ test('current card stays above history and distinguishes PM explanation from aut
       release_observed_at: '2026-10-13T09:18:00Z', pending_update: '9.117.2', error: null },
   };
   const older = update([report()], null, current);
+  view.receiveHumanAttention(2);
   assert.equal(root.querySelector('.pm-chat__body').firstElementChild, card);
   assert.match(card.querySelector('[aria-label="PM notes"]').textContent, /Waiting.*v9.117.2/s);
   assert.equal(card.querySelector('[aria-label="PM notes"] time').getAttribute('datetime'), current.status.items[0].started_at);
@@ -366,6 +484,20 @@ test('current card marks unknown automatic data instead of claiming an empty fle
   assert.match(facts.textContent, /Issues unavailable/);
   assert.match(facts.textContent, /needs_human: Unknown/);
   assert.match(facts.textContent, /Release: Unknown/);
+});
+
+// SPEC #5016 HSF (AC-HS1/HS2): Live facts shows the shared needs_human
+// value the status strip reads, never its own count of the raw facts list.
+test('Live facts needs_human reads the shared attention count, not the facts field', () => {
+  const { root, view, update } = fixture();
+  update([], null, { status: null, facts: { source: 'daemon', active_windows: [], queue_head: null,
+    needs_human_count: 5, release: null, release_observed_at: null, pending_update: null, error: null } });
+  const facts = () => root.querySelector('[aria-label="Live facts"]').textContent;
+  assert.match(facts(), /needs_human: Unknown/, 'the raw facts count is not a second definition');
+  view.receiveHumanAttention(1);
+  assert.match(facts(), /needs_human: 1/);
+  view.receiveHumanAttention(null);
+  assert.match(facts(), /needs_human: Unknown/);
 });
 
 test('Reports renders shared Markdown, metadata and copy, with no input or submit surface', async () => {
@@ -1625,6 +1757,43 @@ test('Home and Decide read one waiting-decision count after an answer', async ()
   assert.equal(actionable.length, 1, 'Decide leaves the same one decision actionable');
 });
 
+// SPEC #5016 HSK: the shared attention model receives the same waiting
+// decisions that Home counts, never a recount of the raw reports.
+test('PM decisions waiting are published from the one derivation Home reads', async () => {
+  const { root, model, view, waiting, update } = fixture({ tasksDefault: true });
+  update([decisionReport('decision-1'), decisionReport('decision-2')], null, { request_tasks: taskOverview([]) });
+  assert.deepEqual(waiting.at(-1), { waiting: 2, ids: ['decision-2', 'decision-1'] });
+  view.showDecisions();
+  root.querySelector('.task-decisions__option').click();
+  model.applyPmWindowReceiveEvent({ kind: 'pane_send_result', window_id: 'pm', ok: true });
+  const home = () => root.querySelector('.task-home')?.textContent ?? '';
+  for (let attempt = 0; attempt < 80 && !/1 decision needs/.test(home()); attempt++) {
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  assert.equal(waiting.at(-1).waiting, 1);
+  assert.equal(waiting.at(-1).ids.length, 1);
+  assert.match(home(), /1 decision needs your attention/, 'Home shows the published count');
+  const published = waiting.length;
+  view.update(model.readPmWindowState().windows.pm);
+  assert.equal(waiting.length, published, 'an unchanged waiting set is not republished');
+});
+
+// SPEC #5016 HSV: unresolved reviews observed by the PM current facts are
+// published once per change; an absent observation is unknown, not zero.
+test('PM current review attention is published from the facts the PM window received', () => {
+  const { reviews, update } = fixture({ tasksDefault: true });
+  update([], null, { facts: { source: 'daemon', active_windows: [] } });
+  assert.equal(reviews.at(-1), null, 'facts without the observation publish unknown');
+  const items = [{ pr_number: 71, issue_numbers: [5016], reason: 'Changes requested' }];
+  update([], null, { facts: { source: 'daemon', active_windows: [], review_attention: items } });
+  assert.deepEqual(reviews.at(-1), items);
+  const published = reviews.length;
+  update([], null, { facts: { source: 'daemon', active_windows: [], review_attention: items } });
+  assert.equal(reviews.length, published, 'an unchanged observation is not republished');
+  update([], null, { facts: { source: 'daemon', active_windows: [], review_attention: [] } });
+  assert.deepEqual(reviews.at(-1), [], 'an observed empty list clears the count');
+});
+
 test('Decide forgets session answers when the PM session changes', () => {
   const { root, model, view, update } = fixture({ tasksDefault: true });
   update([decisionReport()]);
@@ -1638,4 +1807,84 @@ test('Decide forgets session answers when the PM session changes', () => {
   assert.doesNotMatch(card.textContent, /Answer sent/);
   assert.equal(card.querySelectorAll('.task-decisions__option').length, 2,
     'the same decision is actionable again in the new session');
+});
+
+// --- SPEC #7007 T-012/T-013: Progress and Log views in the PM pane ---
+
+async function waitForPm(find, label) {
+  for (let attempt = 0; attempt < 80; attempt++) {
+    const found = find();
+    if (found) return found;
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  assert.fail(`timed out waiting for ${label}`);
+}
+
+test('Progress view lists request tasks from the snapshot with snapshot totals', async () => {
+  const { root, view, update } = fixture();
+  update([], null, { request_tasks: { state: 'ready', revision: 4, total: 57, pending_intake: 3,
+    tasks: [trackedTask('one', { status: 'in_progress', assignee: 'Maya' })] } });
+  view.showProgress();
+  const card = await waitForPm(() => root.querySelector('.task-card'), 'a Progress task card');
+  assert.match(card.textContent, /Task one/);
+  assert.match(card.textContent, /Maya/);
+  const progress = root.querySelector('.task-progress');
+  assert.equal(progress.parentElement.hidden, false, 'the Progress surface is visible');
+  assert.match(progress.textContent, /57 tasks/);
+  const progressButton = [...root.querySelectorAll('.pm-chat__toolbar button')]
+    .find(button => button.textContent === 'Progress');
+  assert.ok(progressButton, 'the toolbar carries a Progress view button');
+  assert.equal(progressButton.getAttribute('aria-pressed'), 'true');
+  view.dispose();
+});
+
+test('Home View progress opens the Progress surface', async () => {
+  const { root, view, update } = fixture({ tasksDefault: true });
+  update([], null, { request_tasks: taskOverview([trackedTask('one', { status: 'in_progress' })]) });
+  const button = await waitForPm(() => [...root.querySelectorAll('.task-home button')]
+    .find(node => node.textContent === 'View progress →'), 'the Home View progress action');
+  button.click();
+  assert.equal(root.querySelector('.task-progress').parentElement.hidden, false);
+  assert.equal(root.querySelector('.task-home').parentElement.hidden, true);
+  view.dispose();
+});
+
+test('Progress View task details switches to the Tasks view and requests the detail', async () => {
+  const { root, view, update, sent } = fixture();
+  update([], null, { request_tasks: taskOverview([trackedTask('one', { status: 'in_progress' })]) });
+  view.showProgress();
+  const details = await waitForPm(() => [...root.querySelectorAll('.task-card button')]
+    .find(node => node.textContent === 'View task details'), 'the Progress detail action');
+  details.click();
+  assert.equal(root.querySelector('.task-progress').parentElement.hidden, true);
+  assert.equal(sent.filter(request => request.kind === 'load_pm_request_task').length, 1,
+    'the detail read travels the existing task detail path');
+  view.dispose();
+});
+
+test('Log view renders fed notification groups and routes the drawer action', async () => {
+  const { document } = parseHTML('<html><body><div id="host"></div></body></html>');
+  const root = document.getElementById('host');
+  const viewed = [];
+  const view = createPmChat({ document, root, sessionId: 'session',
+    onLogVisibility: () => {}, onViewNotification: entry => viewed.push(entry) });
+  view.receiveLog([{ id: 7, key: 'window-command:agent-1:input', category: 'action',
+    title: 'Input failed', message: 'Your input was not delivered to the window.',
+    details: 'owner identity mismatch', count: 2, latestAt: new Date().toISOString(),
+    resolved: false, activatable: false }]);
+  view.showTaskLog();
+  const card = await waitForPm(() => root.querySelector('.task-log__card'), 'a Log group card');
+  assert.match(card.textContent, /Input failed/);
+  assert.match(card.textContent, /Action required/);
+  assert.match(card.textContent, /Repeated 2 times/);
+  const logButton = [...root.querySelectorAll('.pm-chat__toolbar button')]
+    .find(button => button.textContent === 'Log');
+  assert.ok(logButton, 'the toolbar carries a Log view button distinct from Execution log');
+  assert.equal(logButton.getAttribute('aria-pressed'), 'true');
+  const viewButton = [...card.querySelectorAll('button')]
+    .find(node => node.textContent === 'View in Notifications');
+  viewButton.click();
+  assert.equal(viewed.length, 1);
+  assert.equal(viewed[0].key, 'window-command:agent-1:input');
+  view.dispose();
 });

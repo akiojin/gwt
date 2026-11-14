@@ -1340,6 +1340,12 @@ pub(super) fn attach_active_work_issue_numbers<'a>(
         project_repo_hash.as_ref().map(|hash| hash.as_str()),
     );
     for work in active_works {
+        // A terminal Work's remaining local materialization belongs in Other;
+        // its closed children keep their historical owners without reopening it.
+        if work.owner.is_none() && matches!(work.lifecycle_state.as_str(), "done" | "discarded") {
+            work.linked_issue_numbers.clear();
+            continue;
+        }
         let mut numbers = Vec::new();
         numbers.extend(workspace_resume_owner_issue_number(work.owner.as_deref()));
         numbers.extend(issue_number_for_branch(
@@ -1647,27 +1653,66 @@ fn active_work_items_from_projection(
 /// retained Work-history items that have no live agent group. A history item is
 /// Paused when it is incomplete (not Done) and is not already represented by a
 /// live row (matched by exact Work id or shared Session identity without
-/// conflicting git identity). Done items are skipped here — close/cleanup is
-/// handled in a later slice.
+/// conflicting git identity). Closed Issue worktrees remain physical Workspace
+/// rows only while their local directory exists; their Work stays terminal.
 fn append_paused_work_items(
     active_works: &mut Vec<gwt::ActiveWorkItemView>,
     works: &[gwt::WorkspaceHistoryView],
     journal_title_by_session: &std::collections::HashMap<String, String>,
 ) {
     let mut presence = ActiveWorkPresenceIndex::from_active_works(active_works);
-    for work in works {
-        // SPEC-2359 Phase W-12 Slice 4 (FR-352): terminal closes (Done and
-        // Discarded) leave the active Work surface. Both are excluded so a
-        // closed Work never re-appears as a Paused row.
-        if work.status_category == "done" || work.status_category == "discarded" {
-            continue;
-        }
+    // Existing current/paused rows take precedence over a closed Work that
+    // happens to refer to the same physical materialization.
+    for work in works
+        .iter()
+        .filter(|work| !matches!(work.status_category.as_str(), "done" | "discarded"))
+        .chain(
+            works
+                .iter()
+                .filter(|work| matches!(work.status_category.as_str(), "done" | "discarded")),
+        )
+    {
+        let terminal = matches!(work.status_category.as_str(), "done" | "discarded");
         if presence.contains_history(work) {
             continue;
         }
-        let container = work.execution_containers.first();
+        let container =
+            if terminal {
+                work.execution_containers.iter().find(|container| {
+                    container.branch.as_deref().is_some_and(|branch| {
+                        normalize_branch_name(branch).starts_with("work/issue-")
+                    }) && container
+                        .worktree_path
+                        .as_deref()
+                        .is_some_and(|path| Path::new(path).is_dir())
+                })
+            } else {
+                work.execution_containers.first()
+            };
+        if terminal && container.is_none() {
+            continue;
+        }
         let branch = container.and_then(|value| value.branch.clone());
         let worktree_path = container.and_then(|value| value.worktree_path.clone());
+        if terminal
+            && active_works.iter().any(|row| {
+                row.branch
+                    .as_deref()
+                    .zip(branch.as_deref())
+                    .is_some_and(|(left, right)| {
+                        normalize_branch_name(left) == normalize_branch_name(right)
+                    })
+                    || row
+                        .worktree_path
+                        .as_deref()
+                        .zip(worktree_path.as_deref())
+                        .is_some_and(|(left, right)| {
+                            projection_worktree_paths_match(Path::new(left), Path::new(right))
+                        })
+            })
+        {
+            continue;
+        }
         let title = Some(work.title.clone())
             .filter(|value| !value.trim().is_empty())
             .or_else(|| work.summary.clone())
@@ -1677,7 +1722,11 @@ fn append_paused_work_items(
             .summary
             .clone()
             .or_else(|| work.intent.clone())
-            .unwrap_or_else(|| "Paused".to_string());
+            .unwrap_or_else(|| match work.status_category.as_str() {
+                "done" => "Done".to_string(),
+                "discarded" => "Discarded".to_string(),
+                _ => "Paused".to_string(),
+            });
         // SPEC-3075: a paused/backfill Work has no live agent — surface the
         // purpose recorded in the journal (agent `title-summary`), then a
         // non-identifier recorded title. PR title / commit subject layer on top
@@ -1691,14 +1740,17 @@ fn append_paused_work_items(
             Some(work.title.as_str()),
             branch.as_deref(),
         );
-        active_works.push(gwt::ActiveWorkItemView {
+        let mut row = gwt::ActiveWorkItemView {
             linked_issue_numbers: workspace_resume_owner_issue_number(work.owner.as_deref())
                 .into_iter()
                 .collect(),
             id: work.id.clone(),
             title,
-            // Paused Work has no running agent; surface an idle runtime status.
-            status_category: "idle".to_string(),
+            status_category: if terminal {
+                work.status_category.clone()
+            } else {
+                "idle".to_string()
+            },
             status_text,
             summary: work.summary.clone().or_else(|| work.intent.clone()),
             progress_summary: work.progress_summary.clone(),
@@ -1721,17 +1773,31 @@ fn append_paused_work_items(
                 .iter()
                 .map(paused_work_agent_view_from_history)
                 .collect(),
-            // No live agent session owns this Work and it is not user-closed →
-            // WorkAgentRuntime::None resolves to Paused (FR-350).
+            // A retained physical materialization never changes the closed
+            // Work lifecycle. Other non-running Work stays Paused (FR-350).
             works: Vec::new(),
-            lifecycle_state: work_active_lifecycle_state_wire(
-                gwt_core::workspace_projection::recompute_work_active_lifecycle(
-                    gwt_core::workspace_projection::WorkAgentRuntime::None,
-                    None,
-                ),
-            )
-            .to_string(),
-            closed_at: None,
+            lifecycle_state: if terminal {
+                work.status_category.clone()
+            } else {
+                work_active_lifecycle_state_wire(
+                    gwt_core::workspace_projection::recompute_work_active_lifecycle(
+                        gwt_core::workspace_projection::WorkAgentRuntime::None,
+                        None,
+                    ),
+                )
+                .to_string()
+            },
+            closed_at: if terminal {
+                work.completed_at.clone().or_else(|| {
+                    work.events
+                        .iter()
+                        .filter(|event| event.kind == "discard")
+                        .map(|event| event.updated_at.clone())
+                        .min()
+                })
+            } else {
+                None
+            },
             session_agent_total: 0,
             merged_into_base: false,
             workspace_key: None,
@@ -1741,7 +1807,17 @@ fn append_paused_work_items(
             cleanup_blocked_reason: None,
             // FR-403: paused/backfill rows carry the record's last update.
             updated_at: work.updated_at.clone(),
-        });
+        };
+        if terminal {
+            // Keep the closed Work as history inside its physical Workspace.
+            // Removing the parent owner keeps this materialization out of an
+            // active Issue row; its child retains the original close metadata.
+            let child = active_workspace_child_work(&row, None);
+            row.works.push(child);
+            row.owner = None;
+            row.linked_issue_numbers.clear();
+        }
+        active_works.push(row);
         presence.register(
             active_works
                 .last()
@@ -3119,6 +3195,11 @@ fn cleanup_reason_for_work(
         .cloned()
     {
         return Some(reason);
+    }
+    // An old merged PR cannot prove a reused Issue branch is still delivered.
+    // Require the background scan's current base/readiness verdict.
+    if branch.starts_with("work/issue-") {
+        return None;
     }
     if work.merged_into_base
         || work
@@ -7286,6 +7367,18 @@ mod bounded_cache_merge_tests {
             observe_local_agent_activity(&context, &old_candidates, &runtime.sessions_dir, None)
                 .unwrap();
         assert!(!old.agents.as_ref().unwrap()[0].is_pm);
+        // Hold the old census while PM registration reaches the GUI cache.
+        runtime
+            .active_work_projection_refresh
+            .borrow_mut()
+            .projects
+            .clear();
+        let (spawner, tasks) = super::super::BlockingTaskSpawner::queued();
+        runtime.blocking_tasks = spawner;
+        let prefs = gwt::pm_registry::load_pm_prefs(
+            &gwt::pm_registry::pm_prefs_path_for_repo_path(&context.project_root),
+        )
+        .unwrap();
         let refresh = runtime
             .active_work_projection_refresh
             .borrow_mut()
@@ -7314,6 +7407,15 @@ mod bounded_cache_merge_tests {
             "old-role observation must be subtracted"
         );
         assert!(!old.agents.as_ref().unwrap()[0].is_pm);
+        assert!(lock_recover(&refresh).pending.as_ref().unwrap().candidates[0].is_pm);
+        let scheduled = tasks.lock().unwrap().len();
+        assert!(scheduled > 0, "PM identity changes must recapture activity");
+        runtime.sync_pm_session_cache(&context.project_root, prefs.registration.as_ref());
+        assert_eq!(
+            tasks.lock().unwrap().len(),
+            scheduled,
+            "unchanged PM identity must not enqueue another refresh"
+        );
         let current = observe_local_agent_activity(
             &context,
             &runtime.local_agent_activity_candidates("tab-1"),

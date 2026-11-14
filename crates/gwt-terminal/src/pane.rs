@@ -1343,6 +1343,46 @@ mod tests {
     }
 
     #[test]
+    fn test_semantic_snapshot_retains_top_anchored_scroll_region_history() {
+        let mut source = vt100::Parser::new(6, 20, 5000);
+        // Codex inline reserves the bottom rows for its composer and scrolls
+        // the transcript above it with DECSTBM and line feeds.
+        source.process(b"\x1b[6;1Hcomposer\x1b[1;4r\x1b[1;1H");
+        for line in 1..=1500 {
+            source.process(format!("line-{line:04}\r\n").as_bytes());
+        }
+        let oldest = screen_at_oldest_scrollback(source.screen());
+        assert!(oldest.scrollback() >= 1000);
+        assert!(oldest.contents().contains("line-0001"));
+
+        let replay = replay_snapshot(&source, 5000);
+        let restored = screen_at_oldest_scrollback(replay.screen());
+        assert_eq!(restored.scrollback(), oldest.scrollback());
+        assert_eq!(restored.contents(), oldest.contents());
+        assert_eq!(replay.screen().contents(), source.screen().contents());
+        assert!(replay.screen().contents().contains("composer"));
+    }
+
+    #[test]
+    fn test_interior_scroll_region_does_not_add_history() {
+        let mut source = vt100::Parser::new(6, 20, 5000);
+        source.process(b"header\x1b[2;4r\x1b[2;1H");
+        for _ in 0..10 {
+            source.process(b"interior\r\n");
+        }
+        assert_eq!(screen_at_oldest_scrollback(source.screen()).scrollback(), 0);
+        assert!(source.screen().contents().starts_with("header"));
+    }
+
+    #[test]
+    fn test_partial_region_explicit_scroll_does_not_add_history() {
+        let mut source = vt100::Parser::new(6, 20, 5000);
+        source.process(b"first\x1b[2;1Hsecond\x1b[1;4r\x1b[S");
+        assert_eq!(screen_at_oldest_scrollback(source.screen()).scrollback(), 0);
+        assert!(source.screen().contents().starts_with("second"));
+    }
+
+    #[test]
     fn test_semantic_snapshot_round_trips_styled_history_without_visible_overlap() {
         let mut source = vt100::Parser::new(4, 12, 32);
         for line in 1..=10 {

@@ -1127,12 +1127,9 @@ fn explicit_pm_open_bypasses_the_crash_backoff_floor() {
     init_repo_with_initial_commit(&repo);
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    // Issue #4375: the spawn this test is about now begins with a Git refresh
-    // handed to the blocking worker, so the queue is where "did the launcher
-    // start the PM?" is answered. Holding the queue also keeps the fixture's
-    // remote-less repository from running `git fetch` at all.
-    let (spawner, queued) = BlockingTaskSpawner::queued();
-    runtime.blocking_tasks = spawner;
+    // Issue #4375: hold the blocking queue so the accepted PM preparation
+    // gate can be observed without running Git in the remote-less fixture.
+    runtime.blocking_tasks = BlockingTaskSpawner::queued().0;
 
     // A crashed PM registration whose backoff floor is far in the future, with
     // no live pane and no materializable session (forces the fresh-spawn arm).
@@ -1154,17 +1151,24 @@ fn explicit_pm_open_bypasses_the_crash_backoff_floor() {
         "the automatic ladder must keep honouring the backoff floor"
     );
     assert!(
-        queued.lock().expect("queued tasks").is_empty(),
-        "the backoff floor must stop the automatic ladder before it even          prepares the worktree"
+        runtime
+            .project_state(&runtime.test_context())
+            .unwrap()
+            .pending_pm_worktree_preparations
+            .is_empty(),
+        "the backoff floor must stop the automatic ladder before it prepares the worktree"
     );
     drop(automatic);
 
     runtime.ensure_pm_agent_for_tab("tab-1", super::super::pm::PmEnsureTrigger::Explicit);
 
-    assert_eq!(
-        queued.lock().expect("queued tasks").len(),
-        1,
-        "FR-021: the explicit launcher must start the PM despite the backoff          floor, which now begins by preparing the worktree off the event loop"
+    assert!(
+        runtime
+            .project_state(&runtime.test_context())
+            .unwrap()
+            .pending_pm_worktree_preparations
+            .contains(&repo),
+        "FR-021: the explicit launcher must prepare the PM worktree despite the backoff floor"
     );
 }
 

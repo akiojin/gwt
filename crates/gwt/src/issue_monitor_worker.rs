@@ -2030,17 +2030,30 @@ fn load_open_pr_launch_observations(
     let candidates: Vec<_> = issues
         .iter()
         .filter(|issue| {
+            // Queue labels alone are observations, not local launch admission.
+            // Retain candidates that urgent/refill or settlement recovery may
+            // admit during this scan, even before they have local membership.
             issue.state == IssueMonitorIssueState::Open
-                && (issue
-                    .labels
-                    .iter()
-                    .any(|label| label.eq_ignore_ascii_case("gwt-queued"))
+                && (prefs.terminal_queue_auto_refill
                     || local.is_some_and(|queue| {
                         queue
                             .entries
                             .iter()
                             .any(|entry| entry.number == issue.number)
-                    }))
+                    })
+                    || issue
+                        .labels
+                        .iter()
+                        .any(|label| label.eq_ignore_ascii_case("urgent"))
+                    || prefs
+                        .urgent_queue
+                        .grants
+                        .get(&issue.number)
+                        .is_some_and(|grant| grant.label_present)
+                    || prefs
+                        .merged_issue_settlements
+                        .iter()
+                        .any(|settlement| settlement.issue_number == issue.number))
         })
         .collect();
     if candidates.is_empty() {
@@ -5403,6 +5416,159 @@ pub(crate) mod tests {
             });
             assert!(observations.values().all(Option::is_none));
         }
+    }
+
+    #[test]
+    fn issue_6877_launch_readback_ignores_unselected_queue_labels() {
+        use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
+        use gwt_git::pr_status::{parse_pr_inventory_json, PrState};
+
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _gh_lock = crate::cli::fake_gh_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo_path = tmp.path().join("workspace");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        assert!(gwt_core::process::hidden_command("git")
+            .args(["init", "--bare"])
+            .arg(repo_path.join("repo.git"))
+            .output()
+            .unwrap()
+            .status
+            .success());
+        let calls = tmp.path().join("gh-calls.log");
+        let fake_gh = write_bare_repo_bound_fake_gh(&tmp.path().join("bin"), &calls);
+        let mut path_entries = vec![fake_gh.parent().unwrap().to_path_buf()];
+        if let Some(existing) = std::env::var_os("PATH") {
+            path_entries.extend(std::env::split_paths(&existing));
+        }
+        let _path = ScopedEnvVar::set("PATH", std::env::join_paths(path_entries).unwrap());
+        let _sandbox = ScopedEnvVar::set("GWT_TEST_GH_SANDBOX", "1");
+        let mut monitor = test_monitor(Default::default());
+        monitor.terminal_queue_push(&[42], "test", "2026-11-13T00:00:00Z");
+        let mut prefs = monitor.prefs();
+        prefs.urgent_queue.grants.insert(
+            45,
+            crate::issue_monitor::IssueMonitorUrgentGrant {
+                label_present: true,
+                observed_at: "2026-11-13T00:00:00Z".into(),
+                issue_updated_at: None,
+                assignment_revision: None,
+                assigned_by: None,
+                assigned_at: None,
+            },
+        );
+        prefs
+            .merged_issue_settlements
+            .push(crate::MergedIssueSettlement {
+                issue_number: 46,
+                pr_number: 9,
+                merge_sha: None,
+                action: crate::MergedIssueSettlementAction::ContinueWork {
+                    unmet: vec!["AC-1".into()],
+                },
+                settled_at: "2026-11-13T00:00:00Z".into(),
+            });
+        prefs.open_pr_observations.insert(
+            43,
+            crate::issue_monitor::IssueMonitorOpenPrObservation {
+                observed_at: "2020-01-01T00:00:00Z".into(),
+                hold: Some(crate::issue_monitor::IssueMonitorOpenPrHold {
+                    pr_number: 8,
+                    lifecycle: "IN-PROGRESS".into(),
+                }),
+            },
+        );
+        let issues: Vec<_> = [
+            (42, vec![]),
+            (43, vec!["gwt-queued"]),
+            (44, vec!["urgent"]),
+            (45, vec![]),
+            (46, vec!["gwt-queued"]),
+            (47, vec![]),
+        ]
+        .into_iter()
+        .map(|(number, labels)| IssueMonitorIssue {
+            labels: labels.into_iter().map(str::to_string).collect(),
+            ..issue(number)
+        })
+        .collect();
+        let now = Instant::now();
+        // Cached complete histories expose the actual loader's read frontier.
+        for issue in &issues {
+            LINKED_PR_READS.insert(
+                linked_pr_read_key("issue6877", "launch-frontier", issue.number),
+                now,
+                vec![],
+            );
+        }
+        let item = parse_pr_inventory_json(
+            r#"[{"number":7,"state":"OPEN","isDraft":false,"headRefName":"work/issue-42","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[{"status":"IN_PROGRESS"}]}]"#,
+            chrono::Utc::now(),
+        ).unwrap().remove(0);
+        PR_LIFECYCLE_READS.insert(
+            format!("{}#7", repo_path.display()),
+            now,
+            (PrState::Open, item),
+        );
+        let _timer =
+            gwt_git::gh_rest::ScopedMonitorReadMaxAge::enter(ISSUE_MONITOR_PERIODIC_READ_MAX_AGE);
+        let (observations, observed_at, linked) = load_open_pr_launch_observations(
+            &repo_path,
+            "issue6877",
+            "launch-frontier",
+            &issues,
+            &prefs,
+            &mut |result| assert!(result.is_ok(), "inventory fixture failed: {result:?}"),
+        );
+        assert!(
+            !linked.contains_key(&43),
+            "a global queue label does not nominate local PR reads"
+        );
+        assert_eq!(
+            linked.keys().copied().collect::<Vec<_>>(),
+            vec![42, 44, 45, 46]
+        );
+        assert!(observations.get(&42).is_some_and(Option::is_some));
+        assert!(
+            !observations.contains_key(&43),
+            "unselected holds stay unknown"
+        );
+        monitor = test_monitor_with_prefs(Default::default(), prefs.clone());
+        monitor.reconcile_open_pr_holds(&observations, observed_at.as_deref().unwrap());
+        assert_eq!(
+            monitor.prefs().open_pr_observations[&43],
+            prefs.open_pr_observations[&43]
+        );
+        assert!(!std::fs::read_to_string(&calls)
+            .unwrap()
+            .replace('"', "")
+            .contains("pr view 8 "));
+
+        prefs.terminal_queue_auto_refill = true;
+        let (_, _, refill) = load_open_pr_launch_observations(
+            &repo_path,
+            "issue6877",
+            "launch-frontier",
+            &issues,
+            &prefs,
+            &mut |_| {},
+        );
+        assert_eq!(
+            refill.keys().copied().collect::<Vec<_>>(),
+            (42..=47).collect::<Vec<_>>()
+        );
+        assert!(
+            std::fs::read_to_string(&calls)
+                .unwrap()
+                .replace('"', "")
+                .contains("pr view 8 "),
+            "refill refreshes the formerly unselected hold"
+        );
     }
 
     #[test]

@@ -142,8 +142,8 @@ fn frontend_uses_image_browsers_without_a_bootstrap_or_browser_cache() {
 fn the_frontend_job_runs_the_embedded_e2e_suite() {
     assert!(
         frontend_step("Run WebView E2E (embedded Playwright specs)")
-            .contains("run-visual-tests.sh"),
-        "the frontend job must retain the embedded Playwright specs"
+            .contains("bash scripts/run-visual-tests.sh --workers=2"),
+        "the frontend job must retain all embedded Playwright specs with two workers"
     );
 }
 

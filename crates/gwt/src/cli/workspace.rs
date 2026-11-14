@@ -28,12 +28,23 @@ pub enum WorkspaceCommand {
         reason: String,
         observed_done_event_id: String,
     },
+    RepairCloseProof {
+        reason: String,
+    },
     /// Preserve divergent untracked legacy tombstones before merging a fetched ref.
-    EventsReconcile { reference: String, dry_run: bool },
+    EventsReconcile {
+        reference: String,
+        dry_run: bool,
+    },
     /// Ask the authenticated Host to close one eligible Work record.
-    Close { work_id: String, close_kind: String },
+    Close {
+        work_id: String,
+        close_kind: String,
+    },
     /// Read the outcome of one update without contacting or mutating the Host.
-    Receipt { operation_id: String },
+    Receipt {
+        operation_id: String,
+    },
     /// `workspace.update` — update Workspace current projection and journal.
     Update {
         title: Option<String>,
@@ -48,7 +59,9 @@ pub enum WorkspaceCommand {
         title_summary: Option<String>,
     },
     /// `workspace.candidates` — list join candidates.
-    Candidates { agent_session: String },
+    Candidates {
+        agent_session: String,
+    },
     /// `workspace.join`.
     Join {
         agent_session: String,
@@ -79,10 +92,16 @@ pub enum WorkspaceCommand {
     /// SPEC-2359 US-41: `workspace.projection_list` —
     /// list saved Workspace projections under `~/.gwt/projects/*/workspace/`
     /// classified by [`gwt_core::workspace_projection::workspace_projection_stale_reason`].
-    ProjectionList { stale: bool, all: bool },
+    ProjectionList {
+        stale: bool,
+        all: bool,
+    },
     /// SPEC-2359 US-41: `workspace.projection_prune` —
     /// archive / delete stale Workspace projections (FR-153, FR-154).
-    ProjectionPrune { dry_run: bool, ids: Vec<String> },
+    ProjectionPrune {
+        dry_run: bool,
+        ids: Vec<String>,
+    },
     /// Diagnose the shared host endpoint catalog without resolving stale roots.
     ProjectScan,
     /// Quarantine abandoned machine-local project stores; dry-run by default.
@@ -115,7 +134,10 @@ pub enum WorkspaceCommand {
     },
     /// Refold one existing Work's portable container aliases from its durable
     /// sources. This never creates lifecycle events or changes ownership.
-    WorkRepair { work_id: String, dry_run: bool },
+    WorkRepair {
+        work_id: String,
+        dry_run: bool,
+    },
 }
 
 pub fn parse(args: &[String]) -> Result<WorkspaceCommand, CliParseError> {
@@ -127,6 +149,13 @@ pub fn parse(args: &[String]) -> Result<WorkspaceCommand, CliParseError> {
             })
         }
         "update" => parse_update(rest),
+        "repair-close-proof" if rest.len() == 2 && rest[0] == "--reason" => {
+            let reason = parse_required_value(rest, 0, "reason")?;
+            if reason.trim().is_empty() {
+                return Err(CliParseError::MissingFlag("reason"));
+            }
+            Ok(WorkspaceCommand::RepairCloseProof { reason })
+        }
         "reopen" => {
             let mut reason = None;
             let mut observed_done_event_id = None;
@@ -993,11 +1022,13 @@ pub(super) fn run<E: CliEnv>(
                 env.repo_path(),
             );
         if !legacy_stores.is_empty() {
-            out.push_str(&format!(
-                "warning[split_project_store]: canonical store {} has legacy Work stores: {}. Inspect with workspace.store_consolidate params.dry_run=true before planning recovery.\n",
+            let warning = format!(
+                "canonical store {} has legacy Work stores: {}. Inspect with workspace.store_consolidate params.dry_run=true before planning recovery.",
                 gwt_core::paths::gwt_project_dir_for_repo_path(env.repo_path()).display(),
                 legacy_stores.iter().map(|store| store.display().to_string()).collect::<Vec<_>>().join(", "),
-            ));
+            );
+            crate::cli::operation_warnings::push("split_project_store", warning.as_str());
+            let _ = writeln!(env.stderr(), "warning[split_project_store]: {warning}");
         }
     }
     match cmd {
@@ -1652,6 +1683,58 @@ pub(super) fn run<E: CliEnv>(
                 let root = crate::validated_project_state_root_for_session_recovery(&session)
                     .map_err(core_error)?;
                 match crate::agent_project_state::apply_authenticated_workspace_reopen(
+                    &root,
+                    &session_id,
+                    request,
+                ) {
+                    Ok(receipt) => receipt,
+                    Err(error) => return emit_workspace_error(out, &error),
+                }
+            };
+            out.push_str(
+                &serde_json::to_string(&receipt)
+                    .map_err(|error| string_error(error.to_string()))?,
+            );
+            out.push('\n');
+            Ok(0)
+        }
+        WorkspaceCommand::RepairCloseProof { reason } => {
+            let session_id = ambient_session_id().ok_or_else(|| {
+                string_error(
+                    "workspace.repair_close_proof requires ambient GWT_SESSION_ID".to_string(),
+                )
+            })?;
+            let request = crate::AgentWorkspaceCloseProofRepairRequest {
+                schema_version: crate::AGENT_WORKSPACE_CLOSE_PROOF_REPAIR_SCHEMA_VERSION,
+                claimed_session_id: session_id.clone(),
+                observation: crate::observe_agent_runtime(env.repo_path())
+                    .map_err(|error| string_error(error.to_string()))?,
+                primary_provider_session_id: native_primary_provider_session_id(),
+                reason,
+            };
+            let receipt = if let Some(target) =
+                crate::daemon_runtime::HookForwardTarget::from_env_strict().map_err(string_error)?
+            {
+                match crate::daemon_runtime::send_workspace_close_proof_repair_via_agent_bridge(
+                    &target, &request,
+                ) {
+                    Ok(receipt) => receipt,
+                    Err(error) => return emit_workspace_bridge_error(out, &error),
+                }
+            } else {
+                if std::env::var_os(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV).is_some() {
+                    return Err(string_error(
+                        "managed workspace.repair_close_proof requires its Host bridge capability"
+                            .to_string(),
+                    ));
+                }
+                let session = gwt_agent::Session::load(
+                    &gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml")),
+                )
+                .map_err(|error| string_error(error.to_string()))?;
+                let root = crate::validated_project_state_root_for_session_recovery(&session)
+                    .map_err(core_error)?;
+                match crate::agent_project_state::apply_authenticated_workspace_close_proof_repair(
                     &root,
                     &session_id,
                     request,
@@ -9760,6 +9843,98 @@ pub(crate) mod tests {
 
         assert!(error.to_string().contains("terminal"), "{error}");
         assert_eq!(workspace_recovery_state_bytes(&paths), before);
+
+        // AC-3: a legacy-store warning must not hide the outer JSON diagnosis.
+        let session_id = "session-terminal-canonical";
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let mut session = gwt_agent::Session::load(&sessions.join(format!("{session_id}.toml")))
+            .expect("bound Session");
+        let primary = "private-terminal-canonical-thread";
+        session.agent_session_id = Some(primary.to_string());
+        session.save(&sessions).expect("record primary identity");
+        let _session =
+            crate::cli::test_support::ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+        let _native = crate::cli::test_support::ScopedEnvVar::set("CODEX_THREAD_ID", primary);
+        let mut current = WorkspaceProjection::default_for_project(&project_root);
+        current.id = done.work_item_id.clone();
+        let mut agent = assigned_agent_with_window(session_id, "project::agent-1", &worktree);
+        agent.workspace_id = Some(done.work_item_id.clone());
+        agent.title_summary = Some("Terminal Work diagnosis".to_string());
+        current.agents.push(agent);
+        save_workspace_projection(&project_root, &current).expect("current Session assignment");
+        let legacy =
+            gwt_core::paths::gwt_project_dir(&gwt_core::repo_hash::compute_path_hash(&worktree));
+        std::fs::create_dir_all(legacy.join("project-state")).expect("legacy store");
+        assert!(
+            gwt_core::workspace_projection::store_migration::split_project_store_paths(&worktree)
+                .contains(&legacy)
+        );
+        let expected =
+            diagnose_current_terminal_work(session_id, Some(primary)).expect("terminal diagnosis");
+        assert!(expected.details.as_ref().unwrap().recoverable);
+
+        for operation in ["workspace.ensure", "workspace.update"] {
+            let mut env = TestEnv::new(worktree.clone());
+            env.stdin = serde_json::json!({
+                "schema_version": 1,
+                "operation": operation,
+                "params": {
+                    "agent_session": session_id,
+                    "purpose": "Terminal Work diagnosis",
+                    "current_focus": "Inspect terminal Work"
+                }
+            })
+            .to_string();
+            let code = crate::cli::env::dispatch(&mut env, &["gwtd".to_string()]);
+            let payload: serde_json::Value =
+                serde_json::from_slice(&env.stdout).expect("outer JSON response");
+            assert_eq!(code, 1, "{operation}: {payload}");
+            assert_eq!(
+                payload["error_code"], "terminal_work",
+                "{operation}: {payload}"
+            );
+            assert_eq!(
+                payload["details"],
+                serde_json::to_value(&expected.details).unwrap()
+            );
+            assert_eq!(
+                payload["recovery_operations"],
+                serde_json::json!(["workspace.reopen"])
+            );
+            assert_eq!(payload["warnings"][0]["code"], "split_project_store");
+            assert!(payload["warnings"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("workspace.store_consolidate"));
+            serde_json::from_str::<crate::AgentWorkspaceUpdateError>(
+                payload["output"].as_str().unwrap(),
+            )
+            .expect("warning must stay outside the structured diagnostic");
+            assert!(!String::from_utf8_lossy(&env.stdout).contains(primary));
+            assert!(!String::from_utf8_lossy(&env.stderr).contains(primary));
+        }
+
+        // AC-4: the eligible primary can safely retry proof repair when the
+        // existing exact Done proof already passes, without reopening Work.
+        let before_repair = workspace_recovery_state_bytes(&paths);
+        let mut env = TestEnv::new(worktree);
+        env.stdin = serde_json::json!({
+            "schema_version": 1,
+            "operation": "workspace.repair_close_proof",
+            "params": { "reason": "Confirm accepted terminal proof" }
+        })
+        .to_string();
+        let code = crate::cli::env::dispatch(&mut env, &["gwtd".to_string()]);
+        assert_eq!(
+            code,
+            0,
+            "eligible primary proof repair: {} {}",
+            String::from_utf8_lossy(&env.stdout),
+            String::from_utf8_lossy(&env.stderr)
+        );
+        assert_eq!(workspace_recovery_state_bytes(&paths), before_repair);
+        assert!(!String::from_utf8_lossy(&env.stdout).contains(primary));
+        assert!(!String::from_utf8_lossy(&env.stderr).contains(primary));
     }
 
     #[test]
@@ -11713,6 +11888,7 @@ pub(crate) mod tests {
         std::fs::write(&works, "unreadable legacy projection").expect("legacy projection");
         let mut env = TestEnv::new(repo.clone());
         let mut out = String::new();
+        crate::cli::operation_warnings::take();
 
         let code = run(
             &mut env,
@@ -11725,9 +11901,15 @@ pub(crate) mod tests {
         .expect("normal workspace operation");
 
         assert_eq!(code, 0, "{out}");
-        assert!(out.contains("split_project_store"), "{out}");
-        assert!(out.contains(&legacy.display().to_string()), "{out}");
-        assert!(out.contains("workspace.store_consolidate"), "{out}");
+        assert!(!out.contains("split_project_store"), "{out}");
+        let warnings = crate::cli::operation_warnings::take();
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].code, "split_project_store");
+        assert!(warnings[0].message.contains(&legacy.display().to_string()));
+        assert!(warnings[0].message.contains("workspace.store_consolidate"));
+        let stderr = String::from_utf8(env.stderr).expect("stderr text");
+        assert!(stderr.contains("warning[split_project_store]"), "{stderr}");
+        assert!(stderr.contains(&legacy.display().to_string()), "{stderr}");
         assert_eq!(
             std::fs::read_to_string(&works).unwrap(),
             "unreadable legacy projection",

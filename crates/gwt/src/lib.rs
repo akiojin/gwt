@@ -84,6 +84,7 @@ pub mod project_open_control;
 pub mod project_runtime;
 pub mod project_store_maintenance;
 pub mod project_transport;
+pub mod project_work_events;
 pub mod protocol;
 pub mod provider_reset;
 pub mod pty_start_gate;
@@ -121,10 +122,11 @@ pub(crate) fn env_test_lock() -> &'static gwt_core::test_support::EnvLock {
 #[doc(hidden)]
 pub use agent_project_state::{
     adopt_authenticated_execution, apply_authenticated_work_terminalization,
-    apply_authenticated_workspace_update,
+    apply_authenticated_workspace_close_proof_repair, apply_authenticated_workspace_update,
     apply_bound_authenticated_blocked_build_abort_terminalization,
-    apply_bound_authenticated_work_terminalization, apply_bound_authenticated_workspace_reopen,
-    apply_bound_authenticated_workspace_update,
+    apply_bound_authenticated_work_terminalization,
+    apply_bound_authenticated_workspace_close_proof_repair,
+    apply_bound_authenticated_workspace_reopen, apply_bound_authenticated_workspace_update,
     apply_bound_authenticated_workspace_update_with_operation_id,
     continuation_requires_new_session, continue_authenticated_execution,
     describe_authenticated_host_contract, observe_agent_runtime,
@@ -137,11 +139,13 @@ pub use agent_project_state::{
     AgentExecutionContinuationRequest, AgentHostContractReceipt, AgentHostContractRequest,
     AgentRuntimeObservation, AgentWorkMaterializationProbeReceipt,
     AgentWorkMaterializationProbeRequest, AgentWorkTerminalKind, AgentWorkTerminalizationOutcome,
-    AgentWorkTerminalizationReceipt, AgentWorkTerminalizationRequest, AgentWorkspaceReopenReceipt,
-    AgentWorkspaceReopenRequest, AgentWorkspaceUpdateError, AgentWorkspaceUpdateErrorCode,
-    AgentWorkspaceUpdateIntent, AgentWorkspaceUpdateReceipt, AgentWorkspaceUpdateRequest,
-    AGENT_BUILD_ABORT_TERMINALIZATION_SCHEMA_VERSION, AGENT_EXECUTION_BINDING_PROBE_SCHEMA_VERSION,
-    AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION, AGENT_HOST_CONTRACT_SCHEMA_VERSION,
+    AgentWorkTerminalizationReceipt, AgentWorkTerminalizationRequest,
+    AgentWorkspaceCloseProofRepairReceipt, AgentWorkspaceCloseProofRepairRequest,
+    AgentWorkspaceReopenReceipt, AgentWorkspaceReopenRequest, AgentWorkspaceUpdateError,
+    AgentWorkspaceUpdateErrorCode, AgentWorkspaceUpdateIntent, AgentWorkspaceUpdateReceipt,
+    AgentWorkspaceUpdateRequest, AGENT_BUILD_ABORT_TERMINALIZATION_SCHEMA_VERSION,
+    AGENT_EXECUTION_BINDING_PROBE_SCHEMA_VERSION, AGENT_EXECUTION_CONTINUATION_SCHEMA_VERSION,
+    AGENT_HOST_CONTRACT_SCHEMA_VERSION, AGENT_WORKSPACE_CLOSE_PROOF_REPAIR_SCHEMA_VERSION,
     AGENT_WORKSPACE_REOPEN_SCHEMA_VERSION, AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
     AGENT_WORK_MATERIALIZATION_PROBE_SCHEMA_VERSION, AGENT_WORK_TERMINALIZATION_SCHEMA_VERSION,
     EXECUTION_GENERATION_CONTRACT_VERSION,

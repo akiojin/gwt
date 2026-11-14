@@ -1187,10 +1187,19 @@ export function createKnowledgeKanbanSurface({
           ]).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))));
       }
       let issueWorkAssociationKey = workAssociationKey(getActiveWorkProjection?.());
-      const issueMonitorModel = createUiStateStore({ inboxByIssue: {},
+      function issueMonitorCounts(status = {}) {
+        const count = value => Number.isInteger(value) && value >= 0 ? value : 0;
+        return { queue: count(status.queue_len), active: count(status.active_count),
+          maxActive: count(status.max_active_agents ?? 1) };
+      }
+
+      const issueMonitorModel = createUiStateStore({ inboxByIssue: {}, counts: issueMonitorCounts(),
         humanAttention: { count: null, summary: "", byIssue: {} },
         steeringAttention: { count: null, summary: "", byIssue: {} },
-        reviewAttention: { count: null, summary: "", byIssue: {} }, status: {
+        reviewAttention: { count: null, summary: "", byIssue: {} },
+        pmDecisionAttention: { count: null, summary: "", byWindow: {} },
+        prReviewAttention: { count: null, summary: "", byIssue: {}, byWindow: {} },
+        decisionAttention: { count: null, summary: "" }, status: {
         enabled: false,
         state: "disabled",
         queue_len: 0,
@@ -1288,6 +1297,7 @@ export function createKnowledgeKanbanSurface({
       // #5321: current backend failures remain red; history stays in the bell.
       function issueMonitorPillView(state) {
         const status = issueMonitorModel.read().status;
+        const counts = issueMonitorModel.read().counts;
         if (state === "disabled") return { label: "Stopped", tone: "idle" };
         if (state === "github_budget_hold") return { label: "Limited · GitHub", tone: "idle" };
         if (state === "error") return { label: "⚠ Error", tone: "blocked" };
@@ -1295,10 +1305,10 @@ export function createKnowledgeKanbanSurface({
           return { label: "Waiting · Hold", tone: "idle" };
         }
         if (status.agent_blackout) return { label: "⚠ Error", tone: "blocked" };
-        if (Number(status.active_count) >= Number(status.max_active_agents) && Number(status.queue_len) > 0) {
+        if (counts.active >= counts.maxActive && counts.queue > 0) {
           return { label: "Waiting · Full", tone: "idle" };
         }
-        if (!Number(status.active_count) && !Number(status.queue_len)) {
+        if (!counts.active && !counts.queue) {
           return { label: "Waiting · Empty", tone: "idle" };
         }
         return { label: "Running", tone: "active" };
@@ -1392,10 +1402,8 @@ export function createKnowledgeKanbanSurface({
       function renderIssueMonitorControls(element, windowId) {
         const bar = element?.querySelector(".knowledge-monitor-bar");
         if (!bar) return;
-        const maxActive = Math.max(
-          0,
-          Number.parseInt(String(issueMonitorModel.read().status.max_active_agents ?? 1), 10) || 0,
-        );
+        const counts = issueMonitorModel.read().counts;
+        const maxActive = counts.maxActive;
         renderIssueMonitorCapacity(bar);
         const quotaHold = normalizedIssueMonitorQuotaHold(issueMonitorModel.read().status);
         const state = effectiveIssueMonitorState(issueMonitorModel.read().status, quotaHold);
@@ -1419,9 +1427,7 @@ export function createKnowledgeKanbanSurface({
             errorKey ? "Details in notifications" : state === "quota_hold"
               ? `Provider ${quotaHold.provider} | Reset ${quotaHold.reset_at}` : "",
             issueMonitorGitHubBudgetText(issueMonitorModel.read().status),
-            issueMonitorModel.read().humanAttention.summary,
-            issueMonitorModel.read().reviewAttention.summary,
-            issueMonitorModel.read().steeringAttention.summary,
+            issueMonitorModel.read().decisionAttention.summary,
           ].filter(Boolean).join(" | ");
 
           explainIssueControl(pill, `Issues status: ${view.label}. ${pill.title || "The monitor checks the launch queue for eligible issues."}`);
@@ -1431,11 +1437,11 @@ export function createKnowledgeKanbanSurface({
           const activity = agentActivityModel?.read();
           active.textContent = activity?.count == null ? "Active —"
             : `Active ${activity.count} · ${activity.issueCount} ${activity.issueCount === 1 ? "issue" : "issues"} · PM ${activity.pmCount}`;
-          explainIssueControl(active, `Live agents on this terminal, including PM. ${activity?.count == null ? "Runtime observation pending." : `Observed ${activity.snapshot.observed_at}.`} Issues agent capacity: ${issueMonitorModel.read().status.active_count || 0}/${maxActive}.`);
+          explainIssueControl(active, `Live agents on this terminal, including PM. ${activity?.count == null ? "Runtime observation pending." : `Observed ${activity.snapshot.observed_at}.`} Issues agent capacity: ${counts.active}/${maxActive}.`);
         }
         const queue = bar.querySelector('[data-metric="queue"]');
         if (queue) {
-          queue.textContent = `Queue ${issueMonitorModel.read().status.queue_len || 0}`;
+          queue.textContent = `Queue ${counts.queue}`;
           queue.title = issueMonitorModel.read().status.total_candidates
             ? `Total ${issueMonitorModel.read().status.total_candidates}`
             : "";
@@ -1450,7 +1456,7 @@ export function createKnowledgeKanbanSurface({
             : "Agent not started: no saved Agent settings. Save Agent settings, then select Start.";
         }
         const capacity = bar.querySelector('[data-metric="capacity"]');
-        if (capacity) capacity.textContent = `${status.active_count || 0} of ${maxActive}`;
+        if (capacity) capacity.textContent = `${counts.active} of ${maxActive}`;
         const backlog = bar.querySelector('[data-metric="backlog"]');
         if (backlog) backlog.textContent = String(status.unqueued_open_count ?? "—");
         const scan = bar.querySelector('[data-metric="last-scan"]');
@@ -1518,7 +1524,64 @@ export function createKnowledgeKanbanSurface({
 
       }
 
+      // SPEC #5016 AC-HS1/HS2: the one place that combines the components.
+      // An Issue in several components counts once; views read only this value.
+      // PM decisions belong to a PM window, not an Issue, so they add to the
+      // Issue union instead of joining it.
+      function withDecisionAttention(model) {
+        const issueParts = [model.humanAttention, model.reviewAttention, model.steeringAttention,
+          model.prReviewAttention]
+          .filter(part => part?.count != null);
+        const decisions = model.pmDecisionAttention?.count != null ? model.pmDecisionAttention : null;
+        const parts = decisions ? [...issueParts, decisions] : issueParts;
+        if (!parts.length) return { ...model, decisionAttention: { count: null, summary: "" } };
+        const count = new Set(issueParts.flatMap(part => Object.keys(part.byIssue || {}))).size
+          + (decisions?.count ?? 0);
+        return { ...model, decisionAttention: { count,
+          summary: [`Awaiting attention ${count}`, ...parts.map(part => part.summary)].join(" | ") } };
+      }
+
+      // SPEC #5016 HSK: pm-chat publishes the unanswered decisions of one PM
+      // window from its single derivation; `null` (not loaded, or closed)
+      // removes that window from the count.
+      function applyPmDecisions(windowId, decisions) {
+        issueMonitorModel.update(model => {
+          const byWindow = { ...model.pmDecisionAttention.byWindow };
+          if (Array.isArray(decisions?.ids)) byWindow[windowId] = [...decisions.ids];
+          else delete byWindow[windowId];
+          const windows = Object.values(byWindow);
+          const count = windows.length ? windows.reduce((sum, ids) => sum + ids.length, 0) : null;
+          return withDecisionAttention({ ...model, pmDecisionAttention: { count, byWindow,
+            summary: count == null ? "" : `PM decisions ${count}` } });
+        });
+      }
+
+      // SPEC #5016 HSV: a PM window publishes the unresolved reviews its
+      // current facts observed; `null` (not loaded, or closed) removes it.
+      // A PR without an Issue is its own entry in the Issue union.
+      function applyPmReviewAttention(windowId, items) {
+        issueMonitorModel.update(model => {
+          const byWindow = { ...model.prReviewAttention.byWindow };
+          if (Array.isArray(items)) byWindow[windowId] = items.map(item => ({ ...item }));
+          else delete byWindow[windowId];
+          const windows = Object.values(byWindow);
+          const byIssue = {};
+          for (const item of windows.flat()) {
+            const numbers = Array.isArray(item.issue_numbers) ? item.issue_numbers : [];
+            const keys = numbers.length ? numbers.map(String) : [`pr-${item.pr_number}`];
+            for (const key of keys) byIssue[key] ??= { reason: String(item.reason || "").trim() || "Review unresolved" };
+          }
+          const count = windows.length ? Object.keys(byIssue).length : null;
+          return withDecisionAttention({ ...model, prReviewAttention: { count, byIssue, byWindow,
+            summary: count == null ? "" : `Unresolved reviews ${count}` } });
+        });
+      }
+
       function withMonitorAttention(model) {
+        return withDecisionAttention(withMonitorHolds(model));
+      }
+
+      function withMonitorHolds(model) {
         const records = model.status.autonomous_issues;
         if (!Array.isArray(records) || model.humanAttention.count === null) return model;
         // Dispatch holds include automatic capacity/retry waits, not just
@@ -1552,25 +1615,28 @@ export function createKnowledgeKanbanSurface({
       }
 
       function applyIssueMonitorStatus(nextStatus) {
-        issueMonitorModel.update(model => withMonitorAttention({ ...model, status: {
-          ...model.status,
-          ...(nextStatus || {}),
-          max_active_agents_override: nextStatus?.max_active_agents_override ?? null,
-          agent_roster_capacity: nextStatus?.agent_roster_capacity ?? null,
-          agent_capacity: nextStatus?.agent_capacity ?? null,
-          quota_hold: normalizedIssueMonitorQuotaHold(nextStatus),
-          github_budget: nextStatus?.github_budget ?? null,
-          // Issue #4366 AC-6b: omitted once the hold clears, so it must not
-          // survive from the previous status the way merged fields do.
-          effective_launch_profile: nextStatus?.effective_launch_profile ?? null,
-          // Empty facts are omitted on the wire; never retain an older snapshot.
-          tier_facts: Array.isArray(nextStatus?.tier_facts) ? nextStatus.tier_facts : [],
-          tier_config_token: nextStatus?.tier_config_token ?? null,
-          // Issue #3628: omitted (skip_serializing_if) once the fleet recovers.
-          agent_blackout: nextStatus?.agent_blackout ?? null,
-          update_drain: nextStatus?.update_drain ?? null,
-          autonomous_issues: Array.isArray(nextStatus?.autonomous_issues) ? nextStatus.autonomous_issues : [],
-        }}));
+        issueMonitorModel.update(model => {
+          const status = {
+            ...model.status,
+            ...(nextStatus || {}),
+            max_active_agents_override: nextStatus?.max_active_agents_override ?? null,
+            agent_roster_capacity: nextStatus?.agent_roster_capacity ?? null,
+            agent_capacity: nextStatus?.agent_capacity ?? null,
+            quota_hold: normalizedIssueMonitorQuotaHold(nextStatus),
+            github_budget: nextStatus?.github_budget ?? null,
+            // Issue #4366 AC-6b: omitted once the hold clears, so it must not
+            // survive from the previous status the way merged fields do.
+            effective_launch_profile: nextStatus?.effective_launch_profile ?? null,
+            // Empty facts are omitted on the wire; never retain an older snapshot.
+            tier_facts: Array.isArray(nextStatus?.tier_facts) ? nextStatus.tier_facts : [],
+            tier_config_token: nextStatus?.tier_config_token ?? null,
+            // Issue #3628: omitted (skip_serializing_if) once the fleet recovers.
+            agent_blackout: nextStatus?.agent_blackout ?? null,
+            update_drain: nextStatus?.update_drain ?? null,
+            autonomous_issues: Array.isArray(nextStatus?.autonomous_issues) ? nextStatus.autonomous_issues : [],
+          };
+          return withMonitorAttention({ ...model, status, counts: issueMonitorCounts(status) });
+        });
       }
 
       function applyIssueMonitorInbox(items) {
@@ -6221,6 +6287,8 @@ export function createKnowledgeKanbanSurface({
         applyIssueMonitorStatus,
         applyRepositoryLabels,
         applyIssueMonitorInbox,
+        applyPmDecisions,
+        applyPmReviewAttention,
         applyIssueMonitorQueueResult,
         scheduleIssueMonitorProjectionRefresh,
         handleKnowledgeTransportChange,
