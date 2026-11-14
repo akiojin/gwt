@@ -14,12 +14,7 @@
 //! held dpkg lock from hanging a job or failing a PR for an unrelated change.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
-use std::process::Output;
-use std::time::Instant;
-
-use gwt_core::process::{resolved_command, ProcessPlanRequest};
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -208,6 +203,9 @@ fn ci_apt_wrapper_exists_and_waits_on_the_dpkg_lock() {
 #[cfg(unix)]
 mod wrapper {
     use super::*;
+    use std::{os::unix::fs::PermissionsExt, process::Output, time::Instant};
+
+    use gwt_core::process::{resolved_command, ProcessPlanRequest};
 
     struct Harness {
         dir: PathBuf,
