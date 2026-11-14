@@ -728,7 +728,8 @@ fn blocks_file_ops_outside_worktree() {
         "cp {}/foo.txt {}/foo.txt",
         root().display(),
         std::env::temp_dir()
-            .parent()
+            .ancestors()
+            .last()
             .unwrap()
             .join("gwt-test-outside")
             .display()

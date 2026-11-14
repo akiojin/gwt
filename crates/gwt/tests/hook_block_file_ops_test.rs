@@ -9,10 +9,19 @@ fn root() -> PathBuf {
 }
 
 fn outside_root() -> PathBuf {
-    std::env::temp_dir()
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join("gwt-test-outside")
+    outside_root_for(&std::env::temp_dir())
+}
+
+fn outside_root_for(temp: &Path) -> PathBuf {
+    // Unix also allows /tmp even when TMPDIR points to a nested child.
+    temp.ancestors().last().unwrap().join("gwt-test-outside")
+}
+
+#[test]
+fn rejection_fixture_is_outside_shared_temp_even_with_nested_tmpdir() {
+    let shared_temp = std::env::temp_dir();
+    let nested_temp = shared_temp.join("gwt-ci");
+    assert!(!outside_root_for(&nested_temp).starts_with(&shared_temp));
 }
 
 #[test]
@@ -40,8 +49,11 @@ fn session_scratchpad_and_verification_artifacts_are_allowed() {
 
 #[test]
 fn temporary_roots_and_traversal_outside_them_are_blocked() {
-    let temp = std::env::temp_dir();
-    for target in [temp.clone(), temp.join("../gwt-test-outside")] {
+    let temp = dunce::canonicalize(std::env::temp_dir()).unwrap();
+    let escaped = temp
+        .join("../".repeat(temp.components().count()))
+        .join("gwt-test-outside");
+    for target in [temp.clone(), escaped] {
         let command = format!("rm -rf '{}'", target.display());
         assert!(block_file_ops::evaluate_bash_command(&command, &root()).is_some());
     }
@@ -90,7 +102,7 @@ fn refusal_shows_allowed_temporary_artifact_recovery() {
 fn temporary_symlink_escape_is_blocked_even_for_missing_destinations() {
     let temp = tempfile::tempdir().unwrap();
     let link = temp.path().join("outside");
-    let destination = std::env::temp_dir().parent().unwrap().to_path_buf();
+    let destination = outside_root().parent().unwrap().to_path_buf();
     #[cfg(unix)]
     std::os::unix::fs::symlink(&destination, &link).unwrap();
     #[cfg(windows)]
