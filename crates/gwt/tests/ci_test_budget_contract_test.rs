@@ -88,7 +88,7 @@ fn macos_socket_targets_compile_before_the_execution_budget() {
         "gwt-core test test_hygiene_test socket_",
         "gwt-core test daemon_socket_path_limit",
         "gwt lib gwt daemon -- --test-threads=1",
-        "gwt test runtime_tests daemon_project_root_test -- --test-threads=1",
+        "gwt example socket_fixtures daemon_project_root_test -- --test-threads=1",
     ] {
         assert!(
             script
@@ -98,6 +98,18 @@ fn macos_socket_targets_compile_before_the_execution_budget() {
             "reuse the prepared artifact with the same socket filter and threading: {command}"
         );
     }
+    let manifest = read("crates/gwt/Cargo.toml");
+    let manifest: toml::Value = toml::from_str(&manifest).unwrap();
+    let examples = manifest["example"].as_array().unwrap();
+    for name in ["gwtd", "socket_fixtures"] {
+        let example = examples
+            .iter()
+            .find(|example| example["name"].as_str() == Some(name))
+            .unwrap();
+        assert_eq!(example["test"].as_bool(), Some(false));
+    }
+    assert!(read("crates/gwt/examples/socket_fixtures.rs")
+        .contains("../tests/daemon_project_root_test.rs"));
     assert_eq!(steps[execution]["env"]["CARGO_PROFILE_TEST_DEBUG"], "0");
     // Keep default builds and cache keys on the ordinary profile. Only these
     // test artifacts omit line tables, including when the script reuses them.
