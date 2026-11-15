@@ -235,6 +235,15 @@ struct Pairing {
     request: PendingPairing,
     public_key: Vec<u8>,
     issued_at: u64,
+    peer: Option<PairingProof>,
+}
+
+/// A peer-bound pairing request: approvable only after the device signed these
+/// exact bytes on this same peer, and only from this same peer.
+struct PairingProof {
+    binding: PeerBinding,
+    signing_payload: Vec<u8>,
+    proven: bool,
 }
 
 /// Connection-specific public identity supplied by the trusted Host adapter.
@@ -1019,14 +1028,60 @@ impl MobileAuthorization {
         project: ProjectKey,
         now: u64,
     ) -> Result<PendingPairing, AuthorizationError> {
+        self.insert_pairing(name, public_key, project, None, now)
+            .map(|(request, _)| request)
+    }
+
+    /// Pairing request on the exact verified transport peer. The device must
+    /// prove possession of `public_key` by signing the returned exact bytes on
+    /// this same peer ([`Self::prove_pairing`]) before the PC can approve it
+    /// from this same peer ([`Self::approve_peer_bound`]). One pending request
+    /// per connection; retries start from a new PC invite.
+    pub fn request_pairing_peer_bound(
+        &mut self,
+        name: &str,
+        public_key: &[u8],
+        project: ProjectKey,
+        peer: &PeerBinding,
+        now: u64,
+    ) -> Result<(PendingPairing, AuthenticationChallenge), AuthorizationError> {
+        self.insert_pairing(name, public_key, project, Some(peer), now)
+            .map(|(request, signing_payload)| {
+                let challenge = AuthenticationChallenge {
+                    id: request.id.clone(),
+                    signing_payload: signing_payload.expect("peer-bound pairing signs"),
+                };
+                (request, challenge)
+            })
+    }
+
+    fn insert_pairing(
+        &mut self,
+        name: &str,
+        public_key: &[u8],
+        project: ProjectKey,
+        peer: Option<&PeerBinding>,
+        now: u64,
+    ) -> Result<(PendingPairing, Option<Vec<u8>>), AuthorizationError> {
         self.check_enabled_at(now)?;
         self.check_registered_project(&project)?;
         validate_identity(name, public_key)?;
+        if peer.is_some_and(|peer| self.host_binding.as_ref() != Some(&peer.host)) {
+            return Err(AuthorizationError::WrongPeer);
+        }
         if self.devices.values().any(|d| d.public_key == public_key) {
             return Err(AuthorizationError::DuplicateKey);
         }
         self.pending.retain(|_, p| now < p.request.expires_at);
-        if self.pending.len() >= MAX_PENDING_PAIRINGS {
+        if self.pending.len() >= MAX_PENDING_PAIRINGS
+            || peer.is_some_and(|peer| {
+                self.pending.values().any(|p| {
+                    p.peer
+                        .as_ref()
+                        .is_some_and(|bound| bound.binding.connection_id == peer.connection_id)
+                })
+            })
+        {
             return Err(AuthorizationError::Capacity);
         }
         let request = PendingPairing {
@@ -1035,24 +1090,131 @@ impl MobileAuthorization {
             project,
             expires_at: deadline(now, PAIRING_TTL_SECS)?,
         };
+        let proof = match peer {
+            Some(peer) => {
+                use ring::rand::SecureRandom;
+                let host_epoch = self
+                    .runtime
+                    .lock()
+                    .map_err(|_| AuthorizationError::Unavailable)?
+                    .host_epoch;
+                let mut nonce = [0; 32];
+                ring::rand::SystemRandom::new()
+                    .fill(&mut nonce)
+                    .map_err(|_| AuthorizationError::Unavailable)?;
+                // Fixed tuple order is the wire signing contract, domain
+                // separated from gwt-mobile-auth-v*. The browser validates
+                // every field against its own bootstrap/peer descriptions.
+                let signing_payload = serde_json::to_vec(&(
+                    "gwt-mobile-pair-v1",
+                    "pc-host",
+                    "mobile-client",
+                    &peer.host,
+                    host_epoch.to_string(),
+                    hex::encode(ring::digest::digest(&ring::digest::SHA256, public_key)),
+                    name,
+                    request.project.as_str(),
+                    peer.connection_id.to_string(),
+                    hex::encode(peer.host_fingerprint),
+                    hex::encode(peer.mobile_fingerprint),
+                    hex::encode(nonce),
+                    &request.id,
+                    now,
+                    request.expires_at,
+                ))
+                .expect("string/integer tuple is serializable");
+                Some(PairingProof {
+                    binding: peer.clone(),
+                    signing_payload,
+                    proven: false,
+                })
+            }
+            None => None,
+        };
+        let signing_payload = proof.as_ref().map(|proof| proof.signing_payload.clone());
         self.pending.insert(
             request.id.clone(),
             Pairing {
                 request: request.clone(),
                 public_key: public_key.to_vec(),
                 issued_at: now,
+                peer: proof,
             },
         );
+        Ok((request, signing_payload))
+    }
+
+    /// Verify the device's possession proof for a peer-bound pairing request.
+    /// Any failure consumes the request; only a proven request reaches the PC.
+    pub fn prove_pairing(
+        &mut self,
+        request_id: &str,
+        peer: &PeerBinding,
+        signature: &[u8],
+        now: u64,
+    ) -> Result<PendingPairing, AuthorizationError> {
+        self.check_enabled_at(now)?;
+        let mut pending = self
+            .pending
+            .remove(request_id)
+            .ok_or(AuthorizationError::UnknownRequest)?;
+        let proof = pending
+            .peer
+            .as_mut()
+            .filter(|proof| !proof.proven && &proof.binding == peer)
+            .ok_or(AuthorizationError::WrongPeer)?;
+        check_time(pending.issued_at, pending.request.expires_at, now)?;
+        UnparsedPublicKey::new(&ECDSA_P256_SHA256_FIXED, &pending.public_key)
+            .verify(&proof.signing_payload, signature)
+            .map_err(|_| AuthorizationError::InvalidSignature)?;
+        proof.proven = true;
+        let request = pending.request.clone();
+        self.pending.insert(request.id.clone(), pending);
         Ok(request)
     }
 
     /// Call only after the PC user explicitly approves this exact request/key.
+    /// Peer-bound requests are rejected here; use [`Self::approve_peer_bound`].
     pub fn approve(
         &mut self,
         request_id: &str,
         now: u64,
     ) -> Result<DeviceRecord, AuthorizationError> {
+        self.approve_pairing(request_id, None, now)
+    }
+
+    /// PC approval of a proven peer-bound request, from that same peer only.
+    /// The saved device keeps the key/Project, never the connection binding.
+    pub fn approve_peer_bound(
+        &mut self,
+        request_id: &str,
+        peer: &PeerBinding,
+        now: u64,
+    ) -> Result<DeviceRecord, AuthorizationError> {
+        self.approve_pairing(request_id, Some(peer), now)
+    }
+
+    fn approve_pairing(
+        &mut self,
+        request_id: &str,
+        peer: Option<&PeerBinding>,
+        now: u64,
+    ) -> Result<DeviceRecord, AuthorizationError> {
         self.check_enabled_at(now)?;
+        let bound = self
+            .pending
+            .get(request_id)
+            .ok_or(AuthorizationError::UnknownRequest)?
+            .peer
+            .as_ref();
+        let matches = match (bound, peer) {
+            (None, None) => true,
+            (Some(bound), Some(peer)) => bound.proven && &bound.binding == peer,
+            _ => false,
+        };
+        if !matches {
+            return Err(AuthorizationError::WrongPeer);
+        }
         let pending = self
             .pending
             .remove(request_id)
@@ -1121,6 +1283,30 @@ impl MobileAuthorization {
         let device = self.approve(request_id, now)?;
         self.save_or_disable(path)?;
         Ok(device)
+    }
+
+    /// [`Self::approve_peer_bound`] with the same save-before-ACK semantics as
+    /// [`Self::approve_and_save`].
+    pub fn approve_peer_bound_and_save(
+        &mut self,
+        request_id: &str,
+        peer: &PeerBinding,
+        now: u64,
+        path: &Path,
+    ) -> Result<DeviceRecord, DeviceUpdateError> {
+        let device = self.approve_peer_bound(request_id, peer, now)?;
+        self.save_or_disable(path)?;
+        Ok(device)
+    }
+
+    /// Drop unapproved pairing bound to a closed connection (terminal close).
+    pub fn close_pairing_connection(&mut self, connection_id: Uuid) {
+        self.pending.retain(|_, pending| {
+            pending
+                .peer
+                .as_ref()
+                .is_none_or(|proof| proof.binding.connection_id != connection_id)
+        });
     }
 
     /// Revoke on the trusted PC control plane, returning success only after save.
@@ -2279,6 +2465,223 @@ mod tests {
                 .unwrap_err(),
             AuthorizationError::Expired
         );
+    }
+
+    fn peer_pairing(
+        auth: &mut MobileAuthorization,
+        peer: &PeerBinding,
+        key: &EcdsaKeyPair,
+    ) -> (PendingPairing, Vec<u8>) {
+        let (pending, challenge) = auth
+            .request_pairing_peer_bound("Phone", key.public_key().as_ref(), project(), peer, NOW)
+            .unwrap();
+        assert_eq!(challenge.id, pending.id);
+        let signature = key
+            .sign(&SystemRandom::new(), &challenge.signing_payload)
+            .unwrap();
+        (pending, signature.as_ref().to_vec())
+    }
+
+    #[test]
+    fn peer_pairing_signs_exact_context_and_approves_only_the_proven_peer() {
+        let (mut auth, peer) = bound_authority();
+        let key = key();
+        let (pending, challenge) = auth
+            .request_pairing_peer_bound("Phone", key.public_key().as_ref(), project(), &peer, NOW)
+            .unwrap();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&challenge.signing_payload).unwrap();
+        let nonce = payload[11].as_str().unwrap();
+        assert_eq!(hex::decode(nonce).unwrap().len(), 32);
+        assert_eq!(
+            payload,
+            serde_json::json!([
+                "gwt-mobile-pair-v1",
+                "pc-host",
+                "mobile-client",
+                peer.host,
+                auth.runtime.lock().unwrap().host_epoch.to_string(),
+                hex::encode(ring::digest::digest(
+                    &ring::digest::SHA256,
+                    key.public_key().as_ref()
+                )),
+                "Phone",
+                project().as_str(),
+                peer.connection_id.to_string(),
+                hex::encode([1; 32]),
+                hex::encode([2; 32]),
+                nonce,
+                pending.id,
+                NOW,
+                NOW + PAIRING_TTL_SECS
+            ])
+        );
+        let mut other_connection = peer.clone();
+        other_connection.connection_id = Uuid::new_v4();
+        assert_eq!(
+            auth.approve_peer_bound(&pending.id, &peer, NOW)
+                .unwrap_err(),
+            AuthorizationError::WrongPeer,
+            "an unproven request must not be approvable"
+        );
+        let signature = key
+            .sign(&SystemRandom::new(), &challenge.signing_payload)
+            .unwrap();
+        let proven = auth
+            .prove_pairing(&pending.id, &peer, signature.as_ref(), NOW)
+            .unwrap();
+        assert_eq!(proven.id, pending.id);
+        assert_eq!(
+            auth.approve(&pending.id, NOW).unwrap_err(),
+            AuthorizationError::WrongPeer,
+            "legacy approval must not bypass the peer binding"
+        );
+        assert_eq!(
+            auth.approve_peer_bound(&pending.id, &other_connection, NOW)
+                .unwrap_err(),
+            AuthorizationError::WrongPeer
+        );
+        let mut other_fingerprint = peer.clone();
+        other_fingerprint.mobile_fingerprint = [9; 32];
+        assert_eq!(
+            auth.approve_peer_bound(&pending.id, &other_fingerprint, NOW)
+                .unwrap_err(),
+            AuthorizationError::WrongPeer
+        );
+        assert!(auth.devices().is_empty());
+        let device = auth.approve_peer_bound(&pending.id, &peer, NOW).unwrap();
+        assert_eq!(device.project, project().as_str());
+        assert_eq!(auth.devices().len(), 1);
+        assert_eq!(
+            auth.approve_peer_bound(&pending.id, &peer, NOW)
+                .unwrap_err(),
+            AuthorizationError::UnknownRequest
+        );
+        let mut session = peer_session(&mut auth, &peer, &device, &key);
+        assert_eq!(auth.dispatch(&mut session, &project(), 0, NOW, || 7), Ok(7));
+    }
+
+    #[test]
+    fn peer_pairing_rejects_wrong_key_peer_host_expiry_and_consumes_failed_proofs() {
+        let (mut auth, peer) = bound_authority();
+        let key = key();
+
+        let (pending, _) = peer_pairing(&mut auth, &peer, &key);
+        let (_, foreign_signature) = {
+            let other = self::key();
+            let (_, challenge) = auth
+                .request_pairing_peer_bound(
+                    "Other",
+                    other.public_key().as_ref(),
+                    project(),
+                    &{
+                        let mut p = peer.clone();
+                        p.connection_id = Uuid::new_v4();
+                        p
+                    },
+                    NOW,
+                )
+                .unwrap();
+            let sig = other
+                .sign(&SystemRandom::new(), &challenge.signing_payload)
+                .unwrap();
+            ((), sig.as_ref().to_vec())
+        };
+        assert_eq!(
+            auth.prove_pairing(&pending.id, &peer, &foreign_signature, NOW)
+                .unwrap_err(),
+            AuthorizationError::InvalidSignature
+        );
+        assert_eq!(
+            auth.prove_pairing(&pending.id, &peer, &foreign_signature, NOW)
+                .unwrap_err(),
+            AuthorizationError::UnknownRequest,
+            "a failed proof consumes the request"
+        );
+
+        let mut other_connection = peer.clone();
+        other_connection.connection_id = Uuid::new_v4();
+        let (pending, signature) = peer_pairing(&mut auth, &peer, &key);
+        assert_eq!(
+            auth.prove_pairing(&pending.id, &other_connection, &signature, NOW)
+                .unwrap_err(),
+            AuthorizationError::WrongPeer
+        );
+        assert_eq!(
+            auth.approve_peer_bound(&pending.id, &peer, NOW)
+                .unwrap_err(),
+            AuthorizationError::UnknownRequest
+        );
+
+        let (pending, signature) = peer_pairing(&mut auth, &peer, &key);
+        assert_eq!(
+            auth.request_pairing_peer_bound(
+                "Phone",
+                self::key().public_key().as_ref(),
+                project(),
+                &peer,
+                NOW
+            )
+            .unwrap_err(),
+            AuthorizationError::Capacity,
+            "one connection holds at most one pending pairing"
+        );
+        assert_eq!(
+            auth.prove_pairing(&pending.id, &peer, &signature, NOW + PAIRING_TTL_SECS)
+                .unwrap_err(),
+            AuthorizationError::Expired
+        );
+
+        let (pending, signature) = peer_pairing(&mut auth, &peer, &key);
+        auth.close_pairing_connection(peer.connection_id);
+        assert_eq!(
+            auth.prove_pairing(&pending.id, &peer, &signature, NOW)
+                .unwrap_err(),
+            AuthorizationError::UnknownRequest
+        );
+
+        let mut foreign = peer.clone();
+        foreign.host =
+            HostBinding::new(&Uuid::new_v4().to_string(), "https://mobile.example").unwrap();
+        assert_eq!(
+            auth.request_pairing_peer_bound(
+                "Phone",
+                key.public_key().as_ref(),
+                project(),
+                &foreign,
+                NOW
+            )
+            .unwrap_err(),
+            AuthorizationError::WrongPeer
+        );
+
+        let legacy = auth
+            .request_pairing("Phone", key.public_key().as_ref(), project(), NOW)
+            .unwrap();
+        assert_eq!(
+            auth.prove_pairing(&legacy.id, &peer, &signature, NOW)
+                .unwrap_err(),
+            AuthorizationError::WrongPeer
+        );
+        assert_eq!(auth.devices().len(), 0);
+    }
+
+    #[test]
+    fn peer_pairing_approval_saves_without_peer_binding() {
+        let (mut auth, peer) = bound_authority();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("devices.json");
+        let key = key();
+        let (pending, signature) = peer_pairing(&mut auth, &peer, &key);
+        auth.prove_pairing(&pending.id, &peer, &signature, NOW)
+            .unwrap();
+        let device = auth
+            .approve_peer_bound_and_save(&pending.id, &peer, NOW, &path)
+            .unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains(&device.id));
+        assert!(!saved.contains(&peer.connection_id.to_string()));
+        assert!(!saved.contains(&hex::encode([2; 32])));
     }
 
     #[test]
