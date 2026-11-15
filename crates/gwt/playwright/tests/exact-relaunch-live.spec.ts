@@ -1425,7 +1425,10 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
         let provider = await readFile(codexScript, "utf8");
         provider = provider.replace("const at = new Date().toISOString();", `
 process.env.GWT_HOOK_PROFILE_PATH = path.join(process.env.HOME, 'hook-' + process.env.GWT_SESSION_ID + '.jsonl');
+const ptyRuntime = JSON.parse(fs.readFileSync(process.env.GWT_SESSION_RUNTIME_PATH, 'utf8'));
 const at = new Date().toISOString();`);
+        provider = provider.replace("pid:process.pid,argv:args",
+          "pid:process.pid,pty_child_pid:ptyRuntime.child_pid,pty_child_started_at:ptyRuntime.child_started_at,argv:args");
         provider = provider.replace(/const native = resumed \|\| requested \|\| [^;]+;/,
           "const native = resumed || requested || require('node:crypto').randomUUID();");
         provider = provider.replace("  if (line.trim() === 'GWT_FIXTURE_EXIT')", `
@@ -1569,15 +1572,21 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
     const waitForMeasuredChildren = async (expected: number) => {
       if (!fixedMachineCapacity) return;
       await expect.poll(async () => {
-        const launches = await fixture.launches();
+        const launches = await fixture.launches() as (ExactRelaunchInvocation & {
+          pty_child_pid?: number; pty_child_started_at?: number;
+        })[];
         if (launches.length !== expected) return false;
         const capacity = JSON.parse(await readFile(join(fixture.home, ".gwt", "machine-state", "agent-capacity.json"), "utf8"));
         const now = Date.now() / 1000;
         return capacity.observed_at <= now && now < capacity.expires_at
           && capacity.machine_budget >= 5 && capacity.inventory.uncertainties.length === 0
           && launches.every(launch => capacity.inventory.sessions.some((row: any) =>
-            row.session.session_id === launch.gwt_session_id && row.session.child_pid === launch.pid
-              && row.session.child_started_at > 0));
+            row.session.session_id === launch.gwt_session_id && row.session.child_started_at > 0
+              && (process.platform === "win32"
+                ? Number.isSafeInteger(launch.pty_child_pid) && launch.pty_child_pid! > 0
+                  && row.session.child_pid === launch.pty_child_pid
+                  && row.session.child_started_at === launch.pty_child_started_at
+                : row.session.child_pid === launch.pid)));
       }, { timeout: 45_000, message: "previous children have a fresh exact census before the next manual launch" }).toBe(true);
     };
     const receipts = async () => (await readFile(join(fixture.home, "works-hook-receipts.jsonl"), "utf8")
