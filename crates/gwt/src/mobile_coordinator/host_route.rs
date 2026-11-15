@@ -188,6 +188,16 @@ pub(super) struct HostState {
     pub(super) retired: Arc<watch::Sender<()>>,
     pub(super) events: HostEvents,
     pub(super) connections: BrowserConnections,
+    /// The configured per-device message rate of each claimed browser.
+    pub(super) signal_rate: SignalRate,
+}
+
+/// A token-bucket policy: `burst` messages at once, refilled at
+/// `per_second`. Both are positive (validated with the config).
+#[derive(Clone, Copy, Debug)]
+pub(super) struct SignalRate {
+    pub(super) per_second: u16,
+    pub(super) burst: u16,
 }
 
 #[derive(Deserialize)]
