@@ -22,6 +22,40 @@ use std::path::PathBuf;
 const TEST_WORKFLOW: &str = ".github/workflows/test.yml";
 
 #[test]
+fn linux_build_omits_line_tables_only_after_cache_restoration() {
+    let workflow: serde_yaml::Value =
+        serde_yaml::from_str(&read(".github/workflows/build.yml")).unwrap();
+    assert!(workflow["env"]["CARGO_PROFILE_DEV_DEBUG"].is_null());
+    let jobs = workflow["jobs"].as_mapping().unwrap();
+    for (name, job) in jobs {
+        assert!(job["env"]["CARGO_PROFILE_DEV_DEBUG"].is_null());
+        let Some(steps) = job["steps"].as_sequence() else {
+            continue;
+        };
+        for step in steps {
+            if name == "build" && step["name"] == "Build workspace targets" {
+                assert_eq!(step["env"]["CARGO_PROFILE_DEV_DEBUG"], "0");
+                assert_eq!(step["run"], "cargo build -p gwt-core -p gwt --all-features");
+                assert!(step["if"].is_null() && step["continue-on-error"].is_null());
+            } else {
+                assert!(step["env"]["CARGO_PROFILE_DEV_DEBUG"].is_null());
+            }
+        }
+    }
+    let steps = workflow["jobs"]["build"]["steps"].as_sequence().unwrap();
+    let cache = steps
+        .iter()
+        .position(|step| step["uses"] == "Swatinem/rust-cache@v2")
+        .unwrap();
+    let build = steps
+        .iter()
+        .position(|step| step["name"] == "Build workspace targets")
+        .unwrap();
+    assert!(cache < build);
+    assert_eq!(steps[cache]["with"]["shared-key"], "linux-workspace");
+}
+
+#[test]
 fn macos_socket_targets_compile_before_the_execution_budget() {
     let workflow: serde_yaml::Value =
         serde_yaml::from_str(&read(".github/workflows/build.yml")).unwrap();
