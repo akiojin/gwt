@@ -78,14 +78,24 @@ class ThroughputTests(unittest.TestCase):
     def test_required_skip_missing_and_unfinished_are_not_all_success(self):
         data = required_sample()
         data["pull_requests"][0]["check_runs"][1].update(
-            conclusion="skipped", completed_at="2026-10-07T21:19:59Z")
+            conclusion="skipped", started_at="2026-10-07T21:21:01Z")
         data["pull_requests"][1]["check_runs"] = []
         report = throughput.summarize(data)["required_checks"]
         self.assertEqual(report["all_success_prs"], [])
         self.assertEqual(report["complete_prs"], [1])
         self.assertEqual(report["duration_minutes"]["Gate"]["count"], 0)
         self.assertEqual(report["prs"][1]["unavailable"], {"Gate": "missing"})
-        self.assertEqual(report["completion_minutes"]["count"], 0)
+        self.assertEqual(report["completion_minutes"],
+                         {"count": 1, "p50": 21, "p90": 21, "max": 21})
+        skipped = data["pull_requests"][0]["check_runs"][1]
+        skipped["started_at"] = None
+        self.assertEqual(throughput.summarize(data)["required_checks"]["completion_minutes"],
+                         report["completion_minutes"])
+        # Executed checks still need valid timing; do not invent elapsed time.
+        skipped["conclusion"] = "success"
+        self.assertEqual(throughput.summarize(data)["required_checks"]["completion_minutes"]["count"], 0)
+        skipped["started_at"] = "2026-10-07T21:21:01Z"
+        self.assertEqual(throughput.summarize(data)["required_checks"]["completion_minutes"]["count"], 0)
         data["pull_requests"][0]["check_runs"][1].update(
             conclusion=None, status="in_progress", completed_at=None)
         self.assertEqual(throughput.summarize(data)["required_checks"]["complete_prs"], [])
