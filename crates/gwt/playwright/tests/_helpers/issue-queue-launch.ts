@@ -10,8 +10,11 @@ import { startExactRelaunchFixture, writeFixtureNodeCommand, type ExactRelaunchS
 
 /** Real monitor, claims, materialization and PTY; GitHub and provider are local recorders. */
 export async function startIssueQueueLaunchFixture(info: TestInfo, options: {
+  page?: ExactRelaunchSetup["page"];
   issueNumber?: number;
   additionalIssueNumbers?: number[];
+  initialBodies?: Record<number, string>;
+  initialComments?: Record<number, { body: string; updated_at: string }[]>;
   monitorPreferences?: Record<string, unknown>;
   targetIssueNumber?: 44; switching?: boolean; positive?: boolean; terminalConvergence?: boolean; autonomousMode?: boolean;
   prepare?: ExactRelaunchSetup["prepare"];
@@ -30,8 +33,18 @@ export async function startIssueQueueLaunchFixture(info: TestInfo, options: {
     title: "Next planned switch fixture", url: `https://github.com/fixture/queue/issues/${options.targetIssueNumber}` }] : []),
     ...(options.additionalIssueNumbers ?? []).map(number => ({ ...issue, number,
       title: `Queue refill fixture ${number}`, url: `https://github.com/fixture/queue/issues/${number}` }))];
+  for (const [number, body] of Object.entries(options.initialBodies ?? {})) {
+    const selected = issues.find(value => value.number === Number(number));
+    if (!selected) throw new Error(`Initial body references unknown Issue ${number}`);
+    selected.body = body;
+  }
   const issueComments = new Map(issues.map(value => [value.number, value.number === issue.number ? comments : [] as typeof comments]));
   let nextCommentId = 1;
+  for (const [number, initial] of Object.entries(options.initialComments ?? {})) {
+    const selected = issueComments.get(Number(number));
+    if (!selected) throw new Error(`Initial comments reference unknown Issue ${number}`);
+    selected.push(...initial.map(comment => ({ ...comment, id: nextCommentId++ })));
+  }
   const restIssue = (value: typeof issue) => ({ ...value, state: value.state.toLowerCase(), html_url: value.url,
     updated_at: value.updatedAt, user: { login: "fixture" } });
   const server = createServer(async (request, response) => {
@@ -164,6 +177,7 @@ export async function startIssueQueueLaunchFixture(info: TestInfo, options: {
   let fixture;
   try {
     fixture = await startExactRelaunchFixture(info, {
+      page: options.page,
       terminalConvergence: options.terminalConvergence,
       freshNativeIds: !!options.switching || !!options.terminalConvergence,
       switching: options.switching ? { sourceIssueNumber: issue.number,
@@ -317,7 +331,7 @@ console.error('Unimplemented fixture gh: '+text);process.exit(64);
   }
   function scheduleOperation(
     operation: "issue.monitor.schedule.read" | "issue.monitor.schedule.reassign" | "issue.monitor.requeue" | "issue.monitor.launch_now"
-      | "issue.monitor.config.set" | "issue.monitor.status",
+      | "issue.monitor.config.set" | "issue.monitor.status" | "issue.monitor.profiles.set" | "issue.monitor.stop",
     params: Record<string, unknown> = {},
     projectRoot = active.project,
   ) {
@@ -382,6 +396,7 @@ console.error('Unimplemented fixture gh: '+text);process.exit(64);
       return active.start();
     },
     issueNumber: issue.number, targetIssueNumber: options.targetIssueNumber, requests, comments, hookAudits, restoreSummary,
+    commentsForIssue: (number: number) => (issueComments.get(number) ?? []).map(comment => ({ ...comment })),
     actorEvents: async () => (await readFile(join(active.home, "switch-actor.jsonl"), "utf8").catch(() => ""))
       .split("\n").filter(Boolean).map(line => JSON.parse(line)),
     processAlive: (pid: number) => {
@@ -412,6 +427,20 @@ console.error('Unimplemented fixture gh: '+text);process.exit(64);
     executionStatus: (cwd: string) => readOperation("execution.status", cwd),
     terminalExecutionStatus: (cwd: string) => readOperation("execution.status", cwd, true),
     startupReport: () => readOperation("perf.startup", active.project).startup,
+    async restartHost() {
+      const current = daemon;
+      if (!current?.pid || current.exitCode !== null || current.signalCode !== null)
+        throw new Error("Fixture Host restart requires its live owned daemon");
+      await active.stop(async () => {
+        await stopDaemon();
+        const exited = current.exitCode !== null || current.signalCode !== null;
+        await info.attach("fixture-owned-host-restart", {
+          body: JSON.stringify({ pid: current.pid, exited }), contentType: "application/json",
+        });
+        if (!exited) throw new Error(`Owned fixture daemon ${current.pid} remained before restart`);
+      });
+      return active.restart();
+    },
     async stop() {
       try { await active.stop(); }
       finally {

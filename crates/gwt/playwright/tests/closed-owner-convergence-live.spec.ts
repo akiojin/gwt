@@ -29,6 +29,7 @@ test.describe("Issue #3590 closed owner terminal convergence", () => {
 
   test("closes only the idle completed owner with a current bookkeeping warning", async ({ page }, info) => {
     const fixture = await startIssueQueueLaunchFixture(info, {
+      page,
       targetIssueNumber: 44, terminalConvergence: true,
     });
     const errors: string[] = [];

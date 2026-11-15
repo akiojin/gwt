@@ -4,6 +4,9 @@
 
 use std::{fs, path::PathBuf};
 
+#[path = "support/installed_provider_fixture.rs"]
+mod installed_provider_fixture;
+
 #[path = "windows_shell_observer.rs"]
 mod shell_observer;
 

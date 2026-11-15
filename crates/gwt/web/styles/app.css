@@ -3311,6 +3311,24 @@ body {
   background: color-mix(in oklab, var(--color-state-active) 12%, transparent);
 }
 
+/* SPEC #6476 T-005pf: on a phone the Profile list squeezed the editor to about
+   100px, the five-column environment grid needed 440px, and the controls were
+   24-36px. Stack the list above the editor, lay each variable out as a
+   two-column card, and make the controls 44px tap targets; the surface
+   scrolls vertically while the variable grid keeps its own scroll. */
+@media (max-width: 600px) {
+  .profile-root { overflow-y: auto; }
+  .profile-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto; flex: 0 0 auto; }
+  .profile-list-pane { max-height: 30vh; border-right: 0; border-bottom: 1px solid var(--color-border); }
+  .profile-editor-pane { overflow: visible; }
+  .profile-env-grid { max-height: 60vh; }
+  .profile-env-grid-head { display: none; }
+  .profile-env-grid-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .profile-env-result { grid-column: 1 / -1; }
+  .profile-root :is(button, input, select) { min-height: 44px; }
+  .profile-root .icon-button { min-width: 44px; }
+}
+
 .board-chat-shell {
   flex: 1;
   min-height: 0;
@@ -4087,6 +4105,21 @@ body {
 }
 .notification-center__dismiss:hover {
   color: var(--color-text-strong);
+}
+/* SPEC #6476 T-005nc: the drawer controls kept their 20-28px desktop sizes on
+   a phone. The triage row grows to the 44px dismiss; Details stays text-wide. */
+@media (max-width: 600px) {
+  .op-drawer__close,
+  .notification-center__clear,
+  .notification-center__dismiss {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  /* Keep the list-item display so the disclosure marker stays visible. */
+  .notification-center__details > summary {
+    line-height: 44px;
+  }
 }
 
 .attachment-progress {
@@ -5122,6 +5155,25 @@ body {
   justify-content: flex-end;
   gap: var(--space-3);
   margin-top: 10px;
+}
+
+/* SPEC #6476 T-005lw/T-005md: every modal kept its 19-38px desktop control
+   sizes on a phone. Checkboxes and toggles sit inside a label, so the label is
+   the target; 24px icon buttons also need the width. */
+@media (max-width: 600px) {
+  .modal-shell :is(button, select, textarea, [role="button"], input:not([type="checkbox"])),
+  .modal-shell label:has(input[type="checkbox"]) {
+    min-height: 44px;
+  }
+
+  /* A summary stays a list-item (keeps its marker), so center it by line. */
+  .modal-shell summary {
+    line-height: 44px;
+  }
+
+  .modal-shell :is(.icon-button, .text-button) {
+    min-width: 44px;
+  }
 }
 
 .text-button {

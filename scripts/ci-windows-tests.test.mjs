@@ -5,6 +5,26 @@ import path from "node:path";
 import test from "node:test";
 import { build, run, runCore, targets } from "./ci-windows-tests.mjs";
 
+test("exited fixture PIDs skip inspection without hiding live or uncertain processes", async (t) => {
+  const { inspectLiveFixtureProcess } = await import("../crates/gwt/playwright/tests/_helpers/process-inspection.mjs");
+  let code;
+  let queries = 0;
+  t.mock.method(process, "kill", (pid, signal) => {
+    assert.equal(pid, 42);
+    assert.equal(signal, 0);
+    if (code) throw Object.assign(new Error("process probe"), { code });
+    return true;
+  });
+  const inspect = () => { queries++; return "fixture identity"; };
+  code = "ESRCH";
+  assert.equal(inspectLiveFixtureProcess(42, inspect), "");
+  assert.equal(queries, 0);
+  for (code of [undefined, "EPERM"]) assert.equal(inspectLiveFixtureProcess(42, inspect), "fixture identity");
+  code = "EIO";
+  assert.throws(() => inspectLiveFixtureProcess(42, inspect), /process probe/);
+  assert.equal(queries, 2);
+});
+
 test("required Windows CI builds and runs the gate lifecycle regressions", () => {
   assert.ok(targets("default").some(([pkg, kind, name]) =>
     pkg === "gwt-terminal" && kind === "test" && name === "pty_start_gate_test"));
@@ -73,7 +93,7 @@ test("library and runtime builds partition every default harness and retain all 
 
 test("each feature set builds once and runs the exact target with Cargo's cwd and failure status", (t) => {
   const root = fixture(t);
-  for (const group of ["default", "default-lib", "default-runtime", "warm"]) {
+  for (const group of ["default", "default-lib", "default-runtime", "warm", "socket"]) {
     let builds = 0;
     const messages = artifacts(root, group);
     assert.equal(build(group, root, (command, args) => {
@@ -83,6 +103,18 @@ test("each feature set builds once and runs the exact target with Cargo's cwd an
       assert.ok(args.includes("--no-run"));
       assert.ok(args.includes("--message-format=json"));
       assert.equal(args.includes("--all-features"), group === "warm");
+      if (group === "socket") {
+        assert.deepEqual(targets(group), [
+          ["gwt-core", "lib", "gwt_core"],
+          ["gwt-core", "test", "test_hygiene_test"],
+          ["gwt-core", "test", "daemon_socket_path_limit"],
+          ["gwt", "lib", "gwt"],
+          ["gwt", "test", "runtime_tests"],
+        ]);
+        assert.deepEqual(args, ["test", "-p", "gwt-core", "-p", "gwt", "--lib",
+          "--test", "test_hygiene_test", "--test", "daemon_socket_path_limit",
+          "--test", "runtime_tests", "--no-run", "--message-format=json"]);
+      }
       // A normal binary and a different package's same-name harness must not win.
       const decoys = [
         { ...messages[0], profile: { test: false }, executable: "wrong.exe" },
@@ -96,7 +128,7 @@ test("each feature set builds once and runs the exact target with Cargo's cwd an
       (command, args, options) => {
         assert.equal(command, messages[0].executable);
         assert.deepEqual(args, ["the_filter", "--exact", "--test-threads=1"]);
-        assert.equal(options.cwd, path.join(root, "crates", "gwt"));
+        assert.equal(options.cwd, path.join(root, "crates", pkg));
         const pathKey = Object.keys(options.env).find((key) => key.toLowerCase() === "path");
         assert.ok(options.env[pathKey].split(path.delimiter).includes(path.dirname(command)));
         return { status: 37 };

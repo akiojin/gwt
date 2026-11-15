@@ -34,7 +34,68 @@ def sample():
                     (2, "2026-10-08T00:00:00Z", "2026-10-07T21:40:00Z", ["b", "c"]))]}
 
 
+def required_sample():
+    data = sample()
+    data["required_status_checks"] = {"checks": [{"context": "Gate", "app_id": 7}]}
+    for pr in data["pull_requests"]:
+        pr["head_sha"] = "final"
+        pr["check_runs"] = [
+            {"id": 1, "name": "Prerequisite", "head_sha": "final", "app": {"id": 7},
+             "check_suite": {"id": 10}, "status": "completed", "conclusion": "success",
+             "started_at": "2026-10-07T21:00:00Z", "completed_at": "2026-10-07T21:20:00Z"},
+            {"id": 2, "name": "Gate", "head_sha": "final", "app": {"id": 7},
+             "check_suite": {"id": 10}, "status": "completed", "conclusion": "success",
+             "started_at": "2026-10-07T21:20:00Z", "completed_at": "2026-10-07T21:21:00Z"}]
+    return data
+
+
 class ThroughputTests(unittest.TestCase):
+    def test_required_completion_includes_prerequisites_and_replays_without_api(self):
+        data = required_sample()
+        with patch.object(throughput, "api", side_effect=AssertionError("offline replay")):
+            report = throughput.summarize(data)["required_checks"]
+        self.assertEqual(report["complete_prs"], [1, 2])
+        self.assertEqual(report["all_success_prs"], [1, 2])
+        self.assertEqual(report["completion_minutes"]["p50"], 21)
+        self.assertEqual(report["duration_minutes"]["Gate"]["p90"], 1)
+        self.assertEqual(report["prs"][0]["check_ids"], [2])
+
+    def test_required_checks_match_head_app_and_premerge_latest_result(self):
+        data = required_sample()
+        checks = data["pull_requests"][0]["check_runs"]
+        for changes in [
+                {"id": 3, "conclusion": "failure"},
+                {"id": 4, "app": {"id": 8}},
+                {"id": 5, "head_sha": "older"},
+                {"id": 6, "started_at": "2026-10-08T01:00:00Z",
+                 "completed_at": "2026-10-08T01:01:00Z"}]:
+            checks.append(dict(checks[1], **changes))
+        report = throughput.summarize(data)["required_checks"]
+        self.assertEqual(report["complete_prs"], [2])
+        self.assertEqual(report["prs"][0]["check_ids"], [3])
+        self.assertEqual(report["prs"][0]["unavailable"], {"Gate": "failure"})
+
+    def test_required_skip_missing_and_unfinished_are_not_all_success(self):
+        data = required_sample()
+        data["pull_requests"][0]["check_runs"][1].update(
+            conclusion="skipped", completed_at="2026-10-07T21:19:59Z")
+        data["pull_requests"][1]["check_runs"] = []
+        report = throughput.summarize(data)["required_checks"]
+        self.assertEqual(report["all_success_prs"], [])
+        self.assertEqual(report["complete_prs"], [1])
+        self.assertEqual(report["duration_minutes"]["Gate"]["count"], 0)
+        self.assertEqual(report["prs"][1]["unavailable"], {"Gate": "missing"})
+        self.assertEqual(report["completion_minutes"]["count"], 0)
+        data["pull_requests"][0]["check_runs"][1].update(
+            conclusion=None, status="in_progress", completed_at=None)
+        self.assertEqual(throughput.summarize(data)["required_checks"]["complete_prs"], [])
+
+    def test_legacy_snapshots_leave_required_measurements_unavailable(self):
+        report = throughput.summarize(sample())["required_checks"]
+        self.assertEqual(report["completion_minutes"]["count"], 0)
+        self.assertEqual(report["all_success_prs"], [])
+        self.assertEqual(report["prs"][0]["unavailable"], {"policy": "not collected"})
+
     def test_job_steps_attribute_cache_compile_test_and_artifact_time(self):
         data = sample()
         data["pull_requests"][0]["runs"][0]["jobs"][0]["steps"] = [

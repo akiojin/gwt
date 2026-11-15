@@ -29,29 +29,23 @@ pub(super) fn drive_pending(
     sessions: &Path,
     entries: &[Arc<PtyWriterEntry>],
     writers: &Arc<RwLock<HashMap<String, Arc<PtyWriterEntry>>>>,
+    target_waited: &mut bool,
     retire: impl Fn(AgentSwitchSourceExited),
 ) -> Result<gwt::issue_monitor::AgentSwitchSnapshot, String> {
     let path = gwt::issue_monitor_prefs_path_for_repo_path(root);
     if let Some(_guard) = SwitchTickGuard::claim(root) {
         recover_previous_host_intents(root).map_err(|error| error.to_string())?;
         let prefs = gwt::load_issue_monitor_prefs(&path).map_err(|error| error.to_string())?;
-        let host = gwt::process::current_hostname();
-        let host_pid = std::process::id();
-        let host_started_at = gwt::process::host_process_start_time(host_pid);
-        for intent in prefs.agent_switch_intents.values().filter(|intent| {
-            intent.source.assignment.host_id == host
-                && intent.runtime_stop.as_ref().is_some_and(|proof| {
-                    proof.host_pid == host_pid && Some(proof.host_started_at) == host_started_at
-                })
-                && !matches!(
-                    intent.stage,
-                    AgentSwitchStage::Completed
-                        | AgentSwitchStage::Cancelled
-                        | AgentSwitchStage::Failed
-                        | AgentSwitchStage::Unknown
-                )
-        }) {
-            if let Err(error) = drive_switch(root, sessions, intent, entries, writers, &retire) {
+        for intent in local_pending_switches(&prefs) {
+            if let Err(error) = drive_switch(
+                root,
+                sessions,
+                intent,
+                entries,
+                writers,
+                target_waited,
+                &retire,
+            ) {
                 gwt::try_mutate_issue_monitor_prefs(&path, |prefs| {
                     if let Some(current) =
                         prefs.agent_switch_intents.get(&intent.request.operation_id)
@@ -106,6 +100,33 @@ pub(super) fn drive_pending(
             prefs.agent_switch_snapshot(gwt_core::paths::project_scope_hash(root).as_str())
         })
         .map_err(|error| error.to_string())
+}
+
+pub(super) fn has_pending_local_switch(root: &Path) -> io::Result<bool> {
+    let prefs = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(root))?;
+    let pending = local_pending_switches(&prefs).next().is_some();
+    Ok(pending)
+}
+
+fn local_pending_switches(
+    prefs: &gwt::IssueMonitorPrefs,
+) -> impl Iterator<Item = &AgentSwitchIntent> {
+    let host = gwt::process::current_hostname();
+    let host_pid = std::process::id();
+    let host_started_at = gwt::process::host_process_start_time(host_pid);
+    prefs.agent_switch_intents.values().filter(move |intent| {
+        intent.source.assignment.host_id == host
+            && intent.runtime_stop.as_ref().is_some_and(|proof| {
+                proof.host_pid == host_pid && Some(proof.host_started_at) == host_started_at
+            })
+            && !matches!(
+                intent.stage,
+                AgentSwitchStage::Completed
+                    | AgentSwitchStage::Cancelled
+                    | AgentSwitchStage::Failed
+                    | AgentSwitchStage::Unknown
+            )
+    })
 }
 
 fn switch_io(error: impl ToString) -> io::Error {
@@ -399,6 +420,7 @@ fn drive_switch(
     intent: &AgentSwitchIntent,
     entries: &[Arc<PtyWriterEntry>],
     writers: &Arc<RwLock<HashMap<String, Arc<PtyWriterEntry>>>>,
+    target_waited: &mut bool,
     retire: impl Fn(AgentSwitchSourceExited),
 ) -> io::Result<bool> {
     use AgentSwitchStage::*;
@@ -469,7 +491,8 @@ fn drive_switch(
             set_switch_reason(root, intent, &checkpoint_activity_reason(&activity))?;
             return Ok(false);
         }
-        let (target_planning, target_dependencies) = prepare_switch_target(root, intent)?;
+        let (target_planning, target_dependencies) =
+            prepare_switch_target(root, intent).inspect_err(|_| *target_waited = true)?;
         let reservation = match Arc::clone(&entry.handle).reserve_input_transaction() {
             Ok(reservation) => reservation,
             Err(_) => {
@@ -530,7 +553,14 @@ fn drive_switch(
                                 if !exact_writer_is_current(writers, intent, entry) {
                                     return Err("Source writer changed after checkpoint body delivery".into());
                                 }
-                                return reservation.write_input_authorized(bytes, |commit| commit(&mut || {}))
+                                return reservation.write_input_authorized(bytes, |commit| {
+                                    super::agent_dispatch::with_current_monitor_prompt_input(entry, Some(crate::monitor_duplicate_runtime::HeldMonitorPromptSession::Bound(&proof.execution_identity)), || {
+                                        if !exact_writer_is_current(writers, intent, entry) {
+                                            return Err(gwt_terminal::TerminalError::PtyIoError { details: "Source writer changed before checkpoint submit".into() });
+                                        }
+                                        commit(&mut || {})
+                                    })
+                                })
                                     .map(|()| submitted.set(true))
                                     .map_err(|error| error.to_string());
                             }
@@ -541,7 +571,12 @@ fn drive_switch(
                                     return Err(switch_io("Switch cancelled or source changed before checkpoint delivery"));
                                 }
                                 reservation.write_input_authorized(bytes, |commit| {
-                                    reservation.with_unchanged_ordinary_input(revision, || commit(&mut || {}))
+                                    super::agent_dispatch::with_current_monitor_prompt_input(entry, Some(crate::monitor_duplicate_runtime::HeldMonitorPromptSession::Bound(&proof.execution_identity)), || {
+                                        if !exact_writer_is_current(writers, intent, entry) {
+                                            return Err(gwt_terminal::TerminalError::PtyIoError { details: "Source writer changed before checkpoint body".into() });
+                                        }
+                                        reservation.with_unchanged_ordinary_input(revision, || commit(&mut || {}))
+                                    })
                                 }).map_err(switch_io)?;
                                 body_committed = true;
                                 Ok(())
@@ -709,6 +744,9 @@ fn drive_switch(
                     .and_then(|member| member.assignment.as_ref())
                     .is_some_and(|assignment| {
                         assignment.issue_number == Some(intent.request.target_issue_number)
+                            && assignment.project_key.as_deref().is_none_or(|key| {
+                                prefs.agent_registry_project_key.as_deref() == Some(key)
+                            })
                             && assignment.session_id.is_some()
                             && assignment.session_id != intent.source.assignment.session_id
                     })
@@ -742,6 +780,137 @@ fn drive_switch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launching_next_requires_the_new_assignment_to_belong_to_this_project() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let a_root = temp.path().join("project-a");
+        let b_root = temp.path().join("project-b");
+        std::fs::create_dir_all(&a_root).unwrap();
+        std::fs::create_dir_all(&b_root).unwrap();
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let roster = gwt::agent_names::read_project_roster(&a_root, &sessions).unwrap();
+        gwt::agent_names::read_project_roster(&b_root, &sessions).unwrap();
+        let member_id = roster.members[0].agent_member_id.clone();
+        let a_key = gwt_core::paths::project_scope_hash(&a_root).to_string();
+        let b_key = gwt_core::paths::project_scope_hash(&b_root).to_string();
+        let a_path = gwt::issue_monitor_prefs_path_for_repo_path(&a_root);
+        let b_path = gwt::issue_monitor_prefs_path_for_repo_path(&b_root);
+        let operation = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        let host = gwt::process::current_hostname();
+        let mut assignment: gwt::agent_names::AgentMemberAssignment =
+            serde_json::from_value(serde_json::json!({
+            "reservation_id":"next-reservation", "session_id":"new-session",
+            "project_key":b_key, "issue_number":42, "spec_number":null,
+            "delivery_id":"next-delivery", "host_id":host,
+            "host_pid":std::process::id(), "host_started_at":1
+            }))
+            .unwrap();
+        gwt::try_mutate_issue_monitor_prefs(&b_path, |prefs| {
+            prefs.agent_roster.as_mut().unwrap().members[0].assignment = Some(assignment.clone());
+            Ok(())
+        })
+        .unwrap();
+        let intent: AgentSwitchIntent = serde_json::from_value(serde_json::json!({
+            "request":{"operation_id":operation,"member_id":member_id,
+                "expected_roster_revision":roster.revision,"target_issue_number":42},
+            "source":{"assignment":{"reservation_id":"old-reservation",
+                "session_id":"old-session", "project_key":a_key, "issue_number":41,
+                "spec_number":null,"delivery_id":"old-delivery","host_id":host,
+                "host_pid":std::process::id(),"host_started_at":1},
+                "window_id":"old-window","claim_id":"old-claim",
+                "confirmation":{"window_id":"old-window","claim_id":"old-claim",
+                    "delivery_id":"old-delivery","confirmed_at":"2026-10-31T00:00:00Z"}},
+            "stage":"launching_next", "runtime_exit_confirmed":true,
+            "checkpoint":{"verified_head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "work_id":"saved-work","board_entry_id":"handoff"}
+        }))
+        .unwrap();
+        gwt::try_mutate_issue_monitor_prefs(&a_path, |prefs| {
+            prefs
+                .agent_switch_intents
+                .insert(operation.into(), intent.clone());
+            prefs.launch_confirmations.insert(
+                42,
+                serde_json::from_value(serde_json::json!({
+                    "window_id":"next-window","claim_id":"next-claim",
+                    "delivery_id":"next-delivery","confirmed_at":"2026-10-31T00:00:00Z"
+                }))
+                .unwrap(),
+            );
+            prefs.launch_bindings.insert("next-window".into(), 42);
+            prefs.launched_issues.push(gwt::IssueMonitorLaunchedIssue {
+                issue_number: 42,
+                window_id: "next-window".into(),
+            });
+            Ok(())
+        })
+        .unwrap();
+        let writers = Arc::new(RwLock::new(HashMap::new()));
+        drive_switch(
+            &a_root,
+            &sessions,
+            &intent,
+            &[],
+            &writers,
+            &mut false,
+            |_| panic!("LaunchingNext does not retire a runtime"),
+        )
+        .unwrap();
+        let pending = gwt::load_issue_monitor_prefs(&a_path).unwrap();
+        assert_eq!(
+            pending.agent_switch_intents[operation].stage,
+            AgentSwitchStage::LaunchingNext,
+            "a same-number assignment in project B cannot complete project A's switch"
+        );
+        assert!(pending.agent_roster.unwrap().members[0]
+            .assignment
+            .is_none());
+        assert_eq!(
+            gwt::load_issue_monitor_prefs(&b_path)
+                .unwrap()
+                .agent_roster
+                .unwrap()
+                .members[0]
+                .assignment,
+            Some(assignment.clone()),
+            "project A's switch leaves project B's assignment untouched"
+        );
+        // Assign the same Session/number in project A's own projection. Its
+        // already-confirmed launch can now legitimately complete the switch.
+        gwt::try_mutate_issue_monitor_prefs(&b_path, |prefs| {
+            prefs.agent_roster.as_mut().unwrap().members[0].assignment = None;
+            Ok(())
+        })
+        .unwrap();
+        assignment.project_key = Some(a_key.clone());
+        gwt::try_mutate_issue_monitor_prefs(&a_path, |prefs| {
+            prefs.agent_roster.as_mut().unwrap().members[0].assignment = Some(assignment.clone());
+            Ok(())
+        })
+        .unwrap();
+        drive_switch(
+            &a_root,
+            &sessions,
+            &intent,
+            &[],
+            &writers,
+            &mut false,
+            |_| panic!("LaunchingNext does not retire a runtime"),
+        )
+        .unwrap();
+        assert_eq!(
+            gwt::load_issue_monitor_prefs(&a_path)
+                .unwrap()
+                .agent_switch_intents[operation]
+                .stage,
+            AgentSwitchStage::Completed
+        );
+    }
 
     #[test]
     fn an_exact_live_host_is_not_an_abandoned_switch_request() {

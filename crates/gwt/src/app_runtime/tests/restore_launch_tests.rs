@@ -148,8 +148,20 @@ fn automatic_restore_preserves_names_even_when_saved_initials_collide() {
         session.branch = format!("work/{id}");
         session.project_state_root = Some(repo.clone());
         session.save(&runtime.sessions_dir).unwrap();
+        gwt::agent_names::adopt_project_member_session(&repo, &runtime.sessions_dir, &mut session)
+            .expect("register the saved identity before restoring its runtime");
     }
 
+    let before = gwt::agent_names::read_project_roster(&repo, &runtime.sessions_dir).unwrap();
+    assert_eq!(before.enabled_count(), 1);
+    assert_eq!(before.members.len(), 2);
+    // Physical resume capacity is independent of the registered roster size.
+    gwt::machine_agent_settings::set(
+        Some(2),
+        gwt::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
+        "2026-11-10T00:00:00Z",
+    )
+    .expect("admit both saved Sessions without enlarging their member roster");
     runtime.queue_startup_auto_resume_sessions(&HashSet::new());
     let events = drain_startup_auto_resume(&mut runtime);
 
@@ -2247,4 +2259,40 @@ fn startup_auto_resume_drain_evaluates_admission_off_the_gui_thread() {
         "a policy-deferred Session is requeued for the next round trip"
     );
     assert!(runtime.pending_auto_resume_sources.is_empty());
+    assert!(
+        tasks.lock().unwrap().is_empty(),
+        "no retry without another ready event"
+    );
+
+    runtime.startup_auto_resume_ready_events();
+    drain_queued_blocking_tasks(&tasks);
+    let stale = take_startup_auto_resume_admission_prepared(&runtime).unwrap();
+    assert!(
+        !stale.sessions[0].1,
+        "the worker ran before a view was accepted"
+    );
+    runtime.seed_fixture_project_views();
+    runtime.startup_auto_resume_ready_events();
+    runtime.startup_auto_resume_ready_events();
+    assert!(
+        tasks.lock().unwrap().is_empty(),
+        "ready events coalesce while admission is in flight"
+    );
+    runtime.startup_auto_resume_admission_prepared_events(stale);
+    assert_eq!(
+        tasks.lock().unwrap().len(),
+        1,
+        "the newer ready event must recheck the deferred Session"
+    );
+    assert_eq!(
+        super::super::startup::startup_admission_evaluations(),
+        before + 2,
+        "the recheck stays off the GUI thread"
+    );
+    drain_queued_blocking_tasks(&tasks);
+    let current = take_startup_auto_resume_admission_prepared(&runtime).unwrap();
+    assert!(
+        current.sessions[0].1,
+        "the next worker sees the accepted view"
+    );
 }

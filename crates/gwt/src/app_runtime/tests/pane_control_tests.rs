@@ -140,6 +140,12 @@ pub(super) fn control_init_repo(project: &Path) {
 
 pub(super) fn control_seed_foreign_roster(project: &Path) {
     control_init_repo(project);
+    if gwt::agent_registry::is_active().unwrap() {
+        // Another project's live owner already established the shared people.
+        // Enroll this source without replacing their identities or names.
+        gwt::agent_registry::ensure_active_for_project(project).unwrap();
+        return;
+    }
     seed_owner_fixture_roster(project, 8);
     gwt::mutate_issue_monitor_prefs(
         &gwt::issue_monitor_prefs_path_for_repo_path(project),
@@ -160,6 +166,7 @@ pub(super) fn control_seed_foreign_roster(project: &Path) {
         },
     )
     .unwrap();
+    configure_owner_fixture_tools(project, &["pane-contract-fixture"]);
 }
 
 pub(super) fn control_owner_agent(
@@ -177,6 +184,7 @@ pub(super) fn control_owner_agent(
         .is_none()
     {
         seed_owner_fixture_roster(project, 8);
+        configure_owner_fixture_tools(project, &["pane-contract-fixture"]);
     }
     let owner = Arc::new(
         owner_fixture_block_on(
@@ -1223,11 +1231,25 @@ fn fleet_pane_close_protects_authority_acquired_after_inventory() {
         gwt::cli::execution_state::ExecutionSettlement::Completed,
     )
     .unwrap();
-    let closed = control_request_settled(&owner, &pm, control_fleet_request(&target));
-    assert!(closed
-        .events
-        .iter()
-        .any(|event| event["kind"] == "fleet_pane_close_result" && event["ok"] == true));
+    let expected_claims =
+        gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&project))
+            .unwrap()
+            .launched_issues;
+    let closed = control_fleet_request_after_prefs_contention(
+        &owner,
+        &pm,
+        &target,
+        control_fleet_request(&target),
+        &expected_claims,
+    );
+    assert!(
+        closed
+            .events
+            .iter()
+            .any(|event| event["kind"] == "fleet_pane_close_result" && event["ok"] == true),
+        "the exact target must close after its producing authority settles: {:?}",
+        closed.events
+    );
     assert!(target.pty.try_wait().unwrap().is_some());
     control_close(&owner, &pm);
 }
@@ -1249,20 +1271,25 @@ fn fleet_pane_close_protects_claim_acquired_after_inventory() {
         .unwrap()
         .iter()
         .any(|row| row["window_id"] == target.id));
-    gwt::mutate_issue_monitor_prefs(
-        &gwt::issue_monitor_prefs_path_for_repo_path(&project),
-        |prefs| {
-            prefs.launched_issues.push(gwt::IssueMonitorLaunchedIssue {
-                issue_number: 4179,
-                window_id: target.id.clone(),
-            });
-        },
-    )
+    // Retain the exact action observed before the claim; never refresh inventory.
+    let observed_request = control_fleet_request(&target);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&project);
+    let (claimed, ()) = gwt::mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+        prefs.launched_issues.push(gwt::IssueMonitorLaunchedIssue {
+            issue_number: 4179,
+            window_id: target.id.clone(),
+        });
+    })
     .unwrap();
-    assert_fleet_refused(
-        &control_request_settled(&owner, &pm, control_fleet_request(&target)),
-        "claim holder",
+    let expected_claims = claimed.launched_issues;
+    let refused = control_fleet_request_after_prefs_contention(
+        &owner,
+        &pm,
+        &target,
+        observed_request,
+        &expected_claims,
     );
+    assert_fleet_refused(&refused, "claim holder");
     assert!(owner_fixture_block_on(owner.probe(&target.id, target.incarnation)).is_ok());
     control_close(&owner, &target);
     control_close(&owner, &pm);
@@ -1290,11 +1317,25 @@ fn fleet_pane_close_refuses_busy_lifecycle_fence_and_recovers() {
         },
     )
     .unwrap();
-    let closed = control_request_settled(&owner, &pm, control_fleet_request(&target));
-    assert!(closed
-        .events
-        .iter()
-        .any(|event| event["kind"] == "fleet_pane_close_result" && event["ok"] == true));
+    let expected_claims =
+        gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&project))
+            .unwrap()
+            .launched_issues;
+    let closed = control_fleet_request_after_prefs_contention(
+        &owner,
+        &pm,
+        &target,
+        control_fleet_request(&target),
+        &expected_claims,
+    );
+    assert!(
+        closed
+            .events
+            .iter()
+            .any(|event| event["kind"] == "fleet_pane_close_result" && event["ok"] == true),
+        "the exact target must close after its lifecycle fence releases: {:?}",
+        closed.events
+    );
     assert!(target.pty.try_wait().unwrap().is_some());
     control_close(&owner, &pm);
 }
@@ -1529,6 +1570,115 @@ fn recover_restored_window_protects_replacement_and_normal_launches() {
     control_close(&owner, &normal);
     control_close(&owner, &caller);
     control_close(&foreign_owner, &foreign);
+}
+
+/// Issue #4735 RSR: a restore rebound to its predecessor's current Active
+/// binding keeps the source internal Session ID under a fresh owner pane. The
+/// captured Stopped placeholder must not survive beside it, or the restored
+/// Agent's own authenticated Name is refused as ambiguous.
+#[cfg(unix)]
+#[test]
+fn same_session_restore_retires_placeholder_so_authenticated_name_succeeds() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let _custom_agents = ScopedEnvVar::unset(gwt_agent::DISABLE_GLOBAL_CUSTOM_AGENTS_ENV);
+    let project = temp.path().join("project");
+    control_init_repo(&project);
+    seed_owner_fixture_roster(&project, 8);
+    configure_owner_fixture_tools(&project, &["pane-contract-fixture"]);
+    gwt_agent::save_stored_custom_agents_to_path(
+        &gwt_core::paths::gwt_config_path(),
+        &[gwt_agent::StoredCustomAgent::new(control_custom_agent())],
+    )
+    .unwrap();
+    let sessions = gwt_core::paths::gwt_sessions_dir();
+
+    // Previous owner: the production launch alone creates the linked
+    // Session, its Active execution binding and the canonical registry row.
+    let previous = owner_fixture_block_on(
+        gwt::project_runtime::test_support::ProjectOwnerHarness::start(&project),
+    )
+    .unwrap();
+    let source = control_owner_launch(
+        &previous,
+        "agent-source",
+        control_launch_config(&project, 4735),
+    );
+    let source_id = source.session.as_ref().unwrap().id.clone();
+    owner_fixture_block_on(previous.shutdown());
+    assert!(source.pty.try_wait().unwrap().is_some());
+    let mut saved = gwt_agent::Session::load(&sessions.join(format!("{source_id}.toml"))).unwrap();
+    assert_eq!(saved.status, gwt_agent::AgentStatus::Stopped);
+    assert!(saved.restore_window_on_startup);
+    assert!(saved.execution_binding.is_some());
+    // The benign Custom provider's native conversation is fixture metadata.
+    saved.agent_session_id = Some("fixture-native-conversation".into());
+    saved.save(&sessions).unwrap();
+    let rows_for = |session_id: &str| {
+        gwt::persistence::load_workspace_state(&gwt::persistence::workspace_state_path(&project))
+            .unwrap()
+            .windows
+            .into_iter()
+            .filter(|row| row.session_id.as_deref() == Some(session_id))
+            .map(|row| row.id)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(rows_for(&source_id), vec!["agent-source".to_string()]);
+
+    // Restarted owner: the GUI routes a restore to a fresh owner pane id.
+    let owner = owner_fixture_block_on(
+        gwt::project_runtime::test_support::ProjectOwnerHarness::start(&project),
+    )
+    .unwrap();
+    configure_owner_fixture_start_gate(&owner);
+    let restored_id = owner.pane_id("project-pane-restore");
+    let receipt = owner_fixture_block_on(owner.command(
+        gwt::project_runtime::events::OwnerCommand::RestoreSavedSession {
+            id: restored_id.clone(),
+            operation_id: "same-session-restore".into(),
+            source_session_id: source_id.clone(),
+            expected_source: Box::new(saved.clone()),
+            origin: gwt_agent::SessionLaunchOrigin::UserRestart,
+            cols: 80,
+            rows: 24,
+        },
+    ))
+    .unwrap();
+    assert!(
+        receipt.get("restore_refusal").is_none(),
+        "actual restore must be admitted: {receipt:?}"
+    );
+    let restored =
+        owner_fixture_block_on(owner.probe(&restored_id, receipt["incarnation"].as_u64().unwrap()))
+            .unwrap_or_else(|error| panic!("{error}: {receipt}"));
+    assert_eq!(
+        restored.session.as_ref().unwrap().id,
+        source_id,
+        "premise: the rebound restore keeps the source internal Session ID"
+    );
+    assert_eq!(
+        rows_for(&source_id),
+        vec!["project-pane-restore".to_string()],
+        "only the restored pane may carry the restored Session ID"
+    );
+    let named = control_request(
+        &owner,
+        &restored,
+        AgentFrontendRequest::Name {
+            candidate: "Orven".into(),
+            request_id: "restored-name".into(),
+        },
+    );
+    let result = named
+        .events
+        .iter()
+        .find(|event| event["kind"] == "pane_name_result")
+        .unwrap();
+    assert_eq!(result["ok"], true, "{result}");
+    control_close(&owner, &restored);
 }
 
 /// Issue #5248 AC-2/AC-3: stop has already removed the Monitor binding, so
@@ -3841,6 +3991,7 @@ fn agent_name_real_transport_preserves_inspection_metadata_and_active_assignment
     control_init_repo(&project);
     control_init_repo(&foreign);
     seed_owner_fixture_roster(&project, 8);
+    configure_owner_fixture_tools(&project, &["pane-contract-fixture"]);
     // Retained rows are metadata owned by the same native registry. Leave the
     // Sessions absent during startup so its ordinary backfill cannot name them.
     let rows = [
@@ -4108,7 +4259,7 @@ fn agent_name_real_transport_preserves_inspection_metadata_and_active_assignment
 }
 
 #[test]
-fn agent_name_assigns_only_self_and_reserves_names_across_all_tabs() {
+fn agent_name_assigns_only_self_and_preserves_shared_identity_across_tabs() {
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
     let own = temp.path().join("own");
@@ -4157,10 +4308,12 @@ fn agent_name_assigns_only_self_and_reserves_names_across_all_tabs() {
     assert_eq!(result["ok"], true);
     assert!(result["error"].is_null());
     let assigned = result["agent_name"].as_str().unwrap().to_owned();
-    assert_ne!(
-        assigned.chars().next().unwrap().to_ascii_lowercase(),
-        first_assigned.chars().next().unwrap().to_ascii_lowercase()
+    assert_eq!(
+        caller.session.as_ref().unwrap().agent_member_id,
+        foreign_pane.session.as_ref().unwrap().agent_member_id,
+        "the same shared member may work in both projects"
     );
+    assert_eq!(assigned, first_assigned, "a shared member keeps its name");
     assert!(!first_assigned.starts_with("Orven"));
     assert!(!assigned.starts_with("Orven"));
     assert_eq!(
@@ -4323,6 +4476,7 @@ fn agent_name_backfills_registered_pm_without_joining_the_member_pool() {
     seed_owner_fixture_roster(&root, 8);
     let worktree = create_detached_pm_worktree_fixture(&root);
     let (mut row, mut session) = legacy_name_session_row(&root, "pm", WindowPreset::Agent, None);
+    session.agent_id = gwt_agent::AgentId::ClaudeCode;
     session.worktree_path = worktree.clone();
     session.agent_name = Some("Falcon".into());
     session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
@@ -4525,6 +4679,7 @@ fn agent_name_keeps_bound_session_independent_of_roster_readback() {
     let root = temp.path().join("project");
     control_init_repo(&root);
     seed_owner_fixture_roster(&root, 1);
+    configure_owner_fixture_tools(&root, &["pane-contract-fixture"]);
     gwt::mutate_issue_monitor_prefs(
         &gwt::issue_monitor_prefs_path_for_repo_path(&root),
         |prefs| prefs.agent_roster.as_mut().unwrap().members[0].name = "Falcon".into(),
@@ -4795,6 +4950,7 @@ fn switch_source_retirement_fixture(
     let project = root.join("project");
     control_init_repo(&project);
     seed_owner_fixture_roster(&project, 8);
+    configure_owner_fixture_tools(&project, &["pane-contract-fixture"]);
     let tab = sample_project_tab_with_window_at(
         "source",
         "agent",

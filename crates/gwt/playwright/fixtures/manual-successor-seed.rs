@@ -3,7 +3,7 @@ use std::path::Path;
 use gwt::cli::execution_state as execution;
 use gwt_core::workspace_projection::{
     canonical_work_id, load_workspace_projection, load_workspace_work_items,
-    record_workspace_work_event, save_workspace_projection, successor_work_id,
+    record_workspace_work_event, record_workspace_work_event_paths, save_workspace_projection, successor_work_id,
     transact_workspace_close_state_for_work_event_root, WorkEvent, WorkEventKind,
     WorkspaceExecutionContainerRef, WorkspaceProjection,
 };
@@ -44,6 +44,8 @@ fn main() {
             )
             .unwrap();
             let record = execution::load(worktree).unwrap().unwrap();
+            let works_path = gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(worktree);
+            let history_path = gwt_core::paths::gwt_repo_local_work_events_path(worktree);
             let branch = format!("work/issue-{}", owner.number);
             let mut work_id = canonical_work_id(worktree, Some(&branch), Some(worktree)).unwrap();
             let mut start = WorkEvent::new(WorkEventKind::Start, &work_id, record.launched_at);
@@ -60,7 +62,8 @@ fn main() {
                 pr_url: None,
                 pr_state: None,
             });
-            record_workspace_work_event(worktree, start).unwrap();
+            // Foreign-host history predates the portable writer's exact-root rule.
+            record_workspace_work_event_paths(&works_path, &history_path, start).unwrap();
             let works = load_workspace_work_items(worktree).unwrap().unwrap();
             let predecessor = works
                 .work_items
@@ -93,11 +96,11 @@ fn main() {
                 start.owner = Some(format!("Issue #{}", owner.number));
                 start.related_work_item_id = Some(parent);
                 start.execution_container = predecessor.execution_containers.first().cloned();
-                record_workspace_work_event(worktree, start.clone()).unwrap();
+                record_workspace_work_event_paths(&works_path, &history_path, start.clone()).unwrap();
                 start.id = format!("fixture-resume-{index}");
                 start.kind = WorkEventKind::Resume;
                 start.next_action = Some("Check Board for latest updates".into());
-                record_workspace_work_event(worktree, start).unwrap();
+                record_workspace_work_event_paths(&works_path, &history_path, start).unwrap();
                 let works = load_workspace_work_items(worktree).unwrap().unwrap();
                 let item = works.work_items.iter().find(|work| work.id == work_id).unwrap();
                 workspace.apply_work_item(item, item.updated_at);
@@ -124,7 +127,6 @@ fn main() {
             record_workspace_work_event(worktree, invalid.clone()).unwrap();
             // Issue #5288: local detach receipts also remove the container
             // carried by a later supersession audit. Preserve that real shape.
-            let works_path = gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(worktree);
             std::fs::write(
                 works_path.with_extension("detachments.json"),
                 serde_json::to_vec(&std::collections::BTreeMap::from([(

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Issue #4821: build each Windows CI harness once, then run its filters.
+// Build each CI harness once, then run its filters (Windows and macOS sockets).
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
@@ -25,6 +25,13 @@ export function targets(group) {
   if (group === "default-lib") return defaultTargets.filter(([, kind]) => kind === "lib");
   if (group === "default-runtime") return defaultTargets.filter(([, kind]) => kind !== "lib");
   if (group === "warm") return [["gwt", "lib", "gwt"]];
+  if (group === "socket") return [
+    ["gwt-core", "lib", "gwt_core"],
+    ["gwt-core", "test", "test_hygiene_test"],
+    ["gwt-core", "test", "daemon_socket_path_limit"],
+    ["gwt", "lib", "gwt"],
+    ["gwt", "test", "runtime_tests"],
+  ];
   // Cargo discovers all integration targets; do not maintain a second list.
   if (group === "core") return [["gwt-core", "lib", "gwt_core"]];
   throw new Error(`Unknown Windows test feature set: ${group}`);
@@ -104,10 +111,10 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     if (operation === "build") process.exitCode = build(args[0]);
     else if (operation === "run-core") process.exitCode = runCore(root, spawnSync, args);
     else if (operation === "run-core-index") process.exitCode = run("core", ["gwt-core", "test", "index_coordinator"]);
-    else if (["run", "run-lib", "run-runtime", "run-warm"].includes(operation)) {
-      const group = { run: "default", "run-lib": "default-lib", "run-runtime": "default-runtime", "run-warm": "warm" }[operation];
+    else if (["run", "run-lib", "run-runtime", "run-warm", "run-socket"].includes(operation)) {
+      const group = { run: "default", "run-lib": "default-lib", "run-runtime": "default-runtime", "run-warm": "warm", "run-socket": "socket" }[operation];
       process.exitCode = run(group, args);
-    } else throw new Error("Usage: ci-windows-tests.mjs build <default|default-lib|default-runtime|warm|core> | <run|run-lib|run-runtime|run-warm> <package> <kind> <target> [filter] -- [libtest args] | run-core [libtest args] | run-core-index");
+    } else throw new Error("Usage: ci-windows-tests.mjs build <default|default-lib|default-runtime|warm|core|socket> | <run|run-lib|run-runtime|run-warm|run-socket> <package> <kind> <target> [filter] -- [libtest args] | run-core [libtest args] | run-core-index");
   } catch (error) {
     console.error(error.message);
     process.exitCode = 1;

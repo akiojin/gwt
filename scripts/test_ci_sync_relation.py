@@ -77,12 +77,58 @@ class SyncRelationTests(unittest.TestCase):
         self.assertEqual(result["product_commits"], [])
         self.assertIs(result["reuse_evidence"], False)
         self.assertIn("source tree", result["reuse_reason"])
+        self.assertIs(result["cancel_running"], False)
 
     def test_actual_product_push_supersedes_running_jobs(self):
         self.commit("feature.txt", "changed\n")
         result = self.relation()
         self.assertIs(result["base_only"], False)
+        self.assertIs(result["cancel_running"], True)
         self.assertEqual(result["product_commits"], [self.git("rev-parse", "HEAD")])
+
+    def test_metadata_push_cancels_only_proven_duplicate_predecessors(self):
+        (self.repo / ".gwt").mkdir()
+        self.commit(".gwt/event.json", "work event\n")
+        head = self.git("rev-parse", "HEAD")
+        event = {"action": "synchronize", "before": self.before, "pull_request": {
+            "head": {"sha": head}, "base": {"sha": self.original},
+        }}
+        runs = [{"id": i, "head_sha": sha, "status": "in_progress",
+                 "created_at": f"2026-10-05T17:0{i}:00Z"}
+                for i, sha in [(1, self.before), (2, head)]]
+        decide = lambda history: ci_sync_relation.cancellation_decision(self.repo, event, history, 2)
+        result = decide(runs)
+        self.assertIs(result["base_only"], True)
+        self.assertIs(result["cancel_running"], True)
+        self.assertIs(result["reuse_evidence"], False)
+        # Missing current/old history cannot prove every affected job redundant.
+        for history in [[], runs[:1], runs[1:], [dict(runs[0], head_sha="0" * 40), runs[1]]]:
+            self.assertIs(decide(history)["cancel_running"], False)
+        # A prior run may still be testing a different base tree.
+        self.synchronize()
+        event["before"] = head
+        event["pull_request"]["head"]["sha"] = self.git("rev-parse", "HEAD")
+        event["pull_request"]["base"]["sha"] = self.base
+        runs[1]["head_sha"] = event["pull_request"]["head"]["sha"]
+        self.assertIs(decide(runs)["cancel_running"], False)
+        # Even a new metadata push must keep that older different-source run.
+        self.commit(".gwt/event.json", "another event\n")
+        event["before"] = runs[1]["head_sha"]
+        event["pull_request"]["head"]["sha"] = self.git("rev-parse", "HEAD")
+        runs[1]["head_sha"] = event["pull_request"]["head"]["sha"]
+        self.assertIs(decide(runs)["cancel_running"], False)
+
+    def test_metadata_cancellation_audit_is_distinct_from_base_sync(self):
+        (self.repo / ".gwt").mkdir()
+        self.commit(".gwt/event.json", "work event\n")
+        runs = [{"id": i, "head_sha": sha, "conclusion": conclusion,
+                 "created_at": f"2026-10-05T17:0{i}:00Z",
+                 "updated_at": "2026-10-05T17:05:00Z"}
+                for i, sha, conclusion in [(1, self.before, "cancelled"),
+                                           (2, self.git("rev-parse", "HEAD"), "success")]]
+        report = ci_sync_relation.cancellation_audit(self.repo, runs, self.original)
+        self.assertEqual(report["metadata_successor_cancelled_runs"], 1)
+        self.assertEqual(report["base_sync_successor_cancelled_runs"], 0)
 
     def test_develop_push_starts_ci_from_its_own_commit_range(self):
         self.commit("feature.txt", "merged source\n")
@@ -202,7 +248,7 @@ class SyncRelationTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIsNone(json.loads(result.stdout)["base_only"])
-        self.assertEqual(output.read_text(), "base_only=unknown\n")
+        self.assertEqual(output.read_text(), "base_only=unknown\ncancel_running=false\n")
         self.assertIn("cancel running jobs: `False`", summary.read_text())
 
     def test_cancelled_runs_are_counted_by_overlapping_successor_source_with_unknowns(self):

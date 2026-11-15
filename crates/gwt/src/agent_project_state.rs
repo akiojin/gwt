@@ -5503,18 +5503,31 @@ fn durable_session_work_authority(
     branch_authority: SessionBranchAuthority,
 ) -> Result<(Option<String>, String)> {
     let owner = if let Some(binding) = session.execution_binding.as_ref() {
-        Some(match binding.owner_kind.as_str() {
-            "spec" => format!("SPEC-{}", binding.owner_number),
-            "issue" => format!("Issue #{}", binding.owner_number),
+        let kind = match binding.owner_kind.as_str() {
+            "spec" => crate::cli::execution_state::ExecutionOwnerKind::Spec,
+            "issue" => crate::cli::execution_state::ExecutionOwnerKind::Issue,
             _ => {
                 return Err(workspace_ensure_error(
                     &session.id,
                     "durable execution owner kind is invalid",
                 ))
             }
-        })
+        };
+        Some(
+            crate::cli::execution_state::ExecutionOwnerKey {
+                kind,
+                number: binding.owner_number,
+            }
+            .canonical_work_owner_label(),
+        )
     } else if let Some(number) = session.linked_issue_number {
-        Some(format!("Issue #{number}"))
+        Some(
+            crate::cli::execution_state::ExecutionOwnerKey {
+                kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+                number,
+            }
+            .canonical_work_owner_label(),
+        )
     } else if branch_authority == SessionBranchAuthority::DetachedResidentPm {
         None
     } else {

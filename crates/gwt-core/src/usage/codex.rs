@@ -9,8 +9,8 @@
 //!   `window_minutes`, not the key (Issue #3860: upstream dropped the 5h
 //!   window and `primary` became weekly with `secondary: null`).
 //! - `info.total_token_usage` — cumulative per-session tokens.
-//! - `info.model_context_window` — the model's context size (so no static
-//!   table lookup is needed for Codex).
+//! - `info.model_context_window` — the model's context size. When omitted,
+//!   `super::model_context` supplies a catalog estimate.
 //!
 //! Reset instants come as `resets_at` (unix epoch seconds, observed) and we
 //! also accept `resets_at` RFC3339 strings and relative `resets_in_seconds`
@@ -306,9 +306,15 @@ pub fn parse_codex_session(session_id: &str, jsonl: &str) -> SessionUsage {
         .and_then(Value::as_u64)
         .unwrap_or(input + output);
 
+    let model = last_model(jsonl);
     let context_limit = info
         .and_then(|i| i.get("model_context_window"))
-        .and_then(Value::as_u64);
+        .and_then(Value::as_u64)
+        .or_else(|| {
+            model
+                .as_deref()
+                .and_then(super::model_context::context_limit)
+        });
     // Approximate current context occupancy from the last turn's prompt size.
     // `input_tokens` already includes the cached portion, so it must NOT be
     // summed with `cached_input_tokens` (that double-counts and pins ctx to 0%).
@@ -335,7 +341,7 @@ pub fn parse_codex_session(session_id: &str, jsonl: &str) -> SessionUsage {
     SessionUsage {
         session_id: session_id.to_string(),
         provider: UsageProvider::Codex,
-        model: last_model(jsonl),
+        model,
         input_tokens: input,
         output_tokens: output,
         total_tokens,
@@ -878,14 +884,15 @@ mod tests {
         let jsonl = concat!(
             r#"{"type":"session_meta","payload":{"id":"abc","model":"gpt-5.5"}}"#,
             "\n",
-            r#"{"payload":{"type":"token_count","rate_limits":null,"info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":20,"total_tokens":160},"last_token_usage":{"input_tokens":80,"cached_input_tokens":10},"model_context_window":400000}}}"#,
+            r#"{"payload":{"type":"token_count","rate_limits":null,"info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":20,"total_tokens":160},"last_token_usage":{"input_tokens":80,"cached_input_tokens":10},"model_context_window":200000}}}"#,
             "\n",
         );
         let s = parse_codex_session("abc", jsonl);
         assert_eq!(s.input_tokens, 100);
         assert_eq!(s.output_tokens, 20);
         assert_eq!(s.total_tokens, 160);
-        assert_eq!(s.context_limit_tokens, Some(400000));
+        // A reported window takes precedence over the model's 400k estimate.
+        assert_eq!(s.context_limit_tokens, Some(200000));
         // input_tokens already includes the cached portion; no double-count.
         assert_eq!(s.context_used_tokens, Some(80));
         assert_eq!(s.model.as_deref(), Some("gpt-5.5"));
@@ -895,6 +902,24 @@ mod tests {
         assert_eq!(wire["cache_read_tokens"], 40);
         assert!(wire["cache_creation_tokens"].is_null());
         assert!(wire["reported_context_left_pct"].is_null());
+    }
+
+    // Issue #3986: when a rollout omits `model_context_window`, the model name
+    // still yields an estimated window through the shared catalog lookup
+    // instead of silently dropping the context-left percentage.
+    #[test]
+    fn session_usage_falls_back_to_model_context_when_window_missing() {
+        let jsonl = concat!(
+            r#"{"type":"session_meta","payload":{"id":"abc","model":"gpt-6-astra"}}"#,
+            "\n",
+            r#"{"payload":{"type":"token_count","rate_limits":null,"info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":20,"total_tokens":160},"last_token_usage":{"input_tokens":80,"cached_input_tokens":10}}}}"#,
+            "\n",
+        );
+        let s = parse_codex_session("abc", jsonl);
+        assert_eq!(s.model.as_deref(), Some("gpt-6-astra"));
+        assert_eq!(s.context_limit_tokens, Some(400_000));
+        assert_eq!(s.context_used_tokens, Some(80));
+        assert!(s.context_left_pct.is_some());
     }
 
     #[test]
