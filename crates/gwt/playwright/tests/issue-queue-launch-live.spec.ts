@@ -433,7 +433,9 @@ test.describe("Issue queue real backend launch", () => {
     expect(errors).toEqual([]);
   });
 
-  for (const afterAck of ["unchanged", "refresh cancel", "refresh draft", "refresh submit", "stop refresh draft", "stop refresh cancel", "initial draft", "input", "draft", "source edit", "cancel", "target removed", "worktree job", "cancel pending job", "unknown cwd", "restart"] as const) test(afterAck === "refresh cancel"
+  for (const afterAck of ["queued body", "unchanged", "refresh cancel", "refresh draft", "refresh submit", "stop refresh draft", "stop refresh cancel", "initial draft", "input", "draft", "source edit", "cancel", "target removed", "worktree job", "cancel pending job", "unknown cwd", "restart"] as const) test(afterAck === "queued body"
+    ? "T94436 queued input after reservation prevents checkpoint body delivery"
+    : afterAck === "refresh cancel"
     ? "T94431 cancellation during target refresh prevents checkpoint delivery and permits a new switch"
     : afterAck === "refresh draft"
     ? "T94432 draft during target refresh preserves input and resumes the same switch"
@@ -469,7 +471,7 @@ test.describe("Issue queue real backend launch", () => {
     const fixture = await startIssueQueueLaunchFixture(info, {
       page,
       targetIssueNumber: 44, switching: true, positive: true, autonomousMode: true,
-      targetRefreshGate: afterAck === "refresh cancel" || afterAck === "refresh draft" || afterAck === "refresh submit" || afterAck === "stop refresh draft" || afterAck === "stop refresh cancel",
+      targetRefreshGate: afterAck === "queued body" || afterAck === "refresh cancel" || afterAck === "refresh draft" || afterAck === "refresh submit" || afterAck === "stop refresh draft" || afterAck === "stop refresh cancel",
     });
     const errors: string[] = [];
     const theme = info.project.name.includes("light") ? "light" : "dark";
@@ -569,8 +571,135 @@ test.describe("Issue queue real backend launch", () => {
         }
       }
       const handoffDeadline = Date.now() + 120_000;
-      if (afterAck === "refresh cancel" || refreshDraft || refreshSubmit) await fixture.targetRefreshGate.arm();
+      if (afterAck === "queued body" || afterAck === "refresh cancel" || refreshDraft || refreshSubmit) await fixture.targetRefreshGate.arm();
       await plans.locator('[data-action="switch-next"]').click();
+      if (afterAck === "queued body") {
+        await expect.poll(() => fixture.targetRefreshGate.waiting(), { timeout: 30_000 }).not.toBeNull();
+        const held = await fixture.targetRefreshGate.waiting();
+        const pending = Object.values((await preferences()).agent_switch_intents)[0] as any;
+        expect(pending.stage).toBe("requested");
+        expect(held.parent).toBe(pending.runtime_stop.host_pid);
+        expect(held.argv.slice(0, 3)).toEqual(["issue", "view", "44"]);
+        const saved = fixture.savedSource(source.cwd);
+        const work = (await fixture.workItems()).work_items.find((value: any) =>
+          value.events.some((event: any) => event.agent_session_id === source.gwt_session_id));
+        expect(work).toBeTruthy();
+        // Keep browser scheduling outside the two-second runtime lease interval.
+        // This takes the existing lock only; it never edits runtime or authority records.
+        const gate = spawn("python3", ["-c", String.raw`import fcntl, glob, json, pathlib, sys, time, urllib.request, urllib.parse
+home, project, operation, host, session, child = sys.argv[1:]
+home, host, child = pathlib.Path(home), int(host), int(child)
+endpoints = [json.loads(pathlib.Path(p).read_text()) for p in glob.glob(str(home / '.gwt/projects/*/runtime/daemon/*.json'))]
+endpoints = [e for e in endpoints if e['pid'] == host and e['scope']['project_root'] == project]
+assert len(endpoints) == 1, 'exact fixture Host endpoint'
+endpoint = endpoints[0]
+url = endpoint['project_transport_url'] + '/private/project/command'
+assert urllib.parse.urlparse(url).hostname == '127.0.0.1', 'fixture loopback transport'
+http = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+def command(value):
+    request = urllib.request.Request(url, data=json.dumps({'project_key': endpoint['scope']['repo_hash'], 'command': value}).encode(),
+        headers={'Authorization': 'Bearer ' + endpoint['auth_token'], 'Content-Type': 'application/json'})
+    with http.open(request, timeout=1.5) as response:
+        return json.load(response)
+health = command({'type': 'health'})
+assert health['pid'] == host and health['project_key'] == endpoint['scope']['repo_hash'] and not health['draining']
+runtime_path = home / '.gwt/sessions/runtime' / str(host) / (session + '.json')
+runtime = json.loads(runtime_path.read_text())
+assert runtime['child_pid'] == child and runtime['host_started_at'] == health['host_started_at']
+incarnation = runtime['runtime_incarnation']
+source = [p for p in command({'type': 'list_panes'})['panes'] if p.get('session_id') == session]
+assert len(source) == 1 and source[0]['incarnation'] == incarnation and source[0]['child_pid'] == child
+source = source[0]
+assert source['input_observation']['has_unsent_user_input'] is False
+assert runtime_path.exists() and runtime['runtime_incarnation'] == incarnation
+prefs_path = home / '.gwt/projects' / endpoint['scope']['repo_hash'] / 'project-state/issue-monitor.json'
+lock_path = home / '.gwt/sessions' / ('.runtime-writer-' + str(host) + '-' + session + '.json.lock')
+with lock_path.open('r+') as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    try:
+        # The existing target read remains before the reservation; only release it after holding the runtime writer.
+        (home / 'target-refresh.release').write_text('')
+        until = time.monotonic() + 30
+        while True:
+            intent = json.loads(prefs_path.read_text())['agent_switch_intents'][operation]
+            if intent['stage'] == 'checkpointing':
+                break
+            assert intent['stage'] == 'requested' and time.monotonic() < until, 'reservation did not reach Checkpointing'
+            time.sleep(0.01)
+        assert intent['runtime_stop']['session_id'] == session
+        assert intent['source_input_revision'] == source['input_observation']['revision']
+        ack = command({'type': 'input', 'id': source['id'], 'incarnation': incarnation,
+            'data': list(b'GWT_RAW_MONITOR_PROBE')})
+        assert ack['ok'] and ack['input_observation']['has_unsent_user_input']
+        assert ack['input_observation']['revision'] == intent['source_input_revision'] + 1
+        print(json.dumps({'checkpointing': intent, 'input_ack': ack, 'host_pid': host,
+            'host_started_at': health['host_started_at'], 'source_id': source['id'], 'incarnation': incarnation}), flush=True)
+    finally:
+        fcntl.flock(lock, fcntl.LOCK_UN)`, fixture.home, fixture.project,
+          pending.request.operation_id, String(held.parent), source.gwt_session_id!, String(source.pid)],
+        { stdio: ["ignore", "pipe", "pipe"] });
+        let stdout = "", stderr = "";
+        gate.stdout.on("data", data => { stdout += data; });
+        gate.stderr.on("data", data => { stderr += data; });
+        const result = new Promise<number | null>((resolve, reject) => {
+          gate.once("error", reject);
+          gate.once("close", resolve);
+        });
+        const watchdog = setTimeout(() => gate.kill("SIGTERM"), 35_000);
+        let code;
+        try { code = await result; } finally { clearTimeout(watchdog); }
+        expect(code, `queued input barrier failed: ${stderr}`).toBe(0);
+        const proof = JSON.parse(stdout);
+        expect(proof.checkpointing).toMatchObject({ stage: "checkpointing", source: pending.source,
+          runtime_stop: pending.runtime_stop, source_input_revision: expect.any(Number) });
+        expect(proof.input_ack.input_observation).toMatchObject({ has_unsent_user_input: true,
+          revision: proof.checkpointing.source_input_revision + 1 });
+        const reason = "PTY I/O error: PTY I/O error: ordinary input changed before protected body commit";
+        await expect.poll(async () => (await preferences()).agent_switch_intents[pending.request.operation_id],
+          { timeout: 30_000 }).toMatchObject({ stage: "failed", reason });
+        const assertRetained = async () => {
+          const prefs = await preferences();
+          const failed = prefs.agent_switch_intents[pending.request.operation_id];
+          expect(failed).toMatchObject({ stage: "failed", reason, source: pending.source, runtime_stop: pending.runtime_stop });
+          expect(failed.checkpoint).toBeUndefined();
+          expect(failed.runtime_exit_confirmed).not.toBe(true);
+          expect(prefs.monitor_runtime_stop_requests || []).toEqual([]);
+          expect(prefs.launched_claims[43]).toBe(pending.source.claim_id);
+          expect((await readCanonicalRoster(page)).members.find((value: any) => value.agent_member_id === member.agent_member_id)
+            .assignment).toEqual(pending.source.assignment);
+          expect(fixture.processAlive(source.pid)).toBe(true);
+          expect(fixture.processAlive(idle.tree_child_pid)).toBe(true);
+          expect(fixture.executionStatus(source.cwd).ecr_status).toBe("active");
+          expect(await fixture.launchIssues()).toEqual([43]);
+          expect(fixture.requests.filter(request => request.method === "POST"
+            && request.url === "/repos/fixture/queue/issues/44/comments")).toEqual([]);
+          const current = fixture.savedSource(source.cwd);
+          expect(current).toMatchObject({ head: saved.head, remoteHead: saved.remoteHead, branch: saved.branch });
+          expect(current.porcelain).not.toContain("checkpoint-source.txt");
+          const retained = (await fixture.workItems()).work_items.find((value: any) => value.id === work.id);
+          expect(retained.events).toEqual(expect.arrayContaining(work.events));
+          expect(retained.status_category).not.toMatch(/done|blocked/);
+          expect((await fixture.actorEvents()).filter((entry: any) =>
+            ["checkpoint_before_prompt", "checkpoint_received", "checkpoint_acked", "actor_failed"].includes(entry.stage))).toEqual([]);
+        };
+        await assertRetained();
+        expect(await session(source.gwt_session_id!)).toBe(before);
+        await expect.poll(() => page.evaluate(id =>
+          ((window as any).__gwtTerminalTestApi?.bufferText(id) ?? "").split("GWT_RAW_MONITOR_PROBE").length - 1,
+        projectedSource.id), { timeout: 30_000 }).toBe(2);
+        expect((await fixture.actorEvents()).filter((entry: any) => entry.stage === "raw_successor")).toHaveLength(1);
+        // Submit the retained queued draft once; no body is rewritten to make this pass.
+        await sendLiveGwtEvent(page, { kind: "terminal_input", id: projectedSource.id, data: "\r" });
+        await expect.poll(async () => (await fixture.actorEvents()).filter((entry: any) => entry.stage === "raw_successor").length,
+          { timeout: 30_000 }).toBe(2);
+        await assertRetained();
+        await expect(plans.locator(".roster-switch-status")).toContainText(reason);
+        await info.attach("reserved-body-input-proof", { body: JSON.stringify({ held, pending, proof, saved,
+          failed: (await preferences()).agent_switch_intents[pending.request.operation_id] }), contentType: "application/json" });
+        await info.attach(`reserved-body-input-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
+        expect(errors).toEqual([]);
+        return;
+      }
       let cancelledDuringRefresh: any;
       if (refreshDraft || refreshSubmit) {
         await expect.poll(() => fixture.targetRefreshGate.waiting(), { timeout: 30_000 }).not.toBeNull();
@@ -1301,6 +1430,7 @@ test.describe("Issue queue real backend launch", () => {
             }
           }
         }
+        if (afterAck === "queued body") expect(errors, "zero console/page errors including shutdown").toEqual([]);
       }
     }
     expect(errors).toEqual([]);
