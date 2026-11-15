@@ -433,12 +433,14 @@ test.describe("Issue queue real backend launch", () => {
     expect(errors).toEqual([]);
   });
 
-  for (const afterAck of ["unchanged", "refresh cancel", "refresh draft", "refresh submit", "initial draft", "input", "draft", "source edit", "cancel", "target removed", "worktree job", "cancel pending job", "unknown cwd", "restart"] as const) test(afterAck === "refresh cancel"
+  for (const afterAck of ["unchanged", "refresh cancel", "refresh draft", "refresh submit", "stop refresh draft", "initial draft", "input", "draft", "source edit", "cancel", "target removed", "worktree job", "cancel pending job", "unknown cwd", "restart"] as const) test(afterAck === "refresh cancel"
     ? "T94431 cancellation during target refresh prevents checkpoint delivery and permits a new switch"
     : afterAck === "refresh draft"
     ? "T94432 draft during target refresh preserves input and resumes the same switch"
     : afterAck === "refresh submit"
     ? "T94433 submitted input during target refresh resumes with the new revision"
+    : afterAck === "stop refresh draft"
+    ? "T94434 draft during stop target refresh preserves saved source and input"
     : afterAck === "initial draft"
     ? "T94430 unsent draft before the first Switch request waits and resumes naturally"
     : afterAck === "input"
@@ -465,7 +467,7 @@ test.describe("Issue queue real backend launch", () => {
     const fixture = await startIssueQueueLaunchFixture(info, {
       page,
       targetIssueNumber: 44, switching: true, positive: true, autonomousMode: true,
-      targetRefreshGate: afterAck === "refresh cancel" || afterAck === "refresh draft" || afterAck === "refresh submit",
+      targetRefreshGate: afterAck === "refresh cancel" || afterAck === "refresh draft" || afterAck === "refresh submit" || afterAck === "stop refresh draft",
     });
     const errors: string[] = [];
     const theme = info.project.name.includes("light") ? "light" : "dark";
@@ -814,12 +816,34 @@ test.describe("Issue queue real backend launch", () => {
         await info.attach("post-ack-restart-preserved", { body: JSON.stringify({ acknowledged, cancelled, restored,
           assignment, checkpoint, saved, resumedNormal }), contentType: "application/json" });
         await info.attach(`post-ack-restart-preserved-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
-      } else if (afterAck === "input" || afterAck === "draft") {
+      } else if (afterAck === "input" || afterAck === "draft" || afterAck === "stop refresh draft") {
         const acknowledged = (await preferences()).agent_switch_intents[waiting.operation];
         expect(acknowledged.stage).toBe("checkpoint_verified");
         const checkpoint = fixture.savedSource(source.cwd);
         const rawCount = (await fixture.actorEvents()).filter((entry: any) => entry.stage === "raw_successor").length;
-        const draft = afterAck === "draft";
+        const lateDraft = afterAck === "stop refresh draft";
+        const draft = afterAck === "draft" || lateDraft;
+        const echoedProbes = () => page.evaluate(id =>
+          ((window as any).__gwtTerminalTestApi?.bufferText(id) ?? "").split("GWT_RAW_MONITOR_PROBE").length - 1,
+        projectedSource.id);
+        if (lateDraft) {
+          await expect.poll(echoedProbes, { timeout: 30_000 }).toBe(rawCount);
+          await fixture.targetRefreshGate.arm();
+          await releaseNormalStop(waiting.operation);
+          await expect.poll(() => fixture.targetRefreshGate.waiting(), { timeout: 30_000 }).not.toBeNull();
+          const held = await fixture.targetRefreshGate.waiting();
+          expect(held.argv.slice(0, 3)).toEqual(["issue", "view", "44"]);
+          expect(held.parent).toBe(acknowledged.runtime_stop.host_pid);
+          expect(fixture.processAlive(held.pid)).toBe(true);
+          await expect.poll(async () => (await fixture.actorEvents()).some((entry: any) =>
+            entry.stage === "normal_n2_hook_returned" && entry.operation === waiting.operation),
+          { timeout: 30_000 }).toBe(true);
+          expect((await preferences()).agent_switch_intents[waiting.operation]).toMatchObject({
+            stage: "checkpoint_verified", source: acknowledged.source, checkpoint: acknowledged.checkpoint });
+          expect(fixture.savedSource(source.cwd).porcelain).toBe("");
+          await info.attach("stop-target-refresh-held", { body: JSON.stringify({ held, acknowledged }),
+            contentType: "application/json" });
+        }
         await sendLiveGwtEvent(page, { kind: "terminal_input", id: projectedSource.id,
           data: draft ? "GWT_RAW_MONITOR_PROBE" : "GWT_RAW_MONITOR_PROBE\r" });
         let accepted: any;
@@ -836,9 +860,18 @@ test.describe("Issue queue real backend launch", () => {
           expect(subsequentStop.current_hook_event.correlation_id).not.toBe(n1.current_hook_event.correlation_id);
         };
         if (!draft) await observeSubmittedProbe();
+        if (lateDraft) {
+          await expect.poll(echoedProbes, { timeout: 30_000 }).toBe(rawCount + 1);
+          expect((await fixture.actorEvents()).filter((entry: any) => entry.stage === "raw_successor")).toHaveLength(rawCount);
+          expect((await preferences()).agent_switch_intents[waiting.operation].stage).toBe("checkpoint_verified");
+          expect(fixture.savedSource(source.cwd).porcelain).toBe("");
+          await fixture.targetRefreshGate.release();
+          await expect.poll(() => fixture.targetRefreshGate.returned(), { timeout: 30_000 }).toBe(true);
+        }
+        const reason = lateDraft ? "PTY I/O error: ordinary input changed before protected body commit"
+          : "New input invalidated the saved checkpoint. Current work is kept; request another switch.";
         await expect.poll(async () => (await preferences()).agent_switch_intents[waiting.operation],
-          { timeout: Math.max(1, handoffDeadline - Date.now()) }).toMatchObject({ stage: "failed",
-          reason: "New input invalidated the saved checkpoint. Current work is kept; request another switch." });
+          { timeout: Math.max(1, handoffDeadline - Date.now()) }).toMatchObject({ stage: "failed", reason });
         const assertSourceKept = async () => {
           const prefs = await preferences();
           const failed = prefs.agent_switch_intents[waiting.operation];
@@ -869,12 +902,12 @@ test.describe("Issue queue real backend launch", () => {
           expect(work.board_refs).toContain(acknowledged.checkpoint.board_entry_id);
         };
         await assertSourceKept();
-        if (draft) {
+        if (draft && !lateDraft) {
           expect((await fixture.actorEvents()).filter((entry: any) => entry.stage === "raw_successor")).toHaveLength(rawCount);
           expect((await fixture.actorEvents()).some((entry: any) => entry.stage === "normal_n2_started"
             && entry.operation === waiting.operation)).toBe(false);
         }
-        await releaseNormalStop(waiting.operation);
+        if (!lateDraft) await releaseNormalStop(waiting.operation);
         await expect.poll(async () => (await fixture.actorEvents()).some((entry: any) =>
           entry.stage === "normal_n2_hook_returned" && entry.operation === waiting.operation
             && entry.pid === source.pid && entry.gwt_session_id === source.gwt_session_id),
@@ -887,12 +920,12 @@ test.describe("Issue queue real backend launch", () => {
           await observeSubmittedProbe();
           await assertSourceKept();
         }
-        await expect(plans.locator(".roster-switch-status")).toContainText("New input invalidated the saved checkpoint");
+        await expect(plans.locator(".roster-switch-status")).toContainText(reason);
         expect((await fixture.actorEvents()).filter((entry: any) => entry.stage === "actor_failed")).toEqual([]);
-        await info.attach(`post-ack-${draft ? "draft" : "input"}-preserved-source`, { body: JSON.stringify({ acknowledged,
+        await info.attach(`post-ack-${lateDraft ? "stop-refresh-draft" : draft ? "draft" : "input"}-preserved-source`, { body: JSON.stringify({ acknowledged,
           accepted, subsequentStop, failed: (await preferences()).agent_switch_intents[waiting.operation], checkpoint }),
         contentType: "application/json" });
-        await info.attach(`post-ack-${draft ? "draft" : "input"}-preserved-source-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
+        await info.attach(`post-ack-${lateDraft ? "stop-refresh-draft" : draft ? "draft" : "input"}-preserved-source-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
       } else if (afterAck === "source edit") {
         const acknowledged = (await preferences()).agent_switch_intents[waiting.operation];
         expect(acknowledged.stage).toBe("checkpoint_verified");
