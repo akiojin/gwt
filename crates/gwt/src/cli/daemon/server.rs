@@ -23288,6 +23288,7 @@ exit 1
     #[tokio::test(flavor = "current_thread")]
     async fn authority_retry_state_load_does_not_block_the_tokio_worker() {
         let temp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(temp.path().join("home"));
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("repo");
         init_git_repo(&repo);
