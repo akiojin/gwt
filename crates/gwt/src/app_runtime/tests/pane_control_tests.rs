@@ -5143,63 +5143,207 @@ fn switch_source_exit_retires_exact_diagnostic_pane_and_husk_once() {
 
 #[test]
 fn switch_source_exit_preserves_reused_session_and_runtime() {
+    use gwt::project_runtime::events::{OwnerCommand, OwnerEvent};
+
     let _lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    for replace_session in [true, false] {
+    for reuse_session in [true, false] {
         let temp = tempdir().unwrap();
         let _home = ScopedGwtHome::set(temp.path());
         let (mut runtime, owner, source, proof) = switch_source_retirement_fixture(temp.path());
         let id = combined_window_id("source", "agent");
+        let project = runtime.tab("source").unwrap().project_root.clone();
+        let source_session = source.session.as_ref().unwrap();
         let mut events = owner.subscribe();
         assert!(source
             .pty
             .terminate_and_wait_for_tree(Duration::from_secs(5))
             .unwrap());
-        let removed = if replace_session {
-            runtime
-                .tab_mut("source")
-                .unwrap()
-                .workspace
-                .set_session_id("agent", Some("successor-session".into()));
-            owner_fixture_block_on(owner.agent_switch_source_exited(proof, source.pty.clone()))
-                .unwrap();
-            switch_removed_event(&mut events, &source.id)
-        } else {
-            control_close(&owner, &source);
-            let removed = switch_removed_event(&mut events, &source.id);
-            let project = runtime.tab("source").unwrap().project_root.clone();
-            drive_owner_agent_fixture(
-                &mut runtime,
-                &id,
-                control_launch_config(&project, 44),
-                Default::default(),
-            );
-            owner_fixture_block_on(owner.agent_switch_source_exited(proof, source.pty.clone()))
-                .unwrap();
-            let current = &runtime.runtimes[&id];
-            let current =
-                owner_fixture_block_on(owner.probe(&current.owner_pane_id, current.incarnation))
-                    .unwrap();
-            assert!(!Arc::ptr_eq(&current.pty, &source.pty));
-            assert!(
-                !current.pty.tree_exit_confirmed(),
-                "a stale Switch must not stop the replacement tree"
-            );
-            removed
-        };
-        let context = runtime.test_context();
-        let identity = owner.client().identity().unwrap().clone();
-        assert!(runtime
-            .handle_project_owner_event(&context, 1, &identity, removed)
-            .is_empty());
-        assert!(runtime.window_lookup.contains_key(&id));
-        if !replace_session {
-            let current = &runtime.runtimes[&id];
-            let current =
-                owner_fixture_block_on(owner.probe(&current.owner_pane_id, current.incarnation))
-                    .unwrap();
-            control_close(&owner, &current);
+        control_close(&owner, &source);
+        let removed = switch_removed_event(&mut events, &source.id);
+        let closed = owner_fixture_block_on(async {
+            // test-hygiene: allow-wall-clock-deadline Bound actual owner close completion; the matching event is the receipt.
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    let event = events.recv().await.unwrap();
+                    if let OwnerEvent::Closed {
+                        id,
+                        incarnation,
+                        error,
+                        ..
+                    } = &event
+                    {
+                        if id == &source.id && *incarnation == source.incarnation {
+                            assert!(error.is_none(), "source close failed: {error:?}");
+                            return event;
+                        }
+                    }
+                }
+            })
+            .await
+            .expect("the exact old owner must publish its close receipt")
+        });
+        let issue = if reuse_session { 43 } else { 44 };
+        let mut config = control_launch_config(&project, issue);
+        if reuse_session {
+            config.session_mode = gwt_agent::SessionMode::Continue;
+            config.predecessor_session_id = Some(source_session.id.clone());
         }
+        // The GUI launch path assigns a new native pane ID for each operation.
+        // Use the actual owner launch contract to exercise reuse of this exact
+        // native address, then install only its authenticated snapshot below.
+        let raw_id = source.id.split_once("::").unwrap().1;
+        let mut successor = control_owner_launch(&owner, raw_id, config);
+        if let Some(pending) = successor.pending_fresh_execution.as_ref() {
+            let session = successor.session.as_ref().unwrap();
+            let mut ready = runtime_hook_state_for_event("Waiting", "SessionStart", &session.id);
+            ready.project_root = Some(project.display().to_string());
+            ready.branch = Some(session.branch.clone());
+            ready.continuation_readiness_nonce = Some(pending.readiness_nonce.clone());
+            assert!(owner_fixture_block_on(successor.runtime_hook(&ready))
+                .unwrap()
+                .is_success());
+        }
+        successor = owner_fixture_block_on(async {
+            // test-hygiene: allow-wall-clock-deadline Bound authenticated successor activation; pending receipt completion proves readiness.
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    let current = owner
+                        .probe(&successor.id, successor.incarnation)
+                        .await
+                        .unwrap();
+                    if current.pending_fresh_execution.is_none() {
+                        return current;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the real successor must finish its readiness handshake")
+        });
+        let session = successor.session.as_ref().unwrap();
+        assert_eq!(session.id == source_session.id, reuse_session);
+        assert_eq!(successor.id, source.id);
+        assert_ne!(successor.incarnation, source.incarnation);
+        assert!(!Arc::ptr_eq(&successor.pty, &source.pty));
+        let context = runtime.test_context();
+        let snapshot = owner_fixture_block_on(owner.command(OwnerCommand::Snapshot {
+            id: successor.id.clone(),
+            incarnation: successor.incarnation,
+        }))
+        .unwrap();
+        runtime.install_remote_owner_projection(
+            &context,
+            &id,
+            owner.client(),
+            serde_json::from_value(snapshot).unwrap(),
+            successor.session.clone(),
+        );
+        let identity = owner.client().identity().unwrap().clone();
+        assert_eq!(identity.pid, proof.host_pid);
+        assert_eq!(identity.host_started_at, proof.host_started_at);
+        let execution_owner = gwt::cli::execution_state::ExecutionOwnerKey {
+            kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+            number: issue,
+        };
+        assert_eq!(
+            gwt::cli::execution_state::diagnose_owner(&session.worktree_path, execution_owner)
+                .ecr_status,
+            Some(gwt::cli::execution_state::ExecutionControlStatus::Active)
+        );
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let runtime_path =
+            gwt_agent::runtime_state_path_for_pid(&sessions, identity.pid, &session.id);
+        let saved_runtime = gwt_agent::SessionRuntimeState::load(&runtime_path).unwrap();
+        assert_eq!(
+            saved_runtime.runtime_incarnation,
+            Some(successor.incarnation)
+        );
+        assert_eq!(saved_runtime.child_pid, successor.pty.process_id());
+        let mut paths = current_generation_authority_artifacts(&session.worktree_path);
+        paths.extend([
+            sessions.join(format!("{}.toml", session.id)),
+            runtime_path,
+            workspace_state_path(&project),
+            gwt::issue_monitor_prefs_path_for_repo_path(&project),
+            gwt::agent_registry::path(),
+        ]);
+        let saved_files = snapshot_optional_files(&paths);
+        let saved_work = tracked_workspace_work_store_snapshot(&project);
+        let saved_rows = owner_fixture_block_on(owner.command(OwnerCommand::ListPanes)).unwrap()
+            ["canonical_rows"]
+            .clone();
+        let saved_window =
+            serde_json::to_value(runtime.tab("source").unwrap().workspace.persisted()).unwrap();
+        let saved_active = runtime.active_agent_sessions[&id].session_id.clone();
+        let writer = successor.writer.as_ref().unwrap();
+        let grant = successor.grant.as_ref().unwrap();
+        let registered_grant = successor
+            .current_capability_grant()
+            .expect("the actual successor capability must be registered");
+        assert!(successor.has_capability_bearer(&registered_grant));
+        assert!(registered_grant.principal() == grant.principal());
+        assert!(Arc::ptr_eq(&writer.handle, &successor.pty));
+        assert!(Arc::ptr_eq(&writer.current, &successor.current));
+        assert!(!source.current.load(Ordering::Acquire));
+
+        // Both callbacks carry the real predecessor identity and PTY. Replaying
+        // after same-address reuse must not turn them into successor authority.
+        for _ in 0..2 {
+            owner_fixture_block_on(
+                owner.agent_switch_source_exited(proof.clone(), source.pty.clone()),
+            )
+            .unwrap();
+            for event in [&removed, &closed] {
+                assert!(runtime
+                    .handle_project_owner_event(&context, 1, &identity, event.clone())
+                    .is_empty());
+            }
+            owner_fixture_block_on(owner.agent_dispatch_barrier()).unwrap();
+            let current =
+                owner_fixture_block_on(owner.probe(&successor.id, successor.incarnation)).unwrap();
+            assert!(Arc::ptr_eq(&current.pty, &successor.pty));
+            assert!(Arc::ptr_eq(current.writer.as_ref().unwrap(), writer));
+            assert!(current.current.load(Ordering::Acquire));
+            let current_grant = current
+                .current_capability_grant()
+                .expect("stale callbacks must preserve the registered successor capability");
+            assert!(current.has_capability_bearer(&current_grant));
+            assert!(successor.has_capability_bearer(&current_grant));
+            assert!(current_grant.principal() == registered_grant.principal());
+            assert!(current.pty.try_wait().unwrap().is_none());
+            assert!(!current.pty.tree_exit_confirmed());
+            assert_eq!(current.session.as_ref().unwrap().id, session.id);
+            assert_eq!(runtime.active_agent_sessions[&id].session_id, saved_active);
+            assert_eq!(
+                serde_json::to_value(runtime.tab("source").unwrap().workspace.persisted()).unwrap(),
+                saved_window
+            );
+            assert_eq!(runtime.runtimes[&id].incarnation, successor.incarnation);
+            assert!(runtime.window_lookup.contains_key(&id));
+            assert_eq!(
+                owner_fixture_block_on(owner.command(OwnerCommand::ListPanes)).unwrap()
+                    ["canonical_rows"],
+                saved_rows
+            );
+            for (path, expected) in &saved_files {
+                assert!(
+                    fs::read(path).ok() == *expected,
+                    "stale Switch callback changed {}",
+                    path.display()
+                );
+            }
+            assert_tracked_workspace_work_store_unchanged(&project, &saved_work);
+            assert!(
+                !std::iter::from_fn(|| events.try_recv().ok()).any(|event| matches!(
+                    event,
+                    OwnerEvent::WindowRemoved { .. } | OwnerEvent::Closed { .. }
+                )),
+                "stale Switch callbacks must not publish another close or removal"
+            );
+        }
+        control_close(&owner, &successor);
+        assert!(successor.pty.tree_exit_confirmed());
     }
 }
