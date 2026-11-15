@@ -825,6 +825,8 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       await readRoster(page);
       await surface.locator(`.roster-row[data-member-id="${memberId}"] h3`).click();
       await expect(surface.locator(".roster-current-config")).toHaveText(expected);
+      await expect(surface.locator(".roster-member-id")).toHaveText(`Member ID: ${memberId}`);
+      await expect(surface.locator(".roster-current-role")).toHaveText("Role: Implementation");
       await gotoLiveGwt(secondPage, liveGwtProjectUrl(fixture.url, secondProjectKey), { enableTestBridge: true });
       await secondPage.locator('.op-rail__surface[data-surface="agents"]').click();
       const secondSurface = secondPage.locator(".agents-surface:not(.agents-surface--preview)");
@@ -971,6 +973,38 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       await assertSharedSaved();
       // Exercise the same saved core from Agents, through the actual writer.
       const detail = surface.locator(".roster-detail");
+      const checkCatalogRecovery = async (role: string) => {
+        const cache = join(fixture.home, ".codex/models_cache.json");
+        await writeFile(cache, "{broken");
+        let after = await cursor(page);
+        await detail.locator('[data-action="reload-tuning"]').click();
+        await rosterAfter(page, after);
+        await expect(detail.locator('[data-model-catalog-status]')).toContainText("live Codex model catalog is unavailable");
+        await detail.screenshot({ path: info.outputPath(`catalog-${role}-unavailable-${theme}.png`) });
+        const input = detail.locator('[data-member-tuning-field="model"]');
+        const original = await input.inputValue(), writes = tuningRequests.length + pmProfileRequests.length;
+        await input.evaluate(node => { (window as any).__catalogDraftInput = node; });
+        await input.dispatchEvent("compositionstart");
+        await input.fill("未確定-model");
+        await writeFile(cache, JSON.stringify({ models: ["gpt-6.1-sol", "gpt-6-sol", "catalog-recovered-4777"].map(slug => ({
+          slug, visibility: "list", default_reasoning_level: "low",
+          supported_reasoning_levels: ["low", "medium", "high", "xhigh", "max", "ultra"].map(effort => ({ effort })),
+        })) }));
+        after = await cursor(page);
+        await detail.locator('[data-action="retry-model-catalog"]').click();
+        await rosterAfter(page, after);
+        await expect(detail.locator('[data-model-catalog-status]')).toBeHidden();
+        await expect(input.locator('..').locator('datalist option[value="catalog-recovered-4777"]')).toHaveCount(1);
+        expect(await input.evaluate(node => node === (window as any).__catalogDraftInput)).toBe(true);
+        await expect(input).toHaveValue("未確定-model");
+        expect(tuningRequests.length + pmProfileRequests.length).toBe(writes);
+        await detail.screenshot({ path: info.outputPath(`catalog-${role}-recovered-${theme}.png`) });
+        await input.fill(original);
+        await input.dispatchEvent("compositionend");
+        // Ending composition explicitly submits the restored value; the read above did not.
+        await expect.poll(() => tuningRequests.length + pmProfileRequests.length).toBe(writes + 1);
+        await expect(detail.locator('[data-member-tuning-status]')).toHaveText("Saved");
+      };
       const agentReasoning = detail.locator('[data-member-tuning-field="reasoning"]');
       const requestsBeforeComposition = tuningRequests.length;
       await agentReasoning.dispatchEvent("compositionstart");
@@ -1002,6 +1036,7 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       savedCandidate.reasoning = "medium";
       await expect(surface.locator(".roster-current-config")).toHaveText(expected);
       await assertSharedSaved();
+      await checkCatalogRecovery("implementation");
       const agentModel = detail.locator('[data-member-tuning-field="model"]');
       const requestsBeforeCustom = tuningRequests.length;
       await agentModel.fill("private-model-4777");
@@ -1074,6 +1109,10 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       const before = await readRoster(page);
       const member = before.members.find(value => value.agent_member_id === memberId)!;
       expect(member.history.find(value => value.session_id === launch.gwt_session_id)).toMatchObject(facts);
+      const stoppedRecord = await sessionRecord(fixture.home, launch.gwt_session_id);
+      const stoppedHistory = member.history.find(value => value.session_id === launch.gwt_session_id) as any;
+      expect(stoppedHistory).toMatchObject({ role: "implementation", result: "Stopped" });
+      expect(Date.parse(stoppedHistory.ended_at)).toBe(Date.parse(tomlString(stoppedRecord, "last_exited_at")!));
       await surface.locator(`.roster-row[data-member-id="${memberId}"] h3`).click();
       const beforeRename = await sessionRecord(fixture.home, launch.gwt_session_id);
       const sequence = await cursor(page);
@@ -1090,6 +1129,10 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
         expect(saved.history.find(value => value.session_id === launch.gwt_session_id)).toMatchObject(facts);
         await surface.locator(`.roster-row[data-member-id="${memberId}"] h3`).click();
         await expect(surface.locator(".roster-history-config")).toContainText([expected]);
+        await expect(surface.locator(".roster-member-id")).toHaveText(`Member ID: ${memberId}`);
+        await expect(surface.locator(".roster-history-role")).toContainText(["Role: Implementation"]);
+        expect(saved.history.find(value => value.session_id === launch.gwt_session_id)).toMatchObject({ ...facts,
+          role: "implementation", started_at: stoppedHistory.started_at });
       };
       await assertHistory();
       await assertSharedSaved();
@@ -1222,6 +1265,7 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
         await expect(detail.locator('[data-member-tuning-status]')).toHaveText("Saved");
         await expect(detail.locator('[data-member-tuning-revision]')).toHaveText(`Revision: ${pmRevision}`);
       }
+      await checkCatalogRecovery("pm");
       const savedPm = await pmSettings(pmSettingsPath);
       expect(savedPm).toMatchObject({ loop_interval_secs: 90, paused: true, auto_start: false,
         launch_profile: { agent_id: "codex", model: "gpt-6.1-sol", reasoning: "low" } });
@@ -1278,6 +1322,9 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       expect(tomlString(pmRecord, "model")).toBe("gpt-6.1-sol");
       expect(tomlString(pmRecord, "reasoning_level")).toBe("low");
       expect(tomlString(pmRecord, "agent_session_id")).toBe(pmLaunch.provider_session_id);
+      const pmHistoryRoster = await readRoster(page);
+      const recordedPm = pmHistoryRoster.members.find(value => value.agent_member_id === pmMemberId)!;
+      expect(recordedPm.history.find(value => value.session_id === pmLaunch.gwt_session_id)).toMatchObject({ role: "pm", model: "gpt-6.1-sol" });
       const originalRecord = await sessionRecord(fixture.home, launch.gwt_session_id);
       for (const key of ["agent_member_id", "agent_name", "model", "reasoning_level", "agent_session_id"])
         expect(tomlString(originalRecord, key)).toBe(tomlString(record, key));

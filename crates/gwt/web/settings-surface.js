@@ -455,7 +455,7 @@ function reconcileCandidateSave(panel, event) {
 }
 
 export function renderMemberTuningControls(host, options) {
-  const { target, choices = null, available = true, onEdit = () => {}, onRetry = () => {}, onReload = null } = options;
+  const { target, choices = null, available = true, onEdit = () => {}, onRetry = () => {}, onReload = null, onReloadCatalog = null } = options;
   const editable = available && target?.available !== false;
   const document = host.ownerDocument;
   host.dataset.memberTuningHost = "";
@@ -490,6 +490,13 @@ export function renderMemberTuningControls(host, options) {
     modelUnavailable.setAttribute("role", "status");
     modelUnavailable.dataset.modelUnavailable = "";
     host.append(modelUnavailable);
+    const catalogStatus = document.createElement("p");
+    catalogStatus.className = "settings-help"; catalogStatus.setAttribute("role", "status");
+    catalogStatus.dataset.modelCatalogStatus = ""; host.append(catalogStatus);
+    const retryCatalog = document.createElement("button"); retryCatalog.type = "button"; retryCatalog.className = "wizard-button";
+    retryCatalog.textContent = "Retry model catalog"; retryCatalog.dataset.action = "retry-model-catalog";
+    retryCatalog.addEventListener("click", () => { if (owns(retryCatalog) && !retryCatalog.disabled) host.memberTuningOptions.onReloadCatalog?.(); });
+    host.append(retryCatalog);
     const revision = document.createElement("p"); revision.className = "settings-help"; revision.dataset.memberTuningRevision = ""; host.append(revision);
     const status = document.createElement("p"); status.className = "settings-status"; status.dataset.memberTuningStatus = ""; status.setAttribute("role", "status"); host.append(status);
     const retry = document.createElement("button"); retry.type = "button"; retry.className = "wizard-button"; retry.textContent = "Retry profile"; retry.dataset.action = "retry-tuning";
@@ -497,7 +504,7 @@ export function renderMemberTuningControls(host, options) {
     const reload = document.createElement("button"); reload.type = "button"; reload.className = "wizard-button"; reload.textContent = "Reload profile"; reload.dataset.action = "reload-tuning";
     reload.addEventListener("click", () => { if (owns(reload) && !reload.disabled) host.memberTuningOptions.onReload?.(); }); host.append(reload);
   }
-  host.memberTuningOptions = { onEdit, onRetry, onReload };
+  host.memberTuningOptions = { onEdit, onRetry, onReload, onReloadCatalog };
   const catalog = Array.isArray(choices) ? choices : choices?.agents || [];
   const agentChoices = target?.canonical.role === "pm" && target.canonical.agent_options
     ? target.canonical.agent_options.map(option => catalog.find(agent => agent.id === option.id) || option) : catalog;
@@ -540,6 +547,12 @@ export function renderMemberTuningControls(host, options) {
     ? `Model ${model} is not listed in the current ${entry.name} catalog. Your value is kept and not replaced; an unlisted model may still be supported.`
     : "";
   modelUnavailable.hidden = !unlisted;
+  const catalogStatus = host.querySelector("[data-model-catalog-status]");
+  catalogStatus.textContent = entry?.model_catalog_warning || "";
+  catalogStatus.hidden = !catalogStatus.textContent;
+  const retryCatalog = host.querySelector('[data-action="retry-model-catalog"]');
+  retryCatalog.hidden = !catalogStatus.textContent || !onReloadCatalog;
+  retryCatalog.disabled = !onReloadCatalog;
   host.querySelector("[data-member-tuning-revision]").textContent = target ? `Revision: ${target.canonical.revision}` : "Settings unavailable. Reload registered members.";
   host.querySelector("[data-member-tuning-status]").textContent = !editable ? "Settings unavailable. Reload the current profile; your draft is retained." : target?.error || ({ saving: "Saving…", queued: "Saving…", saved: "Saved" }[target?.status] || "");
   const retry = host.querySelector('[data-action="retry-tuning"]'); retry.hidden = !target?.blocked; retry.disabled = !editable || !!target?.composing || !!target?.pending;

@@ -177,9 +177,13 @@ custom agents.
 
 Codex model choices follow its local `models_cache.json` in Launch Wizard and
 Agents settings, with a bundled fallback when the cache is unavailable. Saved
-models that disappear remain unchanged and show a warning. Once every seven
+models that disappear remain unchanged and show a warning. If the live catalog
+is unavailable, Agents shows a notice and **Retry model catalog** rereads it
+without changing saved values or an unfinished edit. Once every seven
 days, gwt checks for catalog and saved-profile differences and adds each new
 difference to PM Reports once.
+The selected member's ID stays visible while names change. Assignment history
+shows recorded roles and observed exit times; missing historical facts remain unknown.
 
 **Settings > Supported Agents** shows the complete catalog, installation status,
 and installed versions. Install missing CLIs there; update actions appear when

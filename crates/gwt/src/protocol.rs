@@ -2432,6 +2432,9 @@ pub struct AgentAssignmentHistoryView {
     pub name: Option<String>,
     #[serde(default)]
     pub provider: Option<String>,
+    /// Recorded role evidence; absent legacy evidence remains unknown.
+    #[serde(default)]
+    pub role: Option<String>,
     /// Recorded launch configuration, not observed provider-internal changes.
     #[serde(default)]
     pub model: Option<String>,

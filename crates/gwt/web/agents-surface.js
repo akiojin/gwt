@@ -133,6 +133,7 @@ export function createAgentsSurface({ document, executionModel, projectTitle, ro
   function recordedConfig(item) {
     return `Recorded name: ${item?.name || "—"} · Tool: ${item?.provider || "—"} · Recorded model: ${item?.model || "—"}`;
   }
+  const recordedRole = item => `Role: ${{ pm: "Project Manager", review: "Review", implementation: "Implementation" }[item?.role] || "—"}`;
   function openCurrent(memberId, expected) {
     const member = rosterModel.read().members.find(member => member.member_id === memberId);
     const current = liveWork(member);
@@ -335,14 +336,16 @@ export function createAgentsSurface({ document, executionModel, projectTitle, ro
         currentWork = document.createElement("section"); currentWork.className = "roster-history roster-current-work";
         currentWork.innerHTML = "<h4>Current work</h4><ol></ol>";
         const li = document.createElement("li"); li.className = "roster-now";
-        const label = document.createElement("small"), button = document.createElement("button"), config = document.createElement("small"), result = document.createElement("span");
+        const label = document.createElement("small"), button = document.createElement("button"), config = document.createElement("small"), role = document.createElement("small"), result = document.createElement("span");
         config.className = "roster-current-config";
+        role.className = "roster-current-role";
         label.textContent = "Now"; button.type = "button";
-        button.addEventListener("click", () => openCurrent(member.member_id, current)); result.textContent = "Current work"; li.append(label, button, config, result);
+        button.addEventListener("click", () => openCurrent(member.member_id, current)); result.textContent = "Current work"; li.append(label, button, config, role, result);
         currentWork.querySelector("ol").append(li); panel.insertBefore(currentWork, plans);
       }
       currentWork.querySelector("button").textContent = `${current.issue_number ? `#${current.issue_number}` : "—"} ${workTitle(current)}`;
       currentWork.querySelector(".roster-current-config").textContent = recordedConfig((member.history || []).find(item => item.session_id === current.session_id));
+      currentWork.querySelector(".roster-current-role").textContent = recordedRole((member.history || []).find(item => item.session_id === current.session_id));
     }
     const historyEntries = [...(member.history || [])].filter(item => !current || item.session_id !== current.session_id).sort((a, b) => (Date.parse(b.ended_at || b.started_at) || 0) - (Date.parse(a.ended_at || a.started_at) || 0));
     for (const item of historyEntries) {
@@ -350,7 +353,8 @@ export function createAgentsSurface({ document, executionModel, projectTitle, ro
       time.textContent = `${date(item.started_at)} – ${date(item.ended_at)} UTC`; title.textContent = `${item.issue_number ? `#${item.issue_number}` : "—"} ${item.title || "—"}`; result.textContent = item.result || "—";
       const config = document.createElement("small"); config.className = "roster-history-config";
       config.textContent = recordedConfig(item);
-      li.append(time, title, config, result); ol.append(li);
+      const role = document.createElement("small"); role.className = "roster-history-role"; role.textContent = recordedRole(item);
+      li.append(time, title, config, role, result); ol.append(li);
     }
     if (!ol.childNodes.length) { const empty = document.createElement("li"); empty.textContent = "No assignment history yet."; ol.append(empty); }
     if (member.assignment?.session_id && activityModel.read().count === null) {
@@ -399,6 +403,9 @@ export function createAgentsSurface({ document, executionModel, projectTitle, ro
     field.head.querySelector("h3").textContent = member.name;
     field.head.querySelector(".roster-avatar").textContent = Array.from(member.name || "?")[0];
     field.head.querySelector("p").textContent = `Registered tool: ${member.provider || "—"} · Member since ${date(member.created_at)} UTC`;
+    let memberId = field.head.querySelector(".roster-member-id");
+    if (!memberId) { memberId = document.createElement("p"); memberId.className = "roster-member-id"; field.head.querySelector("p").after(memberId); }
+    memberId.textContent = `Member ID: ${member.member_id}`;
     const value = edit?.value ?? member.name;
     if (field.input.value !== value) field.input.value = value;
     field.input.disabled = !rosterReady(rosterModel.read());
@@ -416,7 +423,7 @@ export function createAgentsSurface({ document, executionModel, projectTitle, ro
     selectPm.textContent = foreign ? `Open Project Manager project ${member.pm_project_key}` : configuredPm(member) ? "Configured Project Manager" : holdsPmRole(member) ? "Project Manager assignment retained" : "Select as Project Manager";
     selectPm.disabled = !foreign && (!rosterReady(rosterModel.read()) || !member.enabled || !member.pm_eligible || holdsPmRole(member) || !!member.assignment);
     const role = configuredPm(member) ? "pm" : "implementation";
-    renderMemberTuningControls(field.head.querySelector("[data-member-tuning]"), { target: foreign ? null : tuningController?.model.read().targets[`${role}:${member.member_id}`], choices: rosterModel.read().tuning_choices, onReload: foreign ? null : onReloadProfile,
+    renderMemberTuningControls(field.head.querySelector("[data-member-tuning]"), { target: foreign ? null : tuningController?.model.read().targets[`${role}:${member.member_id}`], choices: rosterModel.read().tuning_choices, onReload: foreign ? null : onReloadProfile, onReloadCatalog: foreign ? null : onReloadProfile,
       onEdit: (patch, options) => tuningController?.editTuning(role, member.member_id, patch, options),
       onRetry: () => tuningController?.retryTuning(role, member.member_id) });
     return field.head;
