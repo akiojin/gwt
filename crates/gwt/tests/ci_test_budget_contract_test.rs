@@ -885,7 +885,34 @@ fn windows_regression_slices_build_each_harness_once_and_gate_all_filters() {
         })
         .expect("five workers must retain all ten real-artifact repetitions");
     assert!(driver["if"].is_null());
+    assert!(driver["continue-on-error"].is_null());
+    assert_eq!(driver["timeout-minutes"].as_u64(), Some(20));
     let driver_run = driver["run"].as_str().unwrap();
+    let probe_command = "python crates/gwt-core/tests/fixtures/run_windows_cmd_runner_probe.py";
+    assert_eq!(workflow.matches(probe_command).count(), 1);
+    let probe = driver_run
+        .find(probe_command)
+        .expect("the independent cmd probe must run alongside the driver workers");
+    assert!(driver_run[..probe].contains("Start-Job"));
+    assert!(driver_run[..probe].contains("$env:CARGO_PROFILE_DEV_DEBUG = '0'"));
+    assert!(driver_run[probe..].contains("if ($LASTEXITCODE -ne 0)"));
+    let runtime_steps = runtime["steps"].as_sequence().unwrap();
+    let joined = runtime_steps
+        .iter()
+        .position(|step| step == driver)
+        .unwrap();
+    let provenance = &runtime_steps[joined + 1];
+    assert_eq!(provenance["uses"], "actions/upload-artifact@v7");
+    assert_eq!(provenance["if"], "${{ !cancelled() }}");
+    assert_eq!(
+        provenance["with"]["name"],
+        "windows-cmd-consumer-provenance"
+    );
+    assert_eq!(
+        provenance["with"]["path"],
+        "target/issue6474-probe/green.json"
+    );
+    assert_eq!(provenance["with"]["if-no-files-found"], "error");
     assert!(driver_run.contains("1..5 | ForEach-Object"));
     assert!(driver_run.contains("Start-Job"));
     assert!(driver_run.contains("$attempt -le 2"));
