@@ -14,7 +14,7 @@ const date = value => value && Number.isFinite(Date.parse(value)) ? new Date(val
 
 export function createAgentsSurface({ document, executionModel, projectTitle, rosterModel, activityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel,
   tuningController, pmSettingsPanel, scheduleModel, switchModel, onSwitch = () => {}, onOpenSavedWork = () => {}, onContinueSavedWork = () => {}, isContinuePending = () => false, onReassign = () => {}, onRefreshSchedule = () => {},
-  onAddMember = () => {}, onRestMember = () => {}, onRenameMember = () => {}, onRetryName = () => {}, onSetPmEligibility = () => {}, onSelectPm = () => {}, onNavigateProject = () => {}, onReloadProfile = null, onOpenWork = () => {} }) {
+  onAddMember = () => {}, onRestMember = () => {}, onActivateMember = () => {}, onRenameMember = () => {}, onRetryName = () => {}, onSetPmEligibility = () => {}, onSelectPm = () => {}, onNavigateProject = () => {}, onReloadProfile = null, onOpenWork = () => {} }) {
   const element = document.createElement("section"); element.className = "agents-surface"; element.setAttribute("aria-label", "Agents");
   element.innerHTML = `<header class="roster-heading"><h2>Agents</h2><div class="roster-tabs" role="tablist" aria-label="Agent roster views"><button type="button" id="roster-tab-team" data-tab="team" role="tab" aria-controls="roster-team" aria-selected="true">Team</button><button type="button" id="roster-tab-past" data-tab="past" role="tab" aria-controls="roster-past" aria-selected="false" tabindex="-1">Past</button></div><span class="roster-active"></span></header>
     <div class="roster-pm-identity" role="group" aria-label="Project Manager" hidden><span class="roster-pm-name"></span><span class="window-role-badge">PM</span></div>
@@ -35,6 +35,18 @@ export function createAgentsSurface({ document, executionModel, projectTitle, ro
   registrationEligible.checked = false;
   let nameTouched = false, registeredDraft = null;
   let registrationTools = [], renderedTools = "";
+  const registrationError = element.querySelector("#roster-registration-error");
+  const registrationMessage = document.createElement("span");
+  const showConflict = document.createElement("button");
+  showConflict.type = "button"; showConflict.textContent = "Show member"; showConflict.hidden = true;
+  registrationError.append(registrationMessage, showConflict);
+  const registrationConflict = () => rosterModel.read().members.find(member =>
+    member.name.trim().toLowerCase() === nameInput.value.trim().toLowerCase());
+  showConflict.addEventListener("click", () => {
+    const member = registrationConflict();
+    if (!member || !selectMember(member.member_id)) return;
+    memberRows.get(member.member_id)?.row.scrollIntoView?.({ block: "nearest" });
+  });
   function syncRegistration() {
     const roster = rosterModel.read(), name = nameInput.value.trim();
     if (roster.error) registeredDraft = null;
@@ -45,10 +57,12 @@ export function createAgentsSurface({ document, executionModel, projectTitle, ro
       registeredDraft = null;
     }
     const draft = nameInput.value.trim();
-    const error = !draft ? "Enter a display name." : roster.members.some(member => member.name.trim().toLowerCase() === draft.toLowerCase())
-      ? "This name is already registered, including resting members." : "";
-    const message = element.querySelector("#roster-registration-error");
-    message.textContent = nameTouched ? error : ""; message.hidden = !message.textContent;
+    const conflict = registrationConflict();
+    const error = !draft ? "Enter a display name." : conflict
+      ? `${conflict.name} (${conflict.agent_id || conflict.provider || "Unknown tool"}) is ${conflict.enabled ? "already registered" : "resting"} and uses this name. ` : "";
+    registrationMessage.textContent = nameTouched ? error : "";
+    showConflict.hidden = !nameTouched || !conflict;
+    registrationError.hidden = !nameTouched || !error;
     nameInput.setAttribute("aria-invalid", String(nameTouched && !!error));
     for (const button of element.querySelectorAll('[data-action="add"]')) {
       button.disabled = !!error || registrationTools.length === 0 || !rosterReady(roster);
@@ -456,13 +470,22 @@ export function createAgentsSurface({ document, executionModel, projectTitle, ro
       }
       const assignments = document.createElement("div"); assignments.className = "roster-assignments";
       assignments.setAttribute("role", "group"); assignments.setAttribute("aria-label", "Project assignments");
-      who.append(name, purpose, assignments, stats(member, "roster-row-stats")); row.append(avatar(member), who, state);
+      const activate = document.createElement("button"); activate.type = "button";
+      activate.dataset.action = "activate"; activate.textContent = "Reactivate";
+      activate.addEventListener("click", () => {
+        const roster = rosterModel.read(), latest = roster.members.find(item => item.member_id === member.member_id);
+        if (!disposed && rosterReady(roster) && !roster.pending_roster && latest && !latest.enabled) onActivateMember(latest.member_id);
+      });
+      who.append(name, purpose, assignments, stats(member, "roster-row-stats"), activate); row.append(avatar(member), who, state);
       row.addEventListener("click", event => { if (!event.target.closest("button")) selectMember(member.member_id); });
       row.addEventListener("keydown", event => { if (event.target === row && ["Enter", " "].includes(event.key)) { event.preventDefault(); selectMember(member.member_id); } });
       cached = { key, row }; memberRows.set(member.member_id, cached);
     }
     const { row } = cached, unavailable = member.assignment?.session_id && activityModel.read().count === null;
     row.setAttribute("aria-selected", String(member.member_id === selectedId));
+    const activate = row.querySelector('[data-action="activate"]');
+    activate.hidden = member.enabled;
+    activate.disabled = member.enabled || !rosterReady(rosterModel.read()) || !!rosterModel.read().pending_roster;
     row.querySelector(".roster-avatar").textContent = Array.from(member.name || "?")[0];
     row.querySelector("h3").textContent = member.name;
     const purpose = row.querySelector(".roster-purpose");

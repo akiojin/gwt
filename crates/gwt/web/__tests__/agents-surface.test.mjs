@@ -40,12 +40,12 @@ async function fixture({ onOpenWork = () => {}, onNavigateProject = () => {}, on
   const windowCatalogModel = createUiStateStore({ catalog: { runtimeStates: {}, version: 1, appState: { active_tab_id: "p", tabs: [{ id: "p", workspace: { windows: [{ id: "one", session_id: "s1", agent_member_id: "m1", dynamic_title: "Current issue", status: "running" }] } }] } } }, options);
   const supportedAgentsModel = createUiStateStore({ agents: [{ id: "codex", name: "Codex" }, { id: "claude", name: "Claude Code" }] }, options);
   const customAgentsModel = createUiStateStore({ catalog: { loaded: true, agents: [{ id: "custom-cli", display_name: "Custom CLI" }] } }, options);
-  const opened = [], rested = [], added = [], reassigned = [], refreshed = [], switched = [], saved = [], continued = [];
-  const surface = createAgentsSurface({ document, executionModel, projectTitle: "Alpha", rosterModel, tuningController, pmSettingsPanel, activityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel, scheduleModel, switchModel, onNavigateProject, onRenameMember: rosterController.editAgentMemberName, onRetryName: rosterController.retryAgentMemberName, isContinuePending, onContinueSavedWork: workId => { continued.push(workId); onContinueSavedWork(workId); }, onSwitch: action => { switched.push(action); switchModel.update(state => ({ ...state, pending: action })); }, onOpenSavedWork: intent => saved.push(intent), onReassign: action => reassigned.push(action), onRefreshSchedule: () => refreshed.push(true), onAddMember: (tool, name, pm_eligible) => { added.push({ tool, name, pm_eligible }); rosterModel.update(state => ({ ...state, error: null })); }, onRestMember: id => rested.push(id), onOpenWork: assignment => { opened.push(assignment); onOpenWork(assignment); } });
+  const opened = [], rested = [], activated = [], added = [], reassigned = [], refreshed = [], switched = [], saved = [], continued = [];
+  const surface = createAgentsSurface({ document, executionModel, projectTitle: "Alpha", rosterModel, tuningController, pmSettingsPanel, activityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel, scheduleModel, switchModel, onNavigateProject, onRenameMember: rosterController.editAgentMemberName, onRetryName: rosterController.retryAgentMemberName, isContinuePending, onContinueSavedWork: workId => { continued.push(workId); onContinueSavedWork(workId); }, onSwitch: action => { switched.push(action); switchModel.update(state => ({ ...state, pending: action })); }, onOpenSavedWork: intent => saved.push(intent), onReassign: action => reassigned.push(action), onRefreshSchedule: () => refreshed.push(true), onAddMember: (tool, name, pm_eligible) => { added.push({ tool, name, pm_eligible }); rosterModel.update(state => ({ ...state, error: null })); }, onRestMember: id => rested.push(id), onActivateMember: id => activated.push(id), onOpenWork: assignment => { opened.push(assignment); onOpenWork(assignment); } });
   for (const node of surface.element.querySelectorAll("select, input")) node.focus = () => { activeElement = node; };
   document.querySelector("main").append(surface.element);
   const flush = () => { for (const fn of [...frames]) { frames.delete(fn); fn(); } };
-  return { surface, document, window, frames, flush, rosterModel, rosterController, renamed, supportedAgentsModel, customAgentsModel, activityModel, windowCatalogModel, scheduleModel, opened, rested, added, reassigned, refreshed, switchModel, switched, saved, continued };
+  return { surface, document, window, frames, flush, rosterModel, rosterController, renamed, supportedAgentsModel, customAgentsModel, activityModel, windowCatalogModel, scheduleModel, opened, rested, activated, added, reassigned, refreshed, switchModel, switched, saved, continued };
 }
 
 test("Agents autosaves inline names while retaining native input, focus, invalid drafts and per-member selection drafts", async () => {
@@ -503,6 +503,40 @@ test("resting members stay registered after work ends and across unavailable act
 });
 
 
+test("resting registration collisions identify the member and reactivate only the chosen row", async () => {
+  const f = await fixture();
+  f.rosterModel.update(state => ({ ...state, members: [
+    ...state.members,
+    { member_id: "rest-first", name: "Earlier", agent_id: "claude", enabled: false, history: [] },
+    { member_id: "rest-target", name: "Maple", agent_id: "codex", enabled: false, history: [] },
+  ] })); f.flush();
+  const input = f.surface.element.querySelector('[aria-label="Name for new member"]');
+  input.value = " MAPLE "; input.dispatchEvent(new f.window.Event("input"));
+  const error = f.surface.element.querySelector("#roster-registration-error");
+  assert.match(error.textContent, /Maple.*codex.*resting/i);
+  assert.equal(f.surface.element.querySelector('[data-action="add"]').disabled, true);
+  error.querySelector("button").click();
+  const row = f.surface.element.querySelector('[data-member-id="rest-target"]');
+  assert.equal(row.getAttribute("aria-selected"), "true");
+  assert.equal(f.document.activeElement, row);
+  assert.deepEqual(f.activated, []); assert.deepEqual(f.added, []);
+  const activate = row.querySelector('[data-action="activate"]');
+  activate.click();
+  assert.deepEqual(f.activated, ["rest-target"]);
+  f.rosterModel.update(state => ({ ...state, pending_roster: { request_id: "activate", action: { kind: "activate" } } })); f.flush();
+  assert.equal(activate.disabled, true); activate.click();
+  assert.deepEqual(f.activated, ["rest-target"]);
+  f.rosterModel.update(state => ({ ...state, pending_roster: null, members: state.members.map(member => member.member_id === "rest-target" ? { ...member, enabled: true } : member) })); f.flush();
+  assert.equal(activate.hidden, true); activate.click();
+  assert.deepEqual(f.activated, ["rest-target"]);
+  assert.equal(f.rosterModel.read().members.find(member => member.member_id === "rest-first").enabled, false);
+  f.rosterModel.update(state => ({ ...state, members: state.members.filter(member => member.member_id !== "rest-target") })); f.flush();
+  activate.click();
+  assert.deepEqual(f.activated, ["rest-target"], "a detached old control cannot reactivate a removed identity");
+  f.surface.dispose();
+});
+
+
 test("an observation timestamp alone preserves roster detail, controls and selection", async () => {
   const f = await fixture();
   const detail = f.surface.element.querySelector(".roster-detail").firstElementChild;
@@ -775,6 +809,7 @@ test("ordinary roster rejection receipts show current role/registration diagnost
   const rosterSnapshot = (revision, error = null) => ({ project_key: "project", revision, members: f.rosterModel.read().members.map(member => ({ ...member, agent_member_id: member.member_id })), error });
   const name = f.surface.element.querySelector('[aria-label="Name for new member"]'); name.value = "New member"; name.dispatchEvent(new f.window.Event("input"));
   const eligible = f.surface.element.querySelector('[aria-label="PM eligible for new member"]'); eligible.checked = true;
+  assert.equal(begin("activate", "activate-current", { member_id: "m2" }), true);
   assert.equal(begin("add", "add-current", { name: "New member", agent_id: "codex", pm_eligible: true }), true);
   f.rosterController.applyAgentRosterError({ project_key: "project", request_id: "add-current", message: "Roster changed. Reload before retrying registration." }); f.flush();
   assert.match(f.surface.element.querySelector('.roster-error').textContent, /Reload before retrying registration/);
