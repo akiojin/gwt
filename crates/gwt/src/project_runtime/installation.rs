@@ -4657,6 +4657,8 @@ mod owner_admission_tests {
                 &root,
                 &sessions,
                 crate::agent_names::AgentRosterAction::Add {
+                    model: None,
+                    reasoning: None,
                     pm_eligible: false,
                     name: None,
                     agent_id: Some(agent_id.command().into()),
@@ -4742,6 +4744,8 @@ mod owner_admission_tests {
             &root,
             &sessions,
             crate::agent_names::AgentRosterAction::Add {
+                model: None,
+                reasoning: None,
                 pm_eligible: false,
                 name: None,
                 agent_id: Some("grok".into()),

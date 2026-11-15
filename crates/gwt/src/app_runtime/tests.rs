@@ -10148,6 +10148,8 @@ fn open_agent_settings_sets(
                 repo,
                 &sessions,
                 gwt::agent_names::AgentRosterAction::Add {
+                    model: None,
+                    reasoning: None,
                     pm_eligible: false,
                     name: None,
                     agent_id: Some(tool.into()),

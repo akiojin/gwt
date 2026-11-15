@@ -787,13 +787,23 @@ pub fn is_active() -> io::Result<bool> {
     load().map(|registry| registry.is_some_and(|registry| registry.phase == RegistryPhase::Active))
 }
 
-/// Identity-only PM selection does not mutate any project execution mirror.
+/// Shared registration and PM selection do not mutate project execution mirrors.
 pub(crate) fn mutate_pm_selection(
     root: &Path,
     action: AgentRosterAction,
     expected_revision: Option<u64>,
 ) -> io::Result<IssueMonitorPrefs> {
     let key = gwt_core::paths::project_scope_hash(root).to_string();
+    let adding = matches!(action, AgentRosterAction::Add { .. });
+    let source_path = prefs_path(&key)?;
+    let _source_guard = if adding && source_path.exists() {
+        Some(NamedFileLock::acquire(
+            &source_path.with_extension("lock"),
+            "Agent registry source",
+        )?)
+    } else {
+        None
+    };
     let _guard = lock()?;
     let mut registry =
         load()?.ok_or_else(|| invalid("Load the Agent roster before changing members"))?;
@@ -805,9 +815,52 @@ pub(crate) fn mutate_pm_selection(
     confirm_durable()?;
     let roster = project_roster(&registry, &key)
         .ok_or_else(|| invalid("Load the Agent roster before changing members"))?;
-    if !matches!(action, AgentRosterAction::Read) && expected_revision != Some(roster.revision) {
+    if !matches!(action, AgentRosterAction::Read)
+        && (if adding && registry.sources.contains_key(&key) {
+            expected_revision.is_some_and(|expected| expected != roster.revision)
+        } else {
+            expected_revision != Some(roster.revision)
+        })
+    {
         return Err(invalid("Agent roster changed; reload before retrying"));
     }
+    let mut default_tool = "codex".to_string();
+    if adding {
+        if let Some(source) = registry.sources.get(&key) {
+            assert_known(&registry, &key, raw(&source_path)?.as_deref())?;
+            assert_known_floor(source, &source_path)?;
+            default_tool = decode(Some(&source.after_json))?
+                .launch_profile_pool()
+                .first()
+                .map(|profile| profile.agent_id.clone())
+                .unwrap_or(default_tool);
+        }
+    }
+    let registration_tuning = if let AgentRosterAction::Add {
+        agent_id,
+        model,
+        reasoning,
+        ..
+    } = &action
+    {
+        let normalize = |value: &Option<String>| {
+            value
+                .as_ref()
+                .map(|text| text.trim().to_string())
+                .filter(|text| !text.is_empty())
+        };
+        let model = normalize(model);
+        let reasoning = normalize(reasoning);
+        gwt_agent::validate_native_tuning(
+            agent_id.as_deref().unwrap_or(&default_tool),
+            model.as_deref(),
+            reasoning.as_deref(),
+        )
+        .map_err(invalid)?;
+        Some((model, reasoning))
+    } else {
+        None
+    };
     let member_id: &str = match &action {
         AgentRosterAction::SetPmEligibility { member_id, .. }
         | AgentRosterAction::SelectPm { member_id } => member_id,
@@ -911,9 +964,12 @@ pub(crate) fn mutate_pm_selection(
             }
             registry.pm_projects.entry(key.clone()).or_default();
         }
-        action => {
-            crate::agent_names::apply_roster_action(&mut roster, &history_path(), "codex", action)?
-        }
+        action => crate::agent_names::apply_roster_action(
+            &mut roster,
+            &history_path(),
+            &default_tool,
+            action,
+        )?,
     }
     store_project_roster(&mut registry, &key, Some(roster))?;
     if project_roster(&registry, &key) != before {
@@ -929,6 +985,12 @@ pub(crate) fn mutate_pm_selection(
             .checked_add(1)
             .ok_or_else(|| invalid("Agent registry revision exhausted"))?;
         ensure_cores(&mut registry);
+        if let Some((model, reasoning)) = registration_tuning {
+            let member = registry.roster.as_ref().unwrap().members.last().unwrap();
+            let core = registry.profiles.get_mut(&member.agent_member_id).unwrap();
+            core.model = model;
+            core.reasoning = reasoning;
+        }
         save(&registry)?;
     }
     let source = registry
@@ -4006,6 +4068,8 @@ mod tests {
             &root,
             &sessions,
             AgentRosterAction::Add {
+                model: Some("pm-only-registration-model".into()),
+                reasoning: Some("high".into()),
                 agent_id: Some("codex".into()),
                 name: Some("Pinned candidate".into()),
                 pm_eligible: true,
@@ -4014,6 +4078,14 @@ mod tests {
         )
         .unwrap();
         let pinned = added.members.last().unwrap().agent_member_id.clone();
+        let core = SessionMemberSnapshot::load()
+            .unwrap()
+            .implementation_core(&pinned)
+            .unwrap()
+            .0;
+        assert_eq!(core.model.as_deref(), Some("pm-only-registration-model"));
+        assert_eq!(core.reasoning.as_deref(), Some("high"));
+        assert!(!monitor_path.exists());
         let mut explicit = provider_only;
         explicit.agent_member_id = Some(pinned.clone());
         write_candidate(&mut load().unwrap().unwrap(), explicit);
@@ -4129,6 +4201,8 @@ mod tests {
             &root,
             &sessions,
             AgentRosterAction::Add {
+                model: None,
+                reasoning: None,
                 agent_id: Some("codex".into()),
                 name: Some("Successor".into()),
                 pm_eligible: true,
@@ -4415,6 +4489,8 @@ mod tests {
             &root,
             &sessions,
             AgentRosterAction::Add {
+                model: None,
+                reasoning: None,
                 agent_id: Some("codex".into()),
                 name: Some("Successor".into()),
                 pm_eligible: true,

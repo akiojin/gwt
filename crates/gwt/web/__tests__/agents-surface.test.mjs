@@ -23,7 +23,7 @@ const members = [
   { member_id: "m2", name: "Two", enabled: true, provider: null, model: null, created_at: null, issue_count: null, landed_count: null, active_seconds: null, tokens: null, history: [] },
 ];
 const current = { window_id: "one", session_id: "s1", runtime_incarnation: 4, issue_number: 4777, is_pm: false };
-async function fixture({ onOpenWork = () => {}, onNavigateProject = () => {}, onContinueSavedWork = () => {}, isContinuePending, schedule, switching, executionModel, tuningController, pmSettingsPanel } = {}) {
+async function fixture({ onOpenWork = () => {}, onNavigateProject = () => {}, onContinueSavedWork = () => {}, isContinuePending, schedule, switching, executionModel, tuningController, pmSettingsPanel, onReloadProfile = null } = {}) {
   const { document, window } = parseHTML("<main></main>");
   // linkedom does not track focus; keep that browser state local to this fixture.
   let activeElement = null;
@@ -41,7 +41,7 @@ async function fixture({ onOpenWork = () => {}, onNavigateProject = () => {}, on
   const supportedAgentsModel = createUiStateStore({ agents: [{ id: "codex", name: "Codex" }, { id: "claude", name: "Claude Code" }] }, options);
   const customAgentsModel = createUiStateStore({ catalog: { loaded: true, agents: [{ id: "custom-cli", display_name: "Custom CLI" }] } }, options);
   const opened = [], rested = [], activated = [], added = [], reassigned = [], refreshed = [], switched = [], saved = [], continued = [];
-  const surface = createAgentsSurface({ document, executionModel, projectTitle: "Alpha", rosterModel, tuningController, pmSettingsPanel, activityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel, scheduleModel, switchModel, onNavigateProject, onRenameMember: rosterController.editAgentMemberName, onRetryName: rosterController.retryAgentMemberName, isContinuePending, onContinueSavedWork: workId => { continued.push(workId); onContinueSavedWork(workId); }, onSwitch: action => { switched.push(action); switchModel.update(state => ({ ...state, pending: action })); }, onOpenSavedWork: intent => saved.push(intent), onReassign: action => reassigned.push(action), onRefreshSchedule: () => refreshed.push(true), onAddMember: (tool, name, pm_eligible) => { added.push({ tool, name, pm_eligible }); rosterModel.update(state => ({ ...state, error: null })); }, onRestMember: id => rested.push(id), onActivateMember: id => activated.push(id), onOpenWork: assignment => { opened.push(assignment); onOpenWork(assignment); } });
+  const surface = createAgentsSurface({ document, executionModel, projectTitle: "Alpha", rosterModel, tuningController, pmSettingsPanel, onReloadProfile, activityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel, scheduleModel, switchModel, onNavigateProject, onRenameMember: rosterController.editAgentMemberName, onRetryName: rosterController.retryAgentMemberName, isContinuePending, onContinueSavedWork: workId => { continued.push(workId); onContinueSavedWork(workId); }, onSwitch: action => { switched.push(action); switchModel.update(state => ({ ...state, pending: action })); }, onOpenSavedWork: intent => saved.push(intent), onReassign: action => reassigned.push(action), onRefreshSchedule: () => refreshed.push(true), onAddMember: (tool, name, pm_eligible, tuning) => { added.push({ tool, name, pm_eligible, ...(tuning ? { tuning } : {}) }); rosterModel.update(state => ({ ...state, error: null })); }, onRestMember: id => rested.push(id), onActivateMember: id => activated.push(id), onOpenWork: assignment => { opened.push(assignment); onOpenWork(assignment); } });
   for (const node of surface.element.querySelectorAll("select, input")) node.focus = () => { activeElement = node; };
   document.querySelector("main").append(surface.element);
   const flush = () => { for (const fn of [...frames]) { frames.delete(fn); fn(); } };
@@ -701,6 +701,53 @@ test("Agents continues only server-eligible saved work through the existing corr
   f.surface.dispose();
 });
 
+
+test("registration selects catalog tuning without sending until Register and retains rejected drafts", async () => {
+  let reloads = 0;
+  const f = await fixture({ onReloadProfile: () => { reloads += 1; } });
+  f.rosterModel.update(state => ({ ...state, tuning_choices: { agents: [{ id: "codex", models: [{ value: "catalog-model", reasoning_options: [{ value: "high" }] }] }] } })); f.flush();
+  const host = f.surface.element;
+  const name = host.querySelector('[aria-label="Name for new member"]');
+  const model = host.querySelector('[aria-label="Model for new member"]');
+  const reasoning = host.querySelector('[aria-label="Reasoning for new member"]');
+  assert.ok(model && reasoning, "registration exposes model and reasoning inputs");
+  assert.equal(model.className, "settings-input");
+  assert.equal(model.parentElement.querySelector('option[value="catalog-model"]').value, "catalog-model");
+  name.value = "Maple"; name.dispatchEvent(new f.window.Event("input"));
+  model.value = "  catalog-model  "; model.dispatchEvent(new f.window.Event("input"));
+  reasoning.value = " high "; reasoning.dispatchEvent(new f.window.Event("input"));
+  assert.equal(reasoning.parentElement.querySelector('option[value="high"]').value, "high");
+  assert.equal(f.added.length, 0);
+  reasoning.dispatchEvent(new f.window.Event("compositionstart"));
+  host.querySelector('[data-action="add"]').click();
+  assert.equal(f.added.length, 0, "Register never sends an unfinished IME value");
+  reasoning.dispatchEvent(new f.window.Event("compositionend"));
+  host.querySelector('[data-action="add"]').click();
+  assert.deepEqual(f.added, [{ tool: "codex", name: "Maple", pm_eligible: false, tuning: { model: "catalog-model", reasoning: "high" } }]);
+  model.focus();
+  f.rosterModel.update(state => ({ ...state, error: "Unsupported reasoning; review and retry", tuning_choices: { agents: [] } })); f.flush();
+  assert.equal(model.value, "  catalog-model  "); assert.equal(reasoning.value, " high ");
+  assert.equal(host.querySelector('[aria-label="Model for new member"]'), model);
+  assert.equal(f.document.activeElement, model);
+  f.rosterModel.update(state => ({ ...state, tuning_choices: { agents: [{ id: "codex", model_catalog_warning: "Catalog unavailable. Retry without losing your draft.", models: [] }] } })); f.flush();
+  assert.match(host.querySelector('[data-registration-catalog-status]').textContent, /Catalog unavailable/);
+  const retry = host.querySelector('[data-action="retry-registration-catalog"]');
+  assert.equal(retry.hidden, false); retry.click(); assert.equal(reloads, 1);
+  assert.equal(f.added.length, 1, "catalog Retry is only a read");
+  assert.equal(model.value, "  catalog-model  ");
+  f.rosterModel.update(state => ({ ...state, tuning_choices: { agents: [{ id: "codex", models: [{ value: "recovered-model" }] }] } })); f.flush();
+  assert.equal(retry.hidden, true); assert.equal(model.value, "  catalog-model  ");
+  assert.equal(model.parentElement.querySelector('option[value="recovered-model"]').value, "recovered-model");
+  const tool = host.querySelector('[aria-label="Tool for new member"]');
+  tool.querySelector('[value="claude"]').selected = true; tool.dispatchEvent(new f.window.Event("change"));
+  assert.equal(model.value, ""); assert.equal(reasoning.value, "");
+  const preview = f.document.createElement("aside"); f.surface.setPreviewHost(preview);
+  assert.equal(preview.querySelector('[aria-label="Model for new member"]').disabled, true);
+  assert.equal(preview.querySelector('[aria-label="Reasoning for new member"]').disabled, true);
+  const app = readFileSync(new URL("../app.js", import.meta.url), "utf8");
+  assert.match(app, /kind: "add", agent_id: agentId, name, pm_eligible: pmEligible, model: tuning\?\.model \?\? null, reasoning: tuning\?\.reasoning \?\? null/);
+  f.surface.dispose();
+});
 
 test("Agents registers an explicit name with its selected catalog tool and preserves rejected drafts", async () => {
   const f = await fixture();
