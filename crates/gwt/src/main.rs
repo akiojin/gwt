@@ -2296,6 +2296,10 @@ enum UserEvent {
         monitor_result: WindowCloseMonitorResult,
     },
     RuntimeHook(gwt::RuntimeHookEvent),
+    AuthenticatedRuntimeHook {
+        grant: gwt::agent_capability::AgentCapabilityGrant,
+        event: gwt::RuntimeHookEvent,
+    },
     DaemonRuntimeHook(gwt::RuntimeHookEvent),
     DaemonRuntimeApprovalOverlay {
         id: String,
@@ -11141,6 +11145,19 @@ fn main() -> std::io::Result<()> {
         let completion_context = match &event {
             Event::UserEvent(UserEvent::ProjectCompletion { context, .. }) => Some(context.clone()),
             _ => None,
+        };
+        let event = match event {
+            Event::UserEvent(UserEvent::AuthenticatedRuntimeHook { grant, event }) => {
+                if !app
+                    .agent_capability_issuer
+                    .as_ref()
+                    .is_some_and(|issuer| issuer.hook_grant_is_current(&grant))
+                {
+                    return;
+                }
+                Event::UserEvent(UserEvent::RuntimeHook(event))
+            }
+            event => event,
         };
         let event = match event {
             Event::UserEvent(event) => {

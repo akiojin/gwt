@@ -5153,7 +5153,24 @@ fn switch_source_exit_retires_exact_diagnostic_pane_and_husk_once() {
 
 #[test]
 fn switch_source_exit_preserves_reused_session_and_runtime() {
+    use gwt::project_runtime::agent_frontend::{
+        set_owner_agent_dispatch_test_hook, OwnerAgentDispatchTestStage,
+    };
     use gwt::project_runtime::events::{OwnerCommand, OwnerEvent};
+
+    struct HeldHook {
+        release: Option<std::sync::mpsc::Sender<()>>,
+        worker: Option<std::thread::JoinHandle<Result<reqwest::StatusCode, reqwest::Error>>>,
+    }
+    impl Drop for HeldHook {
+        fn drop(&mut self) {
+            // Disconnect releases the exact callback on every assertion path.
+            self.release.take();
+            if let Some(worker) = self.worker.take() {
+                let _ = worker.join();
+            }
+        }
+    }
 
     let _lock = env_test_lock()
         .lock()
@@ -5217,6 +5234,44 @@ fn switch_source_exit_preserves_reused_session_and_runtime() {
             .await
             .expect("the real predecessor must emit its status and marker before replacement")
         });
+        let mut late_stop = runtime_hook_state_for_event("Stopped", "Stop", &source_session.id);
+        late_stop.project_root = Some(project.display().to_string());
+        late_stop.branch = Some(source_session.branch.clone());
+        let source_grant = source.current_capability_grant().unwrap();
+        let (accepted_tx, accepted_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let _hook = set_owner_agent_dispatch_test_hook(
+            &source_grant,
+            OwnerAgentDispatchTestStage::BeforeHookDispatch,
+            move || {
+                accepted_tx.send(()).unwrap();
+                let _ = release_rx.recv();
+            },
+        );
+        let url = source.issuer.hook_forward_url().to_owned();
+        let authorization =
+            source.agent_pane_request().unwrap().headers()[reqwest::header::AUTHORIZATION].clone();
+        let captured_stop = late_stop.clone();
+        let worker = std::thread::spawn(move || {
+            reqwest::blocking::Client::builder()
+                // test-hygiene: allow-wall-clock-deadline Bound the real HTTP callback and failure cleanup; the authenticated gate establishes ordering.
+                .timeout(Duration::from_secs(10))
+                .build()?
+                .post(url)
+                .header(reqwest::header::AUTHORIZATION, authorization)
+                .json(&captured_stop)
+                .send()
+                .map(|response| response.status())
+        });
+        let mut held_hook = HeldHook {
+            release: Some(release_tx),
+            worker: Some(worker),
+        };
+        // Authentication is real and precedes the physical replacement.
+        accepted_rx
+            // test-hygiene: allow-wall-clock-deadline Bound the real HTTP authentication receipt; the channel establishes ordering.
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the predecessor hook must be authenticated before replacement");
         assert!(source
             .pty
             .terminate_and_wait_for_tree(Duration::from_secs(5))
@@ -5371,13 +5426,23 @@ fn switch_source_exit_preserves_reused_session_and_runtime() {
         assert!(Arc::ptr_eq(&writer.current, &successor.current));
         assert!(!source.current.load(Ordering::Acquire));
 
-        let mut late_stop = runtime_hook_state_for_event("Stopped", "Stop", &source_session.id);
-        late_stop.project_root = Some(project.display().to_string());
-        late_stop.branch = Some(source_session.branch.clone());
         // Discard only the real successor's startup notifications, before any
         // old callback is replayed. Subsequent events must come from a replay.
         owner_fixture_block_on(owner.agent_dispatch_barrier()).unwrap();
         while events.try_recv().is_ok() {}
+        drop(held_hook.release.take());
+        assert_eq!(
+            held_hook.worker.take().unwrap().join().unwrap().unwrap(),
+            reqwest::StatusCode::NO_CONTENT
+        );
+        owner_fixture_block_on(owner.agent_dispatch_barrier()).unwrap();
+        assert_eq!(
+            owner_fixture_block_on(owner.probe(&successor.id, successor.incarnation))
+                .unwrap()
+                .status,
+            saved_status,
+            "an already authenticated predecessor hook must not change the actual successor"
+        );
         // Every replay carries the real predecessor identity. The old bearer
         // and captured native events must not become successor authority.
         for _ in 0..2 {
