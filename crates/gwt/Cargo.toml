@@ -112,7 +112,7 @@ ring = "0.17"
 # SPEC #6476 T-003l1u: coordinator TLS material, same version/features as the
 # rustls/tokio-rustls already locked through reqwest; ring provider only.
 rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
-tokio-rustls = { version = "=0.26.4", default-features = false, features = ["ring", "tls12"] }
+tokio-rustls = { version = "=0.26.6", default-features = false, features = ["ring", "tls12"] }
 zeroize = "1"
 subtle = "2.6"
 hex.workspace = true
