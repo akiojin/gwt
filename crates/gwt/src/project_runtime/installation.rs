@@ -378,6 +378,49 @@ fn owner_restore_placeholder_known_empty(restore: &OwnerSavedSessionRestore) -> 
     })
 }
 
+fn reserve_pm_after_census<T>(
+    automatic: bool,
+    current: &AtomicBool,
+    mut reserve: impl FnMut() -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    loop {
+        if !current.load(Ordering::Acquire) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "PM restore cancelled",
+            ));
+        }
+        if automatic {
+            gwt_core::operation_deadline::ensure_remaining("PM restore census")?;
+        }
+        let error = match reserve() {
+            Ok(value) => return Ok(value),
+            Err(error) => error,
+        };
+        if !automatic
+            || error.kind() != std::io::ErrorKind::WouldBlock
+            || error.to_string()
+                != "Machine Agent census is uncertain; wait for its next observation"
+        {
+            return Err(error);
+        }
+        let Some(deadline) = gwt_core::operation_deadline::current() else {
+            return Err(error);
+        };
+        let remaining = deadline.saturating_duration_since(gwt_core::operation_deadline::now());
+        if remaining.is_zero() {
+            return Err(error);
+        }
+        if !current.load(Ordering::Acquire) {
+            continue;
+        }
+        // Reservation failed before commit and released its locks. Keep the
+        // same source/token and deadline while the sampler publishes fresh facts.
+        std::thread::sleep(std::time::Duration::from_millis(100).min(remaining));
+        gwt_core::operation_deadline::ensure_remaining("PM restore census")?;
+    }
+}
+
 pub(crate) fn prepare_owner_saved_session_restore(
     root: &Path,
     sessions_dir: &Path,
@@ -657,12 +700,18 @@ pub(crate) fn prepare_owner_saved_session_restore(
             .as_ref()
             .map(|(_, token)| token.clone())
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        let prepared = crate::agent_registry::reserve_resume_pm_member(
-            root,
-            sessions_dir,
-            &restore.source,
-            &token,
-            restore.worktree_reserved,
+        let prepared = reserve_pm_after_census(
+            restore.origin == gwt_agent::SessionLaunchOrigin::AutomaticRestore,
+            current,
+            || {
+                crate::agent_registry::reserve_resume_pm_member(
+                    root,
+                    sessions_dir,
+                    &restore.source,
+                    &token,
+                    restore.worktree_reserved,
+                )
+            },
         )
         .map_err(|error| error.to_string())?;
         if !existing {
@@ -4371,6 +4420,97 @@ pub fn issue_monitor_delivery_marker_result(
 mod owner_admission_tests {
     use super::*;
     use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
+
+    #[test]
+    fn automatic_pm_restore_waits_for_census_before_retrying_the_same_reservation() {
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            gwt_core::operation_deadline::now() + std::time::Duration::from_secs(5),
+        );
+        let current = AtomicBool::new(true);
+        let mut attempts = 0;
+        let result = reserve_pm_after_census(true, &current, || {
+            attempts += 1;
+            if attempts == 1 {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "Machine Agent census is uncertain; wait for its next observation",
+                ))
+            } else {
+                Ok("same reservation")
+            }
+        });
+        assert_eq!(result.unwrap(), "same reservation");
+        assert_eq!(attempts, 2);
+    }
+
+    #[test]
+    fn pm_census_wait_preserves_manual_other_error_and_cancellation_boundaries() {
+        let current = AtomicBool::new(true);
+        for (automatic, with_deadline, message) in [
+            (
+                true,
+                true,
+                "Machine Agent capacity is occupied; wait for an exact slot to be released",
+            ),
+            (
+                false,
+                true,
+                "Machine Agent census is uncertain; wait for its next observation",
+            ),
+            (
+                true,
+                false,
+                "Machine Agent census is uncertain; wait for its next observation",
+            ),
+        ] {
+            let _deadline = with_deadline.then(|| {
+                gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+                    gwt_core::operation_deadline::now() + std::time::Duration::from_secs(5),
+                )
+            });
+            let mut attempts = 0;
+            let result: std::io::Result<()> = reserve_pm_after_census(automatic, &current, || {
+                attempts += 1;
+                Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, message))
+            });
+            assert_eq!(result.unwrap_err().to_string(), message);
+            assert_eq!(
+                attempts, 1,
+                "no deadline or nonautomatic refusal is not retried"
+            );
+        }
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            gwt_core::operation_deadline::now() + std::time::Duration::from_secs(5),
+        );
+        let mut attempts = 0;
+        let cancelled: std::io::Result<()> = reserve_pm_after_census(true, &current, || {
+            attempts += 1;
+            current.store(false, Ordering::Release);
+            Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "Machine Agent census is uncertain; wait for its next observation",
+            ))
+        });
+        assert_eq!(
+            cancelled.unwrap_err().kind(),
+            std::io::ErrorKind::Interrupted
+        );
+        assert_eq!(attempts, 1);
+        current.store(true, Ordering::Release);
+        let _expired = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            gwt_core::operation_deadline::now(),
+        );
+        let mut attempts = 0;
+        let expired: std::io::Result<()> = reserve_pm_after_census(true, &current, || {
+            attempts += 1;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "Machine Agent census is uncertain; wait for its next observation",
+            ))
+        });
+        assert!(expired.is_err());
+        assert_eq!(attempts, 0, "an elapsed deadline cannot be extended");
+    }
 
     #[test]
     fn owner_rejects_stale_fresh_selected_member_tuning() {
