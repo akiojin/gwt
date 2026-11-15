@@ -1606,15 +1606,18 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
       await expect(main.locator(".works-source-note")).toContainText("daily merge data");
       await expect.poll(async () => Number(await main.locator(".works-fleet svg").getAttribute("data-known-count"))).toBeGreaterThan(0);
     };
+    let failed = false;
     try {
       await page.setViewportSize({ width: 1600, height: 1500 });
       await page.addInitScript(theme => {
         if (location.protocol === "http:" || location.protocol === "https:") localStorage.setItem("gwt:ui:theme", theme);
       }, theme);
       await gotoLiveGwt(page, fixture.url, { enableTestBridge: true, suppressProjectSurfaces: true });
+      // Match the fixture's startup hang guard; this is not a latency assertion.
       await expect.poll(() => page.evaluate(() => (window as any).__gwtPlaywrightMessages
         ?.filter((entry: any) => entry.payload.kind === "project_execution_status")
-        .at(-1)?.payload.status.view_state)).toBe("open");
+        .at(-1)?.payload.status.view_state),
+      { timeout: 60_000, message: "initial Project view finishes the fixture startup handshake" }).toBe("open");
       await sendLiveGwtEvent(page, { kind: "open_pm_agent" });
       await expect.poll(async () => (await windows()).filter((window: any) => window.is_pm).length, { timeout: 90_000 }).toBe(1);
       for (let i = 1; i <= 4; i += 1) {
@@ -1781,7 +1784,11 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
         const [pid, birth] = (await readLatestOwnActivity(page, activity.project_key)).host_id.split(":").map(Number);
         finalOwner = { pid, birth };
       }
+    } catch (error) {
+      failed = true;
+      throw error;
     } finally {
+      const cleanupErrors: unknown[] = [];
       try {
         await info.attach("works-source-state", { body: JSON.stringify({ workspace, activity, usage, activityObservations }), contentType: "application/json" });
         await captureCapacity("final");
@@ -1793,8 +1800,21 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
         for (const session of new Set((await fixture.launches()).map(launch => launch.gwt_session_id))) {
           expect(profiles, `retain hook timings for launched Session ${session}`).toContain(`hook-${session}.jsonl`);
         }
-      } finally {
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+      try {
         await fixture.stop(undefined, { signalFree: true, disconnectBrowser: () => page.goto("about:blank") });
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+      if (cleanupErrors.length) {
+        try {
+          await info.attach("works-cleanup-failures", { body: cleanupErrors.map(String).join("\n"), contentType: "text/plain" });
+        } catch (error) {
+          cleanupErrors.push(error);
+        }
+        if (!failed) throw new AggregateError(cleanupErrors, "Works evidence or cleanup failed");
       }
     }
     if (process.platform !== "win32") {
