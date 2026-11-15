@@ -17,7 +17,7 @@ test("mobile Agents checkboxes override the shared form's last-child minimum", (
 
 const members = [
   { member_id: "m1", name: "One", enabled: true, assignment: { session_id: "s1" }, provider: "Codex", model: "GPT-6", created_at: "2026-10-20T00:00:00Z", issue_count: 3, landed_count: 2, active_seconds: 7200, tokens: 5000, history: [
-    { session_id: "s0", name: "Recorded author", provider: "claude", model: "recorded-model", issue_number: 4000, title: "Earlier", result: "landed", started_at: "2026-10-20T00:00:00Z", ended_at: "2026-10-20T02:00:00Z" },
+    { session_id: "s0", role: "pm", name: "Recorded author", provider: "claude", model: "recorded-model", issue_number: 4000, title: "Earlier", result: "landed", started_at: "2026-10-20T00:00:00Z", ended_at: "2026-10-20T02:00:00Z" },
     { session_id: "s2", issue_number: 4600, title: "Later", result: null, started_at: "2026-10-22T00:00:00Z", ended_at: "2026-10-22T02:00:00Z" },
   ] },
   { member_id: "m2", name: "Two", enabled: true, provider: null, model: null, created_at: null, issue_count: null, landed_count: null, active_seconds: null, tokens: null, history: [] },
@@ -168,6 +168,8 @@ test("Agents identifies the exact PM before the implementation pool without addi
 
 test("Agents keeps Team and Past tabs, capacity, member details, four real aggregates and reverse history", async () => {
   const f = await fixture();
+  assert.equal(f.surface.element.querySelector('.roster-member-id')?.textContent, 'Member ID: m1');
+  assert.equal(f.surface.element.querySelector('.roster-current-role')?.textContent, 'Role: —');
   assert.deepEqual([...f.surface.element.querySelectorAll('[role="tab"]')].map(tab => tab.textContent), ["Team", "Past"]);
   assert.equal(f.surface.element.querySelector(".roster-count").textContent, "2");
   assert.match(f.surface.element.querySelector(".roster-capacity").textContent, /Recommended.*6/);
@@ -185,7 +187,7 @@ test("Agents keeps Team and Past tabs, capacity, member details, four real aggre
   f.rosterModel.update(state => ({ ...state, members: state.members.map(member => member.member_id !== "m1" ? member : { ...member,
     saved_manual_profile: { agent_id: "codex", model: "saved-model", reasoning: "high", runtime_target: "Docker", docker_service: "worker", skip_permissions: false },
     saved_manual_revision: `manual-profile-v1:${"a".repeat(64)}`,
-    history: [...member.history, { session_id: "s1", name: "Launch author", provider: "codex", model: "launch-model" }],
+    history: [...member.history, { session_id: "s1", role: "implementation", name: "Launch author", provider: "codex", model: "launch-model" }],
   }) })); f.flush();
   assert.match(f.surface.element.querySelector(".roster-saved-settings").textContent, /Model: saved-model.*Reasoning: high.*Runtime: Docker.*worker.*Permissions: Ask/s);
   assert.equal(f.surface.element.querySelector(".roster-saved-revision input"), revisionInput, "revision readout retains the keyboard target");
@@ -193,6 +195,8 @@ test("Agents keeps Team and Past tabs, capacity, member details, four real aggre
   assert.ok(f.surface.element.querySelector(".roster-saved-settings").previousElementSibling.classList.contains("roster-stats"), "refresh preserves aggregates before saved settings");
   assert.match(revisionInput.title, /Same settings.*same revision/);
   assert.equal(f.surface.element.querySelector(".roster-current-config").textContent, "Recorded name: Launch author · Tool: codex · Recorded model: launch-model");
+  assert.equal(f.surface.element.querySelector('.roster-current-role').textContent, 'Role: Implementation');
+  assert.deepEqual([...f.surface.element.querySelectorAll('.roster-history-role')].map(node => node.textContent), ['Role: —', 'Role: Project Manager']);
   const history = [...f.surface.element.querySelectorAll(".roster-history li")];
   assert.match(history[0].textContent, /Now.*#4777.*Current issue/s);
   assert.match(history[1].textContent, /Later/); assert.match(history[2].textContent, /Earlier/);

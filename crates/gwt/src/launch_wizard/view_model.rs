@@ -91,6 +91,9 @@ impl LaunchWizardState {
                     id: agent.id.clone(),
                     name: agent.name.clone(),
                     is_custom: agent.custom_agent.is_some(),
+                    model_catalog_warning: (agent.id == "codex"
+                        && super::codex_models::cached_rows().is_none())
+                    .then(|| "The live Codex model catalog is unavailable. Saved values are kept; built-in suggestions remain available. Retry after Codex refreshes its catalog.".to_string()),
                     supports_model_input: !models.is_empty()
                         || state.current_agent_supports_freetext_model(),
                     models,
@@ -954,6 +957,54 @@ mod tests {
     use super::super::profiles::load_launch_sessions;
     use super::super::test_support::*;
     use super::*;
+
+    #[test]
+    fn saved_agent_choices_report_catalog_read_recovery_without_changing_values() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("models_cache.json");
+        let _catalog = super::super::codex_models::test_override::set(path.clone());
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            sample_agent_options(),
+            Vec::new(),
+        );
+        state.model = "private-model".into();
+        state.reasoning = "high".into();
+        let choices = || serde_json::to_value(state.issue_monitor_agent_choices(&[])).unwrap();
+        for malformed in [None, Some("{broken")] {
+            if let Some(body) = malformed {
+                std::fs::write(&path, body).unwrap();
+            }
+            let wire = choices();
+            let codex = wire
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["id"] == "codex")
+                .unwrap();
+            assert!(codex["model_catalog_warning"].is_string());
+            assert!(!codex["models"].as_array().unwrap().is_empty());
+            let claude = wire
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["id"] == "claude")
+                .unwrap();
+            assert!(claude["model_catalog_warning"].is_null());
+        }
+        std::fs::write(&path, r#"{"models":[]}"#).unwrap();
+        let wire = choices();
+        let codex = wire
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == "codex")
+            .unwrap();
+        assert!(codex["model_catalog_warning"].is_null());
+        assert!(codex["models"].as_array().unwrap().is_empty());
+        assert_eq!(state.model, "private-model");
+        assert_eq!(state.reasoning, "high");
+    }
 
     fn grok_manual_state() -> LaunchWizardState {
         let mut agents = sample_agent_options();
