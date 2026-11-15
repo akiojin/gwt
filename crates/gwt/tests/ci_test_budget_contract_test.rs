@@ -561,6 +561,24 @@ fn nightly_windows_index_e2e_runs_real_scopes_and_background_contention() {
 fn linux_infrastructure_regressions_run_beside_the_workspace_suite() {
     let workflow = read(TEST_WORKFLOW);
     let job = job_body(&workflow, "  test-linux-infrastructure:");
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
+    let infrastructure = &yaml["jobs"]["test-linux-infrastructure"];
+    assert!(infrastructure["env"]["CARGO_PROFILE_DEV_DEBUG"].is_null());
+    for step in infrastructure["steps"].as_sequence().unwrap() {
+        let compiles = matches!(
+            step["name"].as_str(),
+            Some(
+                "Build infrastructure regression artifacts"
+                    | "Run gwtd verification artifact regression"
+                    | "Run managed asset lock concurrency regression"
+            )
+        );
+        if compiles {
+            assert_eq!(step["env"]["CARGO_PROFILE_DEV_DEBUG"].as_str(), Some("0"));
+        } else {
+            assert!(step["env"]["CARGO_PROFILE_DEV_DEBUG"].is_null());
+        }
+    }
     assert!(job.contains("runs-on: ubuntu-latest"));
     assert!(job.contains("shared-key: linux-workspace"));
     assert!(job.contains("cargo-nextest@"));

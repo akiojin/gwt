@@ -353,6 +353,10 @@ jobs:
           shared-key: linux-workspace
         continue-on-error: true
       - name: Build infrastructure regression artifacts
+        # Keep preparation, guarded restoration and stress builds on the same
+        # profile. Omit line tables only here, after the ordinary cache restore.
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
         # The timeout fixture has its own temporary target and spends most of
         # its time parked. Join both results before the guarded artifact tests.
         run: |
@@ -369,11 +373,15 @@ jobs:
       # refusal -> `cargo build -p gwt --bin gwtd` -> successful GitHub read,
       # which is the recovery verify.run now appends to its own matrix.
       - name: Run gwtd verification artifact regression
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
         run: python3 scripts/test-gwtd-verification-artifact.py
         timeout-minutes: 10
       # Issue #4346: repeat the exact lock check with three concurrent cargo
       # workers held until completion; reject zero tests and worker failures.
       - name: Run managed asset lock concurrency regression
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
         run: python3 scripts/test-managed-assets-lock-stress.py
         timeout-minutes: 10
       - name: Check tests left real HOME project stores unchanged
