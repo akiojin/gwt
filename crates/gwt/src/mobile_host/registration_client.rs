@@ -19,7 +19,8 @@
 //! sender only ends invite input, not the registration.
 //!
 //! The coordinator announces browser connections that claimed this
-//! registration's invites, the opaque signals each relays and its close; each
+//! registration's invites (naming the invite by [`InviteRequest::invite_id`]),
+//! the opaque signals each relays and its close; each
 //! becomes a [`ConnectionEvent`] for the caller.
 //! A caller that stopped receiving is ignored, but a full event channel ends
 //! the registration (`EventBacklog`) rather than lose a connection's state.
@@ -38,6 +39,7 @@ use base64::Engine as _;
 use futures_util::{SinkExt as _, StreamExt as _};
 use rustls::pki_types::ServerName;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 use std::{
     sync::{Arc, RwLock, RwLockWriteGuard},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -85,8 +87,10 @@ pub enum RegistrationClientError {
 /// the opaque signals it relays to this Host.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConnectionEvent {
+    /// `invite` is the claimed invite's [`InviteRequest::invite_id`].
     Claimed {
         connection_id: Uuid,
+        invite: [u8; 32],
     },
     Signal {
         connection_id: Uuid,
@@ -109,6 +113,14 @@ pub struct InviteRequest {
     pub secret: Zeroizing<[u8; 32]>,
     pub ttl_secs: u64,
     pub reply: oneshot::Sender<InviteOutcome>,
+}
+
+impl InviteRequest {
+    /// The SHA-256 digest of the secret, by which a later
+    /// [`ConnectionEvent::Claimed`] names this invite. Not a secret.
+    pub fn invite_id(&self) -> [u8; 32] {
+        Sha256::digest(self.secret.as_slice()).into()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -164,6 +176,8 @@ enum CoordinatorMessage {
     ConnectionClaimed {
         generation: Uuid,
         connection_id: Uuid,
+        /// 64 hex; anything else is a protocol violation.
+        invite: String,
     },
     ConnectionSignal {
         generation: Uuid,
@@ -376,10 +390,13 @@ async fn register_and_renew(
                 {
                     answer(&mut pending, nonce, InviteOutcome::Rejected(reason))?;
                 }
-                CoordinatorMessage::ConnectionClaimed { generation: scoped, connection_id }
+                CoordinatorMessage::ConnectionClaimed { generation: scoped, connection_id, invite }
                     if scoped == generation =>
                 {
-                    report(&events, ConnectionEvent::Claimed { connection_id })?;
+                    let mut digest = [0; 32];
+                    hex::decode_to_slice(&invite, &mut digest)
+                        .map_err(|_| RegistrationClientError::Protocol)?;
+                    report(&events, ConnectionEvent::Claimed { connection_id, invite: digest })?;
                 }
                 CoordinatorMessage::ConnectionSignal { generation: scoped, connection_id, payload }
                     if scoped == generation =>

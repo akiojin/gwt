@@ -26,7 +26,8 @@
 //! Host's fences cannot exhaust other Hosts' invites (`host_capacity`).
 //!
 //! When a browser claims one of its invites, the Host is sent
-//! `{"type":"connection_claimed","generation","connection_id"}`, each opaque
+//! `{"type":"connection_claimed","generation","connection_id","invite"}` (the
+//! 64-hex SHA-256 digest of the claimed invite's secret), each opaque
 //! browser signal as `{"type":"connection_signal",...,"payload"}`, and
 //! `{"type":"connection_closed",...}` once that claimed connection is logically
 //! closed (claimed, signals, then closed). Only the owning registration
@@ -83,7 +84,12 @@ const EVENT_BACKLOG: usize = 32;
 /// A claimed browser connection's lifecycle and signals, announced to its Host.
 #[derive(Debug)]
 pub(super) enum HostEvent {
-    Claimed(Uuid),
+    /// A claimed connection and the SHA-256 digest of the claimed invite's
+    /// secret (the registry's key), so the Host can tell which invite it was.
+    Claimed {
+        connection_id: Uuid,
+        invite: [u8; 32],
+    },
     /// A complete `connection_signal` frame, already checked against the
     /// message bound by the browser route.
     Signal(String),
@@ -151,10 +157,16 @@ pub(super) fn announce_claim(
     events: &HostEvents,
     generation: Uuid,
     connection_id: Uuid,
+    invite: [u8; 32],
 ) -> Option<(mpsc::Sender<HostEvent>, mpsc::OwnedPermit<HostEvent>)> {
     let sender = events.lock().ok()?.get(&generation)?.clone();
     let closed = sender.clone().try_reserve_owned().ok()?;
-    sender.try_send(HostEvent::Claimed(connection_id)).ok()?;
+    sender
+        .try_send(HostEvent::Claimed {
+            connection_id,
+            invite,
+        })
+        .ok()?;
     Some((sender, closed))
 }
 
@@ -476,9 +488,18 @@ async fn serve_host(
             let message = match input {
                 Input::Socket(message) => message,
                 Input::Event(event) => {
-                    let (kind, connection_id) = match event {
-                        HostEvent::Claimed(id) => ("connection_claimed", id),
-                        HostEvent::Closed(id) => ("connection_closed", id),
+                    let event = match event {
+                        HostEvent::Claimed {
+                            connection_id,
+                            invite,
+                        } => serde_json::json!({
+                            "type": "connection_claimed", "generation": generation,
+                            "connection_id": connection_id, "invite": hex::encode(invite),
+                        }),
+                        HostEvent::Closed(connection_id) => serde_json::json!({
+                            "type": "connection_closed", "generation": generation,
+                            "connection_id": connection_id,
+                        }),
                         HostEvent::Signal(frame) => {
                             if socket.send(Message::Text(frame.into())).await.is_err() {
                                 break;
@@ -486,9 +507,6 @@ async fn serve_host(
                             continue;
                         }
                     };
-                    let event = serde_json::json!({
-                        "type": kind, "generation": generation, "connection_id": connection_id,
-                    });
                     if !send_json(&mut socket, event).await {
                         break;
                     }
