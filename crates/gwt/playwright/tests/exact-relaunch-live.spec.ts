@@ -20,6 +20,7 @@ type RosterMember = { agent_member_id: string; agent_id: string; name: string; e
   active_assignments?: { project_key: string; project_name: string | null; session_id: string | null; issue_number: number | null; state: string }[];
   saved_manual_profile?: { agent_id: string; agent_member_id: string; model: string | null; reasoning: string | null } | null;
   saved_manual_revision?: string | null;
+  saved_implementation_core?: { agent_id: string; model: string | null; reasoning: string | null };
   history: { session_id: string; name: string | null; provider: string | null; model: string | null }[] };
 type AgentRoster = { project_key: string; revision: number; capacity: number; members: RosterMember[]; error: string | null };
 const WINDOWS_WORKS_CASE = "Works shows the real PM and four implementation children after reload";
@@ -638,6 +639,22 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       await expect(register).toBeDisabled();
       await name.fill("  Maple contributor  ");
       await surface.getByRole("combobox", { name: "Tool for new member", exact: true }).selectOption("codex");
+      const registrationModel = surface.getByRole("combobox", { name: "Model for new member", exact: true });
+      const registrationReasoning = surface.getByRole("combobox", { name: "Reasoning for new member", exact: true });
+      await registrationModel.fill("private-registration-model");
+      await registrationReasoning.fill("ultracode");
+      const invalidSequence = await cursor(page);
+      await register.click();
+      await page.waitForFunction(after => (window as any).__gwtPlaywrightMessages?.some((entry: any) =>
+        entry.sequence > after && entry.payload.kind === "agent_roster" && entry.payload.roster.error?.includes("unsupported")), invalidSequence);
+      const invalid = await readRoster(page);
+      expect(invalid.revision).toBe(before.revision);
+      expect(invalid.members).toEqual(before.members);
+      await expect(name).toHaveValue("  Maple contributor  ");
+      await expect(registrationModel).toHaveValue("private-registration-model");
+      await expect(registrationReasoning).toHaveValue("ultracode");
+      await registrationReasoning.fill("high");
+      await surface.locator(".roster-capacity").screenshot({ path: info.outputPath(`registration-model-reasoning-${theme}.png`) });
       await expect(register).toBeEnabled();
       const sequence = await cursor(page);
       await register.click();
@@ -648,6 +665,7 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       expect(member.agent_member_id).toMatch(/^[0-9a-f-]{36}$/);
       expect(member.agent_id).toBe("codex");
       expect(member.assignment).toBeNull();
+      expect(member.saved_implementation_core).toMatchObject({ agent_id: "codex", model: "private-registration-model", reasoning: "high" });
       await expect(name).toHaveValue("");
       // A stale writer must not replace the registered identity or this draft.
       await name.fill("Retry contributor");

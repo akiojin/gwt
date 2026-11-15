@@ -1248,6 +1248,8 @@ fn app_runtime_add_settings_set_preserves_unused_same_tool_member_core() {
         &repo,
         &sessions,
         gwt::agent_names::AgentRosterAction::Add {
+            model: None,
+            reasoning: None,
             pm_eligible: false,
             name: None,
             agent_id: Some("codex".into()),
@@ -2693,6 +2695,8 @@ fn app_runtime_selected_member_keeps_its_model_when_pool_order_changes() {
         &repo,
         &sessions,
         gwt::agent_names::AgentRosterAction::Add {
+            model: None,
+            reasoning: None,
             pm_eligible: false,
             name: None,
             agent_id: Some("codex".into()),

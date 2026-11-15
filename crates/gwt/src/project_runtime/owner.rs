@@ -15106,6 +15106,8 @@ mod tests {
             &root,
             &sessions,
             crate::agent_names::AgentRosterAction::Add {
+                model: None,
+                reasoning: None,
                 agent_id: Some("codex".into()),
                 name: Some("Successor PM".into()),
                 pm_eligible: true,

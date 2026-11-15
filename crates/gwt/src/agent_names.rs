@@ -89,6 +89,10 @@ pub enum AgentRosterAction {
         name: Option<String>,
         #[serde(default)]
         pm_eligible: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning: Option<String>,
     },
     Rest {
         member_id: String,
@@ -801,7 +805,9 @@ pub fn mutate_project_roster_snapshot(
     crate::agent_registry::ensure_active_for_project(root).map_err(|error| error.to_string())?;
     if matches!(
         action,
-        AgentRosterAction::SetPmEligibility { .. } | AgentRosterAction::SelectPm { .. }
+        AgentRosterAction::Add { .. }
+            | AgentRosterAction::SetPmEligibility { .. }
+            | AgentRosterAction::SelectPm { .. }
     ) {
         return crate::agent_registry::mutate_pm_selection(root, action, expected_revision)
             .map_err(|error| error.to_string());
@@ -865,6 +871,7 @@ pub(crate) fn apply_roster_action(
             ref agent_id,
             ref name,
             pm_eligible,
+            ..
         } => {
             roster
                 .add(
@@ -2270,6 +2277,8 @@ mod tests {
             &root,
             &sessions,
             AgentRosterAction::Add {
+                model: None,
+                reasoning: None,
                 pm_eligible: false,
                 agent_id: None,
                 name: Some("Cedar".into()),
@@ -2437,10 +2446,14 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let sessions = gwt_core::paths::gwt_sessions_dir();
         let original = read_project_roster(&root, &sessions).unwrap();
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&root);
+        let prefs_before = crate::load_issue_monitor_prefs(&prefs_path).unwrap();
+        let mirror_before = std::fs::read(&prefs_path).unwrap();
         // Deserialize the actual wire shape, including legacy optional fields.
         let register = |name: &str, revision| {
             let action = serde_json::from_value(serde_json::json!({
                 "kind": "add", "agent_id": "claude", "name": name,
+                "model": "  private-registration-model  ", "reasoning": " high ",
             }))
             .unwrap();
             mutate_project_roster(&root, &sessions, action, Some(revision))
@@ -2449,6 +2462,39 @@ mod tests {
         let member = added.members.last().unwrap();
         assert_eq!(member.name, "Maple");
         assert_eq!(member.agent_id.as_deref(), Some("claude"));
+        let snapshot = crate::agent_registry::SessionMemberSnapshot::load().unwrap();
+        let core = snapshot
+            .implementation_core(&member.agent_member_id)
+            .unwrap()
+            .0;
+        assert_eq!(core.model.as_deref(), Some("private-registration-model"));
+        assert_eq!(core.reasoning.as_deref(), Some("high"));
+        assert_eq!(std::fs::read(&prefs_path).unwrap(), mirror_before);
+        assert_eq!(
+            crate::load_issue_monitor_prefs(&prefs_path)
+                .unwrap()
+                .launch_profile_pool(),
+            prefs_before.launch_profile_pool(),
+            "registration must not select a launch candidate"
+        );
+        let registry_before = std::fs::read(crate::agent_registry::path()).unwrap();
+        let history_path = history_for_prefs(&prefs_path).unwrap();
+        let history_before = std::fs::read(&history_path).unwrap();
+        let invalid = serde_json::from_value(serde_json::json!({
+            "kind": "add", "agent_id": "codex", "name": "Invalid tuning",
+            "model": "private-model", "reasoning": "ultracode",
+        }))
+        .unwrap();
+        assert!(
+            mutate_project_roster(&root, &sessions, invalid, Some(added.revision))
+                .unwrap_err()
+                .contains("unsupported")
+        );
+        assert_eq!(
+            std::fs::read(crate::agent_registry::path()).unwrap(),
+            registry_before
+        );
+        assert_eq!(std::fs::read(&history_path).unwrap(), history_before);
         assert!(uuid::Uuid::parse_str(&member.agent_member_id).is_ok());
         assert!(!original
             .members
@@ -2726,6 +2772,8 @@ mod tests {
             &root,
             &sessions,
             AgentRosterAction::Add {
+                model: None,
+                reasoning: None,
                 pm_eligible: false,
                 agent_id: Some("claude".into()),
                 name: Some("Next contributor".into()),
@@ -3106,6 +3154,8 @@ mod tests {
             &root,
             &gwt_core::paths::gwt_sessions_dir(),
             AgentRosterAction::Add {
+                model: None,
+                reasoning: None,
                 pm_eligible: false,
                 agent_id: None,
                 name: None,
@@ -3198,6 +3248,8 @@ mod tests {
             &root,
             &gwt_core::paths::gwt_sessions_dir(),
             AgentRosterAction::Add {
+                model: None,
+                reasoning: None,
                 pm_eligible: false,
                 agent_id: None,
                 name: None
@@ -3422,6 +3474,8 @@ mod tests {
             &root,
             &gwt_core::paths::gwt_sessions_dir(),
             AgentRosterAction::Add {
+                model: None,
+                reasoning: None,
                 pm_eligible: false,
                 agent_id: None,
                 name: None,
@@ -3712,6 +3766,8 @@ mod tests {
             &a,
             &sessions,
             AgentRosterAction::Add {
+                model: None,
+                reasoning: None,
                 agent_id: Some("codex".into()),
                 name: Some("Shared PM".into()),
                 pm_eligible: true,
