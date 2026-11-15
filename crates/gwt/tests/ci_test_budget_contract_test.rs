@@ -478,6 +478,10 @@ fn workspace_shards_preserve_the_complete_serial_test_selection() {
         .contains("cargo nextest list --workspace --all-features --message-format json"));
     assert_eq!(step(RUN_TESTS_STEP)["run"].as_str(), Some(
         "cargo nextest run --workspace --all-features --test-threads=1 --profile ci --partition slice:${{ matrix.shard }}/6"));
+    let front_door = step("Run real-binary front-door tests (Xvfb)");
+    assert_eq!(front_door["run"].as_str(), Some(
+        "dbus-run-session -- xvfb-run -a cargo test --workspace --all-features --test stable_server_port --test project_restore_integration --test open_cli_integration -- --ignored --test-threads=1 --nocapture"));
+    assert_eq!(front_door["timeout-minutes"].as_u64(), Some(10));
     for name in [
         "Run doctests",
         "Run real-binary front-door tests (Xvfb)",
