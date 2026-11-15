@@ -230,6 +230,57 @@ fn checkpoint_prompt(intent: &AgentSwitchIntent) -> String {
     format!("GWT checkpoint request {operation}: save the current Issue #{source} before switching this member to Issue #{target}. Continue only the current owner in this process. Read issue.monitor.switch.read for this exact operation before acting. Save only while it is checkpointing; if absent, cancelled, failed or unknown, keep current and clear any declared wait without saving for this request. If already verified, do not save it again. Prepare a coherent checkpoint with your ordinary verification, commit and push workflow; never mark unrun checks PASS. First post a Board handoff for Issue #{source} containing the exact UUID token {operation} and the continuation; confirm its link in your canonical Work. Then record the final workspace.update with status=idle, summary containing the same UUID, nonempty progress_summary and next_action, so the saved Work remains Paused after Board reflection. Commit and push the source changes and immutable Work shards, leaving tracked/untracked state clean. Then call gwtd JSON operation issue.monitor.switch.ack with operation_id={operation}, head=<actual HEAD SHA>, work_id=<your canonical Work ID>, board_entry_id=<the handoff entry ID>. The Host independently verifies these records and the live upstream. Do not complete or block the unfinished execution, kill a process, or start Issue #{target} in this provider. Declare issue.monitor.wait with number={source} and resume_condition=switch cancelled or saved work resumed, then end the turn after ACK; keep the source unchanged. If a coherent checkpoint cannot be saved, report the reason and keep current.\r")
 }
 
+/// Observe the completed body write in an explicitly armed isolated fixture.
+/// This seam is absent from ordinary builds and never changes submit policy.
+#[cfg(all(debug_assertions, feature = "test-gh-guard"))]
+fn pause_after_checkpoint_body(
+    root: &Path,
+    intent: &AgentSwitchIntent,
+    bytes: usize,
+) -> io::Result<()> {
+    let Some(path) = std::env::var_os("GWT_TEST_SWITCH_BODY_GATE").map(PathBuf::from) else {
+        return Ok(());
+    };
+    let marker = |suffix: &str| path.with_extension(suffix);
+    let armed = match std::fs::read(marker("armed")) {
+        Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let operation = intent.request.operation_id.as_str();
+    if armed["root"].as_str() != root.to_str() || armed["operation"].as_str() != Some(operation) {
+        return Ok(());
+    }
+    std::fs::rename(marker("armed"), marker("claimed"))?;
+    let proof = intent.runtime_stop.as_ref().expect("checkpoint runtime");
+    std::fs::write(
+        marker("reached.tmp"),
+        serde_json::to_vec(&serde_json::json!({
+            "operation": operation,
+            "host_pid": std::process::id(),
+            "incarnation": proof.runtime_incarnation,
+            "source_input_revision": intent.source_input_revision,
+            "body_bytes": bytes,
+        }))?,
+    )?;
+    std::fs::rename(marker("reached.tmp"), marker("reached"))?;
+    // test-hygiene: allow-wall-clock-deadline Only bounds an explicitly armed fixture; the matching release establishes ordering.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        if std::fs::read_to_string(marker("release")).is_ok_and(|value| value == operation) {
+            return Ok(());
+        }
+        // test-hygiene: allow-wall-clock-deadline Only prevents a broken fixture from holding the source Session indefinitely.
+        if std::time::Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "checkpoint body fixture was not released",
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
 fn set_switch_reason(root: &Path, intent: &AgentSwitchIntent, reason: &str) -> io::Result<()> {
     gwt::try_mutate_issue_monitor_prefs(
         &gwt::issue_monitor_prefs_path_for_repo_path(root),
@@ -580,7 +631,10 @@ fn drive_switch(
                                 }).map_err(switch_io)?;
                                 body_committed = true;
                                 Ok(())
-                            }).map(|_| ()).map_err(|error| error.to_string())
+                            }).map_err(|error| error.to_string())?;
+                            #[cfg(all(debug_assertions, feature = "test-gh-guard"))]
+                            pause_after_checkpoint_body(root, expected, bytes.len()).map_err(|error| error.to_string())?;
+                            Ok(())
                         }, |duration| {
                             if submitted.get() {
                                 post_submit_grace.set(Some(duration));
