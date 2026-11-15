@@ -150,14 +150,17 @@ fn python_runner_installs_cpu_torch_and_preserves_the_full_suite() {
         .find(|step| step["name"] == "Install runtime deps")
         .unwrap();
     let commands = install["run"].as_str().unwrap();
+    assert_eq!(install["id"], "runtime");
     let cpu = commands
-        .find("pip install torch --index-url https://download.pytorch.org/whl/cpu")
+        .find("pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu")
         .expect("CPU-only Python CI must not download the CUDA stack");
     let runtime = commands
-        .find("pip install -r crates/gwt-core/runtime/project_index_requirements.txt")
+        .find(
+            "pip install --no-cache-dir -r crates/gwt-core/runtime/project_index_requirements.txt",
+        )
         .unwrap();
     assert!(cpu < runtime);
-    assert!(commands.contains("pip install pytest"));
+    assert!(commands.contains("pip install --no-cache-dir pytest"));
     assert!(commands.contains("pip check"));
     assert!(commands.contains("assert torch.version.cuda is None"));
     assert!(install["continue-on-error"].is_null());
@@ -167,10 +170,12 @@ fn python_runner_installs_cpu_torch_and_preserves_the_full_suite() {
         .unwrap();
     assert_eq!(
         tests["run"],
-        "pytest -q crates/gwt-core/runtime/tests crates/gwt-core/runtime/test_chroma_index_runner.py"
+        "\"${{ steps.runtime.outputs.venv }}/bin/python\" -m pytest -q crates/gwt-core/runtime/tests crates/gwt-core/runtime/test_chroma_index_runner.py"
     );
     assert_eq!(tests["env"]["GWT_INDEX_FAKE_EMBEDDING"], "1");
     assert!(tests["continue-on-error"].is_null());
+    assert!(tests["env"]["HOME"].is_null());
+    assert!(tests["env"]["USERPROFILE"].is_null());
 }
 
 #[test]
@@ -179,8 +184,8 @@ fn real_model_bootstrap_installs_cpu_torch_before_runtime_dependencies() {
     let steps = named_steps(&workflow);
     let (_, body) = steps
         .iter()
-        .find(|(name, _)| name == "Bootstrap gwt runtime assets")
-        .expect("real model bootstrap must exist");
+        .find(|(name, _)| name == "Install runtime deps")
+        .expect("one shared runtime installation must exist");
     let cpu_install = body
         .find("pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu")
         .expect("CPU runner must select CPU torch instead of downloading the CUDA stack");
@@ -191,20 +196,34 @@ fn real_model_bootstrap_installs_cpu_torch_before_runtime_dependencies() {
         .expect("keep shared runtime requirements without caching disposable wheels");
     assert!(cpu_install < runtime_install);
     assert!(body.contains("pip check"));
+    assert!(body.contains("echo \"venv=$venv\" >> \"$GITHUB_OUTPUT\""));
 
     // Cargo tests reject the runner's real HOME and resolve content-addressed assets.
     assert!(body.contains("mktemp -d /tmp/gwt-e5-home.XXXXXX"));
-    for asset in ["chroma_index_runner.py", "project_index_requirements.txt"] {
-        assert!(body.contains(&format!("sha256sum crates/gwt-core/runtime/{asset}")));
-    }
+    assert!(body.contains("sha256sum crates/gwt-core/runtime/project_index_requirements.txt"));
     assert!(body.contains("cut -c1-16"));
-    assert!(body.contains("runners/chroma_index_runner-${runner_hash}.py"));
     assert!(body.contains("venvs/chroma-venv-${requirements_hash}"));
-    assert!(body.contains("cp crates/gwt-core/runtime/index_path_policy.json"));
 
     let workflow: serde_yaml::Value = serde_yaml::from_str(&workflow).unwrap();
-    let job = &workflow["jobs"]["test-index-e2e"];
-    assert_eq!(job["name"], "Test (e5 e2e, optional)");
+    let job = &workflow["jobs"]["test-python-runner"];
+    assert_eq!(job["name"], "Test (Python runner)");
+    let steps = job["steps"].as_sequence().unwrap();
+    let bootstrap = steps
+        .iter()
+        .find(|step| step["name"] == "Bootstrap gwt runtime assets")
+        .unwrap();
+    let body = bootstrap["run"].as_str().unwrap();
+    assert!(body.contains("sha256sum crates/gwt-core/runtime/chroma_index_runner.py"));
+    assert!(body.contains("runners/chroma_index_runner-${runner_hash}.py"));
+    assert!(body.contains("cp crates/gwt-core/runtime/index_path_policy.json"));
+    assert!(
+        !body.contains("pip install"),
+        "reuse the required suite's venv"
+    );
+    assert_eq!(
+        bootstrap["env"]["RUNTIME_HOME"],
+        "${{ steps.runtime.outputs.home }}"
+    );
     let run = job["steps"]
         .as_sequence()
         .unwrap()
@@ -212,6 +231,45 @@ fn real_model_bootstrap_installs_cpu_torch_before_runtime_dependencies() {
         .find(|step| step["name"] == "Run ignored e2e tests with real e5 model")
         .unwrap();
     assert_eq!(run["timeout-minutes"].as_u64(), Some(30));
+    assert_eq!(run["continue-on-error"].as_bool(), Some(true));
+    // Optional real-model work still runs after a fake-suite failure, but
+    // cannot introduce new required failures through its setup steps.
+    for name in [
+        "Snapshot real HOME project stores",
+        "Restore real-model Rust dependencies",
+        "Cache HuggingFace model (e5-base)",
+        "Bootstrap gwt runtime assets",
+        "Run ignored e2e tests with real e5 model",
+        "Check tests left real HOME project stores unchanged",
+    ] {
+        let step = steps.iter().find(|step| step["name"] == name).unwrap();
+        let condition = step["if"].as_str().unwrap();
+        assert!(condition.contains("!cancelled()"));
+        assert!(condition.contains("github.event.pull_request.draft == false"));
+        assert!(condition.contains("steps.runtime.outcome == 'success'"));
+        assert_eq!(step["continue-on-error"].as_bool(), Some(true));
+    }
+    assert!(run["if"]
+        .as_str()
+        .unwrap()
+        .contains("steps.assets.outcome == 'success'"));
+    assert_eq!(
+        job["outputs"]["e5_failed"],
+        "${{ steps.home-guard.outcome == 'failure' || steps.hf-cache.outcome == 'failure' || steps.assets.outcome == 'failure' || steps.home-check.outcome == 'failure' }}"
+    );
+    let signal = &workflow["jobs"]["test-index-e2e"];
+    assert_eq!(signal["name"], "Test (e5 e2e, optional)");
+    assert_eq!(
+        signal["if"],
+        "${{ !cancelled() && needs.test-python-runner.outputs.e5_failed == 'true' }}"
+    );
+    assert_eq!(signal["steps"][0]["run"], "exit 1");
+    assert!(signal["steps"][0]["continue-on-error"].is_null());
+    assert!(workflow["jobs"]["report-post-merge-failure"]["needs"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .any(|job| job == "test-index-e2e"));
     for key in ["HOME", "USERPROFILE"] {
         assert_eq!(run["env"][key], "${{ steps.runtime.outputs.home }}");
     }
