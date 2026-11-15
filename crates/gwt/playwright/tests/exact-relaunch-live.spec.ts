@@ -1406,10 +1406,11 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
   test(WINDOWS_WORKS_CASE, async ({ page }, info) => {
     test.setTimeout(420_000);
     const purpose = "Review active work and coordinate delivery";
+    const fixedMachineCapacity = process.platform === "win32" || process.env.GWT_PLAYWRIGHT_FIXED_CAPACITY === "1";
     let finalOwner: { pid: number; birth: number } | undefined;
     const fixture = await startExactRelaunchFixture(info, {
       page,
-      fixedMachineCapacity: process.platform === "win32" || process.env.GWT_PLAYWRIGHT_FIXED_CAPACITY === "1",
+      fixedMachineCapacity,
       monitorPreferences: { max_active_agents: 4 },
       restoreDiagnostics: true,
       async prepare({ home, bin, project, env }) {
@@ -1424,7 +1425,10 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
         let provider = await readFile(codexScript, "utf8");
         provider = provider.replace("const at = new Date().toISOString();", `
 process.env.GWT_HOOK_PROFILE_PATH = path.join(process.env.HOME, 'hook-' + process.env.GWT_SESSION_ID + '.jsonl');
+const ptyRuntime = JSON.parse(fs.readFileSync(process.env.GWT_SESSION_RUNTIME_PATH, 'utf8'));
 const at = new Date().toISOString();`);
+        provider = provider.replace("pid:process.pid,argv:args",
+          "pid:process.pid,pty_child_pid:ptyRuntime.child_pid,pty_child_started_at:ptyRuntime.child_started_at,argv:args");
         provider = provider.replace(/const native = resumed \|\| requested \|\| [^;]+;/,
           "const native = resumed || requested || require('node:crypto').randomUUID();");
         provider = provider.replace("  if (line.trim() === 'GWT_FIXTURE_EXIT')", `
@@ -1565,6 +1569,26 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
     });
     const windows = async () => workspace?.tabs.flatMap((tab: any) => tab.workspace.windows)
       .filter((window: any) => window.session_id) ?? [];
+    const waitForMeasuredChildren = async (expected: number) => {
+      if (!fixedMachineCapacity) return;
+      await expect.poll(async () => {
+        const launches = await fixture.launches() as (ExactRelaunchInvocation & {
+          pty_child_pid?: number; pty_child_started_at?: number;
+        })[];
+        if (launches.length !== expected) return false;
+        const capacity = JSON.parse(await readFile(join(fixture.home, ".gwt", "machine-state", "agent-capacity.json"), "utf8"));
+        const now = Date.now() / 1000;
+        return capacity.observed_at <= now && now < capacity.expires_at
+          && capacity.machine_budget >= 5 && capacity.inventory.uncertainties.length === 0
+          && launches.every(launch => capacity.inventory.sessions.some((row: any) =>
+            row.session.session_id === launch.gwt_session_id && row.session.child_started_at > 0
+              && (process.platform === "win32"
+                ? Number.isSafeInteger(launch.pty_child_pid) && launch.pty_child_pid! > 0
+                  && row.session.child_pid === launch.pty_child_pid
+                  && row.session.child_started_at === launch.pty_child_started_at
+                : row.session.child_pid === launch.pid)));
+      }, { timeout: 45_000, message: "previous children have a fresh exact census before the next manual launch" }).toBe(true);
+    };
     const receipts = async () => (await readFile(join(fixture.home, "works-hook-receipts.jsonl"), "utf8")
       .catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return ""; throw error; }))
       .split("\n").slice(0, -1).filter(Boolean).map(line => JSON.parse(line));
@@ -1620,10 +1644,12 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
       { timeout: 60_000, message: "initial Project view finishes the fixture startup handshake" }).toBe("open");
       await sendLiveGwtEvent(page, { kind: "open_pm_agent" });
       await expect.poll(async () => (await windows()).filter((window: any) => window.is_pm).length, { timeout: 90_000 }).toBe(1);
+      await waitForMeasuredChildren(1);
       for (let i = 1; i <= 4; i += 1) {
         await launchCodex(page, `worker-${i}`);
         await expect.poll(async () => (await windows()).filter((window: any) => window.agent_id === "codex").length,
           { timeout: 60_000 }).toBe(i);
+        await waitForMeasuredChildren(i + 1);
       }
       await expect.poll(async () => (await windows()).length, { timeout: 60_000 }).toBe(5);
       const live = await windows(), pm = live.find((window: any) => window.is_pm);
