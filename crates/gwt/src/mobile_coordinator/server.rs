@@ -1669,12 +1669,18 @@ mod tests {
         let claim = json!({"type":"claim_invite","secret":"07".repeat(32)}).to_string();
         bounded(browser.send(Message::text(claim))).await.unwrap();
         assert_eq!(next_json(&mut browser).await, json!({"type":"claimed"}));
-        // The caller does not drain while the browser floods signals.
-        for index in 0..8 {
-            let text = json!({"type":"signal","payload":index.to_string()}).to_string();
-            if bounded(browser.send(Message::text(text))).await.is_err() {
-                break;
-            }
+        // The caller does not drain: the claim and the first signal fill the
+        // signal share, so the second signal closes this browser only.
+        for payload in ["0", "1"] {
+            let text = json!({"type":"signal","payload":payload}).to_string();
+            bounded(browser.send(Message::text(text))).await.unwrap();
+        }
+        {
+            use futures_util::StreamExt as _;
+            assert!(matches!(
+                bounded(browser.next()).await,
+                None | Some(Err(_)) | Some(Ok(Message::Close(_)))
+            ));
         }
         let connection_id = match bounded(connections.recv()).await.unwrap() {
             ConnectionEvent::Claimed { connection_id } => connection_id,
@@ -1687,20 +1693,10 @@ mod tests {
                 payload: "0".to_string()
             })
         );
-        // Only the flooding browser ends; the registration stays live.
-        let mut seen_close = false;
-        while !seen_close {
-            match bounded(connections.recv()).await.unwrap() {
-                ConnectionEvent::Closed {
-                    connection_id: closed,
-                } => {
-                    assert_eq!(closed, connection_id);
-                    seen_close = true;
-                }
-                ConnectionEvent::Signal { .. } => {}
-                other => panic!("{other:?}"),
-            }
-        }
+        assert_eq!(
+            bounded(connections.recv()).await,
+            Some(ConnectionEvent::Closed { connection_id })
+        );
         assert!(host.read().unwrap().is_enabled());
         assert_eq!(live(&sessions), 1);
 
