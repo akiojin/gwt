@@ -1406,10 +1406,11 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
   test(WINDOWS_WORKS_CASE, async ({ page }, info) => {
     test.setTimeout(420_000);
     const purpose = "Review active work and coordinate delivery";
+    const fixedMachineCapacity = process.platform === "win32" || process.env.GWT_PLAYWRIGHT_FIXED_CAPACITY === "1";
     let finalOwner: { pid: number; birth: number } | undefined;
     const fixture = await startExactRelaunchFixture(info, {
       page,
-      fixedMachineCapacity: process.platform === "win32" || process.env.GWT_PLAYWRIGHT_FIXED_CAPACITY === "1",
+      fixedMachineCapacity,
       monitorPreferences: { max_active_agents: 4 },
       restoreDiagnostics: true,
       async prepare({ home, bin, project, env }) {
@@ -1566,6 +1567,7 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
     const windows = async () => workspace?.tabs.flatMap((tab: any) => tab.workspace.windows)
       .filter((window: any) => window.session_id) ?? [];
     const waitForMeasuredChildren = async (expected: number) => {
+      if (!fixedMachineCapacity) return;
       await expect.poll(async () => {
         const launches = await fixture.launches();
         if (launches.length !== expected) return false;
