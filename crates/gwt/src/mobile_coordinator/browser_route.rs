@@ -35,7 +35,7 @@
 //! the invite stays a replay fence until its TTL.
 
 use super::host_route::{
-    announce_open, call, BrowserConnections, HostEvent, HostState, SharedSessions, SignalRate,
+    announce_open, call, BrowserConnections, HostEvent, HostState, SharedSessions, SignalBudget,
     BROWSER_BACKLOG,
 };
 use super::registration::RegistrationHandle;
@@ -92,36 +92,6 @@ impl Entry {
             Self::Claim => ("claimed", "claim_rejected"),
             Self::Reconnect => ("reconnect_routed", "reconnect_rejected"),
         }
-    }
-}
-
-/// One connection's token bucket for its data messages.
-struct SignalBudget {
-    rate: SignalRate,
-    tokens: f64,
-    refilled: Instant,
-}
-
-impl SignalBudget {
-    fn new(rate: SignalRate, now: Instant) -> Self {
-        Self {
-            rate,
-            tokens: f64::from(rate.burst),
-            refilled: now,
-        }
-    }
-
-    /// Spends one token at `now`; `false` when none is left.
-    fn take(&mut self, now: Instant) -> bool {
-        let elapsed = now.saturating_duration_since(self.refilled).as_secs_f64();
-        self.tokens = (self.tokens + elapsed * f64::from(self.rate.per_second))
-            .min(f64::from(self.rate.burst));
-        self.refilled = now;
-        if self.tokens < 1.0 {
-            return false;
-        }
-        self.tokens -= 1.0;
-        true
     }
 }
 
@@ -283,6 +253,7 @@ async fn serve_browser(mut socket: WebSocket, state: HostState, entry: Entry) {
         events,
         connections,
         signal_rate,
+        host_rate: _,
     } = state;
     // Subscribe before claiming so a registration closed meanwhile is seen.
     let mut retired = retired.subscribe();
@@ -427,33 +398,5 @@ async fn hold(
             }
             _ = stopping.wait_for(|stopped| *stopped) => return,
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn signal_budget_allows_the_burst_then_refills_at_the_rate_up_to_the_burst() {
-        let start = Instant::now();
-        let mut budget = SignalBudget::new(
-            SignalRate {
-                per_second: 1,
-                burst: 2,
-            },
-            start,
-        );
-        assert!(budget.take(start));
-        assert!(budget.take(start));
-        assert!(!budget.take(start));
-        let later = start + Duration::from_secs(1);
-        assert!(budget.take(later));
-        assert!(!budget.take(later));
-        // A long idle period refills only up to the burst.
-        let idle = later + Duration::from_secs(60);
-        assert!(budget.take(idle));
-        assert!(budget.take(idle));
-        assert!(!budget.take(idle));
     }
 }

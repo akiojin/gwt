@@ -72,6 +72,7 @@ pub struct CoordinatorServer {
     sessions: SharedSessions,
     origin: Arc<str>,
     signal_rate: SignalRate,
+    host_rate: SignalRate,
 }
 
 /// Origin checks are additional constraints, never registration or device
@@ -157,6 +158,10 @@ impl CoordinatorServer {
                 per_second: config.limits().device_messages_per_second,
                 burst: config.limits().device_burst,
             },
+            host_rate: SignalRate {
+                per_second: config.limits().host_messages_per_second,
+                burst: config.limits().host_burst,
+            },
         })
     }
 
@@ -186,6 +191,7 @@ impl CoordinatorServer {
             sessions,
             origin,
             signal_rate,
+            host_rate,
         } = self;
         let (stop, stopping) = tokio::sync::watch::channel(false);
         let (alive, mut sockets) = tokio::sync::mpsc::channel::<()>(1);
@@ -197,6 +203,7 @@ impl CoordinatorServer {
             events: Default::default(),
             connections: Default::default(),
             signal_rate,
+            host_rate,
         };
         let router = with_http_boundary(
             axum::Router::new()
@@ -278,6 +285,14 @@ mod tests {
         }
 
         fn with_device_rate(rate: u16, burst: u16) -> Self {
+            Self::with_rates(rate, burst, 256, 512)
+        }
+
+        fn with_host_rate(rate: u16, burst: u16) -> Self {
+            Self::with_rates(32, 64, rate, burst)
+        }
+
+        fn with_rates(rate: u16, burst: u16, host_rate: u16, host_burst: u16) -> Self {
             let home = tempfile::tempdir().unwrap();
             let path = home.path().canonicalize().unwrap();
             let directory = path.join(".gwt/mobile/coordinator");
@@ -301,7 +316,7 @@ mod tests {
                 "bind": reservation.local_addr().unwrap().to_string(),
                 "tls_certificate": directory.join("cert.pem"), "tls_private_key": directory.join("key.pem"),
                 "limits": {"registrations":64,"peers_per_host":8,"device_messages_per_second":rate,
-                           "device_burst":burst,"host_messages_per_second":256,"host_burst":512}
+                           "device_burst":burst,"host_messages_per_second":host_rate,"host_burst":host_burst}
             })).unwrap();
             fs::write(directory.join("config.json"), &config).unwrap();
             fs::set_permissions(
@@ -1795,6 +1810,148 @@ mod tests {
         drop(quiet);
         drop(host);
         wait_until_closed(&sessions).await;
+        shutdown.send(()).unwrap();
+        bounded(task).await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_host_that_exceeds_its_message_rate_loses_its_registration() {
+        use futures_util::{SinkExt as _, StreamExt as _};
+        use tokio_tungstenite::tungstenite::Message;
+        let mut fixture = Fixture::with_host_rate(1, 2);
+        let wall = real_wall();
+        let valid = fixture.issue_token(wall);
+        let server = fixture.start_at(wall).await;
+        let addr = server.local_addr().unwrap();
+        let sessions = Arc::clone(&server.sessions);
+        let (shutdown, signal) = oneshot::channel();
+        let task = tokio::spawn(server.serve_until(async move {
+            let _ = signal.await;
+        }));
+        let auth = [("authorization", format!("Bearer {valid}"))];
+        let origin = [("origin", "https://coordinator.example".to_string())];
+        let mut host = open_host(&fixture, addr, &auth).await.unwrap();
+        let generation: Uuid =
+            serde_json::from_value(next_json(&mut host).await["generation"].clone()).unwrap();
+
+        // Within the burst, messages are served: an invite, then a renewal.
+        let secret = "61".repeat(32);
+        let text = json!({"type":"register_invite","generation":generation,
+                          "nonce":Uuid::new_v4(),"secret":secret,"ttl_secs":300})
+        .to_string();
+        bounded(host.send(Message::text(text))).await.unwrap();
+        assert_eq!(next_json(&mut host).await["type"], "invite_registered");
+        let mut browser = open_path(&fixture, addr, BROWSER_CLAIM_PATH, &origin)
+            .await
+            .unwrap();
+        let text = json!({"type":"claim_invite","secret":secret}).to_string();
+        bounded(browser.send(Message::text(text))).await.unwrap();
+        assert_eq!(next_json(&mut browser).await, json!({"type":"claimed"}));
+        assert_eq!(next_json(&mut host).await["type"], "connection_claimed");
+        let renew = || {
+            Message::text(
+                json!({"type":"renew","generation":generation,"nonce":Uuid::new_v4()}).to_string(),
+            )
+        };
+        bounded(host.send(renew())).await.unwrap();
+        assert_eq!(next_json(&mut host).await["type"], "renewed");
+
+        // Beyond it (at one refill per second), the Host is told and its
+        // registration is logically closed with its claimed browser.
+        let limited = bounded(async {
+            loop {
+                host.send(renew()).await.unwrap();
+                let reply = next_json(&mut host).await;
+                if reply["type"] != "renewed" {
+                    break reply;
+                }
+            }
+        })
+        .await;
+        assert_eq!(
+            limited,
+            json!({"type":"rate_limited","generation":generation})
+        );
+        assert!(matches!(
+            bounded(host.next()).await,
+            None | Some(Err(_)) | Some(Ok(Message::Close(_)))
+        ));
+        wait_until_closed(&sessions).await;
+        assert!(matches!(
+            bounded(browser.next()).await,
+            None | Some(Err(_)) | Some(Ok(Message::Close(_)))
+        ));
+
+        shutdown.send(()).unwrap();
+        bounded(task).await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn host_client_reports_a_rate_limited_registration_and_disables() {
+        use crate::mobile_host::registration_client::{InviteOutcome, InviteRequest};
+        use std::sync::RwLock;
+        use tokio::sync::{mpsc, watch};
+        let mut fixture = Fixture::with_host_rate(1, 2);
+        let wall = real_wall();
+        let (credential, binding) = fixture.issue_credential(wall);
+        let server = fixture.start_at(wall).await;
+        let addr = server.local_addr().unwrap();
+        let sessions = Arc::clone(&server.sessions);
+        let (shutdown, signal) = oneshot::channel();
+        let task = tokio::spawn(server.serve_until(async move {
+            let _ = signal.await;
+        }));
+        let host = Arc::new(RwLock::new(
+            MobileAuthorization::load_bound(&fixture.home.join("devices.json"), &binding).unwrap(),
+        ));
+        let (_stop, stopping) = watch::channel(false);
+        let (invites, requests) = mpsc::channel(1);
+        let client = {
+            let host = Arc::clone(&host);
+            let tls = fixture.client_config();
+            tokio::spawn(async move {
+                let tcp = TcpStream::connect(addr).await.unwrap();
+                run_registration(
+                    host,
+                    &credential,
+                    tls,
+                    tcp,
+                    stopping,
+                    requests,
+                    mpsc::channel(1).1,
+                    mpsc::channel(1).0,
+                )
+                .await
+            })
+        };
+        // Invites go one at a time, each awaiting its answer, until the
+        // coordinator answers one with `rate_limited` instead.
+        let mut registered = 0;
+        for byte in 1..=10u8 {
+            let (reply, outcome) = oneshot::channel();
+            let request = InviteRequest {
+                secret: zeroize::Zeroizing::new([byte; 32]),
+                ttl_secs: 300,
+                reply,
+            };
+            if bounded(invites.send(request)).await.is_err() {
+                break;
+            }
+            match bounded(outcome).await {
+                Ok(InviteOutcome::Registered) => registered += 1,
+                Ok(other) => panic!("{other:?}"),
+                Err(_) => break,
+            }
+        }
+        assert!((1..10).contains(&registered), "{registered}");
+        let result = bounded(client).await.unwrap();
+        assert!(
+            matches!(result, Err(RegistrationClientError::RateLimited)),
+            "{result:?}"
+        );
+        assert!(!host.read().unwrap().is_enabled());
+        wait_until_closed(&sessions).await;
+
         shutdown.send(()).unwrap();
         bounded(task).await.unwrap().unwrap();
     }
