@@ -1276,6 +1276,7 @@ mod tests {
             })
         };
 
+        assert_eq!(register(4, 300).await, Ok(InviteOutcome::Registered));
         assert_eq!(register(1, 300).await, Ok(InviteOutcome::Registered));
         assert_eq!(
             register(1, 300).await,
@@ -1300,11 +1301,16 @@ mod tests {
             let claim = json!({"type":"claim_invite","secret":"01".repeat(32)}).to_string();
             bounded(browser.send(Message::text(claim))).await.unwrap();
             assert_eq!(next_json(&mut browser).await, json!({"type":"claimed"}));
-            let ConnectionEvent::Claimed { connection_id } =
-                bounded(connections.recv()).await.unwrap()
+            let ConnectionEvent::Claimed {
+                connection_id,
+                invite: claimed,
+            } = bounded(connections.recv()).await.unwrap()
             else {
                 panic!("the first connection event must be the claim");
             };
+            // The Host learns which of its pending invites was claimed.
+            assert_eq!(claimed, invite(1, 300).0.invite_id());
+            assert_ne!(claimed, invite(4, 300).0.invite_id());
             let offer = json!({"type":"signal","payload":"offer"}).to_string();
             bounded(browser.send(Message::text(offer))).await.unwrap();
             assert_eq!(
@@ -1346,7 +1352,7 @@ mod tests {
             let claim = json!({"type":"claim_invite","secret":"03".repeat(32)}).to_string();
             bounded(browser.send(Message::text(claim))).await.unwrap();
             assert_eq!(next_json(&mut browser).await, json!({"type":"claimed"}));
-            let ConnectionEvent::Claimed { connection_id } =
+            let ConnectionEvent::Claimed { connection_id, .. } =
                 bounded(connections.recv()).await.unwrap()
             else {
                 panic!("the first connection event must be the claim");
@@ -1453,6 +1459,9 @@ mod tests {
         let claimed = next_json(&mut host).await;
         assert_eq!(claimed["type"], "connection_claimed");
         assert_eq!(claimed["generation"], json!(generation));
+        // It names the claimed invite by the registry's digest of its secret.
+        let digest: [u8; 32] = <sha2::Sha256 as sha2::Digest>::digest([0x21u8; 32]).into();
+        assert_eq!(claimed["invite"], json!(hex::encode(digest)));
         let connection: Uuid = serde_json::from_value(claimed["connection_id"].clone()).unwrap();
 
         // A consumed or unknown secret is refused without saying why.
@@ -1752,7 +1761,7 @@ mod tests {
             ));
         }
         let connection_id = match bounded(connections.recv()).await.unwrap() {
-            ConnectionEvent::Claimed { connection_id } => connection_id,
+            ConnectionEvent::Claimed { connection_id, .. } => connection_id,
             other => panic!("{other:?}"),
         };
         assert_eq!(

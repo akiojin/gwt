@@ -37,6 +37,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde::Deserialize;
+use sha2::{Digest as _, Sha256};
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -170,6 +171,7 @@ async fn serve_browser(mut socket: WebSocket, state: HostState) {
         let claim_sessions = sessions.clone();
         let (outbound, mut inbound) = mpsc::channel(BROWSER_BACKLOG);
         let claimed = tokio::task::spawn_blocking(move || {
+            let invite: [u8; 32] = Sha256::digest(secret.as_slice()).into();
             let (handle, _) = call(&claim_sessions, |sessions, now, wall| {
                 sessions.claim_invite_by_secret(&*secret, connection_id, now, wall)
             })
@@ -181,7 +183,7 @@ async fn serve_browser(mut socket: WebSocket, state: HostState) {
                 .map(|mut table| table.insert(connection_id, (generation, outbound)))
                 .is_ok();
             let announced = routed
-                .then(|| announce_claim(&events, generation, connection_id))
+                .then(|| announce_claim(&events, generation, connection_id, invite))
                 .flatten();
             // A closed sender stands in when unannounced; the claim is then
             // dropped (closed and unrouted) here, on the blocking thread.
