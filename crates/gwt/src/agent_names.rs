@@ -273,7 +273,7 @@ impl AgentRoster {
     }
 }
 
-fn history_for_prefs(path: &Path) -> Result<std::path::PathBuf, String> {
+pub(crate) fn history_for_prefs(path: &Path) -> Result<std::path::PathBuf, String> {
     if crate::issue_monitor::machine_managed_monitor_prefs(path)
         && crate::agent_registry::is_active().map_err(|error| error.to_string())?
     {
