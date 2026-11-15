@@ -40,6 +40,14 @@ export function createAgentsSurface({ document, executionModel, projectTitle, ro
   let nameTouched = false, registeredDraft = null;
   const registrationComposing = new Set();
   let registrationTools = [], renderedTools = "";
+  let registrationTool = "";
+  function syncRegistrationTool() {
+    const next = toolSelect.value || "";
+    if (!next || next === registrationTool) return;
+    registrationTool = next;
+    modelInput.value = ""; reasoningInput.value = "";
+    registrationComposing.delete(modelInput); registrationComposing.delete(reasoningInput);
+  }
   const registrationError = element.querySelector("#roster-registration-error");
   const registrationMessage = document.createElement("span");
   const showConflict = document.createElement("button");
@@ -101,7 +109,7 @@ export function createAgentsSurface({ document, executionModel, projectTitle, ro
       ...custom.agents.map(agent => ({ id: agent.id, name: agent.display_name || agent.id }))] : [];
     const key = JSON.stringify(registrationTools.map(tool => [tool.id, tool.name]));
     if (key !== renderedTools) {
-      const selected = toolSelect.value; toolSelect.replaceChildren();
+      const selected = toolSelect.value || registrationTool; toolSelect.replaceChildren();
       for (const tool of registrationTools) {
         const option = document.createElement("option"); option.value = tool.id; option.textContent = tool.name || tool.id;
         option.selected = tool.id === selected; toolSelect.append(option);
@@ -110,6 +118,7 @@ export function createAgentsSurface({ document, executionModel, projectTitle, ro
       renderedTools = key;
     }
     toolSelect.disabled = registrationTools.length === 0;
+    syncRegistrationTool();
     syncRegistration();
   }
   let selectedId = null, tab = "team", previewElement = null, disposed = false;
@@ -606,7 +615,7 @@ export function createAgentsSurface({ document, executionModel, projectTitle, ro
   });
   registrationEligible.addEventListener("change", syncPreview);
   toolSelect.addEventListener("change", () => {
-    modelInput.value = ""; reasoningInput.value = ""; registrationComposing.clear(); syncRegistration(); syncPreview();
+    syncRegistrationTool(); syncRegistration(); syncPreview();
   });
   retryRegistrationCatalog.addEventListener("click", () => onReloadProfile?.());
   for (const input of [nameInput, modelInput, reasoningInput]) {

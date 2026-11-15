@@ -6050,7 +6050,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         onRetryName: retryAgentMemberName,
         onAddMember: (agentId, name, pmEligible, tuning) => {
           applyAgentRosterError({ project_key: routeProjectKey, message: null });
-          requestAgentRoster({ kind: "add", agent_id: agentId, name, pm_eligible: pmEligible, model: tuning?.model ?? null, reasoning: tuning?.reasoning ?? null });
+          requestAgentRoster({ kind: "add", agent_id: agentId, name, pm_eligible: pmEligible, ...tuning });
         },
         onRestMember: memberId => requestAgentRoster({ kind: "rest", member_id: memberId }),
         onActivateMember: memberId => requestAgentRoster({ kind: "activate", member_id: memberId }),

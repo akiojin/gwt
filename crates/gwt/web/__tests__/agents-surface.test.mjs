@@ -717,6 +717,17 @@ test("registration selects catalog tuning without sending until Register and ret
   model.value = "  catalog-model  "; model.dispatchEvent(new f.window.Event("input"));
   reasoning.value = " high "; reasoning.dispatchEvent(new f.window.Event("input"));
   assert.equal(reasoning.parentElement.querySelector('option[value="high"]').value, "high");
+  name.dispatchEvent(new f.window.Event("compositionstart"));
+  f.supportedAgentsModel.update(state => ({ agents: state.agents.filter(agent => agent.id !== "codex") })); f.flush();
+  assert.equal(model.value, "", "fallback to another tool clears the previous tool's tuning");
+  assert.equal(reasoning.value, "");
+  assert.equal(host.querySelector('[data-action="add"]').disabled, true, "tool fallback preserves name composition");
+  name.dispatchEvent(new f.window.Event("compositionend"));
+  f.supportedAgentsModel.update(() => ({ agents: [{ id: "codex", name: "Codex" }, { id: "claude", name: "Claude Code" }] })); f.flush();
+  host.querySelector('[aria-label="Tool for new member"] option[value="codex"]').selected = true;
+  host.querySelector('[aria-label="Tool for new member"]').dispatchEvent(new f.window.Event("change"));
+  model.value = "  catalog-model  "; model.dispatchEvent(new f.window.Event("input"));
+  reasoning.value = " high "; reasoning.dispatchEvent(new f.window.Event("input"));
   assert.equal(f.added.length, 0);
   reasoning.dispatchEvent(new f.window.Event("compositionstart"));
   host.querySelector('[data-action="add"]').click();
@@ -738,6 +749,12 @@ test("registration selects catalog tuning without sending until Register and ret
   f.rosterModel.update(state => ({ ...state, tuning_choices: { agents: [{ id: "codex", models: [{ value: "recovered-model" }] }] } })); f.flush();
   assert.equal(retry.hidden, true); assert.equal(model.value, "  catalog-model  ");
   assert.equal(model.parentElement.querySelector('option[value="recovered-model"]').value, "recovered-model");
+  f.supportedAgentsModel.update(() => ({ agents: [] })); f.customAgentsModel.update(() => ({ catalog: { loaded: false, agents: [] } })); f.flush();
+  assert.equal(model.value, "  catalog-model  ");
+  f.supportedAgentsModel.update(() => ({ agents: [{ id: "claude", name: "Claude Code" }, { id: "codex", name: "Codex" }] }));
+  f.customAgentsModel.update(() => ({ catalog: { loaded: true, agents: [] } })); f.flush();
+  assert.equal(host.querySelector('[aria-label="Tool for new member"]').value, "codex");
+  assert.equal(model.value, "  catalog-model  ", "same tool after unavailable catalog retains tuning");
   const tool = host.querySelector('[aria-label="Tool for new member"]');
   tool.querySelector('[value="claude"]').selected = true; tool.dispatchEvent(new f.window.Event("change"));
   assert.equal(model.value, ""); assert.equal(reasoning.value, "");
@@ -745,7 +762,7 @@ test("registration selects catalog tuning without sending until Register and ret
   assert.equal(preview.querySelector('[aria-label="Model for new member"]').disabled, true);
   assert.equal(preview.querySelector('[aria-label="Reasoning for new member"]').disabled, true);
   const app = readFileSync(new URL("../app.js", import.meta.url), "utf8");
-  assert.match(app, /kind: "add", agent_id: agentId, name, pm_eligible: pmEligible, model: tuning\?\.model \?\? null, reasoning: tuning\?\.reasoning \?\? null/);
+  assert.match(app, /kind: "add", agent_id: agentId, name, pm_eligible: pmEligible, \.\.\.tuning/);
   f.surface.dispose();
 });
 
