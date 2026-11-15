@@ -1,5 +1,80 @@
 use super::*;
 
+fn attachment_target(runtime: &AppRuntime, id: &str) -> serde_json::Value {
+    let installed = &runtime.runtimes[id];
+    serde_json::json!({ "project_key": runtime.test_context().project_key.to_string(),
+        "session_id": runtime.active_agent_sessions[id].session_id,
+        "host_id": format!("{}:{}", installed.owner_identity.pid, installed.owner_identity.host_started_at),
+        "runtime_incarnation": installed.incarnation })
+}
+
+pub(super) fn qualified_attachment_event(
+    runtime: &AppRuntime,
+    id: &str,
+    mut value: serde_json::Value,
+) -> FrontendEvent {
+    value["expected_target"] = attachment_target(runtime, id);
+    value["operation_id"] = value
+        .get("operation_id")
+        .cloned()
+        .unwrap_or(serde_json::json!("fixture-attachment"));
+    serde_json::from_value(value).unwrap()
+}
+
+pub(super) fn drain_attachment_work(runtime: &mut AppRuntime) -> Vec<OutboundEvent> {
+    let BlockingTaskSpawner::Queued(tasks) = &runtime.blocking_tasks else {
+        panic!("queued fixture")
+    };
+    let tasks = tasks.clone();
+    let AppEventProxy::Stub(recorded) = &runtime.proxy else {
+        panic!("recording fixture")
+    };
+    let recorded = recorded.clone();
+    let mut events = Vec::new();
+    let mut unrelated = Vec::new();
+    loop {
+        let work = std::mem::take(&mut *tasks.lock().unwrap());
+        let completed = std::mem::take(&mut *recorded.lock().unwrap());
+        if work.is_empty() && completed.is_empty() {
+            recorded.lock().unwrap().extend(unrelated);
+            return events;
+        }
+        for task in work {
+            task();
+        }
+        for event in completed {
+            // Initial shared-fixture snapshot/census workers belong to their
+            // own handlers, not attachment acceptance. Preserve them intact.
+            if !matches!(
+                recorded_project_payload(&event),
+                UserEvent::AttachmentPromptReady { .. }
+                    | UserEvent::RemoteRuntimeCommandComplete(_)
+                    | UserEvent::Dispatch(_)
+            ) {
+                unrelated.push(event);
+                continue;
+            }
+            let Some(event) = runtime.accept_project_completion(event) else {
+                continue;
+            };
+            match event {
+                UserEvent::AttachmentPromptReady { operation, prompt } => {
+                    events.extend(runtime.inject_attachment_prompt_events(*operation, prompt))
+                }
+                UserEvent::RemoteRuntimeCommandComplete(completion) => {
+                    events.extend(runtime.handle_remote_runtime_command_complete(*completion))
+                }
+                UserEvent::Dispatch(progress) => events.extend(progress),
+                _ => unreachable!("filtered attachment completion"),
+            }
+        }
+    }
+}
+
+fn assert_attachment_phase(events: &[OutboundEvent], phase: AttachmentProgressPhase) {
+    assert!(events.iter().any(|event| matches!(&event.event, BackendEvent::AttachmentProgress { phase: actual, .. } if *actual == phase)), "missing {phase:?}: {events:?}");
+}
+
 #[test]
 fn local_agent_activity_reports_an_observed_empty_project() {
     let temp = tempdir().expect("tempdir");
@@ -900,50 +975,25 @@ fn image_paste_prepare_rejects_unsupported_mime_and_empty_payload() {
 }
 
 #[test]
-fn image_paste_event_saves_file_under_worktree() {
-    let temp = tempdir().expect("tempdir");
+fn image_paste_legacy_valid_body_also_refuses_before_staging() {
+    let temp = tempdir().unwrap();
     let _gwt_home = ScopedGwtHome::set(temp.path());
     let (mut runtime, probe, window_id) = owner_browser_input_fixture(temp.path());
-    let worktree = probe.session.as_ref().unwrap().worktree_path.clone();
-
-    let payload = base64::engine::general_purpose::STANDARD.encode(b"webp-bytes");
-    let event: FrontendEvent = serde_json::from_value(serde_json::json!({
-        "kind": "paste_image",
-        "id": window_id,
-        "data_base64": payload,
-        "mime_type": "image/webp",
-        "filename": "capture.webp"
-    }))
-    .expect("deserialize paste image event");
-
-    let input_before = probe.pty.ordinary_input_revision().unwrap();
-    let events = runtime.handle_frontend_event("client-1".to_string(), event);
-
-    assert!(events.is_empty());
-    assert!(drain_browser_owner_input(&mut runtime).is_empty());
-    assert!(
-        probe.pty.ordinary_input_revision().unwrap() > input_before,
-        "the actual owner committed the attachment prompt"
+    let event = serde_json::from_value(serde_json::json!({"kind":"paste_image","id":window_id,
+        "data_base64":base64::engine::general_purpose::STANDARD.encode(b"webp-bytes"), "mime_type":"image/webp"})).unwrap();
+    let before = probe.pty.ordinary_input_revision();
+    assert_attachment_phase(
+        &runtime.handle_frontend_event("client-1".into(), event),
+        AttachmentProgressPhase::Failed,
     );
-    let drop_dir = worktree.join(".gwt").join("drop-files");
-    let files = fs::read_dir(&drop_dir)
-        .expect("read drop dir")
-        .collect::<Result<Vec<_>, _>>()
-        .expect("collect paste files");
-    assert_eq!(files.len(), 1, "expected one saved image");
-    assert!(
-        !worktree.join(".gwt").join("paste-images").exists(),
-        "new image paste files must not be written to legacy paste-images"
-    );
-    let saved_path = files[0].path();
-    assert_eq!(
-        saved_path.extension().and_then(|ext| ext.to_str()),
-        Some("webp")
-    );
-    assert_eq!(
-        fs::read(saved_path).expect("read saved image"),
-        b"webp-bytes"
-    );
+    assert_eq!(probe.pty.ordinary_input_revision(), before);
+    assert!(!probe
+        .session
+        .as_ref()
+        .unwrap()
+        .worktree_path
+        .join(".gwt/drop-files")
+        .exists());
 }
 
 #[test]
@@ -967,23 +1017,29 @@ fn uploaded_image_paste_event_saves_file_under_drop_files() {
         )
         .expect("register image upload");
 
-    let event: FrontendEvent = serde_json::from_value(serde_json::json!({
-        "kind": "paste_image_uploaded",
-        "id": window_id,
-        "upload_id": "image-upload-1",
-        "mime_type": "image/png",
-        "filename": "Screenshot.png",
-        "size": 10
-    }))
-    .expect("deserialize uploaded paste image event");
+    let event: FrontendEvent = qualified_attachment_event(
+        &runtime,
+        &window_id,
+        serde_json::json!({
+            "kind": "paste_image_uploaded",
+            "id": window_id,
+            "upload_id": "image-upload-1",
+            "mime_type": "image/png",
+            "filename": "Screenshot.png",
+            "size": 10
+        }),
+    );
 
     let input_before = probe.pty.ordinary_input_revision().unwrap();
     let events = runtime.handle_frontend_event("client-1".to_string(), event);
 
-    assert!(events.is_empty());
-    assert!(drain_browser_owner_input(&mut runtime).is_empty());
+    assert_attachment_phase(&events, AttachmentProgressPhase::Queued);
+    assert_attachment_phase(
+        &drain_attachment_work(&mut runtime),
+        AttachmentProgressPhase::Attached,
+    );
     assert!(
-        probe.pty.ordinary_input_revision().unwrap() > input_before,
+        probe.pty.ordinary_input_revision().unwrap() == input_before + 1,
         "the actual owner committed the attachment prompt"
     );
     let drop_dir = worktree.join(".gwt").join("drop-files");
@@ -1035,7 +1091,7 @@ fn image_paste_event_ignores_non_agent_terminal_window() {
 
     let events = runtime.handle_frontend_event("client-1".to_string(), event);
 
-    assert!(events.is_empty());
+    assert_attachment_phase(&events, AttachmentProgressPhase::Failed);
     assert!(
         !worktree.join(".gwt").join("drop-files").exists(),
         "non-agent terminal paste must not create image files"
@@ -1089,26 +1145,6 @@ fn clipboard_upload_failure_records_cause_and_target_without_stopping_agent() {
         runtime.tab("tab-1").unwrap().workspace.persisted().windows[0].status,
         WindowProcessStatus::Running
     );
-    // An Agent that exited between save and prompt delivery must not appear attached.
-    let events = runtime.inject_attachment_prompt_events(
-        "client-1".into(),
-        window_id.clone(),
-        "paste-after-exit".into(),
-        "Image file: .gwt/drop-files/image.png".into(),
-        1,
-        Some("image.png".into()),
-    );
-    assert!(matches!(
-        events.last().unwrap().event,
-        BackendEvent::AttachmentProgress {
-            phase: gwt::AttachmentProgressPhase::Failed,
-            ..
-        }
-    ));
-    assert!(gwt_core::error_ledger::list_since(None)
-        .unwrap()
-        .iter()
-        .any(|error| error.message.contains("terminal runtime not found")));
 }
 
 #[test]
@@ -1355,28 +1391,34 @@ fn file_attachment_event_saves_inline_file_under_worktree() {
     let worktree = probe.session.as_ref().unwrap().worktree_path.clone();
 
     let payload = base64::engine::general_purpose::STANDARD.encode(b"text-bytes");
-    let event: FrontendEvent = serde_json::from_value(serde_json::json!({
-        "kind": "attach_files",
-        "id": window_id,
-        "files": [
-            {
-                "source": "inline",
-                "filename": "notes.txt",
-                "mime_type": "text/plain",
-                "size": 10,
-                "data_base64": payload
-            }
-        ]
-    }))
-    .expect("deserialize attach files event");
+    let event: FrontendEvent = qualified_attachment_event(
+        &runtime,
+        &window_id,
+        serde_json::json!({
+            "kind": "attach_files",
+            "id": window_id,
+            "files": [
+                {
+                    "source": "inline",
+                    "filename": "notes.txt",
+                    "mime_type": "text/plain",
+                    "size": 10,
+                    "data_base64": payload
+                }
+            ]
+        }),
+    );
 
     let input_before = probe.pty.ordinary_input_revision().unwrap();
     let events = runtime.handle_frontend_event("client-1".to_string(), event);
 
-    assert!(events.is_empty());
-    assert!(drain_browser_owner_input(&mut runtime).is_empty());
+    assert_attachment_phase(&events, AttachmentProgressPhase::Queued);
+    assert_attachment_phase(
+        &drain_attachment_work(&mut runtime),
+        AttachmentProgressPhase::Attached,
+    );
     assert!(
-        probe.pty.ordinary_input_revision().unwrap() > input_before,
+        probe.pty.ordinary_input_revision().unwrap() == input_before + 1,
         "the actual owner committed the attachment prompt"
     );
     let drop_dir = worktree.join(".gwt").join("drop-files");
@@ -1400,25 +1442,31 @@ fn file_attachment_event_saves_native_path_under_drop_files() {
     let source = temp.path().join("large-host-file.bin");
     fs::write(&source, b"native-bytes").expect("write native source");
 
-    let event: FrontendEvent = serde_json::from_value(serde_json::json!({
-        "kind": "attach_files",
-        "id": window_id,
-        "files": [
-            {
-                "source": "native_path",
-                "path": source.display().to_string()
-            }
-        ]
-    }))
-    .expect("deserialize attach files event");
+    let event: FrontendEvent = qualified_attachment_event(
+        &runtime,
+        &window_id,
+        serde_json::json!({
+            "kind": "attach_files",
+            "id": window_id,
+            "files": [
+                {
+                    "source": "native_path",
+                    "path": source.display().to_string()
+                }
+            ]
+        }),
+    );
 
     let input_before = probe.pty.ordinary_input_revision().unwrap();
     let events = runtime.handle_frontend_event("client-1".to_string(), event);
 
-    assert!(events.is_empty());
-    assert!(drain_browser_owner_input(&mut runtime).is_empty());
+    assert_attachment_phase(&events, AttachmentProgressPhase::Queued);
+    assert_attachment_phase(
+        &drain_attachment_work(&mut runtime),
+        AttachmentProgressPhase::Attached,
+    );
     assert!(
-        probe.pty.ordinary_input_revision().unwrap() > input_before,
+        probe.pty.ordinary_input_revision().unwrap() == input_before + 1,
         "the actual owner committed the attachment prompt"
     );
     let drop_dir = worktree.join(".gwt").join("drop-files");
@@ -1461,28 +1509,34 @@ fn file_attachment_event_saves_uploaded_file_under_drop_files() {
         )
         .expect("register upload");
 
-    let event: FrontendEvent = serde_json::from_value(serde_json::json!({
-        "kind": "attach_files",
-        "id": window_id,
-        "files": [
-            {
-                "source": "uploaded",
-                "upload_id": "upload-1",
-                "filename": "Browser Large.bin",
-                "mime_type": "application/octet-stream",
-                "size": 14
-            }
-        ]
-    }))
-    .expect("deserialize attach files event");
+    let event: FrontendEvent = qualified_attachment_event(
+        &runtime,
+        &window_id,
+        serde_json::json!({
+            "kind": "attach_files",
+            "id": window_id,
+            "files": [
+                {
+                    "source": "uploaded",
+                    "upload_id": "upload-1",
+                    "filename": "Browser Large.bin",
+                    "mime_type": "application/octet-stream",
+                    "size": 14
+                }
+            ]
+        }),
+    );
 
     let input_before = probe.pty.ordinary_input_revision().unwrap();
     let events = runtime.handle_frontend_event("client-1".to_string(), event);
 
-    assert!(events.is_empty());
-    assert!(drain_browser_owner_input(&mut runtime).is_empty());
+    assert_attachment_phase(&events, AttachmentProgressPhase::Queued);
+    assert_attachment_phase(
+        &drain_attachment_work(&mut runtime),
+        AttachmentProgressPhase::Attached,
+    );
     assert!(
-        probe.pty.ordinary_input_revision().unwrap() > input_before,
+        probe.pty.ordinary_input_revision().unwrap() == input_before + 1,
         "the actual owner committed the attachment prompt"
     );
     let drop_dir = worktree.join(".gwt").join("drop-files");
@@ -1503,93 +1557,32 @@ fn file_attachment_event_saves_uploaded_file_under_drop_files() {
 
 #[test]
 fn file_attachment_operation_dispatches_failed_progress_without_prompt_on_stage_failure() {
-    let temp = tempdir().expect("tempdir");
+    let temp = tempdir().unwrap();
     let _gwt_home = ScopedGwtHome::set(temp.path());
-    let worktree = temp.path().join("repo");
-    fs::create_dir_all(&worktree).expect("create worktree");
-    let tab_id = "tab-1";
-    let raw_window_id = "agent-1";
-    let window_id = combined_window_id(tab_id, raw_window_id);
-    let tab = sample_project_tab_with_window_at(
-        tab_id,
-        raw_window_id,
-        worktree.clone(),
-        WindowPreset::Agent,
-        WindowProcessStatus::Running,
+    let (mut runtime, probe, window_id) = owner_browser_input_fixture(temp.path());
+    let event = qualified_attachment_event(
+        &runtime,
+        &window_id,
+        serde_json::json!({
+            "kind":"attach_files", "id":window_id, "operation_id":"attachment-op-fail",
+            "files":[{"source":"native_path","path":temp.path().display().to_string()}]
+        }),
     );
-    let (mut runtime, recorded_events) =
-        sample_runtime_with_events(temp.path(), vec![tab], Some(tab_id));
-    runtime.active_agent_sessions.insert(
-        window_id.clone(),
-        ActiveAgentSession {
-            window_id: window_id.clone(),
-            session_id: "session-1".to_string(),
-            agent_id: "codex".to_string(),
-            branch_name: "feature/file-drop".to_string(),
-            display_name: "Codex".to_string(),
-            worktree_path: worktree.clone(),
-            agent_project_root: worktree.display().to_string(),
-            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
-            tab_id: tab_id.to_string(),
-        },
+    let before = probe.pty.ordinary_input_revision();
+    assert_attachment_phase(
+        &runtime.handle_frontend_event("client-1".into(), event),
+        AttachmentProgressPhase::Queued,
     );
-    let event: FrontendEvent = serde_json::from_value(serde_json::json!({
-        "kind": "attach_files",
-        "id": window_id,
-        "operation_id": "attachment-op-fail",
-        "files": [
-            {
-                "source": "native_path",
-                "path": temp.path().display().to_string()
-            }
-        ]
-    }))
-    .expect("deserialize operation attach files event");
-
-    let events = runtime.handle_frontend_event("client-1".to_string(), event);
-
-    assert!(
-            events.iter().any(|event| matches!(
-                &event.event,
-                BackendEvent::AttachmentProgress {
-                    id,
-                    operation_id,
-                    phase: AttachmentProgressPhase::Queued,
-                    ..
-                } if id == &window_id && operation_id == "attachment-op-fail"
-            )),
-            "operation-aware attachment handling should acknowledge queued progress immediately: {events:?}"
-        );
-    wait_for_recorded_event("failed attachment progress", &recorded_events, |events| {
-        events.iter().any(|event| {
-            matches!(
-                recorded_project_payload(event),
-                UserEvent::Dispatch(dispatched)
-                    if dispatched.iter().any(|outbound| matches!(
-                        &outbound.event,
-                        BackendEvent::AttachmentProgress {
-                            id,
-                            operation_id,
-                            phase: AttachmentProgressPhase::Failed,
-                            message: Some(message),
-                            ..
-                        } if id == &window_id
-                            && operation_id == "attachment-op-fail"
-                            && message.contains("not a file")
-                    ))
-            )
-        })
-    });
-    {
-        let events = recorded_events.lock().expect("event log");
-        assert!(
-            !events.iter().any(|event| matches!(
-                recorded_project_payload(event),
-                UserEvent::AttachmentPromptReady { .. }
-            )),
-            "failed staging must not enqueue terminal prompt injection"
-        );
-    }
+    let events = drain_attachment_work(&mut runtime);
+    assert_attachment_phase(&events, AttachmentProgressPhase::Failed);
+    assert!(!events.iter().any(|event| matches!(
+        event.event,
+        BackendEvent::AttachmentProgress {
+            phase: AttachmentProgressPhase::Attached,
+            ..
+        }
+    )));
+    assert_eq!(probe.pty.ordinary_input_revision(), before);
 }
 
 #[test]
@@ -1641,62 +1634,43 @@ fn file_attachment_copy_reports_byte_progress() {
 fn file_attachment_event_saves_prepared_files_incrementally() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
-    let worktree = temp.path().join("repo");
-    fs::create_dir_all(&worktree).expect("create worktree");
-    let tab_id = "tab-1";
-    let raw_window_id = "agent-1";
-    let window_id = combined_window_id(tab_id, raw_window_id);
-    let tab = sample_project_tab_with_window_at(
-        tab_id,
-        raw_window_id,
-        worktree.clone(),
-        WindowPreset::Agent,
-        WindowProcessStatus::Running,
-    );
-    let (mut runtime, _events) = sample_runtime_with_events(temp.path(), vec![tab], Some(tab_id));
-    runtime.active_agent_sessions.insert(
-        window_id.clone(),
-        ActiveAgentSession {
-            window_id: window_id.clone(),
-            session_id: "session-1".to_string(),
-            agent_id: "codex".to_string(),
-            branch_name: "feature/file-drop".to_string(),
-            display_name: "Codex".to_string(),
-            worktree_path: worktree.clone(),
-            agent_project_root: worktree.display().to_string(),
-            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
-            tab_id: tab_id.to_string(),
-        },
-    );
+    let (mut runtime, probe, window_id) = owner_browser_input_fixture(temp.path());
+    let worktree = probe.session.as_ref().unwrap().worktree_path.clone();
     let valid_payload = base64::engine::general_purpose::STANDARD.encode(b"saved-first");
-    let event: FrontendEvent = serde_json::from_value(serde_json::json!({
-        "kind": "attach_files",
-        "id": window_id,
-        "files": [
-            {
-                "source": "inline",
-                "filename": "first.txt",
-                "mime_type": "text/plain",
-                "size": 11,
-                "data_base64": valid_payload
-            },
-            {
-                "source": "inline",
-                "filename": "invalid.txt",
-                "mime_type": "text/plain",
-                "size": 4,
-                "data_base64": "not base64"
-            }
-        ]
-    }))
-    .expect("deserialize attach files event");
+    let event: FrontendEvent = qualified_attachment_event(
+        &runtime,
+        &window_id,
+        serde_json::json!({
+            "kind": "attach_files",
+            "id": window_id,
+            "files": [
+                {
+                    "source": "inline",
+                    "filename": "first.txt",
+                    "mime_type": "text/plain",
+                    "size": 11,
+                    "data_base64": valid_payload
+                },
+                {
+                    "source": "inline",
+                    "filename": "invalid.txt",
+                    "mime_type": "text/plain",
+                    "size": 4,
+                    "data_base64": "not base64"
+                }
+            ]
+        }),
+    );
 
     let events = runtime.handle_frontend_event("client-1".to_string(), event);
 
-    assert!(
-        events.is_empty(),
-        "invalid later attachment must not inject a partial prompt",
+    assert_attachment_phase(&events, AttachmentProgressPhase::Queued);
+    let before = probe.pty.ordinary_input_revision();
+    assert_attachment_phase(
+        &drain_attachment_work(&mut runtime),
+        AttachmentProgressPhase::Failed,
     );
+    assert_eq!(probe.pty.ordinary_input_revision(), before);
     let drop_dir = worktree.join(".gwt").join("drop-files");
     let files = fs::read_dir(&drop_dir)
         .expect("read drop dir")
@@ -1748,9 +1722,473 @@ fn file_attachment_event_ignores_non_agent_terminal_window() {
 
     let events = runtime.handle_frontend_event("client-1".to_string(), event);
 
-    assert!(events.is_empty());
+    assert_attachment_phase(&events, AttachmentProgressPhase::Failed);
     assert!(
         !worktree.join(".gwt").join("drop-files").exists(),
         "non-agent terminal file drop must not create files"
     );
+}
+
+#[test]
+fn attachment_outer_project_refusals_reply_without_staging() {
+    let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, probe, id) = owner_browser_input_fixture(temp.path());
+    let context = runtime.test_context();
+    let target = serde_json::json!({
+        "project_key": context.project_key.to_string(),
+        "session_id": probe.session.as_ref().unwrap().id,
+        "host_id": "correlation-only-host",
+        "runtime_incarnation": probe.incarnation
+    });
+    let path = temp.path().join("unconsumed-upload");
+    fs::write(&path, b"body").unwrap();
+    runtime
+        .attachment_uploads
+        .insert(
+            "outer-upload".into(),
+            UploadedAttachment {
+                path: path.clone(),
+                filename: "notes.txt".into(),
+                mime_type: None,
+                size: 4,
+            },
+        )
+        .unwrap();
+    let request = |window: &str, op: &str| {
+        serde_json::from_value(serde_json::json!({
+        "kind":"attach_files", "id":window, "operation_id":op, "expected_target":target,
+        "files":[{"source":"uploaded","upload_id":"outer-upload","filename":"notes.txt","size":4}]
+    })).unwrap()
+    };
+    let before = probe.pty.ordinary_input_revision();
+    let unavailable = runtime.handle_frontend_event_in_scope(
+        "client-original".into(),
+        request(&id, "outer-missing"),
+        &ClientScope::Project(gwt_core::repo_hash::ProjectKey::parse("0000000000000000").unwrap()),
+    );
+    let mut stale_context = context.clone();
+    stale_context.generation += 1;
+    let foreign = runtime.handle_frontend_event_for_project(
+        &stale_context,
+        "client-original".into(),
+        request(&id, "outer-foreign"),
+    );
+    let hub = runtime.handle_frontend_event_in_scope(
+        "client-original".into(),
+        request(&id, "outer-hub"),
+        &ClientScope::Hub,
+    );
+    let mut reasons = Vec::new();
+    for (events, window, op) in [
+        (unavailable, id.as_str(), "outer-missing"),
+        (foreign, id.as_str(), "outer-foreign"),
+        (hub, id.as_str(), "outer-hub"),
+    ] {
+        assert_eq!(
+            events.len(),
+            1,
+            "each actual outer ingress must visibly refuse"
+        );
+        assert_eq!(
+            events[0].target,
+            gwt::project_transport::DispatchTarget::Client("client-original".into())
+        );
+        let wire = serde_json::to_value(&events[0].event).unwrap();
+        assert_eq!(wire["id"], window);
+        assert_eq!(wire["operation_id"], op);
+        assert_eq!(wire["expected_target"], target);
+        assert_eq!(wire["phase"], "failed");
+        reasons.push(wire["message"].clone());
+    }
+    assert_eq!(reasons[0], reasons[1]);
+    assert_eq!(reasons[0], reasons[2]);
+    assert_eq!(fs::read(&path).unwrap(), b"body");
+    assert!(runtime
+        .attachment_uploads
+        .take("outer-upload")
+        .unwrap()
+        .is_some());
+    let BlockingTaskSpawner::Queued(tasks) = &runtime.blocking_tasks else {
+        panic!("queued fixture")
+    };
+    assert!(tasks.lock().unwrap().is_empty());
+    assert_eq!(probe.pty.ordinary_input_revision(), before);
+}
+
+#[test]
+fn attachment_legacy_body_is_visibly_refused_before_staging_or_input() {
+    let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, probe, id) = owner_browser_input_fixture(temp.path());
+    let before = probe.pty.ordinary_input_revision();
+    let request = serde_json::from_value(serde_json::json!({
+        "kind":"paste_image", "id":id, "data_base64":"not even base64", "mime_type":"image/png"
+    }))
+    .unwrap();
+    let events = runtime.handle_frontend_event("legacy-client".into(), request);
+    assert_eq!(events.len(), 1);
+    let wire = serde_json::to_value(&events[0].event).unwrap();
+    assert_eq!(wire["kind"], "attachment_progress");
+    assert_eq!(wire["phase"], "failed");
+    assert!(wire["message"].as_str().unwrap().contains("Reload"));
+    assert!(!probe
+        .session
+        .as_ref()
+        .unwrap()
+        .worktree_path
+        .join(".gwt/drop-files")
+        .exists());
+    assert_eq!(probe.pty.ordinary_input_revision(), before);
+}
+
+#[test]
+fn attachment_busy_writer_refuses_without_queueing_and_exact_receipt_writes_once() {
+    let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, probe, id) = owner_browser_input_fixture(temp.path());
+    let request = |runtime: &AppRuntime| {
+        qualified_attachment_event(
+            runtime,
+            &id,
+            serde_json::json!({
+                "kind":"attach_files", "id":id, "files":[{"source":"inline", "filename":"notes.txt", "size":4,
+                "data_base64":base64::engine::general_purpose::STANDARD.encode(b"body")}]
+            }),
+        )
+    };
+    let held = probe.pty.reserve_input_transaction().unwrap();
+    let before = probe.pty.ordinary_input_revision().unwrap();
+    let event = request(&runtime);
+    assert_attachment_phase(
+        &runtime.handle_frontend_event("client".into(), event),
+        AttachmentProgressPhase::Queued,
+    );
+    assert_attachment_phase(
+        &drain_attachment_work(&mut runtime),
+        AttachmentProgressPhase::Failed,
+    );
+    assert_eq!(probe.pty.ordinary_input_revision().unwrap(), before);
+    drop(held);
+    assert_eq!(
+        probe.pty.ordinary_input_revision().unwrap(),
+        before,
+        "no queued attachment writes on reservation release"
+    );
+    let event = request(&runtime);
+    let queued = runtime.handle_frontend_event("client".into(), event);
+    assert_attachment_phase(&queued, AttachmentProgressPhase::Queued);
+    assert_eq!(probe.pty.ordinary_input_revision().unwrap(), before);
+    let events = drain_attachment_work(&mut runtime);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(
+                e.event,
+                BackendEvent::AttachmentProgress {
+                    phase: AttachmentProgressPhase::Attached,
+                    ..
+                }
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(probe.pty.ordinary_input_revision().unwrap(), before + 1);
+    assert!(
+        probe.pty.has_unsent_user_input(),
+        "physical body did not append Enter/CR"
+    );
+    assert!(
+        drain_attachment_work(&mut runtime).is_empty(),
+        "no automatic replay"
+    );
+}
+
+#[test]
+fn attachment_captured_staging_target_and_dispatched_completion_never_rebind() {
+    let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, probe, id) = owner_browser_input_fixture(temp.path());
+    let request = qualified_attachment_event(
+        &runtime,
+        &id,
+        serde_json::json!({"kind":"attach_files","id":id,
+        "files":[{"source":"inline","filename":"notes.txt","size":4,"data_base64":"Ym9keQ=="}]}),
+    );
+    runtime.handle_frontend_event("original-client".into(), request);
+    let BlockingTaskSpawner::Queued(tasks) = &runtime.blocking_tasks else {
+        panic!("queued fixture")
+    };
+    let tasks = tasks.clone();
+    let stage = tasks.lock().unwrap().pop().unwrap();
+    stage();
+    let AppEventProxy::Stub(recorded) = &runtime.proxy else {
+        panic!("recorded fixture")
+    };
+    let recorded = recorded.clone();
+    let captured = std::mem::take(&mut *recorded.lock().unwrap())
+        .into_iter()
+        .filter_map(|event| runtime.accept_project_completion(event))
+        .find_map(|event| match event {
+            UserEvent::AttachmentPromptReady { operation, prompt } => Some((operation, prompt)),
+            _ => None,
+        })
+        .unwrap();
+    let (operation, prompt) = captured;
+    let before = probe.pty.ordinary_input_revision();
+    let original_session = runtime.active_agent_sessions[&id].session_id.clone();
+    runtime
+        .active_agent_sessions
+        .get_mut(&id)
+        .unwrap()
+        .session_id = "replacement-session".into();
+    // Stale scoped envelopes must reach the no-start classifier, not silently vanish.
+    let mut stale = operation.context.clone();
+    stale.generation += 1;
+    let event = UserEvent::ProjectCompletion {
+        context: stale,
+        event: Box::new(UserEvent::AttachmentPromptReady {
+            operation: operation.clone(),
+            prompt: prompt.clone(),
+        }),
+    };
+    let Some(UserEvent::Dispatch(refused)) = runtime.accept_project_completion(event) else {
+        panic!("correlated no-start must survive stale wrapper")
+    };
+    assert_attachment_phase(&refused, AttachmentProgressPhase::Failed);
+    assert!(tasks.lock().unwrap().is_empty());
+    assert_eq!(probe.pty.ordinary_input_revision(), before);
+    runtime
+        .active_agent_sessions
+        .get_mut(&id)
+        .unwrap()
+        .session_id = original_session;
+    assert_attachment_phase(
+        &runtime.inject_attachment_prompt_events(*operation, prompt),
+        AttachmentProgressPhase::Injecting,
+    );
+    runtime
+        .active_agent_sessions
+        .get_mut(&id)
+        .unwrap()
+        .session_id = "replacement-session".into();
+    let events = drain_attachment_work(&mut runtime);
+    assert_attachment_phase(&events, AttachmentProgressPhase::OutcomeUnknown);
+    assert!(!events.iter().any(|e| matches!(
+        e.event,
+        BackendEvent::AttachmentProgress {
+            phase: AttachmentProgressPhase::Attached,
+            ..
+        }
+    )));
+    assert_eq!(
+        probe.pty.ordinary_input_revision(),
+        before.map(|v| v + 1),
+        "dispatched original owner may have written despite adoption change"
+    );
+}
+
+#[test]
+fn attachment_completion_requires_typed_original_receipt_and_timeout_is_unknown() {
+    use crate::app_runtime::RemoteRuntimeCommandKind;
+    use gwt::project_runtime::events::{
+        OwnerAttachmentInputOutcome as Outcome, OwnerAttachmentInputReason as Reason,
+        OwnerAttachmentInputReceipt, OwnerCommand, OwnerInputObservation,
+    };
+    let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, _probe, id) = owner_browser_input_fixture(temp.path());
+    let event = qualified_attachment_event(
+        &runtime,
+        &id,
+        serde_json::json!({"kind":"attach_files","id":id,
+        "files":[{"source":"inline","filename":"notes.txt","size":4,"data_base64":"Ym9keQ=="}]}),
+    );
+    runtime.handle_frontend_event("original-client".into(), event);
+    let BlockingTaskSpawner::Queued(tasks) = &runtime.blocking_tasks else {
+        panic!("queued fixture")
+    };
+    let work = std::mem::take(&mut *tasks.lock().unwrap());
+    for task in work {
+        task();
+    }
+    let AppEventProxy::Stub(recorded) = &runtime.proxy else {
+        panic!("recorded fixture")
+    };
+    let completed = std::mem::take(&mut *recorded.lock().unwrap());
+    let operation = completed
+        .into_iter()
+        .filter_map(|event| runtime.accept_project_completion(event))
+        .find_map(|event| match event {
+            UserEvent::AttachmentPromptReady { operation, .. } => Some(operation),
+            _ => None,
+        })
+        .unwrap();
+    let completion = super::super::RemoteRuntimeCommandCompletion {
+        context: operation.context.clone(),
+        connection_id: operation.connection_id,
+        identity: operation.identity.clone(),
+        id: operation.id.clone(),
+        incarnation: operation.expected_target.runtime_incarnation,
+        kind: super::super::RemoteRuntimeCommandKind::AttachmentInput(operation.clone()),
+        approval_resolution_started: false,
+        result: Ok(None),
+        attachment_outcome: None,
+        input_command_id: None,
+    };
+    // Ordinary ok/input_observation or a missing private receipt proves nothing.
+    assert_attachment_phase(
+        &runtime.handle_remote_runtime_command_complete(completion.clone()),
+        AttachmentProgressPhase::OutcomeUnknown,
+    );
+    let mut timeout = completion.clone();
+    timeout.result = Err("project command timed out".into());
+    assert_attachment_phase(
+        &runtime.handle_remote_runtime_command_complete(timeout),
+        AttachmentProgressPhase::OutcomeUnknown,
+    );
+    let receipt = OwnerAttachmentInputReceipt {
+        tag: "attachment_input_receipt".into(),
+        schema_version: 1,
+        pane_id: operation.owner_pane_id.clone(),
+        incarnation: operation.expected_target.runtime_incarnation,
+        session_id: operation.expected_target.session_id.clone(),
+        outcome: Outcome::NotStarted,
+        reason: Some(Reason::WriterUnavailable),
+        input_observation: None,
+    };
+    let mut no_start = completion.clone();
+    no_start.attachment_outcome = Some(receipt.clone());
+    assert_attachment_phase(
+        &runtime.handle_remote_runtime_command_complete(no_start.clone()),
+        AttachmentProgressPhase::Failed,
+    );
+    let original_session = runtime.active_agent_sessions[&id].session_id.clone();
+    runtime
+        .active_agent_sessions
+        .get_mut(&id)
+        .unwrap()
+        .session_id = "replacement-session".into();
+    assert_attachment_phase(
+        &runtime.handle_remote_runtime_command_complete(no_start),
+        AttachmentProgressPhase::OutcomeUnknown,
+    );
+    runtime
+        .active_agent_sessions
+        .get_mut(&id)
+        .unwrap()
+        .session_id = original_session;
+    let mut written = receipt;
+    written.outcome = Outcome::Written;
+    written.reason = None;
+    // An attachment ACK cannot clear an undelivered desktop input lane.
+    for chunk in ["first", "second"] {
+        runtime.terminal_input_events(&id, chunk);
+    }
+    let in_flight = runtime.runtimes[&id].input_in_flight.unwrap();
+    let observation = OwnerInputObservation {
+        revision: runtime.runtimes[&id]
+            .input_observation
+            .map_or(1, |previous| previous.revision + 1),
+        has_unsent_user_input: false,
+        human_input_elapsed_ms: None,
+    };
+    written.input_observation = Some(observation);
+    let mut matching = completion.clone();
+    matching.attachment_outcome = Some(written.clone());
+    assert_attachment_phase(
+        &runtime.handle_remote_runtime_command_complete(matching.clone()),
+        AttachmentProgressPhase::Attached,
+    );
+    assert!(runtime.runtimes[&id]
+        .input_observation
+        .is_some_and(
+            |current| current.revision == observation.revision && !current.has_unsent_user_input
+        ));
+    assert!(runtime.pane_has_unsent_user_input(&id));
+    assert_eq!(runtime.runtimes[&id].input_in_flight, Some(in_flight));
+    let pending = &runtime.runtimes[&id].pending_input_commands;
+    assert!(
+        pending.len() == 1
+            && matches!(pending.front(), Some((OwnerCommand::Input {
+        id: pane_id, incarnation, data,
+    }, RemoteRuntimeCommandKind::Input { reply_client: None, .. }))
+        if pane_id == &operation.owner_pane_id
+            && *incarnation == operation.expected_target.runtime_incarnation
+            && data.as_slice() == b"second")
+    );
+    assert!(drain_browser_owner_input(&mut runtime).is_empty());
+    assert!(
+        runtime.runtimes[&id].input_in_flight.is_none()
+            && runtime.runtimes[&id].pending_input_commands.is_empty()
+            && runtime.pane_has_unsent_user_input(&id)
+    );
+    written.input_observation = Some(OwnerInputObservation {
+        revision: runtime.runtimes[&id].input_observation.unwrap().revision + 1,
+        ..observation
+    });
+    matching.attachment_outcome = Some(written.clone());
+    assert_attachment_phase(
+        &runtime.handle_remote_runtime_command_complete(matching),
+        AttachmentProgressPhase::Attached,
+    );
+    assert!(!runtime.pane_has_unsent_user_input(&id));
+    written.session_id = "different-session".into();
+    let mut wrong = completion;
+    wrong.attachment_outcome = Some(written);
+    assert_attachment_phase(
+        &runtime.handle_remote_runtime_command_complete(wrong),
+        AttachmentProgressPhase::OutcomeUnknown,
+    );
+}
+
+#[test]
+fn attachment_missing_contract_and_stale_runtime_refuse_before_upload_take() {
+    let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, probe, id) = owner_browser_input_fixture(temp.path());
+    let path = temp.path().join("contract-upload");
+    fs::write(&path, b"body").unwrap();
+    runtime
+        .attachment_uploads
+        .insert(
+            "contract-upload".into(),
+            UploadedAttachment {
+                path: path.clone(),
+                filename: "notes.txt".into(),
+                mime_type: None,
+                size: 4,
+            },
+        )
+        .unwrap();
+    let valid = serde_json::json!({"kind":"attach_files","id":id,"operation_id":"original-op",
+        "expected_target":attachment_target(&runtime,&id),
+        "files":[{"source":"uploaded","upload_id":"contract-upload","filename":"notes.txt","size":4}]});
+    let before = probe.pty.ordinary_input_revision();
+    let mut missing_target = valid.clone();
+    missing_target
+        .as_object_mut()
+        .unwrap()
+        .remove("expected_target");
+    let mut missing_op = valid.clone();
+    missing_op.as_object_mut().unwrap().remove("operation_id");
+    let mut stale = valid;
+    stale["expected_target"]["runtime_incarnation"] = serde_json::json!(probe.incarnation + 1);
+    for value in [missing_target, missing_op, stale] {
+        let event = serde_json::from_value(value).unwrap();
+        let events = runtime.handle_frontend_event("original-client".into(), event);
+        assert_eq!(events.len(), 1);
+        assert_attachment_phase(&events, AttachmentProgressPhase::Failed);
+    }
+    assert_eq!(probe.pty.ordinary_input_revision(), before);
+    assert_eq!(fs::read(&path).unwrap(), b"body");
+    assert!(runtime
+        .attachment_uploads
+        .take("contract-upload")
+        .unwrap()
+        .is_some());
+    let BlockingTaskSpawner::Queued(tasks) = &runtime.blocking_tasks else {
+        panic!("queued fixture")
+    };
+    assert!(tasks.lock().unwrap().is_empty());
 }

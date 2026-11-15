@@ -1,13 +1,13 @@
 //! Explicit, default-deny coordinator startup (Issue #6476).
 //!
 //! The only routes are the Host-only registration WebSocket and the browser
-//! invite-claim WebSocket; there is no browser signaling relay or UI route. The caller must keep the selected home, fixed private directories
+//! invite-claim and approved-device reconnect WebSockets; there is no browser signaling relay or UI route. The caller must keep the selected home, fixed private directories
 //! and TLS ancestors trusted and non-replaceable, and prevent in-place edits
 //! during loading and serving, as required by the existing storage adapters.
 
 use super::{
-    browser_route::{self, BROWSER_CLAIM_PATH},
-    host_route::{self, HostState, SharedSessions, HOST_REGISTER_PATH},
+    browser_route::{self, BROWSER_CLAIM_PATH, BROWSER_RECONNECT_PATH},
+    host_route::{self, HostState, SharedSessions, SignalRate, HOST_REGISTER_PATH},
     listener::{TlsListener, HANDSHAKE_TIMEOUT},
     registration::CoordinatorSessions,
     storage::{CoordinatorStore, StoreError},
@@ -71,6 +71,8 @@ pub struct CoordinatorServer {
     listener: TlsListener,
     sessions: SharedSessions,
     origin: Arc<str>,
+    signal_rate: SignalRate,
+    host_rate: SignalRate,
 }
 
 /// Origin checks are additional constraints, never registration or device
@@ -152,6 +154,14 @@ impl CoordinatorServer {
                 wall,
             ))),
             origin: Arc::from(config.origin()),
+            signal_rate: SignalRate {
+                per_second: config.limits().device_messages_per_second,
+                burst: config.limits().device_burst,
+            },
+            host_rate: SignalRate {
+                per_second: config.limits().host_messages_per_second,
+                burst: config.limits().host_burst,
+            },
         })
     }
 
@@ -180,6 +190,8 @@ impl CoordinatorServer {
             listener,
             sessions,
             origin,
+            signal_rate,
+            host_rate,
         } = self;
         let (stop, stopping) = tokio::sync::watch::channel(false);
         let (alive, mut sockets) = tokio::sync::mpsc::channel::<()>(1);
@@ -190,11 +202,18 @@ impl CoordinatorServer {
             retired: Arc::new(tokio::sync::watch::Sender::new(())),
             events: Default::default(),
             connections: Default::default(),
+            signal_rate,
+            host_rate,
+            opens: Arc::new(browser_route::OpenBudgets::new(signal_rate)),
         };
         let router = with_http_boundary(
             axum::Router::new()
                 .route(HOST_REGISTER_PATH, axum::routing::get(host_route::register))
                 .route(BROWSER_CLAIM_PATH, axum::routing::get(browser_route::claim))
+                .route(
+                    BROWSER_RECONNECT_PATH,
+                    axum::routing::get(browser_route::reconnect),
+                )
                 .with_state(state),
             origin,
         );
@@ -202,10 +221,13 @@ impl CoordinatorServer {
             shutdown.await;
             let _ = stop.send(true);
         };
-        let result = axum::serve(listener, router)
-            .with_graceful_shutdown(shutdown)
-            .await
-            .map_err(|_| StartupError::ServeUnavailable);
+        let result = axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<super::listener::PeerAddr>(),
+        )
+        .with_graceful_shutdown(shutdown)
+        .await
+        .map_err(|_| StartupError::ServeUnavailable);
         if result.is_ok() {
             // Every sender is gone once the router and all Host sockets end.
             while sockets.recv().await.is_some() {}
@@ -217,7 +239,7 @@ impl CoordinatorServer {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::super::browser_route::BROWSER_CLAIM_PATH;
+    use super::super::browser_route::{BROWSER_CLAIM_PATH, BROWSER_RECONNECT_PATH};
     use super::super::host_route::{SharedSessions, HOST_REGISTER_PATH};
     use super::super::{
         storage::{CoordinatorStore, StoreError},
@@ -263,6 +285,18 @@ mod tests {
 
     impl Fixture {
         fn new() -> Self {
+            Self::with_device_rate(32, 64)
+        }
+
+        fn with_device_rate(rate: u16, burst: u16) -> Self {
+            Self::with_rates(rate, burst, 256, 512)
+        }
+
+        fn with_host_rate(rate: u16, burst: u16) -> Self {
+            Self::with_rates(32, 64, rate, burst)
+        }
+
+        fn with_rates(rate: u16, burst: u16, host_rate: u16, host_burst: u16) -> Self {
             let home = tempfile::tempdir().unwrap();
             let path = home.path().canonicalize().unwrap();
             let directory = path.join(".gwt/mobile/coordinator");
@@ -285,8 +319,8 @@ mod tests {
                 "schema_version": 1, "origin": "https://coordinator.example",
                 "bind": reservation.local_addr().unwrap().to_string(),
                 "tls_certificate": directory.join("cert.pem"), "tls_private_key": directory.join("key.pem"),
-                "limits": {"registrations":64,"peers_per_host":8,"device_messages_per_second":32,
-                           "device_burst":64,"host_messages_per_second":256,"host_burst":512}
+                "limits": {"registrations":64,"peers_per_host":8,"device_messages_per_second":rate,
+                           "device_burst":burst,"host_messages_per_second":host_rate,"host_burst":host_burst}
             })).unwrap();
             fs::write(directory.join("config.json"), &config).unwrap();
             fs::set_permissions(
@@ -845,6 +879,12 @@ mod tests {
         let generation: Uuid = serde_json::from_value(registered["generation"].clone()).unwrap();
         let ttl = registered["ttl_secs"].as_u64().unwrap();
         assert!((1..=30).contains(&ttl), "{registered}");
+        // The Host learns the message rate its registration is held to.
+        assert_eq!(
+            (&registered["messages_per_second"], &registered["burst"]),
+            (&json!(256), &json!(512)),
+            "{registered}"
+        );
         assert_eq!(live(&sessions), 1);
         let nonce = Uuid::new_v4();
         bounded(socket.send(Message::text(
@@ -1690,6 +1730,375 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_browser_that_exceeds_its_signal_rate_is_closed_alone() {
+        use futures_util::{SinkExt as _, StreamExt as _};
+        use tokio_tungstenite::tungstenite::Message;
+        let mut fixture = Fixture::with_device_rate(1, 2);
+        let wall = real_wall();
+        let valid = fixture.issue_token(wall);
+        let server = fixture.start_at(wall).await;
+        let addr = server.local_addr().unwrap();
+        let sessions = Arc::clone(&server.sessions);
+        let (shutdown, signal) = oneshot::channel();
+        let task = tokio::spawn(server.serve_until(async move {
+            let _ = signal.await;
+        }));
+        let auth = [("authorization", format!("Bearer {valid}"))];
+        let origin = [("origin", "https://coordinator.example".to_string())];
+        let mut host = open_host(&fixture, addr, &auth).await.unwrap();
+        let generation: Uuid =
+            serde_json::from_value(next_json(&mut host).await["generation"].clone()).unwrap();
+        let claim = async |host: &mut HostSocket, byte: u8| {
+            let secret = format!("{byte:02x}").repeat(32);
+            bounded(
+                host.send(Message::text(
+                    json!({"type":"register_invite","generation":generation,
+                    "nonce":Uuid::new_v4(),"secret":secret,"ttl_secs":300})
+                    .to_string(),
+                )),
+            )
+            .await
+            .unwrap();
+            assert_eq!(next_json(host).await["type"], "invite_registered");
+            let mut browser = open_path(&fixture, addr, BROWSER_CLAIM_PATH, &origin)
+                .await
+                .unwrap();
+            let text = json!({"type":"claim_invite","secret":secret}).to_string();
+            bounded(browser.send(Message::text(text))).await.unwrap();
+            assert_eq!(next_json(&mut browser).await, json!({"type":"claimed"}));
+            let claimed = next_json(host).await;
+            let id: Uuid = serde_json::from_value(claimed["connection_id"].clone()).unwrap();
+            (browser, id)
+        };
+        let (mut flooding, flooding_id) = claim(&mut host, 0x51).await;
+        let (mut quiet, quiet_id) = claim(&mut host, 0x52).await;
+
+        // Within the burst, signals are relayed in order.
+        for payload in ["0", "1"] {
+            let text = json!({"type":"signal","payload":payload}).to_string();
+            bounded(flooding.send(Message::text(text))).await.unwrap();
+            assert_eq!(
+                next_json(&mut host).await,
+                json!({"type":"connection_signal","generation":generation,
+                       "connection_id":flooding_id,"payload":payload})
+            );
+        }
+        // Beyond it (ten more at one per second refill), the browser is told
+        // and closed; the Host learns only of the close.
+        for payload in 2..12 {
+            let text = json!({"type":"signal","payload":payload.to_string()}).to_string();
+            if bounded(flooding.send(Message::text(text))).await.is_err() {
+                break;
+            }
+        }
+        assert_eq!(
+            next_json(&mut flooding).await,
+            json!({"type":"rate_limited"})
+        );
+        assert!(matches!(
+            bounded(flooding.next()).await,
+            None | Some(Err(_)) | Some(Ok(Message::Close(_)))
+        ));
+        loop {
+            let event = next_json(&mut host).await;
+            if event["type"] == "connection_closed" {
+                assert_eq!(event["connection_id"], json!(flooding_id));
+                break;
+            }
+            assert_eq!(event["type"], "connection_signal");
+        }
+        // The registration and other connections are unaffected.
+        assert_eq!(live(&sessions), 1);
+        let text = json!({"type":"signal","payload":"still"}).to_string();
+        bounded(quiet.send(Message::text(text))).await.unwrap();
+        assert_eq!(
+            next_json(&mut host).await,
+            json!({"type":"connection_signal","generation":generation,
+                   "connection_id":quiet_id,"payload":"still"})
+        );
+
+        drop(quiet);
+        drop(host);
+        wait_until_closed(&sessions).await;
+        shutdown.send(()).unwrap();
+        bounded(task).await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn browser_opens_are_rate_limited_per_source_before_upgrading() {
+        let mut fixture = Fixture::with_device_rate(1, 2);
+        let wall = real_wall();
+        let valid = fixture.issue_token(wall);
+        let server = fixture.start_at(wall).await;
+        let addr = server.local_addr().unwrap();
+        let sessions = Arc::clone(&server.sessions);
+        let (shutdown, signal) = oneshot::channel();
+        let task = tokio::spawn(server.serve_until(async move {
+            let _ = signal.await;
+        }));
+        let origin = [("origin", "https://coordinator.example".to_string())];
+
+        // Claims and reconnects from one source share its burst.
+        let claim = open_path(&fixture, addr, BROWSER_CLAIM_PATH, &origin).await;
+        let reconnect = open_path(&fixture, addr, BROWSER_RECONNECT_PATH, &origin).await;
+        assert!(claim.is_ok() && reconnect.is_ok());
+        for path in [BROWSER_CLAIM_PATH, BROWSER_RECONNECT_PATH] {
+            assert_eq!(
+                open_path(&fixture, addr, path, &origin).await.err(),
+                Some(429)
+            );
+        }
+        // A Host registration is not a browser open.
+        let auth = [("authorization", format!("Bearer {valid}"))];
+        let mut host = open_host(&fixture, addr, &auth).await.unwrap();
+        assert_eq!(next_json(&mut host).await["type"], "registered");
+
+        // The budget refills at the configured rate.
+        tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+        assert!(open_path(&fixture, addr, BROWSER_CLAIM_PATH, &origin)
+            .await
+            .is_ok());
+
+        drop((claim, reconnect, host));
+        wait_until_closed(&sessions).await;
+        shutdown.send(()).unwrap();
+        bounded(task).await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_host_that_exceeds_its_message_rate_loses_its_registration() {
+        use futures_util::{SinkExt as _, StreamExt as _};
+        use tokio_tungstenite::tungstenite::Message;
+        let mut fixture = Fixture::with_host_rate(1, 2);
+        let wall = real_wall();
+        let valid = fixture.issue_token(wall);
+        let server = fixture.start_at(wall).await;
+        let addr = server.local_addr().unwrap();
+        let sessions = Arc::clone(&server.sessions);
+        let (shutdown, signal) = oneshot::channel();
+        let task = tokio::spawn(server.serve_until(async move {
+            let _ = signal.await;
+        }));
+        let auth = [("authorization", format!("Bearer {valid}"))];
+        let origin = [("origin", "https://coordinator.example".to_string())];
+        let mut host = open_host(&fixture, addr, &auth).await.unwrap();
+        let generation: Uuid =
+            serde_json::from_value(next_json(&mut host).await["generation"].clone()).unwrap();
+
+        // Within the burst, messages are served: an invite, then a renewal.
+        let secret = "61".repeat(32);
+        let text = json!({"type":"register_invite","generation":generation,
+                          "nonce":Uuid::new_v4(),"secret":secret,"ttl_secs":300})
+        .to_string();
+        bounded(host.send(Message::text(text))).await.unwrap();
+        assert_eq!(next_json(&mut host).await["type"], "invite_registered");
+        let mut browser = open_path(&fixture, addr, BROWSER_CLAIM_PATH, &origin)
+            .await
+            .unwrap();
+        let text = json!({"type":"claim_invite","secret":secret}).to_string();
+        bounded(browser.send(Message::text(text))).await.unwrap();
+        assert_eq!(next_json(&mut browser).await, json!({"type":"claimed"}));
+        assert_eq!(next_json(&mut host).await["type"], "connection_claimed");
+        let renew = || {
+            Message::text(
+                json!({"type":"renew","generation":generation,"nonce":Uuid::new_v4()}).to_string(),
+            )
+        };
+        bounded(host.send(renew())).await.unwrap();
+        assert_eq!(next_json(&mut host).await["type"], "renewed");
+
+        // Beyond it (at one refill per second), the Host is told and its
+        // registration is logically closed with its claimed browser.
+        let limited = bounded(async {
+            loop {
+                host.send(renew()).await.unwrap();
+                let reply = next_json(&mut host).await;
+                if reply["type"] != "renewed" {
+                    break reply;
+                }
+            }
+        })
+        .await;
+        assert_eq!(
+            limited,
+            json!({"type":"rate_limited","generation":generation})
+        );
+        assert!(matches!(
+            bounded(host.next()).await,
+            None | Some(Err(_)) | Some(Ok(Message::Close(_)))
+        ));
+        wait_until_closed(&sessions).await;
+        assert!(matches!(
+            bounded(browser.next()).await,
+            None | Some(Err(_)) | Some(Ok(Message::Close(_)))
+        ));
+
+        shutdown.send(()).unwrap();
+        bounded(task).await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn host_client_reports_a_rate_limited_registration_and_disables() {
+        use crate::mobile_host::registration_client::{InviteOutcome, InviteRequest};
+        use std::sync::RwLock;
+        use tokio::sync::{mpsc, watch};
+        let mut fixture = Fixture::with_host_rate(1, 2);
+        let wall = real_wall();
+        let (credential, binding) = fixture.issue_credential(wall);
+        let server = fixture.start_at(wall).await;
+        let addr = server.local_addr().unwrap();
+        let sessions = Arc::clone(&server.sessions);
+        let (shutdown, signal) = oneshot::channel();
+        let task = tokio::spawn(server.serve_until(async move {
+            let _ = signal.await;
+        }));
+        let host = Arc::new(RwLock::new(
+            MobileAuthorization::load_bound(&fixture.home.join("devices.json"), &binding).unwrap(),
+        ));
+        let (_stop, stopping) = watch::channel(false);
+        let (invites, requests) = mpsc::channel(1);
+        let client = {
+            let host = Arc::clone(&host);
+            let tls = fixture.client_config();
+            tokio::spawn(async move {
+                let tcp = TcpStream::connect(addr).await.unwrap();
+                run_registration(
+                    host,
+                    &credential,
+                    tls,
+                    tcp,
+                    stopping,
+                    requests,
+                    mpsc::channel(1).1,
+                    mpsc::channel(1).0,
+                )
+                .await
+            })
+        };
+        // Invites go one at a time, each awaiting its answer, until the
+        // coordinator answers one with `rate_limited` instead.
+        let mut registered = 0;
+        for byte in 1..=10u8 {
+            let (reply, outcome) = oneshot::channel();
+            let request = InviteRequest {
+                secret: zeroize::Zeroizing::new([byte; 32]),
+                ttl_secs: 300,
+                reply,
+            };
+            if bounded(invites.send(request)).await.is_err() {
+                break;
+            }
+            match bounded(outcome).await {
+                Ok(InviteOutcome::Registered) => registered += 1,
+                Ok(other) => panic!("{other:?}"),
+                Err(_) => break,
+            }
+        }
+        assert!((1..10).contains(&registered), "{registered}");
+        let result = bounded(client).await.unwrap();
+        assert!(
+            matches!(result, Err(RegistrationClientError::RateLimited)),
+            "{result:?}"
+        );
+        assert!(!host.read().unwrap().is_enabled());
+        wait_until_closed(&sessions).await;
+
+        shutdown.send(()).unwrap();
+        bounded(task).await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn host_client_paces_its_signals_to_the_announced_host_rate() {
+        use crate::mobile_host::registration_client::{
+            ConnectionEvent, InviteOutcome, InviteRequest, OutboundSignal,
+        };
+        use futures_util::SinkExt as _;
+        use std::sync::RwLock;
+        use tokio::sync::{mpsc, watch};
+        use tokio_tungstenite::tungstenite::Message;
+        let mut fixture = Fixture::with_host_rate(2, 4);
+        let wall = real_wall();
+        let (credential, binding) = fixture.issue_credential(wall);
+        let server = fixture.start_at(wall).await;
+        let addr = server.local_addr().unwrap();
+        let sessions = Arc::clone(&server.sessions);
+        let (shutdown, signal) = oneshot::channel();
+        let task = tokio::spawn(server.serve_until(async move {
+            let _ = signal.await;
+        }));
+        let host = Arc::new(RwLock::new(
+            MobileAuthorization::load_bound(&fixture.home.join("devices.json"), &binding).unwrap(),
+        ));
+        let (stop, stopping) = watch::channel(false);
+        let (invites, requests) = mpsc::channel(1);
+        let (signals, outbound) = mpsc::channel(8);
+        let (events, mut connections) = mpsc::channel(32);
+        let client = {
+            let host = Arc::clone(&host);
+            let tls = fixture.client_config();
+            tokio::spawn(async move {
+                let tcp = TcpStream::connect(addr).await.unwrap();
+                run_registration(
+                    host,
+                    &credential,
+                    tls,
+                    tcp,
+                    stopping,
+                    requests,
+                    outbound,
+                    events,
+                )
+                .await
+            })
+        };
+        let (reply, outcome) = oneshot::channel();
+        let request = InviteRequest {
+            secret: zeroize::Zeroizing::new([1; 32]),
+            ttl_secs: 300,
+            reply,
+        };
+        bounded(invites.send(request)).await.ok().unwrap();
+        assert_eq!(bounded(outcome).await, Ok(InviteOutcome::Registered));
+        let origin = [("origin", "https://coordinator.example".to_string())];
+        let mut browser = open_path(&fixture, addr, BROWSER_CLAIM_PATH, &origin)
+            .await
+            .unwrap();
+        let claim = json!({"type":"claim_invite","secret":"01".repeat(32)}).to_string();
+        bounded(browser.send(Message::text(claim))).await.unwrap();
+        assert_eq!(next_json(&mut browser).await, json!({"type":"claimed"}));
+        let Some(ConnectionEvent::Claimed { connection_id, .. }) =
+            bounded(connections.recv()).await
+        else {
+            panic!("the first connection event must be the claim");
+        };
+
+        // More signals at once than the coordinator's burst allows: the client
+        // holds them to the announced rate instead of losing the registration.
+        for index in 0..6 {
+            let signal = OutboundSignal {
+                connection_id,
+                payload: format!("candidate-{index}"),
+            };
+            bounded(signals.send(signal)).await.ok().unwrap();
+        }
+        for index in 0..6 {
+            assert_eq!(
+                next_json(&mut browser).await,
+                json!({"type":"signal","payload":format!("candidate-{index}")})
+            );
+        }
+        assert!(host.read().unwrap().is_enabled());
+        assert_eq!(live(&sessions), 1);
+        assert!(!client.is_finished());
+
+        stop.send(true).unwrap();
+        assert!(matches!(bounded(client).await.unwrap(), Ok(())));
+        wait_until_closed(&sessions).await;
+        shutdown.send(()).unwrap();
+        bounded(task).await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
     async fn host_client_closes_only_a_browser_that_outpaces_its_signal_share() {
         use crate::mobile_host::registration_client::{ConnectionEvent, InviteRequest};
         use futures_util::SinkExt as _;
@@ -1776,6 +2185,195 @@ mod tests {
             Some(ConnectionEvent::Closed { connection_id })
         );
         assert!(host.read().unwrap().is_enabled());
+        assert_eq!(live(&sessions), 1);
+
+        stop.send(true).unwrap();
+        assert!(matches!(bounded(client).await.unwrap(), Ok(())));
+        wait_until_closed(&sessions).await;
+        shutdown.send(()).unwrap();
+        bounded(task).await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn approved_devices_reconnect_to_their_live_host_without_an_invite() {
+        use crate::mobile_host::registration_client::ConnectionEvent;
+        use base64::Engine as _;
+        use futures_util::SinkExt as _;
+        use std::sync::RwLock;
+        use tokio::sync::{mpsc, watch};
+        use tokio_tungstenite::tungstenite::Message;
+        let mut fixture = Fixture::new();
+        let wall = real_wall();
+        let valid = fixture.issue_token(wall);
+        let (credential, binding) = fixture.issue_credential(wall);
+        let server = fixture.start_at(wall).await;
+        let addr = server.local_addr().unwrap();
+        let sessions = Arc::clone(&server.sessions);
+        let (shutdown, signal) = oneshot::channel();
+        let task = tokio::spawn(server.serve_until(async move {
+            let _ = signal.await;
+        }));
+        let decoded: serde_json::Value = serde_json::from_slice(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(&valid)
+                .unwrap(),
+        )
+        .unwrap();
+        let host_id: Uuid = serde_json::from_value(decoded["host_id"].clone()).unwrap();
+        let origin = [("origin", "https://coordinator.example".to_string())];
+        let request = |host_id: Uuid, project: &str, device_id: Uuid| {
+            json!({"type":"request_reconnect","host_id":host_id,"project":project,
+                   "device_id":device_id})
+            .to_string()
+        };
+        async fn closed(socket: &mut HostSocket) -> bool {
+            use futures_util::StreamExt as _;
+            matches!(
+                bounded(socket.next()).await,
+                None | Some(Err(_)) | Some(Ok(Message::Close(_)))
+            )
+        }
+        let device = Uuid::new_v4();
+
+        // No live registration: refused without a reason.
+        let mut early = open_path(&fixture, addr, BROWSER_RECONNECT_PATH, &origin)
+            .await
+            .unwrap();
+        bounded(early.send(Message::text(request(host_id, PROJECT, device))))
+            .await
+            .unwrap();
+        assert_eq!(
+            next_json(&mut early).await,
+            json!({"type":"reconnect_rejected"})
+        );
+        assert!(closed(&mut early).await);
+        assert_eq!(
+            open_path(&fixture, addr, BROWSER_RECONNECT_PATH, &[])
+                .await
+                .err(),
+            Some(403)
+        );
+
+        let auth = [("authorization", format!("Bearer {valid}"))];
+        let mut host = open_host(&fixture, addr, &auth).await.unwrap();
+        let generation: Uuid =
+            serde_json::from_value(next_json(&mut host).await["generation"].clone()).unwrap();
+        // A foreign Host or Project is refused and leaves the Host untouched.
+        for text in [
+            request(Uuid::new_v4(), PROJECT, device),
+            request(host_id, "fedcba9876543210", device),
+        ] {
+            let mut browser = open_path(&fixture, addr, BROWSER_RECONNECT_PATH, &origin)
+                .await
+                .unwrap();
+            bounded(browser.send(Message::text(text))).await.unwrap();
+            assert_eq!(
+                next_json(&mut browser).await,
+                json!({"type":"reconnect_rejected"})
+            );
+        }
+        assert_eq!(live(&sessions), 1);
+
+        // The named live Host is told of the device's connection, and signals
+        // and the close are relayed as for a claim.
+        let mut browser = open_path(&fixture, addr, BROWSER_RECONNECT_PATH, &origin)
+            .await
+            .unwrap();
+        bounded(browser.send(Message::text(request(host_id, PROJECT, device))))
+            .await
+            .unwrap();
+        assert_eq!(
+            next_json(&mut browser).await,
+            json!({"type":"reconnect_routed"})
+        );
+        let routed = next_json(&mut host).await;
+        assert_eq!(routed["type"], "connection_reconnect");
+        assert_eq!(routed["generation"], json!(generation));
+        assert_eq!(routed["device_id"], json!(device));
+        let id: Uuid = serde_json::from_value(routed["connection_id"].clone()).unwrap();
+        let offer = json!({"type":"signal","payload":"proof"}).to_string();
+        bounded(browser.send(Message::text(offer))).await.unwrap();
+        assert_eq!(
+            next_json(&mut host).await,
+            json!({"type":"connection_signal","generation":generation,
+                   "connection_id":id,"payload":"proof"})
+        );
+        bounded(
+            host.send(Message::text(
+                json!({"type":"signal","generation":generation,
+                "connection_id":id,"payload":"nonce"})
+                .to_string(),
+            )),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            next_json(&mut browser).await,
+            json!({"type":"signal","payload":"nonce"})
+        );
+        bounded(browser.close(None)).await.unwrap();
+        assert_eq!(
+            next_json(&mut host).await,
+            json!({"type":"connection_closed","generation":generation,"connection_id":id})
+        );
+        bounded(host.close(None)).await.unwrap();
+        wait_until_closed(&sessions).await;
+
+        // The Host client reports the reconnect and stays registered.
+        let authority = Arc::new(RwLock::new(
+            MobileAuthorization::load_bound(&fixture.home.join("devices.json"), &binding).unwrap(),
+        ));
+        let client_host = credential.identity().host_id;
+        let (stop, stopping) = watch::channel(false);
+        let (events, mut connections) = mpsc::channel(8);
+        let client = {
+            let authority = Arc::clone(&authority);
+            let tls = fixture.client_config();
+            tokio::spawn(async move {
+                let tcp = TcpStream::connect(addr).await.unwrap();
+                run_registration(
+                    authority,
+                    &credential,
+                    tls,
+                    tcp,
+                    stopping,
+                    mpsc::channel(1).1,
+                    mpsc::channel(1).1,
+                    events,
+                )
+                .await
+            })
+        };
+        let mut browser = bounded(async {
+            loop {
+                let mut browser = open_path(&fixture, addr, BROWSER_RECONNECT_PATH, &origin)
+                    .await
+                    .unwrap();
+                let text = request(client_host, PROJECT, device);
+                bounded(browser.send(Message::text(text))).await.unwrap();
+                if next_json(&mut browser).await["type"] == "reconnect_routed" {
+                    break browser;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        })
+        .await;
+        let connection_id = match bounded(connections.recv()).await.unwrap() {
+            ConnectionEvent::Reconnect {
+                connection_id,
+                device_id,
+            } => {
+                assert_eq!(device_id, device);
+                connection_id
+            }
+            other => panic!("{other:?}"),
+        };
+        bounded(browser.close(None)).await.unwrap();
+        assert_eq!(
+            bounded(connections.recv()).await,
+            Some(ConnectionEvent::Closed { connection_id })
+        );
+        assert!(authority.read().unwrap().is_enabled());
         assert_eq!(live(&sessions), 1);
 
         stop.send(true).unwrap();

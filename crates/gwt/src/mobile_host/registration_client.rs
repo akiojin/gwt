@@ -19,7 +19,8 @@
 //! sender only ends invite input, not the registration.
 //!
 //! The coordinator announces browser connections that claimed this
-//! registration's invites (naming the invite by [`InviteRequest::invite_id`]),
+//! registration's invites (naming the invite by [`InviteRequest::invite_id`])
+//! or that reconnect an approved device (naming the unverified device ID),
 //! the opaque signals each relays and its close; each
 //! becomes a [`ConnectionEvent`] for the caller.
 //! A caller that stopped receiving is ignored, but a full event channel ends
@@ -32,6 +33,13 @@
 //! a time while enabled. A signal whose frame exceeds the coordinator's message
 //! bound would end the whole registration there, so it is dropped and only its
 //! connection closed. Dropping every signal sender only ends signal input.
+//!
+//! The coordinator ends a registration whose socket exceeds the Host message
+//! rate it announces in `registered`. Every message the client sends spends
+//! from its own bucket at that rate, holding half the burst (the other half
+//! absorbs arrival jitter). Renewals, invites and closes are bounded by the
+//! protocol and never wait, so a lease renewal is not delayed; signals wait
+//! for a token, which backpressures the caller's bounded channel.
 
 use super::credential::LoadedHostCredential;
 use crate::mobile_connection::{AuthorizationError, MobileAuthorization};
@@ -81,6 +89,8 @@ pub enum RegistrationClientError {
     Closed,
     #[error("the Host fell behind on coordinator connection events; explicitly enable again")]
     EventBacklog,
+    #[error("the coordinator closed the Host registration for exceeding its message rate; explicitly enable again")]
+    RateLimited,
 }
 
 /// A browser connection that claimed one of this registration's invites, and
@@ -91,6 +101,12 @@ pub enum ConnectionEvent {
     Claimed {
         connection_id: Uuid,
         invite: [u8; 32],
+    },
+    /// An approved device's reconnect, by the device ID its browser named.
+    /// Not proof of the device: the caller must verify its key possession.
+    Reconnect {
+        connection_id: Uuid,
+        device_id: Uuid,
     },
     Signal {
         connection_id: Uuid,
@@ -158,6 +174,8 @@ enum CoordinatorMessage {
         generation: Uuid,
         #[allow(dead_code)]
         ttl_secs: u64,
+        messages_per_second: u16,
+        burst: u16,
     },
     Renewed {
         generation: Uuid,
@@ -179,6 +197,11 @@ enum CoordinatorMessage {
         /// 64 hex; anything else is a protocol violation.
         invite: String,
     },
+    ConnectionReconnect {
+        generation: Uuid,
+        connection_id: Uuid,
+        device_id: Uuid,
+    },
     ConnectionSignal {
         generation: Uuid,
         connection_id: Uuid,
@@ -187,6 +210,9 @@ enum CoordinatorMessage {
     ConnectionClosed {
         generation: Uuid,
         connection_id: Uuid,
+    },
+    RateLimited {
+        generation: Uuid,
     },
 }
 
@@ -316,11 +342,20 @@ async fn register_and_renew(
                     _ => RegistrationClientError::Connect,
                 })?;
         match next_message(&mut socket).await? {
-            CoordinatorMessage::Registered { generation, .. } => Ok((socket, generation)),
+            CoordinatorMessage::Registered {
+                generation,
+                messages_per_second,
+                burst,
+                ..
+            } if messages_per_second > 0 && burst > 0 => Ok((
+                socket,
+                generation,
+                SendBudget::new(messages_per_second, burst, Instant::now()),
+            )),
             _ => Err(RegistrationClientError::Protocol),
         }
     });
-    let (mut socket, generation) = tokio::select! {
+    let (mut socket, generation, mut budget) = tokio::select! {
         _ = stopped(&mut stop) => return Ok(()),
         result = handshake => result.map_err(|_| RegistrationClientError::Connect)??,
     };
@@ -332,6 +367,7 @@ async fn register_and_renew(
         Instant::now(),
         wall()?,
     )?;
+    budget.spend(Instant::now());
     send_renew(&mut socket, request.generation(), request.nonce()).await?;
     let mut poll = tokio::time::interval(POLL_INTERVAL);
     let mut invites_open = true;
@@ -350,19 +386,25 @@ async fn register_and_renew(
                     continue;
                 };
                 let nonce = Uuid::new_v4();
+                budget.spend(Instant::now());
                 send_invite(&mut socket, generation, nonce, &request).await?;
                 pending = Some((nonce, request.reply));
             }
-            signal = signals.recv(), if signals_open => {
+            signal = signals.recv(), if signals_open && budget.ready(Instant::now()) => {
                 let Some(signal) = signal else {
                     signals_open = false;
                     continue;
                 };
+                budget.spend(Instant::now());
                 send_signal(&mut socket, generation, signal).await?;
             }
+            // Wakes the loop when the next signal token is due.
+            _ = tokio::time::sleep_until(budget.next_token().into()), if signals_open
+                && !budget.ready(Instant::now()) => {}
             _ = poll.tick() => {
                 let request = write(authority)?.poll_registration(Instant::now(), wall()?)?;
                 if let Some(request) = request {
+                    budget.spend(Instant::now());
                     send_renew(&mut socket, request.generation(), request.nonce()).await?;
                 }
             }
@@ -398,6 +440,11 @@ async fn register_and_renew(
                         .map_err(|_| RegistrationClientError::Protocol)?;
                     report(&events, ConnectionEvent::Claimed { connection_id, invite: digest })?;
                 }
+                CoordinatorMessage::ConnectionReconnect { generation: scoped, connection_id, device_id }
+                    if scoped == generation =>
+                {
+                    report(&events, ConnectionEvent::Reconnect { connection_id, device_id })?;
+                }
                 CoordinatorMessage::ConnectionSignal { generation: scoped, connection_id, payload }
                     if scoped == generation =>
                 {
@@ -406,6 +453,7 @@ async fn register_and_renew(
                     if events.capacity() > events.max_capacity() / 2 {
                         report(&events, ConnectionEvent::Signal { connection_id, payload })?;
                     } else {
+                        budget.spend(Instant::now());
                         send_close(&mut socket, generation, connection_id).await?;
                     }
                 }
@@ -414,9 +462,57 @@ async fn register_and_renew(
                 {
                     report(&events, ConnectionEvent::Closed { connection_id })?;
                 }
+                CoordinatorMessage::RateLimited { generation: scoped } if scoped == generation => {
+                    return Err(RegistrationClientError::RateLimited);
+                }
                 _ => return Err(RegistrationClientError::Protocol),
             },
         }
+    }
+}
+
+/// The client's own token bucket for the messages it sends: refilled at the
+/// announced rate and holding half the announced burst (at least one). Its
+/// balance may go negative after messages that never wait.
+struct SendBudget {
+    per_second: f64,
+    capacity: f64,
+    tokens: f64,
+    refilled: Instant,
+}
+
+impl SendBudget {
+    fn new(per_second: u16, burst: u16, now: Instant) -> Self {
+        let capacity = f64::from((burst / 2).max(1));
+        Self {
+            per_second: f64::from(per_second),
+            capacity,
+            tokens: capacity,
+            refilled: now,
+        }
+    }
+
+    fn refill(&mut self, now: Instant) {
+        let elapsed = now.saturating_duration_since(self.refilled).as_secs_f64();
+        self.tokens = (self.tokens + elapsed * self.per_second).min(self.capacity);
+        self.refilled = now;
+    }
+
+    /// Whether a signal may be sent at `now`.
+    fn ready(&mut self, now: Instant) -> bool {
+        self.refill(now);
+        self.tokens >= 1.0
+    }
+
+    fn spend(&mut self, now: Instant) {
+        self.refill(now);
+        self.tokens -= 1.0;
+    }
+
+    /// When the balance reaches one token.
+    fn next_token(&self) -> Instant {
+        let missing = (1.0 - self.tokens).max(0.0);
+        self.refilled + Duration::from_secs_f64(missing / self.per_second)
     }
 }
 

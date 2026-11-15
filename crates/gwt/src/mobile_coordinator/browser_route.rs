@@ -12,12 +12,26 @@
 //! full) it answers `claim_rejected` without a reason and closes. A claim is
 //! not device approval or read/input authority.
 //!
-//! A claimed browser may then only send `{"type":"signal","payload"}` with an
+//! An approved device reconnects on `BROWSER_RECONNECT_PATH` instead, with the
+//! single message `{"type":"request_reconnect","host_id","project","device_id"}`.
+//! It is routed only to the one live registration of that Host and Project, and
+//! the Host is sent `connection_reconnect` with the named device ID; the
+//! browser gets `reconnect_routed`, or `reconnect_rejected` without a reason.
+//! Reaching the Host is not device approval: the Host verifies the device.
+//!
+//! A claimed (or reconnected) browser may then only send `{"type":"signal","payload"}` with an
 //! opaque string; it is relayed to its Host as `connection_signal`, waiting for
 //! room in the Host's backlog (one pending signal per connection). A signal
 //! whose relayed frame would exceed the message bound, or any other data
 //! frame, closes the socket. Host signals for this connection arrive as
-//! `{"type":"signal","payload"}`.
+//! `{"type":"signal","payload"}`. Every data message after the claim spends
+//! one token of the connection's configured device rate (burst, refilled per
+//! second); a message beyond it is not relayed, and the browser is sent
+//! `{"type":"rate_limited"}` and closed. Nothing is queued or retried.
+//!
+//! Every upgrade request on either browser path spends one token of its
+//! source's budget (the configured device rate, keyed like the listener's
+//! per-peer slots). One beyond it is refused with 429 before upgrading.
 //!
 //! A claimed socket ends when the server stops, when its Host registration is
 //! logically closed or its lease passes. Every exit after a claim logically
@@ -25,21 +39,26 @@
 //! the invite stays a replay fence until its TTL.
 
 use super::host_route::{
-    announce_claim, call, BrowserConnections, HostEvent, HostState, SharedSessions, BROWSER_BACKLOG,
+    announce_open, call, BrowserConnections, HostEvent, HostState, SharedSessions, SignalBudget,
+    SignalRate, BROWSER_BACKLOG,
 };
+use super::listener::{peer_key, PeerAddr};
 use super::registration::RegistrationHandle;
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        State,
+        ConnectInfo, State,
     },
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
+use gwt_core::repo_hash::ProjectKey;
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
 use std::{
-    sync::Arc,
+    collections::HashMap,
+    net::{IpAddr, SocketAddr},
+    sync::{Arc, Mutex, PoisonError},
     time::{Duration, Instant},
 };
 use tokio::sync::{mpsc, watch};
@@ -47,6 +66,7 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 pub(super) const BROWSER_CLAIM_PATH: &str = "/browser/v1/claim";
+pub(super) const BROWSER_RECONNECT_PATH: &str = "/browser/v1/reconnect";
 /// The same bound as HTTP request bodies (the mobile policy's maximum SDP).
 const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 /// A browser that has not claimed within this bound releases its connection.
@@ -59,6 +79,27 @@ enum BrowserMessage {
         #[serde(deserialize_with = "super::borrowed_hex_secret")]
         secret: Zeroizing<[u8; 32]>,
     },
+    RequestReconnect {
+        host_id: Uuid,
+        project: String,
+        device_id: Uuid,
+    },
+}
+
+/// Which single opening message a browser path accepts.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Entry {
+    Claim,
+    Reconnect,
+}
+
+impl Entry {
+    fn replies(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Claim => ("claimed", "claim_rejected"),
+            Self::Reconnect => ("reconnect_routed", "reconnect_rejected"),
+        }
+    }
 }
 
 /// The only message of a claimed browser.
@@ -68,11 +109,69 @@ enum ClaimedMessage {
     Signal { payload: String },
 }
 
+/// Each source's token bucket for browser upgrade requests. A bucket that has
+/// refilled to its burst is dropped, so only recently active sources are kept.
+pub(super) struct OpenBudgets {
+    rate: SignalRate,
+    sources: Mutex<HashMap<IpAddr, SignalBudget>>,
+}
+
+impl OpenBudgets {
+    pub(super) fn new(rate: SignalRate) -> Self {
+        Self {
+            rate,
+            sources: Mutex::default(),
+        }
+    }
+
+    /// Spends one of `peer`'s tokens at `now`; `false` when none is left.
+    pub(super) fn take(&self, peer: SocketAddr, now: Instant) -> bool {
+        let mut sources = self.sources.lock().unwrap_or_else(PoisonError::into_inner);
+        sources.retain(|_, budget| !budget.is_full(now));
+        sources
+            .entry(peer_key(peer.ip()))
+            .or_insert_with(|| SignalBudget::new(self.rate, now))
+            .take(now)
+    }
+
+    #[cfg(test)]
+    fn sources(&self) -> usize {
+        self.sources.lock().unwrap().len()
+    }
+}
+
 pub(super) async fn claim(
     State(state): State<HostState>,
+    ConnectInfo(PeerAddr(peer)): ConnectInfo<PeerAddr>,
     headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Response {
+    open(state, peer, headers, upgrade, Entry::Claim)
+}
+
+pub(super) async fn reconnect(
+    State(state): State<HostState>,
+    ConnectInfo(PeerAddr(peer)): ConnectInfo<PeerAddr>,
+    headers: HeaderMap,
+    upgrade: WebSocketUpgrade,
+) -> Response {
+    open(state, peer, headers, upgrade, Entry::Reconnect)
+}
+
+fn open(
+    state: HostState,
+    peer: SocketAddr,
+    headers: HeaderMap,
+    upgrade: WebSocketUpgrade,
+    entry: Entry,
+) -> Response {
+    if !state.opens.take(peer, Instant::now()) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            "coordinator browser requests from this source exceed the configured rate",
+        )
+            .into_response();
+    }
     if !headers.contains_key(header::ORIGIN) {
         return (
             StatusCode::FORBIDDEN,
@@ -83,7 +182,7 @@ pub(super) async fn claim(
     upgrade
         .max_message_size(MAX_MESSAGE_BYTES)
         .max_frame_size(MAX_MESSAGE_BYTES)
-        .on_upgrade(move |socket| serve_browser(socket, state))
+        .on_upgrade(move |socket| serve_browser(socket, state, entry))
 }
 
 /// One claimed connection; logically closed exactly once on drop, and its
@@ -131,11 +230,12 @@ async fn send_json(socket: &mut WebSocket, value: serde_json::Value) -> bool {
         .is_ok()
 }
 
-/// Waits up to `CLAIM_TIMEOUT` for the single claim message.
-async fn read_claim(
+/// Waits up to `CLAIM_TIMEOUT` for the single opening message of `entry`.
+async fn read_opening(
     socket: &mut WebSocket,
     stopping: &mut watch::Receiver<bool>,
-) -> Option<Zeroizing<[u8; 32]>> {
+    entry: Entry,
+) -> Option<BrowserMessage> {
     let deadline = tokio::time::Instant::now() + CLAIM_TIMEOUT;
     loop {
         let message = tokio::select! {
@@ -145,9 +245,12 @@ async fn read_claim(
         };
         match message {
             Some(Ok(Message::Text(text))) => {
-                let BrowserMessage::ClaimInvite { secret } =
-                    serde_json::from_str(text.as_str()).ok()?;
-                return Some(secret);
+                let message = serde_json::from_str(text.as_str()).ok()?;
+                let expected = match message {
+                    BrowserMessage::ClaimInvite { .. } => Entry::Claim,
+                    BrowserMessage::RequestReconnect { .. } => Entry::Reconnect,
+                };
+                return (expected == entry).then_some(message);
             }
             Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
             _ => return None,
@@ -155,7 +258,46 @@ async fn read_claim(
     }
 }
 
-async fn serve_browser(mut socket: WebSocket, state: HostState) {
+/// Admits the opening message: the registration it routes to and the event
+/// that opens the connection for that Host. `None` for any refusal.
+fn admit(
+    sessions: &SharedSessions,
+    message: BrowserMessage,
+    connection_id: Uuid,
+) -> Option<(RegistrationHandle, HostEvent)> {
+    match message {
+        BrowserMessage::ClaimInvite { secret } => {
+            let invite: [u8; 32] = Sha256::digest(secret.as_slice()).into();
+            let (handle, _) = call(sessions, |sessions, now, wall| {
+                sessions.claim_invite_by_secret(&*secret, connection_id, now, wall)
+            })
+            .ok()?;
+            let opened = HostEvent::Claimed {
+                connection_id,
+                invite,
+            };
+            Some((handle, opened))
+        }
+        BrowserMessage::RequestReconnect {
+            host_id,
+            project,
+            device_id,
+        } => {
+            let project = ProjectKey::parse(&project).ok()?;
+            let handle = call(sessions, |sessions, now, wall| {
+                sessions.request_reconnect(host_id, &project, connection_id, now, wall)
+            })
+            .ok()?;
+            let opened = HostEvent::Reconnect {
+                connection_id,
+                device_id,
+            };
+            Some((handle, opened))
+        }
+    }
+}
+
+async fn serve_browser(mut socket: WebSocket, state: HostState, entry: Entry) {
     let HostState {
         sessions,
         mut stopping,
@@ -163,19 +305,19 @@ async fn serve_browser(mut socket: WebSocket, state: HostState) {
         retired,
         events,
         connections,
+        signal_rate,
+        host_rate: _,
+        opens: _,
     } = state;
     // Subscribe before claiming so a registration closed meanwhile is seen.
     let mut retired = retired.subscribe();
-    if let Some(secret) = read_claim(&mut socket, &mut stopping).await {
+    let (accepted, rejected) = entry.replies();
+    if let Some(message) = read_opening(&mut socket, &mut stopping, entry).await {
         let connection_id = Uuid::new_v4();
         let claim_sessions = sessions.clone();
         let (outbound, mut inbound) = mpsc::channel(BROWSER_BACKLOG);
         let claimed = tokio::task::spawn_blocking(move || {
-            let invite: [u8; 32] = Sha256::digest(secret.as_slice()).into();
-            let (handle, _) = call(&claim_sessions, |sessions, now, wall| {
-                sessions.claim_invite_by_secret(&*secret, connection_id, now, wall)
-            })
-            .ok()?;
+            let (handle, opened) = admit(&claim_sessions, message, connection_id)?;
             let generation = handle.generation();
             // Routed before the Host learns of it, so its first signal lands.
             let routed = connections
@@ -183,7 +325,7 @@ async fn serve_browser(mut socket: WebSocket, state: HostState) {
                 .map(|mut table| table.insert(connection_id, (generation, outbound)))
                 .is_ok();
             let announced = routed
-                .then(|| announce_claim(&events, generation, connection_id, invite))
+                .then(|| announce_open(&events, generation, opened))
                 .flatten();
             // A closed sender stands in when unannounced; the claim is then
             // dropped (closed and unrouted) here, on the blocking thread.
@@ -204,12 +346,13 @@ async fn serve_browser(mut socket: WebSocket, state: HostState) {
         .await;
         match claimed {
             Ok(Some(claimed)) => {
-                if send_json(&mut socket, serde_json::json!({"type": "claimed"})).await {
+                if send_json(&mut socket, serde_json::json!({"type": accepted})).await {
                     let generation = claimed.handle.generation();
                     hold(
                         &mut socket,
                         &claimed,
                         generation,
+                        SignalBudget::new(signal_rate, Instant::now()),
                         &mut inbound,
                         &mut stopping,
                         &mut retired,
@@ -219,7 +362,7 @@ async fn serve_browser(mut socket: WebSocket, state: HostState) {
                 let _ = tokio::task::spawn_blocking(move || drop(claimed)).await;
             }
             _ => {
-                let _ = send_json(&mut socket, serde_json::json!({"type": "claim_rejected"})).await;
+                let _ = send_json(&mut socket, serde_json::json!({"type": rejected})).await;
             }
         }
     }
@@ -245,6 +388,7 @@ async fn hold(
     socket: &mut WebSocket,
     claimed: &Arc<Claimed>,
     generation: Uuid,
+    mut budget: SignalBudget,
     inbound: &mut mpsc::Receiver<String>,
     stopping: &mut watch::Receiver<bool>,
     retired: &mut watch::Receiver<()>,
@@ -259,10 +403,12 @@ async fn hold(
         enum Next {
             ToHost(String),
             ToBrowser(String),
+            RateLimited,
         }
         let next = tokio::select! {
             message = socket.recv() => match message {
                 Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
+                Some(Ok(Message::Text(_))) if !budget.take(Instant::now()) => Next::RateLimited,
                 Some(Ok(Message::Text(text))) => {
                     match host_signal(text.as_str(), generation, claimed.connection_id) {
                         Some(frame) => Next::ToHost(frame),
@@ -292,6 +438,10 @@ async fn hold(
                 }
                 continue;
             }
+            Next::RateLimited => {
+                let _ = send_json(socket, serde_json::json!({"type": "rate_limited"})).await;
+                return;
+            }
         };
         // Waits for room in the Host backlog: one pending signal per browser.
         tokio::select! {
@@ -302,5 +452,36 @@ async fn hold(
             }
             _ = stopping.wait_for(|stopped| *stopped) => return,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::SocketAddr;
+
+    #[test]
+    fn open_budgets_are_kept_per_source_key_and_dropped_once_refilled() {
+        let start = Instant::now();
+        let opens = OpenBudgets::new(SignalRate {
+            per_second: 1,
+            burst: 2,
+        });
+        let a: SocketAddr = "192.0.2.1:1000".parse().unwrap();
+        let a_mapped: SocketAddr = "[::ffff:192.0.2.1]:2000".parse().unwrap();
+        let b: SocketAddr = "[2001:db8::1]:3000".parse().unwrap();
+        let b_same_64: SocketAddr = "[2001:db8::2]:3000".parse().unwrap();
+        assert!(opens.take(a, start));
+        assert!(opens.take(a_mapped, start));
+        assert!(!opens.take(a, start));
+        assert!(opens.take(b, start));
+        assert!(opens.take(b_same_64, start));
+        assert!(!opens.take(b, start));
+        assert_eq!(opens.sources(), 2);
+        // Every bucket is full again after burst / rate seconds and is dropped.
+        let later = start + Duration::from_secs(2);
+        let c: SocketAddr = "198.51.100.7:1".parse().unwrap();
+        assert!(opens.take(c, later));
+        assert_eq!(opens.sources(), 1);
     }
 }

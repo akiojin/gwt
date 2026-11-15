@@ -81,8 +81,8 @@ fn startup_reaper_runs_after_restore_selection_before_monitor_and_pm_dispatch() 
         .expect("owner dispatch boundary")
         .0;
     let durable_recovery = owner_start
-        .find("super::startup::reconcile_durable_launches")
-        .expect("owner durable recovery");
+        .find("state.initialize_shared_registry()")
+        .expect("owner initialization calls durable recovery");
     let admission = owner_start
         .find("state.run(receiver)")
         .expect("owner admission loop");
@@ -90,6 +90,11 @@ fn startup_reaper_runs_after_restore_selection_before_monitor_and_pm_dispatch() 
         durable_recovery < admission,
         "actual owner recovery must precede restore and Monitor command admission"
     );
+    let initializer = owner_start
+        .split_once("fn initialize_shared_registry(")
+        .expect("owner initializer")
+        .1;
+    assert!(initializer.contains("super::startup::reconcile_durable_launches"));
     let readonly_selection = source
         .split_once("fn load_recovery_session(")
         .expect("GUI source read")

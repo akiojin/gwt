@@ -478,6 +478,10 @@ fn workspace_shards_preserve_the_complete_serial_test_selection() {
         .contains("cargo nextest list --workspace --all-features --message-format json"));
     assert_eq!(step(RUN_TESTS_STEP)["run"].as_str(), Some(
         "cargo nextest run --workspace --all-features --test-threads=1 --profile ci --partition slice:${{ matrix.shard }}/6"));
+    let front_door = step("Run real-binary front-door tests (Xvfb)");
+    assert_eq!(front_door["run"].as_str(), Some(
+        "dbus-run-session -- xvfb-run -a cargo test --workspace --all-features --test stable_server_port --test project_restore_integration --test open_cli_integration -- --ignored --test-threads=1 --nocapture"));
+    assert_eq!(front_door["timeout-minutes"].as_u64(), Some(10));
     for name in [
         "Run doctests",
         "Run real-binary front-door tests (Xvfb)",
@@ -1171,7 +1175,8 @@ fn nightly_auto_feedback_auth_probe_is_read_only_and_token_scoped() {
 
 /// Issue #4134 AC-2: four matrix shards each paid a 279s cold build to run
 /// 137s of tests. The installed-only job still builds once, runs both
-/// providers, and attributes a failure to its provider.
+/// providers, and attributes a failure to its provider. Operational binaries
+/// are restored after the tests, whose feature graph enables test-only guards.
 #[test]
 fn windows_agent_launch_e2e_builds_once_and_runs_installed_providers() {
     use serde_yaml::Value;
@@ -1211,11 +1216,19 @@ fn windows_agent_launch_e2e_builds_once_and_runs_installed_providers() {
     let agent_job = &doc["jobs"]["test-windows-agent-launch-e2e"];
     assert!(agent_job["env"]["CARGO_PROFILE_DEV_DEBUG"].is_null());
     let steps = agent_job["steps"].as_sequence().unwrap();
+    let last_test = steps
+        .iter()
+        .rposition(|step| {
+            step["run"]
+                .as_str()
+                .is_some_and(|run| run.contains("cargo test"))
+        })
+        .unwrap();
     assert!(
-        steps.iter().all(|step| !step["run"]
+        steps[..=last_test].iter().all(|step| !step["run"]
             .as_str()
             .is_some_and(|run| run.contains("cargo build"))),
-        "the integration build emits gwt and gwtd; a separate build repeats their dependency graph"
+        "share the integration build before tests; restore operational binaries only after tests"
     );
     let cargo_steps: Vec<_> = steps
         .iter()
