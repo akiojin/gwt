@@ -12,7 +12,14 @@
 //! full) it answers `claim_rejected` without a reason and closes. A claim is
 //! not device approval or read/input authority.
 //!
-//! A claimed browser may then only send `{"type":"signal","payload"}` with an
+//! An approved device reconnects on `BROWSER_RECONNECT_PATH` instead, with the
+//! single message `{"type":"request_reconnect","host_id","project","device_id"}`.
+//! It is routed only to the one live registration of that Host and Project, and
+//! the Host is sent `connection_reconnect` with the named device ID; the
+//! browser gets `reconnect_routed`, or `reconnect_rejected` without a reason.
+//! Reaching the Host is not device approval: the Host verifies the device.
+//!
+//! A claimed (or reconnected) browser may then only send `{"type":"signal","payload"}` with an
 //! opaque string; it is relayed to its Host as `connection_signal`, waiting for
 //! room in the Host's backlog (one pending signal per connection). A signal
 //! whose relayed frame would exceed the message bound, or any other data
@@ -25,7 +32,7 @@
 //! the invite stays a replay fence until its TTL.
 
 use super::host_route::{
-    announce_claim, call, BrowserConnections, HostEvent, HostState, SharedSessions, BROWSER_BACKLOG,
+    announce_open, call, BrowserConnections, HostEvent, HostState, SharedSessions, BROWSER_BACKLOG,
 };
 use super::registration::RegistrationHandle;
 use axum::{
@@ -36,6 +43,7 @@ use axum::{
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
+use gwt_core::repo_hash::ProjectKey;
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
 use std::{
@@ -47,6 +55,7 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 pub(super) const BROWSER_CLAIM_PATH: &str = "/browser/v1/claim";
+pub(super) const BROWSER_RECONNECT_PATH: &str = "/browser/v1/reconnect";
 /// The same bound as HTTP request bodies (the mobile policy's maximum SDP).
 const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 /// A browser that has not claimed within this bound releases its connection.
@@ -59,6 +68,27 @@ enum BrowserMessage {
         #[serde(deserialize_with = "super::borrowed_hex_secret")]
         secret: Zeroizing<[u8; 32]>,
     },
+    RequestReconnect {
+        host_id: Uuid,
+        project: String,
+        device_id: Uuid,
+    },
+}
+
+/// Which single opening message a browser path accepts.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Entry {
+    Claim,
+    Reconnect,
+}
+
+impl Entry {
+    fn replies(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Claim => ("claimed", "claim_rejected"),
+            Self::Reconnect => ("reconnect_routed", "reconnect_rejected"),
+        }
+    }
 }
 
 /// The only message of a claimed browser.
@@ -73,6 +103,18 @@ pub(super) async fn claim(
     headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Response {
+    open(state, headers, upgrade, Entry::Claim)
+}
+
+pub(super) async fn reconnect(
+    State(state): State<HostState>,
+    headers: HeaderMap,
+    upgrade: WebSocketUpgrade,
+) -> Response {
+    open(state, headers, upgrade, Entry::Reconnect)
+}
+
+fn open(state: HostState, headers: HeaderMap, upgrade: WebSocketUpgrade, entry: Entry) -> Response {
     if !headers.contains_key(header::ORIGIN) {
         return (
             StatusCode::FORBIDDEN,
@@ -83,7 +125,7 @@ pub(super) async fn claim(
     upgrade
         .max_message_size(MAX_MESSAGE_BYTES)
         .max_frame_size(MAX_MESSAGE_BYTES)
-        .on_upgrade(move |socket| serve_browser(socket, state))
+        .on_upgrade(move |socket| serve_browser(socket, state, entry))
 }
 
 /// One claimed connection; logically closed exactly once on drop, and its
@@ -131,11 +173,12 @@ async fn send_json(socket: &mut WebSocket, value: serde_json::Value) -> bool {
         .is_ok()
 }
 
-/// Waits up to `CLAIM_TIMEOUT` for the single claim message.
-async fn read_claim(
+/// Waits up to `CLAIM_TIMEOUT` for the single opening message of `entry`.
+async fn read_opening(
     socket: &mut WebSocket,
     stopping: &mut watch::Receiver<bool>,
-) -> Option<Zeroizing<[u8; 32]>> {
+    entry: Entry,
+) -> Option<BrowserMessage> {
     let deadline = tokio::time::Instant::now() + CLAIM_TIMEOUT;
     loop {
         let message = tokio::select! {
@@ -145,9 +188,12 @@ async fn read_claim(
         };
         match message {
             Some(Ok(Message::Text(text))) => {
-                let BrowserMessage::ClaimInvite { secret } =
-                    serde_json::from_str(text.as_str()).ok()?;
-                return Some(secret);
+                let message = serde_json::from_str(text.as_str()).ok()?;
+                let expected = match message {
+                    BrowserMessage::ClaimInvite { .. } => Entry::Claim,
+                    BrowserMessage::RequestReconnect { .. } => Entry::Reconnect,
+                };
+                return (expected == entry).then_some(message);
             }
             Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
             _ => return None,
@@ -155,7 +201,46 @@ async fn read_claim(
     }
 }
 
-async fn serve_browser(mut socket: WebSocket, state: HostState) {
+/// Admits the opening message: the registration it routes to and the event
+/// that opens the connection for that Host. `None` for any refusal.
+fn admit(
+    sessions: &SharedSessions,
+    message: BrowserMessage,
+    connection_id: Uuid,
+) -> Option<(RegistrationHandle, HostEvent)> {
+    match message {
+        BrowserMessage::ClaimInvite { secret } => {
+            let invite: [u8; 32] = Sha256::digest(secret.as_slice()).into();
+            let (handle, _) = call(sessions, |sessions, now, wall| {
+                sessions.claim_invite_by_secret(&*secret, connection_id, now, wall)
+            })
+            .ok()?;
+            let opened = HostEvent::Claimed {
+                connection_id,
+                invite,
+            };
+            Some((handle, opened))
+        }
+        BrowserMessage::RequestReconnect {
+            host_id,
+            project,
+            device_id,
+        } => {
+            let project = ProjectKey::parse(&project).ok()?;
+            let handle = call(sessions, |sessions, now, wall| {
+                sessions.request_reconnect(host_id, &project, connection_id, now, wall)
+            })
+            .ok()?;
+            let opened = HostEvent::Reconnect {
+                connection_id,
+                device_id,
+            };
+            Some((handle, opened))
+        }
+    }
+}
+
+async fn serve_browser(mut socket: WebSocket, state: HostState, entry: Entry) {
     let HostState {
         sessions,
         mut stopping,
@@ -166,16 +251,13 @@ async fn serve_browser(mut socket: WebSocket, state: HostState) {
     } = state;
     // Subscribe before claiming so a registration closed meanwhile is seen.
     let mut retired = retired.subscribe();
-    if let Some(secret) = read_claim(&mut socket, &mut stopping).await {
+    let (accepted, rejected) = entry.replies();
+    if let Some(message) = read_opening(&mut socket, &mut stopping, entry).await {
         let connection_id = Uuid::new_v4();
         let claim_sessions = sessions.clone();
         let (outbound, mut inbound) = mpsc::channel(BROWSER_BACKLOG);
         let claimed = tokio::task::spawn_blocking(move || {
-            let invite: [u8; 32] = Sha256::digest(secret.as_slice()).into();
-            let (handle, _) = call(&claim_sessions, |sessions, now, wall| {
-                sessions.claim_invite_by_secret(&*secret, connection_id, now, wall)
-            })
-            .ok()?;
+            let (handle, opened) = admit(&claim_sessions, message, connection_id)?;
             let generation = handle.generation();
             // Routed before the Host learns of it, so its first signal lands.
             let routed = connections
@@ -183,7 +265,7 @@ async fn serve_browser(mut socket: WebSocket, state: HostState) {
                 .map(|mut table| table.insert(connection_id, (generation, outbound)))
                 .is_ok();
             let announced = routed
-                .then(|| announce_claim(&events, generation, connection_id, invite))
+                .then(|| announce_open(&events, generation, opened))
                 .flatten();
             // A closed sender stands in when unannounced; the claim is then
             // dropped (closed and unrouted) here, on the blocking thread.
@@ -204,7 +286,7 @@ async fn serve_browser(mut socket: WebSocket, state: HostState) {
         .await;
         match claimed {
             Ok(Some(claimed)) => {
-                if send_json(&mut socket, serde_json::json!({"type": "claimed"})).await {
+                if send_json(&mut socket, serde_json::json!({"type": accepted})).await {
                     let generation = claimed.handle.generation();
                     hold(
                         &mut socket,
@@ -219,7 +301,7 @@ async fn serve_browser(mut socket: WebSocket, state: HostState) {
                 let _ = tokio::task::spawn_blocking(move || drop(claimed)).await;
             }
             _ => {
-                let _ = send_json(&mut socket, serde_json::json!({"type": "claim_rejected"})).await;
+                let _ = send_json(&mut socket, serde_json::json!({"type": rejected})).await;
             }
         }
     }

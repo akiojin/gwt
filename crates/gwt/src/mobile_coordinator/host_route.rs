@@ -30,7 +30,10 @@
 //! 64-hex SHA-256 digest of the claimed invite's secret), each opaque
 //! browser signal as `{"type":"connection_signal",...,"payload"}`, and
 //! `{"type":"connection_closed",...}` once that claimed connection is logically
-//! closed (claimed, signals, then closed). Only the owning registration
+//! closed (claimed, signals, then closed). An approved device's reconnect
+//! (`browser_route`) is announced as
+//! `{"type":"connection_reconnect","generation","connection_id","device_id"}`
+//! and then relayed and closed the same way. Only the owning registration
 //! receives them. The Host answers with
 //! `{"type":"signal","generation","connection_id","payload"}`, relayed only to
 //! that connection while it is one of the registration's live claims; any
@@ -77,9 +80,9 @@ const UNAUTHORIZED: &str =
 /// the last accepted connection closes.
 pub(super) type SharedSessions = Arc<Mutex<CoordinatorSessions>>;
 
-/// Bound of undelivered connection events per Host: claimed and closed for
-/// each of the per-Host 16 invite records.
-const EVENT_BACKLOG: usize = 32;
+/// Bound of undelivered connection events per Host: opened and closed for
+/// each of the per-Host 16 invite records and 8 reconnects.
+const EVENT_BACKLOG: usize = 48;
 
 /// A claimed browser connection's lifecycle and signals, announced to its Host.
 #[derive(Debug)]
@@ -89,6 +92,12 @@ pub(super) enum HostEvent {
     Claimed {
         connection_id: Uuid,
         invite: [u8; 32],
+    },
+    /// An approved device's reconnect, by the device ID the browser named;
+    /// the Host verifies the device itself.
+    Reconnect {
+        connection_id: Uuid,
+        device_id: Uuid,
     },
     /// A complete `connection_signal` frame, already checked against the
     /// message bound by the browser route.
@@ -148,25 +157,19 @@ fn close_browser(connections: &BrowserConnections, generation: Uuid, connection_
     true
 }
 
-/// Queues `connection_claimed` for the live registration `generation` and
-/// returns the Host's event sender (for signals) with the slot reserved for
+/// Queues the `opened` event (a claim or reconnect) for the live registration
+/// `generation` and returns the Host's event sender (for signals) with the slot reserved for
 /// its `connection_closed`, so the close can never be lost to a full backlog.
 /// `None` when the registration is gone or its backlog cannot hold both
 /// events (the caller fails closed).
-pub(super) fn announce_claim(
+pub(super) fn announce_open(
     events: &HostEvents,
     generation: Uuid,
-    connection_id: Uuid,
-    invite: [u8; 32],
+    opened: HostEvent,
 ) -> Option<(mpsc::Sender<HostEvent>, mpsc::OwnedPermit<HostEvent>)> {
     let sender = events.lock().ok()?.get(&generation)?.clone();
     let closed = sender.clone().try_reserve_owned().ok()?;
-    sender
-        .try_send(HostEvent::Claimed {
-            connection_id,
-            invite,
-        })
-        .ok()?;
+    sender.try_send(opened).ok()?;
     Some((sender, closed))
 }
 
@@ -495,6 +498,13 @@ async fn serve_host(
                         } => serde_json::json!({
                             "type": "connection_claimed", "generation": generation,
                             "connection_id": connection_id, "invite": hex::encode(invite),
+                        }),
+                        HostEvent::Reconnect {
+                            connection_id,
+                            device_id,
+                        } => serde_json::json!({
+                            "type": "connection_reconnect", "generation": generation,
+                            "connection_id": connection_id, "device_id": device_id,
                         }),
                         HostEvent::Closed(connection_id) => serde_json::json!({
                             "type": "connection_closed", "generation": generation,

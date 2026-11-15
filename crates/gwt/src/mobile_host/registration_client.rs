@@ -19,7 +19,8 @@
 //! sender only ends invite input, not the registration.
 //!
 //! The coordinator announces browser connections that claimed this
-//! registration's invites (naming the invite by [`InviteRequest::invite_id`]),
+//! registration's invites (naming the invite by [`InviteRequest::invite_id`])
+//! or that reconnect an approved device (naming the unverified device ID),
 //! the opaque signals each relays and its close; each
 //! becomes a [`ConnectionEvent`] for the caller.
 //! A caller that stopped receiving is ignored, but a full event channel ends
@@ -91,6 +92,12 @@ pub enum ConnectionEvent {
     Claimed {
         connection_id: Uuid,
         invite: [u8; 32],
+    },
+    /// An approved device's reconnect, by the device ID its browser named.
+    /// Not proof of the device: the caller must verify its key possession.
+    Reconnect {
+        connection_id: Uuid,
+        device_id: Uuid,
     },
     Signal {
         connection_id: Uuid,
@@ -178,6 +185,11 @@ enum CoordinatorMessage {
         connection_id: Uuid,
         /// 64 hex; anything else is a protocol violation.
         invite: String,
+    },
+    ConnectionReconnect {
+        generation: Uuid,
+        connection_id: Uuid,
+        device_id: Uuid,
     },
     ConnectionSignal {
         generation: Uuid,
@@ -397,6 +409,11 @@ async fn register_and_renew(
                     hex::decode_to_slice(&invite, &mut digest)
                         .map_err(|_| RegistrationClientError::Protocol)?;
                     report(&events, ConnectionEvent::Claimed { connection_id, invite: digest })?;
+                }
+                CoordinatorMessage::ConnectionReconnect { generation: scoped, connection_id, device_id }
+                    if scoped == generation =>
+                {
+                    report(&events, ConnectionEvent::Reconnect { connection_id, device_id })?;
                 }
                 CoordinatorMessage::ConnectionSignal { generation: scoped, connection_id, payload }
                     if scoped == generation =>
