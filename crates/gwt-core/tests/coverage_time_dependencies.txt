@@ -525,7 +525,6 @@ crates/gwt/src/project_index_bootstrap.rs|rebuild_for_same_cell_is_coalesced_whi
 crates/gwt/src/project_runtime.rs|physical_spawn_completes_without_gui_runtime|assert!(std::time::Instant::now()<deadline,)|1
 crates/gwt/src/project_runtime.rs|physical_spawn_completes_without_gui_runtime|letdeadline=std::time::Instant::now()+std::time::Duration::from_secs(5)|1
 crates/gwt/src/project_transport.rs|authenticated_http_and_websocket_dispatch_without_gui|assert!(matches!(tokio::time::timeout(std::time::Duration::from_secs(5),received.recv()).await.unwrap(),Some(TransportEvent::AgentFrontend|1
-crates/gwt/src/project_transport.rs|authenticated_http_and_websocket_dispatch_without_gui|assert!(matches!(tokio::time::timeout(std::time::Duration::from_secs(5),received.recv()).await.unwrap(),Some(TransportEvent::RuntimeHook(_))))|1
 crates/gwt/src/project_transport.rs|client_hub_dispatch_releases_lock_before_serializing_and_sending|letdispatch_paused=dispatch_paused_rx.recv_timeout(Duration::from_secs(5))|1
 crates/gwt/src/project_transport.rs|client_hub_dispatch_releases_lock_before_serializing_and_sending|letregistered=register_done_rx.recv_timeout(Duration::from_secs(5))|1
 crates/gwt/src/runtime_gc.rs|namespace_gc_runs_at_startup_periodically_and_stops_with_owner|assert!(matches!(events.recv_timeout(Duration::from_secs(30)),Err(mpsc::RecvTimeoutError::Disconnected)))|1

@@ -9956,7 +9956,10 @@ impl OwnerState {
                 request,
                 reply,
             } => self.resend_fresh_readiness(grant, request, reply),
-            TransportEvent::RuntimeHook(event) => self.runtime_hook(event),
+            TransportEvent::RuntimeHook(event) => self.runtime_hook(event, None),
+            TransportEvent::AuthenticatedRuntimeHook { grant, event } => {
+                self.runtime_hook(event, Some(grant));
+            }
             TransportEvent::WorkspaceProjectionChanged { project_root } => {
                 if gwt_core::paths::resolve_project_scope(&project_root)
                     .hash
@@ -9969,7 +9972,17 @@ impl OwnerState {
             event => self.pending_transport.push_back(event),
         }
     }
-    fn runtime_hook(&mut self, mut event: crate::RuntimeHookEvent) {
+    fn runtime_hook(
+        &mut self,
+        mut event: crate::RuntimeHookEvent,
+        grant: Option<crate::agent_capability::AgentCapabilityGrant>,
+    ) {
+        if grant
+            .as_ref()
+            .is_some_and(|grant| !self.issuer.hook_grant_is_current(grant))
+        {
+            return;
+        }
         if self.stopping {
             return;
         }
@@ -9992,9 +10005,10 @@ impl OwnerState {
                     .as_deref()
                     .is_some_and(|session| event.gwt_session_id.as_deref() == Some(session))
         }) {
-            operation
-                .early_events
-                .push_back(TransportEvent::RuntimeHook(event));
+            operation.early_events.push_back(match grant {
+                Some(grant) => TransportEvent::AuthenticatedRuntimeHook { grant, event },
+                None => TransportEvent::RuntimeHook(event),
+            });
             return;
         }
         let id = [
@@ -14185,12 +14199,24 @@ mod tests {
             message: None,
             occurred_at: chrono::Utc::now().to_rfc3339(),
         };
-        state.handle_transport_event(TransportEvent::RuntimeHook(event.clone()));
+        let issued = state
+            .issuer
+            .issue(root.path(), "materialized-session")
+            .unwrap();
+        let grant = state.issuer.grant_for_test(&issued.token).unwrap();
+        state.handle_transport_event(TransportEvent::AuthenticatedRuntimeHook {
+            grant: grant.clone(),
+            event: event.clone(),
+        });
         assert_eq!(
             state.agent_operations["launch"].early_events.len(),
             1,
             "a materialized SessionStart must survive the physical installation gap"
         );
+        assert!(matches!(
+            state.agent_operations["launch"].early_events.front(),
+            Some(TransportEvent::AuthenticatedRuntimeHook { .. })
+        ));
         assert!(
             events.try_recv().is_err(),
             "private readiness cannot escape before installation"
@@ -14207,6 +14233,20 @@ mod tests {
             state.pending_transport.is_empty(),
             "hook traffic must be consumed by the fixed owner"
         );
+        assert!(state.issuer.revoke_token(&issued.token));
+        let queued = state
+            .agent_operations
+            .get_mut("launch")
+            .unwrap()
+            .early_events
+            .pop_front()
+            .unwrap();
+        state.handle_transport_event(queued);
+        assert!(
+            state.agent_operations["launch"].early_events.is_empty(),
+            "a revoked early hook must not re-enter the pending launch"
+        );
+        assert!(events.try_recv().is_err());
     }
 
     #[test]

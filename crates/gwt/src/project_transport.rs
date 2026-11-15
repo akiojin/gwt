@@ -287,6 +287,10 @@ pub enum TransportEvent {
         >,
     },
     RuntimeHook(RuntimeHookEvent),
+    AuthenticatedRuntimeHook {
+        grant: AgentCapabilityGrant,
+        event: RuntimeHookEvent,
+    },
     WorkspaceProjectionChanged {
         project_root: PathBuf,
     },
@@ -1637,9 +1641,10 @@ async fn hook_live_handler(
     State(state): State<TransportState>,
     Json(mut event): Json<RuntimeHookEvent>,
 ) -> StatusCode {
-    let Some(principal) = agent_capability_principal(&headers, &state) else {
+    let Some(grant) = agent_capability_grant(&headers, &state) else {
         return StatusCode::UNAUTHORIZED;
     };
+    let principal = grant.principal();
     if event.gwt_session_id.as_deref() != Some(principal.session_id()) {
         tracing::warn!(
             target: "gwt_security",
@@ -1679,7 +1684,22 @@ async fn hook_live_handler(
         occurred_at,
         "runtime hook delivery"
     );
-    state.send(TransportEvent::RuntimeHook(event));
+    #[cfg(any(test, feature = "test-gh-guard"))]
+    {
+        let captured = grant.clone();
+        if tokio::task::spawn_blocking(move || {
+            crate::project_runtime::agent_frontend::run_owner_agent_dispatch_test_hook(
+                &captured,
+                crate::project_runtime::agent_frontend::OwnerAgentDispatchTestStage::BeforeHookDispatch,
+            );
+        })
+        .await
+        .is_err()
+        {
+            return StatusCode::INTERNAL_SERVER_ERROR;
+        }
+    }
+    state.send(TransportEvent::AuthenticatedRuntimeHook { grant, event });
     StatusCode::NO_CONTENT
 }
 
@@ -3641,10 +3661,11 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), reqwest::StatusCode::NO_CONTENT);
         assert!(matches!(
+            // test-hygiene: allow-wall-clock-deadline Bound delivery of the actual authenticated HTTP request; channel receipt establishes progress.
             tokio::time::timeout(std::time::Duration::from_secs(5), received.recv())
                 .await
                 .unwrap(),
-            Some(TransportEvent::RuntimeHook(_))
+            Some(TransportEvent::AuthenticatedRuntimeHook { .. })
         ));
         let text = std::fs::read_to_string(hook_log.path()).unwrap();
         let records: Vec<serde_json::Value> = text
