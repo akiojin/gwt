@@ -1259,7 +1259,8 @@ impl OwnerState {
             retiring: 0,
             input_jobs: 0,
             switch_job_inflight: false,
-            next_switch_drive: None,
+            // Recover persisted old-Host intents without requiring a GUI action.
+            next_switch_drive: Some(std::time::Instant::now()),
             pm_wake_permits: Default::default(),
             agent_operations: HashMap::new(),
             retirements: HashMap::new(),
