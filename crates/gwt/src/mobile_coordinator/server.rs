@@ -1122,6 +1122,7 @@ mod tests {
                     tcp,
                     stopping,
                     tokio::sync::mpsc::channel(1).1,
+                    tokio::sync::mpsc::channel(1).1,
                     tokio::sync::mpsc::channel(1).0,
                 )
                 .await
@@ -1173,6 +1174,7 @@ mod tests {
                     tcp,
                     stopping,
                     tokio::sync::mpsc::channel(1).1,
+                    tokio::sync::mpsc::channel(1).1,
                     tokio::sync::mpsc::channel(1).0,
                 )
                 .await
@@ -1217,7 +1219,7 @@ mod tests {
     #[tokio::test]
     async fn host_client_registers_invites_over_its_live_registration() {
         use crate::mobile_host::registration_client::{
-            ConnectionEvent, InviteOutcome, InviteRejection, InviteRequest,
+            ConnectionEvent, InviteOutcome, InviteRejection, InviteRequest, OutboundSignal,
         };
         use std::sync::RwLock;
         use tokio::sync::{mpsc, watch};
@@ -1236,13 +1238,24 @@ mod tests {
         ));
         let (stop, stopping) = watch::channel(false);
         let (invites, requests) = mpsc::channel(1);
+        let (signals, outbound) = mpsc::channel(1);
         let (events, mut connections) = mpsc::channel(32);
         let client = {
             let host = Arc::clone(&host);
             let tls = fixture.client_config();
             tokio::spawn(async move {
                 let tcp = TcpStream::connect(addr).await.unwrap();
-                run_registration(host, &credential, tls, tcp, stopping, requests, events).await
+                run_registration(
+                    host,
+                    &credential,
+                    tls,
+                    tcp,
+                    stopping,
+                    requests,
+                    outbound,
+                    events,
+                )
+                .await
             })
         };
         let invite = |byte: u8, ttl_secs: u64| {
@@ -1301,6 +1314,16 @@ mod tests {
                     payload: "offer".to_string()
                 })
             );
+            // The Host's signal reaches this browser.
+            let answer = OutboundSignal {
+                connection_id,
+                payload: "answer".to_string(),
+            };
+            bounded(signals.send(answer)).await.ok().unwrap();
+            assert_eq!(
+                next_json(&mut browser).await,
+                json!({"type":"signal","payload":"answer"})
+            );
             bounded(browser.close(None)).await.unwrap();
             assert_eq!(
                 bounded(connections.recv()).await,
@@ -1310,9 +1333,45 @@ mod tests {
         assert!(host.read().unwrap().is_enabled());
         assert_eq!(live(&sessions), 1);
 
-        // Ending the invite input does not end the registration: the client
+        // A Host signal too large for the coordinator's message bound closes
+        // only its connection; the registration stays live.
+        {
+            use futures_util::{SinkExt as _, StreamExt as _};
+            use tokio_tungstenite::tungstenite::Message;
+            assert_eq!(register(3, 300).await, Ok(InviteOutcome::Registered));
+            let origin = [("origin", "https://coordinator.example".to_string())];
+            let mut browser = open_path(&fixture, addr, BROWSER_CLAIM_PATH, &origin)
+                .await
+                .unwrap();
+            let claim = json!({"type":"claim_invite","secret":"03".repeat(32)}).to_string();
+            bounded(browser.send(Message::text(claim))).await.unwrap();
+            assert_eq!(next_json(&mut browser).await, json!({"type":"claimed"}));
+            let ConnectionEvent::Claimed { connection_id } =
+                bounded(connections.recv()).await.unwrap()
+            else {
+                panic!("the first connection event must be the claim");
+            };
+            let oversized = OutboundSignal {
+                connection_id,
+                payload: "x".repeat(64 * 1024),
+            };
+            bounded(signals.send(oversized)).await.ok().unwrap();
+            assert!(matches!(
+                bounded(browser.next()).await,
+                None | Some(Err(_)) | Some(Ok(Message::Close(_)))
+            ));
+            assert_eq!(
+                bounded(connections.recv()).await,
+                Some(ConnectionEvent::Closed { connection_id })
+            );
+        }
+        assert!(host.read().unwrap().is_enabled());
+        assert_eq!(live(&sessions), 1);
+
+        // Ending the invite and signal inputs does not end the registration: the client
         // keeps renewing past the next lease poll.
         drop(invites);
+        drop(signals);
         tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
         assert!(host.read().unwrap().is_enabled());
         assert_eq!(live(&sessions), 1);
@@ -1650,7 +1709,17 @@ mod tests {
             let tls = fixture.client_config();
             tokio::spawn(async move {
                 let tcp = TcpStream::connect(addr).await.unwrap();
-                run_registration(host, &credential, tls, tcp, stopping, requests, events).await
+                run_registration(
+                    host,
+                    &credential,
+                    tls,
+                    tcp,
+                    stopping,
+                    requests,
+                    mpsc::channel(1).1,
+                    events,
+                )
+                .await
             })
         };
         let (reply, outcome) = oneshot::channel();
