@@ -29,9 +29,7 @@ concurrency:
 jobs:
   audit:
     name: Cargo Deny (advisories + sources)
-    # Dependency audits do not compile the workspace. Use the lightweight
-    # runner; its 15-minute cap still exceeds this short security check.
-    runs-on: ubuntu-slim
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.99.1

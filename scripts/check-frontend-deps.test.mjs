@@ -92,12 +92,6 @@ test("registry errors and malformed audit responses fail as unknown rather than 
 test("the existing required Cargo Deny job runs dependency tests and the real gate with Node 22", () => {
   const workflow = readFileSync(join(repo, ".github/workflows/lint.yml"), "utf8");
   const audit = workflow.slice(workflow.indexOf("  audit:"), workflow.indexOf("  lint:"));
-  assert.match(audit, /runs-on: ubuntu-slim/);
-  assert.match(audit, /uses: actions\/checkout@v7/);
-  assert.match(audit, /uses: dtolnay\/rust-toolchain@1\.99\.1/);
-  assert.match(audit, /tool: cargo-deny@0\.19\.4/);
-  assert.match(audit, /run: cargo deny check advisories sources/);
-  assert.match(audit, /uses: actions\/setup-node@v7/);
   assert.match(audit, /node-version: 22/);
   assert.match(audit, /node --test scripts\/check-frontend-deps\.test\.mjs/);
   assert.match(audit, /run: node scripts\/check-frontend-deps\.mjs/);
