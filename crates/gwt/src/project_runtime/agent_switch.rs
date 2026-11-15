@@ -233,9 +233,11 @@ fn checkpoint_prompt(intent: &AgentSwitchIntent) -> String {
 /// Observe the completed body write in an explicitly armed isolated fixture.
 /// This seam is absent from ordinary builds and never changes submit policy.
 #[cfg(all(debug_assertions, feature = "test-gh-guard"))]
-fn pause_after_checkpoint_body(
+fn pause_checkpoint_input_for_test(
     root: &Path,
     intent: &AgentSwitchIntent,
+    phase: &str,
+    revision: u64,
     bytes: usize,
 ) -> io::Result<()> {
     let Some(path) = std::env::var_os("GWT_TEST_SWITCH_BODY_GATE").map(PathBuf::from) else {
@@ -248,7 +250,10 @@ fn pause_after_checkpoint_body(
         Err(error) => return Err(error),
     };
     let operation = intent.request.operation_id.as_str();
-    if armed["root"].as_str() != root.to_str() || armed["operation"].as_str() != Some(operation) {
+    if armed["root"].as_str() != root.to_str()
+        || armed["operation"].as_str() != Some(operation)
+        || armed["phase"].as_str().unwrap_or("after_body") != phase
+    {
         return Ok(());
     }
     std::fs::rename(marker("armed"), marker("claimed"))?;
@@ -259,8 +264,9 @@ fn pause_after_checkpoint_body(
             "operation": operation,
             "host_pid": std::process::id(),
             "incarnation": proof.runtime_incarnation,
-            "source_input_revision": intent.source_input_revision,
+            "source_input_revision": revision,
             "body_bytes": bytes,
+            "phase": phase,
         }))?,
     )?;
     std::fs::rename(marker("reached.tmp"), marker("reached"))?;
@@ -279,6 +285,42 @@ fn pause_after_checkpoint_body(
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
+}
+
+#[cfg(all(debug_assertions, feature = "test-gh-guard"))]
+fn checkpoint_attempt_finished_for_test(
+    root: &Path,
+    intent: &AgentSwitchIntent,
+    error: Option<String>,
+) -> io::Result<()> {
+    let Some(path) = std::env::var_os("GWT_TEST_SWITCH_BODY_GATE").map(PathBuf::from) else {
+        return Ok(());
+    };
+    let armed: serde_json::Value = match std::fs::read(path.with_extension("claimed")) {
+        Ok(bytes) => serde_json::from_slice(&bytes)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if armed["root"].as_str() != root.to_str()
+        || armed["operation"].as_str() != Some(intent.request.operation_id.as_str())
+    {
+        return Ok(());
+    }
+    // SwitchTickGuard serializes attempts for this root. Keep the first
+    // claimed attempt's result when a later natural retry succeeds.
+    if path.with_extension("finished").exists() {
+        return Ok(());
+    }
+    std::fs::write(
+        path.with_extension("finished.tmp"),
+        serde_json::to_vec(&serde_json::json!({
+            "operation": intent.request.operation_id, "error": error,
+        }))?,
+    )?;
+    std::fs::rename(
+        path.with_extension("finished.tmp"),
+        path.with_extension("finished"),
+    )
 }
 
 fn set_switch_reason(root: &Path, intent: &AgentSwitchIntent, reason: &str) -> io::Result<()> {
@@ -556,6 +598,8 @@ fn drive_switch(
             }
         };
         if intent.stage == Requested {
+            #[cfg(all(debug_assertions, feature = "test-gh-guard"))]
+            pause_checkpoint_input_for_test(root, intent, "after_reservation", revision, 0)?;
             let submitted = std::cell::Cell::new(false);
             let post_submit_grace = std::cell::Cell::new(None);
             let delivered =
@@ -587,6 +631,14 @@ fn drive_switch(
                             Ok(())
                         })?;
                         let expected = &saved.agent_switch_intents[&intent.request.operation_id];
+                        #[cfg(all(debug_assertions, feature = "test-gh-guard"))]
+                        pause_checkpoint_input_for_test(
+                            root,
+                            expected,
+                            "before_body",
+                            revision,
+                            0,
+                        )?;
                         let prompt = checkpoint_prompt(intent);
                         let mut body_committed = false;
                         // Once the full body is accepted, finish its one submit so
@@ -633,7 +685,7 @@ fn drive_switch(
                                 Ok(())
                             }).map_err(|error| error.to_string())?;
                             #[cfg(all(debug_assertions, feature = "test-gh-guard"))]
-                            pause_after_checkpoint_body(root, expected, bytes.len()).map_err(|error| error.to_string())?;
+                            pause_checkpoint_input_for_test(root, expected, "after_body", revision, bytes.len()).map_err(|error| error.to_string())?;
                             Ok(())
                         }, |duration| {
                             if submitted.get() {
@@ -645,6 +697,16 @@ fn drive_switch(
                         Ok(())
                     },
                 );
+            #[cfg(all(debug_assertions, feature = "test-gh-guard"))]
+            checkpoint_attempt_finished_for_test(
+                root,
+                intent,
+                match &delivered {
+                    Ok(Some(Ok(()))) => None,
+                    Ok(Some(Err(error))) | Err(error) => Some(error.to_string()),
+                    Ok(None) => Some("Source authority changed before checkpoint delivery".into()),
+                },
+            )?;
             // The immediate provider hook needs the Session lease too. Keep
             // body/CR authorization and the input reservation, but wait for
             // the existing submit grace only after releasing that lease.
