@@ -1,12 +1,12 @@
 //! Explicit, default-deny coordinator startup (Issue #6476).
 //!
 //! The only routes are the Host-only registration WebSocket and the browser
-//! invite-claim WebSocket; there is no browser signaling relay or UI route. The caller must keep the selected home, fixed private directories
+//! invite-claim and approved-device reconnect WebSockets; there is no browser signaling relay or UI route. The caller must keep the selected home, fixed private directories
 //! and TLS ancestors trusted and non-replaceable, and prevent in-place edits
 //! during loading and serving, as required by the existing storage adapters.
 
 use super::{
-    browser_route::{self, BROWSER_CLAIM_PATH},
+    browser_route::{self, BROWSER_CLAIM_PATH, BROWSER_RECONNECT_PATH},
     host_route::{self, HostState, SharedSessions, HOST_REGISTER_PATH},
     listener::{TlsListener, HANDSHAKE_TIMEOUT},
     registration::CoordinatorSessions,
@@ -195,6 +195,10 @@ impl CoordinatorServer {
             axum::Router::new()
                 .route(HOST_REGISTER_PATH, axum::routing::get(host_route::register))
                 .route(BROWSER_CLAIM_PATH, axum::routing::get(browser_route::claim))
+                .route(
+                    BROWSER_RECONNECT_PATH,
+                    axum::routing::get(browser_route::reconnect),
+                )
                 .with_state(state),
             origin,
         );
@@ -217,7 +221,7 @@ impl CoordinatorServer {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::super::browser_route::BROWSER_CLAIM_PATH;
+    use super::super::browser_route::{BROWSER_CLAIM_PATH, BROWSER_RECONNECT_PATH};
     use super::super::host_route::{SharedSessions, HOST_REGISTER_PATH};
     use super::super::{
         storage::{CoordinatorStore, StoreError},
@@ -1776,6 +1780,195 @@ mod tests {
             Some(ConnectionEvent::Closed { connection_id })
         );
         assert!(host.read().unwrap().is_enabled());
+        assert_eq!(live(&sessions), 1);
+
+        stop.send(true).unwrap();
+        assert!(matches!(bounded(client).await.unwrap(), Ok(())));
+        wait_until_closed(&sessions).await;
+        shutdown.send(()).unwrap();
+        bounded(task).await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn approved_devices_reconnect_to_their_live_host_without_an_invite() {
+        use crate::mobile_host::registration_client::ConnectionEvent;
+        use base64::Engine as _;
+        use futures_util::SinkExt as _;
+        use std::sync::RwLock;
+        use tokio::sync::{mpsc, watch};
+        use tokio_tungstenite::tungstenite::Message;
+        let mut fixture = Fixture::new();
+        let wall = real_wall();
+        let valid = fixture.issue_token(wall);
+        let (credential, binding) = fixture.issue_credential(wall);
+        let server = fixture.start_at(wall).await;
+        let addr = server.local_addr().unwrap();
+        let sessions = Arc::clone(&server.sessions);
+        let (shutdown, signal) = oneshot::channel();
+        let task = tokio::spawn(server.serve_until(async move {
+            let _ = signal.await;
+        }));
+        let decoded: serde_json::Value = serde_json::from_slice(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(&valid)
+                .unwrap(),
+        )
+        .unwrap();
+        let host_id: Uuid = serde_json::from_value(decoded["host_id"].clone()).unwrap();
+        let origin = [("origin", "https://coordinator.example".to_string())];
+        let request = |host_id: Uuid, project: &str, device_id: Uuid| {
+            json!({"type":"request_reconnect","host_id":host_id,"project":project,
+                   "device_id":device_id})
+            .to_string()
+        };
+        async fn closed(socket: &mut HostSocket) -> bool {
+            use futures_util::StreamExt as _;
+            matches!(
+                bounded(socket.next()).await,
+                None | Some(Err(_)) | Some(Ok(Message::Close(_)))
+            )
+        }
+        let device = Uuid::new_v4();
+
+        // No live registration: refused without a reason.
+        let mut early = open_path(&fixture, addr, BROWSER_RECONNECT_PATH, &origin)
+            .await
+            .unwrap();
+        bounded(early.send(Message::text(request(host_id, PROJECT, device))))
+            .await
+            .unwrap();
+        assert_eq!(
+            next_json(&mut early).await,
+            json!({"type":"reconnect_rejected"})
+        );
+        assert!(closed(&mut early).await);
+        assert_eq!(
+            open_path(&fixture, addr, BROWSER_RECONNECT_PATH, &[])
+                .await
+                .err(),
+            Some(403)
+        );
+
+        let auth = [("authorization", format!("Bearer {valid}"))];
+        let mut host = open_host(&fixture, addr, &auth).await.unwrap();
+        let generation: Uuid =
+            serde_json::from_value(next_json(&mut host).await["generation"].clone()).unwrap();
+        // A foreign Host or Project is refused and leaves the Host untouched.
+        for text in [
+            request(Uuid::new_v4(), PROJECT, device),
+            request(host_id, "fedcba9876543210", device),
+        ] {
+            let mut browser = open_path(&fixture, addr, BROWSER_RECONNECT_PATH, &origin)
+                .await
+                .unwrap();
+            bounded(browser.send(Message::text(text))).await.unwrap();
+            assert_eq!(
+                next_json(&mut browser).await,
+                json!({"type":"reconnect_rejected"})
+            );
+        }
+        assert_eq!(live(&sessions), 1);
+
+        // The named live Host is told of the device's connection, and signals
+        // and the close are relayed as for a claim.
+        let mut browser = open_path(&fixture, addr, BROWSER_RECONNECT_PATH, &origin)
+            .await
+            .unwrap();
+        bounded(browser.send(Message::text(request(host_id, PROJECT, device))))
+            .await
+            .unwrap();
+        assert_eq!(
+            next_json(&mut browser).await,
+            json!({"type":"reconnect_routed"})
+        );
+        let routed = next_json(&mut host).await;
+        assert_eq!(routed["type"], "connection_reconnect");
+        assert_eq!(routed["generation"], json!(generation));
+        assert_eq!(routed["device_id"], json!(device));
+        let id: Uuid = serde_json::from_value(routed["connection_id"].clone()).unwrap();
+        let offer = json!({"type":"signal","payload":"proof"}).to_string();
+        bounded(browser.send(Message::text(offer))).await.unwrap();
+        assert_eq!(
+            next_json(&mut host).await,
+            json!({"type":"connection_signal","generation":generation,
+                   "connection_id":id,"payload":"proof"})
+        );
+        bounded(
+            host.send(Message::text(
+                json!({"type":"signal","generation":generation,
+                "connection_id":id,"payload":"nonce"})
+                .to_string(),
+            )),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            next_json(&mut browser).await,
+            json!({"type":"signal","payload":"nonce"})
+        );
+        bounded(browser.close(None)).await.unwrap();
+        assert_eq!(
+            next_json(&mut host).await,
+            json!({"type":"connection_closed","generation":generation,"connection_id":id})
+        );
+        bounded(host.close(None)).await.unwrap();
+        wait_until_closed(&sessions).await;
+
+        // The Host client reports the reconnect and stays registered.
+        let authority = Arc::new(RwLock::new(
+            MobileAuthorization::load_bound(&fixture.home.join("devices.json"), &binding).unwrap(),
+        ));
+        let client_host = credential.identity().host_id;
+        let (stop, stopping) = watch::channel(false);
+        let (events, mut connections) = mpsc::channel(8);
+        let client = {
+            let authority = Arc::clone(&authority);
+            let tls = fixture.client_config();
+            tokio::spawn(async move {
+                let tcp = TcpStream::connect(addr).await.unwrap();
+                run_registration(
+                    authority,
+                    &credential,
+                    tls,
+                    tcp,
+                    stopping,
+                    mpsc::channel(1).1,
+                    mpsc::channel(1).1,
+                    events,
+                )
+                .await
+            })
+        };
+        let mut browser = bounded(async {
+            loop {
+                let mut browser = open_path(&fixture, addr, BROWSER_RECONNECT_PATH, &origin)
+                    .await
+                    .unwrap();
+                let text = request(client_host, PROJECT, device);
+                bounded(browser.send(Message::text(text))).await.unwrap();
+                if next_json(&mut browser).await["type"] == "reconnect_routed" {
+                    break browser;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        })
+        .await;
+        let connection_id = match bounded(connections.recv()).await.unwrap() {
+            ConnectionEvent::Reconnect {
+                connection_id,
+                device_id,
+            } => {
+                assert_eq!(device_id, device);
+                connection_id
+            }
+            other => panic!("{other:?}"),
+        };
+        bounded(browser.close(None)).await.unwrap();
+        assert_eq!(
+            bounded(connections.recv()).await,
+            Some(ConnectionEvent::Closed { connection_id })
+        );
+        assert!(authority.read().unwrap().is_enabled());
         assert_eq!(live(&sessions), 1);
 
         stop.send(true).unwrap();
