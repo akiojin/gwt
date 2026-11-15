@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdir, readFile, readdir, realpath, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, realpath, rmdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { startIssueQueueLaunchFixture } from "./_helpers/issue-queue-launch";
 import { gotoLiveGwt, sendLiveGwtEvent } from "./_helpers/live-gwt";
@@ -375,7 +375,7 @@ test.describe("Issue queue real backend launch", () => {
     expect(errors).toEqual([]);
   });
 
-  for (const afterAck of ["unchanged", "input", "source edit", "cancel", "target removed", "worktree job", "cancel pending job"] as const) test(afterAck === "input"
+  for (const afterAck of ["unchanged", "input", "source edit", "cancel", "target removed", "worktree job", "cancel pending job", "unknown cwd"] as const) test(afterAck === "input"
     ? "T94421 input after checkpoint ACK preserves the source without switching"
     : afterAck === "source edit"
       ? "T94422 source edit after checkpoint ACK preserves unsaved work without switching"
@@ -387,7 +387,9 @@ test.describe("Issue queue real backend launch", () => {
             ? "T94425 worktree job after checkpoint ACK holds the source until ordinary job exit"
             : afterAck === "cancel pending job"
               ? "T94426 cancellation while a post-ACK job is pending survives ordinary job exit"
-              : "T20b saved checkpoint switches through the real Host and Issues", async ({ page }, info) => {
+              : afterAck === "unknown cwd"
+                ? "T94427 unknown job cwd after checkpoint ACK holds the source until ordinary job exit"
+                : "T20b saved checkpoint switches through the real Host and Issues", async ({ page }, info) => {
     test.skip(process.platform !== "linux" || process.env.GWT_PLAYWRIGHT_SWITCH_POSITIVE !== "1",
       "positive proof requires the isolated Linux root process namespace");
     const fixture = await startIssueQueueLaunchFixture(info, {
@@ -665,13 +667,16 @@ test.describe("Issue queue real backend launch", () => {
           contentType: "application/json" });
         await info.attach(`post-ack-${targetRemoved ? "target-removal" : "cancellation"}-preserved-source-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
       } else {
-        if (afterAck === "worktree job" || afterAck === "cancel pending job") {
+        if (afterAck === "worktree job" || afterAck === "cancel pending job" || afterAck === "unknown cwd") {
           const acknowledged = (await preferences()).agent_switch_intents[waiting.operation];
           expect(acknowledged.stage).toBe("checkpoint_verified");
           const checkpoint = fixture.savedSource(source.cwd);
+          const unknownCwd = afterAck === "unknown cwd";
+          const jobCwd = unknownCwd ? join(source.cwd, "pending-job-cwd") : source.cwd;
+          if (unknownCwd) await mkdir(jobCwd);
           job = spawn(process.execPath, ["-e",
             "process.stdout.write(JSON.stringify({pid:process.pid,cwd:process.cwd()})+'\\n');process.stdin.resume();process.stdin.on('end',()=>process.exit(0))"], {
-            cwd: source.cwd, env: { HOME: fixture.home, PATH: process.env.PATH ?? "" }, stdio: ["pipe", "pipe", "ignore"],
+            cwd: jobCwd, env: { HOME: fixture.home, PATH: process.env.PATH ?? "" }, stdio: ["pipe", "pipe", "ignore"],
           });
           jobClosed = new Promise(resolve => job!.once("close", () => resolve()));
           const ready = await new Promise<{ pid: number; cwd: string }>((resolve, reject) => {
@@ -682,7 +687,12 @@ test.describe("Issue queue real backend launch", () => {
               try { resolve(JSON.parse(bytes.toString())); } catch (error) { reject(error); }
             });
           });
-          expect(ready).toEqual({ pid: job.pid, cwd: source.cwd });
+          expect(ready).toEqual({ pid: job.pid, cwd: jobCwd });
+          if (unknownCwd) {
+            await rmdir(jobCwd);
+            await expect(realpath(`/proc/${ready.pid}/cwd`)).rejects.toMatchObject({ code: "ENOENT" });
+            expect(fixture.savedSource(source.cwd)).toEqual(checkpoint);
+          }
           await writeFile(join(fixture.home, `normal-n2-${waiting.operation}.json`), JSON.stringify({ operation: waiting.operation }));
           await expect.poll(async () => (await fixture.actorEvents()).some((entry: any) =>
             entry.stage === "normal_n2_hook_returned" && entry.operation === waiting.operation
@@ -692,8 +702,12 @@ test.describe("Issue queue real backend launch", () => {
             const reason = (await preferences()).agent_switch_intents[waiting.operation]?.reason || "";
             const pids = /Observed worktree PIDs: \[([\d, ]*)\]/.exec(reason)?.[1]
               .split(",").map((value: string) => Number(value.trim()));
-            return pids?.includes(ready.pid) && reason.includes("unknown cwd PIDs: [] (0 total); census complete: true.");
-          }, { timeout: Math.max(1, handoffDeadline - Date.now()), message: "complete post-ACK census identifies the real unfinished job" }).toBe(true);
+            const unknownPids = /unknown cwd PIDs: \[([\d, ]*)\]/.exec(reason)?.[1]
+              .split(",").map((value: string) => Number(value.trim()));
+            return unknownCwd
+              ? unknownPids?.includes(ready.pid) && !pids?.includes(ready.pid) && reason.includes("census complete: true.")
+              : pids?.includes(ready.pid) && reason.includes("unknown cwd PIDs: [] (0 total); census complete: true.");
+          }, { timeout: Math.max(1, handoffDeadline - Date.now()), message: "complete post-ACK census identifies the real unfinished job and its cwd status" }).toBe(true);
           const prefs = await preferences();
           const held = prefs.agent_switch_intents[waiting.operation];
           expect(held).toMatchObject({ stage: "checkpoint_verified", source: acknowledged.source, checkpoint: acknowledged.checkpoint });
