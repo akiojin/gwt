@@ -375,9 +375,11 @@ test.describe("Issue queue real backend launch", () => {
     expect(errors).toEqual([]);
   });
 
-  for (const afterAck of ["unchanged", "input", "source edit", "cancel", "target removed", "worktree job", "cancel pending job", "unknown cwd", "restart"] as const) test(afterAck === "input"
+  for (const afterAck of ["unchanged", "input", "draft", "source edit", "cancel", "target removed", "worktree job", "cancel pending job", "unknown cwd", "restart"] as const) test(afterAck === "input"
     ? "T94421 input after checkpoint ACK preserves the source without switching"
-    : afterAck === "source edit"
+    : afterAck === "draft"
+      ? "T94429 unsent draft after checkpoint ACK survives the delayed Normal Stop"
+      : afterAck === "source edit"
       ? "T94422 source edit after checkpoint ACK preserves unsaved work without switching"
       : afterAck === "cancel"
         ? "T94423 cancellation after checkpoint ACK survives the delayed Normal Stop"
@@ -571,21 +573,28 @@ test.describe("Issue queue real backend launch", () => {
         await info.attach("post-ack-restart-preserved", { body: JSON.stringify({ acknowledged, cancelled, restored,
           assignment, checkpoint, saved, resumedNormal }), contentType: "application/json" });
         await info.attach(`post-ack-restart-preserved-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
-      } else if (afterAck === "input") {
+      } else if (afterAck === "input" || afterAck === "draft") {
         const acknowledged = (await preferences()).agent_switch_intents[waiting.operation];
         expect(acknowledged.stage).toBe("checkpoint_verified");
         const checkpoint = fixture.savedSource(source.cwd);
         const rawCount = (await fixture.actorEvents()).filter((entry: any) => entry.stage === "raw_successor").length;
-        await sendLiveGwtEvent(page, { kind: "terminal_input", id: projectedSource.id, data: "GWT_RAW_MONITOR_PROBE\r" });
-        await expect.poll(async () => (await fixture.actorEvents()).filter((entry: any) => entry.stage === "raw_successor").length,
-          { timeout: 60_000 }).toBe(rawCount + 1);
-        const events = await fixture.actorEvents();
-        const accepted = events.filter((entry: any) => entry.stage === "raw_accepted").at(-1);
-        const subsequentStop = events.filter((entry: any) => entry.stage === "raw_successor").at(-1);
-        expect(accepted).toMatchObject({ pid: source.pid, gwt_session_id: source.gwt_session_id, current_hook_event: null });
-        expect(subsequentStop).toMatchObject({ pid: source.pid, gwt_session_id: source.gwt_session_id,
-          current_hook_event: { event: "Stop", outcome: "normal" } });
-        expect(subsequentStop.current_hook_event.correlation_id).not.toBe(n1.current_hook_event.correlation_id);
+        const draft = afterAck === "draft";
+        await sendLiveGwtEvent(page, { kind: "terminal_input", id: projectedSource.id,
+          data: draft ? "GWT_RAW_MONITOR_PROBE" : "GWT_RAW_MONITOR_PROBE\r" });
+        let accepted: any;
+        let subsequentStop: any;
+        const observeSubmittedProbe = async () => {
+          await expect.poll(async () => (await fixture.actorEvents()).filter((entry: any) => entry.stage === "raw_successor").length,
+            { timeout: 60_000 }).toBe(rawCount + 1);
+          const events = await fixture.actorEvents();
+          accepted = events.filter((entry: any) => entry.stage === "raw_accepted").at(-1);
+          subsequentStop = events.filter((entry: any) => entry.stage === "raw_successor").at(-1);
+          expect(accepted).toMatchObject({ pid: source.pid, gwt_session_id: source.gwt_session_id, current_hook_event: null });
+          expect(subsequentStop).toMatchObject({ pid: source.pid, gwt_session_id: source.gwt_session_id,
+            current_hook_event: { event: "Stop", outcome: "normal" } });
+          expect(subsequentStop.current_hook_event.correlation_id).not.toBe(n1.current_hook_event.correlation_id);
+        };
+        if (!draft) await observeSubmittedProbe();
         await expect.poll(async () => (await preferences()).agent_switch_intents[waiting.operation],
           { timeout: Math.max(1, handoffDeadline - Date.now()) }).toMatchObject({ stage: "failed",
           reason: "New input invalidated the saved checkpoint. Current work is kept; request another switch." });
@@ -619,18 +628,30 @@ test.describe("Issue queue real backend launch", () => {
           expect(work.board_refs).toContain(acknowledged.checkpoint.board_entry_id);
         };
         await assertSourceKept();
+        if (draft) {
+          expect((await fixture.actorEvents()).filter((entry: any) => entry.stage === "raw_successor")).toHaveLength(rawCount);
+          expect((await fixture.actorEvents()).some((entry: any) => entry.stage === "normal_n2_started"
+            && entry.operation === waiting.operation)).toBe(false);
+        }
         await releaseNormalStop(waiting.operation);
         await expect.poll(async () => (await fixture.actorEvents()).some((entry: any) =>
           entry.stage === "normal_n2_hook_returned" && entry.operation === waiting.operation
             && entry.pid === source.pid && entry.gwt_session_id === source.gwt_session_id),
         { timeout: Math.max(1, handoffDeadline - Date.now()) }).toBe(true);
         await assertSourceKept();
+        if (draft) {
+          expect((await fixture.actorEvents()).filter((entry: any) => entry.stage === "raw_successor")).toHaveLength(rawCount);
+          // Submit only the retained draft; no body is rewritten after the late Stop.
+          await sendLiveGwtEvent(page, { kind: "terminal_input", id: projectedSource.id, data: "\r" });
+          await observeSubmittedProbe();
+          await assertSourceKept();
+        }
         await expect(plans.locator(".roster-switch-status")).toContainText("New input invalidated the saved checkpoint");
         expect((await fixture.actorEvents()).filter((entry: any) => entry.stage === "actor_failed")).toEqual([]);
-        await info.attach("post-ack-input-preserved-source", { body: JSON.stringify({ acknowledged,
+        await info.attach(`post-ack-${draft ? "draft" : "input"}-preserved-source`, { body: JSON.stringify({ acknowledged,
           accepted, subsequentStop, failed: (await preferences()).agent_switch_intents[waiting.operation], checkpoint }),
         contentType: "application/json" });
-        await info.attach(`post-ack-input-preserved-source-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
+        await info.attach(`post-ack-${draft ? "draft" : "input"}-preserved-source-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
       } else if (afterAck === "source edit") {
         const acknowledged = (await preferences()).agent_switch_intents[waiting.operation];
         expect(acknowledged.stage).toBe("checkpoint_verified");
