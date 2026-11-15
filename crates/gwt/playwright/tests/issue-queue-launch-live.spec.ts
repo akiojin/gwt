@@ -433,7 +433,9 @@ test.describe("Issue queue real backend launch", () => {
     expect(errors).toEqual([]);
   });
 
-  for (const afterAck of ["unchanged", "input", "draft", "source edit", "cancel", "target removed", "worktree job", "cancel pending job", "unknown cwd", "restart"] as const) test(afterAck === "input"
+  for (const afterAck of ["unchanged", "initial draft", "input", "draft", "source edit", "cancel", "target removed", "worktree job", "cancel pending job", "unknown cwd", "restart"] as const) test(afterAck === "initial draft"
+    ? "T94430 unsent draft before the first Switch request waits and resumes naturally"
+    : afterAck === "input"
     ? "T94421 input after checkpoint ACK preserves the source without switching"
     : afterAck === "draft"
       ? "T94429 unsent draft after checkpoint ACK survives the delayed Normal Stop"
@@ -541,16 +543,70 @@ test.describe("Issue queue real backend launch", () => {
       const plans = agents.locator(".roster-plans");
       await plans.getByRole("button", { name: "Refresh plans", exact: true }).click();
       await expect(plans.locator('[data-action="switch-next"]')).toBeEnabled();
+      const initialDraft = afterAck === "initial draft";
+      let pendingDraftOperation: string | undefined;
+      if (initialDraft) {
+        const echoedProbes = () => page.evaluate(id =>
+          ((window as any).__gwtTerminalTestApi?.bufferText(id) ?? "").split("GWT_RAW_MONITOR_PROBE").length - 1,
+        projectedSource.id);
+        await expect.poll(echoedProbes, { timeout: 30_000, message: "the initial submitted probe has reached the terminal" }).toBe(1);
+        await sendLiveGwtEvent(page, { kind: "terminal_input", id: projectedSource.id, data: "GWT_RAW_MONITOR_PROBE" });
+        await expect.poll(echoedProbes, { timeout: 30_000, message: "the real source PTY echoes the unsubmitted draft" }).toBe(2);
+      }
       const handoffDeadline = Date.now() + 120_000;
       await plans.locator('[data-action="switch-next"]').click();
+      if (initialDraft) {
+        await expect.poll(async () => Object.values((await preferences()).agent_switch_intents || {}),
+          { timeout: 30_000 }).toEqual([expect.objectContaining({ stage: "requested",
+            reason: "Waiting for the current turn to finish. Current work is kept." })]);
+        const prefs = await preferences();
+        const pending = Object.values(prefs.agent_switch_intents)[0] as any;
+        pendingDraftOperation = pending.request.operation_id;
+        expect(pending.checkpoint).toBeUndefined();
+        expect(pending.runtime_exit_confirmed).not.toBe(true);
+        expect(prefs.monitor_runtime_stop_requests || []).toEqual([]);
+        expect(prefs.launched_claims[43]).toBe(pending.source.claim_id);
+        expect((await readCanonicalRoster(page)).members.find((value: any) => value.agent_member_id === member.agent_member_id)
+          .assignment).toEqual(pending.source.assignment);
+        expect(await session(source.gwt_session_id!)).toBe(before);
+        expect(fixture.processAlive(source.pid)).toBe(true);
+        expect(fixture.processAlive(idle.tree_child_pid)).toBe(true);
+        expect(fixture.executionStatus(source.cwd).ecr_status).toBe("active");
+        expect(await fixture.launchIssues()).toEqual([43]);
+        expect(fixture.requests.filter(request => request.method === "POST"
+          && request.url === "/repos/fixture/queue/issues/44/comments")).toEqual([]);
+        const events = await fixture.actorEvents();
+        expect(events.filter((entry: any) => entry.stage === "raw_successor")).toHaveLength(1);
+        expect(events.filter((entry: any) => ["checkpoint_before_prompt", "checkpoint_received", "checkpoint_acked"].includes(entry.stage))).toEqual([]);
+        const work = (await fixture.workItems()).work_items.find((value: any) =>
+          value.events.some((event: any) => event.agent_session_id === source.gwt_session_id));
+        expect(work).toBeTruthy();
+        expect(work.status_category).not.toMatch(/done|blocked/);
+        const unsaved = fixture.savedSource(source.cwd);
+        expect(unsaved.porcelain).not.toContain("checkpoint-source.txt");
+        await expect(plans.locator(".roster-switch-status")).toContainText("Waiting for the current turn to finish");
+        await info.attach("pre-request-draft-held", { body: JSON.stringify({ pending, work, unsaved }), contentType: "application/json" });
+        await info.attach(`pre-request-draft-held-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
+        // Submit only the existing composer body; no new Switch or refresh drives recovery.
+        await sendLiveGwtEvent(page, { kind: "terminal_input", id: projectedSource.id, data: "\r" });
+        await expect.poll(async () => (await fixture.actorEvents()).filter((entry: any) => entry.stage === "raw_successor").length,
+          { timeout: Math.max(1, handoffDeadline - Date.now()) }).toBe(2);
+        const submitted = (await fixture.actorEvents()).filter((entry: any) => entry.stage === "raw_successor").at(-1);
+        expect(submitted).toMatchObject({ pid: source.pid, gwt_session_id: source.gwt_session_id,
+          current_hook_event: { event: "Stop", outcome: "normal" } });
+        expect(submitted.current_hook_event.correlation_id).not.toBe(n1.current_hook_event.correlation_id);
+      }
       await expect.poll(async () => !!await actor("awaiting_normal_n2"),
         { timeout: 60_000, message: "actual checkpoint ACK before the next genuine Normal Stop" }).toBe(true);
       const waiting = await actor("awaiting_normal_n2");
+      if (initialDraft) expect(waiting.operation).toBe(pendingDraftOperation);
       const beforePrompt = await actor("checkpoint_before_prompt");
       const activity = await actor("checkpoint_activity");
       expect(beforePrompt.current_hook_event, "explicit checkpoint acceptance invalidates N1 before the next provider hook").toBeNull();
       expect(beforePrompt.runtime_sha256).not.toBe(n1.runtime_sha256);
-      expect(beforePrompt.runtime_without_current_sha256, "acceptance preserves all history, activity and native source fields").toBe(n1.runtime_without_current_sha256);
+      const previousNormal = initialDraft
+        ? (await fixture.actorEvents()).filter((entry: any) => entry.stage === "raw_successor").at(-1) : n1;
+      expect(beforePrompt.runtime_without_current_sha256, "acceptance preserves all history, activity and native source fields").toBe(previousNormal.runtime_without_current_sha256);
       expect(activity).toMatchObject({ pid: source.pid, gwt_session_id: source.gwt_session_id,
         runtime_status: "Running", current_hook_event: { event: "UserPromptSubmit", outcome: "normal" } });
       expect(activity.current_hook_event.correlation_id).not.toBe(n1.current_hook_event.correlation_id);
@@ -597,7 +653,7 @@ test.describe("Issue queue real backend launch", () => {
           checkpoint: acknowledged.checkpoint, runtime_stop: acknowledged.runtime_stop });
         expect(cancelled.runtime_exit_confirmed).not.toBe(true);
         expect(prefs.monitor_runtime_stop_requests || []).toEqual([]);
-        const assignment = prefs.agent_roster.members.find((value: any) => value.agent_member_id === member.agent_member_id).assignment;
+        const assignment = (await readCanonicalRoster(page)).members.find((value: any) => value.agent_member_id === member.agent_member_id).assignment;
         expect(assignment).toMatchObject({ issue_number: 43, session_id: restored.gwt_session_id });
         expect(assignment.host_pid).toBeGreaterThan(0);
         expect(assignment.host_pid).not.toBe(acknowledged.runtime_stop.host_pid);
