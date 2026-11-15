@@ -97,13 +97,19 @@ async function liveCodexWindow(page: Page, sessionId: string): Promise<AgentWind
   return (await codexWindows(page)).find((entry) => entry.session_id === sessionId)!;
 }
 
-async function launchCodex(page: Page, branch: string) {
+async function launchCodex(page: Page, branch: string, issueNumber?: number) {
   const after = await cursor(page);
   await sendLiveGwtEvent(page, { kind: "open_active_work_launch_wizard", branch_name: branch });
   await latestWizard(page, after, true);
   await wizardAction(page, { kind: "set_launch_path", path: "manual_setup" });
   // The installed (fixture) Codex is the only route: the wizard has no version choice.
   let state = await wizardAction(page, { kind: "set_agent", agent_id: "codex" });
+  if (issueNumber !== undefined) {
+    await wizardAction(page, { kind: "set_branch_mode", create_new: true });
+    await wizardAction(page, { kind: "set_branch_name", value: `issue-${issueNumber}` });
+    state = await wizardAction(page, { kind: "set_linked_issue", issue_number: issueNumber });
+    expect(state.wizard?.linked_issue_number).toBe(issueNumber);
+  }
   for (let step = 0; step < 12 && state.wizard; step += 1) {
     expect(state.wizard.error).toBeFalsy();
     if (state.wizard.selected_runtime_target !== "host"
@@ -452,15 +458,25 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
 
   test("one shared member runs in two projects and closing one preserves the other", async ({ page }, info) => {
     let firstKey = "", secondKey = "";
+    const firstIssue = 43, secondIssue = 44;
     const fixture = await startExactRelaunchFixture(info, {
       page, freshNativeIds: true,
       monitorPreferences: { max_active_agents: 2, max_active_agents_mode: "manual", max_active_agents_override: 2 },
+      async prepare({ home, project, env }) {
+        const origin = join(home, "project-a.git");
+        execFileSync("git", ["init", "--bare", "-q", origin], { cwd: project, env, encoding: "utf8" });
+        execFileSync("git", ["remote", "add", "origin", origin], { cwd: project, env, encoding: "utf8" });
+        execFileSync("git", ["push", "-q", "origin", "HEAD:refs/heads/main"], { cwd: project, env, encoding: "utf8" });
+      },
       async beforeStart({ home, project, env, preferences }) {
         firstKey = basename(dirname(preferences));
         const second = join(home, "project-b");
         await mkdir(second);
         for (const args of [["init", "-q", "-b", "main"], ["-c", "user.name=gwt", "-c", "user.email=gwt@example.invalid",
-          "commit", "-q", "--allow-empty", "-m", "shared member fixture"]]) {
+          "commit", "-q", "--allow-empty", "-m", "shared member fixture"],
+          ["init", "--bare", "-q", join(home, "project-b.git")],
+          ["remote", "add", "origin", join(home, "project-b.git")],
+          ["push", "-q", "origin", "HEAD:refs/heads/main"]]) {
           execFileSync("git", args, { cwd: second, env, encoding: "utf8" });
         }
         const status = JSON.parse(execFileSync(join(process.env.GWT_PLAYWRIGHT_CHECKOUT_ROOT!, "target/debug/gwtd"), [], {
@@ -519,13 +535,13 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       await gotoLiveGwt(secondPage, liveGwtProjectUrl(fixture.url, secondKey), { enableTestBridge: true });
       await openAgents(secondPage);
       expect((await readRoster(secondPage)).members.some(member => member.agent_member_id === memberId)).toBe(true);
-      await launchCodex(page, fixture.branch);
+      await launchCodex(page, fixture.branch, firstIssue);
       await expect.poll(async () => (await fixture.launches()).length, { timeout: 60_000 }).toBe(1);
       const first = await liveCodexWindow(page, (await fixture.launches())[0].gwt_session_id!);
       await openAgents(page);
       const firstRow = page.locator(`.roster-row[data-member-id="${memberId}"]`);
       await expect(firstRow.locator("[data-assignment-project]")).toHaveCount(1);
-      await launchCodex(secondPage, fixture.branch);
+      await launchCodex(secondPage, fixture.branch, secondIssue);
       await expect.poll(async () => (await fixture.launches()).length, { timeout: 60_000 }).toBe(2);
       const second = await liveCodexWindow(secondPage, (await fixture.launches())[1].gwt_session_id!);
       secondWindow = second;
@@ -535,20 +551,27 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       // A's local census did not change: the shared update must arrive without
       // reentering Agents or explicitly reading its roster.
       await expect(firstRow.locator("[data-assignment-project]")).toHaveCount(2);
-      for (const session of [first.session_id, second.session_id]) {
-        expect(tomlString(await sessionRecord(fixture.home, session), "agent_member_id")).toBe(memberId);
+      for (const [session, issue] of [[first.session_id, firstIssue], [second.session_id, secondIssue]] as const) {
+        const record = await sessionRecord(fixture.home, session);
+        expect(tomlString(record, "agent_member_id")).toBe(memberId);
+        expect(Number(record.match(/^linked_issue_number = (\d+)$/m)?.[1])).toBe(issue);
       }
       const assignments = (roster: AgentRoster) => roster.members.find(member => member.agent_member_id === memberId)?.active_assignments ?? [];
-      for (const [target, own, session] of [[page, firstKey, first.session_id], [secondPage, secondKey, second.session_id]] as const) {
+      for (const [target, session, issue] of [[page, first.session_id, firstIssue], [secondPage, second.session_id, secondIssue]] as const) {
+        await target.reload();
         await openAgents(target);
         await expect.poll(async () => assignments(await readRoster(target)).map(assignment => assignment.project_key).sort())
           .toEqual([firstKey, secondKey].sort());
-        expect((await readRoster(target)).members.find(member => member.agent_member_id === memberId)?.assignment?.session_id).toBe(session);
+        const member = (await readRoster(target)).members.find(member => member.agent_member_id === memberId)!;
+        expect(member.assignment).toMatchObject({ session_id: session, issue_number: issue });
+        expect(member.active_assignments).toEqual(expect.arrayContaining([
+          expect.objectContaining({ project_key: firstKey, session_id: first.session_id, issue_number: firstIssue }),
+          expect.objectContaining({ project_key: secondKey, session_id: second.session_id, issue_number: secondIssue }),
+        ]));
         const row = target.locator(`.roster-row[data-member-id="${memberId}"]`);
         await expect(row.locator(".roster-assignments [data-assignment-project]")).toHaveCount(2);
-        await expect(row.locator(`[data-assignment-project="${own}"]`)).toContainText("No issue");
-        await expect(row.locator(`[data-assignment-project="${firstKey}"]`)).toHaveText(/^project · No issue · Recorded (Running|Idle|Waiting)$/);
-        await expect(row.locator(`[data-assignment-project="${secondKey}"]`)).toHaveText(/^project-b · No issue · Recorded (Running|Idle|Waiting)$/);
+        await expect(row.locator(`[data-assignment-project="${firstKey}"]`)).toHaveText(/^project · #43 · Recorded (Running|Idle|Waiting)$/);
+        await expect(row.locator(`[data-assignment-project="${secondKey}"]`)).toHaveText(/^project-b · #44 · Recorded (Running|Idle|Waiting)$/);
         await expect(target.locator("html")).toHaveAttribute("data-theme", theme);
         expect(await target.locator(".agents-surface:not(.agents-surface--preview)").evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
       }
@@ -558,10 +581,11 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       await sendLiveGwtEvent(page, { kind: "close_window", id: first.id });
       const secondRow = secondPage.locator(`.roster-row[data-member-id="${memberId}"]`);
       await expect(secondRow.locator("[data-assignment-project]")).toHaveCount(1);
-      await expect(secondRow.locator(`[data-assignment-project="${secondKey}"]`)).toBeVisible();
+      await expect(secondRow.locator(`[data-assignment-project="${secondKey}"]`)).toHaveText(/^project-b · #44 · Recorded (Running|Idle|Waiting)$/);
       await expect.poll(async () => (await readRoster(page)).members.find(member => member.agent_member_id === memberId)?.assignment ?? null)
         .toBeNull();
-      expect((await readRoster(secondPage)).members.find(member => member.agent_member_id === memberId)?.assignment?.session_id).toBe(second.session_id);
+      expect((await readRoster(secondPage)).members.find(member => member.agent_member_id === memberId)?.assignment)
+        .toMatchObject({ session_id: second.session_id, issue_number: secondIssue });
       await liveCodexWindow(secondPage, second.session_id);
       await expect.poll(async () => assignments(await readRoster(secondPage)).map(assignment => assignment.project_key))
         .toEqual([secondKey]);
