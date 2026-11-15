@@ -433,8 +433,10 @@ test.describe("Issue queue real backend launch", () => {
     expect(errors).toEqual([]);
   });
 
-  for (const afterAck of ["unchanged", "refresh cancel", "initial draft", "input", "draft", "source edit", "cancel", "target removed", "worktree job", "cancel pending job", "unknown cwd", "restart"] as const) test(afterAck === "refresh cancel"
+  for (const afterAck of ["unchanged", "refresh cancel", "refresh draft", "initial draft", "input", "draft", "source edit", "cancel", "target removed", "worktree job", "cancel pending job", "unknown cwd", "restart"] as const) test(afterAck === "refresh cancel"
     ? "T94431 cancellation during target refresh prevents checkpoint delivery and permits a new switch"
+    : afterAck === "refresh draft"
+    ? "T94432 draft during target refresh preserves input and resumes the same switch"
     : afterAck === "initial draft"
     ? "T94430 unsent draft before the first Switch request waits and resumes naturally"
     : afterAck === "input"
@@ -461,7 +463,7 @@ test.describe("Issue queue real backend launch", () => {
     const fixture = await startIssueQueueLaunchFixture(info, {
       page,
       targetIssueNumber: 44, switching: true, positive: true, autonomousMode: true,
-      targetRefreshGate: afterAck === "refresh cancel",
+      targetRefreshGate: afterAck === "refresh cancel" || afterAck === "refresh draft",
     });
     const errors: string[] = [];
     const theme = info.project.name.includes("light") ? "light" : "dark";
@@ -546,20 +548,45 @@ test.describe("Issue queue real backend launch", () => {
       const plans = agents.locator(".roster-plans");
       await plans.getByRole("button", { name: "Refresh plans", exact: true }).click();
       await expect(plans.locator('[data-action="switch-next"]')).toBeEnabled();
-      const initialDraft = afterAck === "initial draft";
+      const refreshDraft = afterAck === "refresh draft";
+      const initialDraft = afterAck === "initial draft" || refreshDraft;
       let pendingDraftOperation: string | undefined;
       if (initialDraft) {
         const echoedProbes = () => page.evaluate(id =>
           ((window as any).__gwtTerminalTestApi?.bufferText(id) ?? "").split("GWT_RAW_MONITOR_PROBE").length - 1,
         projectedSource.id);
         await expect.poll(echoedProbes, { timeout: 30_000, message: "the initial submitted probe has reached the terminal" }).toBe(1);
-        await sendLiveGwtEvent(page, { kind: "terminal_input", id: projectedSource.id, data: "GWT_RAW_MONITOR_PROBE" });
-        await expect.poll(echoedProbes, { timeout: 30_000, message: "the real source PTY echoes the unsubmitted draft" }).toBe(2);
+        if (!refreshDraft) {
+          await sendLiveGwtEvent(page, { kind: "terminal_input", id: projectedSource.id, data: "GWT_RAW_MONITOR_PROBE" });
+          await expect.poll(echoedProbes, { timeout: 30_000, message: "the real source PTY echoes the unsubmitted draft" }).toBe(2);
+        }
       }
       const handoffDeadline = Date.now() + 120_000;
-      if (afterAck === "refresh cancel") await fixture.targetRefreshGate.arm();
+      if (afterAck === "refresh cancel" || refreshDraft) await fixture.targetRefreshGate.arm();
       await plans.locator('[data-action="switch-next"]').click();
       let cancelledDuringRefresh: any;
+      if (refreshDraft) {
+        await expect.poll(() => fixture.targetRefreshGate.waiting(), { timeout: 30_000 }).not.toBeNull();
+        const held = await fixture.targetRefreshGate.waiting();
+        const pending = Object.values((await preferences()).agent_switch_intents)[0] as any;
+        expect(pending.stage).toBe("requested");
+        expect(pending.reason ?? "").not.toMatch(/^Waiting for the current turn/);
+        expect(held.argv.slice(0, 3)).toEqual(["issue", "view", "44"]);
+        expect(held.parent, "the captured Switch Host owns the blocked target read").toBe(pending.runtime_stop.host_pid);
+        expect(fixture.processAlive(held.pid)).toBe(true);
+        pendingDraftOperation = pending.request.operation_id;
+        await sendLiveGwtEvent(page, { kind: "terminal_input", id: projectedSource.id, data: "GWT_RAW_MONITOR_PROBE" });
+        await expect.poll(() => page.evaluate(id =>
+          ((window as any).__gwtTerminalTestApi?.bufferText(id) ?? "").split("GWT_RAW_MONITOR_PROBE").length - 1,
+        projectedSource.id), { timeout: 30_000, message: "the blocked target read permits a real unsubmitted draft" }).toBe(2);
+        await fixture.targetRefreshGate.release();
+        await expect.poll(() => fixture.targetRefreshGate.returned(), { timeout: 30_000 }).toBe(true);
+        // A new reason proves the driver resumed beyond the held read and rejected its old snapshot.
+        await expect.poll(async () => (await preferences()).agent_switch_intents[pendingDraftOperation!],
+          { timeout: 30_000 }).toMatchObject({ stage: "requested", reason: expect.stringMatching(/^Waiting for the current turn (?:and input to settle|to finish)\./) });
+        await info.attach("draft-during-target-refresh", { body: JSON.stringify({ held, pending }),
+          contentType: "application/json" });
+      }
       if (afterAck === "refresh cancel") {
         await expect.poll(() => fixture.targetRefreshGate.waiting(), { timeout: 30_000 }).not.toBeNull();
         const held = await fixture.targetRefreshGate.waiting();
@@ -607,9 +634,11 @@ test.describe("Issue queue real backend launch", () => {
       if (initialDraft) {
         await expect.poll(async () => Object.values((await preferences()).agent_switch_intents || {}),
           { timeout: 30_000 }).toEqual([expect.objectContaining({ stage: "requested",
-            reason: "Waiting for the current turn to finish. Current work is kept." })]);
+            reason: refreshDraft ? expect.stringMatching(/^Waiting for the current turn (?:and input to settle|to finish)\./)
+              : "Waiting for the current turn to finish. Current work is kept." })]);
         const prefs = await preferences();
         const pending = Object.values(prefs.agent_switch_intents)[0] as any;
+        if (refreshDraft) expect(pending.request.operation_id).toBe(pendingDraftOperation);
         pendingDraftOperation = pending.request.operation_id;
         expect(pending.checkpoint).toBeUndefined();
         expect(pending.runtime_exit_confirmed).not.toBe(true);
@@ -633,7 +662,8 @@ test.describe("Issue queue real backend launch", () => {
         expect(work.status_category).not.toMatch(/done|blocked/);
         const unsaved = fixture.savedSource(source.cwd);
         expect(unsaved.porcelain).not.toContain("checkpoint-source.txt");
-        await expect(plans.locator(".roster-switch-status")).toContainText("Waiting for the current turn to finish");
+        await expect(plans.locator(".roster-switch-status")).toContainText(refreshDraft
+          ? /Waiting for the current turn (?:and input to settle|to finish)/ : "Waiting for the current turn to finish");
         await info.attach("pre-request-draft-held", { body: JSON.stringify({ pending, work, unsaved }), contentType: "application/json" });
         await info.attach(`pre-request-draft-held-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
         // Submit only the existing composer body; no new Switch or refresh drives recovery.
