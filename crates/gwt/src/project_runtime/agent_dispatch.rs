@@ -2613,6 +2613,49 @@ pub(crate) fn with_current_monitor_prompt_input<T>(
     })
 }
 
+/// Observe the real confirming-input path in an explicitly armed Switch fixture.
+/// No wait or authorization is added, and ordinary builds do not contain it.
+#[cfg(all(debug_assertions, feature = "test-gh-guard"))]
+fn observe_checkpoint_raw_input_for_test(
+    entry: &PtyWriterEntry,
+    phase: &str,
+) -> Result<(), TerminalError> {
+    let Some(path) = std::env::var_os("GWT_TEST_SWITCH_BODY_GATE").map(PathBuf::from) else {
+        return Ok(());
+    };
+    let Some(registration) = &entry.monitor_runtime else {
+        return Ok(());
+    };
+    let observe = || -> std::io::Result<()> {
+        let armed: serde_json::Value = match std::fs::read(path.with_extension("claimed")) {
+            Ok(bytes) => serde_json::from_slice(&bytes)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        if armed["observe_raw"].as_bool() != Some(true)
+            || armed["root"].as_str() != registration.project_root.to_str()
+            || armed["session_id"].as_str() != Some(registration.session_id.as_str())
+            || armed["incarnation"].as_u64() != Some(registration.incarnation)
+        {
+            return Ok(());
+        }
+        let marker = path.with_extension(phase);
+        let temporary = path.with_extension(format!("{phase}.tmp"));
+        std::fs::write(
+            &temporary,
+            serde_json::to_vec(&serde_json::json!({
+                "operation": armed["operation"], "session_id": registration.session_id,
+                "incarnation": registration.incarnation, "host_pid": std::process::id(),
+                "input_revision": entry.handle.ordinary_input_revision(),
+            }))?,
+        )?;
+        std::fs::rename(temporary, marker)
+    };
+    observe().map_err(|error| TerminalError::PtyIoError {
+        details: error.to_string(),
+    })
+}
+
 /// The private GUI and agent commands use the same ordinary-input revision.
 /// A captured entry cannot target a same-address replacement.
 pub fn write_current_raw_input(
@@ -2659,7 +2702,14 @@ fn write_current_raw_input_with_session(
                     commit()
                 };
                 if confirms {
-                    with_current_monitor_prompt_input(entry, held_session, accept)
+                    #[cfg(all(debug_assertions, feature = "test-gh-guard"))]
+                    observe_checkpoint_raw_input_for_test(entry, "raw-entered")?;
+                    let result = with_current_monitor_prompt_input(entry, held_session, accept);
+                    #[cfg(all(debug_assertions, feature = "test-gh-guard"))]
+                    if result.is_ok() {
+                        observe_checkpoint_raw_input_for_test(entry, "raw-accepted")?;
+                    }
+                    result
                 } else {
                     accept()
                 }
