@@ -627,10 +627,13 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       const before = await readRoster(page);
       await expect(register).toBeDisabled();
       await name.fill(" ");
-      await expect(surface.locator("#roster-registration-error")).toHaveText("Enter a display name.");
+      await expect(surface.locator("#roster-registration-error > span")).toHaveText("Enter a display name.");
+      await expect(surface.getByRole("button", { name: "Show member", exact: true })).toBeHidden();
       await expect(register).toBeDisabled();
       await name.fill(` ${before.members[0].name.toLowerCase()} `);
-      await expect(surface.locator("#roster-registration-error")).toHaveText("This name is already registered, including resting members.");
+      await expect(surface.locator("#roster-registration-error > span")).toContainText(before.members[0].name);
+      await expect(surface.locator("#roster-registration-error > span")).toContainText(before.members[0].agent_id);
+      await expect(surface.getByRole("button", { name: "Show member", exact: true })).toBeVisible();
       await expect(name).toHaveAttribute("aria-invalid", "true");
       await expect(register).toBeDisabled();
       await name.fill("  Maple contributor  ");
@@ -672,7 +675,8 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       expect(rested.members.find(value => value.agent_member_id === retryMember.agent_member_id)?.enabled).toBe(false);
       await name.fill("  RETRY CONTRIBUTOR  ");
       await expect(name).toHaveAttribute("aria-invalid", "true");
-      await expect(surface.locator("#roster-registration-error")).toHaveText("This name is already registered, including resting members.");
+      await expect(surface.locator("#roster-registration-error > span")).toHaveText("Retry contributor (codex) is resting and uses this name. ");
+      await expect(surface.getByRole("button", { name: "Show member", exact: true })).toBeVisible();
       await expect(register).toBeDisabled();
       await name.fill("");
       await surface.locator(`.roster-row[data-member-id="${member.agent_member_id}"]`).click();
@@ -819,7 +823,7 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       const expected = `Recorded name: ${facts.name} · Tool: ${facts.provider} · Recorded model: ${facts.model || "—"}`;
       await page.locator('.op-rail__surface[data-surface="agents"]').click();
       await readRoster(page);
-      await surface.locator(`.roster-row[data-member-id="${memberId}"]`).click();
+      await surface.locator(`.roster-row[data-member-id="${memberId}"] h3`).click();
       await expect(surface.locator(".roster-current-config")).toHaveText(expected);
       await gotoLiveGwt(secondPage, liveGwtProjectUrl(fixture.url, secondProjectKey), { enableTestBridge: true });
       await secondPage.locator('.op-rail__surface[data-surface="agents"]').click();
@@ -863,7 +867,7 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
         expect(member.saved_manual_revision).toMatch(/^manual-profile-v1:[a-f0-9]{64}$/);
         savedRevision ??= member.saved_manual_revision!;
         expect(member.saved_manual_revision).toBe(savedRevision);
-        await surface.locator(`.roster-row[data-member-id="${memberId}"]`).click();
+        await surface.locator(`.roster-row[data-member-id="${memberId}"] h3`).click();
         await expect(surface.locator(".roster-saved-settings")).toContainText("Model: gpt-6-sol");
         await expect(surface.locator(".roster-saved-settings")).toContainText(`Reasoning: ${savedCandidate.reasoning}`);
         await expect(surface.locator(".roster-saved-settings")).toContainText("Permissions: Ask");
@@ -965,6 +969,56 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       expect(await surface.evaluate(node => node === (window as any).__savedCandidateRoster)).toBe(true);
       savedCandidate.reasoning = "high";
       await assertSharedSaved();
+      // Exercise the same saved core from Agents, through the actual writer.
+      const detail = surface.locator(".roster-detail");
+      const agentReasoning = detail.locator('[data-member-tuning-field="reasoning"]');
+      const requestsBeforeComposition = tuningRequests.length;
+      await agentReasoning.dispatchEvent("compositionstart");
+      await agentReasoning.fill("ultracode");
+      await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+      expect(tuningRequests).toHaveLength(requestsBeforeComposition);
+      const beforeRefusal = await cursor(page);
+      await agentReasoning.dispatchEvent("compositionend");
+      await expect.poll(() => tuningRequests.length).toBe(requestsBeforeComposition + 1);
+      const refusedRequest = tuningRequests[requestsBeforeComposition];
+      expect(refusedRequest.action).toMatchObject({ member_id: memberId, reasoning: "ultracode",
+        expected_core_revision: tuned.saved_implementation_core_revision });
+      const refused = await page.waitForFunction(({ after, requestId }) => ((window as any).__gwtPlaywrightMessages || []).find((entry: any) =>
+        entry.sequence > after && entry.payload.request_id === requestId && entry.payload.kind === "agent_roster")?.payload.roster,
+      { after: beforeRefusal, requestId: refusedRequest.request_id }).then(handle => handle.jsonValue());
+      expect(refused.error).toContain("unsupported");
+      const unchanged = refused.members.find((value: any) => value.agent_member_id === memberId);
+      expect(unchanged.saved_implementation_core_revision).toBe(tuned.saved_implementation_core_revision);
+      expect(unchanged.saved_manual_revision).toBe(savedRevision);
+      await expect(agentReasoning).toHaveValue("ultracode");
+      await expect(detail.locator('[data-member-tuning-status]')).toContainText("unsupported");
+      await agentReasoning.fill("medium");
+      expect(tuningRequests).toHaveLength(requestsBeforeComposition + 1);
+      await detail.locator('[data-action="retry-tuning"]').click();
+      await expect.poll(() => tuningRequests.length).toBe(requestsBeforeComposition + 2);
+      await expect(detail.locator('[data-member-tuning-status]')).toHaveText("Saved");
+      await expect(revisionInput).not.toHaveValue(savedRevision!);
+      savedRevision = await revisionInput.inputValue();
+      savedCandidate.reasoning = "medium";
+      await expect(surface.locator(".roster-current-config")).toHaveText(expected);
+      await assertSharedSaved();
+      const agentModel = detail.locator('[data-member-tuning-field="model"]');
+      const requestsBeforeCustom = tuningRequests.length;
+      await agentModel.fill("private-model-4777");
+      await expect.poll(() => tuningRequests.length).toBe(requestsBeforeCustom + 1);
+      const customRequest = tuningRequests[requestsBeforeCustom];
+      const custom = await page.waitForFunction(requestId => ((window as any).__gwtPlaywrightMessages || []).find((entry: any) =>
+        entry.payload.request_id === requestId && entry.payload.kind === "agent_roster")?.payload.roster,
+      customRequest.request_id).then(handle => handle.jsonValue());
+      expect(custom.error).toBeNull();
+      expect(custom.members.find((value: any) => value.agent_member_id === memberId).saved_manual_profile.model).toBe("private-model-4777");
+      await expect(detail.locator('[data-member-tuning-status]')).toHaveText("Saved");
+      await expect(detail.locator('[data-model-unavailable]')).toContainText("an unlisted model may still be supported");
+      await agentModel.fill(savedCandidate.model);
+      await expect.poll(() => tuningRequests.length).toBe(requestsBeforeCustom + 2);
+      await expect(detail.locator('[data-member-tuning-status]')).toHaveText("Saved");
+      await expect(revisionInput).toHaveValue(savedRevision!);
+      await expect(surface.locator(".roster-current-config")).toHaveText(expected);
       const beforeSettings = await cursor(secondPage);
       await sendLiveGwtEvent(secondPage, { kind: "issue_monitor_configure_profile" });
       const openedSettings = await latestWizard(secondPage, beforeSettings, true);
@@ -1020,7 +1074,7 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       const before = await readRoster(page);
       const member = before.members.find(value => value.agent_member_id === memberId)!;
       expect(member.history.find(value => value.session_id === launch.gwt_session_id)).toMatchObject(facts);
-      await surface.locator(`.roster-row[data-member-id="${memberId}"]`).click();
+      await surface.locator(`.roster-row[data-member-id="${memberId}"] h3`).click();
       const beforeRename = await sessionRecord(fixture.home, launch.gwt_session_id);
       const sequence = await cursor(page);
       await surface.getByRole("textbox", { name: "Display name", exact: true }).fill("Current renamed member");
@@ -1034,7 +1088,7 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
         const saved = roster.members.find(value => value.agent_member_id === memberId)!;
         expect(saved.name).toBe("Current renamed member");
         expect(saved.history.find(value => value.session_id === launch.gwt_session_id)).toMatchObject(facts);
-        await surface.locator(`.roster-row[data-member-id="${memberId}"]`).click();
+        await surface.locator(`.roster-row[data-member-id="${memberId}"] h3`).click();
         await expect(surface.locator(".roster-history-config")).toContainText([expected]);
       };
       await assertHistory();
@@ -1113,7 +1167,6 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       const pmMemberId = pmMember.agent_member_id;
       expect(pmMemberId).not.toBe(memberId);
       expect(pmMemberId).not.toBe(spare.agent_member_id);
-      const detail = surface.locator(".roster-detail");
       await surface.locator(`.roster-row[data-member-id="${pmMemberId}"]`).click();
       await pmMutation("select_pm", () => detail.locator('[data-action="select-pm"]').click());
       const beforePmRead = await cursor(page);

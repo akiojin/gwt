@@ -537,7 +537,7 @@ export function renderMemberTuningControls(host, options) {
   const unlisted = Boolean(entry && (entry.id === "codex" || entry.models?.length) && model && !selectedModel);
   const modelUnavailable = host.querySelector("[data-model-unavailable]");
   modelUnavailable.textContent = unlisted
-    ? `Saved model ${model} is no longer offered by ${entry.name}. It is kept as saved and not replaced; choose a listed model before launching.`
+    ? `Model ${model} is not listed in the current ${entry.name} catalog. Your value is kept and not replaced; an unlisted model may still be supported.`
     : "";
   modelUnavailable.hidden = !unlisted;
   host.querySelector("[data-member-tuning-revision]").textContent = target ? `Revision: ${target.canonical.revision}` : "Settings unavailable. Reload registered members.";
