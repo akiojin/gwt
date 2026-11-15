@@ -879,6 +879,12 @@ mod tests {
         let generation: Uuid = serde_json::from_value(registered["generation"].clone()).unwrap();
         let ttl = registered["ttl_secs"].as_u64().unwrap();
         assert!((1..=30).contains(&ttl), "{registered}");
+        // The Host learns the message rate its registration is held to.
+        assert_eq!(
+            (&registered["messages_per_second"], &registered["burst"]),
+            (&json!(256), &json!(512)),
+            "{registered}"
+        );
         assert_eq!(live(&sessions), 1);
         let nonce = Uuid::new_v4();
         bounded(socket.send(Message::text(
@@ -1997,6 +2003,97 @@ mod tests {
         assert!(!host.read().unwrap().is_enabled());
         wait_until_closed(&sessions).await;
 
+        shutdown.send(()).unwrap();
+        bounded(task).await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn host_client_paces_its_signals_to_the_announced_host_rate() {
+        use crate::mobile_host::registration_client::{
+            ConnectionEvent, InviteOutcome, InviteRequest, OutboundSignal,
+        };
+        use futures_util::SinkExt as _;
+        use std::sync::RwLock;
+        use tokio::sync::{mpsc, watch};
+        use tokio_tungstenite::tungstenite::Message;
+        let mut fixture = Fixture::with_host_rate(2, 4);
+        let wall = real_wall();
+        let (credential, binding) = fixture.issue_credential(wall);
+        let server = fixture.start_at(wall).await;
+        let addr = server.local_addr().unwrap();
+        let sessions = Arc::clone(&server.sessions);
+        let (shutdown, signal) = oneshot::channel();
+        let task = tokio::spawn(server.serve_until(async move {
+            let _ = signal.await;
+        }));
+        let host = Arc::new(RwLock::new(
+            MobileAuthorization::load_bound(&fixture.home.join("devices.json"), &binding).unwrap(),
+        ));
+        let (stop, stopping) = watch::channel(false);
+        let (invites, requests) = mpsc::channel(1);
+        let (signals, outbound) = mpsc::channel(8);
+        let (events, mut connections) = mpsc::channel(32);
+        let client = {
+            let host = Arc::clone(&host);
+            let tls = fixture.client_config();
+            tokio::spawn(async move {
+                let tcp = TcpStream::connect(addr).await.unwrap();
+                run_registration(
+                    host,
+                    &credential,
+                    tls,
+                    tcp,
+                    stopping,
+                    requests,
+                    outbound,
+                    events,
+                )
+                .await
+            })
+        };
+        let (reply, outcome) = oneshot::channel();
+        let request = InviteRequest {
+            secret: zeroize::Zeroizing::new([1; 32]),
+            ttl_secs: 300,
+            reply,
+        };
+        bounded(invites.send(request)).await.ok().unwrap();
+        assert_eq!(bounded(outcome).await, Ok(InviteOutcome::Registered));
+        let origin = [("origin", "https://coordinator.example".to_string())];
+        let mut browser = open_path(&fixture, addr, BROWSER_CLAIM_PATH, &origin)
+            .await
+            .unwrap();
+        let claim = json!({"type":"claim_invite","secret":"01".repeat(32)}).to_string();
+        bounded(browser.send(Message::text(claim))).await.unwrap();
+        assert_eq!(next_json(&mut browser).await, json!({"type":"claimed"}));
+        let Some(ConnectionEvent::Claimed { connection_id, .. }) =
+            bounded(connections.recv()).await
+        else {
+            panic!("the first connection event must be the claim");
+        };
+
+        // More signals at once than the coordinator's burst allows: the client
+        // holds them to the announced rate instead of losing the registration.
+        for index in 0..6 {
+            let signal = OutboundSignal {
+                connection_id,
+                payload: format!("candidate-{index}"),
+            };
+            bounded(signals.send(signal)).await.ok().unwrap();
+        }
+        for index in 0..6 {
+            assert_eq!(
+                next_json(&mut browser).await,
+                json!({"type":"signal","payload":format!("candidate-{index}")})
+            );
+        }
+        assert!(host.read().unwrap().is_enabled());
+        assert_eq!(live(&sessions), 1);
+        assert!(!client.is_finished());
+
+        stop.send(true).unwrap();
+        assert!(matches!(bounded(client).await.unwrap(), Ok(())));
+        wait_until_closed(&sessions).await;
         shutdown.send(()).unwrap();
         bounded(task).await.unwrap().unwrap();
     }

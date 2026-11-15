@@ -7,7 +7,9 @@
 //! separate `browser_route`. The registration exists only while its socket is served: every
 //! exit path, including a failed upgrade, logically closes it once.
 //!
-//! The coordinator answers `{"type":"registered","generation","ttl_secs"}` and
+//! The coordinator answers
+//! `{"type":"registered","generation","ttl_secs","messages_per_second","burst"}`
+//! (the Host rate this socket is held to, so the Host can pace itself) and
 //! echoes each `{"type":"renew","generation","nonce"}` as `renewed` with the
 //! remaining lease seconds. The Host's request-start/nonce lease remains its own
 //! contract; this route never extends a lease beyond the domain deadline and
@@ -532,6 +534,7 @@ async fn serve_host(
 ) {
     let registered = serde_json::json!({
         "type": "registered", "generation": generation, "ttl_secs": ttl_secs(deadline),
+        "messages_per_second": budget.rate.per_second, "burst": budget.rate.burst,
     });
     if send_json(&mut socket, registered).await {
         loop {
