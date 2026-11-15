@@ -433,7 +433,7 @@ test.describe("Issue queue real backend launch", () => {
     expect(errors).toEqual([]);
   });
 
-  for (const afterAck of ["unchanged", "refresh cancel", "refresh draft", "refresh submit", "stop refresh draft", "initial draft", "input", "draft", "source edit", "cancel", "target removed", "worktree job", "cancel pending job", "unknown cwd", "restart"] as const) test(afterAck === "refresh cancel"
+  for (const afterAck of ["unchanged", "refresh cancel", "refresh draft", "refresh submit", "stop refresh draft", "stop refresh cancel", "initial draft", "input", "draft", "source edit", "cancel", "target removed", "worktree job", "cancel pending job", "unknown cwd", "restart"] as const) test(afterAck === "refresh cancel"
     ? "T94431 cancellation during target refresh prevents checkpoint delivery and permits a new switch"
     : afterAck === "refresh draft"
     ? "T94432 draft during target refresh preserves input and resumes the same switch"
@@ -441,6 +441,8 @@ test.describe("Issue queue real backend launch", () => {
     ? "T94433 submitted input during target refresh resumes with the new revision"
     : afterAck === "stop refresh draft"
     ? "T94434 draft during stop target refresh preserves saved source and input"
+    : afterAck === "stop refresh cancel"
+    ? "T94435 cancellation during stop target refresh preserves the saved source"
     : afterAck === "initial draft"
     ? "T94430 unsent draft before the first Switch request waits and resumes naturally"
     : afterAck === "input"
@@ -467,7 +469,7 @@ test.describe("Issue queue real backend launch", () => {
     const fixture = await startIssueQueueLaunchFixture(info, {
       page,
       targetIssueNumber: 44, switching: true, positive: true, autonomousMode: true,
-      targetRefreshGate: afterAck === "refresh cancel" || afterAck === "refresh draft" || afterAck === "refresh submit" || afterAck === "stop refresh draft",
+      targetRefreshGate: afterAck === "refresh cancel" || afterAck === "refresh draft" || afterAck === "refresh submit" || afterAck === "stop refresh draft" || afterAck === "stop refresh cancel",
     });
     const errors: string[] = [];
     const theme = info.project.name.includes("light") ? "light" : "dark";
@@ -972,17 +974,36 @@ test.describe("Issue queue real backend launch", () => {
         await info.attach("post-ack-source-edit-preserved", { body: JSON.stringify({ acknowledged, failed, saved }),
           contentType: "application/json" });
         await info.attach(`post-ack-source-edit-preserved-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
-      } else if (afterAck === "cancel" || afterAck === "target removed") {
+      } else if (afterAck === "cancel" || afterAck === "target removed" || afterAck === "stop refresh cancel") {
         const acknowledged = (await preferences()).agent_switch_intents[waiting.operation];
         expect(acknowledged.stage).toBe("checkpoint_verified");
         const checkpoint = fixture.savedSource(source.cwd);
         expect(checkpoint.porcelain).toBe("");
         const targetRemoved = afterAck === "target removed";
+        const lateCancel = afterAck === "stop refresh cancel";
         const stage = targetRemoved ? "failed" : "cancelled";
         const reason = targetRemoved
           ? "The current assignment or next plan changed. Current work is kept; refresh plans."
           : "Cancelled before stopping the current Session";
         const visibleReason = targetRemoved ? reason : "Switch cancelled";
+        if (lateCancel) {
+          await fixture.targetRefreshGate.arm();
+          await releaseNormalStop(waiting.operation);
+          await expect.poll(() => fixture.targetRefreshGate.waiting(), { timeout: 30_000 }).not.toBeNull();
+          const held = await fixture.targetRefreshGate.waiting();
+          expect(held.argv.slice(0, 3)).toEqual(["issue", "view", "44"]);
+          expect(held.parent).toBe(acknowledged.runtime_stop.host_pid);
+          expect(fixture.processAlive(held.pid)).toBe(true);
+          await expect.poll(async () => (await fixture.actorEvents()).some((entry: any) =>
+            entry.stage === "normal_n2_hook_returned" && entry.operation === waiting.operation
+              && entry.pid === source.pid && entry.gwt_session_id === source.gwt_session_id),
+          { timeout: 30_000 }).toBe(true);
+          expect((await preferences()).agent_switch_intents[waiting.operation]).toMatchObject({
+            stage: "checkpoint_verified", source: acknowledged.source, checkpoint: acknowledged.checkpoint });
+          expect(fixture.savedSource(source.cwd).porcelain).toBe("");
+          await info.attach("cancel-stop-target-refresh-held", { body: JSON.stringify({ held, acknowledged }),
+            contentType: "application/json" });
+        }
         if (targetRemoved) {
           await request({ kind: "issue_monitor_queue_remove", issue_numbers: [fixture.targetIssueNumber] },
             "issue_monitor_queue_result");
@@ -998,7 +1019,13 @@ test.describe("Issue queue real backend launch", () => {
         await expect.poll(async () => (await preferences()).agent_switch_intents[waiting.operation])
           .toMatchObject({ stage, reason });
         await expect(plans.locator(".roster-switch-status")).toContainText(visibleReason);
-        await releaseNormalStop(waiting.operation);
+        const cancelledBeforeRelease = (await preferences()).agent_switch_intents[waiting.operation];
+        if (lateCancel) {
+          await fixture.targetRefreshGate.release();
+          await expect.poll(() => fixture.targetRefreshGate.returned(), { timeout: 30_000 }).toBe(true);
+        } else {
+          await releaseNormalStop(waiting.operation);
+        }
         await expect.poll(async () => (await fixture.actorEvents()).some((entry: any) =>
           entry.stage === "normal_n2_hook_returned" && entry.operation === waiting.operation
             && entry.pid === source.pid && entry.gwt_session_id === source.gwt_session_id),
@@ -1035,10 +1062,11 @@ test.describe("Issue queue real backend launch", () => {
         })]));
         expect(work.board_refs).toContain(acknowledged.checkpoint.board_entry_id);
         await expect(plans.locator(".roster-switch-status")).toContainText(visibleReason);
+        if (lateCancel) expect((await preferences()).agent_switch_intents[waiting.operation]).toEqual(cancelledBeforeRelease);
         expect((await fixture.actorEvents()).filter((entry: any) => entry.stage === "actor_failed")).toEqual([]);
-        await info.attach(targetRemoved ? "post-ack-target-removal-preserved-source" : "post-ack-cancellation-preserved-source", { body: JSON.stringify({ acknowledged, cancelled, saved }),
+        await info.attach(targetRemoved ? "post-ack-target-removal-preserved-source" : lateCancel ? "stop-refresh-cancellation-preserved-source" : "post-ack-cancellation-preserved-source", { body: JSON.stringify({ acknowledged, cancelled, saved }),
           contentType: "application/json" });
-        await info.attach(`post-ack-${targetRemoved ? "target-removal" : "cancellation"}-preserved-source-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
+        await info.attach(`post-ack-${targetRemoved ? "target-removal" : lateCancel ? "stop-refresh-cancellation" : "cancellation"}-preserved-source-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
       } else {
         if (afterAck === "worktree job" || afterAck === "cancel pending job" || afterAck === "unknown cwd") {
           const acknowledged = (await preferences()).agent_switch_intents[waiting.operation];
