@@ -630,6 +630,9 @@ jobs:
           shared-key: windows-workspace
         continue-on-error: true
       - name: Build the complete core suite once
+        # Omit CI line tables; keep the same profile for the doctests below.
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
         run: node scripts/ci-windows-tests.mjs build core
         timeout-minutes: 20
       - name: Record the complete core test inventory
@@ -649,6 +652,8 @@ jobs:
       # cargo --no-run does not compile doctests. Keep all five original passes.
       - name: Run core doctests five times
         shell: pwsh
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
         run: |
           1..5 | ForEach-Object {
             cargo test -p gwt-core --all-features --doc

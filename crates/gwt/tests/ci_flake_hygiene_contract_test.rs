@@ -329,6 +329,27 @@ fn windows_core_stability_runs_the_complete_suite_five_times_at_default_parallel
     assert_eq!(producer["needs"].as_str(), Some("source-sync"));
     assert_eq!(producer["if"].as_str(), Some("${{ !cancelled() }}"));
     let producer_steps = run_steps(&producer);
+    let build_steps = producer["steps"].as_sequence().unwrap();
+    let cache = build_steps
+        .iter()
+        .position(|step| step["uses"].as_str() == Some("Swatinem/rust-cache@v2"))
+        .unwrap();
+    for command in [
+        "node scripts/ci-windows-tests.mjs build core",
+        "cargo test -p gwt-core --all-features --doc",
+    ] {
+        let index = build_steps
+            .iter()
+            .position(|step| {
+                step["run"]
+                    .as_str()
+                    .is_some_and(|run| run.contains(command))
+            })
+            .unwrap();
+        assert!(index > cache, "retain the shared cache configuration");
+        assert_eq!(build_steps[index]["env"]["CARGO_PROFILE_DEV_DEBUG"], "0");
+    }
+    assert!(producer["env"]["CARGO_PROFILE_DEV_DEBUG"].is_null());
     assert_eq!(
         producer_steps
             .iter()
