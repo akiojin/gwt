@@ -204,6 +204,7 @@ impl CoordinatorServer {
             connections: Default::default(),
             signal_rate,
             host_rate,
+            opens: Arc::new(browser_route::OpenBudgets::new(signal_rate)),
         };
         let router = with_http_boundary(
             axum::Router::new()
@@ -220,10 +221,13 @@ impl CoordinatorServer {
             shutdown.await;
             let _ = stop.send(true);
         };
-        let result = axum::serve(listener, router)
-            .with_graceful_shutdown(shutdown)
-            .await
-            .map_err(|_| StartupError::ServeUnavailable);
+        let result = axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<super::listener::PeerAddr>(),
+        )
+        .with_graceful_shutdown(shutdown)
+        .await
+        .map_err(|_| StartupError::ServeUnavailable);
         if result.is_ok() {
             // Every sender is gone once the router and all Host sockets end.
             while sockets.recv().await.is_some() {}
@@ -1809,6 +1813,47 @@ mod tests {
 
         drop(quiet);
         drop(host);
+        wait_until_closed(&sessions).await;
+        shutdown.send(()).unwrap();
+        bounded(task).await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn browser_opens_are_rate_limited_per_source_before_upgrading() {
+        let mut fixture = Fixture::with_device_rate(1, 2);
+        let wall = real_wall();
+        let valid = fixture.issue_token(wall);
+        let server = fixture.start_at(wall).await;
+        let addr = server.local_addr().unwrap();
+        let sessions = Arc::clone(&server.sessions);
+        let (shutdown, signal) = oneshot::channel();
+        let task = tokio::spawn(server.serve_until(async move {
+            let _ = signal.await;
+        }));
+        let origin = [("origin", "https://coordinator.example".to_string())];
+
+        // Claims and reconnects from one source share its burst.
+        let claim = open_path(&fixture, addr, BROWSER_CLAIM_PATH, &origin).await;
+        let reconnect = open_path(&fixture, addr, BROWSER_RECONNECT_PATH, &origin).await;
+        assert!(claim.is_ok() && reconnect.is_ok());
+        for path in [BROWSER_CLAIM_PATH, BROWSER_RECONNECT_PATH] {
+            assert_eq!(
+                open_path(&fixture, addr, path, &origin).await.err(),
+                Some(429)
+            );
+        }
+        // A Host registration is not a browser open.
+        let auth = [("authorization", format!("Bearer {valid}"))];
+        let mut host = open_host(&fixture, addr, &auth).await.unwrap();
+        assert_eq!(next_json(&mut host).await["type"], "registered");
+
+        // The budget refills at the configured rate.
+        tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+        assert!(open_path(&fixture, addr, BROWSER_CLAIM_PATH, &origin)
+            .await
+            .is_ok());
+
+        drop((claim, reconnect, host));
         wait_until_closed(&sessions).await;
         shutdown.send(()).unwrap();
         bounded(task).await.unwrap().unwrap();

@@ -29,6 +29,10 @@
 //! second); a message beyond it is not relayed, and the browser is sent
 //! `{"type":"rate_limited"}` and closed. Nothing is queued or retried.
 //!
+//! Every upgrade request on either browser path spends one token of its
+//! source's budget (the configured device rate, keyed like the listener's
+//! per-peer slots). One beyond it is refused with 429 before upgrading.
+//!
 //! A claimed socket ends when the server stops, when its Host registration is
 //! logically closed or its lease passes. Every exit after a claim logically
 //! closes that connection once and announces `connection_closed` to the Host;
@@ -36,13 +40,14 @@
 
 use super::host_route::{
     announce_open, call, BrowserConnections, HostEvent, HostState, SharedSessions, SignalBudget,
-    BROWSER_BACKLOG,
+    SignalRate, BROWSER_BACKLOG,
 };
+use super::listener::{peer_key, PeerAddr};
 use super::registration::RegistrationHandle;
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        State,
+        ConnectInfo, State,
     },
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
@@ -51,7 +56,9 @@ use gwt_core::repo_hash::ProjectKey;
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
 use std::{
-    sync::Arc,
+    collections::HashMap,
+    net::{IpAddr, SocketAddr},
+    sync::{Arc, Mutex, PoisonError},
     time::{Duration, Instant},
 };
 use tokio::sync::{mpsc, watch};
@@ -102,23 +109,69 @@ enum ClaimedMessage {
     Signal { payload: String },
 }
 
+/// Each source's token bucket for browser upgrade requests. A bucket that has
+/// refilled to its burst is dropped, so only recently active sources are kept.
+pub(super) struct OpenBudgets {
+    rate: SignalRate,
+    sources: Mutex<HashMap<IpAddr, SignalBudget>>,
+}
+
+impl OpenBudgets {
+    pub(super) fn new(rate: SignalRate) -> Self {
+        Self {
+            rate,
+            sources: Mutex::default(),
+        }
+    }
+
+    /// Spends one of `peer`'s tokens at `now`; `false` when none is left.
+    pub(super) fn take(&self, peer: SocketAddr, now: Instant) -> bool {
+        let mut sources = self.sources.lock().unwrap_or_else(PoisonError::into_inner);
+        sources.retain(|_, budget| !budget.is_full(now));
+        sources
+            .entry(peer_key(peer.ip()))
+            .or_insert_with(|| SignalBudget::new(self.rate, now))
+            .take(now)
+    }
+
+    #[cfg(test)]
+    fn sources(&self) -> usize {
+        self.sources.lock().unwrap().len()
+    }
+}
+
 pub(super) async fn claim(
     State(state): State<HostState>,
+    ConnectInfo(PeerAddr(peer)): ConnectInfo<PeerAddr>,
     headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Response {
-    open(state, headers, upgrade, Entry::Claim)
+    open(state, peer, headers, upgrade, Entry::Claim)
 }
 
 pub(super) async fn reconnect(
     State(state): State<HostState>,
+    ConnectInfo(PeerAddr(peer)): ConnectInfo<PeerAddr>,
     headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Response {
-    open(state, headers, upgrade, Entry::Reconnect)
+    open(state, peer, headers, upgrade, Entry::Reconnect)
 }
 
-fn open(state: HostState, headers: HeaderMap, upgrade: WebSocketUpgrade, entry: Entry) -> Response {
+fn open(
+    state: HostState,
+    peer: SocketAddr,
+    headers: HeaderMap,
+    upgrade: WebSocketUpgrade,
+    entry: Entry,
+) -> Response {
+    if !state.opens.take(peer, Instant::now()) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            "coordinator browser requests from this source exceed the configured rate",
+        )
+            .into_response();
+    }
     if !headers.contains_key(header::ORIGIN) {
         return (
             StatusCode::FORBIDDEN,
@@ -254,6 +307,7 @@ async fn serve_browser(mut socket: WebSocket, state: HostState, entry: Entry) {
         connections,
         signal_rate,
         host_rate: _,
+        opens: _,
     } = state;
     // Subscribe before claiming so a registration closed meanwhile is seen.
     let mut retired = retired.subscribe();
@@ -398,5 +452,36 @@ async fn hold(
             }
             _ = stopping.wait_for(|stopped| *stopped) => return,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::SocketAddr;
+
+    #[test]
+    fn open_budgets_are_kept_per_source_key_and_dropped_once_refilled() {
+        let start = Instant::now();
+        let opens = OpenBudgets::new(SignalRate {
+            per_second: 1,
+            burst: 2,
+        });
+        let a: SocketAddr = "192.0.2.1:1000".parse().unwrap();
+        let a_mapped: SocketAddr = "[::ffff:192.0.2.1]:2000".parse().unwrap();
+        let b: SocketAddr = "[2001:db8::1]:3000".parse().unwrap();
+        let b_same_64: SocketAddr = "[2001:db8::2]:3000".parse().unwrap();
+        assert!(opens.take(a, start));
+        assert!(opens.take(a_mapped, start));
+        assert!(!opens.take(a, start));
+        assert!(opens.take(b, start));
+        assert!(opens.take(b_same_64, start));
+        assert!(!opens.take(b, start));
+        assert_eq!(opens.sources(), 2);
+        // Every bucket is full again after burst / rate seconds and is dropped.
+        let later = start + Duration::from_secs(2);
+        let c: SocketAddr = "198.51.100.7:1".parse().unwrap();
+        assert!(opens.take(c, later));
+        assert_eq!(opens.sources(), 1);
     }
 }

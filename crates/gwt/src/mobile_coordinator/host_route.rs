@@ -197,6 +197,8 @@ pub(super) struct HostState {
     pub(super) signal_rate: SignalRate,
     /// The configured message rate of each Host registration socket.
     pub(super) host_rate: SignalRate,
+    /// Each source's budget for browser claim/reconnect upgrade requests.
+    pub(super) opens: Arc<super::browser_route::OpenBudgets>,
 }
 
 /// A token-bucket policy: `burst` messages at once, refilled at
@@ -222,6 +224,12 @@ impl SignalBudget {
             tokens: f64::from(rate.burst),
             refilled: now,
         }
+    }
+
+    /// Whether the bucket has refilled to its burst by `now`.
+    pub(super) fn is_full(&self, now: Instant) -> bool {
+        let elapsed = now.saturating_duration_since(self.refilled).as_secs_f64();
+        self.tokens + elapsed * f64::from(self.rate.per_second) >= f64::from(self.rate.burst)
     }
 
     /// Spends one token at `now`; `false` when none is left.
