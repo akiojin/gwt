@@ -1565,6 +1565,19 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
     });
     const windows = async () => workspace?.tabs.flatMap((tab: any) => tab.workspace.windows)
       .filter((window: any) => window.session_id) ?? [];
+    const waitForMeasuredChildren = async (expected: number) => {
+      await expect.poll(async () => {
+        const launches = await fixture.launches();
+        if (launches.length !== expected) return false;
+        const capacity = JSON.parse(await readFile(join(fixture.home, ".gwt", "machine-state", "agent-capacity.json"), "utf8"));
+        const now = Date.now() / 1000;
+        return capacity.observed_at <= now && now < capacity.expires_at
+          && capacity.machine_budget >= 5 && capacity.inventory.uncertainties.length === 0
+          && launches.every(launch => capacity.inventory.sessions.some((row: any) =>
+            row.session.session_id === launch.gwt_session_id && row.session.child_pid === launch.pid
+              && row.session.child_started_at > 0));
+      }, { timeout: 45_000, message: "previous children have a fresh exact census before the next manual launch" }).toBe(true);
+    };
     const receipts = async () => (await readFile(join(fixture.home, "works-hook-receipts.jsonl"), "utf8")
       .catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return ""; throw error; }))
       .split("\n").slice(0, -1).filter(Boolean).map(line => JSON.parse(line));
@@ -1617,10 +1630,12 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
         .at(-1)?.payload.status.view_state)).toBe("open");
       await sendLiveGwtEvent(page, { kind: "open_pm_agent" });
       await expect.poll(async () => (await windows()).filter((window: any) => window.is_pm).length, { timeout: 90_000 }).toBe(1);
+      await waitForMeasuredChildren(1);
       for (let i = 1; i <= 4; i += 1) {
         await launchCodex(page, `worker-${i}`);
         await expect.poll(async () => (await windows()).filter((window: any) => window.agent_id === "codex").length,
           { timeout: 60_000 }).toBe(i);
+        await waitForMeasuredChildren(i + 1);
       }
       await expect.poll(async () => (await windows()).length, { timeout: 60_000 }).toBe(5);
       const live = await windows(), pm = live.find((window: any) => window.is_pm);
