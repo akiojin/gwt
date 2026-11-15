@@ -19,9 +19,13 @@
 //! sender only ends invite input, not the registration.
 //!
 //! The coordinator announces browser connections that claimed this
-//! registration's invites; each becomes a [`ConnectionEvent`] for the caller.
+//! registration's invites, the opaque signals each relays and its close; each
+//! becomes a [`ConnectionEvent`] for the caller.
 //! A caller that stopped receiving is ignored, but a full event channel ends
 //! the registration (`EventBacklog`) rather than lose a connection's state.
+//! Signals may use only half the channel: a signal beyond that is dropped and
+//! its connection closed through the coordinator (`close_connection`), so one
+//! browser cannot end the registration for the others.
 
 use super::credential::LoadedHostCredential;
 use crate::mobile_connection::{AuthorizationError, MobileAuthorization};
@@ -72,11 +76,20 @@ pub enum RegistrationClientError {
     EventBacklog,
 }
 
-/// A browser connection that claimed one of this registration's invites.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A browser connection that claimed one of this registration's invites, and
+/// the opaque signals it relays to this Host.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConnectionEvent {
-    Claimed { connection_id: Uuid },
-    Closed { connection_id: Uuid },
+    Claimed {
+        connection_id: Uuid,
+    },
+    Signal {
+        connection_id: Uuid,
+        payload: String,
+    },
+    Closed {
+        connection_id: Uuid,
+    },
 }
 
 /// A pairing invite for the coordinator to admit under this registration.
@@ -139,6 +152,11 @@ enum CoordinatorMessage {
     ConnectionClaimed {
         generation: Uuid,
         connection_id: Uuid,
+    },
+    ConnectionSignal {
+        generation: Uuid,
+        connection_id: Uuid,
+        payload: String,
     },
     ConnectionClosed {
         generation: Uuid,
@@ -336,6 +354,17 @@ async fn register_and_renew(
                 {
                     report(&events, ConnectionEvent::Claimed { connection_id })?;
                 }
+                CoordinatorMessage::ConnectionSignal { generation: scoped, connection_id, payload }
+                    if scoped == generation =>
+                {
+                    // Half the channel stays free for claimed/closed events: a
+                    // browser outpacing the caller loses only its own connection.
+                    if events.capacity() > events.max_capacity() / 2 {
+                        report(&events, ConnectionEvent::Signal { connection_id, payload })?;
+                    } else {
+                        send_close(&mut socket, generation, connection_id).await?;
+                    }
+                }
                 CoordinatorMessage::ConnectionClosed { generation: scoped, connection_id }
                     if scoped == generation =>
                 {
@@ -387,6 +416,21 @@ async fn send_renew(
     nonce: Uuid,
 ) -> Result<(), RegistrationClientError> {
     let text = serde_json::json!({"type": "renew", "generation": generation, "nonce": nonce});
+    socket
+        .send(Message::text(text.to_string()))
+        .await
+        .map_err(|_| RegistrationClientError::Closed)
+}
+
+/// Asks the coordinator to close one claimed connection of this registration.
+async fn send_close(
+    socket: &mut Socket,
+    generation: Uuid,
+    connection_id: Uuid,
+) -> Result<(), RegistrationClientError> {
+    let text = serde_json::json!({
+        "type": "close_connection", "generation": generation, "connection_id": connection_id,
+    });
     socket
         .send(Message::text(text.to_string()))
         .await

@@ -811,18 +811,6 @@ jobs:
           node scripts/ci-windows-tests.mjs run-runtime gwt-core test windows_process_resolver
           node scripts/ci-windows-tests.mjs run-runtime gwt-core test process_adapter_parity
         timeout-minutes: 15
-      - name: Run real Windows cmd health and ConPTY parity
-        env:
-          CARGO_PROFILE_DEV_DEBUG: "0"
-        run: python crates/gwt-core/tests/fixtures/run_windows_cmd_runner_probe.py
-        timeout-minutes: 15
-      - name: Preserve Windows cmd consumer provenance
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v7
-        with:
-          name: windows-cmd-consumer-provenance
-          path: target/issue6474-probe/green.json
-          if-no-files-found: error
       - name: Run real Claude probe caller regressions
         shell: bash
         run: |
@@ -862,29 +850,49 @@ jobs:
       - name: Run agent process resolver caller contracts
         run: 'node scripts/ci-windows-tests.mjs run-runtime gwt test runtime_tests agent_process_resolution_contract_test::'
         timeout-minutes: 15
-      - name: Run Windows verification driver relink regression
+      - name: Run Windows cmd probe and verification driver regressions
         # Issue #5466 AC-4: all ten passes retain their real-artifact assertions.
         # Each process has private fixture HOME/project/target directories.
+        # The cmd probe writes only its own artifacts; overlap its build/wait
+        # with the five drivers. Its former 15m cap shares this step's 20m cap.
         run: |
-          $jobs = 1..5 | ForEach-Object {
-            Start-Job -ArgumentList (Get-Location).Path,$_ -ScriptBlock {
-              param($repo, $worker)
+          $jobs = @()
+          try {
+            $jobs += Start-Job -ArgumentList (Get-Location).Path -ScriptBlock {
+              param($repo)
+              $ErrorActionPreference = 'Stop'
               Set-Location $repo
-              for ($attempt = 1; $attempt -le 2; $attempt++) {
-                Write-Host "Windows verification driver worker $worker attempt $attempt of 2"
-                node scripts/ci-windows-tests.mjs run-runtime gwt test cli_contracts verification_driver_cli_test:: -- --test-threads=1
-                if ($LASTEXITCODE -ne 0) { throw "driver worker $worker failed ($LASTEXITCODE)" }
+              $env:CARGO_PROFILE_DEV_DEBUG = '0'
+              python crates/gwt-core/tests/fixtures/run_windows_cmd_runner_probe.py
+              if ($LASTEXITCODE -ne 0) { throw "cmd probe failed ($LASTEXITCODE)" }
+            }
+            1..5 | ForEach-Object {
+              $jobs += Start-Job -ArgumentList (Get-Location).Path,$_ -ScriptBlock {
+                param($repo, $worker)
+                $ErrorActionPreference = 'Stop'
+                Set-Location $repo
+                for ($attempt = 1; $attempt -le 2; $attempt++) {
+                  Write-Host "Windows verification driver worker $worker attempt $attempt of 2"
+                  node scripts/ci-windows-tests.mjs run-runtime gwt test cli_contracts verification_driver_cli_test:: -- --test-threads=1
+                  if ($LASTEXITCODE -ne 0) { throw "driver worker $worker failed ($LASTEXITCODE)" }
+                }
               }
             }
-          }
-          try {
             $results = $jobs | Wait-Job
             $results | Receive-Job -ErrorAction Continue
             if (@($results | Where-Object State -ne Completed).Count -ne 0) { exit 1 }
           } finally {
+            $jobs | Wait-Job | Out-Null
             $jobs | Remove-Job -Force
           }
         timeout-minutes: 20
+      - name: Preserve Windows cmd consumer provenance
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-cmd-consumer-provenance
+          path: target/issue6474-probe/green.json
+          if-no-files-found: error
       - name: Run release asset contract tests
         run: node scripts/test_release_assets.cjs
         timeout-minutes: 15
