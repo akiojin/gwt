@@ -93,6 +93,9 @@ pub enum AgentRosterAction {
     Rest {
         member_id: String,
     },
+    Activate {
+        member_id: String,
+    },
     Rename {
         member_id: String,
         name: String,
@@ -880,6 +883,14 @@ pub(crate) fn apply_roster_action(
             roster
                 .resize(size, history, default_tool)
                 .map_err(std::io::Error::other)?;
+        }
+        AgentRosterAction::Activate { ref member_id } => {
+            roster
+                .members
+                .iter_mut()
+                .find(|member| member.agent_member_id == *member_id)
+                .ok_or_else(|| std::io::Error::other("Agent member no longer exists"))?
+                .enabled = true;
         }
         AgentRosterAction::Rest { ref member_id } => {
             if roster.members.iter().any(|member| {
@@ -2473,9 +2484,65 @@ mod tests {
             "resting keeps the registered name"
         );
         assert_eq!(read_project_roster(&root, &sessions).unwrap(), rested);
+        let other = register("Earlier", rested.revision).unwrap();
+        let other_id = other.members.last().unwrap().agent_member_id.clone();
+        let both_resting = mutate_project_roster(
+            &root,
+            &sessions,
+            AgentRosterAction::Rest {
+                member_id: other_id.clone(),
+            },
+            Some(other.revision),
+        )
+        .unwrap();
+        let machine_path = crate::machine_agent_settings::path();
+        let machine_before = std::fs::read(&machine_path).ok();
+        let activate = || {
+            serde_json::from_value(serde_json::json!({
+                "kind": "activate", "member_id": other_id,
+            }))
+            .unwrap()
+        };
+        assert!(
+            mutate_project_roster(&root, &sessions, activate(), Some(rested.revision)).is_err()
+        );
+        let missing =
+            serde_json::from_value(serde_json::json!({"kind": "activate", "member_id": "missing"}))
+                .unwrap();
+        assert!(
+            mutate_project_roster(&root, &sessions, missing, Some(both_resting.revision))
+                .unwrap_err()
+                .contains("no longer exists")
+        );
+        assert_eq!(read_project_roster(&root, &sessions).unwrap(), both_resting);
+        let active =
+            mutate_project_roster(&root, &sessions, activate(), Some(both_resting.revision))
+                .unwrap();
+        let mut expected = both_resting.clone();
+        expected.revision += 1;
+        expected
+            .members
+            .iter_mut()
+            .find(|value| value.agent_member_id == other_id)
+            .unwrap()
+            .enabled = true;
+        assert_eq!(active, expected, "only the named member becomes enabled");
+        assert!(
+            !active
+                .members
+                .iter()
+                .find(|value| value.agent_member_id == member.agent_member_id)
+                .unwrap()
+                .enabled
+        );
+        assert_eq!(
+            mutate_project_roster(&root, &sessions, activate(), Some(active.revision)).unwrap(),
+            active
+        );
+        assert_eq!(std::fs::read(&machine_path).ok(), machine_before);
         let legacy = serde_json::from_value(serde_json::json!({"kind": "add"})).unwrap();
         let legacy =
-            mutate_project_roster(&root, &sessions, legacy, Some(rested.revision)).unwrap();
+            mutate_project_roster(&root, &sessions, legacy, Some(active.revision)).unwrap();
         assert_ne!(legacy.members.last().unwrap().name.to_lowercase(), "maple");
     }
 

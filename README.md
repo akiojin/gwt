@@ -771,6 +771,9 @@ The same member can work in different projects at the same time, with one assign
 Agents lists those project assignments together; selecting another project's assignment opens that project.
 Resting members remain in Agents with their saved settings and history;
 they do not receive new work.
+Choose **Reactivate** on a resting member's row to make that same member available again.
+If a new name is already registered, the message identifies its member and tool;
+**Show member** opens that row so you can reactivate or rename it.
 A new Issue reuses an available member; a continuation prefers its previous member when available.
 New member names are unique across the shared roster and use localized family names when needed.
 Saved manual model, reasoning and Fast Mode follow the member; runtime, permission and routing settings remain project-specific.

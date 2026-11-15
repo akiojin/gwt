@@ -6053,6 +6053,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
           requestAgentRoster({ kind: "add", agent_id: agentId, name, pm_eligible: pmEligible });
         },
         onRestMember: memberId => requestAgentRoster({ kind: "rest", member_id: memberId }),
+        onActivateMember: memberId => requestAgentRoster({ kind: "activate", member_id: memberId }),
         onSwitch: requestAgentSwitch,
         onOpenSavedWork: () => openSurface("works"),
         onContinueSavedWork: (workId) => continueWorkDispatcher.dispatch(workId),

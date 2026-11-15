@@ -835,6 +835,29 @@ test.describe("Works and Agents approved baseline", () => {
     await expectNoHorizontalOverflow(page, ".agents-surface:not([hidden]):not(.agents-surface--preview)");
     await resting.scrollIntoViewIfNeeded();
     await page.screenshot({ path: info.outputPath("agents-resting-reload-400.png") });
+    // The collision route reveals the canonical resting identity without a write.
+    const beforeActivation = (await sent(page)).filter(message => message.kind === "agent_roster" && message.action.kind !== "read");
+    await roster(page).getByLabel("Name for new member", { exact: true }).fill(" DAHLIA ");
+    const conflict = roster(page).locator("#roster-registration-error");
+    await expect(conflict).toContainText("Dahlia (codex) is resting");
+    await expect(roster(page).locator('.roster-capacity [data-action="add"]')).toBeDisabled();
+    await conflict.getByRole("button", { name: "Show member", exact: true }).click();
+    await expect(resting).toBeFocused();
+    expect((await sent(page)).filter(message => message.kind === "agent_roster" && message.action.kind !== "read")).toEqual(beforeActivation);
+    await resting.getByRole("button", { name: "Reactivate", exact: true }).click();
+    await expect(resting.locator(".roster-state")).toHaveText("Waiting");
+    const activation = (await sent(page)).filter(message => message.kind === "agent_roster" && message.action.kind === "activate");
+    expect(activation).toHaveLength(1);
+    expect(activation[0].action).toEqual({ kind: "activate", member_id: "m-added" });
+    expect(await page.evaluate(() => (window as any).__worksAgentsFixture.members.find(member => member.agent_member_id === "m-added"))).toEqual(beforeRest);
+    await expect(roster(page).locator(".roster-count")).toHaveText("4");
+    await expectNoHorizontalOverflow(page, ".agents-surface:not([hidden]):not(.agents-surface--preview)");
+    await page.screenshot({ path: info.outputPath("agents-reactivated-400.png") });
+    await page.reload();
+    await openRail(page, "agents");
+    await expect(resting.locator(".roster-state")).toHaveText("Waiting");
+    expect(await page.evaluate(() => (window as any).__worksAgentsFixture.members.find(member => member.agent_member_id === "m-added"))).toEqual(beforeRest);
+
   });
 
   // SPEC #6476 T-005g (AC-1): on a phone the Agents controls kept their
@@ -1278,6 +1301,7 @@ async function installWorksAgentsBackend(page: Page) {
           if (message.action.kind === "select_pm") { const member = members.find(member => member.agent_member_id === message.action.member_id); if (member?.pm_eligible && member.enabled && !member.assignment) { pmMemberId = member.agent_member_id; member.is_pm = true; member.pm_project_key = projectKey; revision++; this.emit(pmStatus()); } }
           if (message.action.kind === "add") { members.push({ agent_member_id: "m-added", agent_id: message.action.agent_id, name: message.action.name, pm_eligible: message.action.pm_eligible === true, enabled: true, created_at: "2026-10-25T00:00:00Z", last_issue_number: null, last_spec_number: null, assignment: null, provider: null, model: null, history: [], issue_count: 0, landed_count: 0, active_seconds: 0, tokens: 0 }); revision++; }
           if (message.action.kind === "rest") { const member = members.find(member => member.agent_member_id === message.action.member_id); if (member) { member.enabled = false; revision++; } }
+          if (message.action.kind === "activate") { const member = members.find(member => member.agent_member_id === message.action.member_id); if (member && !member.enabled) { member.enabled = true; revision++; } }
           if (message.action.kind !== "read") sessionStorage.setItem("fixture:works-roster", JSON.stringify({ members, revision }));
           if (message.action.kind === "set_pm_eligibility" && deferredEligibility) {
             pendingEligibilityReceipt = JSON.stringify({ ...rosterSnapshot(), request_id: message.request_id }); return;
