@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdir, readFile, readdir, realpath, rmdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, realpath, rename, rmdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { startIssueQueueLaunchFixture } from "./_helpers/issue-queue-launch";
 import { gotoLiveGwt, sendLiveGwtEvent } from "./_helpers/live-gwt";
@@ -375,7 +375,7 @@ test.describe("Issue queue real backend launch", () => {
     expect(errors).toEqual([]);
   });
 
-  for (const afterAck of ["unchanged", "input", "source edit", "cancel", "target removed", "worktree job", "cancel pending job", "unknown cwd"] as const) test(afterAck === "input"
+  for (const afterAck of ["unchanged", "input", "source edit", "cancel", "target removed", "worktree job", "cancel pending job", "unknown cwd", "restart"] as const) test(afterAck === "input"
     ? "T94421 input after checkpoint ACK preserves the source without switching"
     : afterAck === "source edit"
       ? "T94422 source edit after checkpoint ACK preserves unsaved work without switching"
@@ -389,7 +389,9 @@ test.describe("Issue queue real backend launch", () => {
               ? "T94426 cancellation while a post-ACK job is pending survives ordinary job exit"
               : afterAck === "unknown cwd"
                 ? "T94427 unknown job cwd after checkpoint ACK holds the source until ordinary job exit"
-                : "T20b saved checkpoint switches through the real Host and Issues", async ({ page }, info) => {
+                : afterAck === "restart"
+                  ? "T94428 owner restart after checkpoint ACK preserves saved work without replay"
+                  : "T20b saved checkpoint switches through the real Host and Issues", async ({ page }, info) => {
     test.skip(process.platform !== "linux" || process.env.GWT_PLAYWRIGHT_SWITCH_POSITIVE !== "1",
       "positive proof requires the isolated Linux root process namespace");
     const fixture = await startIssueQueueLaunchFixture(info, {
@@ -403,6 +405,11 @@ test.describe("Issue queue real backend launch", () => {
     page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
     const preferences = async () => JSON.parse((await fixture.monitorPreferencesBytes()).toString());
     const actor = async (stage: string) => (await fixture.actorEvents()).find((entry: any) => entry.stage === stage);
+    const releaseNormalStop = async (operation: string) => {
+      const path = join(fixture.home, `normal-n2-${operation}.json`);
+      await writeFile(`${path}.tmp`, JSON.stringify({ operation }));
+      await rename(`${path}.tmp`, path);
+    };
     const session = async (id: string) => readFile(join(fixture.home, ".gwt", "sessions", `${id}.toml`), "utf8");
     const field = (record: string, key: string) => record.match(new RegExp(`^${key}\\s*=\\s*"([^"]*)"`, "m"))?.[1];
     const request = async (event: unknown, kind: string, timeout = 30_000): Promise<any> => {
@@ -493,7 +500,78 @@ test.describe("Issue queue real backend launch", () => {
       expect(fixture.processAlive(source.pid)).toBe(true);
       expect(fixture.processAlive(idle.tree_child_pid)).toBe(true);
       expect(await fixture.launches()).toHaveLength(1);
-      if (afterAck === "input") {
+      if (afterAck === "restart") {
+        const acknowledged = (await preferences()).agent_switch_intents[waiting.operation];
+        expect(acknowledged.stage).toBe("checkpoint_verified");
+        const checkpoint = fixture.savedSource(source.cwd);
+        expect(checkpoint.porcelain).toBe("");
+        const savedWork = (await fixture.workItems()).work_items.find((value: any) => value.id === acknowledged.checkpoint.work_id);
+        expect(savedWork).toMatchObject({ owner: "Issue #43", status_category: "idle" });
+        expect(savedWork.board_refs).toContain(acknowledged.checkpoint.board_entry_id);
+        const context = page.context();
+        await page.close();
+        // The fixture replaces its owned Host and cleans up its old providers;
+        // their exit here is not a successful Switch stop.
+        await fixture.restartRuntime(acknowledged.runtime_stop.host_pid);
+        page = await context.newPage();
+        page.on("pageerror", error => errors.push(error.message));
+        page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+        await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+        await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
+        await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+        await expect.poll(async () => (await preferences()).agent_switch_intents[waiting.operation]?.stage,
+          { timeout: 45_000 }).toBe("cancelled");
+        await expect.poll(async () => (await fixture.launches()).length, { timeout: 45_000 }).toBe(2);
+        const restored = (await fixture.launches())[1];
+        expect(restored.provider_session_id).toBe(source.provider_session_id);
+        expect(restored.resume_session_id).toBe(source.provider_session_id);
+        expect(restored.gwt_session_id).toBeTruthy();
+        expect(restored.pid).not.toBe(source.pid);
+        await expect.poll(async () => (await fixture.actorEvents()).some((entry: any) =>
+          entry.stage === "idle" && entry.pid === restored.pid && entry.gwt_session_id === restored.gwt_session_id),
+        { timeout: 60_000 }).toBe(true);
+        const prefs = await preferences();
+        const cancelled = prefs.agent_switch_intents[waiting.operation];
+        expect(cancelled).toMatchObject({ stage: "cancelled", source: acknowledged.source,
+          checkpoint: acknowledged.checkpoint, runtime_stop: acknowledged.runtime_stop });
+        expect(cancelled.runtime_exit_confirmed).not.toBe(true);
+        expect(prefs.monitor_runtime_stop_requests || []).toEqual([]);
+        const assignment = prefs.agent_roster.members.find((value: any) => value.agent_member_id === member.agent_member_id).assignment;
+        expect(assignment).toMatchObject({ issue_number: 43, session_id: restored.gwt_session_id });
+        expect(assignment.host_pid).toBeGreaterThan(0);
+        expect(assignment.host_pid).not.toBe(acknowledged.runtime_stop.host_pid);
+        expect(fixture.processAlive(acknowledged.runtime_stop.host_pid)).toBe(false);
+        expect(fixture.processAlive(source.pid)).toBe(false);
+        expect(fixture.processAlive(idle.tree_child_pid)).toBe(false);
+        expect(fixture.processAlive(restored.pid)).toBe(true);
+        expect(await fixture.launchIssues()).toEqual([43, 43]);
+        expect(fixture.requests.filter(request => request.method === "POST"
+          && request.url === "/repos/fixture/queue/issues/44/comments")).toEqual([]);
+        expect(fixture.executionStatus(source.cwd).ecr_status).toBe("active");
+        const saved = fixture.savedSource(source.cwd);
+        expect(saved).toMatchObject({ branch: checkpoint.branch, head: checkpoint.head, remoteHead: checkpoint.remoteHead });
+        for (const line of saved.porcelain.split("\n").filter(Boolean))
+          expect(line).toMatch(/^\?\? \.gwt\/work\/events\/[0-9a-f]{2}\/[0-9a-f]{64}\.jsonl$/);
+        const work = (await fixture.workItems()).work_items.find((value: any) => value.id === savedWork.id);
+        expect(work).toMatchObject({ owner: "Issue #43" });
+        expect(["idle", "active"]).toContain(work.status_category);
+        expect(work.events).toEqual(expect.arrayContaining(savedWork.events));
+        expect(work.board_refs).toContain(acknowledged.checkpoint.board_entry_id);
+        const resumedNormal = (await fixture.actorEvents()).find((entry: any) => entry.stage === "normal_n1"
+          && entry.pid === restored.pid && entry.gwt_session_id === restored.gwt_session_id);
+        expect(resumedNormal.current_hook_event).toMatchObject({ event: "Stop", outcome: "normal" });
+        expect((await fixture.actorEvents()).some((entry: any) => entry.stage === "normal_n2_started"
+          && entry.operation === waiting.operation)).toBe(false);
+        await page.locator('.op-rail__surface[data-surface="agents"]').click();
+        const resumedAgents = page.getByRole("region", { name: "Main pane", exact: true })
+          .locator(".agents-surface:not(.agents-surface--preview)");
+        await resumedAgents.locator(`.roster-row[data-member-id="${member.agent_member_id}"]`).click();
+        await expect(resumedAgents.locator(".roster-switch-status")).toContainText(/cancelled|Cancelled/);
+        expect((await fixture.actorEvents()).filter((entry: any) => entry.stage === "actor_failed")).toEqual([]);
+        await info.attach("post-ack-restart-preserved", { body: JSON.stringify({ acknowledged, cancelled, restored,
+          assignment, checkpoint, saved, resumedNormal }), contentType: "application/json" });
+        await info.attach(`post-ack-restart-preserved-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
+      } else if (afterAck === "input") {
         const acknowledged = (await preferences()).agent_switch_intents[waiting.operation];
         expect(acknowledged.stage).toBe("checkpoint_verified");
         const checkpoint = fixture.savedSource(source.cwd);
@@ -541,7 +619,7 @@ test.describe("Issue queue real backend launch", () => {
           expect(work.board_refs).toContain(acknowledged.checkpoint.board_entry_id);
         };
         await assertSourceKept();
-        await writeFile(join(fixture.home, `normal-n2-${waiting.operation}.json`), JSON.stringify({ operation: waiting.operation }));
+        await releaseNormalStop(waiting.operation);
         await expect.poll(async () => (await fixture.actorEvents()).some((entry: any) =>
           entry.stage === "normal_n2_hook_returned" && entry.operation === waiting.operation
             && entry.pid === source.pid && entry.gwt_session_id === source.gwt_session_id),
@@ -562,7 +640,7 @@ test.describe("Issue queue real backend launch", () => {
         const editedBytes = "Unsaved work after checkpoint ACK must survive the switch request.\n";
         await writeFile(editedPath, editedBytes);
         expect(fixture.savedSource(source.cwd).porcelain).toMatch(/^M checkpoint-source\.txt$/);
-        await writeFile(join(fixture.home, `normal-n2-${waiting.operation}.json`), JSON.stringify({ operation: waiting.operation }));
+        await releaseNormalStop(waiting.operation);
         await expect.poll(async () => (await fixture.actorEvents()).some((entry: any) =>
           entry.stage === "normal_n2_hook_returned" && entry.operation === waiting.operation
             && entry.pid === source.pid && entry.gwt_session_id === source.gwt_session_id),
@@ -625,7 +703,7 @@ test.describe("Issue queue real backend launch", () => {
         await expect.poll(async () => (await preferences()).agent_switch_intents[waiting.operation])
           .toMatchObject({ stage, reason });
         await expect(plans.locator(".roster-switch-status")).toContainText(visibleReason);
-        await writeFile(join(fixture.home, `normal-n2-${waiting.operation}.json`), JSON.stringify({ operation: waiting.operation }));
+        await releaseNormalStop(waiting.operation);
         await expect.poll(async () => (await fixture.actorEvents()).some((entry: any) =>
           entry.stage === "normal_n2_hook_returned" && entry.operation === waiting.operation
             && entry.pid === source.pid && entry.gwt_session_id === source.gwt_session_id),
@@ -693,7 +771,7 @@ test.describe("Issue queue real backend launch", () => {
             await expect(realpath(`/proc/${ready.pid}/cwd`)).rejects.toMatchObject({ code: "ENOENT" });
             expect(fixture.savedSource(source.cwd)).toEqual(checkpoint);
           }
-          await writeFile(join(fixture.home, `normal-n2-${waiting.operation}.json`), JSON.stringify({ operation: waiting.operation }));
+          await releaseNormalStop(waiting.operation);
           await expect.poll(async () => (await fixture.actorEvents()).some((entry: any) =>
             entry.stage === "normal_n2_hook_returned" && entry.operation === waiting.operation
               && entry.pid === source.pid && entry.gwt_session_id === source.gwt_session_id),
@@ -777,7 +855,7 @@ test.describe("Issue queue real backend launch", () => {
           }
         }
         if (afterAck !== "cancel pending job") {
-          await writeFile(join(fixture.home, `normal-n2-${waiting.operation}.json`), JSON.stringify({ operation: waiting.operation }));
+          await releaseNormalStop(waiting.operation);
           await expect.poll(async () => (await fixture.launches()).length === 2
             || (await fixture.actorEvents()).some((entry: any) => entry.stage === "normal_n2_hook_returned"
               && entry.operation === waiting.operation && entry.pid === source.pid
