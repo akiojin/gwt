@@ -82,6 +82,8 @@ pub enum RegistrationClientError {
     Closed,
     #[error("the Host fell behind on coordinator connection events; explicitly enable again")]
     EventBacklog,
+    #[error("the coordinator closed the Host registration for exceeding its message rate; explicitly enable again")]
+    RateLimited,
 }
 
 /// A browser connection that claimed one of this registration's invites, and
@@ -199,6 +201,9 @@ enum CoordinatorMessage {
     ConnectionClosed {
         generation: Uuid,
         connection_id: Uuid,
+    },
+    RateLimited {
+        generation: Uuid,
     },
 }
 
@@ -430,6 +435,9 @@ async fn register_and_renew(
                     if scoped == generation =>
                 {
                     report(&events, ConnectionEvent::Closed { connection_id })?;
+                }
+                CoordinatorMessage::RateLimited { generation: scoped } if scoped == generation => {
+                    return Err(RegistrationClientError::RateLimited);
                 }
                 _ => return Err(RegistrationClientError::Protocol),
             },
