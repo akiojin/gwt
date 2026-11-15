@@ -189,6 +189,7 @@ impl CoordinatorServer {
             alive,
             retired: Arc::new(tokio::sync::watch::Sender::new(())),
             events: Default::default(),
+            connections: Default::default(),
         };
         let router = with_http_boundary(
             axum::Router::new()
@@ -1291,6 +1292,15 @@ mod tests {
             else {
                 panic!("the first connection event must be the claim");
             };
+            let offer = json!({"type":"signal","payload":"offer"}).to_string();
+            bounded(browser.send(Message::text(offer))).await.unwrap();
+            assert_eq!(
+                bounded(connections.recv()).await,
+                Some(ConnectionEvent::Signal {
+                    connection_id,
+                    payload: "offer".to_string()
+                })
+            );
             bounded(browser.close(None)).await.unwrap();
             assert_eq!(
                 bounded(connections.recv()).await,
@@ -1453,6 +1463,250 @@ mod tests {
         wait_until_closed(&sessions).await;
         assert!(closed(&mut second).await);
 
+        shutdown.send(()).unwrap();
+        bounded(task).await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn claimed_browsers_and_their_host_relay_signals_only_to_each_other() {
+        use futures_util::SinkExt as _;
+        use tokio_tungstenite::tungstenite::Message;
+        let mut fixture = Fixture::new();
+        let wall = real_wall();
+        let valid = fixture.issue_token(wall);
+        let server = fixture.start_at(wall).await;
+        let addr = server.local_addr().unwrap();
+        let sessions = Arc::clone(&server.sessions);
+        let (shutdown, signal) = oneshot::channel();
+        let task = tokio::spawn(server.serve_until(async move {
+            let _ = signal.await;
+        }));
+        let auth = [("authorization", format!("Bearer {valid}"))];
+        let origin = [("origin", "https://coordinator.example".to_string())];
+        let secret = |byte: u8| format!("{byte:02x}").repeat(32);
+        async fn closed(socket: &mut HostSocket) -> bool {
+            use futures_util::StreamExt as _;
+            matches!(
+                bounded(socket.next()).await,
+                None | Some(Err(_)) | Some(Ok(Message::Close(_)))
+            )
+        }
+
+        let mut host = open_host(&fixture, addr, &auth).await.unwrap();
+        let generation: Uuid =
+            serde_json::from_value(next_json(&mut host).await["generation"].clone()).unwrap();
+        // Claims a fresh invite and returns the browser with its connection ID.
+        let mut next_byte = 0x40;
+        let mut claim = async |host: &mut HostSocket| {
+            next_byte += 1;
+            bounded(
+                host.send(Message::text(
+                    json!({"type":"register_invite","generation":generation,
+                    "nonce":Uuid::new_v4(),"secret":secret(next_byte),"ttl_secs":300})
+                    .to_string(),
+                )),
+            )
+            .await
+            .unwrap();
+            assert_eq!(next_json(host).await["type"], "invite_registered");
+            let mut browser = open_path(&fixture, addr, BROWSER_CLAIM_PATH, &origin)
+                .await
+                .unwrap();
+            let text = json!({"type":"claim_invite","secret":secret(next_byte)}).to_string();
+            bounded(browser.send(Message::text(text))).await.unwrap();
+            assert_eq!(next_json(&mut browser).await, json!({"type":"claimed"}));
+            let claimed = next_json(host).await;
+            assert_eq!(claimed["type"], "connection_claimed");
+            let id: Uuid = serde_json::from_value(claimed["connection_id"].clone()).unwrap();
+            (browser, id)
+        };
+        let (mut first, first_id) = claim(&mut host).await;
+        let (mut second, second_id) = claim(&mut host).await;
+
+        // A browser signal reaches its Host under the claimed connection ID.
+        let offer = json!({"type":"signal","payload":"offer \"sdp\""}).to_string();
+        bounded(first.send(Message::text(offer))).await.unwrap();
+        assert_eq!(
+            next_json(&mut host).await,
+            json!({"type":"connection_signal","generation":generation,
+                   "connection_id":first_id,"payload":"offer \"sdp\""})
+        );
+        // A Host signal reaches only the addressed browser; one for an unknown
+        // connection is ignored and the registration stays live.
+        for (connection_id, payload) in [(Uuid::new_v4(), "lost"), (second_id, "answer")] {
+            bounded(
+                host.send(Message::text(
+                    json!({"type":"signal","generation":generation,
+                    "connection_id":connection_id,"payload":payload})
+                    .to_string(),
+                )),
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(
+            next_json(&mut second).await,
+            json!({"type":"signal","payload":"answer"})
+        );
+        bounded(
+            host.send(Message::text(
+                json!({"type":"signal","generation":generation,
+                "connection_id":first_id,"payload":"candidate"})
+                .to_string(),
+            )),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            next_json(&mut first).await,
+            json!({"type":"signal","payload":"candidate"})
+        );
+        assert_eq!(live(&sessions), 1);
+
+        // The Host closes one of its own claimed connections; one it does not
+        // own is ignored.
+        let (mut third, third_id) = claim(&mut host).await;
+        for connection_id in [Uuid::new_v4(), third_id] {
+            bounded(
+                host.send(Message::text(
+                    json!({"type":"close_connection","generation":generation,
+                    "connection_id":connection_id})
+                    .to_string(),
+                )),
+            )
+            .await
+            .unwrap();
+        }
+        assert!(closed(&mut third).await);
+        assert_eq!(
+            next_json(&mut host).await,
+            json!({"type":"connection_closed","generation":generation,"connection_id":third_id})
+        );
+
+        // A signal whose relayed frame would exceed the message bound, or any
+        // other message, closes that browser and its Host is told.
+        let oversized = json!({"type":"signal","payload":"x".repeat(64 * 1024 - 40)}).to_string();
+        assert!(oversized.len() <= 64 * 1024);
+        for (mut browser, id, text) in [
+            (first, first_id, oversized),
+            (
+                second,
+                second_id,
+                json!({"type":"claim_invite"}).to_string(),
+            ),
+        ] {
+            bounded(browser.send(Message::text(text))).await.unwrap();
+            assert!(closed(&mut browser).await);
+            assert_eq!(
+                next_json(&mut host).await,
+                json!({"type":"connection_closed","generation":generation,"connection_id":id})
+            );
+        }
+        assert_eq!(live(&sessions), 1);
+
+        // A Host signal for another registration generation ends the Host.
+        bounded(
+            host.send(Message::text(
+                json!({"type":"signal","generation":Uuid::new_v4(),
+                "connection_id":first_id,"payload":"x"})
+                .to_string(),
+            )),
+        )
+        .await
+        .unwrap();
+        assert!(closed(&mut host).await);
+        wait_until_closed(&sessions).await;
+
+        shutdown.send(()).unwrap();
+        bounded(task).await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn host_client_closes_only_a_browser_that_outpaces_its_signal_share() {
+        use crate::mobile_host::registration_client::{ConnectionEvent, InviteRequest};
+        use futures_util::SinkExt as _;
+        use std::sync::RwLock;
+        use tokio::sync::{mpsc, watch};
+        use tokio_tungstenite::tungstenite::Message;
+        let mut fixture = Fixture::new();
+        let wall = real_wall();
+        let (credential, binding) = fixture.issue_credential(wall);
+        let server = fixture.start_at(wall).await;
+        let addr = server.local_addr().unwrap();
+        let sessions = Arc::clone(&server.sessions);
+        let (shutdown, signal) = oneshot::channel();
+        let task = tokio::spawn(server.serve_until(async move {
+            let _ = signal.await;
+        }));
+        let host = Arc::new(RwLock::new(
+            MobileAuthorization::load_bound(&fixture.home.join("devices.json"), &binding).unwrap(),
+        ));
+        let (stop, stopping) = watch::channel(false);
+        let (invites, requests) = mpsc::channel(1);
+        // Room for the claim plus one signal: the signal share is half.
+        let (events, mut connections) = mpsc::channel(4);
+        let client = {
+            let host = Arc::clone(&host);
+            let tls = fixture.client_config();
+            tokio::spawn(async move {
+                let tcp = TcpStream::connect(addr).await.unwrap();
+                run_registration(host, &credential, tls, tcp, stopping, requests, events).await
+            })
+        };
+        let (reply, outcome) = oneshot::channel();
+        let request = InviteRequest {
+            secret: zeroize::Zeroizing::new([7; 32]),
+            ttl_secs: 300,
+            reply,
+        };
+        bounded(invites.send(request)).await.ok().unwrap();
+        bounded(outcome).await.unwrap();
+
+        let origin = [("origin", "https://coordinator.example".to_string())];
+        let mut browser = open_path(&fixture, addr, BROWSER_CLAIM_PATH, &origin)
+            .await
+            .unwrap();
+        let claim = json!({"type":"claim_invite","secret":"07".repeat(32)}).to_string();
+        bounded(browser.send(Message::text(claim))).await.unwrap();
+        assert_eq!(next_json(&mut browser).await, json!({"type":"claimed"}));
+        // The caller does not drain while the browser floods signals.
+        for index in 0..8 {
+            let text = json!({"type":"signal","payload":index.to_string()}).to_string();
+            if bounded(browser.send(Message::text(text))).await.is_err() {
+                break;
+            }
+        }
+        let connection_id = match bounded(connections.recv()).await.unwrap() {
+            ConnectionEvent::Claimed { connection_id } => connection_id,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            bounded(connections.recv()).await,
+            Some(ConnectionEvent::Signal {
+                connection_id,
+                payload: "0".to_string()
+            })
+        );
+        // Only the flooding browser ends; the registration stays live.
+        let mut seen_close = false;
+        while !seen_close {
+            match bounded(connections.recv()).await.unwrap() {
+                ConnectionEvent::Closed {
+                    connection_id: closed,
+                } => {
+                    assert_eq!(closed, connection_id);
+                    seen_close = true;
+                }
+                ConnectionEvent::Signal { .. } => {}
+                other => panic!("{other:?}"),
+            }
+        }
+        assert!(host.read().unwrap().is_enabled());
+        assert_eq!(live(&sessions), 1);
+
+        stop.send(true).unwrap();
+        assert!(matches!(bounded(client).await.unwrap(), Ok(())));
+        wait_until_closed(&sessions).await;
         shutdown.send(()).unwrap();
         bounded(task).await.unwrap().unwrap();
     }

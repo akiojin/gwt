@@ -21,14 +21,21 @@
 //! the secret is decoded from the borrowed frame text straight into a wiped
 //! buffer; an escaped secret is refused (after serde has made its own
 //! unescaped copies), and neither the frame buffer nor stack copies left by
-//! moves are erased. Browser signaling and device authority are out of scope. Closed invites stay as replay fences until their TTL; they count
+//! moves are erased. Device authority is out of scope. Closed invites stay as replay fences until their TTL; they count
 //! toward the global 64-record bound and a per-Host 16-record bound, so one
 //! Host's fences cannot exhaust other Hosts' invites (`host_capacity`).
 //!
 //! When a browser claims one of its invites, the Host is sent
-//! `{"type":"connection_claimed","generation","connection_id"}`, and
+//! `{"type":"connection_claimed","generation","connection_id"}`, each opaque
+//! browser signal as `{"type":"connection_signal",...,"payload"}`, and
 //! `{"type":"connection_closed",...}` once that claimed connection is logically
-//! closed (claimed before closed). Only the owning registration receives them.
+//! closed (claimed, signals, then closed). Only the owning registration
+//! receives them. The Host answers with
+//! `{"type":"signal","generation","connection_id","payload"}`, relayed only to
+//! that connection while it is one of the registration's live claims; any
+//! other connection ID is ignored, and a browser that falls behind is closed.
+//! `{"type":"close_connection","generation","connection_id"}` closes one of
+//! the registration's own claimed connections (others are ignored).
 //!
 //! Each call reads the real wall clock; a backwards step makes the domain gate
 //! terminal (fail closed) until the operator restarts the coordinator.
@@ -73,29 +80,82 @@ pub(super) type SharedSessions = Arc<Mutex<CoordinatorSessions>>;
 /// each of the per-Host 16 invite records.
 const EVENT_BACKLOG: usize = 32;
 
-/// A claimed browser connection's lifecycle, announced to its Host.
-#[derive(Debug, Clone, Copy)]
+/// A claimed browser connection's lifecycle and signals, announced to its Host.
+#[derive(Debug)]
 pub(super) enum HostEvent {
     Claimed(Uuid),
+    /// A complete `connection_signal` frame, already checked against the
+    /// message bound by the browser route.
+    Signal(String),
     Closed(Uuid),
 }
 
 /// Event senders of live registrations, by registration generation.
 pub(super) type HostEvents = Arc<Mutex<HashMap<Uuid, mpsc::Sender<HostEvent>>>>;
 
+/// Bound of undelivered Host signal frames per claimed browser connection.
+pub(super) const BROWSER_BACKLOG: usize = 32;
+
+/// Live claimed browser connections, by connection ID: the owning registration
+/// generation and the sender of frames for that browser.
+pub(super) type BrowserConnections = Arc<Mutex<HashMap<Uuid, (Uuid, mpsc::Sender<String>)>>>;
+
+/// Relays a Host signal to one of its own live claimed connections. A
+/// connection that is gone or belongs to another registration is ignored (it
+/// may have just closed); a browser that fell behind is dropped from the table,
+/// which closes it. `false` only when the table is unusable.
+fn relay_to_browser(
+    connections: &BrowserConnections,
+    generation: Uuid,
+    connection_id: Uuid,
+    payload: String,
+) -> bool {
+    let Ok(mut table) = connections.lock() else {
+        return false;
+    };
+    let Some((_, sender)) = table
+        .get(&connection_id)
+        .filter(|(owner, _)| *owner == generation)
+    else {
+        return true;
+    };
+    let frame = serde_json::json!({"type": "signal", "payload": payload}).to_string();
+    if sender.try_send(frame).is_err() {
+        table.remove(&connection_id);
+    }
+    true
+}
+
+/// Closes one of the registration's own live claimed connections by dropping
+/// its route (the browser then closes); others are ignored. `false` only when
+/// the table is unusable.
+fn close_browser(connections: &BrowserConnections, generation: Uuid, connection_id: Uuid) -> bool {
+    let Ok(mut table) = connections.lock() else {
+        return false;
+    };
+    if table
+        .get(&connection_id)
+        .is_some_and(|(owner, _)| *owner == generation)
+    {
+        table.remove(&connection_id);
+    }
+    true
+}
+
 /// Queues `connection_claimed` for the live registration `generation` and
-/// returns the slot reserved for its `connection_closed`, so the close can
-/// never be lost to a full backlog. `None` when the registration is gone or
-/// its backlog cannot hold both events (the caller fails closed).
+/// returns the Host's event sender (for signals) with the slot reserved for
+/// its `connection_closed`, so the close can never be lost to a full backlog.
+/// `None` when the registration is gone or its backlog cannot hold both
+/// events (the caller fails closed).
 pub(super) fn announce_claim(
     events: &HostEvents,
     generation: Uuid,
     connection_id: Uuid,
-) -> Option<mpsc::OwnedPermit<HostEvent>> {
+) -> Option<(mpsc::Sender<HostEvent>, mpsc::OwnedPermit<HostEvent>)> {
     let sender = events.lock().ok()?.get(&generation)?.clone();
     let closed = sender.clone().try_reserve_owned().ok()?;
     sender.try_send(HostEvent::Claimed(connection_id)).ok()?;
-    Some(closed)
+    Some((sender, closed))
 }
 
 /// Route state. `stopping` ends every Host socket when the server stops; each
@@ -103,7 +163,8 @@ pub(super) fn announce_claim(
 /// so the server can wait for all of them before releasing the registry.
 /// `retired` is notified after each registration's logical close, so claimed
 /// browser sockets of that registration can end. `events` routes claimed
-/// connection events to the owning Host socket.
+/// connection events to the owning Host socket, and `connections` routes Host
+/// signals to one claimed browser.
 #[derive(Clone)]
 pub(super) struct HostState {
     pub(super) sessions: SharedSessions,
@@ -111,6 +172,7 @@ pub(super) struct HostState {
     pub(super) alive: mpsc::Sender<()>,
     pub(super) retired: Arc<watch::Sender<()>>,
     pub(super) events: HostEvents,
+    pub(super) connections: BrowserConnections,
 }
 
 #[derive(Deserialize)]
@@ -187,6 +249,7 @@ struct Registration {
     handle: RegistrationHandle,
     retired: Arc<watch::Sender<()>>,
     events: HostEvents,
+    connections: BrowserConnections,
 }
 
 impl Registration {
@@ -233,6 +296,15 @@ enum HostMessage {
         #[serde(deserialize_with = "super::borrowed_hex_secret")]
         secret: Zeroizing<[u8; 32]>,
         ttl_secs: u64,
+    },
+    Signal {
+        generation: Uuid,
+        connection_id: Uuid,
+        payload: String,
+    },
+    CloseConnection {
+        generation: Uuid,
+        connection_id: Uuid,
     },
 }
 
@@ -315,6 +387,7 @@ pub(super) async fn register(
         handle,
         retired: state.retired,
         events: state.events,
+        connections: state.connections,
     };
     // A poisoned route table drops (closes) the registration; the guard is
     // released before that drop takes the lock again.
@@ -406,6 +479,12 @@ async fn serve_host(
                     let (kind, connection_id) = match event {
                         HostEvent::Claimed(id) => ("connection_claimed", id),
                         HostEvent::Closed(id) => ("connection_closed", id),
+                        HostEvent::Signal(frame) => {
+                            if socket.send(Message::Text(frame.into())).await.is_err() {
+                                break;
+                            }
+                            continue;
+                        }
                     };
                     let event = serde_json::json!({
                         "type": kind, "generation": generation, "connection_id": connection_id,
@@ -468,6 +547,30 @@ async fn serve_host(
                         }),
                         Err(None) => break,
                     }
+                }
+                HostMessage::Signal {
+                    generation: scoped,
+                    connection_id,
+                    payload,
+                } if scoped == generation => {
+                    if !relay_to_browser(
+                        &registration.connections,
+                        generation,
+                        connection_id,
+                        payload,
+                    ) {
+                        break;
+                    }
+                    continue;
+                }
+                HostMessage::CloseConnection {
+                    generation: scoped,
+                    connection_id,
+                } if scoped == generation => {
+                    if !close_browser(&registration.connections, generation, connection_id) {
+                        break;
+                    }
+                    continue;
                 }
                 _ => break,
             };
