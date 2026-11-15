@@ -96,6 +96,10 @@ class ThroughputTests(unittest.TestCase):
         self.assertEqual(throughput.summarize(data)["required_checks"]["completion_minutes"]["count"], 0)
         skipped["started_at"] = "2026-10-07T21:21:01Z"
         self.assertEqual(throughput.summarize(data)["required_checks"]["completion_minutes"]["count"], 0)
+        skipped.update(conclusion="skipped", started_at=None)
+        data["pull_requests"][0]["check_runs"][0].update(
+            started_at="2026-10-07T21:22:00Z", completed_at="2026-10-07T21:23:00Z")
+        self.assertEqual(throughput.summarize(data)["required_checks"]["completion_minutes"]["count"], 0)
         data["pull_requests"][0]["check_runs"][1].update(
             conclusion=None, status="in_progress", completed_at=None)
         self.assertEqual(throughput.summarize(data)["required_checks"]["complete_prs"], [])
