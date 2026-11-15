@@ -178,8 +178,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
         with:
-          save-if: ${{ github.ref == 'refs/heads/develop' }}
-          shared-key: macos-workspace
+          # Let Cache Warm publish the complete graph before this immutable key exists.
+          save-if: 'false'
+          shared-key: macos-workspace-v2
         continue-on-error: true
       - name: Check macOS compilation
         run: |
