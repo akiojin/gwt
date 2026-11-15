@@ -1,11 +1,12 @@
 //! Explicit, default-deny coordinator startup (Issue #6476).
 //!
-//! The only route is the Host-only registration WebSocket; there is no browser
-//! signaling, invite or UI route. The caller must keep the selected home, fixed private directories
+//! The only routes are the Host-only registration WebSocket and the browser
+//! invite-claim WebSocket; there is no browser signaling relay or UI route. The caller must keep the selected home, fixed private directories
 //! and TLS ancestors trusted and non-replaceable, and prevent in-place edits
 //! during loading and serving, as required by the existing storage adapters.
 
 use super::{
+    browser_route::{self, BROWSER_CLAIM_PATH},
     host_route::{self, HostState, SharedSessions, HOST_REGISTER_PATH},
     listener::{TlsListener, HANDSHAKE_TIMEOUT},
     registration::CoordinatorSessions,
@@ -160,14 +161,14 @@ impl CoordinatorServer {
             .map_err(|_| StartupError::BindUnavailable)
     }
 
-    /// Serve only the Host registration route behind Origin checks and security
-    /// headers; every other path is 404. No local/agent router can be supplied.
+    /// Serve only the Host registration and browser claim routes behind Origin
+    /// checks and security headers; every other path is 404. No local/agent router can be supplied.
     /// Each connection service also retains the registry guard: axum's HTTP
     /// tasks can outlive a cancelled serving future and must still exclude a
     /// second writer until those connections close.
     /// Graceful shutdown waits for accepted HTTP connections, then signals every
-    /// Host registration socket and waits until each registration is logically
-    /// closed before returning. A connection whose
+    /// Host registration and browser claim socket and waits until each is
+    /// logically closed before returning. A connection whose
     /// reads and writes stall ends at the listener's idle deadline, and the
     /// listener caps how many connections exist at once. Pending TLS handshakes
     /// retain their existing deadline.
@@ -186,10 +187,13 @@ impl CoordinatorServer {
             sessions: Arc::clone(&sessions),
             stopping,
             alive,
+            retired: Arc::new(tokio::sync::watch::Sender::new(())),
+            events: Default::default(),
         };
         let router = with_http_boundary(
             axum::Router::new()
                 .route(HOST_REGISTER_PATH, axum::routing::get(host_route::register))
+                .route(BROWSER_CLAIM_PATH, axum::routing::get(browser_route::claim))
                 .with_state(state),
             origin,
         );
@@ -212,6 +216,7 @@ impl CoordinatorServer {
 
 #[cfg(all(test, unix))]
 mod tests {
+    use super::super::browser_route::BROWSER_CLAIM_PATH;
     use super::super::host_route::{SharedSessions, HOST_REGISTER_PATH};
     use super::super::{
         storage::{CoordinatorStore, StoreError},
@@ -702,8 +707,17 @@ mod tests {
         addr: SocketAddr,
         headers: &[(&'static str, String)],
     ) -> Result<HostSocket, u16> {
+        open_path(fixture, addr, HOST_REGISTER_PATH, headers).await
+    }
+
+    async fn open_path(
+        fixture: &Fixture,
+        addr: SocketAddr,
+        path: &str,
+        headers: &[(&'static str, String)],
+    ) -> Result<HostSocket, u16> {
         use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Error};
-        let mut request = format!("wss://coordinator.example{HOST_REGISTER_PATH}")
+        let mut request = format!("wss://coordinator.example{path}")
             .into_client_request()
             .unwrap();
         for (name, value) in headers {
@@ -1100,7 +1114,16 @@ mod tests {
             let tls = fixture.client_config();
             tokio::spawn(async move {
                 let tcp = TcpStream::connect(addr).await.unwrap();
-                run_registration(authority, &credential, tls, tcp, stopping).await
+                run_registration(
+                    authority,
+                    &credential,
+                    tls,
+                    tcp,
+                    stopping,
+                    tokio::sync::mpsc::channel(1).1,
+                    tokio::sync::mpsc::channel(1).0,
+                )
+                .await
             })
         };
         let enabled = |authority: &Arc<RwLock<MobileAuthorization>>| {
@@ -1142,7 +1165,16 @@ mod tests {
             );
             tokio::spawn(async move {
                 let tcp = TcpStream::connect(addr).await.unwrap();
-                run_registration(authority, &credential, tls, tcp, stopping).await
+                run_registration(
+                    authority,
+                    &credential,
+                    tls,
+                    tcp,
+                    stopping,
+                    tokio::sync::mpsc::channel(1).1,
+                    tokio::sync::mpsc::channel(1).0,
+                )
+                .await
             })
         })
         .await
@@ -1179,5 +1211,249 @@ mod tests {
             "{result:?}"
         );
         assert!(!host.read().unwrap().is_enabled());
+    }
+
+    #[tokio::test]
+    async fn host_client_registers_invites_over_its_live_registration() {
+        use crate::mobile_host::registration_client::{
+            ConnectionEvent, InviteOutcome, InviteRejection, InviteRequest,
+        };
+        use std::sync::RwLock;
+        use tokio::sync::{mpsc, watch};
+        let mut fixture = Fixture::new();
+        let wall = real_wall();
+        let (credential, binding) = fixture.issue_credential(wall);
+        let server = fixture.start_at(wall).await;
+        let addr = server.local_addr().unwrap();
+        let sessions = Arc::clone(&server.sessions);
+        let (shutdown, signal) = oneshot::channel();
+        let task = tokio::spawn(server.serve_until(async move {
+            let _ = signal.await;
+        }));
+        let host = Arc::new(RwLock::new(
+            MobileAuthorization::load_bound(&fixture.home.join("devices.json"), &binding).unwrap(),
+        ));
+        let (stop, stopping) = watch::channel(false);
+        let (invites, requests) = mpsc::channel(1);
+        let (events, mut connections) = mpsc::channel(32);
+        let client = {
+            let host = Arc::clone(&host);
+            let tls = fixture.client_config();
+            tokio::spawn(async move {
+                let tcp = TcpStream::connect(addr).await.unwrap();
+                run_registration(host, &credential, tls, tcp, stopping, requests, events).await
+            })
+        };
+        let invite = |byte: u8, ttl_secs: u64| {
+            let (reply, outcome) = oneshot::channel();
+            let request = InviteRequest {
+                secret: zeroize::Zeroizing::new([byte; 32]),
+                ttl_secs,
+                reply,
+            };
+            (request, outcome)
+        };
+        let register = |byte: u8, ttl_secs: u64| {
+            let (request, outcome) = invite(byte, ttl_secs);
+            let invites = invites.clone();
+            bounded(async move {
+                invites.send(request).await.ok().unwrap();
+                outcome.await
+            })
+        };
+
+        assert_eq!(register(1, 300).await, Ok(InviteOutcome::Registered));
+        assert_eq!(
+            register(1, 300).await,
+            Ok(InviteOutcome::Rejected(InviteRejection::AlreadyRegistered))
+        );
+        assert_eq!(
+            register(2, 0).await,
+            Ok(InviteOutcome::Rejected(InviteRejection::InvalidTtl))
+        );
+        assert!(host.read().unwrap().is_enabled());
+        assert_eq!(live(&sessions), 1);
+
+        // A browser claim and its close reach the Host as connection events,
+        // and the registration stays live.
+        {
+            use futures_util::SinkExt as _;
+            use tokio_tungstenite::tungstenite::Message;
+            let origin = [("origin", "https://coordinator.example".to_string())];
+            let mut browser = open_path(&fixture, addr, BROWSER_CLAIM_PATH, &origin)
+                .await
+                .unwrap();
+            let claim = json!({"type":"claim_invite","secret":"01".repeat(32)}).to_string();
+            bounded(browser.send(Message::text(claim))).await.unwrap();
+            assert_eq!(next_json(&mut browser).await, json!({"type":"claimed"}));
+            let ConnectionEvent::Claimed { connection_id } =
+                bounded(connections.recv()).await.unwrap()
+            else {
+                panic!("the first connection event must be the claim");
+            };
+            bounded(browser.close(None)).await.unwrap();
+            assert_eq!(
+                bounded(connections.recv()).await,
+                Some(ConnectionEvent::Closed { connection_id })
+            );
+        }
+        assert!(host.read().unwrap().is_enabled());
+        assert_eq!(live(&sessions), 1);
+
+        // Ending the invite input does not end the registration: the client
+        // keeps renewing past the next lease poll.
+        drop(invites);
+        tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
+        assert!(host.read().unwrap().is_enabled());
+        assert_eq!(live(&sessions), 1);
+        stop.send(true).unwrap();
+        assert!(matches!(bounded(client).await.unwrap(), Ok(())));
+        assert!(!host.read().unwrap().is_enabled());
+        wait_until_closed(&sessions).await;
+
+        shutdown.send(()).unwrap();
+        bounded(task).await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn browser_claims_a_registered_invite_once_and_closes_with_its_host() {
+        use futures_util::SinkExt as _;
+        use tokio_tungstenite::tungstenite::Message;
+        let mut fixture = Fixture::new();
+        let wall = real_wall();
+        let valid = fixture.issue_token(wall);
+        let server = fixture.start_at(wall).await;
+        let addr = server.local_addr().unwrap();
+        let sessions = Arc::clone(&server.sessions);
+        let (shutdown, signal) = oneshot::channel();
+        let task = tokio::spawn(server.serve_until(async move {
+            let _ = signal.await;
+        }));
+        let auth = [("authorization", format!("Bearer {valid}"))];
+        let origin = [("origin", "https://coordinator.example".to_string())];
+        let secret = |byte: u8| format!("{byte:02x}").repeat(32);
+        let claim = |byte: u8| json!({"type":"claim_invite","secret":secret(byte)}).to_string();
+        async fn closed(socket: &mut HostSocket) -> bool {
+            use futures_util::StreamExt as _;
+            use tokio_tungstenite::tungstenite::Message;
+            matches!(
+                bounded(socket.next()).await,
+                None | Some(Err(_)) | Some(Ok(Message::Close(_)))
+            )
+        }
+
+        let mut host = open_host(&fixture, addr, &auth).await.unwrap();
+        let registered = next_json(&mut host).await;
+        let generation: Uuid = serde_json::from_value(registered["generation"].clone()).unwrap();
+        for byte in [0x21, 0x22] {
+            bounded(
+                host.send(Message::text(
+                    json!({"type":"register_invite","generation":generation,
+                    "nonce":Uuid::new_v4(),"secret":secret(byte),"ttl_secs":300})
+                    .to_string(),
+                )),
+            )
+            .await
+            .unwrap();
+            assert_eq!(next_json(&mut host).await["type"], "invite_registered");
+        }
+
+        // A browser must present exactly the configured Origin.
+        assert_eq!(
+            open_path(&fixture, addr, BROWSER_CLAIM_PATH, &[])
+                .await
+                .err(),
+            Some(403)
+        );
+        let foreign = [("origin", "https://evil.example".to_string())];
+        assert_eq!(
+            open_path(&fixture, addr, BROWSER_CLAIM_PATH, &foreign)
+                .await
+                .err(),
+            Some(403)
+        );
+
+        let mut first = open_path(&fixture, addr, BROWSER_CLAIM_PATH, &origin)
+            .await
+            .unwrap();
+        bounded(first.send(Message::text(claim(0x21))))
+            .await
+            .unwrap();
+        assert_eq!(next_json(&mut first).await, json!({"type":"claimed"}));
+        // The claim is announced only to its own Host registration.
+        let claimed = next_json(&mut host).await;
+        assert_eq!(claimed["type"], "connection_claimed");
+        assert_eq!(claimed["generation"], json!(generation));
+        let connection: Uuid = serde_json::from_value(claimed["connection_id"].clone()).unwrap();
+
+        // A consumed or unknown secret is refused without saying why.
+        for byte in [0x21, 0x99] {
+            let mut socket = open_path(&fixture, addr, BROWSER_CLAIM_PATH, &origin)
+                .await
+                .unwrap();
+            bounded(socket.send(Message::text(claim(byte))))
+                .await
+                .unwrap();
+            assert_eq!(
+                next_json(&mut socket).await,
+                json!({"type":"claim_rejected"})
+            );
+            assert!(closed(&mut socket).await);
+        }
+        // A malformed or escaped claim closes without a reply.
+        let escaped = claim(0x22).replacen("\"secret\":\"22", "\"secret\":\"\\u00322", 1);
+        for text in [escaped, json!({"type":"renew"}).to_string()] {
+            let mut socket = open_path(&fixture, addr, BROWSER_CLAIM_PATH, &origin)
+                .await
+                .unwrap();
+            bounded(socket.send(Message::text(text))).await.unwrap();
+            assert!(closed(&mut socket).await);
+        }
+
+        // Closing the claimed browser leaves a replay fence for its secret.
+        bounded(first.close(None)).await.unwrap();
+        // Rejected claims announced nothing; the next Host message is the close.
+        assert_eq!(
+            next_json(&mut host).await,
+            json!({"type":"connection_closed","generation":generation,"connection_id":connection})
+        );
+        let mut socket = open_path(&fixture, addr, BROWSER_CLAIM_PATH, &origin)
+            .await
+            .unwrap();
+        bounded(socket.send(Message::text(claim(0x21))))
+            .await
+            .unwrap();
+        assert_eq!(
+            next_json(&mut socket).await,
+            json!({"type":"claim_rejected"})
+        );
+        bounded(
+            host.send(Message::text(
+                json!({"type":"register_invite","generation":generation,
+                "nonce":Uuid::new_v4(),"secret":secret(0x21),"ttl_secs":300})
+                .to_string(),
+            )),
+        )
+        .await
+        .unwrap();
+        assert_eq!(next_json(&mut host).await["reason"], "already_registered");
+
+        // A claimed browser ends with its Host registration.
+        let mut second = open_path(&fixture, addr, BROWSER_CLAIM_PATH, &origin)
+            .await
+            .unwrap();
+        bounded(second.send(Message::text(claim(0x22))))
+            .await
+            .unwrap();
+        assert_eq!(next_json(&mut second).await, json!({"type":"claimed"}));
+        let claimed = next_json(&mut host).await;
+        assert_eq!(claimed["type"], "connection_claimed");
+        assert_ne!(claimed["connection_id"], json!(connection));
+        bounded(host.close(None)).await.unwrap();
+        wait_until_closed(&sessions).await;
+        assert!(closed(&mut second).await);
+
+        shutdown.send(()).unwrap();
+        bounded(task).await.unwrap().unwrap();
     }
 }

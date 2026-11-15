@@ -194,6 +194,30 @@ impl CoordinatorSessions {
         self.invite_result(result, now)
     }
 
+    /// Browser claims carry only the secret. The routing actor finds the live
+    /// registration from the invite's saved scope (never a browser destination)
+    /// and claims through it; `claim_invite` re-verifies the credential and the
+    /// exact scope. A missing invite is `Unauthorized`; adapters must not tell
+    /// the browser which refusal occurred.
+    pub fn claim_invite_by_secret(
+        &mut self,
+        secret: &[u8],
+        connection_id: Uuid,
+        now: Instant,
+        wall: u64,
+    ) -> Result<(RegistrationHandle, InviteClaim), RegistrationError> {
+        self.observe(now, wall)?;
+        let result = self.invites.pending_scope(secret, now);
+        let unauthorized = RegistrationError::Invite(InviteError::Unauthorized);
+        let scope = self.invite_result(result, now)?.ok_or(unauthorized)?;
+        let handle = RegistrationHandle {
+            owner: self.owner,
+            generation: scope.registration_generation(),
+        };
+        let claim = self.claim_invite(&handle, secret, connection_id, now, wall)?;
+        Ok((handle, claim))
+    }
+
     pub fn close_connection(
         &mut self,
         handle: &RegistrationHandle,

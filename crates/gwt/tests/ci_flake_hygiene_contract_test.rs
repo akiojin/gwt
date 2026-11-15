@@ -537,7 +537,7 @@ fn the_required_windows_check_requires_successful_core_stability() {
     );
     assert_eq!(
         windows.get("runs-on").and_then(Value::as_str),
-        Some("ubuntu-latest")
+        Some("ubuntu-slim")
     );
     let needs: Vec<_> = windows
         .get("needs")

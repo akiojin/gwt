@@ -231,6 +231,32 @@ class ChangedTestSelectionTests(unittest.TestCase):
         self.assertEqual(self.select_suite(changed, library=True, dependencies=["src/lib.rs"]),
                          ["changed::first", "unrelated::first"])
 
+    def test_library_preserves_proven_empty_selection_with_uncompiled_companions(self):
+        changed = {"../src/main.rs": "fn main() {} // binary-only\n",
+                   "changed.rs": "fn first() {} // integration-only\n",
+                   "../../../.github/workflows/test.yml": "# workflow-only\n",
+                   "../../../.gwt/work/events/ab/event.jsonl": "{}\n"}
+        self.assertEqual(self.select_suite(changed, library=True, dependencies=["src/lib.rs"]), [])
+
+    def test_empty_library_selection_keeps_unproven_or_compiled_changes(self):
+        changed = {"../src/main.rs": "fn main() {} // binary-only\n"}
+        full = ["changed::first", "changed::first_extra", "unrelated::first"]
+        for dependencies in (None, "malformed\n", ["src/main.rs"],
+                             ["src/lib.rs", "src/main.rs"]):
+            with self.subTest(dependencies=dependencies):
+                self.assertEqual(self.select_suite(changed, library=True,
+                                                   dependencies=dependencies), full)
+        for companion, dependencies in (
+            ("../Cargo.toml", ["src/lib.rs"]),
+            ("../../../scripts/config.py", ["src/lib.rs"]),
+            ("../../../.github/workflows/test.yml", ["src/lib.rs", "../../.github/workflows/test.yml"]),
+        ):
+            with self.subTest(companion=companion):
+                self.assertEqual(self.select_suite({**changed, companion: "# changed\n"},
+                                                   library=True, dependencies=dependencies), full)
+        self.assertEqual(self.select_suite({"../src/main.rs": None}, library=True,
+                                           dependencies=["src/lib.rs"]), full)
+
     def test_library_keeps_full_fallback_without_proof_or_for_unknown_and_deleted_sources(self):
         full = ["changed::first", "changed::first_extra", "unrelated::first"]
         changed = {"../src/lib.rs": "fn first() {} // changed\n",

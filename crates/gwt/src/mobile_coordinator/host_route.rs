@@ -3,8 +3,8 @@
 //! A PC Host authenticates with exactly one `Authorization: Bearer` header whose
 //! token is base64url (no padding) JSON naming its credential identity, one
 //! Project, its trusted Host epoch and the 32-byte secret in hex. A request with
-//! any Origin is a browser and is refused; browser signaling is a separate,
-//! later route. The registration exists only while its socket is served: every
+//! any Origin is a browser and is refused; browsers claim invites on the
+//! separate `browser_route`. The registration exists only while its socket is served: every
 //! exit path, including a failed upgrade, logically closes it once.
 //!
 //! The coordinator answers `{"type":"registered","generation","ttl_secs"}` and
@@ -21,9 +21,14 @@
 //! the secret is decoded from the borrowed frame text straight into a wiped
 //! buffer; an escaped secret is refused (after serde has made its own
 //! unescaped copies), and neither the frame buffer nor stack copies left by
-//! moves are erased. Browser claim/signaling and device authority are out of
-//! scope. Closed invites stay as replay fences in the global 64-record bound
-//! until their TTL; per-Host accounting of those fences is a known follow-up.
+//! moves are erased. Browser signaling and device authority are out of scope. Closed invites stay as replay fences until their TTL; they count
+//! toward the global 64-record bound and a per-Host 16-record bound, so one
+//! Host's fences cannot exhaust other Hosts' invites (`host_capacity`).
+//!
+//! When a browser claims one of its invites, the Host is sent
+//! `{"type":"connection_claimed","generation","connection_id"}`, and
+//! `{"type":"connection_closed",...}` once that claimed connection is logically
+//! closed (claimed before closed). Only the owning registration receives them.
 //!
 //! Each call reads the real wall clock; a backwards step makes the domain gate
 //! terminal (fail closed) until the operator restarts the coordinator.
@@ -45,6 +50,7 @@ use base64::Engine as _;
 use gwt_core::repo_hash::ProjectKey;
 use serde::Deserialize;
 use std::{
+    collections::HashMap,
     sync::{Arc, Mutex},
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
@@ -63,14 +69,48 @@ const UNAUTHORIZED: &str =
 /// the last accepted connection closes.
 pub(super) type SharedSessions = Arc<Mutex<CoordinatorSessions>>;
 
+/// Bound of undelivered connection events per Host: claimed and closed for
+/// each of the per-Host 16 invite records.
+const EVENT_BACKLOG: usize = 32;
+
+/// A claimed browser connection's lifecycle, announced to its Host.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum HostEvent {
+    Claimed(Uuid),
+    Closed(Uuid),
+}
+
+/// Event senders of live registrations, by registration generation.
+pub(super) type HostEvents = Arc<Mutex<HashMap<Uuid, mpsc::Sender<HostEvent>>>>;
+
+/// Queues `connection_claimed` for the live registration `generation` and
+/// returns the slot reserved for its `connection_closed`, so the close can
+/// never be lost to a full backlog. `None` when the registration is gone or
+/// its backlog cannot hold both events (the caller fails closed).
+pub(super) fn announce_claim(
+    events: &HostEvents,
+    generation: Uuid,
+    connection_id: Uuid,
+) -> Option<mpsc::OwnedPermit<HostEvent>> {
+    let sender = events.lock().ok()?.get(&generation)?.clone();
+    let closed = sender.clone().try_reserve_owned().ok()?;
+    sender.try_send(HostEvent::Claimed(connection_id)).ok()?;
+    Some(closed)
+}
+
 /// Route state. `stopping` ends every Host socket when the server stops; each
 /// socket holds an `alive` sender until its registration is logically closed,
 /// so the server can wait for all of them before releasing the registry.
+/// `retired` is notified after each registration's logical close, so claimed
+/// browser sockets of that registration can end. `events` routes claimed
+/// connection events to the owning Host socket.
 #[derive(Clone)]
 pub(super) struct HostState {
     pub(super) sessions: SharedSessions,
     pub(super) stopping: watch::Receiver<bool>,
     pub(super) alive: mpsc::Sender<()>,
+    pub(super) retired: Arc<watch::Sender<()>>,
+    pub(super) events: HostEvents,
 }
 
 #[derive(Deserialize)]
@@ -129,7 +169,7 @@ fn parse_authorization(headers: &HeaderMap) -> Option<HostCredentials> {
 /// Synchronous domain call; the store checkpoint fsyncs at most once per
 /// trusted wall second, so async callers run it on a blocking thread. The
 /// monotonic instant is read under the lock.
-fn call<T>(
+pub(super) fn call<T>(
     sessions: &SharedSessions,
     f: impl FnOnce(&mut CoordinatorSessions, Instant, u64) -> Result<T, RegistrationError>,
 ) -> Result<T, RegistrationError> {
@@ -145,6 +185,8 @@ fn call<T>(
 struct Registration {
     sessions: SharedSessions,
     handle: RegistrationHandle,
+    retired: Arc<watch::Sender<()>>,
+    events: HostEvents,
 }
 
 impl Registration {
@@ -168,9 +210,13 @@ impl Registration {
 /// drop the registration on a blocking thread.
 impl Drop for Registration {
     fn drop(&mut self) {
+        if let Ok(mut events) = self.events.lock() {
+            events.remove(&self.handle.generation());
+        }
         let _ = call(&self.sessions, |sessions, now, wall| {
             sessions.close(&self.handle, now, wall)
         });
+        self.retired.send_modify(|_| {});
     }
 }
 
@@ -263,16 +309,39 @@ pub(super) async fn register(
         Err(_) => return unavailable(),
     };
     let generation = handle.generation();
+    let (sender, events) = mpsc::channel(EVENT_BACKLOG);
     let registration = Registration {
         sessions: state.sessions,
         handle,
+        retired: state.retired,
+        events: state.events,
     };
+    // A poisoned route table drops (closes) the registration; the guard is
+    // released before that drop takes the lock again.
+    let routed = registration
+        .events
+        .lock()
+        .map(|mut routes| {
+            routes.insert(generation, sender);
+        })
+        .is_ok();
+    if !routed {
+        return unavailable();
+    }
     let (stopping, alive) = (state.stopping, state.alive);
     upgrade
         .max_message_size(MAX_MESSAGE_BYTES)
         .max_frame_size(MAX_MESSAGE_BYTES)
         .on_upgrade(move |socket| {
-            serve_host(socket, registration, generation, deadline, stopping, alive)
+            serve_host(
+                socket,
+                registration,
+                generation,
+                deadline,
+                stopping,
+                alive,
+                events,
+            )
         })
 }
 
@@ -311,16 +380,41 @@ async fn serve_host(
     mut deadline: Instant,
     mut stopping: watch::Receiver<bool>,
     alive: mpsc::Sender<()>,
+    mut events: mpsc::Receiver<HostEvent>,
 ) {
     let registered = serde_json::json!({
         "type": "registered", "generation": generation, "ttl_secs": ttl_secs(deadline),
     });
     if send_json(&mut socket, registered).await {
         loop {
-            let message = tokio::select! {
-                message = socket.recv() => message,
+            enum Input {
+                Socket(Option<Result<Message, axum::Error>>),
+                Event(HostEvent),
+            }
+            let input = tokio::select! {
+                message = socket.recv() => Input::Socket(message),
+                event = events.recv() => match event {
+                    Some(event) => Input::Event(event),
+                    None => break,
+                },
                 _ = tokio::time::sleep_until(deadline.into()) => break,
                 _ = stopping.wait_for(|stopped| *stopped) => break,
+            };
+            let message = match input {
+                Input::Socket(message) => message,
+                Input::Event(event) => {
+                    let (kind, connection_id) = match event {
+                        HostEvent::Claimed(id) => ("connection_claimed", id),
+                        HostEvent::Closed(id) => ("connection_closed", id),
+                    };
+                    let event = serde_json::json!({
+                        "type": kind, "generation": generation, "connection_id": connection_id,
+                    });
+                    if !send_json(&mut socket, event).await {
+                        break;
+                    }
+                    continue;
+                }
             };
             let text = match message {
                 Some(Ok(Message::Text(text))) => text,

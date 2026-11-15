@@ -17,6 +17,7 @@ use zeroize::Zeroizing;
 
 const MAX_TTL_SECS: u64 = 300;
 const MAX_HOST_PENDING: usize = 8;
+const MAX_HOST_RECORDS: usize = 16;
 const MAX_RECORDS: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -29,7 +30,7 @@ pub enum InviteError {
     InvalidConnection,
     #[error("invite is already registered; use a fresh PC-generated secret")]
     AlreadyRegistered,
-    #[error("Host has eight pending invites; close or claim one, or wait for expiry")]
+    #[error("Host has eight pending invites or sixteen unexpired records including replay fences; close or claim one, or wait for expiry")]
     HostCapacity,
     #[error("invite registry holds 64 unexpired records including replay fences; wait for expiry")]
     Capacity,
@@ -138,7 +139,8 @@ struct InviteRecord {
 
 /// Synchronous transitions must be serialized by the trusted coordinator.
 /// All unexpired records, including claimed/closed replay fences, count toward
-/// the global bound. Clock rollback is terminal; recovery requires a fresh
+/// the global bound and toward a per-Host bound, so one Host cannot occupy the
+/// global bound with fences. Clock rollback is terminal; recovery requires a fresh
 /// PC enable/authenticated registration and new registry, not old-token reuse.
 pub struct InviteRegistry {
     records: Vec<InviteRecord>,
@@ -180,12 +182,16 @@ impl InviteRegistry {
         if self.records.len() >= MAX_RECORDS {
             return Err(InviteError::Capacity);
         }
-        if self
-            .records
-            .iter()
-            .filter(|r| r.scope.host_id == scope.host_id && !r.closed && r.connection_id.is_none())
-            .count()
-            >= MAX_HOST_PENDING
+        let host_records = || {
+            self.records
+                .iter()
+                .filter(|r| r.scope.host_id == scope.host_id)
+        };
+        if host_records().count() >= MAX_HOST_RECORDS
+            || host_records()
+                .filter(|r| !r.closed && r.connection_id.is_none())
+                .count()
+                >= MAX_HOST_PENDING
         {
             return Err(InviteError::HostCapacity);
         }
@@ -239,6 +245,23 @@ impl InviteRegistry {
             scope: record.scope.clone(),
             connection_id,
         })
+    }
+
+    /// The saved scope of the active (unclaimed, open, unexpired) invite with
+    /// this secret, so a trusted adapter can route a claim without trusting a
+    /// browser-supplied destination. Lookup alone does not consume the invite.
+    pub fn pending_scope(
+        &mut self,
+        secret: &[u8],
+        now: Instant,
+    ) -> Result<Option<InviteScope>, InviteError> {
+        self.observe(now)?;
+        let digest: [u8; 32] = Sha256::digest(secret).into();
+        Ok(self
+            .records
+            .iter()
+            .find(|r| bool::from(r.digest.ct_eq(&digest)) && !r.closed && r.connection_id.is_none())
+            .map(|r| r.scope.clone()))
     }
 
     pub fn close_connection(
@@ -591,6 +614,35 @@ mod tests {
                 300,
                 expired,
             )
+            .unwrap();
+    }
+
+    #[test]
+    fn one_hosts_replay_fences_cannot_occupy_the_global_bound() {
+        let now = Instant::now();
+        let mut registry = InviteRegistry::new(now);
+        let scope = invite_scope();
+        for n in 0..16u8 {
+            let connection = Uuid::new_v4();
+            registry
+                .register_invite(&[n; 32], &scope, 300, now)
+                .unwrap();
+            registry
+                .claim_invite(&[n; 32], &scope, connection, now)
+                .unwrap();
+            registry.close_connection(connection, now).unwrap();
+        }
+        assert_eq!(
+            registry.register_invite(&[16; 32], &scope, 300, now),
+            Err(InviteError::HostCapacity)
+        );
+        let other = invite_scope();
+        registry
+            .register_invite(&[17; 32], &other, 300, now)
+            .unwrap();
+        let expired = now + Duration::from_secs(300);
+        registry
+            .register_invite(&[16; 32], &scope, 300, expired)
             .unwrap();
     }
 

@@ -137,6 +137,20 @@ fn frontend_uses_image_browsers_without_a_bootstrap_or_browser_cache() {
     );
 }
 
+/// Bound file-level parallelism without moving host tests into the browser image.
+#[test]
+fn frontend_unit_files_run_with_bounded_concurrency_on_the_host() {
+    let unit = frontend_step("Run frontend unit tests");
+    assert!(unit.contains("bash scripts/run-frontend-unit-tests.sh --test-concurrency=2"));
+    assert!(unit.contains("git fetch --no-tags --depth=1 origin \"$GWT_PULL_RENDER_BASE_SHA\""));
+    assert!(
+        unit.contains("github.event.pull_request.base.sha || github.event.merge_group.base_sha")
+    );
+    assert!(unit.contains("timeout-minutes: 10"));
+    assert!(!unit.contains("docker run"));
+    assert!(!unit.contains("continue-on-error:"));
+}
+
 /// Replacing browser bootstrap must retain the embedded E2E suite itself.
 #[test]
 fn the_frontend_job_runs_the_embedded_e2e_suite() {
