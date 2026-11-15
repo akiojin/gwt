@@ -22,8 +22,24 @@ impl LaunchWizardState {
         &self,
         profiles: &[crate::IssueMonitorLaunchProfile],
     ) -> IssueMonitorProfileChoices {
-        let agents = self
-            .detected_agents
+        IssueMonitorProfileChoices {
+            agents: self.issue_monitor_agent_choices(profiles),
+            docker_services: self.docker_service_options(),
+            default_docker_service: self
+                .context
+                .docker_context
+                .as_ref()
+                .and_then(|context| context.suggested_service.clone()),
+            windows_shell_supported: cfg!(windows),
+        }
+    }
+
+    /// Pure input assistance; no launch, Monitor or Docker discovery.
+    pub fn issue_monitor_agent_choices(
+        &self,
+        profiles: &[crate::IssueMonitorLaunchProfile],
+    ) -> Vec<IssueMonitorAgentChoices> {
+        self.detected_agents
             .iter()
             .map(|agent| {
                 let mut state = self.clone();
@@ -99,17 +115,7 @@ impl LaunchWizardState {
                     session_modes,
                 }
             })
-            .collect();
-        IssueMonitorProfileChoices {
-            agents,
-            docker_services: self.docker_service_options(),
-            default_docker_service: self
-                .context
-                .docker_context
-                .as_ref()
-                .and_then(|context| context.suggested_service.clone()),
-            windows_shell_supported: cfg!(windows),
-        }
+            .collect()
     }
 
     pub fn view(&self) -> LaunchWizardView {

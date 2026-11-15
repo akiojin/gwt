@@ -30,6 +30,9 @@ use crate::discussion_resume::load_pending_resume;
 use crate::window_state::window_state_for_hook_event;
 
 const HOOK_SESSION_METADATA_LEASE_WAIT: Duration = Duration::from_millis(25);
+// Native startup identity is a mandatory durable commit, so use the normal
+// Session transaction's bounded wait rather than fail-open bookkeeping's budget.
+const SESSION_START_METADATA_LEASE_WAIT: Duration = Duration::from_secs(2);
 
 /// A read-only snapshot, never an execution grant. Completion and doctor compare
 /// this existing Session/process identity again before publishing evidence.
@@ -489,7 +492,15 @@ impl HookCompletionContext {
         gwt_agent::session::with_session_path_lease_wait(
             &self.sessions_dir,
             &self.session_id,
-            HOOK_SESSION_METADATA_LEASE_WAIT,
+            if self
+                .observation
+                .as_ref()
+                .is_some_and(|event| event.event == "SessionStart")
+            {
+                SESSION_START_METADATA_LEASE_WAIT
+            } else {
+                HOOK_SESSION_METADATA_LEASE_WAIT
+            },
             |state| {
                 let gwt_agent::SessionPathState::Present(session) = state else {
                     return Ok(None);
@@ -1030,7 +1041,11 @@ fn persist_hook_metadata(
             event,
             provider.map(HookSessionId::as_str),
             root.as_deref(),
-            HOOK_SESSION_METADATA_LEASE_WAIT,
+            if event == "SessionStart" && provider.is_some() {
+                SESSION_START_METADATA_LEASE_WAIT
+            } else {
+                HOOK_SESSION_METADATA_LEASE_WAIT
+            },
         )
     }
 }
@@ -2270,48 +2285,71 @@ mod tests {
     #[test]
     fn claude_session_start_persists_agent_session_id_into_session_toml() {
         let _lock = env_lock();
-        let mut env = EnvGuard::new();
-        let dir = tempfile::tempdir().unwrap();
-        let sessions_dir = dir.path().join(".gwt").join("sessions");
-        let worktree = dir.path().join("pm-worktree");
-        std::fs::create_dir_all(&worktree).unwrap();
-        let session = Session::new(&worktree, "work", AgentId::ClaudeCode);
-        let session_id = session.id.clone();
-        session.save(&sessions_dir).unwrap();
-        assert!(
-            Session::load(&sessions_dir.join(format!("{session_id}.toml")))
-                .unwrap()
-                .exact_resume_session_id()
-                .is_none(),
-            "a freshly registered Session starts without a resume handle"
-        );
-        let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &session_id);
-        env.set(GWT_SESSION_ID_ENV, session_id.clone());
-        env.set(
-            gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV,
-            runtime_path.as_os_str().to_os_string(),
-        );
+        for aggregate in [false, true] {
+            let mut env = EnvGuard::new();
+            let dir = tempfile::tempdir().unwrap();
+            let sessions_dir = dir.path().join(".gwt").join("sessions");
+            let worktree = dir.path().join("pm-worktree");
+            std::fs::create_dir_all(&worktree).unwrap();
+            let session = Session::new(&worktree, "work", AgentId::ClaudeCode);
+            let session_id = session.id.clone();
+            session.save(&sessions_dir).unwrap();
+            assert!(
+                Session::load(&sessions_dir.join(format!("{session_id}.toml")))
+                    .unwrap()
+                    .exact_resume_session_id()
+                    .is_none(),
+                "a freshly registered Session starts without a resume handle"
+            );
+            let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &session_id);
+            env.set(GWT_SESSION_ID_ENV, session_id.clone());
+            env.set(
+                gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV,
+                runtime_path.as_os_str().to_os_string(),
+            );
 
-        handle_with_input(
-            "SessionStart",
-            r#"{"session_id":"pm-conversation-3966","cwd":"pm-worktree"}"#,
-        )
-        .expect("SessionStart must persist the provider conversation id");
+            // A concurrent Session transaction can hold this same lease
+            // while a restored provider reports its native conversation.
+            let lease = OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(sessions_dir.join(format!(".{session_id}.lock")))
+                .unwrap();
+            lease.lock_exclusive().unwrap();
+            let release = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(300));
+                lease.unlock().unwrap();
+            });
 
-        let loaded = Session::load(&sessions_dir.join(format!("{session_id}.toml"))).unwrap();
-        assert_eq!(
-            loaded.exact_resume_session_id(),
-            Some("pm-conversation-3966"),
-            "the reloaded Session must expose the handle the restore path resumes from"
-        );
-        assert_eq!(
-            loaded
-                .session_history
-                .iter()
-                .map(|entry| entry.agent_session_id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["pm-conversation-3966"],
-        );
+            let input = r#"{"session_id":"pm-conversation-3966","cwd":"pm-worktree"}"#;
+            let result = if aggregate {
+                let completion = begin_hook_event(&worktree, "SessionStart", input)
+                    .expect("current Session permits an owned startup hook");
+                handle_with_input_owned("SessionStart", input, Some(&completion)).map(|_| ())
+            } else {
+                handle_with_input("SessionStart", input)
+            };
+            release.join().unwrap();
+            result
+                .expect("SessionStart must persist the provider conversation id after contention");
+
+            let loaded = Session::load(&sessions_dir.join(format!("{session_id}.toml"))).unwrap();
+            assert_eq!(
+                loaded.exact_resume_session_id(),
+                Some("pm-conversation-3966"),
+                "the reloaded Session must expose the handle the restore path resumes from"
+            );
+            assert_eq!(
+                loaded
+                    .session_history
+                    .iter()
+                    .map(|entry| entry.agent_session_id.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["pm-conversation-3966"],
+            );
+        }
     }
 
     #[test]

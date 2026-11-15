@@ -269,16 +269,19 @@ test("swipe over a mouse-tracking fullscreen agent reaches xterm as a wheel even
 });
 
 test("swipe over retained history scrolls xterm lines without application input", () => {
+  const observedScrolls = [];
   const fixture = mountFixture({
     isWindowsHost: () => false,
     applicationScrollFallback: true,
     terminalOptions: { buffer: { active: { baseY: 180 } } },
+    onUserScroll: () => observedScrolls.push(fixture.scrollCalls.at(-1)),
   });
 
   fixture.swipe([100, 132]);
   fixture.swipe([300, 284]);
 
   assert.deepEqual(fixture.scrollCalls, [-2, 1]);
+  assert.deepEqual(observedScrolls, [-2, 1], "each user scroll is observed after xterm moves");
   assert.deepEqual(fixture.inputCalls, []);
   assert.equal(fixture.bubbledWheelCount, 0);
   fixture.dispose();
@@ -451,6 +454,7 @@ function mountFixture({
   terminalOptions = {},
   applicationScrollFallback = false,
   isRuntimeStopped,
+  onUserScroll,
 } = {}) {
   const terminalRoot = new FakeTerminalRoot();
   const scrollCalls = [];
@@ -471,6 +475,7 @@ function mountFixture({
     },
     isApplicationScrollFallbackEnabled: () => applicationScrollFallback,
     isRuntimeStopped,
+    onUserScroll,
     sendTerminalInput: (data, options) => {
       inputCalls.push(data);
       inputOptions.push(options);

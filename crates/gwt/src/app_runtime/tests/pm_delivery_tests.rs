@@ -29,20 +29,34 @@ pub(super) struct PmDeliveryFixture {
 }
 
 pub(super) fn pm_delivery_owner_fixture(temp: &Path) -> PmDeliveryFixture {
-    pm_delivery_owner_fixture_for_agent(temp, gwt_agent::AgentId::Codex)
+    pm_delivery_owner_fixture_with_target_role(temp, false)
+}
+
+pub(super) fn pm_delivery_owner_fixture_with_target_role(
+    temp: &Path,
+    pm_role_target: bool,
+) -> PmDeliveryFixture {
+    pm_delivery_owner_fixture_for_agent(temp, gwt_agent::AgentId::Codex, pm_role_target)
 }
 
 fn pm_delivery_owner_fixture_for_agent(
     temp: &Path,
     agent_id: gwt_agent::AgentId,
+    pm_role_target: bool,
 ) -> PmDeliveryFixture {
-    pm_delivery_owner_fixture_for_launch_route(temp, agent_id, gwt_agent::LaunchRoute::Manual)
+    pm_delivery_owner_fixture_for_launch_route(
+        temp,
+        agent_id,
+        gwt_agent::LaunchRoute::Manual,
+        pm_role_target,
+    )
 }
 
 fn pm_delivery_owner_fixture_for_launch_route(
     temp: &Path,
     agent_id: gwt_agent::AgentId,
     launch_route: gwt_agent::LaunchRoute,
+    pm_role_target: bool,
 ) -> PmDeliveryFixture {
     use super::pane_control_tests::{
         control_launch_config, control_owner_agent, control_owner_launch, control_register_pm,
@@ -52,7 +66,9 @@ fn pm_delivery_owner_fixture_for_launch_route(
     seed_owner_fixture_roster(&repo, 8);
     configure_owner_fixture_tools(&repo, &["pane-contract-fixture", agent_id.command()]);
     let (owner, pm) = control_owner_agent(&repo, "pm", 42);
-    control_register_pm(&repo, &pm);
+    if !pm_role_target {
+        control_register_pm(&repo, &pm);
+    }
     let runner = temp.join(if cfg!(windows) {
         "pm-codex.cmd"
     } else {
@@ -66,16 +82,36 @@ fn pm_delivery_owner_fixture_for_launch_route(
     }
     #[cfg(windows)]
     fs::write(&runner, "@echo off\r\nif \"%~1\"==\"--version\" (echo 1.2.3& exit /b 0)\r\nif \"%~1\"==\"features\" exit /b 0\r\npowershell -NoProfile -Command \"[Console]::TreatControlCAsInput = $true; [Console]::WriteLine('pm-fixture-ready'); while ($true) { [void][Console]::ReadKey($true) }\"\r\n").unwrap();
-    let location = control_launch_config(&repo, 43);
-    let mut config = gwt_agent::AgentLaunchBuilder::new(agent_id.clone())
-        .launch_route(launch_route)
-        .working_dir(location.working_dir.unwrap())
-        .branch(location.branch.unwrap())
-        .base_branch(location.base_branch.unwrap())
-        .build();
+    let mut config = if pm_role_target {
+        let worktree = create_detached_pm_worktree_fixture(&repo);
+        gwt::pm_registry::mutate_pm_prefs(
+            &gwt::pm_registry::pm_prefs_path_for_repo_path(&repo),
+            |prefs| {
+                prefs.settings.launch_profile = Some(gwt::pm_registry::PmLaunchProfile {
+                    agent_id: agent_id.command().into(),
+                    model: None,
+                    reasoning: None,
+                    version: None,
+                    codex_speed: None,
+                    fast_mode: None,
+                });
+            },
+        )
+        .unwrap();
+        AppRuntime::pm_new_launch_config(&repo, &worktree).unwrap()
+    } else {
+        let location = control_launch_config(&repo, 43);
+        let mut config = gwt_agent::AgentLaunchBuilder::new(agent_id.clone())
+            .working_dir(location.working_dir.unwrap())
+            .branch(location.branch.unwrap())
+            .base_branch(location.base_branch.unwrap())
+            .build();
+        config.linked_issue_number = Some(43);
+        config.explicit_follow_up = true;
+        config
+    };
+    config.launch_route = launch_route;
     config.command = runner.display().to_string();
-    config.linked_issue_number = Some(43);
-    config.explicit_follow_up = true;
     let target = control_owner_launch(&owner, "target", config);
     owner_runtime_status_event(&owner, &target, "Working", "SessionStart");
     let target = owner_fixture_block_on(owner.probe(&target.id, target.incarnation)).unwrap();
@@ -88,6 +124,44 @@ fn pm_delivery_owner_fixture_for_launch_route(
         target.status
     );
     assert_eq!(target.session.as_ref().unwrap().agent_id, agent_id);
+    if pm_role_target {
+        // The real PM retires its own authority; pm.stop keeps its live pane.
+        // Registering the legacy principal below must not replace a live PM.
+        target.with_agent_environment(|| {
+            let mut env = gwt::cli::TestEnv::new(repo.clone());
+            let code = gwt::cli::dispatch_json_input(
+                &mut env,
+                "gwtd",
+                &serde_json::json!({
+                    "schema_version": 1,
+                    "operation": "pm.stop",
+                    "params": { "project_root": repo },
+                })
+                .to_string(),
+            );
+            assert_eq!(code, 0, "pm.stop: {}", String::from_utf8_lossy(&env.stdout));
+            let envelope: serde_json::Value = serde_json::from_slice(&env.stdout).unwrap();
+            let report: serde_json::Value =
+                serde_json::from_str(envelope["output"].as_str().unwrap()).unwrap();
+            assert_eq!(
+                report["stopped_session_id"],
+                target.session.as_ref().unwrap().id
+            );
+            assert_eq!(report["registration_cleared"], true);
+        });
+        assert!(
+            gwt::pm_registry::load_pm_prefs(&gwt::pm_registry::pm_prefs_path_for_repo_path(&repo))
+                .unwrap()
+                .registration
+                .is_none(),
+            "the real pm.stop must clear registration before the legacy principal is registered"
+        );
+        assert!(
+            target.pty.try_wait().unwrap().is_none(),
+            "pm.stop retains the protected live PM-role pane"
+        );
+        control_register_pm(&repo, &pm);
+    }
     // Issue #6071: the PTY start gate and runner write startup output
     // asynchronously. Wait until the non-echoing runner's ready marker has
     // been parsed so no late startup bytes can redraw a test-painted surface.
@@ -284,6 +358,7 @@ fn authenticated_pm_send_cancel_before_monitor_fence_stays_uncommitted() {
         temp.path(),
         gwt_agent::AgentId::Codex,
         gwt_agent::LaunchRoute::Autonomous,
+        false,
     );
     let writer = fixture.target.writer.as_ref().expect("owner writer");
     assert!(writer
@@ -347,7 +422,8 @@ fn issue_3706_grok_pm_send_refuses_permission_and_unknown_surfaces_before_body()
     let _user_home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let _grok_home = ScopedEnvVar::set("GROK_HOME", temp.path().join(".grok"));
-    let fixture = pm_delivery_owner_fixture_for_agent(temp.path(), gwt_agent::AgentId::GrokBuild);
+    let fixture =
+        pm_delivery_owner_fixture_for_agent(temp.path(), gwt_agent::AgentId::GrokBuild, false);
     // Upstream Options mode has its own shortcut footer and owns Enter.
     let hidden_root = grok_hidden_composer(80);
     let feedback = format!(
@@ -410,7 +486,8 @@ fn issue_3706_grok_submit_rechecks_the_current_composer_surface() {
     let _user_home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let _grok_home = ScopedEnvVar::set("GROK_HOME", temp.path().join(".grok"));
-    let fixture = pm_delivery_owner_fixture_for_agent(temp.path(), gwt_agent::AgentId::GrokBuild);
+    let fixture =
+        pm_delivery_owner_fixture_for_agent(temp.path(), gwt_agent::AgentId::GrokBuild, false);
     let target = &fixture.target;
     let wrapped = format!(
         "\x1b[2J\x1b[16;1H╭{}╮\x1b[17;1H  ❯ notification\x1b[18;1H    {}\x1b[19;1H    tail\x1b[20;1H╰{}╯\x1b[24;1HEnter send  Shift+Tab mode\x1b[19;9H\x1b[?25h",
@@ -502,7 +579,8 @@ fn issue_3706_grok_submit_recovery_refuses_a_focused_permission_card() {
     let _user_home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let _grok_home = ScopedEnvVar::set("GROK_HOME", temp.path().join(".grok"));
-    let fixture = pm_delivery_owner_fixture_for_agent(temp.path(), gwt_agent::AgentId::GrokBuild);
+    let fixture =
+        pm_delivery_owner_fixture_for_agent(temp.path(), gwt_agent::AgentId::GrokBuild, false);
     let operation = uuid::Uuid::new_v4().to_string();
     let text = "notification with a dropped submission\r";
     let (responder, result, _cancellation) =
@@ -556,7 +634,7 @@ fn assert_pm_send_waits_for_exact_target_hook_ack(agent_id: gwt_agent::AgentId) 
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let _owner_home = ScopedGwtHome::set(temp.path());
-    let fixture = pm_delivery_owner_fixture_for_agent(temp.path(), agent_id);
+    let fixture = pm_delivery_owner_fixture_for_agent(temp.path(), agent_id, false);
     let repo = fixture.repo.clone();
     let target_window = fixture.target.id.clone();
     let target_session_id = fixture.target.session.as_ref().unwrap().id.clone();
@@ -787,7 +865,7 @@ fn assert_pm_unconfirmed_delivery_preserves_a_later_draft(agent_id: gwt_agent::A
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let _owner_home = ScopedGwtHome::set(temp.path());
     let _grok_home = ScopedEnvVar::set("GROK_HOME", temp.path().join(".grok"));
-    let fixture = pm_delivery_owner_fixture_for_agent(temp.path(), agent_id.clone());
+    let fixture = pm_delivery_owner_fixture_for_agent(temp.path(), agent_id.clone(), false);
     let repo = fixture.repo.clone();
     let target_window = fixture.target.id.clone();
 
@@ -903,7 +981,26 @@ fn authenticated_pm_send_recovers_the_same_operation_after_dropped_submit() {
         &format!("{body}\r"),
         Some(responder),
     );
-    assert!(matches!(result.blocking_recv().unwrap(),
+    let first_result = result.blocking_recv().unwrap();
+    let first_observation = match &first_result {
+        BackendEvent::PmMessageSendResult { status, reason, .. } => {
+            let detail = reason.as_deref().unwrap_or_default().to_ascii_lowercase();
+            serde_json::json!({
+                "status": match status.as_str() {
+                    "unconfirmed" => "unconfirmed", "delivered" => "delivered",
+                    "failed" => "failed", "refused" => "refused", "lost" => "lost",
+                    _ => "other_status",
+                },
+                "receipt_commit_failed": detail.contains("receipt commit failed")
+                    || detail.contains("receipt terminal commit failed"),
+                "readback_error": detail.contains("receipt")
+                    && (detail.contains("unavailable") || detail.contains("replay failed")),
+                "readback_only": detail.contains("readback-only"),
+            })
+        }
+        _ => serde_json::json!({"status": "other_event"}),
+    };
+    assert!(matches!(&first_result,
         BackendEvent::PmMessageSendResult { status, .. } if status == "unconfirmed"));
     let entry = fixture.target.writer.as_ref().unwrap().clone();
     let original_transaction = entry
@@ -914,6 +1011,41 @@ fn authenticated_pm_send_recovers_the_same_operation_after_dropped_submit() {
         .unwrap()
         .transaction_revision;
     let path = gwt::pm_registry::pm_delivery_receipts_path_for_repo_path(&repo);
+    // One raw snapshot: never lock, repair the receipt tail, or claim current authority.
+    let receipt_snapshot = match fs::read_to_string(&path) {
+        Ok(raw) => {
+            let rows = raw
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .map(serde_json::from_str::<gwt::pm_registry::PmDeliveryReceipt>)
+                .collect::<Result<Vec<_>, _>>();
+            match rows {
+                Ok(rows) => serde_json::json!({
+                    "read": "parsed", "unterminated_tail": !raw.is_empty() && !raw.ends_with('\n'),
+                    "matching_rows": rows.iter().filter(|row| row.operation_id == operation_id).count(),
+                    "last_status": rows.iter().rev().find(|row| row.operation_id == operation_id).map(|row| row.status),
+                }),
+                Err(_) => serde_json::json!({
+                    "read": "unparseable", "unterminated_tail": !raw.is_empty() && !raw.ends_with('\n'),
+                }),
+            }
+        }
+        Err(error) => serde_json::json!({
+            "read": "unavailable", "not_found": error.kind() == std::io::ErrorKind::NotFound,
+        }),
+    };
+    let guard_snapshot = entry.pm_delivery_replay.lock().ok().map(|replay| {
+        let guard = replay.as_ref();
+        serde_json::json!({
+            "present": guard.is_some(),
+            "same_operation": guard.is_some_and(|guard| guard.operation_id == operation_id),
+            "same_target": guard.is_some_and(|guard| guard.target_session_id == target_session_id),
+            "explicit_pm_guard": guard.is_some_and(|guard| guard.retained_input.is_none()),
+            "same_recorded_transaction": guard.is_some_and(|guard| guard.transaction_revision == original_transaction),
+            "ordinary_revision_matches": guard.is_some_and(|guard| entry.handle.ordinary_input_revision() == Some(guard.ordinary_revision)),
+            "unsent_user_input": entry.handle.has_unsent_user_input(),
+        })
+    });
     let (responder, result, recovery_cancellation) = AgentPmSendResponder::channel();
     fixture.send(
         "client".into(),
@@ -922,9 +1054,19 @@ fn authenticated_pm_send_recovers_the_same_operation_after_dropped_submit() {
         &format!("{body}\r"),
         Some(responder),
     );
-    assert!(matches!(result.blocking_recv().unwrap(),
+    let recovered_result = result.blocking_recv().unwrap();
+    let status_reason = match &recovered_result {
+        BackendEvent::PmMessageSendResult { status, reason, .. } => {
+            Some((status.as_str(), reason.as_deref()))
+        }
+        _ => None,
+    };
+    assert!(
+        matches!(&recovered_result,
         BackendEvent::PmMessageSendResult { status, reason: Some(reason), .. }
-            if status == "unconfirmed" && reason.contains("Further calls are readback-only")));
+            if status == "unconfirmed" && reason.contains("Further calls are readback-only")),
+        "same-operation submit recovery status/reason: {status_reason:?}; first={first_observation} receipt_snapshot={receipt_snapshot} guard_snapshot={guard_snapshot:?}"
+    );
     assert!(
         recovery_cancellation.cancel(),
         "the bounded recovery must reach its input commit"

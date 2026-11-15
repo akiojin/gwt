@@ -90,6 +90,14 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "agent.registry.reconcile",
+        aliases: &[],
+    },
+    Operation {
+        name: "agent.registry.status",
+        aliases: &[],
+    },
+    Operation {
         name: "board.config.set",
         aliases: &[],
     },

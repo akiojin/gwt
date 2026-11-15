@@ -24,6 +24,36 @@ impl OwnerInputObservation {
     }
 }
 
+/// Attachment-only physical writer result, carried on the existing private reply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OwnerAttachmentInputOutcome {
+    Written,
+    NotStarted,
+    OutcomeUnknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OwnerAttachmentInputReason {
+    TargetUnavailable,
+    WriterUnavailable,
+    WriteUncertain,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OwnerAttachmentInputReceipt {
+    pub tag: String,
+    pub schema_version: u32,
+    pub pane_id: String,
+    pub incarnation: u64,
+    pub session_id: String,
+    pub outcome: OwnerAttachmentInputOutcome,
+    pub reason: Option<OwnerAttachmentInputReason>,
+    pub input_observation: Option<OwnerInputObservation>,
+}
+
 /// Immutable readback of an exact Genesis compensation. This receipt only
 /// invalidates caches; it never grants cleanup or input authority.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -130,6 +160,12 @@ pub struct OwnerMonitorLaunchRejection {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum OwnerCommand {
+    AttachmentInput {
+        id: String,
+        incarnation: u64,
+        session_id: String,
+        data: Vec<u8>,
+    },
     InvalidateProjectObservation {
         host_pid: u32,
         host_started_at: u64,
