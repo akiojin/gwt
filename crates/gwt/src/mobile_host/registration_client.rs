@@ -26,6 +26,11 @@
 //! Signals may use only half the channel: a signal beyond that is dropped and
 //! its connection closed through the coordinator (`close_connection`), so one
 //! browser cannot end the registration for the others.
+//!
+//! The caller answers a claimed connection with [`OutboundSignal`]s, sent one at
+//! a time while enabled. A signal whose frame exceeds the coordinator's message
+//! bound would end the whole registration there, so it is dropped and only its
+//! connection closed. Dropping every signal sender only ends signal input.
 
 use super::credential::LoadedHostCredential;
 use crate::mobile_connection::{AuthorizationError, MobileAuthorization};
@@ -90,6 +95,13 @@ pub enum ConnectionEvent {
     Closed {
         connection_id: Uuid,
     },
+}
+
+/// An opaque signal for one claimed connection of this registration. The
+/// coordinator ignores a connection that is no longer live.
+pub struct OutboundSignal {
+    pub connection_id: Uuid,
+    pub payload: String,
 }
 
 /// A pairing invite for the coordinator to admit under this registration.
@@ -209,8 +221,9 @@ fn write(
 /// sender is dropped (`Ok`, observed during the handshake too) or the
 /// registration fails (`Err`). The authority is disabled on return either way.
 /// `tcp` must already be connected to the credential's coordinator origin.
-/// `invites` is read only while enabled and one request at a time; claimed
-/// connections are reported on `events`.
+/// `invites` is read only while enabled and one request at a time; `signals`
+/// only while enabled; claimed connections are reported on `events`.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_registration(
     authority: Arc<RwLock<MobileAuthorization>>,
     credential: &LoadedHostCredential,
@@ -218,9 +231,13 @@ pub async fn run_registration(
     tcp: TcpStream,
     stop: watch::Receiver<bool>,
     invites: mpsc::Receiver<InviteRequest>,
+    signals: mpsc::Receiver<OutboundSignal>,
     events: mpsc::Sender<ConnectionEvent>,
 ) -> Result<(), RegistrationClientError> {
-    let result = register_and_renew(&authority, credential, tls, tcp, stop, invites, events).await;
+    let result = register_and_renew(
+        &authority, credential, tls, tcp, stop, invites, signals, events,
+    )
+    .await;
     authority
         .write()
         .unwrap_or_else(|error| error.into_inner())
@@ -228,6 +245,7 @@ pub async fn run_registration(
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn register_and_renew(
     authority: &RwLock<MobileAuthorization>,
     credential: &LoadedHostCredential,
@@ -235,6 +253,7 @@ async fn register_and_renew(
     tcp: TcpStream,
     mut stop: watch::Receiver<bool>,
     mut invites: mpsc::Receiver<InviteRequest>,
+    mut signals: mpsc::Receiver<OutboundSignal>,
     events: mpsc::Sender<ConnectionEvent>,
 ) -> Result<(), RegistrationClientError> {
     let host_epoch = write(authority)?.prepare_registration(credential)?;
@@ -302,6 +321,7 @@ async fn register_and_renew(
     send_renew(&mut socket, request.generation(), request.nonce()).await?;
     let mut poll = tokio::time::interval(POLL_INTERVAL);
     let mut invites_open = true;
+    let mut signals_open = true;
     // The one unanswered invite: its nonce and the caller's reply.
     let mut pending: Option<(Uuid, oneshot::Sender<InviteOutcome>)> = None;
     loop {
@@ -318,6 +338,13 @@ async fn register_and_renew(
                 let nonce = Uuid::new_v4();
                 send_invite(&mut socket, generation, nonce, &request).await?;
                 pending = Some((nonce, request.reply));
+            }
+            signal = signals.recv(), if signals_open => {
+                let Some(signal) = signal else {
+                    signals_open = false;
+                    continue;
+                };
+                send_signal(&mut socket, generation, signal).await?;
             }
             _ = poll.tick() => {
                 let request = write(authority)?.poll_registration(Instant::now(), wall()?)?;
@@ -433,6 +460,27 @@ async fn send_close(
     });
     socket
         .send(Message::text(text.to_string()))
+        .await
+        .map_err(|_| RegistrationClientError::Closed)
+}
+
+/// Relays a signal to one claimed connection, or closes that connection when
+/// the frame would exceed the coordinator's message bound.
+async fn send_signal(
+    socket: &mut Socket,
+    generation: Uuid,
+    signal: OutboundSignal,
+) -> Result<(), RegistrationClientError> {
+    let text = serde_json::json!({
+        "type": "signal", "generation": generation,
+        "connection_id": signal.connection_id, "payload": signal.payload,
+    })
+    .to_string();
+    if text.len() > MAX_MESSAGE_BYTES {
+        return send_close(socket, generation, signal.connection_id).await;
+    }
+    socket
+        .send(Message::text(text))
         .await
         .map_err(|_| RegistrationClientError::Closed)
 }
