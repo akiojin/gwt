@@ -433,7 +433,9 @@ test.describe("Issue queue real backend launch", () => {
     expect(errors).toEqual([]);
   });
 
-  for (const afterAck of ["unchanged", "initial draft", "input", "draft", "source edit", "cancel", "target removed", "worktree job", "cancel pending job", "unknown cwd", "restart"] as const) test(afterAck === "initial draft"
+  for (const afterAck of ["unchanged", "refresh cancel", "initial draft", "input", "draft", "source edit", "cancel", "target removed", "worktree job", "cancel pending job", "unknown cwd", "restart"] as const) test(afterAck === "refresh cancel"
+    ? "T94431 cancellation during target refresh prevents checkpoint delivery and permits a new switch"
+    : afterAck === "initial draft"
     ? "T94430 unsent draft before the first Switch request waits and resumes naturally"
     : afterAck === "input"
     ? "T94421 input after checkpoint ACK preserves the source without switching"
@@ -459,6 +461,7 @@ test.describe("Issue queue real backend launch", () => {
     const fixture = await startIssueQueueLaunchFixture(info, {
       page,
       targetIssueNumber: 44, switching: true, positive: true, autonomousMode: true,
+      targetRefreshGate: afterAck === "refresh cancel",
     });
     const errors: string[] = [];
     const theme = info.project.name.includes("light") ? "light" : "dark";
@@ -554,7 +557,53 @@ test.describe("Issue queue real backend launch", () => {
         await expect.poll(echoedProbes, { timeout: 30_000, message: "the real source PTY echoes the unsubmitted draft" }).toBe(2);
       }
       const handoffDeadline = Date.now() + 120_000;
+      if (afterAck === "refresh cancel") await fixture.targetRefreshGate.arm();
       await plans.locator('[data-action="switch-next"]').click();
+      let cancelledDuringRefresh: any;
+      if (afterAck === "refresh cancel") {
+        await expect.poll(() => fixture.targetRefreshGate.waiting(), { timeout: 30_000 }).not.toBeNull();
+        const held = await fixture.targetRefreshGate.waiting();
+        const prefs = await preferences();
+        const pending = Object.values(prefs.agent_switch_intents)[0] as any;
+        expect(pending.stage).toBe("requested");
+        expect(held.argv.slice(0, 3)).toEqual(["issue", "view", "44"]);
+        expect(held.parent, "the captured Switch Host owns the blocked target read").toBe(pending.runtime_stop.host_pid);
+        expect(fixture.processAlive(held.pid)).toBe(true);
+        await plans.getByRole("button", { name: "Cancel switch", exact: true }).click();
+        await expect.poll(async () => (await preferences()).agent_switch_intents[pending.request.operation_id]?.stage)
+          .toBe("cancelled");
+        cancelledDuringRefresh = (await preferences()).agent_switch_intents[pending.request.operation_id];
+        await fixture.targetRefreshGate.release();
+        await expect.poll(() => fixture.targetRefreshGate.returned(), { timeout: 30_000 }).toBe(true);
+        const retained = await preferences();
+        expect(retained.agent_switch_intents[pending.request.operation_id]).toEqual(cancelledDuringRefresh);
+        expect(cancelledDuringRefresh.checkpoint).toBeUndefined();
+        expect(cancelledDuringRefresh.runtime_exit_confirmed).not.toBe(true);
+        expect(retained.monitor_runtime_stop_requests || []).toEqual([]);
+        expect(retained.launched_claims[43]).toBe(pending.source.claim_id);
+        expect((await readCanonicalRoster(page)).members.find((value: any) => value.agent_member_id === member.agent_member_id)
+          .assignment).toEqual(pending.source.assignment);
+        expect(await session(source.gwt_session_id!)).toBe(before);
+        expect(fixture.processAlive(source.pid)).toBe(true);
+        expect(fixture.processAlive(idle.tree_child_pid)).toBe(true);
+        expect(fixture.executionStatus(source.cwd).ecr_status).toBe("active");
+        const work = (await fixture.workItems()).work_items.find((value: any) =>
+          value.events.some((event: any) => event.agent_session_id === source.gwt_session_id));
+        expect(work).toBeTruthy();
+        expect(work.status_category).not.toMatch(/done|blocked/);
+        expect(fixture.savedSource(source.cwd).porcelain).not.toContain("checkpoint-source.txt");
+        expect(await fixture.launchIssues()).toEqual([43]);
+        expect(fixture.requests.filter(request => request.method === "POST"
+          && request.url === "/repos/fixture/queue/issues/44/comments")).toEqual([]);
+        expect((await fixture.actorEvents()).filter((entry: any) =>
+          ["checkpoint_before_prompt", "checkpoint_received", "checkpoint_acked"].includes(entry.stage))).toEqual([]);
+        await info.attach("cancelled-target-refresh", { body: JSON.stringify({ held, cancelledDuringRefresh }),
+          contentType: "application/json" });
+        await info.attach(`cancelled-target-refresh-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
+        // A fresh request must work after the cancelled worker finishes its read.
+        await expect(plans.locator('[data-action="switch-next"]')).toBeEnabled();
+        await plans.locator('[data-action="switch-next"]').click();
+      }
       if (initialDraft) {
         await expect.poll(async () => Object.values((await preferences()).agent_switch_intents || {}),
           { timeout: 30_000 }).toEqual([expect.objectContaining({ stage: "requested",
@@ -599,6 +648,13 @@ test.describe("Issue queue real backend launch", () => {
       await expect.poll(async () => !!await actor("awaiting_normal_n2"),
         { timeout: 60_000, message: "actual checkpoint ACK before the next genuine Normal Stop" }).toBe(true);
       const waiting = await actor("awaiting_normal_n2");
+      if (cancelledDuringRefresh) {
+        expect(waiting.operation).not.toBe(cancelledDuringRefresh.request.operation_id);
+        expect((await preferences()).agent_switch_intents[cancelledDuringRefresh.request.operation_id])
+          .toEqual(cancelledDuringRefresh);
+        expect((await fixture.actorEvents()).filter((entry: any) =>
+          entry.operation === cancelledDuringRefresh.request.operation_id)).toEqual([]);
+      }
       if (initialDraft) expect(waiting.operation).toBe(pendingDraftOperation);
       const beforePrompt = await actor("checkpoint_before_prompt");
       const activity = await actor("checkpoint_activity");
@@ -1024,8 +1080,17 @@ test.describe("Issue queue real backend launch", () => {
             body: JSON.stringify(await targetConfirmation()), contentType: "application/json",
           });
           await expect.poll(async () => Object.values((await preferences()).agent_switch_intents || {})
-            .map((intent: any) => intent.stage), { timeout: Math.max(1, completionDeadline - Date.now()) }).toEqual(["completed"]);
-          const saved = Object.values((await preferences()).agent_switch_intents)[0] as any;
+            .map((intent: any) => intent.stage).sort(), { timeout: Math.max(1, completionDeadline - Date.now()) })
+            .toEqual(cancelledDuringRefresh ? ["cancelled", "completed"] : ["completed"]);
+          const finalPreferences = await preferences();
+          const saved = finalPreferences.agent_switch_intents[waiting.operation];
+          if (cancelledDuringRefresh) {
+            expect(finalPreferences.agent_switch_intents[cancelledDuringRefresh.request.operation_id])
+              .toEqual(cancelledDuringRefresh);
+            expect(saved.runtime_stop.host_pid).toBe(cancelledDuringRefresh.runtime_stop.host_pid);
+            expect((await fixture.actorEvents()).filter((entry: any) =>
+              entry.operation === cancelledDuringRefresh.request.operation_id)).toEqual([]);
+          }
           expect(saved.runtime_exit_confirmed).toBe(true);
           expect(saved.source.assignment.session_id).toBe(source.gwt_session_id);
           expect(saved.request.member_id).toBe(member.agent_member_id);
