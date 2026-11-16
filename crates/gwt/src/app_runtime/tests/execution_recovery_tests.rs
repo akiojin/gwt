@@ -4187,7 +4187,10 @@ fn runtime_hook_agent_failure_enqueue_error_does_not_commit_local_fallback() {
         }
         impl Drop for RestoreOwnedEndpoint {
             fn drop(&mut self) {
-                fs::write(&self.path, &self.bytes)
+                if self.path.is_dir() {
+                    fs::remove_dir(&self.path).expect("remove the owned endpoint fault directory");
+                }
+                gwt_core::atomic_file::write_atomic(&self.path, &self.bytes)
                     .expect("restore the exact owned endpoint before owner teardown");
             }
         }
@@ -4196,6 +4199,9 @@ fn runtime_hook_agent_failure_enqueue_error_does_not_commit_local_fallback() {
             path: endpoint_path,
         };
         fs::remove_file(&endpoint.path).unwrap();
+        // Keep discovery unavailable even when the real daemon tries to
+        // self-heal its descriptor before both notification workers finish.
+        fs::create_dir(&endpoint.path).expect("block owned endpoint descriptor repair");
         let mut hook = runtime_hook_state("Error", &pane.session.as_ref().unwrap().id);
         hook.gwt_session_id = Some(pane.session.as_ref().unwrap().id.clone());
         hook.project_root = Some(root.display().to_string());
