@@ -1,6 +1,12 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.166.2] - 2026-11-16
+
+### Bug Fixes
+
+- **agents:** 移行で取り込まれた legacy PM 予約（停止済み Session 束縛）を新規 PM 起動時に reconciliation する
+
 ## [9.166.1] - 2026-11-16
 
 ### Bug Fixes
