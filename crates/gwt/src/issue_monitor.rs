@@ -7742,10 +7742,19 @@ pub(crate) fn establish_issue_monitor_authority_fence_with_lease(
     }
     with_issue_monitor_prefs_lock(prefs_path, |registry| {
         let mut prefs = load_issue_monitor_prefs_for_registry(prefs_path, registry)?;
+        // The caller holds the exclusive lifetime lease, so the previous
+        // GUI/daemon driver has handed over authority. Its recent heartbeat
+        // cannot establish concurrent scanning by this new owner.
+        let mut handover_unsaved = prefs.last_scan_driver.take().is_some();
         match load_issue_monitor_authority_fence(prefs_path)? {
             IssueMonitorAuthorityFenceState::Missing => {
                 persist_issue_monitor_authority_fence(prefs_path, current)?;
             }
+            // Issue #7483: this identity is unique to the caller, so only an
+            // earlier attempt of the same startup wrote it, after revoking
+            // the previous owner. Revoking again would spend the retry's
+            // budget on the same writes and never converge.
+            IssueMonitorAuthorityFenceState::Active(existing) if existing == *current => {}
             IssueMonitorAuthorityFenceState::Active(existing)
                 if existing.version == LEGACY_ISSUE_MONITOR_AUTHORITY_FENCE_VERSION
                     && is_process_alive(existing.pid) =>
@@ -7763,14 +7772,13 @@ pub(crate) fn establish_issue_monitor_authority_fence_with_lease(
                 prefs.advance_effect_authority_epoch().ok_or_else(|| {
                     io::Error::other("Issues authority epoch exhausted during fence replay")
                 })?;
+                // One save carries both the revocation and the handover.
                 prefs = save_issue_monitor_prefs_unlocked(prefs_path, &prefs, registry, true)?;
+                handover_unsaved = false;
                 persist_issue_monitor_authority_fence(prefs_path, current)?;
             }
         }
-        // The caller holds the exclusive lifetime lease, so the previous
-        // GUI/daemon driver has handed over authority. Its recent heartbeat
-        // cannot establish concurrent scanning by this new owner.
-        if prefs.last_scan_driver.take().is_some() {
+        if handover_unsaved {
             prefs = save_issue_monitor_prefs_unlocked(prefs_path, &prefs, registry, true)?;
         }
         Ok(prefs)
@@ -45816,6 +45824,62 @@ mod tests {
         let mut stale = original;
         stale.rebase_daemon_driver_prefs(&prefs);
         observe_cancelled_claims(&mut stale);
+    }
+
+    /// Issue #7483: a startup attempt that ran out of budget after persisting
+    /// its own fence must not revoke its own authority again on the retry.
+    #[test]
+    fn retried_authority_attempt_keeps_the_epoch_it_already_advanced() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        save_issue_monitor_prefs(
+            &prefs_path,
+            &IssueMonitorPrefs {
+                effect_authority_epoch: 876,
+                last_scan_driver: Some(IssueMonitorScanDriver {
+                    kind: IssueMonitorScanDriverKind::Daemon,
+                    pid: std::process::id(),
+                    at: "2026-11-16T12:22:40Z".into(),
+                }),
+                ..provisional_claim_monitor().prefs()
+            },
+        )
+        .expect("seed prefs");
+        persist_issue_monitor_authority_fence(
+            &prefs_path,
+            &IssueMonitorAuthorityFence {
+                version: ISSUE_MONITOR_AUTHORITY_FENCE_VERSION,
+                pid: std::process::id(),
+                instance_id: "previous-attempt".to_string(),
+            },
+        )
+        .expect("seed the fence an exhausted attempt left behind");
+        let current = IssueMonitorAuthorityFence::current_process();
+
+        let (first, lease) =
+            establish_issue_monitor_authority_fence(&prefs_path, &current, |_| true)
+                .expect("the free lifetime lock proves the retained fence stale");
+        assert_eq!(first.effect_authority_epoch, 877);
+        let retried = establish_issue_monitor_authority_fence_with_lease(
+            &prefs_path,
+            &current,
+            |_| true,
+            &lease,
+        )
+        .expect("a retry by the same owner is idempotent");
+
+        assert_eq!(retried.effect_authority_epoch, 877);
+        assert!(retried.last_scan_driver.is_none());
+        assert_eq!(
+            load_issue_monitor_prefs(&prefs_path)
+                .expect("durable prefs")
+                .effect_authority_epoch,
+            877
+        );
+        assert!(matches!(
+            load_issue_monitor_authority_fence(&prefs_path).expect("fence"),
+            IssueMonitorAuthorityFenceState::Active(fence) if fence == current
+        ));
     }
 
     #[test]
