@@ -177,9 +177,13 @@ custom agents.
 
 Codex model choices follow its local `models_cache.json` in Launch Wizard and
 Agents settings, with a bundled fallback when the cache is unavailable. Saved
-models that disappear remain unchanged and show a warning. Once every seven
+models that disappear remain unchanged and show a warning. If the live catalog
+is unavailable, Agents shows a notice and **Retry model catalog** rereads it
+without changing saved values or an unfinished edit. Once every seven
 days, gwt checks for catalog and saved-profile differences and adds each new
 difference to PM Reports once.
+The selected member's ID stays visible while names change. Assignment history
+shows recorded roles and observed exit times; missing historical facts remain unknown.
 
 **Settings > Supported Agents** shows the complete catalog, installation status,
 and installed versions. Install missing CLIs there; update actions appear when
@@ -766,9 +770,20 @@ Board keeps up to 1,000 entries in each window. Scroll to the top or choose
 `Load earlier entries` to retrieve older posts. When browsing older history,
 choose `Back to latest entries` to resume the latest updates.
 
-Implementation Agents are persistent project members with memorable names in the output language.
+Implementation Agents are persistent members shared by projects on this computer, with memorable names in the output language.
+The same member can work in different projects at the same time, with one assignment per project and the shared machine budget still enforced.
+Agents lists those project assignments together; selecting another project's assignment opens that project.
+Resting members remain in Agents with their saved settings and history;
+they do not receive new work.
+Choose **Reactivate** on a resting member's row to make that same member available again.
+If a new name is already registered, the message identifies its member and tool;
+**Show member** opens that row so you can reactivate or rename it.
 A new Issue reuses an available member; a continuation prefers its previous member when available.
-New member names are unique within the project and use localized family names when needed.
+New member names are unique across the shared roster and use localized family names when needed.
+Saved manual model, reasoning and Fast Mode follow the member; runtime, permission and routing settings remain project-specific.
+Saved settings apply to the next NEW launch and do not reconfigure a running Session.
+Existing rosters migrate when the project runtime starts or Agents is read; older releases cannot edit the new preference format.
+Imported people remain distinct even when their old names match.
 Restoration and restart preserve the member identity. Names appear in Works, Agents, Fleet,
 Kanban, Board, Issue comments, and PR attribution. The resident PM shows its assigned name
 alongside a PM badge in PM, Works, and Agents.
@@ -876,11 +891,15 @@ timing-dependent test failures may block unrelated PRs. In roster projects, auto
 `issue.monitor.config.set` with `{"max_active":4}` to resize the roster to four enabled
 members. To return the machine limit to Auto, use the **Auto** button beside
 **Agent limit** or `issue.monitor.config.set` with `{"max_active_mode":"auto"}`;
-this also works with a roster and keeps its members. Without a roster,
+this also works with a roster and keeps its members.
+Explicit Manual limits and roster resize requests may not exceed 256; `max_active`
+still requires a positive value. Reducing a request preserves registered members,
+and existing larger rosters remain readable.
+Without a roster,
 `{"max_active":4}` sets a Manual limit of four. `issue.monitor.status` reports the effective limit,
 `max_active_agents_override` (the shared requested value), `max_active_agents_scope: "machine"`,
 and the shared `agent_capacity` measurement. Roster projects also report
-`agent_roster_capacity` and `agent_roster_revision` for the project member setting.
+`agent_roster_capacity` and `agent_roster_revision` for the shared member setting.
 `max_active_last_change` records the last explicit setting change with `changed_at`
 and `source` (`gui` or `json_operation`); automatic capacity updates preserve this record.
 
@@ -1090,6 +1109,15 @@ Landing means a successful Work `done` update from the matching owner and
 session; closing or cancelling an Issue alone does not count. It measures
 agent-declared completion, so the rate can be optimistic if the PR fails later.
 PR merge is not required for this metric.
+
+`issue.monitor.status` also exposes `event_history`: the newest 100 Monitor
+notifications, ordered oldest first, with an `id`, RFC3339 `recorded_at`,
+an emission `sequence` that preserves order when timestamps coincide,
+`issue_number`, notification kind `level` (`info`/`warn`/`error`/`done`), and
+`message`. Failed attempts, retry notices, needs-human transitions, merges and
+slot releases remain readable after GUI notifications are consumed and across
+restarts. New entries evict the oldest; display fields such as `last_error`
+continue to report the latest error separately.
 
 Host free space is part of the same snapshot: `disk_space` in
 `issue.monitor.status` lists the volumes the worktrees and the verification
@@ -1319,20 +1347,20 @@ Replaying Update or Complete preserves
 the original receipt while the current task may reflect later changes, including
 a subsequent reopen. Raw-ID Reopen and Cancel
 continue to return their receipt's applied task state.
-Reopen and Cancel also accept a top-level `task_key` from the selected Task
+Reopen, Cancel and Complete also accept a top-level `task_key` from the selected Task
 projection with an empty `request.task_id`. Empty, unknown or mixed selectors
 are rejected. These keyed operations return the current saved task and revision
 alongside the original receipt, so a retry cannot present an older receipt's
 task state as current. Reopen keeps the same user audit, CAS and pending
-reassessment rules; a Reopen control in the Tasks detail is separate work.
+reassessment rules. Completed Tasks can also be reopened from their selected detail.
 After a connection loss, read the current task and original receipt: a new
 connection has a new actor, so replaying the old operation there is a conflict.
 The current task and the receipt's historical task state retain their own
 revisions. Missing or unreadable data returns a diagnostic and recovery read.
 Reading a receipt observes its recorded outcome; it does not acknowledge a new
 durable write.
-This transport adapter is available; the Tasks screen and checkbox controls
-are still pending.
+The Tasks detail supports cancellation and reopening completed tasks. Task
+editing and completion checkbox controls are still pending.
 
 For selected native intake, the registered PM reads
 `selector:{kind:"native_turns"}` through `pm.request_tasks.read`. The result gives
@@ -1642,7 +1670,7 @@ unchanged.
 
 - It starts automatically when you open a project, and there is a per-project
   opt-out.
-- PM settings offers **Pause / Resume** for its autonomous loop. Pause persists
+- The Project Manager section in Agents offers **Pause / Resume** for its autonomous loop. Pause persists
   across restarts while the PM remains available for conversation; Issues
   and running agents keep working. Resume reconciles the latest status. JSON
   operations `pm.pause` / `pm.resume` provide the same control, and `pm.status`
@@ -2238,6 +2266,8 @@ with a saved change to that task, so this is not a complete operation history.
 **Reload details** refreshes it; changes or read failures retain confirmed detail
 with a stale warning. **Close details** returns focus to its task.
 To cancel tracking, enter a reason in the selected detail and choose **Cancel task**.
+For a completed task, enter a reason and choose **Reopen task** to return it to
+pending tracking and request a fresh PM review. This does not restart its Issue.
 This records the browser user's reason and preserves the original request and past changes;
 it does not stop agents or change Issues or pull requests. The state changes only after
 the host confirms it. A conflict or unconfirmed response keeps the last confirmed detail;
@@ -2348,14 +2378,13 @@ an entry removes its copied policy on the next refresh.
 - Open **PM** from its separate rail entry; PM uses a single pane and also appears first in Works. Its assigned name and PM badge also appear at the top of Agents.
 - **Works** lists each local live agent once, with its latest terminal output. Choose 3–10 lines (default 3) in **Settings → System → Works output lines**; the saved value applies immediately to Works and its read-only list and survives reloads and app restarts. Select or scroll the output without opening a terminal. Click elsewhere in a row, or use Enter or Space, to use the same native terminal. **Back to Works** returns to the list; the arrows switch between current agents. Esc and other terminal keys go to the agent.
 - **Agents** shows persistent members in **Team**, assignment history and measured statistics, plus actual previous contributors in **Past**. A Works name selects that member in Agents; a current task in Agents opens its exact Works terminal.
-- In **Agents**, enter a display name, choose a tool, and click **Register**. Change a selected member’s **Display name** inline to save it automatically; the same member and current work are retained. Invalid drafts stay in the field, and **Retry name** retries a failed or conflicting save. Assignment and Board history retain their original names. **Saved manual candidate** shows the selected member’s saved manual model, reasoning, runtime and permission settings; automatic launches use tier settings. **Saved manual candidate revision** identifies that saved setting content: changing the settings changes the revision, while renaming the member or returning to the same settings preserves it. Focus the read-only field to select or copy the full value; it does not indicate chronological order. **Current work** shows the exact Session’s recorded launch facts separately. **Assignment history** shows each Session’s recorded name, tool and launch model; missing values appear as **—**, and provider-internal model changes are not measured here. Empty names and duplicate names (after trimming spaces and ignoring case, including resting members) are rejected. That member keeps the same tool. **Agents Settings** selects registered people by name and shows their tools; model and runtime settings remain available for each candidate. If the selected tool is unavailable, the queue explains the wait and does not switch tools automatically. Existing saved candidates are imported with their settings and configured concurrency capacity preserved.
+- In **Agents**, enter a display name, choose a tool and optional **Model** / **Reasoning**, and click **Register**. These settings are saved together for that member; registration does not select a launch candidate. Change a selected member’s **Display name** inline to save it automatically; the same member and current work are retained. Invalid drafts stay in the field, and **Retry name** retries a failed or conflicting save. Assignment and Board history retain their original names. **Saved manual candidate** shows the selected member’s saved manual model, reasoning, runtime and permission settings; automatic launches use tier settings. **Saved manual candidate revision** identifies that saved setting content: changing the settings changes the revision, while renaming the member or returning to the same settings preserves it. Focus the read-only field to select or copy the full value; it does not indicate chronological order. **Current work** shows the exact Session’s recorded launch facts separately. **Assignment history** shows each Session’s recorded name, tool and launch model; missing values appear as **—**, and provider-internal model changes are not measured here. Empty names and duplicate names (after trimming spaces and ignoring case, including resting members) are rejected. That member keeps the same tool. **Agents Settings** selects registered people by name and shows their tools; runtime settings remain available for each candidate. **Saved implementation settings** edits that registered member’s default model and reasoning, including members outside the candidate pool. The tool stays fixed. Changes apply to future manual launches; automatic launches use tier settings and current work keeps its recorded launch settings. **PM eligible** is available during registration and in member details; registration defaults to unchecked and does not select a PM. It allows an enabled, available member to be selected with **Select as Project Manager**. The configured PM retains the same member, name and history in Team. Its shared editor changes the saved project PM tool, model and reasoning; The project-labeled Project Manager section in **Agents** provides auto start, loop interval, pause and restart; explicit restart applies saved PM changes to a new conversation. **Retry profile** retries a refused save after review. A PM owned by another project links to that project before editing. If the selected tool is unavailable, the queue explains the wait and does not switch tools automatically. Existing saved candidates retain their project execution settings and current assignments during migration.
 - In the selected **Team** member's details, **Next planned issues** shows upcoming assignments in order with their reasons. Choose another member and select **Reassign** to move a queued issue, or use **Refresh plans** to reload after a conflict or failed response.
 - **Switch to next issue** waits for current activity to finish, then asks the agent to save and push a coherent checkpoint before the same member starts the selected issue. The current task stays open when activity or saved state cannot be confirmed. Use **Cancel switch** before stopping begins; after a launch failure, **Continue saved work** uses the saved task's normal continuation flow. A Host restart discards an unexecuted switch request.
-- **Register** increases the project's requested concurrent capacity by one. **Rest member** reduces it by one while allowing current work to finish. At least one enabled member remains. Machine safety limits can lower the effective allocation.
+- **Register** adds one enabled member to the shared roster. **Rest member** reduces it by one while allowing current work to finish. At least one enabled member remains. Machine safety limits can lower the effective allocation.
 - Use **Split view** to choose each pane independently; **Close split** keeps the active surface in one pane. Shells remain auxiliary terminals and do not count as members or live agents.
 
-**Active** counts live agents on this machine, including PM. **Busy**, **Team**, and concurrent
-capacity count implementation members only. Member identities, enabled capacity, and confirmed
+**Active** counts live agents on this machine, including PM. **Team** counts enabled registered members, including the configured PM. **Busy** counts active implementation members; concurrent capacity excludes members holding a PM role. Member identities, enabled capacity, and confirmed
 planned-issue reassignments survive an app restart.
 
 Works shows session-attributed input, cache and output usage, a thirty-minute activity graph,
@@ -2376,7 +2405,7 @@ Use `Cmd/Ctrl+Shift+Right` and `Cmd/Ctrl+Shift+Left` to select current implement
 Agents by activity while keeping the split layout. PM and auxiliary Shells are skipped.
 The selected native terminal receives input; returning to the list keeps every session running.
 Names stay on one line, and longer purposes can be scrolled horizontally or read on hover.
-Issue and Project Manager settings explain their controls on hover and keyboard focus.
+Issue settings and the Project Manager controls in Agents explain their controls on hover and keyboard focus. Registered manual Monitor launches use the member’s current global implementation defaults; automatic launches use the selected tier. Ordinary manual Work uses the launch form and the tool’s previous preferences. A new Project Manager uses its project’s saved PM profile; an unspecified value uses that route’s existing default. Saving does not change a running or restored Session.
 
 ## Operator Design Language (SPEC-2356)
 
@@ -2685,6 +2714,18 @@ Replay needs neither GitHub access nor Git history. The saved baseline is:
 ```bash
 python scripts/ci_throughput.py --input scripts/fixtures/ci-throughput-2026-10-08.json
 ```
+
+Merge snapshots also record the current branch-protection context/app IDs and
+each final head's check runs. `required_checks` reports the latest pre-merge
+result for every required check, successful check durations, and the interval
+from the earliest job in their check suites (including prerequisites) to the
+last required completion. `complete_prs` accepts success, neutral, or skipped;
+`all_success_prs` requires literal success for every check. Missing or incomplete
+evidence is reported separately and does not count as a complete sample. This
+uses protection at collection time, not historical protection; old snapshots
+remain replayable but cannot supply these additional measurements.
+Individual check durations exclude dependencies; an aggregator's short duration
+alone does not prove that its underlying test or coverage pipeline is fast.
 
 The JSON reports PR creation-to-merge time, each PR's latest successful final-head
 workflow attempt, base synchronizations per merge, runner waits, and per-job

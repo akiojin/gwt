@@ -18,6 +18,74 @@ User Verification Result: n/a (autonomous)
 
 Agent Visual Check: n/a (no UI surface)
 
+## 2026-11-16: 配備済み v9.166.0 の定常 gh 起動数と timeline 読み取りの間引き（小田 洋平）
+
+### 配備済み runtime の実測（AC-2 未達）
+
+fetch 後の `origin/main` は `555a3add55178352e9cc5b0a6b3f5456c12bcb97`
+（v9.166.0）で、これまでの Issue #6877 の source（PR #6889〜#7201）を
+すべて包含する。work branch に未配送の source は無かった。
+
+- Host: macOS `akiojin-7th`、`/Applications/GWT.app`（installed gwtd 9.166.0）。
+  GUI binary SHA-256
+  `b61544551923d4a56174327ba475917b0f3b25dc99409ce36cfc10746e619d39`。
+- 資料: `~/.gwt/logs/gwt.log.2026-11-16` の `gwt.process.summary`
+  （`kind=gh`、`phase=start`、span `issue_monitor_scan`）。
+  scan 対象の project_root は `/Users/akio-jinsenji/Repos/gwt` の 1 件のみ。
+- 09:00〜11:30 JST の連続 15 窓（各 600 秒）は、いずれも **27 回**
+  （09:00 台と 09:10 台のみ `gh pr view` を含み 29 / 28 回）。
+  内訳は `gh api graphql issue timelines` 20、`gh api issues` 5、
+  open pulls 1、closed pulls 1。閾値 20 回を超えるため AC-2 は未達。
+- GUI 再起動（PID 1020、11:45:17 JST）直後の 3 窓は 65 / 31 / 46 回。
+  cold cache と制御操作による一覧再読を含み、定常値ではない。
+- timeline 呼出 394 回の所要時間は p50 830 ms、p95 2598 ms、最大 3757 ms、
+  失敗 0。
+
+### 根因
+
+launch discovery の timeline は 1 scan（30 秒）に 5 Issue の 1 ページだけ読み
+（Issue #6954）、完了分を 600 秒の read cache に置く。1 回の cache 寿命で
+読めるのは 100 Issue までだが、対象の open な `gwt-queued` Issue は 128 件
+あった。読み終える前に先頭が失効するため queue が空にならず、
+`Issues incremental timeline readback` は再起動から 12:12 JST までの
+72 回すべて `pending=true` で、
+毎 scan 1 回の `gh` 起動が恒常化していた。
+
+### 採否
+
+- Issue の `updatedAt` による変更検知は不採用。実 GitHub の read-only 確認
+  で、open な `gwt-queued` 40 件のうち 25 件は最新の cross-reference が
+  `updatedAt` より後であり、PR の関連付けは `updatedAt` を更新しない。
+- 1 ページの Issue 数を増やす案は不採用。5 件でも p95 が 2.6 秒で、
+  Issue #6954 の open-PR readback p95 3 秒未満を崩す。
+- 採用: 定期 scan の discovery ページ読み取りを 45 秒に 1 回までに間引く
+  （30 秒周期では 1 scan おき）。ページの大きさ、cache 寿命、完全な timeline
+  のみを公開する契約、fresh（制御起点）scan の即時読み取りは変えない。
+  読まれなかった Issue は従来どおり前回の launch hold を保持する。
+  慣例の `work/issue-N` branch の PR は open PR inventory が独立に検出する。
+
+変更後の見込みは timeline 10 回 + その他 7 回 = 約 17 回 / 600 秒。
+128 件の一巡は約 13 分から約 26 分に延びる。これは source の回帰と計算に
+基づく見込みであり、配備後の実測ではない。
+
+### 回帰と残件
+
+`open_pr_timeline_pages_are_paced_across_periodic_scans` は変更前に
+「30 秒後の scan が再度読む」assert で RED、変更後に GREEN。
+worker / daemon / monitor の既存回帰 1234 件も PASS。
+
+AC-2 は、この修正を含む release を配備した runtime の 600 秒実測まで
+未チェックを維持する。制御操作の直後に `gh api issues` の 5 ページ読みが
+600 秒内に 2〜3 回起きる窓（12:00 台は timeline 以外で 20 回）は今回の
+範囲外で、別途の根因調査が必要。AC-4 / AC-5（6 agent 稼働時の 5 秒 CPU、
+5 分 / 60 分の CPU 対）は未測定。Issue #6877 は close しない。
+
+Acceptance Surface: non-user-facing (monitor read cadence).
+
+User Verification Result: n/a (autonomous)
+
+Agent Visual Check: n/a (no UI surface)
+
 ## 2026-11-13: 失敗effectとscan却下の相互再試行（鈴木 和斗）
 
 v9.164.0 の稼働GUI（PID92211、17:48:21 JST起動）を読み取り専用で観測した。

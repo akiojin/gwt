@@ -508,7 +508,13 @@ pub(super) fn run<E: CliEnv>(
         ) {
             Ok(binding) => binding,
             Err(_) => {
-                out.push_str("PR mutation refused: current execution authority requires the exact durable owning Session and generation binding; relaunch or continue the owning Session before retrying.\n");
+                out.push_str(&format!(
+                    "PR mutation refused: current execution authority requires the exact durable owning Session and generation binding; relaunch or continue the owning Session before retrying.{}\n",
+                    crate::cli::verification_record::current_holder_recovery_guidance(
+                        &worktree,
+                        session_id.as_deref(),
+                    ),
+                ));
                 return Ok(2);
             }
         };
@@ -2827,6 +2833,10 @@ mod tests {
                 out.contains("authority"),
                 "refusal must describe the caller authority requirement without reflecting identity: {out}"
             );
+            if session_id.is_none() || session_id == Some("session-foreign-secret") {
+                assert!(out.contains("session-current"), "{out}");
+                assert!(out.contains("execution.adopt"), "{out}");
+            }
         }
         assert!(env.pr_create_call_log.is_empty(), "create reached GitHub");
         assert!(env.pr_edit_call_log.is_empty(), "edit reached GitHub");

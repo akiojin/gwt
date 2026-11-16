@@ -67,6 +67,19 @@ path = "tests/startup_tray_performance.rs"
 name = "windows_agent_launch_e2e"
 path = "tests/windows_agent_launch_e2e.rs"
 
+# Explicit socket CI adapters avoid Cargo's integration-test build of every binary.
+[[example]]
+name = "gwtd"
+path = "examples/gwtd.rs"
+test = false
+harness = false
+
+[[example]]
+name = "socket_fixtures"
+path = "examples/socket_fixtures.rs"
+test = false
+harness = true
+
 [dependencies]
 # Optional: only compiled for the test-only `test-gh-guard` feature below.
 ctor = { version = "1.0.13", optional = true }
@@ -112,7 +125,7 @@ ring = "0.17"
 # SPEC #6476 T-003l1u: coordinator TLS material, same version/features as the
 # rustls/tokio-rustls already locked through reqwest; ring provider only.
 rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
-tokio-rustls = { version = "=0.26.4", default-features = false, features = ["ring", "tls12"] }
+tokio-rustls = { version = "=0.26.6", default-features = false, features = ["ring", "tls12"] }
 zeroize = "1"
 subtle = "2.6"
 hex.workspace = true

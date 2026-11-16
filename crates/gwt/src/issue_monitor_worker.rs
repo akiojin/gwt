@@ -114,8 +114,20 @@ fn ci_wait_hold_active(repo_path: &Path, pr: u64, now: Instant) -> bool {
 /// Launch discovery spreads cold and deep timelines over scans. Completion
 /// probes below retain their separate, strict full-read contract.
 const OPEN_PR_TIMELINE_CHUNK: usize = 5;
-type PendingTimelineReads =
-    HashMap<String, (Instant, Arc<Mutex<crate::cli::issue::LinkedPrBulkRead>>)>;
+/// Issue #6877 AC-2: periodic scans read at most one discovery page per this
+/// interval. It sits between one and two 30-second scan periods, so every
+/// other scan reads: a queue longer than one cache lifetime otherwise costs a
+/// `gh` start on every scan. Unread Issues keep their prior launch holds.
+const OPEN_PR_TIMELINE_PAGE_INTERVAL: Duration = Duration::from_secs(45);
+/// Per repository: last activity, pending pages, and the last page read.
+type PendingTimelineReads = HashMap<
+    String,
+    (
+        Instant,
+        Arc<Mutex<crate::cli::issue::LinkedPrBulkRead>>,
+        Option<Instant>,
+    ),
+>;
 static PENDING_TIMELINE_READS: OnceLock<Mutex<PendingTimelineReads>> = OnceLock::new();
 
 fn fetch_open_linked_prs_for_monitor(
@@ -124,12 +136,33 @@ fn fetch_open_linked_prs_for_monitor(
     numbers: &[u64],
     observe: impl FnMut(u64, &[crate::cli::LinkedPrSummary]),
 ) -> std::io::Result<BTreeMap<u64, Vec<crate::cli::LinkedPrSummary>>> {
-    let now = Instant::now();
-    fetch_linked_prs_bulk_for_monitor_with(
+    fetch_open_linked_prs_for_monitor_with(
         owner,
         repo,
         numbers,
         monitor_read_max_age(),
+        Instant::now(),
+        observe,
+        |query| crate::cli::issue::run_linked_prs_bulk_query(owner, repo, query),
+    )
+}
+
+/// Injectable core of [`fetch_open_linked_prs_for_monitor`]: `run` executes
+/// one bulk query and answers its JSON body.
+fn fetch_open_linked_prs_for_monitor_with(
+    owner: &str,
+    repo: &str,
+    numbers: &[u64],
+    max_age: Option<Duration>,
+    now: Instant,
+    observe: impl FnMut(u64, &[crate::cli::LinkedPrSummary]),
+    mut run: impl FnMut(&str) -> std::io::Result<String>,
+) -> std::io::Result<BTreeMap<u64, Vec<crate::cli::LinkedPrSummary>>> {
+    fetch_linked_prs_bulk_for_monitor_with(
+        owner,
+        repo,
+        numbers,
+        max_age,
         now,
         observe,
         |missing, observe| {
@@ -140,7 +173,7 @@ fn fetch_open_linked_prs_for_monitor(
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 // Discard idle histories, without resetting an active long
                 // queue before its later pages have had a turn.
-                reads.retain(|_, (started, _)| {
+                reads.retain(|_, (started, _, _)| {
                     now.saturating_duration_since(*started) <= ISSUE_MONITOR_PERIODIC_READ_MAX_AGE
                 });
                 if reads.len() >= REMOTE_READ_CACHE_CAPACITY {
@@ -152,8 +185,17 @@ fn fetch_open_linked_prs_for_monitor(
                         owner.to_ascii_lowercase(),
                         repo.to_ascii_lowercase()
                     ))
-                    .or_insert_with(|| (now, Arc::new(Mutex::new(Default::default()))));
+                    .or_insert_with(|| (now, Arc::new(Mutex::new(Default::default())), None));
                 entry.0 = now;
+                // A fresh scan (no max age) is never deferred.
+                if max_age.is_some()
+                    && entry.2.is_some_and(|read_at| {
+                        now.saturating_duration_since(read_at) < OPEN_PR_TIMELINE_PAGE_INTERVAL
+                    })
+                {
+                    return Ok(BTreeMap::new());
+                }
+                entry.2 = Some(now);
                 entry.1.clone()
             };
             let mut pending = pending
@@ -161,7 +203,7 @@ fn fetch_open_linked_prs_for_monitor(
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             pending.sync_numbers(missing, OPEN_PR_TIMELINE_CHUNK);
             let mut linked = BTreeMap::new();
-            pending.read_next(owner, repo, |number, prs| {
+            pending.read_next_with(&mut run, |number, prs| {
                 observe(number, prs);
                 linked.insert(number, prs.to_vec());
             })?;
@@ -10893,6 +10935,67 @@ mod remote_read_cache_tests {
         )
         .unwrap();
         assert_eq!(fetches.get(), 4, "an expired entry is read again");
+    }
+
+    /// Issue #6877 AC-2: periodic scans read launch-discovery timelines at
+    /// most one page per [`OPEN_PR_TIMELINE_PAGE_INTERVAL`], so a queue longer
+    /// than one cache lifetime no longer costs one `gh` start on every scan.
+    /// A fresh (control-driven) scan is never deferred.
+    #[test]
+    fn open_pr_timeline_pages_are_paced_across_periodic_scans() {
+        let owner = "issue6877";
+        let repo = "timeline-pace";
+        let numbers: Vec<u64> = (1..=12).collect();
+        let now = Instant::now();
+        let pages = Cell::new(0);
+        let run = |query: &str| {
+            pages.set(pages.get() + 1);
+            let issues: serde_json::Map<_, _> = numbers
+                .iter()
+                .filter(|number| query.contains(&format!("i{number}: issue(")))
+                .map(|number| {
+                    (
+                        format!("i{number}"),
+                        serde_json::json!({"timelineItems": {
+                            "nodes": [],
+                            "pageInfo": {"hasNextPage": false}
+                        }}),
+                    )
+                })
+                .collect();
+            Ok(serde_json::json!({"data": {"repository": issues}}).to_string())
+        };
+        let scan = |max_age, at| {
+            fetch_open_linked_prs_for_monitor_with(
+                owner,
+                repo,
+                &numbers,
+                max_age,
+                at,
+                |_, _| {},
+                run,
+            )
+            .unwrap()
+        };
+        let max_age = Some(ISSUE_MONITOR_PERIODIC_READ_MAX_AGE);
+
+        assert_eq!(scan(max_age, now).len(), OPEN_PR_TIMELINE_CHUNK);
+        assert_eq!(pages.get(), 1, "the first scan reads one page");
+
+        let next_scan = scan(max_age, now + Duration::from_secs(30));
+        assert_eq!(pages.get(), 1, "the next 30-second scan spawns no read");
+        assert_eq!(
+            next_scan.len(),
+            OPEN_PR_TIMELINE_CHUNK,
+            "completed timelines still answer from the cache"
+        );
+
+        let later = scan(max_age, now + Duration::from_secs(60));
+        assert_eq!(pages.get(), 2, "the scan after that reads the next page");
+        assert_eq!(later.len(), 2 * OPEN_PR_TIMELINE_CHUNK);
+
+        scan(None, now + Duration::from_secs(61));
+        assert_eq!(pages.get(), 3, "a fresh scan is never deferred");
     }
 
     /// Issue #6877 AC-2: a held PR's lifecycle (`gh pr view`) is read once per

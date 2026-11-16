@@ -2613,6 +2613,49 @@ pub(crate) fn with_current_monitor_prompt_input<T>(
     })
 }
 
+/// Observe the real confirming-input path in an explicitly armed Switch fixture.
+/// No wait or authorization is added, and ordinary builds do not contain it.
+#[cfg(all(debug_assertions, feature = "test-gh-guard"))]
+fn observe_checkpoint_raw_input_for_test(
+    entry: &PtyWriterEntry,
+    phase: &str,
+) -> Result<(), TerminalError> {
+    let Some(path) = std::env::var_os("GWT_TEST_SWITCH_BODY_GATE").map(PathBuf::from) else {
+        return Ok(());
+    };
+    let Some(registration) = &entry.monitor_runtime else {
+        return Ok(());
+    };
+    let observe = || -> std::io::Result<()> {
+        let armed: serde_json::Value = match std::fs::read(path.with_extension("claimed")) {
+            Ok(bytes) => serde_json::from_slice(&bytes)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        if armed["observe_raw"].as_bool() != Some(true)
+            || armed["root"].as_str() != registration.project_root.to_str()
+            || armed["session_id"].as_str() != Some(registration.session_id.as_str())
+            || armed["incarnation"].as_u64() != Some(registration.incarnation)
+        {
+            return Ok(());
+        }
+        let marker = path.with_extension(phase);
+        let temporary = path.with_extension(format!("{phase}.tmp"));
+        std::fs::write(
+            &temporary,
+            serde_json::to_vec(&serde_json::json!({
+                "operation": armed["operation"], "session_id": registration.session_id,
+                "incarnation": registration.incarnation, "host_pid": std::process::id(),
+                "input_revision": entry.handle.ordinary_input_revision(),
+            }))?,
+        )?;
+        std::fs::rename(temporary, marker)
+    };
+    observe().map_err(|error| TerminalError::PtyIoError {
+        details: error.to_string(),
+    })
+}
+
 /// The private GUI and agent commands use the same ordinary-input revision.
 /// A captured entry cannot target a same-address replacement.
 pub fn write_current_raw_input(
@@ -2621,9 +2664,98 @@ pub fn write_current_raw_input(
     entry: &Arc<PtyWriterEntry>,
     bytes: &[u8],
 ) -> Result<(), String> {
+    write_current_raw_input_with_session(writers, id, entry, bytes, None)
+}
+
+fn write_current_raw_input_with_session(
+    writers: &PtyWriterRegistry,
+    id: &str,
+    entry: &Arc<PtyWriterEntry>,
+    bytes: &[u8],
+    held_session: Option<HeldMonitorPromptSession<'_>>,
+) -> Result<(), String> {
     with_current_writer(writers, id, entry, |handle| {
-        handle.write_input(bytes).map_err(|error| error.to_string())
+        if entry
+            .monitor_runtime
+            .as_ref()
+            .is_none_or(|registration| registration.review_dispatch)
+        {
+            return handle.write_input(bytes).map_err(|error| error.to_string());
+        }
+        handle
+            .write_input_with_acceptance(bytes, |confirms, commit| {
+                let mut accept = || {
+                    let registered = writers.read().map_err(|error| TerminalError::PtyIoError {
+                        details: error.to_string(),
+                    })?;
+                    if !registered
+                        .get(id)
+                        .is_some_and(|current| Arc::ptr_eq(current, entry))
+                        || !entry.current.load(std::sync::atomic::Ordering::Acquire)
+                    {
+                        return Err(TerminalError::PtyIoError {
+                            details: "pane runtime changed before raw input acceptance".into(),
+                        });
+                    }
+                    // Keep this exact entry registered through the short queue
+                    // commit, never through runtime I/O or physical writer waits.
+                    commit()
+                };
+                if confirms {
+                    #[cfg(all(debug_assertions, feature = "test-gh-guard"))]
+                    observe_checkpoint_raw_input_for_test(entry, "raw-entered")?;
+                    let result = with_current_monitor_prompt_input(entry, held_session, accept);
+                    #[cfg(all(debug_assertions, feature = "test-gh-guard"))]
+                    if result.is_ok() {
+                        observe_checkpoint_raw_input_for_test(entry, "raw-accepted")?;
+                    }
+                    result
+                } else {
+                    accept()
+                }
+            })
+            .map_err(|error| error.to_string())
     })
+}
+
+/// One attachment body on the reserved physical writer; ordinary protected queues
+/// are never used. A settled false flag proves refusal, never a timeout result.
+pub(crate) fn write_current_attachment_input(
+    writers: &PtyWriterRegistry,
+    id: &str,
+    entry: &Arc<PtyWriterEntry>,
+    session_current: &std::sync::atomic::AtomicBool,
+    bytes: &[u8],
+) -> super::events::OwnerAttachmentInputOutcome {
+    use super::events::OwnerAttachmentInputOutcome;
+    let mut attempted = false;
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let reservation = with_current_writer(writers, id, entry, |handle| {
+            Arc::clone(handle)
+                .reserve_input_transaction()
+                .map_err(|error| error.to_string())
+        })?;
+        with_current_writer(writers, id, entry, |_| {
+            reservation
+                .write_ordinary_input_authorized(bytes, |commit| {
+                    if !entry.current.load(std::sync::atomic::Ordering::Acquire)
+                        || !session_current.load(std::sync::atomic::Ordering::Acquire)
+                    {
+                        return Err(gwt_terminal::TerminalError::PtyIoError {
+                            details: "attachment target changed before physical input".into(),
+                        });
+                    }
+                    commit(&mut || attempted = true)
+                })
+                .map_err(|error| error.to_string())
+        })
+    }))
+    .unwrap_or_else(|_| Err("attachment physical writer panicked".into()));
+    match result {
+        Ok(()) => OwnerAttachmentInputOutcome::Written,
+        Err(_) if attempted => OwnerAttachmentInputOutcome::OutcomeUnknown,
+        Err(_) => OwnerAttachmentInputOutcome::NotStarted,
+    }
 }
 
 /// Synchronous accepted prompt delivery; the final CR stays inside its grant
@@ -2640,7 +2772,7 @@ pub fn write_current_pane_input(
         return if body.is_empty() {
             Ok(())
         } else {
-            write_current_raw_input(writers, id, entry, body.as_bytes())
+            write_current_raw_input_with_session(writers, id, entry, body.as_bytes(), held_session)
         };
     };
     let reservation = with_current_writer(writers, id, entry, |handle| {
@@ -3635,6 +3767,7 @@ pub(crate) fn owned_process_window_state(
         linked_issue_number: session.and_then(|session| session.linked_issue_number),
         runtime_started_at_ms: None,
         is_pm: false,
+        pm_activity: None,
     })
 }
 

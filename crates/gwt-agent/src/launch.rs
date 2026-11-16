@@ -17,6 +17,34 @@ use crate::{
     },
 };
 
+/// The native Codex argv mapping, shared with future-launch editors/pickers.
+/// Unknown models retain passthrough; this is deliberately not a model catalog.
+pub fn codex_reasoning_effort<'a>(model: Option<&str>, effort: Option<&'a str>) -> Option<&'a str> {
+    match (model, effort) {
+        (Some("gpt-6-astra"), Some("none" | "minimal")) => Some("low"),
+        (Some("gpt-6-astra"), Some(level @ ("low" | "medium" | "high" | "xhigh" | "max"))) => {
+            Some(level)
+        }
+        (Some("gpt-6-astra"), _) | (_, Some("ultracode")) => None,
+        (_, level) => level,
+    }
+}
+
+/// Reject only inputs that the existing native lowering demonstrably discards.
+pub fn validate_native_tuning(
+    agent: &str,
+    model: Option<&str>,
+    effort: Option<&str>,
+) -> Result<(), String> {
+    if crate::resolve_agent_id(agent) == Some(AgentId::Codex)
+        && effort.is_some()
+        && codex_reasoning_effort(model, effort).is_none()
+    {
+        return Err("This reasoning value is unsupported by native Codex. Choose a supported effort or provider default.".into());
+    }
+    Ok(())
+}
+
 /// `RUST_LOG` filter that turns on Codex's own file logging (Issue #3341).
 ///
 /// Codex writes `$CODEX_HOME/log/codex-tui.log` (default
@@ -1074,6 +1102,12 @@ impl AgentLaunchBuilder {
             }
             AgentId::GrokBuild => {
                 self.build_grok_build_args(&mut args);
+                // Issue #7465: Grok runs `.claude/settings.local.json` hooks
+                // under its auto-detected Windows shell (pwsh first), but the
+                // managed hook commands are POSIX. Pin it to Git Bash.
+                if cfg!(windows) {
+                    env_vars.insert("GROK_SHELL".to_string(), "bash".to_string());
+                }
             }
             AgentId::Antigravity => {
                 self.build_antigravity_args(&mut args);
@@ -1396,14 +1430,8 @@ impl AgentLaunchBuilder {
         // Issue #4108: migrate Astra's legacy efforts and omit unsupported
         // overrides so Codex can use its default. Other models keep their
         // existing passthrough, excluding the Claude-only ultracode setting.
-        let reasoning_level = match (self.model.as_deref(), self.reasoning_level.as_deref()) {
-            (Some("gpt-6-astra"), Some("none" | "minimal")) => Some("low"),
-            (Some("gpt-6-astra"), Some(level @ ("low" | "medium" | "high" | "xhigh" | "max"))) => {
-                Some(level)
-            }
-            (Some("gpt-6-astra"), _) | (_, Some("ultracode")) => None,
-            (_, level) => level,
-        };
+        let reasoning_level =
+            codex_reasoning_effort(self.model.as_deref(), self.reasoning_level.as_deref());
         if let Some(level) = reasoning_level {
             args.push("-c".to_string());
             args.push(format!("model_reasoning_effort={level}"));
@@ -2058,6 +2086,26 @@ mod tests {
                 "Astra effort {requested} must emit {expected}"
             );
         }
+    }
+
+    #[test]
+    fn future_tuning_rejects_only_known_native_omissions() {
+        assert!(validate_native_tuning("codex", Some("private-model"), Some("ultracode")).is_err());
+        assert!(validate_native_tuning("codex", Some("gpt-6-astra"), Some("ultra")).is_err());
+        assert!(validate_native_tuning("codex", Some("gpt-6-astra"), Some("minimal")).is_ok());
+        assert!(validate_native_tuning(
+            "codex",
+            Some("private-model"),
+            Some("provider-experimental")
+        )
+        .is_ok());
+        assert!(validate_native_tuning(
+            "grok",
+            Some("private-model"),
+            Some("provider-experimental")
+        )
+        .is_ok());
+        assert!(validate_native_tuning("claude", Some("opusplan"), Some("ultracode")).is_ok());
     }
 
     #[test]
@@ -2776,6 +2824,21 @@ mod tests {
                 "gwt must not inject {key}"
             );
         }
+    }
+
+    /// Issue #7465: Grok reads the POSIX managed hooks from
+    /// `.claude/settings.local.json`, but on Windows it runs hook commands
+    /// under its auto-detected shell (pwsh first), which fails with
+    /// `ParserError`. The launch pins Grok's Windows shell to Git Bash.
+    #[test]
+    fn issue_7465_grok_runs_managed_hooks_under_git_bash_on_windows() {
+        let grok = AgentLaunchBuilder::new(AgentId::GrokBuild).build();
+        assert_eq!(
+            grok.env_vars.get("GROK_SHELL").map(String::as_str),
+            cfg!(windows).then_some("bash")
+        );
+        let claude = AgentLaunchBuilder::new(AgentId::ClaudeCode).build();
+        assert!(!claude.env_vars.contains_key("GROK_SHELL"));
     }
 
     #[test]

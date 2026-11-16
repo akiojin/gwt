@@ -11,6 +11,43 @@ fn workflow(name: &str) -> Value {
 }
 
 #[test]
+fn windows_cold_restart_restores_operational_binaries_after_cargo_tests() {
+    let document = workflow("test.yml");
+    let steps = document["jobs"]["test-windows-agent-launch-e2e"]["steps"]
+        .as_sequence()
+        .unwrap();
+    let last_test = steps
+        .iter()
+        .rposition(|step| {
+            step["run"]
+                .as_str()
+                .is_some_and(|run| run.contains("cargo test"))
+        })
+        .unwrap();
+    let restore = steps
+        .iter()
+        .position(|step| step["name"] == "Build checkout binaries for Windows cold restart")
+        .unwrap();
+    let browser = steps
+        .iter()
+        .position(|step| step["name"] == "Verify Windows Works cold restart in both themes")
+        .unwrap();
+    assert!(
+        last_test < restore && restore < browser,
+        "cargo test arms test-gh-guard; restore operational binaries before headed verification"
+    );
+    let build = steps[restore]["run"].as_str().unwrap();
+    assert!(
+        build
+            .find("cargo build -p gwt --example exact_relaunch_capacity")
+            .unwrap()
+            < build
+                .find("cargo build -p gwt --bin gwt --bin gwtd")
+                .unwrap()
+    );
+}
+
+#[test]
 fn exact_head_home_guards_skip_unavailable_pre_feature_helpers() {
     for (file, jobs) in [
         (
