@@ -118,7 +118,9 @@ tao = "0.37"
 base64.workspace = true
 regex.workspace = true
 quick-xml = "0.42.0"
-rfd = "0.18"
+# Keep the version in one place so dependency updates cannot leave Windows
+# resolving a second rfd version. This feature only affects its Windows backend.
+rfd = { version = "0.18", features = ["common-controls-v6"] }
 reqwest.workspace = true
 sha2.workspace = true
 ring = "0.17"
@@ -168,7 +170,6 @@ objc2-service-management = { version = "0.3", features = ["SMAppService", "objc2
 winresource.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
-rfd = { version = "0.17", features = ["common-controls-v6"] }
 windows = { version = "0.62.2", features = ["Data_Xml_Dom", "UI_Notifications", "Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Security", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_ToolHelp", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_System_Performance", "Win32_System_Pipes", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_System_Com", "Win32_System_Ole", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 windows-registry = "0.100"
 windows-result = "0.100"
