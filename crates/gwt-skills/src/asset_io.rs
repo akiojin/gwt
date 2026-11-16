@@ -111,7 +111,7 @@ pub fn reject_indirection(path: &Path, metadata: &std::fs::Metadata) -> std::io:
 }
 
 /// Check only the selected mutation path and its ancestors inside the managed
-/// namespace (see [`mutation_boundary`]), never unrelated project entries or
+/// namespace (see `mutation_boundary`), never unrelated project entries or
 /// credential links. Remove the reported link (or restore
 /// a real managed directory/file) and retry to recover from a refusal.
 /// This is a preflight check, not protection against concurrent link swaps.
