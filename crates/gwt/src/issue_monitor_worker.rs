@@ -78,6 +78,37 @@ static BRANCH_PROTECTION_READS: RemoteReadCache<
 /// Reviewing PRs whose gate last routed to "required CI still running".
 static CI_WAIT_HOLDS: RemoteReadCache<()> = RemoteReadCache::new();
 
+/// Issue #7300: review diffs of pull requests over GitHub's 300-file `gh pr
+/// diff` limit, keyed by repository, PR and head SHA.
+static OVERSIZED_PR_DIFFS: RemoteReadCache<String> = RemoteReadCache::new();
+
+/// The diff a review dispatch reads. `gh pr diff` permanently answers HTTP 406
+/// for a head that changes more than 300 files, so that head is read once
+/// through the files API and served from `cache` afterwards: the same head
+/// costs no further GitHub call and no repeated `pr-diff-readback` failure.
+/// Every other outcome, including every other failure, is passed through
+/// uncached.
+fn read_review_diff<E: fmt::Display>(
+    cache: &RemoteReadCache<String>,
+    key: String,
+    now: Instant,
+    fetch_diff: impl FnOnce() -> Result<Option<String>, E>,
+    fetch_files_diff: impl FnOnce() -> Result<String, E>,
+) -> Result<String, E> {
+    if let Some(diff) = cache.get(&key, now, Some(Duration::MAX)) {
+        return Ok(diff);
+    }
+    match fetch_diff() {
+        Ok(diff) => Ok(diff.unwrap_or_default()),
+        Err(error) if gwt_git::pr_status::pr_diff_exceeds_github_limit(&error.to_string()) => {
+            let diff = fetch_files_diff()?;
+            cache.insert(key, now, diff.clone());
+            Ok(diff)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 /// Issue #6877 AC-2: how long a Reviewing PR whose required CI is still
 /// running waits before a timer-driven scan reads its gate evidence again.
 const ISSUE_MONITOR_CI_WAIT_RECHECK: Duration = Duration::from_secs(60);
@@ -3838,9 +3869,18 @@ fn advance_one_autonomous_issue(
                     // wait for, until the stuck sweep eventually reset it.
                     let diff =
                         run_budgeted_readback_stage(IssueMonitorScanStage::PrDiffReadback, || {
-                            gwt_git::pr_status::try_fetch_pr_diff(repo_path, pr, 200_000)
-                        })?
-                        .unwrap_or_default();
+                            read_review_diff(
+                                &OVERSIZED_PR_DIFFS,
+                                format!("{}#{pr}@{sha}", repo_path.display()),
+                                Instant::now(),
+                                || gwt_git::pr_status::try_fetch_pr_diff(repo_path, pr, 200_000),
+                                || {
+                                    gwt_git::pr_status::try_fetch_pr_files_diff(
+                                        repo_path, pr, 200_000,
+                                    )
+                                },
+                            )
+                        })?;
                     let linked_issue_kind = issues
                         .iter()
                         .find(|issue| issue.number == issue_number)
@@ -11001,6 +11041,61 @@ mod remote_read_cache_tests {
     /// Issue #6877 AC-2: a held PR's lifecycle (`gh pr view`) is read once per
     /// read max age during periodic scans; errors are not cached and a fresh
     /// scan (no max age) always reads again.
+    /// Issue #7300 AC-1..AC-4: a PR over GitHub's 300-file diff limit reads
+    /// through the files API once per head SHA; later scans of that head call
+    /// GitHub for neither read and report no `pr-diff-readback` failure.
+    #[test]
+    fn oversized_pr_diff_is_classified_once_per_head_sha() {
+        const TOO_LARGE: &str = "gh pr diff: HTTP 406: Sorry, the diff exceeded the maximum \
+                                 number of files (300).";
+        let cache: RemoteReadCache<String> = RemoteReadCache::new();
+        let now = Instant::now();
+        let (diffs, files) = (Cell::new(0), Cell::new(0));
+        let scan = |key: &str, diff: Result<Option<String>, String>| {
+            run_budgeted_readback_stage(IssueMonitorScanStage::PrDiffReadback, || {
+                read_review_diff(
+                    &cache,
+                    key.to_string(),
+                    now,
+                    || {
+                        diffs.set(diffs.get() + 1);
+                        diff
+                    },
+                    || {
+                        files.set(files.get() + 1);
+                        Ok("files diff".to_string())
+                    },
+                )
+            })
+        };
+        let too_large = || Err(TOO_LARGE.to_string());
+
+        for _ in 0..3 {
+            assert_eq!(scan("repo#7@abc", too_large()).unwrap(), "files diff");
+        }
+        assert_eq!(
+            (diffs.get(), files.get()),
+            (1, 1),
+            "the same head is never asked of GitHub again"
+        );
+
+        // A new head is a new question.
+        assert_eq!(scan("repo#7@def", too_large()).unwrap(), "files diff");
+        assert_eq!((diffs.get(), files.get()), (2, 2));
+
+        // AC-4: an ordinary PR keeps the live `gh pr diff` on every scan, and
+        // any other failure still degrades the scan and is never cached.
+        for _ in 0..2 {
+            assert_eq!(
+                scan("repo#8@abc", Ok(Some("small".to_string()))).unwrap(),
+                "small"
+            );
+        }
+        let failure = scan("repo#8@abc", Err("gh pr diff: HTTP 502".to_string())).unwrap_err();
+        assert_eq!(failure.stage, IssueMonitorScanStage::PrDiffReadback);
+        assert_eq!((diffs.get(), files.get()), (5, 2));
+    }
+
     #[test]
     fn cached_remote_reads_are_reused_within_the_periodic_max_age() {
         let cache: RemoteReadCache<u32> = RemoteReadCache::new();
