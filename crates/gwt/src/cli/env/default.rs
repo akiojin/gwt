@@ -460,7 +460,7 @@ impl CliEnv for DefaultCliEnv {
         );
         if !outcome.is_success() {
             return Err(io::Error::other(format!(
-                "external fork auto-merge failed: {outcome:?}; inspect remote state before retrying. If this scoped route is unavailable, human merge required: repository automation may exclude external forks"
+                "auto-merge failed: {outcome:?}; inspect remote state before retrying. If this scoped route is unavailable, human merge required: repository automation may exclude external forks or fail to start"
             )));
         }
         match pr_status::fetch_pr_auto_merge_remote_state_in_repository(&self.repo_path, &repository, number) {

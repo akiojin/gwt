@@ -1715,6 +1715,11 @@ source. A changed head requires a new review and authorization. If this route is
 unavailable or the owner has not delegated it, a human must merge the PR;
 `pr.list` explains the external-fork fallback instead of repeating a merge proposal.
 
+The same operation can recover a Ready PR in this repository when the auto-merge
+workflow fails to start. The PM still needs permission for the exact PR and head
+SHA, passing CI, and the existing review and visual checks. GitHub's branch
+protection and required checks remain enforced.
+
 For an explicitly authorized PR close, build-cache cleanup, or provider approval
 response, the PM uses `pm.operation.execute` with the existing `pr.close`,
 `worktree.gc_build_artifacts`, or `pm.message.send` action. This route supports

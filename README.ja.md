@@ -1544,6 +1544,10 @@ head が変わった場合は再レビューと新しい許可が必要です。
 委任が無い場合は人によるマージが必要です。`pr.list` はマージ提案を繰り返す代わりに、
 外部 fork のため自動化の対象外になり得る理由と代替経路を示します。
 
+auto-merge workflow が起動に失敗した場合、同じ operation で同一リポジトリの Ready PR も
+回復できます。PM には対象 PR 番号と head SHA に限定した許可、成功した CI、既存の review・
+visual check が引き続き必要です。GitHub の branch protection と必須チェックは維持します。
+
 明示的に許可した PR の close、ビルドキャッシュ削除、provider 承認への応答には、PM が
 `pm.operation.execute` を使います。対象は既存の `pr.close` / `worktree.gc_build_artifacts` /
 `pm.message.send` の3種類に限られ、それぞれの既存のチェックを維持します。

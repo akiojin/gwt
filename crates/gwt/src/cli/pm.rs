@@ -350,7 +350,7 @@ const CAPABILITY_GAPS: &[(&str, &str, CapabilityGapReason, &str)] = &[
     ),
     (
         "pr.auto_merge.enable", r#"{}"#, CapabilityGapReason::Permission,
-        "Review the external fork PR and use a scoped instruction_id or pm.approval.request bound to its exact number and reviewed_head_sha; otherwise human merge required because repository automation may exclude external forks",
+        "Review the PR and use a scoped instruction_id or pm.approval.request bound to its exact number and reviewed_head_sha; supports same-repository recovery when merge automation cannot start, with current CI and Ready gates intact",
     ),
     (
         "release.metadata.set", r#"{}"#, CapabilityGapReason::Permission,
