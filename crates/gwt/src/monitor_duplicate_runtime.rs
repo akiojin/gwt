@@ -296,8 +296,8 @@ impl TestReconcilerControl {
             .map_err(|_| {
                 io::Error::new(io::ErrorKind::BrokenPipe, "reconciliation worker stopped")
             })?;
-        // test-hygiene: allow-wall-clock-deadline Bound the fixture's actual worker ACK, rather than deciding success from elapsed time.
         ready_receiver
+            // test-hygiene: allow-wall-clock-deadline Bound the fixture's actual worker ACK, rather than deciding success from elapsed time.
             .recv_timeout(gwt_core::deadline_budget::HANG_GUARD)
             .map_err(|error| {
                 let kind = match error {
