@@ -251,12 +251,75 @@ pub fn capture_stop_request(
 /// The host owns the handles; this worker only retains exact captured references.
 /// No client connection, canvas snapshot or GUI event dispatch is needed.
 pub struct MonitorRuntimeReconciler {
-    stop: std::sync::mpsc::Sender<()>,
+    stop: std::sync::mpsc::Sender<WorkerCommand>,
     worker: Option<std::thread::JoinHandle<()>>,
 }
+
+enum WorkerCommand {
+    Stop,
+    #[cfg(any(test, feature = "test-gh-guard"))]
+    Pause {
+        ready: std::sync::mpsc::Sender<()>,
+        resume: std::sync::mpsc::Receiver<()>,
+    },
+}
+
+#[cfg(any(test, feature = "test-gh-guard"))]
+#[derive(Clone)]
+pub(crate) struct TestReconcilerControl(std::sync::mpsc::Sender<WorkerCommand>);
+
+/// Holds the fixture's actual reconciliation worker between completed passes.
+#[cfg(any(test, feature = "test-gh-guard"))]
+pub struct RuntimeReconciliationPause {
+    resume: std::sync::mpsc::Sender<()>,
+}
+
+#[cfg(any(test, feature = "test-gh-guard"))]
+impl Drop for RuntimeReconciliationPause {
+    fn drop(&mut self) {
+        let _ = self.resume.send(());
+    }
+}
+
+#[cfg(any(test, feature = "test-gh-guard"))]
+impl TestReconcilerControl {
+    pub(crate) fn pause(&self) -> io::Result<RuntimeReconciliationPause> {
+        let (ready, ready_receiver) = std::sync::mpsc::channel();
+        let (resume, resume_receiver) = std::sync::mpsc::channel();
+        // Release the worker on every failed ACK path, including unwinding.
+        let pause = RuntimeReconciliationPause { resume };
+        self.0
+            .send(WorkerCommand::Pause {
+                ready,
+                resume: resume_receiver,
+            })
+            .map_err(|_| {
+                io::Error::new(io::ErrorKind::BrokenPipe, "reconciliation worker stopped")
+            })?;
+        // test-hygiene: allow-wall-clock-deadline Bound the fixture's actual worker ACK, rather than deciding success from elapsed time.
+        ready_receiver
+            .recv_timeout(gwt_core::deadline_budget::HANG_GUARD)
+            .map_err(|error| {
+                let kind = match error {
+                    std::sync::mpsc::RecvTimeoutError::Timeout => io::ErrorKind::TimedOut,
+                    std::sync::mpsc::RecvTimeoutError::Disconnected => io::ErrorKind::BrokenPipe,
+                };
+                io::Error::new(kind, format!("reconciliation pause ACK failed: {error}"))
+            })?;
+        Ok(pause)
+    }
+}
+
+#[cfg(any(test, feature = "test-gh-guard"))]
+impl MonitorRuntimeReconciler {
+    pub(crate) fn test_control(&self) -> TestReconcilerControl {
+        TestReconcilerControl(self.stop.clone())
+    }
+}
+
 impl Drop for MonitorRuntimeReconciler {
     fn drop(&mut self) {
-        let _ = self.stop.send(());
+        let _ = self.stop.send(WorkerCommand::Stop);
         if let Some(worker) = self.worker.take() {
             if worker.join().is_err() {
                 tracing::error!(target: "gwt.monitor.runtime", "Monitor runtime reconciliation worker failed during owner drain");
@@ -285,7 +348,16 @@ pub fn spawn(
             loop {
                 let draining = match stopped.recv_timeout(Duration::from_secs(5)) {
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => false,
-                    Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => true,
+                    Ok(WorkerCommand::Stop)
+                    | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => true,
+                    #[cfg(any(test, feature = "test-gh-guard"))]
+                    Ok(WorkerCommand::Pause { ready, resume }) => {
+                        // Receiving here proves the preceding reconciliation,
+                        // including its prefs transaction, has completed.
+                        let _ = ready.send(());
+                        let _ = resume.recv();
+                        continue;
+                    }
                 };
                 if let Some(current) = snapshot() {
                     for entry in current {

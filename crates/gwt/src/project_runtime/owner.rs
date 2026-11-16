@@ -529,6 +529,12 @@ pub(crate) enum OwnerMessage {
         reply: oneshot::Sender<Result<(), String>>,
     },
     #[cfg(any(test, feature = "test-gh-guard"))]
+    PauseRuntimeReconciliation {
+        reply: oneshot::Sender<
+            Result<crate::monitor_duplicate_runtime::RuntimeReconciliationPause, String>,
+        >,
+    },
+    #[cfg(any(test, feature = "test-gh-guard"))]
     PauseCapacityRetry {
         id: String,
         incarnation: u64,
@@ -708,6 +714,18 @@ pub struct OwnerHandle {
     residency: tokio::sync::watch::Receiver<ResidencySnapshot>,
 }
 impl OwnerHandle {
+    #[cfg(any(test, feature = "test-gh-guard"))]
+    pub(crate) async fn test_pause_runtime_reconciliation(
+        &self,
+    ) -> Result<crate::monitor_duplicate_runtime::RuntimeReconciliationPause, String> {
+        let (reply, receive) = oneshot::channel();
+        self.sender
+            .send(OwnerMessage::PauseRuntimeReconciliation { reply })
+            .map_err(|_| "project owner unavailable".to_string())?;
+        receive
+            .await
+            .map_err(|_| "project owner stopped before reconciliation pause".to_string())?
+    }
     #[cfg(any(test, feature = "test-gh-guard"))]
     pub(crate) async fn test_set_issue_client_factory(
         &self,
@@ -1135,6 +1153,8 @@ pub(crate) struct OwnerState {
     test_continue_before_receive: Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>,
     #[cfg(any(test, feature = "test-gh-guard"))]
     test_operation_clock: Option<std::time::Instant>,
+    #[cfg(any(test, feature = "test-gh-guard"))]
+    test_reconciler: Option<crate::monitor_duplicate_runtime::TestReconcilerControl>,
     issue_client_factory: super::launch::RuntimeIssueClientFactory,
     #[cfg(any(test, feature = "test-gh-guard"))]
     test_dispatch_barriers: Vec<(bool, oneshot::Sender<()>)>,
@@ -1229,6 +1249,8 @@ impl OwnerState {
             test_dispatch_barriers: Vec::new(),
             #[cfg(any(test, feature = "test-gh-guard"))]
             test_operation_clock: None,
+            #[cfg(any(test, feature = "test-gh-guard"))]
+            test_reconciler: None,
             policy_usage_accounts: Vec::new(),
             policy_capacity_resumes: HashMap::new(),
             agent_registry,
@@ -1303,6 +1325,12 @@ impl OwnerState {
                     })).collect())
                 },
             ).map_err(|error| tracing::error!(target: "gwt.monitor.runtime", %error, "failed to start owner Monitor runtime reconciliation")).ok();
+            #[cfg(any(test, feature = "test-gh-guard"))]
+            {
+                state.test_reconciler = _monitor_reconciler
+                    .as_ref()
+                    .map(crate::monitor_duplicate_runtime::MonitorRuntimeReconciler::test_control);
+            }
             state.start_initial_gui_attach_grace();
             let shutdown_replies = state.run(receiver);
             drop(_monitor_reconciler);
@@ -1552,6 +1580,15 @@ impl OwnerState {
                     self.resume_deferred_close(&id, incarnation);
                 }
 
+                #[cfg(any(test, feature = "test-gh-guard"))]
+                OwnerMessage::PauseRuntimeReconciliation { reply } => {
+                    let result = self
+                        .test_reconciler
+                        .as_ref()
+                        .ok_or_else(|| "Monitor runtime reconciler unavailable".to_string())
+                        .and_then(|control| control.pause().map_err(|error| error.to_string()));
+                    let _ = reply.send(result);
+                }
                 #[cfg(any(test, feature = "test-gh-guard"))]
                 OwnerMessage::DisconnectPreparingMailbox { reply } => {
                     if self.pending.len() != 1
@@ -12777,6 +12814,8 @@ fn owner_fixture(
         test_dispatch_barriers: Vec::new(),
         #[cfg(any(test, feature = "test-gh-guard"))]
         test_operation_clock: None,
+        #[cfg(any(test, feature = "test-gh-guard"))]
+        test_reconciler: None,
         policy_usage_accounts: Vec::new(),
         policy_capacity_resumes: HashMap::new(),
         agent_registry: super::agent_dispatch::load_owner_registry(root),
@@ -14930,6 +14969,8 @@ mod tests {
             test_dispatch_barriers: Vec::new(),
             #[cfg(any(test, feature = "test-gh-guard"))]
             test_operation_clock: None,
+            #[cfg(any(test, feature = "test-gh-guard"))]
+            test_reconciler: None,
             policy_usage_accounts: Vec::new(),
             policy_capacity_resumes: HashMap::new(),
             agent_registry: super::super::agent_dispatch::load_owner_registry(root.path()),
