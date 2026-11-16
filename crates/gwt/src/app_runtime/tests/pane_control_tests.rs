@@ -5548,6 +5548,9 @@ fn switch_source_exit_preserves_reused_session_and_runtime() {
             .pty
             .terminate_and_wait_for_tree(Duration::from_secs(5))
             .unwrap());
+        // Unix ordinary exit already owns the natural close below. A second
+        // Close can arrive after its exact incarnation has been retired.
+        #[cfg(not(unix))]
         control_close(&owner, &source);
         let removed = switch_removed_event(&mut events, &source.id);
         let closed = owner_fixture_block_on(async {
