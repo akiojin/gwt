@@ -958,7 +958,7 @@ pub(crate) fn apply_roster_action(
 }
 
 /// A reservation becomes reusable only after exact physical absence is known.
-fn assignment_is_busy(
+pub(crate) fn assignment_is_busy(
     root: &Path,
     assignment: &AgentMemberAssignment,
     sessions_dir: &Path,

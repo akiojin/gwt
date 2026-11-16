@@ -1048,6 +1048,25 @@ fn pm_host_matches(assignment: &crate::agent_names::AgentMemberAssignment) -> bo
         })
 }
 
+/// Issue #7472: whether a configured PM's existing assignment is a leftover
+/// that a new launch may reconcile. Only an unspawned reservation (no bound
+/// Session) whose reserving host incarnation is provably gone qualifies; the
+/// liveness proof reuses the roster discipline (`assignment_is_busy`), so a
+/// live holder, a bound Session, another host's reservation, and this
+/// process's own in-flight attempt all stay busy and keep blocking.
+fn pm_leftover_assignment_is_dead(
+    root: &Path,
+    sessions: &Path,
+    key: &str,
+    assignment: &crate::agent_names::AgentMemberAssignment,
+) -> bool {
+    assignment.role == AgentAssignmentRole::Pm
+        && assignment.project_key.as_deref() == Some(key)
+        && assignment.session_id.is_none()
+        && !pm_host_matches(assignment)
+        && !crate::agent_names::assignment_is_busy(root, assignment, sessions)
+}
+
 fn commit_pm_identity(registry: &mut Registry) -> io::Result<()> {
     let roster = registry
         .roster
@@ -1244,7 +1263,14 @@ fn reserve_new_pm_member_inner(
                     prior_assignment: None,
                 });
             }
-            return Err(invalid(format!("Configured PM {} retains a live or unknown reservation; resume its conversation or choose another PM", member.name)));
+            if !pm_leftover_assignment_is_dead(root, sessions, key.as_str(), assignment) {
+                return Err(invalid(format!("Configured PM {} retains a live or unknown reservation; resume its conversation or choose another PM", member.name)));
+            }
+            // Issue #7472: the reserving gwtd incarnation is gone and no
+            // Session was ever bound, so no owner remains that could cancel
+            // or reap this reservation. Reconcile it as part of this launch
+            // instead of wedging every future PM launch on it; the fresh
+            // assignment is written and committed below.
         }
         member.assignment = Some(expected_assignment);
         set_project_assignment(
