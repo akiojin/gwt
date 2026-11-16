@@ -526,14 +526,19 @@ Supported direct scoped operations:
   self-review and CI gates still apply; this does not create an internal
   reviewer verdict or override merge automation.
 - `pr.auto_merge.enable {number, reviewed_head_sha}` enables GitHub auto-merge
-  for a reviewed external fork PR. The owner must authorize that exact PR and
+  for a reviewed PR, including same-repository recovery when the Auto Merge PR
+  workflow fails to start. The owner must authorize that exact PR and
   full head SHA through a recorded scoped instruction or native approval.
   Remembered approval also stays bound to that PR and SHA. The runtime reads
   current fork identity, Ready state, passing CI, approval and resolved review
   threads before arming auto-merge with the reviewed head fixed. It records
   the PR, SHA and permission source in the audit. A changed head requires
   another review and authorization; it never bypasses GitHub's merge gates.
-  Same-repository PRs retain the ordinary verification and delivery path.
+  Same-repository recovery requires the existing completion/Ready predicate,
+  including current passing CI, completed review, zero unresolved threads and
+  Agent Visual Check. External forks still require an APPROVED GitHub review.
+  Unknown repository identity refuses both routes. This operation never
+  changes workflow event policies, branch protection or required checks.
 - `release.metadata.set {tag, name?, body?, prerelease?}` changes an existing
   release's display name, notes or prerelease flag. Publishing, assets and
   latest selection remain with the existing gated release workflow.
@@ -4960,6 +4965,9 @@ This paragraph says it is reported immediately and never held for a digest.\n\
         assert_eq!(claude, render_contract());
         let intake = unwrapped(&claude);
         for phrase in [
+            "including same-repository recovery when the Auto Merge PR",
+            "External forks still require an APPROVED GitHub review",
+            "changes workflow event policies, branch protection or required checks",
             "including the first cold start with zero signal differences and no new user request",
             "Check semantic priority",
             "Curate the backlog",
