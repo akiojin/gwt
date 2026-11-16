@@ -110,8 +110,9 @@ pub fn reject_indirection(path: &Path, metadata: &std::fs::Metadata) -> std::io:
     Ok(())
 }
 
-/// Check only the selected mutation path and its ancestors, never unrelated
-/// project entries or credential links. Remove the reported link (or restore
+/// Check only the selected mutation path and its ancestors inside the managed
+/// namespace (see [`mutation_boundary`]), never unrelated project entries or
+/// credential links. Remove the reported link (or restore
 /// a real managed directory/file) and retry to recover from a refusal.
 /// This is a preflight check, not protection against concurrent link swaps.
 pub fn ensure_safe_mutation(path: &Path, route: AssetRoute) -> Result<(), AssetIoError> {
@@ -130,29 +131,47 @@ pub fn ensure_safe_mutation(path: &Path, route: AssetRoute) -> Result<(), AssetI
     }
     let absolute =
         std::path::absolute(path).map_err(|source| AssetIoError::new(route, path, source))?;
-    for node in absolute.ancestors().collect::<Vec<_>>().into_iter().rev() {
-        // macOS provides these root-owned system aliases. Do not canonicalize
-        // arbitrary parents: doing so would hide a project's symlink.
-        #[cfg(target_os = "macos")]
-        if [("/var", "/private/var"), ("/tmp", "/private/tmp")]
-            .iter()
-            .any(|(alias, target)| {
-                node == Path::new(alias)
-                    && std::fs::read_link(node).is_ok_and(|link| {
-                        node.parent().unwrap_or(Path::new("/")).join(link) == Path::new(target)
-                    })
-            })
-        {
-            continue;
-        }
+    let ancestors = absolute.ancestors().collect::<Vec<_>>();
+    for node in ancestors[..mutation_boundary(&ancestors)].iter().rev() {
         match std::fs::symlink_metadata(node) {
             Ok(metadata) => reject_indirection(node, &metadata)
                 .map_err(|source| AssetIoError::new(route, path, source))?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            // Nothing exists below a missing node or a regular file, so no
+            // link can redirect the mutation; the mutation itself reports it.
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                break
+            }
             Err(source) => return Err(AssetIoError::new(route, path, source)),
         }
     }
     Ok(())
+}
+
+/// Namespaces gwt materializes inside a worktree (or a repository's git dir).
+const MANAGED_NAMESPACES: &[&str] = &[".claude", ".codex", ".agents", ".gwt", ".git"];
+
+/// Number of nodes (leaf first) that [`ensure_safe_mutation`] inspects.
+///
+/// The worktree root and everything above it are the user's choice: a
+/// worktree reached through an alias (`/tmp` → `/private/tmp`, a symlinked
+/// workspace directory) is legitimate. Only the managed namespace below that
+/// root and the target itself are guarded, so the boundary is the managed
+/// namespace component nearest the target (worktrees may themselves live under
+/// a managed directory such as `~/.gwt`), or just the leaf when there is none.
+fn mutation_boundary(ancestors: &[&Path]) -> usize {
+    ancestors
+        .iter()
+        .position(|node| {
+            node.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| MANAGED_NAMESPACES.contains(&name))
+        })
+        .map_or(1.min(ancestors.len()), |index| index + 1)
 }
 
 /// Read a file, tagging failure as [`AssetRoute::Read`].

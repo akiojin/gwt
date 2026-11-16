@@ -171,7 +171,7 @@ fn mutation_helpers_reject_linked_parents_with_their_route_and_path() {
     let source = root.path().join("source");
     fs::write(&source, "new").unwrap();
     fs::write(outside.join("sentinel"), "keep").unwrap();
-    let link = root.path().join("link");
+    let link = root.path().join(".claude");
     link_dir(&outside, &link);
     let target = link.join("sentinel");
 
@@ -227,7 +227,7 @@ fn hooks_backup_restore_and_merge_reject_external_parent() {
     fs::create_dir(&outside).unwrap();
     fs::write(outside.join("hooks.json"), "{}").unwrap();
     fs::write(outside.join("hooks.json.bak"), "backup").unwrap();
-    let link = root.path().join("link");
+    let link = root.path().join(".claude");
     link_dir(&outside, &link);
     let target = link.join("hooks.json");
 
@@ -255,4 +255,23 @@ fn hooks_backup_restore_and_merge_reject_external_parent() {
         "backup"
     );
     assert_eq!(fs::read_dir(outside).unwrap().count(), 2);
+}
+
+#[test]
+fn worktree_alias_above_the_managed_namespace_is_allowed() {
+    let root = tempfile::tempdir().unwrap();
+    let actual = root.path().join("actual");
+    fs::create_dir(&actual).unwrap();
+    let alias = root.path().join("worktree-alias");
+    link_dir(&actual, &alias);
+
+    gwt_skills::asset_io::create_dir_all(alias.join(".claude/skills")).unwrap();
+    gwt_skills::asset_io::write(alias.join(".claude/skills/SKILL.md"), "ok").unwrap();
+    gwt_skills::asset_io::write(alias.join("README.md"), "ok").unwrap();
+
+    assert_eq!(
+        fs::read_to_string(actual.join(".claude/skills/SKILL.md")).unwrap(),
+        "ok"
+    );
+    assert_eq!(fs::read_to_string(actual.join("README.md")).unwrap(), "ok");
 }
