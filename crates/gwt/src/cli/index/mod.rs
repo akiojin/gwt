@@ -634,11 +634,18 @@ mod tests {
     #[test]
     fn runtime_readiness_matches_the_query_worker_and_search_admission() {
         let report = gwt_core::runtime::ProjectIndexRuntimeReport::default();
-        for (model_state, heavy_held, healthy, reason) in [
-            ("cold", false, false, "query_worker_cold"),
-            ("warming", true, false, "query_worker_warming"),
-            ("warm", true, false, "search_heavy_lease_unavailable"),
-            ("warm", false, true, "ready"),
+        for (model_state, heavy_status_available, heavy_held, healthy, reason) in [
+            ("cold", true, false, false, "query_worker_cold"),
+            ("warming", true, true, false, "query_worker_warming"),
+            ("warm", true, true, false, "search_heavy_lease_unavailable"),
+            ("warm", true, false, true, "ready"),
+            (
+                "warm",
+                false,
+                false,
+                false,
+                "search_coordinator_unavailable",
+            ),
         ] {
             let mut payload = serde_json::json!({
                 "runtime": {"healthy": true, "reason": "ready", "asset_hash": "asset", "smoke_test": "passed"}
@@ -648,6 +655,7 @@ mod tests {
                     model_state,
                     ..Default::default()
                 },
+                heavy_status_available,
                 heavy_held,
                 ..Default::default()
             };

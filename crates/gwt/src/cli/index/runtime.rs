@@ -292,6 +292,7 @@ pub(crate) fn apply_search_readiness(
         return;
     }
     let reason = match resources.query_worker.model_state {
+        "warm" if !resources.heavy_status_available => "search_coordinator_unavailable",
         "warm" if resources.heavy_held => "search_heavy_lease_unavailable",
         "warm" => "ready",
         "warming" => "query_worker_warming",
