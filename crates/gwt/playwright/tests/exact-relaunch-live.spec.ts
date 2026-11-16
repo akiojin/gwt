@@ -20,6 +20,7 @@ type RosterMember = { agent_member_id: string; agent_id: string; name: string; e
   active_assignments?: { project_key: string; project_name: string | null; session_id: string | null; issue_number: number | null; state: string }[];
   saved_manual_profile?: { agent_id: string; agent_member_id: string; model: string | null; reasoning: string | null } | null;
   saved_manual_revision?: string | null;
+  saved_implementation_core?: { agent_id: string; model: string | null; reasoning: string | null };
   history: { session_id: string; name: string | null; provider: string | null; model: string | null }[] };
 type AgentRoster = { project_key: string; revision: number; capacity: number; members: RosterMember[]; error: string | null };
 const WINDOWS_WORKS_CASE = "Works shows the real PM and four implementation children after reload";
@@ -97,13 +98,19 @@ async function liveCodexWindow(page: Page, sessionId: string): Promise<AgentWind
   return (await codexWindows(page)).find((entry) => entry.session_id === sessionId)!;
 }
 
-async function launchCodex(page: Page, branch: string) {
+async function launchCodex(page: Page, branch: string, issueNumber?: number) {
   const after = await cursor(page);
   await sendLiveGwtEvent(page, { kind: "open_active_work_launch_wizard", branch_name: branch });
   await latestWizard(page, after, true);
   await wizardAction(page, { kind: "set_launch_path", path: "manual_setup" });
   // The installed (fixture) Codex is the only route: the wizard has no version choice.
   let state = await wizardAction(page, { kind: "set_agent", agent_id: "codex" });
+  if (issueNumber !== undefined) {
+    await wizardAction(page, { kind: "set_branch_mode", create_new: true });
+    await wizardAction(page, { kind: "set_branch_name", value: `issue-${issueNumber}` });
+    state = await wizardAction(page, { kind: "set_linked_issue", issue_number: issueNumber });
+    expect(state.wizard?.linked_issue_number).toBe(issueNumber);
+  }
   for (let step = 0; step < 12 && state.wizard; step += 1) {
     expect(state.wizard.error).toBeFalsy();
     if (state.wizard.selected_runtime_target !== "host"
@@ -452,15 +459,25 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
 
   test("one shared member runs in two projects and closing one preserves the other", async ({ page }, info) => {
     let firstKey = "", secondKey = "";
+    const firstIssue = 43, secondIssue = 44;
     const fixture = await startExactRelaunchFixture(info, {
       page, freshNativeIds: true,
       monitorPreferences: { max_active_agents: 2, max_active_agents_mode: "manual", max_active_agents_override: 2 },
+      async prepare({ home, project, env }) {
+        const origin = join(home, "project-a.git");
+        execFileSync("git", ["init", "--bare", "-q", origin], { cwd: project, env, encoding: "utf8" });
+        execFileSync("git", ["remote", "add", "origin", origin], { cwd: project, env, encoding: "utf8" });
+        execFileSync("git", ["push", "-q", "origin", "HEAD:refs/heads/main"], { cwd: project, env, encoding: "utf8" });
+      },
       async beforeStart({ home, project, env, preferences }) {
         firstKey = basename(dirname(preferences));
         const second = join(home, "project-b");
         await mkdir(second);
         for (const args of [["init", "-q", "-b", "main"], ["-c", "user.name=gwt", "-c", "user.email=gwt@example.invalid",
-          "commit", "-q", "--allow-empty", "-m", "shared member fixture"]]) {
+          "commit", "-q", "--allow-empty", "-m", "shared member fixture"],
+          ["init", "--bare", "-q", join(home, "project-b.git")],
+          ["remote", "add", "origin", join(home, "project-b.git")],
+          ["push", "-q", "origin", "HEAD:refs/heads/main"]]) {
           execFileSync("git", args, { cwd: second, env, encoding: "utf8" });
         }
         const status = JSON.parse(execFileSync(join(process.env.GWT_PLAYWRIGHT_CHECKOUT_ROOT!, "target/debug/gwtd"), [], {
@@ -519,13 +536,13 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       await gotoLiveGwt(secondPage, liveGwtProjectUrl(fixture.url, secondKey), { enableTestBridge: true });
       await openAgents(secondPage);
       expect((await readRoster(secondPage)).members.some(member => member.agent_member_id === memberId)).toBe(true);
-      await launchCodex(page, fixture.branch);
+      await launchCodex(page, fixture.branch, firstIssue);
       await expect.poll(async () => (await fixture.launches()).length, { timeout: 60_000 }).toBe(1);
       const first = await liveCodexWindow(page, (await fixture.launches())[0].gwt_session_id!);
       await openAgents(page);
       const firstRow = page.locator(`.roster-row[data-member-id="${memberId}"]`);
       await expect(firstRow.locator("[data-assignment-project]")).toHaveCount(1);
-      await launchCodex(secondPage, fixture.branch);
+      await launchCodex(secondPage, fixture.branch, secondIssue);
       await expect.poll(async () => (await fixture.launches()).length, { timeout: 60_000 }).toBe(2);
       const second = await liveCodexWindow(secondPage, (await fixture.launches())[1].gwt_session_id!);
       secondWindow = second;
@@ -535,20 +552,27 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       // A's local census did not change: the shared update must arrive without
       // reentering Agents or explicitly reading its roster.
       await expect(firstRow.locator("[data-assignment-project]")).toHaveCount(2);
-      for (const session of [first.session_id, second.session_id]) {
-        expect(tomlString(await sessionRecord(fixture.home, session), "agent_member_id")).toBe(memberId);
+      for (const [session, issue] of [[first.session_id, firstIssue], [second.session_id, secondIssue]] as const) {
+        const record = await sessionRecord(fixture.home, session);
+        expect(tomlString(record, "agent_member_id")).toBe(memberId);
+        expect(Number(record.match(/^linked_issue_number = (\d+)$/m)?.[1])).toBe(issue);
       }
       const assignments = (roster: AgentRoster) => roster.members.find(member => member.agent_member_id === memberId)?.active_assignments ?? [];
-      for (const [target, own, session] of [[page, firstKey, first.session_id], [secondPage, secondKey, second.session_id]] as const) {
+      for (const [target, session, issue] of [[page, first.session_id, firstIssue], [secondPage, second.session_id, secondIssue]] as const) {
+        await target.reload();
         await openAgents(target);
         await expect.poll(async () => assignments(await readRoster(target)).map(assignment => assignment.project_key).sort())
           .toEqual([firstKey, secondKey].sort());
-        expect((await readRoster(target)).members.find(member => member.agent_member_id === memberId)?.assignment?.session_id).toBe(session);
+        const member = (await readRoster(target)).members.find(member => member.agent_member_id === memberId)!;
+        expect(member.assignment).toMatchObject({ session_id: session, issue_number: issue });
+        expect(member.active_assignments).toEqual(expect.arrayContaining([
+          expect.objectContaining({ project_key: firstKey, session_id: first.session_id, issue_number: firstIssue }),
+          expect.objectContaining({ project_key: secondKey, session_id: second.session_id, issue_number: secondIssue }),
+        ]));
         const row = target.locator(`.roster-row[data-member-id="${memberId}"]`);
         await expect(row.locator(".roster-assignments [data-assignment-project]")).toHaveCount(2);
-        await expect(row.locator(`[data-assignment-project="${own}"]`)).toContainText("No issue");
-        await expect(row.locator(`[data-assignment-project="${firstKey}"]`)).toHaveText(/^project · No issue · Recorded (Running|Idle|Waiting)$/);
-        await expect(row.locator(`[data-assignment-project="${secondKey}"]`)).toHaveText(/^project-b · No issue · Recorded (Running|Idle|Waiting)$/);
+        await expect(row.locator(`[data-assignment-project="${firstKey}"]`)).toHaveText(/^project · #43 · Recorded (Running|Idle|Waiting)$/);
+        await expect(row.locator(`[data-assignment-project="${secondKey}"]`)).toHaveText(/^project-b · #44 · Recorded (Running|Idle|Waiting)$/);
         await expect(target.locator("html")).toHaveAttribute("data-theme", theme);
         expect(await target.locator(".agents-surface:not(.agents-surface--preview)").evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
       }
@@ -558,10 +582,11 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       await sendLiveGwtEvent(page, { kind: "close_window", id: first.id });
       const secondRow = secondPage.locator(`.roster-row[data-member-id="${memberId}"]`);
       await expect(secondRow.locator("[data-assignment-project]")).toHaveCount(1);
-      await expect(secondRow.locator(`[data-assignment-project="${secondKey}"]`)).toBeVisible();
+      await expect(secondRow.locator(`[data-assignment-project="${secondKey}"]`)).toHaveText(/^project-b · #44 · Recorded (Running|Idle|Waiting)$/);
       await expect.poll(async () => (await readRoster(page)).members.find(member => member.agent_member_id === memberId)?.assignment ?? null)
         .toBeNull();
-      expect((await readRoster(secondPage)).members.find(member => member.agent_member_id === memberId)?.assignment?.session_id).toBe(second.session_id);
+      expect((await readRoster(secondPage)).members.find(member => member.agent_member_id === memberId)?.assignment)
+        .toMatchObject({ session_id: second.session_id, issue_number: secondIssue });
       await liveCodexWindow(secondPage, second.session_id);
       await expect.poll(async () => assignments(await readRoster(secondPage)).map(assignment => assignment.project_key))
         .toEqual([secondKey]);
@@ -603,14 +628,33 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       const before = await readRoster(page);
       await expect(register).toBeDisabled();
       await name.fill(" ");
-      await expect(surface.locator("#roster-registration-error")).toHaveText("Enter a display name.");
+      await expect(surface.locator("#roster-registration-error > span")).toHaveText("Enter a display name.");
+      await expect(surface.getByRole("button", { name: "Show member", exact: true })).toBeHidden();
       await expect(register).toBeDisabled();
       await name.fill(` ${before.members[0].name.toLowerCase()} `);
-      await expect(surface.locator("#roster-registration-error")).toHaveText("This name is already registered, including resting members.");
+      await expect(surface.locator("#roster-registration-error > span")).toContainText(before.members[0].name);
+      await expect(surface.locator("#roster-registration-error > span")).toContainText(before.members[0].agent_id);
+      await expect(surface.getByRole("button", { name: "Show member", exact: true })).toBeVisible();
       await expect(name).toHaveAttribute("aria-invalid", "true");
       await expect(register).toBeDisabled();
       await name.fill("  Maple contributor  ");
       await surface.getByRole("combobox", { name: "Tool for new member", exact: true }).selectOption("codex");
+      const registrationModel = surface.getByRole("combobox", { name: "Model for new member", exact: true });
+      const registrationReasoning = surface.getByRole("combobox", { name: "Reasoning for new member", exact: true });
+      await registrationModel.fill("private-registration-model");
+      await registrationReasoning.fill("ultracode");
+      const invalidSequence = await cursor(page);
+      await register.click();
+      await page.waitForFunction(after => (window as any).__gwtPlaywrightMessages?.some((entry: any) =>
+        entry.sequence > after && entry.payload.kind === "agent_roster" && entry.payload.roster.error?.includes("unsupported")), invalidSequence);
+      const invalid = await readRoster(page);
+      expect(invalid.revision).toBe(before.revision);
+      expect(invalid.members).toEqual(before.members);
+      await expect(name).toHaveValue("  Maple contributor  ");
+      await expect(registrationModel).toHaveValue("private-registration-model");
+      await expect(registrationReasoning).toHaveValue("ultracode");
+      await registrationReasoning.fill("high");
+      await surface.locator(".roster-capacity").screenshot({ path: info.outputPath(`registration-model-reasoning-${theme}.png`) });
       await expect(register).toBeEnabled();
       const sequence = await cursor(page);
       await register.click();
@@ -621,6 +665,7 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       expect(member.agent_member_id).toMatch(/^[0-9a-f-]{36}$/);
       expect(member.agent_id).toBe("codex");
       expect(member.assignment).toBeNull();
+      expect(member.saved_implementation_core).toMatchObject({ agent_id: "codex", model: "private-registration-model", reasoning: "high" });
       await expect(name).toHaveValue("");
       // A stale writer must not replace the registered identity or this draft.
       await name.fill("Retry contributor");
@@ -648,7 +693,8 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       expect(rested.members.find(value => value.agent_member_id === retryMember.agent_member_id)?.enabled).toBe(false);
       await name.fill("  RETRY CONTRIBUTOR  ");
       await expect(name).toHaveAttribute("aria-invalid", "true");
-      await expect(surface.locator("#roster-registration-error")).toHaveText("This name is already registered, including resting members.");
+      await expect(surface.locator("#roster-registration-error > span")).toHaveText("Retry contributor (codex) is resting and uses this name. ");
+      await expect(surface.getByRole("button", { name: "Show member", exact: true })).toBeVisible();
       await expect(register).toBeDisabled();
       await name.fill("");
       await surface.locator(`.roster-row[data-member-id="${member.agent_member_id}"]`).click();
@@ -795,8 +841,10 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       const expected = `Recorded name: ${facts.name} · Tool: ${facts.provider} · Recorded model: ${facts.model || "—"}`;
       await page.locator('.op-rail__surface[data-surface="agents"]').click();
       await readRoster(page);
-      await surface.locator(`.roster-row[data-member-id="${memberId}"]`).click();
+      await surface.locator(`.roster-row[data-member-id="${memberId}"] h3`).click();
       await expect(surface.locator(".roster-current-config")).toHaveText(expected);
+      await expect(surface.locator(".roster-member-id")).toHaveText(`Member ID: ${memberId}`);
+      await expect(surface.locator(".roster-current-role")).toHaveText("Role: Implementation");
       await gotoLiveGwt(secondPage, liveGwtProjectUrl(fixture.url, secondProjectKey), { enableTestBridge: true });
       await secondPage.locator('.op-rail__surface[data-surface="agents"]').click();
       const secondSurface = secondPage.locator(".agents-surface:not(.agents-surface--preview)");
@@ -839,7 +887,7 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
         expect(member.saved_manual_revision).toMatch(/^manual-profile-v1:[a-f0-9]{64}$/);
         savedRevision ??= member.saved_manual_revision!;
         expect(member.saved_manual_revision).toBe(savedRevision);
-        await surface.locator(`.roster-row[data-member-id="${memberId}"]`).click();
+        await surface.locator(`.roster-row[data-member-id="${memberId}"] h3`).click();
         await expect(surface.locator(".roster-saved-settings")).toContainText("Model: gpt-6-sol");
         await expect(surface.locator(".roster-saved-settings")).toContainText(`Reasoning: ${savedCandidate.reasoning}`);
         await expect(surface.locator(".roster-saved-settings")).toContainText("Permissions: Ask");
@@ -941,6 +989,89 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       expect(await surface.evaluate(node => node === (window as any).__savedCandidateRoster)).toBe(true);
       savedCandidate.reasoning = "high";
       await assertSharedSaved();
+      // Exercise the same saved core from Agents, through the actual writer.
+      const detail = surface.locator(".roster-detail");
+      const checkCatalogRecovery = async (role: string) => {
+        const cache = join(fixture.home, ".codex/models_cache.json");
+        await writeFile(cache, "{broken");
+        let after = await cursor(page);
+        await detail.locator('[data-action="reload-tuning"]').click();
+        await rosterAfter(page, after);
+        await expect(detail.locator('[data-model-catalog-status]')).toContainText("live Codex model catalog is unavailable");
+        await detail.screenshot({ path: info.outputPath(`catalog-${role}-unavailable-${theme}.png`) });
+        const input = detail.locator('[data-member-tuning-field="model"]');
+        const original = await input.inputValue(), writes = tuningRequests.length + pmProfileRequests.length;
+        await input.evaluate(node => { (window as any).__catalogDraftInput = node; });
+        await input.dispatchEvent("compositionstart");
+        await input.fill("未確定-model");
+        await writeFile(cache, JSON.stringify({ models: ["gpt-6.1-sol", "gpt-6-sol", "catalog-recovered-4777"].map(slug => ({
+          slug, visibility: "list", default_reasoning_level: "low",
+          supported_reasoning_levels: ["low", "medium", "high", "xhigh", "max", "ultra"].map(effort => ({ effort })),
+        })) }));
+        after = await cursor(page);
+        await detail.locator('[data-action="retry-model-catalog"]').click();
+        await rosterAfter(page, after);
+        await expect(detail.locator('[data-model-catalog-status]')).toBeHidden();
+        await expect(input.locator('..').locator('datalist option[value="catalog-recovered-4777"]')).toHaveCount(1);
+        expect(await input.evaluate(node => node === (window as any).__catalogDraftInput)).toBe(true);
+        await expect(input).toHaveValue("未確定-model");
+        expect(tuningRequests.length + pmProfileRequests.length).toBe(writes);
+        await detail.screenshot({ path: info.outputPath(`catalog-${role}-recovered-${theme}.png`) });
+        await input.fill(original);
+        await input.dispatchEvent("compositionend");
+        // Ending composition explicitly submits the restored value; the read above did not.
+        await expect.poll(() => tuningRequests.length + pmProfileRequests.length).toBe(writes + 1);
+        await expect(detail.locator('[data-member-tuning-status]')).toHaveText("Saved");
+      };
+      const agentReasoning = detail.locator('[data-member-tuning-field="reasoning"]');
+      const requestsBeforeComposition = tuningRequests.length;
+      await agentReasoning.dispatchEvent("compositionstart");
+      await agentReasoning.fill("ultracode");
+      await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+      expect(tuningRequests).toHaveLength(requestsBeforeComposition);
+      const beforeRefusal = await cursor(page);
+      await agentReasoning.dispatchEvent("compositionend");
+      await expect.poll(() => tuningRequests.length).toBe(requestsBeforeComposition + 1);
+      const refusedRequest = tuningRequests[requestsBeforeComposition];
+      expect(refusedRequest.action).toMatchObject({ member_id: memberId, reasoning: "ultracode",
+        expected_core_revision: tuned.saved_implementation_core_revision });
+      const refused = await page.waitForFunction(({ after, requestId }) => ((window as any).__gwtPlaywrightMessages || []).find((entry: any) =>
+        entry.sequence > after && entry.payload.request_id === requestId && entry.payload.kind === "agent_roster")?.payload.roster,
+      { after: beforeRefusal, requestId: refusedRequest.request_id }).then(handle => handle.jsonValue());
+      expect(refused.error).toContain("unsupported");
+      const unchanged = refused.members.find((value: any) => value.agent_member_id === memberId);
+      expect(unchanged.saved_implementation_core_revision).toBe(tuned.saved_implementation_core_revision);
+      expect(unchanged.saved_manual_revision).toBe(savedRevision);
+      await expect(agentReasoning).toHaveValue("ultracode");
+      await expect(detail.locator('[data-member-tuning-status]')).toContainText("unsupported");
+      await agentReasoning.fill("medium");
+      expect(tuningRequests).toHaveLength(requestsBeforeComposition + 1);
+      await detail.locator('[data-action="retry-tuning"]').click();
+      await expect.poll(() => tuningRequests.length).toBe(requestsBeforeComposition + 2);
+      await expect(detail.locator('[data-member-tuning-status]')).toHaveText("Saved");
+      await expect(revisionInput).not.toHaveValue(savedRevision!);
+      savedRevision = await revisionInput.inputValue();
+      savedCandidate.reasoning = "medium";
+      await expect(surface.locator(".roster-current-config")).toHaveText(expected);
+      await assertSharedSaved();
+      await checkCatalogRecovery("implementation");
+      const agentModel = detail.locator('[data-member-tuning-field="model"]');
+      const requestsBeforeCustom = tuningRequests.length;
+      await agentModel.fill("private-model-4777");
+      await expect.poll(() => tuningRequests.length).toBe(requestsBeforeCustom + 1);
+      const customRequest = tuningRequests[requestsBeforeCustom];
+      const custom = await page.waitForFunction(requestId => ((window as any).__gwtPlaywrightMessages || []).find((entry: any) =>
+        entry.payload.request_id === requestId && entry.payload.kind === "agent_roster")?.payload.roster,
+      customRequest.request_id).then(handle => handle.jsonValue());
+      expect(custom.error).toBeNull();
+      expect(custom.members.find((value: any) => value.agent_member_id === memberId).saved_manual_profile.model).toBe("private-model-4777");
+      await expect(detail.locator('[data-member-tuning-status]')).toHaveText("Saved");
+      await expect(detail.locator('[data-model-unavailable]')).toContainText("an unlisted model may still be supported");
+      await agentModel.fill(savedCandidate.model);
+      await expect.poll(() => tuningRequests.length).toBe(requestsBeforeCustom + 2);
+      await expect(detail.locator('[data-member-tuning-status]')).toHaveText("Saved");
+      await expect(revisionInput).toHaveValue(savedRevision!);
+      await expect(surface.locator(".roster-current-config")).toHaveText(expected);
       const beforeSettings = await cursor(secondPage);
       await sendLiveGwtEvent(secondPage, { kind: "issue_monitor_configure_profile" });
       const openedSettings = await latestWizard(secondPage, beforeSettings, true);
@@ -996,7 +1127,11 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       const before = await readRoster(page);
       const member = before.members.find(value => value.agent_member_id === memberId)!;
       expect(member.history.find(value => value.session_id === launch.gwt_session_id)).toMatchObject(facts);
-      await surface.locator(`.roster-row[data-member-id="${memberId}"]`).click();
+      const stoppedRecord = await sessionRecord(fixture.home, launch.gwt_session_id);
+      const stoppedHistory = member.history.find(value => value.session_id === launch.gwt_session_id) as any;
+      expect(stoppedHistory).toMatchObject({ role: "implementation", result: "Stopped" });
+      expect(Date.parse(stoppedHistory.ended_at)).toBe(Date.parse(tomlString(stoppedRecord, "last_exited_at")!));
+      await surface.locator(`.roster-row[data-member-id="${memberId}"] h3`).click();
       const beforeRename = await sessionRecord(fixture.home, launch.gwt_session_id);
       const sequence = await cursor(page);
       await surface.getByRole("textbox", { name: "Display name", exact: true }).fill("Current renamed member");
@@ -1010,8 +1145,12 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
         const saved = roster.members.find(value => value.agent_member_id === memberId)!;
         expect(saved.name).toBe("Current renamed member");
         expect(saved.history.find(value => value.session_id === launch.gwt_session_id)).toMatchObject(facts);
-        await surface.locator(`.roster-row[data-member-id="${memberId}"]`).click();
+        await surface.locator(`.roster-row[data-member-id="${memberId}"] h3`).click();
         await expect(surface.locator(".roster-history-config")).toContainText([expected]);
+        await expect(surface.locator(".roster-member-id")).toHaveText(`Member ID: ${memberId}`);
+        await expect(surface.locator(".roster-history-role")).toContainText(["Role: Implementation"]);
+        expect(saved.history.find(value => value.session_id === launch.gwt_session_id)).toMatchObject({ ...facts,
+          role: "implementation", started_at: stoppedHistory.started_at });
       };
       await assertHistory();
       await assertSharedSaved();
@@ -1089,7 +1228,6 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       const pmMemberId = pmMember.agent_member_id;
       expect(pmMemberId).not.toBe(memberId);
       expect(pmMemberId).not.toBe(spare.agent_member_id);
-      const detail = surface.locator(".roster-detail");
       await surface.locator(`.roster-row[data-member-id="${pmMemberId}"]`).click();
       await pmMutation("select_pm", () => detail.locator('[data-action="select-pm"]').click());
       const beforePmRead = await cursor(page);
@@ -1145,6 +1283,7 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
         await expect(detail.locator('[data-member-tuning-status]')).toHaveText("Saved");
         await expect(detail.locator('[data-member-tuning-revision]')).toHaveText(`Revision: ${pmRevision}`);
       }
+      await checkCatalogRecovery("pm");
       const savedPm = await pmSettings(pmSettingsPath);
       expect(savedPm).toMatchObject({ loop_interval_secs: 90, paused: true, auto_start: false,
         launch_profile: { agent_id: "codex", model: "gpt-6.1-sol", reasoning: "low" } });
@@ -1201,6 +1340,9 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       expect(tomlString(pmRecord, "model")).toBe("gpt-6.1-sol");
       expect(tomlString(pmRecord, "reasoning_level")).toBe("low");
       expect(tomlString(pmRecord, "agent_session_id")).toBe(pmLaunch.provider_session_id);
+      const pmHistoryRoster = await readRoster(page);
+      const recordedPm = pmHistoryRoster.members.find(value => value.agent_member_id === pmMemberId)!;
+      expect(recordedPm.history.find(value => value.session_id === pmLaunch.gwt_session_id)).toMatchObject({ role: "pm", model: "gpt-6.1-sol" });
       const originalRecord = await sessionRecord(fixture.home, launch.gwt_session_id);
       for (const key of ["agent_member_id", "agent_name", "model", "reasoning_level", "agent_session_id"])
         expect(tomlString(originalRecord, key)).toBe(tomlString(record, key));
@@ -1406,10 +1548,11 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
   test(WINDOWS_WORKS_CASE, async ({ page }, info) => {
     test.setTimeout(420_000);
     const purpose = "Review active work and coordinate delivery";
+    const fixedMachineCapacity = process.platform === "win32" || process.env.GWT_PLAYWRIGHT_FIXED_CAPACITY === "1";
     let finalOwner: { pid: number; birth: number } | undefined;
     const fixture = await startExactRelaunchFixture(info, {
       page,
-      fixedMachineCapacity: process.platform === "win32" || process.env.GWT_PLAYWRIGHT_FIXED_CAPACITY === "1",
+      fixedMachineCapacity,
       monitorPreferences: { max_active_agents: 4 },
       restoreDiagnostics: true,
       async prepare({ home, bin, project, env }) {
@@ -1424,7 +1567,10 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
         let provider = await readFile(codexScript, "utf8");
         provider = provider.replace("const at = new Date().toISOString();", `
 process.env.GWT_HOOK_PROFILE_PATH = path.join(process.env.HOME, 'hook-' + process.env.GWT_SESSION_ID + '.jsonl');
+const ptyRuntime = JSON.parse(fs.readFileSync(process.env.GWT_SESSION_RUNTIME_PATH, 'utf8'));
 const at = new Date().toISOString();`);
+        provider = provider.replace("pid:process.pid,argv:args",
+          "pid:process.pid,pty_child_pid:ptyRuntime.child_pid,pty_child_started_at:ptyRuntime.child_started_at,argv:args");
         provider = provider.replace(/const native = resumed \|\| requested \|\| [^;]+;/,
           "const native = resumed || requested || require('node:crypto').randomUUID();");
         provider = provider.replace("  if (line.trim() === 'GWT_FIXTURE_EXIT')", `
@@ -1565,6 +1711,26 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
     });
     const windows = async () => workspace?.tabs.flatMap((tab: any) => tab.workspace.windows)
       .filter((window: any) => window.session_id) ?? [];
+    const waitForMeasuredChildren = async (expected: number) => {
+      if (!fixedMachineCapacity) return;
+      await expect.poll(async () => {
+        const launches = await fixture.launches() as (ExactRelaunchInvocation & {
+          pty_child_pid?: number; pty_child_started_at?: number;
+        })[];
+        if (launches.length !== expected) return false;
+        const capacity = JSON.parse(await readFile(join(fixture.home, ".gwt", "machine-state", "agent-capacity.json"), "utf8"));
+        const now = Date.now() / 1000;
+        return capacity.observed_at <= now && now < capacity.expires_at
+          && capacity.machine_budget >= 5 && capacity.inventory.uncertainties.length === 0
+          && launches.every(launch => capacity.inventory.sessions.some((row: any) =>
+            row.session.session_id === launch.gwt_session_id && row.session.child_started_at > 0
+              && (process.platform === "win32"
+                ? Number.isSafeInteger(launch.pty_child_pid) && launch.pty_child_pid! > 0
+                  && row.session.child_pid === launch.pty_child_pid
+                  && row.session.child_started_at === launch.pty_child_started_at
+                : row.session.child_pid === launch.pid)));
+      }, { timeout: 45_000, message: "previous children have a fresh exact census before the next manual launch" }).toBe(true);
+    };
     const receipts = async () => (await readFile(join(fixture.home, "works-hook-receipts.jsonl"), "utf8")
       .catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return ""; throw error; }))
       .split("\n").slice(0, -1).filter(Boolean).map(line => JSON.parse(line));
@@ -1606,21 +1772,26 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
       await expect(main.locator(".works-source-note")).toContainText("daily merge data");
       await expect.poll(async () => Number(await main.locator(".works-fleet svg").getAttribute("data-known-count"))).toBeGreaterThan(0);
     };
+    let failed = false;
     try {
       await page.setViewportSize({ width: 1600, height: 1500 });
       await page.addInitScript(theme => {
         if (location.protocol === "http:" || location.protocol === "https:") localStorage.setItem("gwt:ui:theme", theme);
       }, theme);
       await gotoLiveGwt(page, fixture.url, { enableTestBridge: true, suppressProjectSurfaces: true });
+      // Match the fixture's startup hang guard; this is not a latency assertion.
       await expect.poll(() => page.evaluate(() => (window as any).__gwtPlaywrightMessages
         ?.filter((entry: any) => entry.payload.kind === "project_execution_status")
-        .at(-1)?.payload.status.view_state)).toBe("open");
+        .at(-1)?.payload.status.view_state),
+      { timeout: 60_000, message: "initial Project view finishes the fixture startup handshake" }).toBe("open");
       await sendLiveGwtEvent(page, { kind: "open_pm_agent" });
       await expect.poll(async () => (await windows()).filter((window: any) => window.is_pm).length, { timeout: 90_000 }).toBe(1);
+      await waitForMeasuredChildren(1);
       for (let i = 1; i <= 4; i += 1) {
         await launchCodex(page, `worker-${i}`);
         await expect.poll(async () => (await windows()).filter((window: any) => window.agent_id === "codex").length,
           { timeout: 60_000 }).toBe(i);
+        await waitForMeasuredChildren(i + 1);
       }
       await expect.poll(async () => (await windows()).length, { timeout: 60_000 }).toBe(5);
       const live = await windows(), pm = live.find((window: any) => window.is_pm);
@@ -1781,7 +1952,11 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
         const [pid, birth] = (await readLatestOwnActivity(page, activity.project_key)).host_id.split(":").map(Number);
         finalOwner = { pid, birth };
       }
+    } catch (error) {
+      failed = true;
+      throw error;
     } finally {
+      const cleanupErrors: unknown[] = [];
       try {
         await info.attach("works-source-state", { body: JSON.stringify({ workspace, activity, usage, activityObservations }), contentType: "application/json" });
         await captureCapacity("final");
@@ -1793,8 +1968,21 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
         for (const session of new Set((await fixture.launches()).map(launch => launch.gwt_session_id))) {
           expect(profiles, `retain hook timings for launched Session ${session}`).toContain(`hook-${session}.jsonl`);
         }
-      } finally {
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+      try {
         await fixture.stop(undefined, { signalFree: true, disconnectBrowser: () => page.goto("about:blank") });
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+      if (cleanupErrors.length) {
+        try {
+          await info.attach("works-cleanup-failures", { body: cleanupErrors.map(String).join("\n"), contentType: "text/plain" });
+        } catch (error) {
+          cleanupErrors.push(error);
+        }
+        if (!failed) throw new AggregateError(cleanupErrors, "Works evidence or cleanup failed");
       }
     }
     if (process.platform !== "win32") {

@@ -78,12 +78,16 @@ def summarize_required_checks(snapshot):
         starts = [check["started_at"] for check in latest.values()
                   if check.get("started_at") and check["conclusion"] not in ("skipped", "cancelled")]
         elapsed = None
-        if complete and starts and all(check.get("started_at") and
-                                      timestamp(check["started_at"]) <= timestamp(check["completed_at"])
+        # Skipped checks never ran; GitHub can report their start after completion.
+        if complete and starts and all(check["conclusion"] == "skipped" or
+                                      (check.get("started_at") and
+                                       timestamp(check["started_at"]) <= timestamp(check["completed_at"]))
                                       for check in selected):
-            elapsed = minutes(min(starts, key=timestamp),
-                              max((check["completed_at"] for check in selected), key=timestamp))
-            completion.append(elapsed)
+            start = min(starts, key=timestamp)
+            end = max((check["completed_at"] for check in selected), key=timestamp)
+            if timestamp(start) <= timestamp(end):
+                elapsed = minutes(start, end)
+                completion.append(elapsed)
         rows.append({"pr": pr["number"], "head_sha": pr.get("head_sha"),
                      "check_ids": [check["id"] for check in selected],
                      "complete": complete,

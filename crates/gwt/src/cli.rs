@@ -311,6 +311,9 @@ pub enum CliParseError {
     InvalidJson(String),
     /// Fixed diagnostic: safe to display even when caller input must be redacted.
     InvalidVerificationMode,
+    /// Params diagnostic built only from operation and schema-owned field
+    /// names, so it is safe to display under the redacting safe intake.
+    InvalidParams(String),
     InvalidNumber(String),
     MissingFlag(&'static str),
     InvalidValue {
@@ -324,6 +327,7 @@ impl std::fmt::Display for CliParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CliParseError::InvalidJson(message) => write!(f, "invalid JSON envelope: {message}"),
+            CliParseError::InvalidParams(message) => write!(f, "{message}"),
             CliParseError::InvalidVerificationMode => {
                 write!(f, "verify.plan mode must be full or pre-pr")
             }

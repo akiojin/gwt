@@ -779,6 +779,25 @@ mod tests {
         .await;
     }
 
+    /// Issue an invite on the enabled Host and register it with its coordinator;
+    /// returns the claim secret as the browser sends it.
+    async fn issued_invite(
+        host: &std::sync::RwLock<MobileAuthorization>,
+        invites: &tokio::sync::mpsc::Sender<crate::mobile_host::registration_client::InviteRequest>,
+    ) -> crate::mobile_connection::IssuedInvite {
+        bounded(async {
+            while !host.read().unwrap().is_enabled() {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        })
+        .await;
+        bounded(crate::mobile_host::registration_client::register_invite(
+            host, invites,
+        ))
+        .await
+        .unwrap()
+    }
+
     async fn next_json(socket: &mut HostSocket) -> serde_json::Value {
         use futures_util::StreamExt as _;
         match bounded(socket.next()).await.unwrap().unwrap() {
@@ -1338,7 +1357,10 @@ mod tests {
             let mut browser = open_path(&fixture, addr, BROWSER_CLAIM_PATH, &origin)
                 .await
                 .unwrap();
-            let claim = json!({"type":"claim_invite","secret":"01".repeat(32)}).to_string();
+            let issued = issued_invite(&host, &invites).await;
+            let claim =
+                json!({"type":"claim_invite","secret":hex::encode(issued.secret.as_slice())})
+                    .to_string();
             bounded(browser.send(Message::text(claim))).await.unwrap();
             assert_eq!(next_json(&mut browser).await, json!({"type":"claimed"}));
             let ConnectionEvent::Claimed {
@@ -1349,7 +1371,7 @@ mod tests {
                 panic!("the first connection event must be the claim");
             };
             // The Host learns which of its pending invites was claimed.
-            assert_eq!(claimed, invite(1, 300).0.invite_id());
+            assert_eq!(claimed, issued.invite_id);
             assert_ne!(claimed, invite(4, 300).0.invite_id());
             let offer = json!({"type":"signal","payload":"offer"}).to_string();
             bounded(browser.send(Message::text(offer))).await.unwrap();
@@ -1384,12 +1406,14 @@ mod tests {
         {
             use futures_util::{SinkExt as _, StreamExt as _};
             use tokio_tungstenite::tungstenite::Message;
-            assert_eq!(register(3, 300).await, Ok(InviteOutcome::Registered));
+            let issued = issued_invite(&host, &invites).await;
             let origin = [("origin", "https://coordinator.example".to_string())];
             let mut browser = open_path(&fixture, addr, BROWSER_CLAIM_PATH, &origin)
                 .await
                 .unwrap();
-            let claim = json!({"type":"claim_invite","secret":"03".repeat(32)}).to_string();
+            let claim =
+                json!({"type":"claim_invite","secret":hex::encode(issued.secret.as_slice())})
+                    .to_string();
             bounded(browser.send(Message::text(claim))).await.unwrap();
             assert_eq!(next_json(&mut browser).await, json!({"type":"claimed"}));
             let ConnectionEvent::Claimed { connection_id, .. } =
@@ -1426,6 +1450,105 @@ mod tests {
         assert!(!host.read().unwrap().is_enabled());
         wait_until_closed(&sessions).await;
 
+        shutdown.send(()).unwrap();
+        bounded(task).await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn host_client_admits_only_claims_of_invites_its_host_issued() {
+        use crate::mobile_connection::AuthorizationError;
+        use crate::mobile_host::registration_client::{
+            ConnectionEvent, InviteOutcome, InviteRequest,
+        };
+        use futures_util::{SinkExt as _, StreamExt as _};
+        use std::sync::RwLock;
+        use tokio::sync::{mpsc, watch};
+        use tokio_tungstenite::tungstenite::Message;
+        let mut fixture = Fixture::new();
+        let wall = real_wall();
+        let (credential, binding) = fixture.issue_credential(wall);
+        let server = fixture.start_at(wall).await;
+        let addr = server.local_addr().unwrap();
+        let sessions = Arc::clone(&server.sessions);
+        let (shutdown, signal) = oneshot::channel();
+        let task = tokio::spawn(server.serve_until(async move {
+            let _ = signal.await;
+        }));
+        let host = Arc::new(RwLock::new(
+            MobileAuthorization::load_bound(&fixture.home.join("devices.json"), &binding).unwrap(),
+        ));
+        let (stop, stopping) = watch::channel(false);
+        let (invites, requests) = mpsc::channel(1);
+        let (events, mut connections) = mpsc::channel(32);
+        let client = {
+            let host = Arc::clone(&host);
+            let tls = fixture.client_config();
+            tokio::spawn(async move {
+                let tcp = TcpStream::connect(addr).await.unwrap();
+                run_registration(
+                    host,
+                    &credential,
+                    tls,
+                    tcp,
+                    stopping,
+                    requests,
+                    mpsc::channel(1).1,
+                    events,
+                )
+                .await
+            })
+        };
+        let origin = [("origin", "https://coordinator.example".to_string())];
+
+        // An invite the coordinator admitted but this Host never issued: its
+        // claim is closed and never reaches the caller as a claim.
+        let issued = issued_invite(&host, &invites).await;
+        let (reply, outcome) = oneshot::channel();
+        let foreign = InviteRequest {
+            secret: zeroize::Zeroizing::new([9; 32]),
+            ttl_secs: 300,
+            reply,
+        };
+        bounded(invites.send(foreign)).await.ok().unwrap();
+        assert_eq!(bounded(outcome).await, Ok(InviteOutcome::Registered));
+        let mut stranger = open_path(&fixture, addr, BROWSER_CLAIM_PATH, &origin)
+            .await
+            .unwrap();
+        let claim = json!({"type":"claim_invite","secret":"09".repeat(32)}).to_string();
+        bounded(stranger.send(Message::text(claim))).await.unwrap();
+        assert_eq!(next_json(&mut stranger).await, json!({"type":"claimed"}));
+        assert!(matches!(
+            bounded(stranger.next()).await,
+            None | Some(Err(_)) | Some(Ok(Message::Close(_)))
+        ));
+        let event = bounded(connections.recv()).await.unwrap();
+        assert!(matches!(event, ConnectionEvent::Closed { .. }), "{event:?}");
+
+        // The Host's own invite is claimed once, bound to that connection.
+        let mut browser = open_path(&fixture, addr, BROWSER_CLAIM_PATH, &origin)
+            .await
+            .unwrap();
+        let claim = json!({"type":"claim_invite","secret":hex::encode(issued.secret.as_slice())})
+            .to_string();
+        bounded(browser.send(Message::text(claim))).await.unwrap();
+        assert_eq!(next_json(&mut browser).await, json!({"type":"claimed"}));
+        let ConnectionEvent::Claimed { invite, .. } = bounded(connections.recv()).await.unwrap()
+        else {
+            panic!("the Host's own invite must be reported claimed");
+        };
+        assert_eq!(invite, issued.invite_id);
+        assert_eq!(
+            host.write()
+                .unwrap()
+                .claim_invite(issued.invite_id, Uuid::new_v4(), real_wall()),
+            Err(AuthorizationError::WrongPeer)
+        );
+        assert!(host.read().unwrap().is_enabled());
+        assert_eq!(live(&sessions), 1);
+
+        stop.send(true).unwrap();
+        assert!(matches!(bounded(client).await.unwrap(), Ok(())));
+        wait_until_closed(&sessions).await;
         shutdown.send(()).unwrap();
         bounded(task).await.unwrap().unwrap();
     }
@@ -2009,9 +2132,7 @@ mod tests {
 
     #[tokio::test]
     async fn host_client_paces_its_signals_to_the_announced_host_rate() {
-        use crate::mobile_host::registration_client::{
-            ConnectionEvent, InviteOutcome, InviteRequest, OutboundSignal,
-        };
+        use crate::mobile_host::registration_client::{ConnectionEvent, OutboundSignal};
         use futures_util::SinkExt as _;
         use std::sync::RwLock;
         use tokio::sync::{mpsc, watch};
@@ -2051,19 +2172,13 @@ mod tests {
                 .await
             })
         };
-        let (reply, outcome) = oneshot::channel();
-        let request = InviteRequest {
-            secret: zeroize::Zeroizing::new([1; 32]),
-            ttl_secs: 300,
-            reply,
-        };
-        bounded(invites.send(request)).await.ok().unwrap();
-        assert_eq!(bounded(outcome).await, Ok(InviteOutcome::Registered));
+        let issued = issued_invite(&host, &invites).await;
         let origin = [("origin", "https://coordinator.example".to_string())];
         let mut browser = open_path(&fixture, addr, BROWSER_CLAIM_PATH, &origin)
             .await
             .unwrap();
-        let claim = json!({"type":"claim_invite","secret":"01".repeat(32)}).to_string();
+        let claim = json!({"type":"claim_invite","secret":hex::encode(issued.secret.as_slice())})
+            .to_string();
         bounded(browser.send(Message::text(claim))).await.unwrap();
         assert_eq!(next_json(&mut browser).await, json!({"type":"claimed"}));
         let Some(ConnectionEvent::Claimed { connection_id, .. }) =
@@ -2100,7 +2215,7 @@ mod tests {
 
     #[tokio::test]
     async fn host_client_closes_only_a_browser_that_outpaces_its_signal_share() {
-        use crate::mobile_host::registration_client::{ConnectionEvent, InviteRequest};
+        use crate::mobile_host::registration_client::ConnectionEvent;
         use futures_util::SinkExt as _;
         use std::sync::RwLock;
         use tokio::sync::{mpsc, watch};
@@ -2140,20 +2255,14 @@ mod tests {
                 .await
             })
         };
-        let (reply, outcome) = oneshot::channel();
-        let request = InviteRequest {
-            secret: zeroize::Zeroizing::new([7; 32]),
-            ttl_secs: 300,
-            reply,
-        };
-        bounded(invites.send(request)).await.ok().unwrap();
-        bounded(outcome).await.unwrap();
+        let issued = issued_invite(&host, &invites).await;
 
         let origin = [("origin", "https://coordinator.example".to_string())];
         let mut browser = open_path(&fixture, addr, BROWSER_CLAIM_PATH, &origin)
             .await
             .unwrap();
-        let claim = json!({"type":"claim_invite","secret":"07".repeat(32)}).to_string();
+        let claim = json!({"type":"claim_invite","secret":hex::encode(issued.secret.as_slice())})
+            .to_string();
         bounded(browser.send(Message::text(claim))).await.unwrap();
         assert_eq!(next_json(&mut browser).await, json!({"type":"claimed"}));
         // The caller does not drain: the claim and the first signal fill the

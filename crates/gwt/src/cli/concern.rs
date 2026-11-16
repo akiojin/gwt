@@ -32,20 +32,20 @@ pub(super) fn parse(
     params: &Map<String, Value>,
 ) -> Result<ConcernCommand, CliParseError> {
     match operation {
-        "concern.create" => decode(params.clone()).map(ConcernCommand::Create),
-        "concern.list" => decode(params.clone()).map(ConcernCommand::List),
+        "concern.create" => decode(operation, params.clone()).map(ConcernCommand::Create),
+        "concern.list" => decode(operation, params.clone()).map(ConcernCommand::List),
         "concern.update" => {
-            let (id, fields) = take_id(params)?;
+            let (id, fields) = take_id(operation, params)?;
             Ok(ConcernCommand::Update {
                 id,
-                patch: decode(fields)?,
+                patch: decode(operation, fields)?,
             })
         }
         "concern.measure" => {
-            let (id, fields) = take_id(params)?;
+            let (id, fields) = take_id(operation, params)?;
             Ok(ConcernCommand::Measure {
                 id,
-                update: decode(fields)?,
+                update: decode(operation, fields)?,
             })
         }
         "concern.resolve" => {
@@ -54,8 +54,8 @@ pub(super) fn parse(
             struct Resolution {
                 state: ConcernResolution,
             }
-            let (id, fields) = take_id(params)?;
-            let resolution: Resolution = decode(fields)?;
+            let (id, fields) = take_id(operation, params)?;
+            let resolution: Resolution = decode(operation, fields)?;
             Ok(ConcernCommand::Resolve {
                 id,
                 state: resolution.state,
@@ -65,18 +65,49 @@ pub(super) fn parse(
     }
 }
 
-fn decode<T: DeserializeOwned>(params: Map<String, Value>) -> Result<T, CliParseError> {
+fn decode<T: DeserializeOwned>(
+    operation: &str,
+    params: Map<String, Value>,
+) -> Result<T, CliParseError> {
     serde_json::from_value(Value::Object(params))
-        .map_err(|error| CliParseError::InvalidJson(error.to_string()))
+        .map_err(|error| params_error(operation, &error.to_string()))
 }
 
-fn take_id(params: &Map<String, Value>) -> Result<(String, Map<String, Value>), CliParseError> {
+/// Issue #7259: name the rejected param without echoing caller-controlled
+/// keys or values. Serde's `missing field` names and `expected` lists come
+/// from the schema; an unknown key and any invalid value do not.
+fn params_error(operation: &str, serde_message: &str) -> CliParseError {
+    let detail = if let Some(rest) = serde_message.strip_prefix("missing field ") {
+        let field = rest.split('`').nth(1).unwrap_or_default();
+        format!("missing required param `{field}`")
+    } else if serde_message.starts_with("unknown field ") {
+        match serde_message.split_once(", expected ") {
+            Some((_, expected)) => format!("unknown param; expected {expected}"),
+            None => "unknown param".to_string(),
+        }
+    } else {
+        "a param has an invalid type or value".to_string()
+    };
+    let hint = match operation {
+        "concern.measure" => {
+            "; required: id, cycle_id, measurement, owner_progress (one entry per owner Issue)"
+        }
+        "concern.resolve" => "; required: id, state",
+        _ => "",
+    };
+    CliParseError::InvalidParams(format!("{operation}: {detail}{hint}"))
+}
+
+fn take_id(
+    operation: &str,
+    params: &Map<String, Value>,
+) -> Result<(String, Map<String, Value>), CliParseError> {
     let mut fields = params.clone();
     match fields.remove("id") {
         Some(Value::String(id)) if !id.trim().is_empty() => Ok((id, fields)),
-        _ => Err(CliParseError::InvalidJson(
-            "id must be a non-empty string".to_string(),
-        )),
+        _ => Err(CliParseError::InvalidParams(format!(
+            "{operation}: param `id` must be a non-empty string"
+        ))),
     }
 }
 

@@ -521,7 +521,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn merge_hooks_safe_preserves_symlink_target() {
+    fn merge_hooks_safe_rejects_symlink_target() {
         use std::os::unix::fs::symlink;
 
         let dir = tempfile::tempdir().unwrap();
@@ -540,7 +540,12 @@ mod tests {
         symlink(&target, &link).unwrap();
 
         let managed = vec![make_hook("pre-commit", "new-lint", true)];
-        merge_hooks_safe(&link, &managed).unwrap();
+        let error = merge_hooks_safe(&link, &managed).unwrap_err();
+        assert!(error.to_string().contains("write"), "{error}");
+        assert!(
+            error.to_string().contains(&link.display().to_string()),
+            "{error}"
+        );
 
         assert!(std::fs::symlink_metadata(&link)
             .unwrap()
@@ -548,7 +553,7 @@ mod tests {
             .is_symlink());
         let cfg: HooksConfig =
             serde_json::from_str(&std::fs::read_to_string(&target).unwrap()).unwrap();
-        assert_eq!(cfg.managed_hooks[0].command, "new-lint");
+        assert_eq!(cfg.managed_hooks[0].command, "old-lint");
         assert_eq!(cfg.user_hooks, initial.user_hooks);
     }
 

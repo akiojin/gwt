@@ -17,13 +17,13 @@ test("mobile Agents checkboxes override the shared form's last-child minimum", (
 
 const members = [
   { member_id: "m1", name: "One", enabled: true, assignment: { session_id: "s1" }, provider: "Codex", model: "GPT-6", created_at: "2026-10-20T00:00:00Z", issue_count: 3, landed_count: 2, active_seconds: 7200, tokens: 5000, history: [
-    { session_id: "s0", name: "Recorded author", provider: "claude", model: "recorded-model", issue_number: 4000, title: "Earlier", result: "landed", started_at: "2026-10-20T00:00:00Z", ended_at: "2026-10-20T02:00:00Z" },
+    { session_id: "s0", role: "pm", name: "Recorded author", provider: "claude", model: "recorded-model", issue_number: 4000, title: "Earlier", result: "landed", started_at: "2026-10-20T00:00:00Z", ended_at: "2026-10-20T02:00:00Z" },
     { session_id: "s2", issue_number: 4600, title: "Later", result: null, started_at: "2026-10-22T00:00:00Z", ended_at: "2026-10-22T02:00:00Z" },
   ] },
   { member_id: "m2", name: "Two", enabled: true, provider: null, model: null, created_at: null, issue_count: null, landed_count: null, active_seconds: null, tokens: null, history: [] },
 ];
 const current = { window_id: "one", session_id: "s1", runtime_incarnation: 4, issue_number: 4777, is_pm: false };
-async function fixture({ onOpenWork = () => {}, onNavigateProject = () => {}, onContinueSavedWork = () => {}, isContinuePending, schedule, switching, executionModel, tuningController, pmSettingsPanel } = {}) {
+async function fixture({ onOpenWork = () => {}, onNavigateProject = () => {}, onContinueSavedWork = () => {}, isContinuePending, schedule, switching, executionModel, tuningController, pmSettingsPanel, onReloadProfile = null } = {}) {
   const { document, window } = parseHTML("<main></main>");
   // linkedom does not track focus; keep that browser state local to this fixture.
   let activeElement = null;
@@ -40,12 +40,12 @@ async function fixture({ onOpenWork = () => {}, onNavigateProject = () => {}, on
   const windowCatalogModel = createUiStateStore({ catalog: { runtimeStates: {}, version: 1, appState: { active_tab_id: "p", tabs: [{ id: "p", workspace: { windows: [{ id: "one", session_id: "s1", agent_member_id: "m1", dynamic_title: "Current issue", status: "running" }] } }] } } }, options);
   const supportedAgentsModel = createUiStateStore({ agents: [{ id: "codex", name: "Codex" }, { id: "claude", name: "Claude Code" }] }, options);
   const customAgentsModel = createUiStateStore({ catalog: { loaded: true, agents: [{ id: "custom-cli", display_name: "Custom CLI" }] } }, options);
-  const opened = [], rested = [], added = [], reassigned = [], refreshed = [], switched = [], saved = [], continued = [];
-  const surface = createAgentsSurface({ document, executionModel, projectTitle: "Alpha", rosterModel, tuningController, pmSettingsPanel, activityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel, scheduleModel, switchModel, onNavigateProject, onRenameMember: rosterController.editAgentMemberName, onRetryName: rosterController.retryAgentMemberName, isContinuePending, onContinueSavedWork: workId => { continued.push(workId); onContinueSavedWork(workId); }, onSwitch: action => { switched.push(action); switchModel.update(state => ({ ...state, pending: action })); }, onOpenSavedWork: intent => saved.push(intent), onReassign: action => reassigned.push(action), onRefreshSchedule: () => refreshed.push(true), onAddMember: (tool, name, pm_eligible) => { added.push({ tool, name, pm_eligible }); rosterModel.update(state => ({ ...state, error: null })); }, onRestMember: id => rested.push(id), onOpenWork: assignment => { opened.push(assignment); onOpenWork(assignment); } });
+  const opened = [], rested = [], activated = [], added = [], reassigned = [], refreshed = [], switched = [], saved = [], continued = [];
+  const surface = createAgentsSurface({ document, executionModel, projectTitle: "Alpha", rosterModel, tuningController, pmSettingsPanel, onReloadProfile, activityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel, scheduleModel, switchModel, onNavigateProject, onRenameMember: rosterController.editAgentMemberName, onRetryName: rosterController.retryAgentMemberName, isContinuePending, onContinueSavedWork: workId => { continued.push(workId); onContinueSavedWork(workId); }, onSwitch: action => { switched.push(action); switchModel.update(state => ({ ...state, pending: action })); }, onOpenSavedWork: intent => saved.push(intent), onReassign: action => reassigned.push(action), onRefreshSchedule: () => refreshed.push(true), onAddMember: (tool, name, pm_eligible, tuning) => { added.push({ tool, name, pm_eligible, ...(tuning ? { tuning } : {}) }); rosterModel.update(state => ({ ...state, error: null })); }, onRestMember: id => rested.push(id), onActivateMember: id => activated.push(id), onOpenWork: assignment => { opened.push(assignment); onOpenWork(assignment); } });
   for (const node of surface.element.querySelectorAll("select, input")) node.focus = () => { activeElement = node; };
   document.querySelector("main").append(surface.element);
   const flush = () => { for (const fn of [...frames]) { frames.delete(fn); fn(); } };
-  return { surface, document, window, frames, flush, rosterModel, rosterController, renamed, supportedAgentsModel, customAgentsModel, activityModel, windowCatalogModel, scheduleModel, opened, rested, added, reassigned, refreshed, switchModel, switched, saved, continued };
+  return { surface, document, window, frames, flush, rosterModel, rosterController, renamed, supportedAgentsModel, customAgentsModel, activityModel, windowCatalogModel, scheduleModel, opened, rested, activated, added, reassigned, refreshed, switchModel, switched, saved, continued };
 }
 
 test("Agents autosaves inline names while retaining native input, focus, invalid drafts and per-member selection drafts", async () => {
@@ -168,6 +168,8 @@ test("Agents identifies the exact PM before the implementation pool without addi
 
 test("Agents keeps Team and Past tabs, capacity, member details, four real aggregates and reverse history", async () => {
   const f = await fixture();
+  assert.equal(f.surface.element.querySelector('.roster-member-id')?.textContent, 'Member ID: m1');
+  assert.equal(f.surface.element.querySelector('.roster-current-role')?.textContent, 'Role: —');
   assert.deepEqual([...f.surface.element.querySelectorAll('[role="tab"]')].map(tab => tab.textContent), ["Team", "Past"]);
   assert.equal(f.surface.element.querySelector(".roster-count").textContent, "2");
   assert.match(f.surface.element.querySelector(".roster-capacity").textContent, /Recommended.*6/);
@@ -185,7 +187,7 @@ test("Agents keeps Team and Past tabs, capacity, member details, four real aggre
   f.rosterModel.update(state => ({ ...state, members: state.members.map(member => member.member_id !== "m1" ? member : { ...member,
     saved_manual_profile: { agent_id: "codex", model: "saved-model", reasoning: "high", runtime_target: "Docker", docker_service: "worker", skip_permissions: false },
     saved_manual_revision: `manual-profile-v1:${"a".repeat(64)}`,
-    history: [...member.history, { session_id: "s1", name: "Launch author", provider: "codex", model: "launch-model" }],
+    history: [...member.history, { session_id: "s1", role: "implementation", name: "Launch author", provider: "codex", model: "launch-model" }],
   }) })); f.flush();
   assert.match(f.surface.element.querySelector(".roster-saved-settings").textContent, /Model: saved-model.*Reasoning: high.*Runtime: Docker.*worker.*Permissions: Ask/s);
   assert.equal(f.surface.element.querySelector(".roster-saved-revision input"), revisionInput, "revision readout retains the keyboard target");
@@ -193,6 +195,8 @@ test("Agents keeps Team and Past tabs, capacity, member details, four real aggre
   assert.ok(f.surface.element.querySelector(".roster-saved-settings").previousElementSibling.classList.contains("roster-stats"), "refresh preserves aggregates before saved settings");
   assert.match(revisionInput.title, /Same settings.*same revision/);
   assert.equal(f.surface.element.querySelector(".roster-current-config").textContent, "Recorded name: Launch author · Tool: codex · Recorded model: launch-model");
+  assert.equal(f.surface.element.querySelector('.roster-current-role').textContent, 'Role: Implementation');
+  assert.deepEqual([...f.surface.element.querySelectorAll('.roster-history-role')].map(node => node.textContent), ['Role: —', 'Role: Project Manager']);
   const history = [...f.surface.element.querySelectorAll(".roster-history li")];
   assert.match(history[0].textContent, /Now.*#4777.*Current issue/s);
   assert.match(history[1].textContent, /Later/); assert.match(history[2].textContent, /Earlier/);
@@ -503,6 +507,40 @@ test("resting members stay registered after work ends and across unavailable act
 });
 
 
+test("resting registration collisions identify the member and reactivate only the chosen row", async () => {
+  const f = await fixture();
+  f.rosterModel.update(state => ({ ...state, members: [
+    ...state.members,
+    { member_id: "rest-first", name: "Earlier", agent_id: "claude", enabled: false, history: [] },
+    { member_id: "rest-target", name: "Maple", agent_id: "codex", enabled: false, history: [] },
+  ] })); f.flush();
+  const input = f.surface.element.querySelector('[aria-label="Name for new member"]');
+  input.value = " MAPLE "; input.dispatchEvent(new f.window.Event("input"));
+  const error = f.surface.element.querySelector("#roster-registration-error");
+  assert.match(error.textContent, /Maple.*codex.*resting/i);
+  assert.equal(f.surface.element.querySelector('[data-action="add"]').disabled, true);
+  error.querySelector("button").click();
+  const row = f.surface.element.querySelector('[data-member-id="rest-target"]');
+  assert.equal(row.getAttribute("aria-selected"), "true");
+  assert.equal(f.document.activeElement, row);
+  assert.deepEqual(f.activated, []); assert.deepEqual(f.added, []);
+  const activate = row.querySelector('[data-action="activate"]');
+  activate.click();
+  assert.deepEqual(f.activated, ["rest-target"]);
+  f.rosterModel.update(state => ({ ...state, pending_roster: { request_id: "activate", action: { kind: "activate" } } })); f.flush();
+  assert.equal(activate.disabled, true); activate.click();
+  assert.deepEqual(f.activated, ["rest-target"]);
+  f.rosterModel.update(state => ({ ...state, pending_roster: null, members: state.members.map(member => member.member_id === "rest-target" ? { ...member, enabled: true } : member) })); f.flush();
+  assert.equal(activate.hidden, true); activate.click();
+  assert.deepEqual(f.activated, ["rest-target"]);
+  assert.equal(f.rosterModel.read().members.find(member => member.member_id === "rest-first").enabled, false);
+  f.rosterModel.update(state => ({ ...state, members: state.members.filter(member => member.member_id !== "rest-target") })); f.flush();
+  activate.click();
+  assert.deepEqual(f.activated, ["rest-target"], "a detached old control cannot reactivate a removed identity");
+  f.surface.dispose();
+});
+
+
 test("an observation timestamp alone preserves roster detail, controls and selection", async () => {
   const f = await fixture();
   const detail = f.surface.element.querySelector(".roster-detail").firstElementChild;
@@ -664,6 +702,70 @@ test("Agents continues only server-eligible saved work through the existing corr
 });
 
 
+test("registration selects catalog tuning without sending until Register and retains rejected drafts", async () => {
+  let reloads = 0;
+  const f = await fixture({ onReloadProfile: () => { reloads += 1; } });
+  f.rosterModel.update(state => ({ ...state, tuning_choices: { agents: [{ id: "codex", models: [{ value: "catalog-model", reasoning_options: [{ value: "high" }] }] }] } })); f.flush();
+  const host = f.surface.element;
+  const name = host.querySelector('[aria-label="Name for new member"]');
+  const model = host.querySelector('[aria-label="Model for new member"]');
+  const reasoning = host.querySelector('[aria-label="Reasoning for new member"]');
+  assert.ok(model && reasoning, "registration exposes model and reasoning inputs");
+  assert.equal(model.className, "settings-input");
+  assert.equal(model.parentElement.querySelector('option[value="catalog-model"]').value, "catalog-model");
+  name.value = "Maple"; name.dispatchEvent(new f.window.Event("input"));
+  model.value = "  catalog-model  "; model.dispatchEvent(new f.window.Event("input"));
+  reasoning.value = " high "; reasoning.dispatchEvent(new f.window.Event("input"));
+  assert.equal(reasoning.parentElement.querySelector('option[value="high"]').value, "high");
+  name.dispatchEvent(new f.window.Event("compositionstart"));
+  f.supportedAgentsModel.update(state => ({ agents: state.agents.filter(agent => agent.id !== "codex") })); f.flush();
+  assert.equal(model.value, "", "fallback to another tool clears the previous tool's tuning");
+  assert.equal(reasoning.value, "");
+  assert.equal(host.querySelector('[data-action="add"]').disabled, true, "tool fallback preserves name composition");
+  name.dispatchEvent(new f.window.Event("compositionend"));
+  f.supportedAgentsModel.update(() => ({ agents: [{ id: "codex", name: "Codex" }, { id: "claude", name: "Claude Code" }] })); f.flush();
+  host.querySelector('[aria-label="Tool for new member"] option[value="codex"]').selected = true;
+  host.querySelector('[aria-label="Tool for new member"]').dispatchEvent(new f.window.Event("change"));
+  model.value = "  catalog-model  "; model.dispatchEvent(new f.window.Event("input"));
+  reasoning.value = " high "; reasoning.dispatchEvent(new f.window.Event("input"));
+  assert.equal(f.added.length, 0);
+  reasoning.dispatchEvent(new f.window.Event("compositionstart"));
+  host.querySelector('[data-action="add"]').click();
+  assert.equal(f.added.length, 0, "Register never sends an unfinished IME value");
+  reasoning.dispatchEvent(new f.window.Event("compositionend"));
+  host.querySelector('[data-action="add"]').click();
+  assert.deepEqual(f.added, [{ tool: "codex", name: "Maple", pm_eligible: false, tuning: { model: "catalog-model", reasoning: "high" } }]);
+  model.focus();
+  f.rosterModel.update(state => ({ ...state, error: "Unsupported reasoning; review and retry", tuning_choices: { agents: [] } })); f.flush();
+  assert.equal(model.value, "  catalog-model  "); assert.equal(reasoning.value, " high ");
+  assert.equal(host.querySelector('[aria-label="Model for new member"]'), model);
+  assert.equal(f.document.activeElement, model);
+  f.rosterModel.update(state => ({ ...state, tuning_choices: { agents: [{ id: "codex", model_catalog_warning: "Catalog unavailable. Retry without losing your draft.", models: [] }] } })); f.flush();
+  assert.match(host.querySelector('[data-registration-catalog-status]').textContent, /Catalog unavailable/);
+  const retry = host.querySelector('[data-action="retry-registration-catalog"]');
+  assert.equal(retry.hidden, false); retry.click(); assert.equal(reloads, 1);
+  assert.equal(f.added.length, 1, "catalog Retry is only a read");
+  assert.equal(model.value, "  catalog-model  ");
+  f.rosterModel.update(state => ({ ...state, tuning_choices: { agents: [{ id: "codex", models: [{ value: "recovered-model" }] }] } })); f.flush();
+  assert.equal(retry.hidden, true); assert.equal(model.value, "  catalog-model  ");
+  assert.equal(model.parentElement.querySelector('option[value="recovered-model"]').value, "recovered-model");
+  f.supportedAgentsModel.update(() => ({ agents: [] })); f.customAgentsModel.update(() => ({ catalog: { loaded: false, agents: [] } })); f.flush();
+  assert.equal(model.value, "  catalog-model  ");
+  f.supportedAgentsModel.update(() => ({ agents: [{ id: "claude", name: "Claude Code" }, { id: "codex", name: "Codex" }] }));
+  f.customAgentsModel.update(() => ({ catalog: { loaded: true, agents: [] } })); f.flush();
+  assert.equal(host.querySelector('[aria-label="Tool for new member"]').value, "codex");
+  assert.equal(model.value, "  catalog-model  ", "same tool after unavailable catalog retains tuning");
+  const tool = host.querySelector('[aria-label="Tool for new member"]');
+  tool.querySelector('[value="claude"]').selected = true; tool.dispatchEvent(new f.window.Event("change"));
+  assert.equal(model.value, ""); assert.equal(reasoning.value, "");
+  const preview = f.document.createElement("aside"); f.surface.setPreviewHost(preview);
+  assert.equal(preview.querySelector('[aria-label="Model for new member"]').disabled, true);
+  assert.equal(preview.querySelector('[aria-label="Reasoning for new member"]').disabled, true);
+  const app = readFileSync(new URL("../app.js", import.meta.url), "utf8");
+  assert.match(app, /kind: "add", agent_id: agentId, name, pm_eligible: pmEligible, \.\.\.tuning/);
+  f.surface.dispose();
+});
+
 test("Agents registers an explicit name with its selected catalog tool and preserves rejected drafts", async () => {
   const f = await fixture();
   const select = f.surface.element.querySelector('[aria-label="Tool for new member"]');
@@ -775,6 +877,7 @@ test("ordinary roster rejection receipts show current role/registration diagnost
   const rosterSnapshot = (revision, error = null) => ({ project_key: "project", revision, members: f.rosterModel.read().members.map(member => ({ ...member, agent_member_id: member.member_id })), error });
   const name = f.surface.element.querySelector('[aria-label="Name for new member"]'); name.value = "New member"; name.dispatchEvent(new f.window.Event("input"));
   const eligible = f.surface.element.querySelector('[aria-label="PM eligible for new member"]'); eligible.checked = true;
+  assert.equal(begin("activate", "activate-current", { member_id: "m2" }), true);
   assert.equal(begin("add", "add-current", { name: "New member", agent_id: "codex", pm_eligible: true }), true);
   f.rosterController.applyAgentRosterError({ project_key: "project", request_id: "add-current", message: "Roster changed. Reload before retrying registration." }); f.flush();
   assert.match(f.surface.element.querySelector('.roster-error').textContent, /Reload before retrying registration/);

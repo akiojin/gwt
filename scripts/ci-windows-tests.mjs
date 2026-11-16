@@ -30,7 +30,7 @@ export function targets(group) {
     ["gwt-core", "test", "test_hygiene_test"],
     ["gwt-core", "test", "daemon_socket_path_limit"],
     ["gwt", "lib", "gwt"],
-    ["gwt", "test", "runtime_tests"],
+    ["gwt", "example", "socket_fixtures"],
   ];
   // Cargo discovers all integration targets; do not maintain a second list.
   if (group === "core") return [["gwt-core", "lib", "gwt_core"]];
@@ -49,6 +49,24 @@ export function build(group, repo = root, spawn = spawnSync) {
   const packages = [...new Set((group.startsWith("default") ? defaultTargets : selected).map(([pkg]) => pkg))];
   const selectors = [...new Map(selected.map(([, kind, name]) =>
     [kind === "lib" ? kind : `${kind}|${name}`, kind === "lib" ? ["--lib"] : [`--${kind}`, name]])).values()].flat();
+  let gwtdExecutable;
+  if (group === "socket") {
+    const args = ["build", ...packages.flatMap((pkg) => ["-p", pkg]), "--example", "gwtd", "--profile", "test", "--message-format=json"];
+    console.log(`cargo ${args.join(" ")}`);
+    const result = spawn("cargo", args, { cwd: repo, encoding: "utf8", stdio: ["ignore", "pipe", "inherit"], maxBuffer: 64 * 1024 * 1024 });
+    if (result.error) throw result.error;
+    const messages = result.stdout.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+    for (const message of messages) {
+      if (message.reason === "compiler-message" && message.message?.rendered) process.stderr.write(message.message.rendered);
+    }
+    if (result.status !== 0) return result.status ?? 1;
+    const binaries = messages.filter((message) =>
+      message.reason === "compiler-artifact" && !message.profile.test && message.executable &&
+      path.resolve(message.manifest_path) === path.join(repo, "crates", "gwt", "Cargo.toml") &&
+      message.target.kind.includes("example") && message.target.name === "gwtd");
+    if (binaries.length !== 1) throw new Error("Missing or duplicate real gwtd artifact");
+    gwtdExecutable = binaries[0].executable;
+  }
   const args = ["test", ...packages.flatMap((pkg) => ["-p", pkg]), ...(group === "core" ? [] : selectors),
     ...(group === "warm" || group === "core" ? ["--all-features"] : []), "--no-run", "--message-format=json"];
   console.log(`cargo ${args.join(" ")}`);
@@ -69,7 +87,8 @@ export function build(group, repo = root, spawn = spawnSync) {
       : selected.find(([p, kind, name]) => p === pkg && message.target.kind.includes(kind) && message.target.name === name);
     if (!target) continue;
     if (artifacts[key(target)]) throw new Error(`Duplicate test artifact: ${key(target)}`);
-    artifacts[key(target)] = { package_id: message.package_id, executable: message.executable, cwd: path.dirname(message.manifest_path) };
+    artifacts[key(target)] = { package_id: message.package_id, executable: message.executable, cwd: path.dirname(message.manifest_path),
+      ...(gwtdExecutable ? { gwtd_executable: gwtdExecutable } : {}) };
   }
   for (const target of selected) {
     if (!artifacts[key(target)]) throw new Error(`Missing test artifact: ${key(target)}`);
@@ -87,6 +106,10 @@ export function run(group, argv, repo = root, spawn = spawnSync) {
   const separator = testArgs.indexOf("--");
   if (separator !== -1) testArgs.splice(separator, 1);
   const env = { ...process.env };
+  if (group === "socket") {
+    if (!artifact.gwtd_executable) throw new Error("Missing real gwtd artifact");
+    env.GWT_TEST_GWTD_EXE = artifact.gwtd_executable;
+  }
   const pathKey = Object.keys(env).find((name) => name.toLowerCase() === "path") ?? "PATH";
   const deps = path.dirname(artifact.executable);
   env[pathKey] = [deps, path.dirname(deps), env[pathKey] ?? ""].join(path.delimiter);

@@ -17,6 +17,7 @@ export async function startIssueQueueLaunchFixture(info: TestInfo, options: {
   initialComments?: Record<number, { body: string; updated_at: string }[]>;
   monitorPreferences?: Record<string, unknown>;
   targetIssueNumber?: 44; switching?: boolean; positive?: boolean; terminalConvergence?: boolean; autonomousMode?: boolean;
+  targetRefreshGate?: boolean;
   prepare?: ExactRelaunchSetup["prepare"];
 } = {}) {
   const windows = process.platform === "win32";
@@ -252,7 +253,28 @@ if(a[0]==='auth'){if(a[1]==='token')console.log('fixture-only');process.exit(0);
 if(a.includes('--include'))process.stdout.write('HTTP/2.0 200 OK\\r\\n\\r\\n');
 if(a[0]==='api' && text.includes('/issues?')){console.log(JSON.stringify(/[?&]page=1(?:&| |$)/.test(text)?issues:[]));process.exit(0);}
 if(a[0]==='api' && text.includes('/pulls?')){console.log('[]');process.exit(0);}
-if(a[0]==='issue'&&a[1]==='view'){console.log(JSON.stringify({...selected,comments:[]}));process.exit(0);}
+if(a[0]==='issue'&&a[1]==='view'){
+${options.targetRefreshGate ? `
+  const gate=${JSON.stringify(join(home, "target-refresh"))};
+  let held=false;
+  if(a[2]==='44') {
+    try {fs.renameSync(gate+'.armed',gate+'.claimed');held=true;}
+    catch(error) {if(error.code!=='ENOENT')throw error;}
+  }
+  if(held) {
+    fs.writeFileSync(gate+'.waiting.tmp',JSON.stringify({pid:process.pid,parent:process.ppid,cwd:process.cwd(),argv:a}));
+    fs.renameSync(gate+'.waiting.tmp',gate+'.waiting');
+    const until=Date.now()+30000;
+    while(!fs.existsSync(gate+'.release')) {
+      if(Date.now()>=until)throw new Error('Target refresh gate was not released');
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,100);
+    }
+  }
+` : ""}
+  console.log(JSON.stringify({...selected,comments:[]}));
+${options.targetRefreshGate ? `if(held)fs.writeFileSync(gate+'.returned','');` : ""}
+  process.exit(0);
+}
 if(a[0]==='api'&&a[1]==='graphql'){console.log(JSON.stringify({data:{repository:{issue:{timelineItems:{nodes:[],pageInfo:{hasNextPage:false,endCursor:null}}}}}}));process.exit(0);}
 if(a[0]==='pr'&&a[1]==='list'){console.log('[]');process.exit(0);}
 console.error('Unimplemented fixture gh: '+text);process.exit(64);
@@ -381,6 +403,21 @@ console.error('Unimplemented fixture gh: '+text);process.exit(64);
     return null;
   }
   return { ...active, get url() { return active.url; }, get ownedPid() { return active.ownedPid; },
+    targetRefreshGate: {
+      arm: () => writeFile(join(active.home, "target-refresh.armed"), "", { flag: "wx" }),
+      waiting: async () => {
+        const bytes = await readFile(join(active.home, "target-refresh.waiting"), "utf8").catch(error => {
+          if (error.code === "ENOENT") return null;
+          throw error;
+        });
+        return bytes === null ? null : JSON.parse(bytes);
+      },
+      release: () => writeFile(join(active.home, "target-refresh.release"), ""),
+      returned: () => readFile(join(active.home, "target-refresh.returned")).then(() => true, error => {
+        if (error.code === "ENOENT") return false;
+        throw error;
+      }),
+    },
     async restartRuntime(ownerPid: number) {
       if (daemon?.pid !== ownerPid) throw new Error("Saved switch host is not the owned fixture daemon");
       // Quiet GUI reconnects before replacing the physical owner. Provider
@@ -442,10 +479,14 @@ console.error('Unimplemented fixture gh: '+text);process.exit(64);
       return active.restart();
     },
     async stop() {
-      try { await active.stop(); }
-      finally {
-        try { await stopDaemon(); }
-        finally { await new Promise<void>(resolve => server.close(() => resolve())); }
+      try {
+        if (options.targetRefreshGate) await writeFile(join(active.home, "target-refresh.release"), "");
+      } finally {
+        try { await active.stop(); }
+        finally {
+          try { await stopDaemon(); }
+          finally { await new Promise<void>(resolve => server.close(() => resolve())); }
+        }
       }
     },
   };

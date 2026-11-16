@@ -89,8 +89,15 @@ pub enum AgentRosterAction {
         name: Option<String>,
         #[serde(default)]
         pm_eligible: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning: Option<String>,
     },
     Rest {
+        member_id: String,
+    },
+    Activate {
         member_id: String,
     },
     Rename {
@@ -266,7 +273,7 @@ impl AgentRoster {
     }
 }
 
-fn history_for_prefs(path: &Path) -> Result<std::path::PathBuf, String> {
+pub(crate) fn history_for_prefs(path: &Path) -> Result<std::path::PathBuf, String> {
     if crate::issue_monitor::machine_managed_monitor_prefs(path)
         && crate::agent_registry::is_active().map_err(|error| error.to_string())?
     {
@@ -798,7 +805,9 @@ pub fn mutate_project_roster_snapshot(
     crate::agent_registry::ensure_active_for_project(root).map_err(|error| error.to_string())?;
     if matches!(
         action,
-        AgentRosterAction::SetPmEligibility { .. } | AgentRosterAction::SelectPm { .. }
+        AgentRosterAction::Add { .. }
+            | AgentRosterAction::SetPmEligibility { .. }
+            | AgentRosterAction::SelectPm { .. }
     ) {
         return crate::agent_registry::mutate_pm_selection(root, action, expected_revision)
             .map_err(|error| error.to_string());
@@ -862,6 +871,7 @@ pub(crate) fn apply_roster_action(
             ref agent_id,
             ref name,
             pm_eligible,
+            ..
         } => {
             roster
                 .add(
@@ -880,6 +890,14 @@ pub(crate) fn apply_roster_action(
             roster
                 .resize(size, history, default_tool)
                 .map_err(std::io::Error::other)?;
+        }
+        AgentRosterAction::Activate { ref member_id } => {
+            roster
+                .members
+                .iter_mut()
+                .find(|member| member.agent_member_id == *member_id)
+                .ok_or_else(|| std::io::Error::other("Agent member no longer exists"))?
+                .enabled = true;
         }
         AgentRosterAction::Rest { ref member_id } => {
             if roster.members.iter().any(|member| {
@@ -940,7 +958,7 @@ pub(crate) fn apply_roster_action(
 }
 
 /// A reservation becomes reusable only after exact physical absence is known.
-fn assignment_is_busy(
+pub(crate) fn assignment_is_busy(
     root: &Path,
     assignment: &AgentMemberAssignment,
     sessions_dir: &Path,
@@ -2259,6 +2277,8 @@ mod tests {
             &root,
             &sessions,
             AgentRosterAction::Add {
+                model: None,
+                reasoning: None,
                 pm_eligible: false,
                 agent_id: None,
                 name: Some("Cedar".into()),
@@ -2426,10 +2446,14 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let sessions = gwt_core::paths::gwt_sessions_dir();
         let original = read_project_roster(&root, &sessions).unwrap();
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&root);
+        let prefs_before = crate::load_issue_monitor_prefs(&prefs_path).unwrap();
+        let mirror_before = std::fs::read(&prefs_path).unwrap();
         // Deserialize the actual wire shape, including legacy optional fields.
         let register = |name: &str, revision| {
             let action = serde_json::from_value(serde_json::json!({
                 "kind": "add", "agent_id": "claude", "name": name,
+                "model": "  private-registration-model  ", "reasoning": " high ",
             }))
             .unwrap();
             mutate_project_roster(&root, &sessions, action, Some(revision))
@@ -2438,6 +2462,39 @@ mod tests {
         let member = added.members.last().unwrap();
         assert_eq!(member.name, "Maple");
         assert_eq!(member.agent_id.as_deref(), Some("claude"));
+        let snapshot = crate::agent_registry::SessionMemberSnapshot::load().unwrap();
+        let core = snapshot
+            .implementation_core(&member.agent_member_id)
+            .unwrap()
+            .0;
+        assert_eq!(core.model.as_deref(), Some("private-registration-model"));
+        assert_eq!(core.reasoning.as_deref(), Some("high"));
+        assert_eq!(std::fs::read(&prefs_path).unwrap(), mirror_before);
+        assert_eq!(
+            crate::load_issue_monitor_prefs(&prefs_path)
+                .unwrap()
+                .launch_profile_pool(),
+            prefs_before.launch_profile_pool(),
+            "registration must not select a launch candidate"
+        );
+        let registry_before = std::fs::read(crate::agent_registry::path()).unwrap();
+        let history_path = history_for_prefs(&prefs_path).unwrap();
+        let history_before = std::fs::read(&history_path).unwrap();
+        let invalid = serde_json::from_value(serde_json::json!({
+            "kind": "add", "agent_id": "codex", "name": "Invalid tuning",
+            "model": "private-model", "reasoning": "ultracode",
+        }))
+        .unwrap();
+        assert!(
+            mutate_project_roster(&root, &sessions, invalid, Some(added.revision))
+                .unwrap_err()
+                .contains("unsupported")
+        );
+        assert_eq!(
+            std::fs::read(crate::agent_registry::path()).unwrap(),
+            registry_before
+        );
+        assert_eq!(std::fs::read(&history_path).unwrap(), history_before);
         assert!(uuid::Uuid::parse_str(&member.agent_member_id).is_ok());
         assert!(!original
             .members
@@ -2473,9 +2530,65 @@ mod tests {
             "resting keeps the registered name"
         );
         assert_eq!(read_project_roster(&root, &sessions).unwrap(), rested);
+        let other = register("Earlier", rested.revision).unwrap();
+        let other_id = other.members.last().unwrap().agent_member_id.clone();
+        let both_resting = mutate_project_roster(
+            &root,
+            &sessions,
+            AgentRosterAction::Rest {
+                member_id: other_id.clone(),
+            },
+            Some(other.revision),
+        )
+        .unwrap();
+        let machine_path = crate::machine_agent_settings::path();
+        let machine_before = std::fs::read(&machine_path).ok();
+        let activate = || {
+            serde_json::from_value(serde_json::json!({
+                "kind": "activate", "member_id": other_id,
+            }))
+            .unwrap()
+        };
+        assert!(
+            mutate_project_roster(&root, &sessions, activate(), Some(rested.revision)).is_err()
+        );
+        let missing =
+            serde_json::from_value(serde_json::json!({"kind": "activate", "member_id": "missing"}))
+                .unwrap();
+        assert!(
+            mutate_project_roster(&root, &sessions, missing, Some(both_resting.revision))
+                .unwrap_err()
+                .contains("no longer exists")
+        );
+        assert_eq!(read_project_roster(&root, &sessions).unwrap(), both_resting);
+        let active =
+            mutate_project_roster(&root, &sessions, activate(), Some(both_resting.revision))
+                .unwrap();
+        let mut expected = both_resting.clone();
+        expected.revision += 1;
+        expected
+            .members
+            .iter_mut()
+            .find(|value| value.agent_member_id == other_id)
+            .unwrap()
+            .enabled = true;
+        assert_eq!(active, expected, "only the named member becomes enabled");
+        assert!(
+            !active
+                .members
+                .iter()
+                .find(|value| value.agent_member_id == member.agent_member_id)
+                .unwrap()
+                .enabled
+        );
+        assert_eq!(
+            mutate_project_roster(&root, &sessions, activate(), Some(active.revision)).unwrap(),
+            active
+        );
+        assert_eq!(std::fs::read(&machine_path).ok(), machine_before);
         let legacy = serde_json::from_value(serde_json::json!({"kind": "add"})).unwrap();
         let legacy =
-            mutate_project_roster(&root, &sessions, legacy, Some(rested.revision)).unwrap();
+            mutate_project_roster(&root, &sessions, legacy, Some(active.revision)).unwrap();
         assert_ne!(legacy.members.last().unwrap().name.to_lowercase(), "maple");
     }
 
@@ -2659,6 +2772,8 @@ mod tests {
             &root,
             &sessions,
             AgentRosterAction::Add {
+                model: None,
+                reasoning: None,
                 pm_eligible: false,
                 agent_id: Some("claude".into()),
                 name: Some("Next contributor".into()),
@@ -3039,6 +3154,8 @@ mod tests {
             &root,
             &gwt_core::paths::gwt_sessions_dir(),
             AgentRosterAction::Add {
+                model: None,
+                reasoning: None,
                 pm_eligible: false,
                 agent_id: None,
                 name: None,
@@ -3131,6 +3248,8 @@ mod tests {
             &root,
             &gwt_core::paths::gwt_sessions_dir(),
             AgentRosterAction::Add {
+                model: None,
+                reasoning: None,
                 pm_eligible: false,
                 agent_id: None,
                 name: None
@@ -3355,6 +3474,8 @@ mod tests {
             &root,
             &gwt_core::paths::gwt_sessions_dir(),
             AgentRosterAction::Add {
+                model: None,
+                reasoning: None,
                 pm_eligible: false,
                 agent_id: None,
                 name: None,
@@ -3645,6 +3766,8 @@ mod tests {
             &a,
             &sessions,
             AgentRosterAction::Add {
+                model: None,
+                reasoning: None,
                 agent_id: Some("codex".into()),
                 name: Some("Shared PM".into()),
                 pm_eligible: true,

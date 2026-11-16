@@ -24,6 +24,10 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertNotIn("verify_timings", jobs,
                          "the nightly measurement needs no PR path classifier")
         runner = jobs.split("\n  test-python-runner:", 1)[1].split("\n  test-index-e2e:", 1)[0]
+        self.assertIn("Run ignored e2e tests with real e5 model", runner)
+        signal = jobs.split("\n  test-index-e2e:", 1)[1].split("\n  test-windows-core-build:", 1)[0]
+        self.assertIn("needs.test-python-runner.outputs.e5_failed == 'true'", signal)
+        self.assertNotIn("pip install", signal)
         self.assertIn("python -m unittest discover -s scripts -p 'test_ci_*.py'", runner,
                       "the source classifier regressions must run in CI")
 

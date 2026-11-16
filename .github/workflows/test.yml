@@ -513,6 +513,8 @@ jobs:
       group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-test-python-runner
       cancel-in-progress: ${{ needs.source-sync.outputs.cancel_running == 'true' }}
     runs-on: ubuntu-latest
+    outputs:
+      e5_failed: ${{ steps.home-guard.outcome == 'failure' || steps.hf-cache.outcome == 'failure' || steps.assets.outcome == 'failure' || steps.home-check.outcome == 'failure' }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -521,76 +523,70 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.99.1
       - name: Check CI source classification and paired evidence
         run: python -m unittest discover -s scripts -p 'test_ci_*.py'
+      # Both suites use the same requirements. Install once at the real
+      # runner's content-addressed path, leaving the fake suite's HOME intact.
       - name: Install runtime deps
+        id: runtime
+        if: ${{ !cancelled() }}
         run: |
-          python -m pip install --upgrade pip
+          runtime_home="$(mktemp -d /tmp/gwt-e5-home.XXXXXX)"
+          requirements_hash="$(sha256sum crates/gwt-core/runtime/project_index_requirements.txt | cut -d ' ' -f1 | cut -c1-16)"
+          venv="$runtime_home/.gwt/runtime/venvs/chroma-venv-${requirements_hash}"
+          python -m venv "$venv"
+          "$venv/bin/python" -m pip install --upgrade pip
           # This runner has no GPU; avoid PyPI torch's unused CUDA dependencies.
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install -r crates/gwt-core/runtime/project_index_requirements.txt
-          pip install pytest
-          pip check
-          python -c "import torch; print('torch:', torch.__version__, 'CUDA:', torch.version.cuda); assert torch.version.cuda is None"
+          "$venv/bin/python" -m pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
+          "$venv/bin/python" -m pip install --no-cache-dir -r crates/gwt-core/runtime/project_index_requirements.txt
+          "$venv/bin/python" -m pip install --no-cache-dir pytest
+          "$venv/bin/python" -m pip check
+          "$venv/bin/python" -c "import torch; print('torch:', torch.__version__, 'CUDA:', torch.version.cuda); assert torch.version.cuda is None"
+          echo "home=$runtime_home" >> "$GITHUB_OUTPUT"
+          echo "venv=$venv" >> "$GITHUB_OUTPUT"
+          echo "cargo_home=${CARGO_HOME:-$HOME/.cargo}" >> "$GITHUB_OUTPUT"
+          echo "rustup_home=${RUSTUP_HOME:-$HOME/.rustup}" >> "$GITHUB_OUTPUT"
+          echo "hf_home=${HF_HOME:-$HOME/.cache/huggingface}" >> "$GITHUB_OUTPUT"
       - name: Run Phase 8 runner tests
+        if: ${{ !cancelled() && steps.runtime.outcome == 'success' }}
         env:
           GWT_INDEX_FAKE_EMBEDDING: "1"
-        run: pytest -q crates/gwt-core/runtime/tests crates/gwt-core/runtime/test_chroma_index_runner.py
+        run: '"${{ steps.runtime.outputs.venv }}/bin/python" -m pytest -q crates/gwt-core/runtime/tests crates/gwt-core/runtime/test_chroma_index_runner.py'
         timeout-minutes: 10
-
-  test-index-e2e:
-    name: Test (e5 e2e, optional)
-    needs: source-sync
-    concurrency:
-      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-test-index-e2e
-      cancel-in-progress: ${{ needs.source-sync.outputs.cancel_running == 'true' }}
-    runs-on: ubuntu-latest
-    if: ${{ github.event.pull_request.draft == false }}
-    steps:
-      - uses: actions/checkout@v7
+      # Keep real-model work optional and independent of the fake test result.
+      # Sharing its runner removes one allocation and a second dependency install.
       - name: Snapshot real HOME project stores
         id: home-guard
+        if: ${{ !cancelled() && github.event.pull_request.draft == false && steps.runtime.outcome == 'success' }}
+        continue-on-error: true
         run: python scripts/ci_home_guard.py snapshot "${{ runner.temp }}/ci-home-projects-before.json"
-      - uses: dtolnay/rust-toolchain@1.99.1
-      - uses: Swatinem/rust-cache@v2
+      - name: Restore real-model Rust dependencies
+        if: ${{ !cancelled() && github.event.pull_request.draft == false && steps.runtime.outcome == 'success' && steps.home-guard.outcome == 'success' }}
+        uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/develop' }}
           shared-key: linux-workspace
         continue-on-error: true
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.11"
       - name: Cache HuggingFace model (e5-base)
+        id: hf-cache
+        if: ${{ !cancelled() && github.event.pull_request.draft == false && steps.runtime.outcome == 'success' && steps.home-guard.outcome == 'success' }}
         uses: actions/cache@v6
+        continue-on-error: true
         with:
           path: ~/.cache/huggingface
           key: hf-cache-multilingual-e5-base-v1
       - name: Bootstrap gwt runtime assets
-        id: runtime
+        id: assets
+        if: ${{ !cancelled() && github.event.pull_request.draft == false && steps.runtime.outcome == 'success' && steps.home-guard.outcome == 'success' && steps.hf-cache.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          RUNTIME_HOME: ${{ steps.runtime.outputs.home }}
         run: |
-          df -h "$HOME" "$RUNNER_TEMP"
-          # Cargo tests only accept temporary HOME paths. Keep toolchains and
-          # the restored model cache at their original absolute locations.
-          echo "cargo_home=${CARGO_HOME:-$HOME/.cargo}" >> "$GITHUB_OUTPUT"
-          echo "rustup_home=${RUSTUP_HOME:-$HOME/.rustup}" >> "$GITHUB_OUTPUT"
-          echo "hf_home=${HF_HOME:-$HOME/.cache/huggingface}" >> "$GITHUB_OUTPUT"
-          runtime_home="$(mktemp -d /tmp/gwt-e5-home.XXXXXX)"
-          echo "home=$runtime_home" >> "$GITHUB_OUTPUT"
-          runtime_dir="$runtime_home/.gwt/runtime"
+          runtime_dir="$RUNTIME_HOME/.gwt/runtime"
           runner_hash="$(sha256sum crates/gwt-core/runtime/chroma_index_runner.py | cut -d ' ' -f1 | cut -c1-16)"
-          requirements_hash="$(sha256sum crates/gwt-core/runtime/project_index_requirements.txt | cut -d ' ' -f1 | cut -c1-16)"
-          venv="$runtime_dir/venvs/chroma-venv-${requirements_hash}"
-          mkdir -p "$runtime_dir/runners" "$runtime_dir/venvs"
+          mkdir -p "$runtime_dir/runners"
           cp crates/gwt-core/runtime/chroma_index_runner.py "$runtime_dir/runners/chroma_index_runner-${runner_hash}.py"
           cp crates/gwt-core/runtime/index_path_policy.json "$runtime_dir/runners/"
-          python -m venv "$venv"
-          "$venv/bin/python" -m pip install --no-cache-dir --upgrade pip
-          # This runner has no GPU; PyPI torch otherwise pulls in the CUDA stack.
-          "$venv/bin/python" -m pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
-          "$venv/bin/python" -m pip install --no-cache-dir -r crates/gwt-core/runtime/project_index_requirements.txt
-          "$venv/bin/python" -m pip check
-          "$venv/bin/python" -c "import torch; print('torch:', torch.__version__, 'CUDA:', torch.version.cuda); assert torch.version.cuda is None"
-          du -sh "$venv"
-          df -h "$runtime_home" "$RUNNER_TEMP"
       - name: Run ignored e2e tests with real e5 model
+        if: ${{ !cancelled() && github.event.pull_request.draft == false && steps.runtime.outcome == 'success' && steps.assets.outcome == 'success' }}
         env:
           HOME: ${{ steps.runtime.outputs.home }}
           USERPROFILE: ${{ steps.runtime.outputs.home }}
@@ -602,8 +598,24 @@ jobs:
         timeout-minutes: 30
         continue-on-error: true
       - name: Check tests left real HOME project stores unchanged
-        if: ${{ !cancelled() && steps.home-guard.outcome == 'success' }}
+        id: home-check
+        if: ${{ !cancelled() && github.event.pull_request.draft == false && steps.runtime.outcome == 'success' && steps.home-guard.outcome == 'success' }}
+        continue-on-error: true
         run: python scripts/ci_home_guard.py check "${{ runner.temp }}/ci-home-projects-before.json"
+
+  # Preserve the old optional job's failure/notification signal without
+  # allocating a second runner when its shared preparation succeeds.
+  test-index-e2e:
+    name: Test (e5 e2e, optional)
+    needs: [source-sync, test-python-runner]
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-test-index-e2e
+      cancel-in-progress: ${{ needs.source-sync.outputs.cancel_running == 'true' }}
+    runs-on: ubuntu-slim
+    if: ${{ !cancelled() && needs.test-python-runner.outputs.e5_failed == 'true' }}
+    steps:
+      - name: Report real-model preparation failure
+        run: exit 1
 
   # Issue #5565: compile one core feature set, then share the same harnesses.
   test-windows-core-build:
@@ -630,6 +642,9 @@ jobs:
           shared-key: windows-workspace
         continue-on-error: true
       - name: Build the complete core suite once
+        # Omit CI line tables; keep the same profile for the doctests below.
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
         run: node scripts/ci-windows-tests.mjs build core
         timeout-minutes: 20
       - name: Record the complete core test inventory
@@ -649,6 +664,8 @@ jobs:
       # cargo --no-run does not compile doctests. Keep all five original passes.
       - name: Run core doctests five times
         shell: pwsh
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
         run: |
           1..5 | ForEach-Object {
             cargo test -p gwt-core --all-features --doc

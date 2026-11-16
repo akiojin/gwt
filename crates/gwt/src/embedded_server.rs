@@ -104,6 +104,9 @@ impl ServerState {
                 TransportEvent::RuntimeHook(event) => {
                     state.proxy.send(UserEvent::RuntimeHook(event))
                 }
+                TransportEvent::AuthenticatedRuntimeHook { grant, event } => state
+                    .proxy
+                    .send(UserEvent::AuthenticatedRuntimeHook { grant, event }),
                 TransportEvent::WorkspaceProjectionChanged { project_root } => state
                     .proxy
                     .send(UserEvent::WorkspaceProjectionChanged { project_root }),
@@ -2347,7 +2350,11 @@ mod tests {
         let recorded = events
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let [UserEvent::RuntimeHook(recorded_event)] = recorded.as_slice() else {
+        let [UserEvent::AuthenticatedRuntimeHook {
+            event: recorded_event,
+            ..
+        }] = recorded.as_slice()
+        else {
             panic!("only the current matching capability should dispatch: {recorded:?}");
         };
         let canonical_project = dunce::canonicalize(project.path())
@@ -4167,7 +4174,7 @@ mod tests {
             .split("async fn workspace_update_handler(")
             .next()
             .unwrap();
-        assert!(hook.contains("TransportEvent::RuntimeHook(event)"));
+        assert!(hook.contains("TransportEvent::AuthenticatedRuntimeHook { grant, event }"));
         assert!(
             !hook.contains(".dispatch("),
             "hook events require project routing in the runtime"
@@ -4176,6 +4183,18 @@ mod tests {
             .rsplit_once("fn main() ->")
             .expect("the final main signature follows test fixture strings")
             .1;
+        let accepted_hook = main
+            .split("Event::UserEvent(UserEvent::AuthenticatedRuntimeHook { grant, event })")
+            .nth(1)
+            .expect("GUI transport retains the authenticated grant")
+            .split("event => event,")
+            .next()
+            .unwrap();
+        assert!(
+            accepted_hook.find("hook_grant_is_current(&grant)").unwrap()
+                < accepted_hook.find("UserEvent::RuntimeHook(event)").unwrap(),
+            "GUI dispatch checks the captured grant before normalizing the hook"
+        );
         for (arm, policy) in [
             (
                 "ActiveWorkProjectionPrepared(prepared)",
@@ -4802,7 +4821,7 @@ mod tests {
         assert!(recorded.iter().any(|user_event| {
             matches!(
                 user_event,
-                UserEvent::RuntimeHook(recorded_event)
+                UserEvent::AuthenticatedRuntimeHook { event: recorded_event, .. }
                     if recorded_event.kind == RuntimeHookEventKind::RuntimeState
                         && recorded_event.source_event.as_deref() == Some("PreToolUse")
                         && recorded_event.agent_session_id.as_deref() == Some("agent-1")

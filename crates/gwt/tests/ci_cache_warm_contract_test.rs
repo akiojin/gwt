@@ -47,9 +47,18 @@ fn every_pull_request_rust_cache_disables_pr_cache_saves() {
                     .unwrap_or_default()
                     .starts_with(RUST_CACHE_ACTION)
                 {
+                    // Only the warm job may publish the complete macOS graph.
+                    let expected = if step["with"]["shared-key"]
+                        .as_str()
+                        .is_some_and(|key| key.starts_with("macos-workspace"))
+                    {
+                        "false"
+                    } else {
+                        "${{ github.ref == 'refs/heads/develop' }}"
+                    };
                     assert_eq!(
                         step["with"]["save-if"].as_str(),
-                        Some("${{ github.ref == 'refs/heads/develop' }}"),
+                        Some(expected),
                         "{} / {name:?} must not save a PR cache",
                         path.display()
                     );
@@ -202,6 +211,22 @@ fn pr_rust_cache_steps_name_their_scope_with_a_shared_key() {
 /// identical key rather than two keys that merely look alike.
 #[test]
 fn every_pr_cache_scope_is_warmed_by_a_matching_job() {
+    let warm = read_workflow(WARM_WORKFLOW);
+    let macos = &warm["jobs"]["warm-macos"];
+    let steps = macos["steps"].as_sequence().unwrap();
+    let cache = steps
+        .iter()
+        .find(|step| step["uses"].as_str() == Some("Swatinem/rust-cache@v2"))
+        .unwrap();
+    // Rotate the immutable archive that a partial Clippy graph populated.
+    assert_eq!(
+        cache["with"]["shared-key"].as_str(),
+        Some("macos-workspace-v2")
+    );
+    assert!(cache["with"]["save-if"].is_null());
+    assert!(steps.iter().any(|step| {
+        step["run"].as_str() == Some("cargo test --workspace --all-features --no-run")
+    }));
     let warmed: BTreeSet<(String, String)> = cache_sites(WARM_WORKFLOW)
         .into_iter()
         .filter(|site| {
