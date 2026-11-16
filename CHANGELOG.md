@@ -1,6 +1,39 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.167.0] - 2026-11-16
+
+### Bug Fixes
+
+- **ci:** Allow setup-node action version updates in budget contract
+- **ci:** Standalone Windows probe に native library 探索パスを引き継ぐ
+- **deps:** Unify rfd version across Windows targets
+- **issue-monitor:** 300 ファイル超の PR の review diff を files API から読む
+- **ci:** Flake 対象の選択を検査対象 merge commit の現在の base 基準にする
+- **test:** Absent-runtime の fleet close を census writer と同期する
+- **issue-monitor:** 起動時の authority 確立を収束させ、予算切れ後も再起動なしで回復する
+
+### Documentation
+
+- **perf:** 配備済み v9.166.1 の gh 起動数と GUI CPU の実測を記録する
+
+### Features
+
+- **agents:** Edit saved tools and preserve exact session resume
+
+### Miscellaneous Tasks
+
+- **work:** Issue 6877 の実測世代の作業イベントを記録する
+- **work:** Issue 5170 の Flake 対象選択修正の作業イベントを記録する
+- **work:** Issue 5170 の PR 7484 配送の作業イベントを記録する
+- **work:** Issue 5170 の PR 7485 の作業イベントを記録する
+- **work:** Link member settings delivery to PR 7489
+
+### Testing
+
+- **runtime:** ACK 待ちの例外理由を検出行へ移す
+- **issue-monitor:** 起動回復テストの待機から壁時計 timeout を外す
+
 ## [9.166.2] - 2026-11-16
 
 ### Bug Fixes
