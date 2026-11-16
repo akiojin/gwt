@@ -505,6 +505,15 @@ test.describe("Issue queue real backend launch", () => {
         // wait. Leave its genuine UserPromptSubmit active, as ongoing work.
         const continuedSource = afterAck === "source replaced"
           ? source.replace("  sourceOperation('issue.monitor.wait',{number:owner,", "  if (resumed) { actorEvent('successor_ready', observedRuntime()); return; }\n  sourceOperation('issue.monitor.wait',{number:owner,")
+          : afterAck === "claim replaced" || afterAck === "stop claim replaced"
+          ? source.replace("  nativeHook('UserPromptSubmit',args.at(-1));", String.raw`  nativeHook('UserPromptSubmit',args.at(-1));
+  const firstLaunch = JSON.parse(fs.readFileSync(path.join(process.env.HOME,'provider-argv.jsonl'),'utf8').trim().split('\n')[0]);
+  if (owner === switching.sourceIssueNumber && firstLaunch.gwt_session_id !== process.env.GWT_SESSION_ID) {
+    // This unfinished successor keeps working. G4 protects its actual current
+    // hook observation, including a pending outcome; it does not certify Stop.
+    actorEvent('successor_ready',{first_session_id:firstLaunch.gwt_session_id,...observedRuntime()});
+    return;
+  }`)
           : source;
         const orderedSource = afterAck === "body submit"
           ? continuedSource.replace(lineHandler, "let checkpointInFlight = Promise.resolve();\n" + lineHandler)
@@ -622,9 +631,13 @@ test.describe("Issue queue real backend launch", () => {
         expect(successor.gwt_session_id).not.toBe(source.gwt_session_id);
         expect(successor.provider_session_id).not.toBe(source.provider_session_id);
         expect(successor.pid).not.toBe(source.pid);
-        await expect.poll(async () => (await fixture.actorEvents()).some((event: any) => event.stage === "idle"
+        await expect.poll(async () => (await fixture.actorEvents()).some((event: any) => event.stage === "successor_ready"
           && event.pid === successor.pid && event.gwt_session_id === successor.gwt_session_id),
         { timeout: 30_000 }).toBe(true);
+        const ready = (await fixture.actorEvents()).find((event: any) => event.stage === "successor_ready"
+          && event.pid === successor.pid && event.gwt_session_id === successor.gwt_session_id);
+        expect(ready).toMatchObject({ first_session_id: source.gwt_session_id, runtime_status: "Running",
+          current_hook_event: { event: "UserPromptSubmit" } });
         await expect.poll(async () => {
           const prefs = await preferences();
           return prefs.launched_claims?.[43] && prefs.launched_claims[43] !== intent.source.claim_id
@@ -644,7 +657,8 @@ test.describe("Issue queue real backend launch", () => {
         expect(native.runtime_incarnation).not.toBe(intent.runtime_stop.runtime_incarnation);
         expect(native.child_pid).toBe(successor.pid);
         expect(native.execution_identity).not.toEqual(intent.runtime_stop.execution_identity);
-        expect(native.current_hook_event).toMatchObject({ event: "Stop", outcome: "normal" });
+        expect(native.status).toBe("Running");
+        expect(native.current_hook_event).toMatchObject({ event: "UserPromptSubmit" });
         expect(fixture.executionStatus(source.cwd).ecr_status).toBe("active");
         expect(await fixture.launchIssues()).toEqual([43, 43]);
         const successorWork = async () => (await fixture.workItems()).work_items.find((value: any) =>
