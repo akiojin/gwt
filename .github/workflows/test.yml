@@ -90,6 +90,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
           MERGE_GROUP_BASE: ${{ github.event.merge_group.base_sha }}
           MERGE_GROUP_HEAD: ${{ github.event.merge_group.head_sha }}
           PUSH_BASE: ${{ github.event.before }}
@@ -100,7 +101,17 @@ jobs:
           elif [ "$GITHUB_EVENT_NAME" = push ]; then
             files=$(git diff --name-only --no-renames "$PUSH_BASE" "$PUSH_HEAD")
           else
-            files=$(gh api "repos/$REPO/pulls/$PR_NUMBER/files" --paginate --jq '.[].filename')
+            # Issue #5170: GitHub's PR listing keeps the base tip from when the
+            # PR was opened, so a head that later merged a newer base reports
+            # those delivered files as its own (PR #7413: 491 files for 3).
+            # The merge commit under test has the current base tip as first
+            # parent. Trust it only for this exact head; else keep the listing.
+            files=""
+            if [ "$(git rev-list --parents -n 1 HEAD | wc -w)" -eq 3 ] &&
+              [ "$(git rev-parse --verify --quiet 'HEAD^2')" = "$PR_HEAD" ]; then
+              files=$(git diff --name-only --no-renames 'HEAD^1...HEAD^2') || files=""
+            fi
+            [ -n "$files" ] || files=$(gh api "repos/$REPO/pulls/$PR_NUMBER/files" --paginate --jq '.[].filename')
           fi
           # Documentation is Markdown anywhere plus docs/. Markdown the binaries
           # embed is code: CHANGELOG.md (include_str! in gwt-core) and

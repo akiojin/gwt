@@ -102,6 +102,20 @@ crate, kind, target = entry.split("|")
 # CI may test a synthetic merge containing newer base commits. Select only
 # the owner's changes, while retaining the merged checkout for test execution.
 head = os.environ.get("GWT_FLAKE_HEAD_SHA") or "HEAD"
+
+
+def git_words(*args):
+    return subprocess.run(["git", *args], capture_output=True, text=True).stdout.split()
+
+
+# A pull request event names the base tip from when the PR was opened. A head
+# that later merged a newer base would report those delivered changes as its
+# own (PR #7413: 95 files instead of 3, two full library runs). The merge
+# commit CI tests has the current base tip as first parent; use it only when
+# its second parent is this exact head, otherwise keep the event base.
+tested = git_words("rev-list", "--parents", "-n", "1", "HEAD")
+if len(tested) == 3 and [tested[2]] == git_words("rev-parse", "--verify", "--quiet", f"{head}^{{commit}}"):
+    base = tested[1]
 changed = subprocess.check_output(
     ["git", "diff", "--name-only", "--no-renames", "-z", f"{base}...{head}"],
     text=True,
