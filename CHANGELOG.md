@@ -1,6 +1,97 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.166.1] - 2026-11-16
+
+### Bug Fixes
+
+- **skills:** 書き込み対象と祖先のsymlinkを共通ガードで拒否する
+- **skills:** Prune対象のないproject共有リンクを保持する
+- **issue-monitor:** Drain解除後の保留claimをretry_backoffと誤報告しない
+- **ci:** Measure completion with skipped required checks
+- **ci:** Leave reversed skipped-only windows unmeasured
+- **agents:** Reactivate a selected resting member
+- **agents:** 未掲載モデルの案内と設定保存の検証を整合する
+- **agents:** Preserve catalog drafts and recorded history facts
+- **agents:** Preserve registration defaults and tool drafts
+- **hooks:** Reject queued notifications from replaced sessions
+- **restore:** Reserve names from the shared registry history
+- **actions:** Nested Bare layout の登録済み PM を workflow policy 操作で受理する
+- **concern:** 拒否時に不足・不正な params 名を返す
+- **agents:** Windows で Grok の managed hook を Git Bash で実行し hook 失敗を即時報告する
+- **daemon:** 到達不能な退役候補 daemon の stale endpoint を除去して新 daemon を起動する
+- **skills:** Symlink検査をworktree配下の管理名前空間に限定する
+- **skills:** 公開docから非公開関数へのリンクを外す
+- **agents:** 消滅した host の未 spawn PM 予約を新規 PM 起動時に reconciliation する
+
+### Features
+
+- **mobile:** Host発行inviteの登録とclaimをregistrationでHost台帳へ結び付ける
+- **agents:** Select model and reasoning during registration
+
+### Miscellaneous Tasks
+
+- **work:** 作業イベントを記録する
+- **work:** 作業イベントを記録する
+- **work:** 作業イベントを記録する
+- **work:** Include final T94431 delivery event
+- **work:** Link T94431 delivery to PR 7430
+- **work:** Link T94432 delivery to PR 7434
+- **work:** Link T94433 delivery to PR 7436
+- **work:** Record native macOS timing audit
+- **work:** Link T94434 delivery to PR 7439
+- **work:** Link T94435 delivery to PR 7443
+- **work:** Record resting member pull request
+- **work:** Link T94436 delivery to PR 7446
+- **work:** T94437の配送をPR 7448へ関連付ける
+- **work:** T25設定検証とPR7452の配送履歴を記録する
+- **work:** Link T94438 delivery to PR 7453
+- **work:** 共有CIビルド案の採否と計測を記録する
+- **work:** Link T94439 delivery to PR 7456
+- **work:** Record PR 7457 delivery history
+- **work:** Link T94440 delivery to PR 7459
+- **work:** Record PR 7458 delivery history
+- **work:** Link T94441 delivery to PR 7461
+- **work:** 作業イベントを記録する
+- **work:** Issue 6877 の作業イベントを記録する
+- **work:** PR 7466 の配送記録を追加する
+- **work:** Issue 4249 の作業イベントを記録する
+- **work:** Issue #7259 の作業イベントを記録する
+- **work:** Issue #7259 の作業イベントを記録する
+- **work:** Issue #7259 の作業イベントを記録する
+- **work:** Issue #7259 の作業イベントを記録する
+- **work:** Issue #7259 の配送完了を記録する
+- **work:** Issue #7465 の作業イベントを記録する
+- **work:** Issue #7463 の作業イベントを記録する
+
+### Performance
+
+- **ci:** Omit Linux build artifact line tables
+- **ci:** MacOSキャッシュの保存元を完全warmに限定する
+- **ci:** Avoid unused binaries in socket preparation
+- **ci:** Share Python runtime for model verification
+- **monitor:** Pace launch-discovery timeline pages across periodic scans
+
+### Testing
+
+- **monitor:** Cancel switch during target revalidation
+- **e2e:** Worksの起動同期と最初の失敗診断を保持する
+- **monitor:** Preserve input during target revalidation
+- **works:** Await measured children before manual fleet launch
+- **works:** Scope census wait to fixed capacity fixtures
+- **works:** Match Windows census against the PTY child identity
+- **monitor:** Revalidate submitted input during target refresh
+- **monitor:** Preserve drafts during the final switch target check
+- **agents:** Verify issue assignments across two projects
+- **monitor:** Preserve cancellation during the final switch check
+- **monitor:** Reject checkpoint body after reserved input
+- **agents:** 休止中の作業終了と名簿保持を検証する
+- **monitor:** 同Host後継を旧Switch完了通知から保全する回帰検証
+- **monitor:** Preserve successors from stale hook and output events
+- **monitor:** Prove input ordering after checkpoint body
+- **monitor:** Prove checkpoint reservation input fences
+- **agents:** 消滅した host incarnation の PM 予約が全起動を塞ぐ回帰テストを追加
+
 ## [9.166.0] - 2026-11-15
 
 ### Bug Fixes

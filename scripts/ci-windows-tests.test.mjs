@@ -91,7 +91,7 @@ test("library and runtime builds partition every default harness and retain all 
   }
 });
 
-test("each feature set builds once and runs the exact target with Cargo's cwd and failure status", (t) => {
+test("each feature set prepares its artifacts and runs the exact target with Cargo's cwd and failure status", (t) => {
   const root = fixture(t);
   for (const group of ["default", "default-lib", "default-runtime", "warm", "socket"]) {
     let builds = 0;
@@ -99,6 +99,11 @@ test("each feature set builds once and runs the exact target with Cargo's cwd an
     assert.equal(build(group, root, (command, args) => {
       builds++;
       assert.equal(command, "cargo");
+      if (group === "socket" && builds === 1) {
+        assert.deepEqual(args, ["build", "-p", "gwt-core", "-p", "gwt", "--example", "gwtd", "--profile", "test", "--message-format=json"]);
+        return { status: 0, stdout: JSON.stringify({ ...messages.at(-1), profile: { test: false },
+          target: { kind: ["example"], name: "gwtd" }, executable: path.join(root, "target", "debug", "examples", "gwtd") }) };
+      }
       assert.equal(args[0], "test");
       assert.ok(args.includes("--no-run"));
       assert.ok(args.includes("--message-format=json"));
@@ -109,11 +114,11 @@ test("each feature set builds once and runs the exact target with Cargo's cwd an
           ["gwt-core", "test", "test_hygiene_test"],
           ["gwt-core", "test", "daemon_socket_path_limit"],
           ["gwt", "lib", "gwt"],
-          ["gwt", "test", "runtime_tests"],
+          ["gwt", "example", "socket_fixtures"],
         ]);
         assert.deepEqual(args, ["test", "-p", "gwt-core", "-p", "gwt", "--lib",
           "--test", "test_hygiene_test", "--test", "daemon_socket_path_limit",
-          "--test", "runtime_tests", "--no-run", "--message-format=json"]);
+          "--example", "socket_fixtures", "--no-run", "--message-format=json"]);
       }
       // A normal binary and a different package's same-name harness must not win.
       const decoys = [
@@ -122,13 +127,15 @@ test("each feature set builds once and runs the exact target with Cargo's cwd an
       ];
       return { status: 0, stdout: [...decoys, ...messages].map(JSON.stringify).join("\n") };
     }), 0);
-    assert.equal(builds, 1);
+    assert.equal(builds, group === "socket" ? 2 : 1);
     const [pkg, kind, name] = targets(group)[0];
     assert.equal(run(group, [pkg, kind, name, "the_filter", "--", "--exact", "--test-threads=1"], root,
       (command, args, options) => {
         assert.equal(command, messages[0].executable);
         assert.deepEqual(args, ["the_filter", "--exact", "--test-threads=1"]);
         assert.equal(options.cwd, path.join(root, "crates", pkg));
+        if (group === "socket") assert.equal(options.env.GWT_TEST_GWTD_EXE,
+          path.join(root, "target", "debug", "examples", "gwtd"));
         const pathKey = Object.keys(options.env).find((key) => key.toLowerCase() === "path");
         assert.ok(options.env[pathKey].split(path.delimiter).includes(path.dirname(command)));
         return { status: 37 };
@@ -177,4 +184,18 @@ test("core artifacts include every Cargo harness and run without rebuilding at d
     return { status: executed.length === 2 ? 23 : 0 };
   }), 23);
   assert.deepEqual(executed, messages.slice(0, 2).map((message) => message.executable));
+});
+
+// The socket adapter requires the exact real front door from this build.
+test("socket preparation fails closed without its real gwtd artifact", (t) => {
+  const root = fixture(t);
+  assert.equal(build("socket", root, () => ({ status: 19, stdout: "" })), 19);
+  assert.throws(() => build("socket", root, () => ({ status: 0, stdout: "" })), /missing.*gwtd/i);
+  let builds = 0;
+  assert.equal(build("socket", root, () => {
+    if (++builds === 1) return { status: 0, stdout: JSON.stringify({ ...artifacts(root, "socket").at(-1),
+      profile: { test: false }, target: { kind: ["example"], name: "gwtd" }, executable: "/current/gwtd" }) };
+    return { status: 23, stdout: "" };
+  }), 23);
+  assert.equal(fs.existsSync(path.join(root, "target", "ci-windows-tests-socket.json")), false);
 });

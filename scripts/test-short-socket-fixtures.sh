@@ -14,4 +14,4 @@ node scripts/ci-windows-tests.mjs run-socket gwt-core lib gwt_core test_support:
 node scripts/ci-windows-tests.mjs run-socket gwt-core test test_hygiene_test socket_
 node scripts/ci-windows-tests.mjs run-socket gwt-core test daemon_socket_path_limit
 node scripts/ci-windows-tests.mjs run-socket gwt lib gwt daemon -- --test-threads=1
-node scripts/ci-windows-tests.mjs run-socket gwt test runtime_tests daemon_project_root_test -- --test-threads=1
+node scripts/ci-windows-tests.mjs run-socket gwt example socket_fixtures daemon_project_root_test -- --test-threads=1

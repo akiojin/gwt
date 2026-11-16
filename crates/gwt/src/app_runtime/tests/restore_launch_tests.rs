@@ -622,6 +622,21 @@ fn restore_summary_waits_for_async_preparation_failure_in_each_restore_route() {
         let (spawner, tasks) = BlockingTaskSpawner::queued();
         runtime.blocking_tasks = spawner;
         let _owner = project_owner_fixture(&mut runtime, "tab-1::agent-restore");
+        let existing_names: HashSet<_> =
+            gwt::agent_names::read_project_roster(&repo, &runtime.sessions_dir)
+                .expect("initialized shared roster")
+                .members
+                .into_iter()
+                .map(|member| member.name)
+                .collect();
+        // Imported roster members may predate the machine name history.
+        fs::write(gwt::agent_registry::history_path(), "").expect("history predates import");
+        // The shared registry owns name allocation; obsolete project history
+        // must not prevent an otherwise admissible restore.
+        let legacy_history =
+            gwt_core::paths::gwt_project_dir_for_repo_path(&repo).join("agent-names.jsonl");
+        fs::write(&legacy_history, "obsolete project name history\n")
+            .expect("legacy history fixture");
         save_restore_fixture_session(
             &runtime.sessions_dir,
             "session-restore",
@@ -658,7 +673,22 @@ fn restore_summary_waits_for_async_preparation_failure_in_each_restore_route() {
             .expect("pending restore")
             .clone();
         let completed = capture_tracing_events(|| {
-            drain_owner_launch_fixtures(&mut runtime, &tasks);
+            drain_queued_blocking_tasks(&tasks);
+            let completion = take_remote_owner_launch_completion(match &runtime.proxy {
+                AppEventProxy::Stub(events) => events,
+                _ => panic!("recorded restore completion"),
+            });
+            let refusal = completion
+                .restore_refusal
+                .as_ref()
+                .expect("restore failure");
+            assert!(
+                refusal.remove_placeholder,
+                "startup={startup}, code={}, error={:?}",
+                refusal.code,
+                completion.result.as_ref().err()
+            );
+            runtime.handle_remote_owner_launch_complete(completion);
         });
         let summary = restore_admission_summary(&completed);
         assert_eq!(
@@ -671,6 +701,19 @@ fn restore_summary_waits_for_async_preparation_failure_in_each_restore_route() {
             Some("launch_not_started=1")
         );
         assert!(!runtime.window_lookup.contains_key(&window_id));
+        let restored = gwt_agent::Session::load(&path).expect("retired restore source");
+        let name = restored.agent_name.expect("allocated restore name");
+        let history: HashSet<String> = fs::read_to_string(gwt::agent_registry::history_path())
+            .expect("canonical Agent name history")
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("reserved name"))
+            .collect();
+        let mut expected_names = existing_names;
+        expected_names.insert(name);
+        assert!(
+            expected_names.is_subset(&history),
+            "startup={startup}: shared names {expected_names:?} must stay reserved: {history:?}"
+        );
     }
 }
 

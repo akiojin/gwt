@@ -3722,6 +3722,8 @@ fn shared_roster_watcher_broadcasts_without_mutation_and_rejects_retired_context
         &context,
         &"read-client".into(),
         gwt::agent_names::AgentRosterAction::Add {
+            model: None,
+            reasoning: None,
             agent_id: Some("codex".into()),
             name: None,
             pm_eligible: false,
@@ -3850,6 +3852,8 @@ fn ordinary_roster_read_refreshes_pm_profile_after_unavailable_retry() {
         &repo,
         &runtime.sessions_dir,
         gwt::agent_names::AgentRosterAction::Add {
+            model: None,
+            reasoning: None,
             agent_id: Some("codex".into()),
             name: Some("Selected PM".into()),
             pm_eligible: true,

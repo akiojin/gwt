@@ -53,7 +53,7 @@ fn write_git_exclude(
 
     // Create parent directory if needed
     if let Some(parent) = exclude_path.parent() {
-        fs::create_dir_all(parent)?;
+        crate::asset_io::create_dir_all(parent)?;
     }
 
     let existing = if exclude_path.exists() {
@@ -63,7 +63,7 @@ fn write_git_exclude(
     };
 
     let updated = replace(&existing)?;
-    fs::write(&exclude_path, updated)?;
+    crate::asset_io::write(&exclude_path, updated)?;
 
     Ok(())
 }
@@ -260,6 +260,46 @@ fn malformed_marker_error(detail: &str) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn update_git_exclude_rejects_symlink_mutation() {
+        let repo = tempfile::tempdir().unwrap();
+        let status = hidden_command("git")
+            .arg("-C")
+            .arg(repo.path())
+            .arg("init")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let external = tempfile::tempdir().unwrap();
+        let sentinel = external.path().join("exclude");
+        fs::write(&sentinel, "sentinel\n").unwrap();
+        let exclude = resolve_git_exclude_path(repo.path()).unwrap();
+        let target = exclude.parent().unwrap();
+        fs::remove_file(&exclude).unwrap();
+        fs::remove_dir(target).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(external.path(), target).unwrap();
+        #[cfg(windows)]
+        {
+            let output = hidden_command("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(target.components().collect::<PathBuf>())
+                .arg(external.path().components().collect::<PathBuf>())
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+        }
+
+        let error = update_git_exclude(repo.path()).unwrap_err();
+        assert!(error.to_string().contains("write"), "{error}");
+        assert!(
+            error.to_string().contains(&target.display().to_string()),
+            "{error}"
+        );
+        assert_eq!(fs::read_to_string(sentinel).unwrap(), "sentinel\n");
+    }
 
     #[test]
     fn adds_managed_block_to_empty_file() {

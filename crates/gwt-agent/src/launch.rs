@@ -1102,6 +1102,12 @@ impl AgentLaunchBuilder {
             }
             AgentId::GrokBuild => {
                 self.build_grok_build_args(&mut args);
+                // Issue #7465: Grok runs `.claude/settings.local.json` hooks
+                // under its auto-detected Windows shell (pwsh first), but the
+                // managed hook commands are POSIX. Pin it to Git Bash.
+                if cfg!(windows) {
+                    env_vars.insert("GROK_SHELL".to_string(), "bash".to_string());
+                }
             }
             AgentId::Antigravity => {
                 self.build_antigravity_args(&mut args);
@@ -2818,6 +2824,21 @@ mod tests {
                 "gwt must not inject {key}"
             );
         }
+    }
+
+    /// Issue #7465: Grok reads the POSIX managed hooks from
+    /// `.claude/settings.local.json`, but on Windows it runs hook commands
+    /// under its auto-detected shell (pwsh first), which fails with
+    /// `ParserError`. The launch pins Grok's Windows shell to Git Bash.
+    #[test]
+    fn issue_7465_grok_runs_managed_hooks_under_git_bash_on_windows() {
+        let grok = AgentLaunchBuilder::new(AgentId::GrokBuild).build();
+        assert_eq!(
+            grok.env_vars.get("GROK_SHELL").map(String::as_str),
+            cfg!(windows).then_some("bash")
+        );
+        let claude = AgentLaunchBuilder::new(AgentId::ClaudeCode).build();
+        assert!(!claude.env_vars.contains_key("GROK_SHELL"));
     }
 
     #[test]

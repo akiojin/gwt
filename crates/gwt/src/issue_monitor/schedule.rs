@@ -1655,6 +1655,8 @@ mod tests {
             &root,
             &sessions,
             crate::agent_names::AgentRosterAction::Add {
+                model: None,
+                reasoning: None,
                 pm_eligible: false,
                 agent_id: Some("claude".into()),
                 name: None,

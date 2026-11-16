@@ -14,11 +14,11 @@ const date = value => value && Number.isFinite(Date.parse(value)) ? new Date(val
 
 export function createAgentsSurface({ document, executionModel, projectTitle, rosterModel, activityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel,
   tuningController, pmSettingsPanel, scheduleModel, switchModel, onSwitch = () => {}, onOpenSavedWork = () => {}, onContinueSavedWork = () => {}, isContinuePending = () => false, onReassign = () => {}, onRefreshSchedule = () => {},
-  onAddMember = () => {}, onRestMember = () => {}, onRenameMember = () => {}, onRetryName = () => {}, onSetPmEligibility = () => {}, onSelectPm = () => {}, onNavigateProject = () => {}, onReloadProfile = null, onOpenWork = () => {} }) {
+  onAddMember = () => {}, onRestMember = () => {}, onActivateMember = () => {}, onRenameMember = () => {}, onRetryName = () => {}, onSetPmEligibility = () => {}, onSelectPm = () => {}, onNavigateProject = () => {}, onReloadProfile = null, onOpenWork = () => {} }) {
   const element = document.createElement("section"); element.className = "agents-surface"; element.setAttribute("aria-label", "Agents");
   element.innerHTML = `<header class="roster-heading"><h2>Agents</h2><div class="roster-tabs" role="tablist" aria-label="Agent roster views"><button type="button" id="roster-tab-team" data-tab="team" role="tab" aria-controls="roster-team" aria-selected="true">Team</button><button type="button" id="roster-tab-past" data-tab="past" role="tab" aria-controls="roster-past" aria-selected="false" tabindex="-1">Past</button></div><span class="roster-active"></span></header>
     <div class="roster-pm-identity" role="group" aria-label="Project Manager" hidden><span class="roster-pm-name"></span><span class="window-role-badge">PM</span></div>
-    <p class="roster-error" role="status" hidden></p><section class="roster-team" id="roster-team" role="tabpanel" aria-labelledby="roster-tab-team"><div class="roster-capacity"><div><b class="roster-count">—</b><span> enabled members<br>Concurrent capacity <b class="roster-capacity-value">—</b></span></div><div class="roster-capacity-scale"><div class="roster-capacity-bar" role="meter" aria-label="Enabled members"><span class="roster-capacity-fill"></span><span class="roster-capacity-limit"></span></div><small class="roster-capacity-note"></small></div><button type="button" data-action="rest">− Rest member</button><label class="settings-field">Name for new member<input class="settings-input" type="text" aria-label="Name for new member" aria-describedby="roster-registration-error" autocomplete="off" required></label><label class="settings-field">Tool for new member<select aria-label="Tool for new member"></select></label><label class="settings-field"><input class="settings-checkbox" type="checkbox" aria-label="PM eligible for new member">PM eligible</label><button type="button" data-action="add">Register</button><p id="roster-registration-error" class="roster-error" role="status" hidden></p></div>
+    <p class="roster-error" role="status" hidden></p><section class="roster-team" id="roster-team" role="tabpanel" aria-labelledby="roster-tab-team"><div class="roster-capacity"><div><b class="roster-count">—</b><span> enabled members<br>Concurrent capacity <b class="roster-capacity-value">—</b></span></div><div class="roster-capacity-scale"><div class="roster-capacity-bar" role="meter" aria-label="Enabled members"><span class="roster-capacity-fill"></span><span class="roster-capacity-limit"></span></div><small class="roster-capacity-note"></small></div><button type="button" data-action="rest">− Rest member</button><label class="settings-field">Name for new member<input class="settings-input" type="text" aria-label="Name for new member" aria-describedby="roster-registration-error" autocomplete="off" required></label><label class="settings-field">Tool for new member<select aria-label="Tool for new member"></select></label><label class="settings-field">Model for new member<input class="settings-input" type="text" aria-label="Model for new member" list="roster-registration-models" autocomplete="off" placeholder="Provider default"><datalist id="roster-registration-models"></datalist></label><label class="settings-field">Reasoning for new member<input class="settings-input" type="text" aria-label="Reasoning for new member" list="roster-registration-reasoning" autocomplete="off" placeholder="Provider default"><datalist id="roster-registration-reasoning"></datalist></label><p class="settings-help" data-registration-catalog-status role="status" hidden></p><button type="button" data-action="retry-registration-catalog" hidden>Retry model catalog</button><label class="settings-field"><input class="settings-checkbox" type="checkbox" aria-label="PM eligible for new member">PM eligible</label><button type="button" data-action="add">Register</button><p id="roster-registration-error" class="roster-error" role="status" hidden></p></div>
     <section data-role="pm-project-operations" aria-label="Project Manager operations"></section><p class="roster-description">Named members are reused across issues with their registered tool. Current work and terminals are in Works.</p><div class="roster-split"><div><div class="roster-list" role="list" aria-label="Team members"></div><div class="roster-list roster-reviews" role="list" aria-label="Review windows" hidden></div><button type="button" class="roster-add" data-action="add"><span aria-hidden="true">＋</span> Register a member · Choose a name and tool above</button></div><aside class="roster-detail" aria-label="Selected member"></aside></div></section>
     <section class="roster-past" id="roster-past" role="tabpanel" aria-labelledby="roster-tab-past" hidden><div class="roster-past-kpis"></div><p class="roster-description">Previous contributors recorded in sessions and Board. Periods are shown in UTC.</p><table><thead><tr><th>Agent</th><th>Kind</th><th>Issues</th><th>Period (UTC)</th><th>Posts</th></tr></thead><tbody></tbody></table><p class="roster-past-empty">No previous contributors are recorded.</p></section>`;
   let releaseExecution = null;
@@ -31,29 +31,76 @@ export function createAgentsSurface({ document, executionModel, projectTitle, ro
   }
   const toolSelect = element.querySelector('[aria-label="Tool for new member"]');
   const nameInput = element.querySelector('[aria-label="Name for new member"]');
+  const modelInput = element.querySelector('[aria-label="Model for new member"]');
+  const reasoningInput = element.querySelector('[aria-label="Reasoning for new member"]');
+  const registrationCatalogStatus = element.querySelector("[data-registration-catalog-status]");
+  const retryRegistrationCatalog = element.querySelector('[data-action="retry-registration-catalog"]');
   const registrationEligible = element.querySelector('[aria-label="PM eligible for new member"]');
   registrationEligible.checked = false;
   let nameTouched = false, registeredDraft = null;
+  const registrationComposing = new Set();
   let registrationTools = [], renderedTools = "";
+  let registrationTool = "";
+  function syncRegistrationTool() {
+    const next = toolSelect.value || "";
+    if (!next || next === registrationTool) return;
+    registrationTool = next;
+    modelInput.value = ""; reasoningInput.value = "";
+    registrationComposing.delete(modelInput); registrationComposing.delete(reasoningInput);
+  }
+  const registrationError = element.querySelector("#roster-registration-error");
+  const registrationMessage = document.createElement("span");
+  const showConflict = document.createElement("button");
+  showConflict.type = "button"; showConflict.textContent = "Show member"; showConflict.hidden = true;
+  registrationError.append(registrationMessage, showConflict);
+  const registrationConflict = () => rosterModel.read().members.find(member =>
+    member.name.trim().toLowerCase() === nameInput.value.trim().toLowerCase());
+  showConflict.addEventListener("click", () => {
+    const member = registrationConflict();
+    if (!member || !selectMember(member.member_id)) return;
+    memberRows.get(member.member_id)?.row.scrollIntoView?.({ block: "nearest" });
+  });
   function syncRegistration() {
     const roster = rosterModel.read(), name = nameInput.value.trim();
     if (roster.error) registeredDraft = null;
     if (registeredDraft && roster.members.some(member => !registeredDraft.ids.has(member.member_id)
       && member.name === registeredDraft.name)) {
-      if (name === registeredDraft.name) { nameInput.value = ""; nameTouched = false; }
+      if (!registrationComposing.has(nameInput) && name === registeredDraft.name) { nameInput.value = ""; nameTouched = false; }
       if (registrationEligible.checked === registeredDraft.pm_eligible) registrationEligible.checked = false;
+      if (!registrationComposing.has(modelInput) && modelInput.value.trim() === registeredDraft.model) modelInput.value = "";
+      if (!registrationComposing.has(reasoningInput) && reasoningInput.value.trim() === registeredDraft.reasoning) reasoningInput.value = "";
       registeredDraft = null;
     }
     const draft = nameInput.value.trim();
-    const error = !draft ? "Enter a display name." : roster.members.some(member => member.name.trim().toLowerCase() === draft.toLowerCase())
-      ? "This name is already registered, including resting members." : "";
-    const message = element.querySelector("#roster-registration-error");
-    message.textContent = nameTouched ? error : ""; message.hidden = !message.textContent;
+    const conflict = registrationConflict();
+    const error = !draft ? "Enter a display name." : conflict
+      ? `${conflict.name} (${conflict.agent_id || conflict.provider || "Unknown tool"}) is ${conflict.enabled ? "already registered" : "resting"} and uses this name. ` : "";
+    registrationMessage.textContent = nameTouched ? error : "";
+    showConflict.hidden = !nameTouched || !conflict;
+    registrationError.hidden = !nameTouched || !error;
     nameInput.setAttribute("aria-invalid", String(nameTouched && !!error));
     for (const button of element.querySelectorAll('[data-action="add"]')) {
-      button.disabled = !!error || registrationTools.length === 0 || !rosterReady(roster);
+      button.disabled = !!error || registrationComposing.size > 0 || registrationTools.length === 0 || !rosterReady(roster);
       button.title = registrationTools.length ? "Register this name with the selected tool." : "Loading supported and custom coding tools…";
     }
+    const choices = Array.isArray(roster.tuning_choices) ? roster.tuning_choices : roster.tuning_choices?.agents || [];
+    const entry = choices.find(agent => agent.id === toolSelect.value);
+    const selectedModel = entry?.models?.find(model => model.value === modelInput.value.trim());
+    for (const [input, suggestions] of [
+      [modelInput, [...(entry?.models || []).map(model => model.value), ...(entry?.model_suggestions || [])]],
+      [reasoningInput, (selectedModel?.reasoning_options || entry?.reasoning_options || []).map(option => typeof option === "string" ? option : option.value)],
+    ]) {
+      const list = input.parentElement.querySelector("datalist"); list.replaceChildren();
+      for (const value of suggestions) {
+        const option = document.createElement("option"); option.value = value;
+        if (input === modelInput) option.label = entry?.models?.find(model => model.value === value)?.label || value;
+        list.append(option);
+      }
+      input.disabled = !rosterReady(roster);
+    }
+    registrationCatalogStatus.textContent = entry?.model_catalog_warning || "";
+    registrationCatalogStatus.hidden = !registrationCatalogStatus.textContent;
+    retryRegistrationCatalog.hidden = !registrationCatalogStatus.textContent || !onReloadProfile;
   }
   function syncTools() {
     const builtins = supportedAgentsModel?.read().agents;
@@ -62,7 +109,7 @@ export function createAgentsSurface({ document, executionModel, projectTitle, ro
       ...custom.agents.map(agent => ({ id: agent.id, name: agent.display_name || agent.id }))] : [];
     const key = JSON.stringify(registrationTools.map(tool => [tool.id, tool.name]));
     if (key !== renderedTools) {
-      const selected = toolSelect.value; toolSelect.replaceChildren();
+      const selected = toolSelect.value || registrationTool; toolSelect.replaceChildren();
       for (const tool of registrationTools) {
         const option = document.createElement("option"); option.value = tool.id; option.textContent = tool.name || tool.id;
         option.selected = tool.id === selected; toolSelect.append(option);
@@ -71,6 +118,7 @@ export function createAgentsSurface({ document, executionModel, projectTitle, ro
       renderedTools = key;
     }
     toolSelect.disabled = registrationTools.length === 0;
+    syncRegistrationTool();
     syncRegistration();
   }
   let selectedId = null, tab = "team", previewElement = null, disposed = false;
@@ -119,6 +167,7 @@ export function createAgentsSurface({ document, executionModel, projectTitle, ro
   function recordedConfig(item) {
     return `Recorded name: ${item?.name || "—"} · Tool: ${item?.provider || "—"} · Recorded model: ${item?.model || "—"}`;
   }
+  const recordedRole = item => `Role: ${{ pm: "Project Manager", review: "Review", implementation: "Implementation" }[item?.role] || "—"}`;
   function openCurrent(memberId, expected) {
     const member = rosterModel.read().members.find(member => member.member_id === memberId);
     const current = liveWork(member);
@@ -321,14 +370,16 @@ export function createAgentsSurface({ document, executionModel, projectTitle, ro
         currentWork = document.createElement("section"); currentWork.className = "roster-history roster-current-work";
         currentWork.innerHTML = "<h4>Current work</h4><ol></ol>";
         const li = document.createElement("li"); li.className = "roster-now";
-        const label = document.createElement("small"), button = document.createElement("button"), config = document.createElement("small"), result = document.createElement("span");
+        const label = document.createElement("small"), button = document.createElement("button"), config = document.createElement("small"), role = document.createElement("small"), result = document.createElement("span");
         config.className = "roster-current-config";
+        role.className = "roster-current-role";
         label.textContent = "Now"; button.type = "button";
-        button.addEventListener("click", () => openCurrent(member.member_id, current)); result.textContent = "Current work"; li.append(label, button, config, result);
+        button.addEventListener("click", () => openCurrent(member.member_id, current)); result.textContent = "Current work"; li.append(label, button, config, role, result);
         currentWork.querySelector("ol").append(li); panel.insertBefore(currentWork, plans);
       }
       currentWork.querySelector("button").textContent = `${current.issue_number ? `#${current.issue_number}` : "—"} ${workTitle(current)}`;
       currentWork.querySelector(".roster-current-config").textContent = recordedConfig((member.history || []).find(item => item.session_id === current.session_id));
+      currentWork.querySelector(".roster-current-role").textContent = recordedRole((member.history || []).find(item => item.session_id === current.session_id));
     }
     const historyEntries = [...(member.history || [])].filter(item => !current || item.session_id !== current.session_id).sort((a, b) => (Date.parse(b.ended_at || b.started_at) || 0) - (Date.parse(a.ended_at || a.started_at) || 0));
     for (const item of historyEntries) {
@@ -336,7 +387,8 @@ export function createAgentsSurface({ document, executionModel, projectTitle, ro
       time.textContent = `${date(item.started_at)} – ${date(item.ended_at)} UTC`; title.textContent = `${item.issue_number ? `#${item.issue_number}` : "—"} ${item.title || "—"}`; result.textContent = item.result || "—";
       const config = document.createElement("small"); config.className = "roster-history-config";
       config.textContent = recordedConfig(item);
-      li.append(time, title, config, result); ol.append(li);
+      const role = document.createElement("small"); role.className = "roster-history-role"; role.textContent = recordedRole(item);
+      li.append(time, title, config, role, result); ol.append(li);
     }
     if (!ol.childNodes.length) { const empty = document.createElement("li"); empty.textContent = "No assignment history yet."; ol.append(empty); }
     if (member.assignment?.session_id && activityModel.read().count === null) {
@@ -385,6 +437,9 @@ export function createAgentsSurface({ document, executionModel, projectTitle, ro
     field.head.querySelector("h3").textContent = member.name;
     field.head.querySelector(".roster-avatar").textContent = Array.from(member.name || "?")[0];
     field.head.querySelector("p").textContent = `Registered tool: ${member.provider || "—"} · Member since ${date(member.created_at)} UTC`;
+    let memberId = field.head.querySelector(".roster-member-id");
+    if (!memberId) { memberId = document.createElement("p"); memberId.className = "roster-member-id"; field.head.querySelector("p").after(memberId); }
+    memberId.textContent = `Member ID: ${member.member_id}`;
     const value = edit?.value ?? member.name;
     if (field.input.value !== value) field.input.value = value;
     field.input.disabled = !rosterReady(rosterModel.read());
@@ -402,7 +457,7 @@ export function createAgentsSurface({ document, executionModel, projectTitle, ro
     selectPm.textContent = foreign ? `Open Project Manager project ${member.pm_project_key}` : configuredPm(member) ? "Configured Project Manager" : holdsPmRole(member) ? "Project Manager assignment retained" : "Select as Project Manager";
     selectPm.disabled = !foreign && (!rosterReady(rosterModel.read()) || !member.enabled || !member.pm_eligible || holdsPmRole(member) || !!member.assignment);
     const role = configuredPm(member) ? "pm" : "implementation";
-    renderMemberTuningControls(field.head.querySelector("[data-member-tuning]"), { target: foreign ? null : tuningController?.model.read().targets[`${role}:${member.member_id}`], choices: rosterModel.read().tuning_choices, onReload: foreign ? null : onReloadProfile,
+    renderMemberTuningControls(field.head.querySelector("[data-member-tuning]"), { target: foreign ? null : tuningController?.model.read().targets[`${role}:${member.member_id}`], choices: rosterModel.read().tuning_choices, onReload: foreign ? null : onReloadProfile, onReloadCatalog: foreign ? null : onReloadProfile,
       onEdit: (patch, options) => tuningController?.editTuning(role, member.member_id, patch, options),
       onRetry: () => tuningController?.retryTuning(role, member.member_id) });
     return field.head;
@@ -456,13 +511,22 @@ export function createAgentsSurface({ document, executionModel, projectTitle, ro
       }
       const assignments = document.createElement("div"); assignments.className = "roster-assignments";
       assignments.setAttribute("role", "group"); assignments.setAttribute("aria-label", "Project assignments");
-      who.append(name, purpose, assignments, stats(member, "roster-row-stats")); row.append(avatar(member), who, state);
+      const activate = document.createElement("button"); activate.type = "button";
+      activate.dataset.action = "activate"; activate.textContent = "Reactivate";
+      activate.addEventListener("click", () => {
+        const roster = rosterModel.read(), latest = roster.members.find(item => item.member_id === member.member_id);
+        if (!disposed && rosterReady(roster) && !roster.pending_roster && latest && !latest.enabled) onActivateMember(latest.member_id);
+      });
+      who.append(name, purpose, assignments, stats(member, "roster-row-stats"), activate); row.append(avatar(member), who, state);
       row.addEventListener("click", event => { if (!event.target.closest("button")) selectMember(member.member_id); });
       row.addEventListener("keydown", event => { if (event.target === row && ["Enter", " "].includes(event.key)) { event.preventDefault(); selectMember(member.member_id); } });
       cached = { key, row }; memberRows.set(member.member_id, cached);
     }
     const { row } = cached, unavailable = member.assignment?.session_id && activityModel.read().count === null;
     row.setAttribute("aria-selected", String(member.member_id === selectedId));
+    const activate = row.querySelector('[data-action="activate"]');
+    activate.hidden = member.enabled;
+    activate.disabled = member.enabled || !rosterReady(rosterModel.read()) || !!rosterModel.read().pending_roster;
     row.querySelector(".roster-avatar").textContent = Array.from(member.name || "?")[0];
     row.querySelector("h3").textContent = member.name;
     const purpose = row.querySelector(".roster-purpose");
@@ -544,11 +608,25 @@ export function createAgentsSurface({ document, executionModel, projectTitle, ro
   for (const button of element.querySelectorAll('[data-action="add"]')) button.addEventListener("click", () => {
     nameTouched = true; syncRegistration();
     if (button.disabled || !registrationTools.some(tool => tool.id === toolSelect.value)) return;
-    registeredDraft = { name: nameInput.value.trim(), pm_eligible: registrationEligible.checked, ids: new Set(rosterModel.read().members.map(member => member.member_id)) };
-    onAddMember(toolSelect.value, registeredDraft.name, registeredDraft.pm_eligible);
+    registeredDraft = { name: nameInput.value.trim(), pm_eligible: registrationEligible.checked,
+      model: modelInput.value.trim(), reasoning: reasoningInput.value.trim(), ids: new Set(rosterModel.read().members.map(member => member.member_id)) };
+    onAddMember(toolSelect.value, registeredDraft.name, registeredDraft.pm_eligible,
+      registeredDraft.model || registeredDraft.reasoning ? { model: registeredDraft.model || null, reasoning: registeredDraft.reasoning || null } : undefined);
   });
   registrationEligible.addEventListener("change", syncPreview);
-  nameInput.addEventListener("input", () => { nameTouched = true; syncRegistration(); syncPreview(); });
+  toolSelect.addEventListener("change", () => {
+    syncRegistrationTool(); syncRegistration(); syncPreview();
+  });
+  retryRegistrationCatalog.addEventListener("click", () => onReloadProfile?.());
+  for (const input of [nameInput, modelInput, reasoningInput]) {
+    input.addEventListener("compositionstart", () => { registrationComposing.add(input); syncRegistration(); });
+    input.addEventListener("compositionend", () => { registrationComposing.delete(input); syncRegistration(); syncPreview(); });
+    input.addEventListener("input", event => {
+      if (input === nameInput) nameTouched = true;
+      if (event.isComposing === true) registrationComposing.add(input);
+      syncRegistration(); syncPreview();
+    });
+  }
   element.querySelector('.roster-capacity [data-action="rest"]').addEventListener("click", restSelected);
   for (const button of element.querySelectorAll("[data-tab]")) {
     button.addEventListener("click", () => { tab = button.dataset.tab; sync(); });

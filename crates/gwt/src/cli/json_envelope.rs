@@ -106,8 +106,10 @@ pub(super) fn dispatch_input<E: CliEnv>(
     let parsed = match parse(input) {
         Ok(parsed) => parsed,
         Err(err) => {
-            if !matches!(err, CliParseError::InvalidVerificationMode)
-                && super::feedback::safe_intake_required(env.repo_path())
+            if !matches!(
+                err,
+                CliParseError::InvalidVerificationMode | CliParseError::InvalidParams(_)
+            ) && super::feedback::safe_intake_required(env.repo_path())
             {
                 // A malformed envelope cannot reliably identify its operation.
                 // Never echo serde's caller-controlled keys/values in Auto.
@@ -3647,6 +3649,83 @@ mod tests {
         }
     }
 
+    /// Issue #7259: under the fail-closed safe intake (auto mode), a rejected
+    /// `concern.measure` must name the missing/unknown param instead of a bare
+    /// `invalid JSON envelope`, without echoing caller-controlled keys/values,
+    /// and the documented shape must still be accepted.
+    #[test]
+    fn concern_measure_under_safe_intake_names_the_rejected_param() {
+        use gwt_core::test_support::ScopedEnvVar;
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _profile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let repo = home.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        crate::save_issue_monitor_prefs(
+            &crate::issue_monitor_prefs_path_for_repo_path(&repo),
+            &crate::IssueMonitorPrefs {
+                autonomous_mode: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut env = TestEnv::new(repo);
+        let created = concern_call(&mut env, "concern.create", concern_create_params());
+        let id = created["concern"]["id"].clone();
+
+        let rejected = |env: &mut TestEnv, params: Value| -> String {
+            env.stdout.clear();
+            env.stderr.clear();
+            env.stdin = envelope("concern.measure", params);
+            assert_eq!(super::dispatch(env, "gwtd"), 2);
+            String::from_utf8_lossy(&env.stderr).into_owned()
+        };
+        let stderr = rejected(&mut env, json!({}));
+        assert!(stderr.contains("`id`"), "{stderr}");
+        assert!(!stderr.contains("invalid JSON envelope"), "{stderr}");
+
+        let stderr = rejected(
+            &mut env,
+            json!({"id":id,"cycle_id":"x","measurement":{"cpu_percent":45.6}}),
+        );
+        assert!(stderr.contains("concern.measure"), "{stderr}");
+        assert!(stderr.contains("`owner_progress`"), "{stderr}");
+        assert!(!stderr.contains("invalid JSON envelope"), "{stderr}");
+
+        let stderr = rejected(
+            &mut env,
+            json!({"id":id,"cycle_id":"x","measurement":{},"owner_progress":[],
+                   "private-key-value":"private-secret-value"}),
+        );
+        assert!(stderr.contains("`owner_progress`"), "{stderr}");
+        assert!(!stderr.contains("private-key-value"), "{stderr}");
+        assert!(!stderr.contains("private-secret-value"), "{stderr}");
+
+        let stderr = rejected(
+            &mut env,
+            json!({"id":id,"cycle_id":"x","measurement":{},"owner_progress":"private-secret-value"}),
+        );
+        assert!(stderr.contains("concern.measure"), "{stderr}");
+        assert!(!stderr.contains("private-secret-value"), "{stderr}");
+        assert!(!stderr.contains("invalid JSON envelope"), "{stderr}");
+
+        let measured = concern_call(
+            &mut env,
+            "concern.measure",
+            json!({
+                "id":id,"cycle_id":"x","measurement":{"cpu_percent":45.6},
+                "owner_progress":concern_owner_progress("open")
+            }),
+        );
+        assert_eq!(
+            measured["concern"]["last_measurement"],
+            json!({"cpu_percent":45.6})
+        );
+    }
+
     fn concern_owner_progress(state: &str) -> Value {
         json!([{"number":4059,"state":state,"queue_position":3,"status":"queued","pull_requests":[]}])
     }
@@ -3869,7 +3948,7 @@ mod tests {
         assert!(String::from_utf8_lossy(&env.stdout).contains("measurement"));
         assert!(matches!(
             err("concern.update", json!({"id":id,"state":"verified"})),
-            CliParseError::InvalidJson(_)
+            CliParseError::InvalidParams(_)
         ));
     }
 
