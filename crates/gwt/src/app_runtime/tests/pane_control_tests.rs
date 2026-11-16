@@ -1348,6 +1348,9 @@ fn fleet_pane_close_matches_absent_runtime_without_wildcards() {
     let target = control_retained_husk(&project, "target");
     let (owner, pm) = control_owner_agent(&project, "pm", 42);
     control_register_pm(&project, &pm);
+    // This test proves exact absent-runtime matching, so isolate its one-shot
+    // close from this owner's periodic prefs writer, including an in-flight tick.
+    let _census = owner_fixture_block_on(owner.pause_runtime_reconciliation()).unwrap();
     let inventory = control_request(&owner, &pm, AgentFrontendRequest::ListFleetPanes);
     let target_row = inventory.events[0]["panes"]
         .as_array()
