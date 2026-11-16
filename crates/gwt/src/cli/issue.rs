@@ -2776,10 +2776,11 @@ fn monitor_admission_exclusions(
     if !status.has_launch_profile {
         add("no_launch_profile");
     }
+    // Issue #7266 AC-2: `retry_backoff` is per-Issue and already on the row
+    // with its release time; the Monitor-wide stall is not copied onto it.
     match status.stall_reason {
         Some(crate::IssueMonitorStallReason::GuiDisconnected) => add("gui_disconnected"),
         Some(crate::IssueMonitorStallReason::GithubAuthRequired) => add("github_auth_required"),
-        Some(crate::IssueMonitorStallReason::RetryBackoff) => add("retry_backoff"),
         _ => {}
     }
     reasons
@@ -7476,7 +7477,11 @@ pub(crate) fn fetch_linked_prs_bulk_via_gh_observing(
     )
 }
 
-fn run_linked_prs_bulk_query(owner: &str, repo: &str, query: &str) -> io::Result<String> {
+pub(crate) fn run_linked_prs_bulk_query(
+    owner: &str,
+    repo: &str,
+    query: &str,
+) -> io::Result<String> {
     let hub = gwt_core::process_console::global();
     let output = gwt_core::process_console::spawn_logged_blocking(
         &hub,
@@ -7589,19 +7594,7 @@ impl LinkedPrBulkRead {
         self.chunks.is_empty()
     }
 
-    pub(crate) fn read_next(
-        &mut self,
-        owner: &str,
-        repo: &str,
-        observe: impl FnMut(u64, &[LinkedPrSummary]),
-    ) -> io::Result<()> {
-        self.read_next_with(
-            |query| run_linked_prs_bulk_query(owner, repo, query),
-            observe,
-        )
-    }
-
-    fn read_next_with(
+    pub(crate) fn read_next_with(
         &mut self,
         mut run: impl FnMut(&str) -> io::Result<String>,
         mut observe: impl FnMut(u64, &[LinkedPrSummary]),
