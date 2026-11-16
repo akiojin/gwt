@@ -183,10 +183,11 @@ test.describe("retired automatic restore sources", () => {
         await expect(drawer).toBeVisible();
         const skipped = drawer.locator(".notification-center__item")
           .filter({ hasText: "Automatic restore skipped: landed_worktree" });
-        await expect(skipped).toHaveCount(generation === 1 ? sources.length : 0);
+        await expect(skipped).toHaveCount(generation === 1 ? 1 : 0);
         if (generation === 1) {
-          expect(await skipped.evaluateAll(nodes => nodes.map(node => (node as HTMLElement).dataset.level)))
-            .toEqual(sources.map(() => "info"));
+          await expect(skipped).toHaveAttribute("data-level", "info");
+          await expect(skipped.locator(".notification-center__count"))
+            .toHaveText(`×${sources.length}`);
         }
         await expect(drawer.locator('.notification-center__item[data-level="error"]')).toHaveCount(0);
         await expect(page.locator("#wizard-modal")).toBeHidden();

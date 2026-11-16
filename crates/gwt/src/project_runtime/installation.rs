@@ -609,7 +609,7 @@ pub(crate) fn prepare_owner_saved_session_restore(
             let name = match existing_name {
                 Some(name) => name,
                 None => {
-                    let known = restore
+                    let mut known: HashSet<_> = restore
                         .registry
                         .lock()
                         .map_err(|error| error.to_string())?
@@ -618,11 +618,19 @@ pub(crate) fn prepare_owner_saved_session_restore(
                         .iter()
                         .filter_map(|row| row.agent_name.clone())
                         .collect();
+                    let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(root);
+                    // Imported members may not yet have a history entry.
+                    if let Some(roster) = crate::load_issue_monitor_prefs(&prefs_path)
+                        .map_err(|error| error.to_string())?
+                        .agent_roster
+                    {
+                        known.extend(roster.members.into_iter().map(|member| member.name));
+                    }
                     let language = gwt_config::Settings::load()
                         .map(|settings| settings.ai.effective_language())
                         .unwrap_or("en");
                     crate::agent_names::allocate(
-                        &own_project_dir.join("agent-names.jsonl"),
+                        &crate::agent_names::history_for_prefs(&prefs_path)?,
                         language,
                         &HashSet::new(),
                         &known,
