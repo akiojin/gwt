@@ -4939,6 +4939,216 @@ fn agent_name_reserves_live_initials_and_backfills_named_legacy_sessions() {
     owner_fixture_block_on(owner.shutdown());
 }
 
+#[cfg(unix)]
+fn native_cli_completion_config(config: &mut gwt_agent::LaunchConfig, root: &Path) {
+    config.command = "/bin/sh".into();
+    config.args = vec![
+        "-c".into(),
+        concat!(
+            "stty -echo -icanon -isig; ",
+            "exec \"$GWT_TEST_CLI_COMPLETION_RUNNER\" --exact ",
+            "app_runtime::tests::pane_control_tests::native_cli_completion_actor --ignored --nocapture --test-threads=1 ",
+            ">\"$GWT_TEST_CLI_COMPLETION_ROOT/actor-$GWT_SESSION_ID.log\" 2>&1"
+        )
+        .into(),
+    ];
+    for (key, value) in [
+        ("GWT_TEST_CLI_COMPLETION_ROOT", root.to_path_buf()),
+        (
+            "GWT_TEST_CLI_COMPLETION_RUNNER",
+            std::env::current_exe().unwrap(),
+        ),
+        (
+            "GWT_TEST_CLI_COMPLETION_HOME",
+            gwt_core::test_support::gwt_home_override().unwrap(),
+        ),
+    ] {
+        config
+            .env_vars
+            .insert(key.into(), value.display().to_string());
+    }
+}
+
+#[cfg(unix)]
+fn native_cli_completion_wait(path: &Path) {
+    // test-hygiene: allow-wall-clock-deadline Only bounds a missing actor; atomic marker publication establishes ordering.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !path.exists() {
+        // test-hygiene: allow-wall-clock-deadline Only bounds a missing actor, never an elapsed-time assertion.
+        assert!(
+            // test-hygiene: allow-wall-clock-deadline Only bounds the missing atomic marker, never an elapsed-time assertion.
+            Instant::now() < deadline,
+            "missing native CLI receipt: {}; actor stdout={}; actor stderr={}",
+            path.display(),
+            fs::read_to_string(path.parent().unwrap().join("delayed-stdout.log"))
+                .unwrap_or_default(),
+            fs::read_to_string(path.parent().unwrap().join("delayed-stderr.log"))
+                .unwrap_or_default()
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[cfg(unix)]
+fn native_cli_completion_exited(directory: &Path) -> bool {
+    let Ok(pid) = fs::read_to_string(directory.join("delayed-pid")) else {
+        return true;
+    };
+    let Ok(pid) = pid.parse::<u32>() else {
+        return false;
+    };
+    let started_at = fs::read(directory.join("accepted.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|receipt| receipt["producer_started_at"].as_u64());
+    // test-hygiene: allow-wall-clock-deadline Bound actual orphan reaping after releasing its callback; no timing-based ordering assertion.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while gwt::process::is_host_process_alive(pid) {
+        if started_at.is_some_and(|expected| {
+            gwt::process::host_process_start_time(pid).is_some_and(|observed| observed != expected)
+        }) {
+            return true;
+        }
+        // test-hygiene: allow-wall-clock-deadline Bound actual exit observation after the producer's done receipt.
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    true
+}
+
+/// A real native provider and its CLI producer, built from the checkout's hook
+/// front door. Argument/stdin parsing is outside this completion regression.
+#[cfg(unix)]
+#[test]
+#[ignore = "invoked only as the native CLI completion fixture"]
+fn native_cli_completion_actor() {
+    use std::io::Read;
+    use std::os::unix::process::CommandExt;
+    let Some(root) = std::env::var_os("GWT_TEST_CLI_COMPLETION_ROOT").map(PathBuf::from) else {
+        return;
+    };
+    let _home = ScopedGwtHome::set(std::env::var_os("GWT_TEST_CLI_COMPLETION_HOME").unwrap());
+    let session = std::env::var("GWT_SESSION_ID").unwrap();
+    let runtime_path = PathBuf::from(std::env::var_os("GWT_SESSION_RUNTIME_PATH").unwrap());
+    let directory = root.join(&session);
+    fs::create_dir_all(&directory).unwrap();
+    let mode = std::env::var("GWT_TEST_CLI_COMPLETION_MODE").ok();
+    if let Some(mode) = mode {
+        let physical = gwt_agent::SessionRuntimeState::load(&runtime_path).unwrap();
+        assert!(
+            gwt::process::is_descendant_of(std::process::id(), physical.child_pid.unwrap())
+                .unwrap(),
+            "the real CLI must still descend from the current provider at admission"
+        );
+        let worktree =
+            gwt::cli::CliEnv::repo_path(&gwt::cli::DefaultCliEnv::new_for_hooks()).to_path_buf();
+        let blocked = mode == "delayed-blocked";
+        let event = if blocked { "PreToolUse" } else { "PostToolUse" };
+        let guard = mode.starts_with("delayed").then(|| {
+            let directory = directory.clone();
+            let runtime_path = runtime_path.clone();
+            let event_name = event;
+            gwt::cli::hook::runtime_state::set_hook_completion_test_hook(&worktree, &session, move || {
+                let accepted = gwt_agent::SessionRuntimeState::load(&runtime_path).unwrap();
+                assert!(accepted.current_hook_event.as_ref().is_some_and(|event|
+                    event.event == event_name && event.outcome.is_none()));
+                assert!(gwt::process::is_descendant_of(std::process::id(), accepted.child_pid.unwrap()).unwrap());
+                gwt_github::cache::write_atomic(&directory.join("accepted.json"),
+                    &serde_json::to_vec(&serde_json::json!({"producer_pid":std::process::id(),"producer_started_at":gwt::process::host_process_start_time(std::process::id()).unwrap(),"runtime":accepted})).unwrap()).unwrap();
+                native_cli_completion_wait(&directory.join("release"));
+            })
+        });
+        let mut env = gwt::cli::TestEnv::new(worktree);
+        env.stdin = serde_json::json!({"tool_name":"Bash", "tool_input":{"command": if blocked {"gh issue edit 1 --title blocked"} else {"pwd"}}, "tool_use_id":"native-cli-completion"}).to_string();
+        let code = gwt::cli::hook::run_daemon_hook(&mut env, "event", &[event.into()]).unwrap();
+        assert_eq!(
+            code,
+            if blocked { 2 } else { 0 },
+            "native CLI dispatch: {}",
+            String::from_utf8_lossy(&env.stderr)
+        );
+        drop(guard);
+        let receipt = if mode.starts_with("delayed") {
+            "delayed"
+        } else {
+            "current"
+        };
+        gwt_github::cache::write_atomic(&directory.join(format!("{receipt}-done.json")),
+            &serde_json::to_vec(&serde_json::json!({"code":code,"outcome":if blocked {"blocked"} else {"normal"},"stdout":env.stdout,"runtime":gwt_agent::SessionRuntimeState::load(&runtime_path).ok()})).unwrap()).unwrap();
+        return;
+    }
+    let mut terminal = fs::OpenOptions::new().write(true).open("/dev/tty").unwrap();
+    let mut command = Vec::new();
+    for byte in std::io::stdin().lock().bytes() {
+        let byte = byte.unwrap();
+        if !matches!(byte, b'\r' | b'\n') {
+            command.push(byte);
+            continue;
+        }
+        if command == b"GWT_CLI_EXIT" {
+            std::process::exit(0);
+        } else if command == b"GWT_CLI_DELAYED"
+            || command == b"GWT_CLI_DELAYED_BLOCKED"
+            || command == b"GWT_CLI_CURRENT"
+        {
+            let mode = if command == b"GWT_CLI_DELAYED" {
+                "delayed"
+            } else if command == b"GWT_CLI_DELAYED_BLOCKED" {
+                "delayed-blocked"
+            } else {
+                "current"
+            };
+            let mut actor = gwt_core::process::hidden_command(std::env::current_exe().unwrap());
+            actor
+                .args([
+                    "--exact",
+                    "app_runtime::tests::pane_control_tests::native_cli_completion_actor",
+                    "--ignored",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env("GWT_TEST_CLI_COMPLETION_MODE", mode)
+                .stdin(std::process::Stdio::null())
+                .stdout(fs::File::create(directory.join(format!("{mode}-stdout.log"))).unwrap())
+                .stderr(fs::File::create(directory.join(format!("{mode}-stderr.log"))).unwrap());
+            // A separate SID preserves the accepted callback across its provider's
+            // ordinary exit; setsid does not change its parent or grant authority.
+            unsafe {
+                actor.pre_exec(|| {
+                    if libc::setsid() == -1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+            // The delayed producer deliberately outlives its ordinary provider exit.
+            #[allow(clippy::zombie_processes)]
+            let mut child = actor.spawn().unwrap();
+            let receipt = if mode.starts_with("delayed") {
+                "delayed"
+            } else {
+                "current"
+            };
+            gwt_github::cache::write_atomic(
+                &directory.join(format!("{receipt}-pid")),
+                child.id().to_string().as_bytes(),
+            )
+            .unwrap();
+            if mode == "current" {
+                assert!(child.wait().unwrap().success());
+                gwt_github::cache::write_atomic(&directory.join("current-reaped"), b"").unwrap();
+            }
+        } else if !command.is_empty() {
+            terminal.write_all(&command).unwrap();
+            terminal.write_all(b"\r\n").unwrap();
+            terminal.flush().unwrap();
+        }
+        command.clear();
+    }
+}
+
 fn switch_source_retirement_fixture(
     root: &Path,
     echo_output: bool,
@@ -4974,6 +5184,10 @@ fn switch_source_retirement_fixture(
         } else {
             vec!["-c".into(), "stty -echo -icanon -isig; exec cat".into()]
         };
+    }
+    #[cfg(unix)]
+    if echo_output {
+        native_cli_completion_config(&mut config, root);
     }
     drive_owner_agent_fixture(&mut runtime, &id, config, Default::default());
     let owner = runtime.test_project_owners[&project].clone();
@@ -5272,6 +5486,64 @@ fn switch_source_exit_preserves_reused_session_and_runtime() {
             // test-hygiene: allow-wall-clock-deadline Bound the real HTTP authentication receipt; the channel establishes ordering.
             .recv_timeout(Duration::from_secs(10))
             .expect("the predecessor hook must be authenticated before replacement");
+        #[cfg(unix)]
+        let cli_directory = temp.path().join(&source_session.id);
+        #[cfg(unix)]
+        struct ReleaseCli(PathBuf);
+        #[cfg(unix)]
+        impl Drop for ReleaseCli {
+            fn drop(&mut self) {
+                let _ = fs::write(self.0.join("release"), b"");
+                let _ = native_cli_completion_exited(&self.0);
+            }
+        }
+        #[cfg(unix)]
+        let _release_cli = ReleaseCli(cli_directory.clone());
+        #[cfg(unix)]
+        {
+            source
+                .pty
+                .write_input(if reuse_session {
+                    b"GWT_CLI_DELAYED\r"
+                } else {
+                    b"GWT_CLI_DELAYED_BLOCKED\r"
+                })
+                .unwrap();
+            native_cli_completion_wait(&cli_directory.join("accepted.json"));
+            let accepted: serde_json::Value =
+                serde_json::from_slice(&fs::read(cli_directory.join("accepted.json")).unwrap())
+                    .unwrap();
+            assert_eq!(
+                accepted["runtime"]["runtime_incarnation"],
+                source.incarnation
+            );
+            assert_eq!(
+                accepted["runtime"]["child_pid"],
+                source.pty.process_id().unwrap()
+            );
+            assert_eq!(
+                accepted["runtime"]["execution_identity"],
+                serde_json::to_value(&proof.execution_identity).unwrap()
+            );
+            let producer = accepted["producer_pid"].as_u64().unwrap() as u32;
+            assert!(
+                gwt::process::is_descendant_of(producer, source.pty.process_id().unwrap()).unwrap()
+            );
+            source.pty.write_input(b"GWT_CLI_EXIT\r").unwrap();
+            // test-hygiene: allow-wall-clock-deadline Observe the provider's ordinary exit, without a kill or timer-based ordering assumption.
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while source.pty.try_wait().unwrap().is_none() {
+                // test-hygiene: allow-wall-clock-deadline Bound an absent ordinary-exit receipt.
+                assert!(
+                    // test-hygiene: allow-wall-clock-deadline Bound the provider's actual normal-exit receipt.
+                    Instant::now() < deadline,
+                    "native source did not exit normally"
+                );
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            assert!(gwt::process::is_host_process_alive(producer));
+        }
+        #[cfg(not(unix))]
         assert!(source
             .pty
             .terminate_and_wait_for_tree(Duration::from_secs(5))
@@ -5302,6 +5574,8 @@ fn switch_source_exit_preserves_reused_session_and_runtime() {
         });
         let issue = if reuse_session { 43 } else { 44 };
         let mut config = control_launch_config(&project, issue);
+        #[cfg(unix)]
+        native_cli_completion_config(&mut config, temp.path());
         if reuse_session {
             config.session_mode = gwt_agent::SessionMode::Continue;
             config.predecessor_session_id = Some(source_session.id.clone());
@@ -5436,6 +5710,24 @@ fn switch_source_exit_preserves_reused_session_and_runtime() {
             reqwest::StatusCode::NO_CONTENT
         );
         owner_fixture_block_on(owner.agent_dispatch_barrier()).unwrap();
+        #[cfg(unix)]
+        {
+            gwt_github::cache::write_atomic(&cli_directory.join("release"), b"").unwrap();
+            native_cli_completion_wait(&cli_directory.join("delayed-done.json"));
+            let receipt: serde_json::Value =
+                serde_json::from_slice(&fs::read(cli_directory.join("delayed-done.json")).unwrap())
+                    .unwrap();
+            assert_eq!(receipt["code"], if reuse_session { 0 } else { 2 });
+            assert_eq!(
+                receipt["outcome"],
+                if reuse_session { "normal" } else { "blocked" }
+            );
+            assert!(
+                native_cli_completion_exited(&cli_directory),
+                "accepted old CLI producer must actually exit after release"
+            );
+            assert_optional_files_unchanged(&saved_files);
+        }
         assert_eq!(
             owner_fixture_block_on(owner.probe(&successor.id, successor.incarnation))
                 .unwrap()
@@ -5571,6 +5863,27 @@ fn switch_source_exit_preserves_reused_session_and_runtime() {
                 )),
                 "stale callbacks must not publish successor output, status, hooks or retirement"
             );
+        }
+        #[cfg(unix)]
+        {
+            successor.pty.write_input(b"GWT_CLI_CURRENT\r").unwrap();
+            let current = temp.path().join(&session.id).join("current-done.json");
+            native_cli_completion_wait(&current);
+            let receipt: serde_json::Value =
+                serde_json::from_slice(&fs::read(current).unwrap()).unwrap();
+            assert_eq!(receipt["code"], 0);
+            assert_eq!(receipt["outcome"], "normal");
+            native_cli_completion_wait(&temp.path().join(&session.id).join("current-reaped"));
+            let actual = gwt_agent::SessionRuntimeState::load(
+                &gwt_agent::runtime_state_path_for_pid(&sessions, identity.pid, &session.id),
+            )
+            .unwrap();
+            assert_eq!(actual.runtime_incarnation, Some(successor.incarnation));
+            assert_eq!(
+                actual.current_hook_event.as_ref().unwrap().outcome,
+                Some(gwt_agent::session::HookCompletionOutcome::Normal)
+            );
+            assert!(actual.last_completed_hook_event_at.is_some());
         }
         control_close(&owner, &successor);
         assert!(successor.pty.tree_exit_confirmed());

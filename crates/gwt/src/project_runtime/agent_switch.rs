@@ -719,6 +719,8 @@ fn drive_switch(
             })??;
             return Ok(false);
         }
+        #[cfg(all(debug_assertions, feature = "test-gh-guard"))]
+        pause_checkpoint_input_for_test(root, intent, "before_stop", revision, 0)?;
         // Hold protected input until the captured runtime has actually exited.
         let outcome =
             gwt::cli::execution_state::with_current_active_session_execution_identity_lease(

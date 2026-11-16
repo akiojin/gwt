@@ -433,7 +433,11 @@ test.describe("Issue queue real backend launch", () => {
     expect(errors).toEqual([]);
   });
 
-  for (const afterAck of ["before body cancel", "source replaced", "reserved submit", "body submit", "body cancel", "body input", "queued body", "unchanged", "refresh cancel", "refresh draft", "refresh submit", "stop refresh draft", "stop refresh cancel", "initial draft", "input", "draft", "source edit", "cancel", "target removed", "worktree job", "cancel pending job", "unknown cwd", "restart"] as const) test(afterAck === "before body cancel"
+  for (const afterAck of ["claim replaced", "stop claim replaced", "before body cancel", "source replaced", "reserved submit", "body submit", "body cancel", "body input", "queued body", "unchanged", "refresh cancel", "refresh draft", "refresh submit", "stop refresh draft", "stop refresh cancel", "initial draft", "input", "draft", "source edit", "cancel", "target removed", "worktree job", "cancel pending job", "unknown cwd", "restart"] as const) test(afterAck === "claim replaced"
+    ? "T94442 claim-bearing replacement before checkpoint body preserves the successor"
+    : afterAck === "stop claim replaced"
+    ? "T94442 claim-bearing replacement after saved ACK preserves the successor"
+    : afterAck === "before body cancel"
     ? "T94440 cancellation after reservation rejects the checkpoint body CAS"
     : afterAck === "source replaced"
     ? "T94440 actual source replacement after reservation rejects the old checkpoint"
@@ -481,12 +485,12 @@ test.describe("Issue queue real backend launch", () => {
     test.skip(process.platform !== "linux" || process.env.GWT_PLAYWRIGHT_SWITCH_POSITIVE !== "1",
       "positive proof requires the isolated Linux root process namespace");
     const postBody = afterAck === "body cancel" || afterAck === "body input" || afterAck === "body submit";
-    const preBody = afterAck === "before body cancel" || afterAck === "source replaced" || afterAck === "reserved submit";
+    const preBody = afterAck === "before body cancel" || afterAck === "source replaced" || afterAck === "claim replaced" || afterAck === "reserved submit";
     const gatedInput = postBody || preBody;
     let bodyGate = "";
     const fixture = await startIssueQueueLaunchFixture(info, {
       page,
-      ...(gatedInput ? { prepare: async ({ home, bin, env }) => {
+      ...(gatedInput || afterAck === "stop claim replaced" ? { prepare: async ({ home, bin, env }) => {
         bodyGate = join(home, "switch-body-gate");
         env.GWT_TEST_SWITCH_BODY_GATE = bodyGate;
         const provider = join(bin, "codex");
@@ -594,6 +598,94 @@ test.describe("Issue queue real backend launch", () => {
       const member = roster.members.find((member: any) => member.assignment?.session_id === source.gwt_session_id);
       expect(member).toBeTruthy();
       const before = await session(source.gwt_session_id!);
+      const claims = () => fixture.commentsForIssue(43).flatMap(comment => {
+        const json = /```json\s*([\s\S]*?)```/.exec(comment.body)?.[1];
+        return comment.body.startsWith("<!-- gwt-auto-improve-claim v1 -->") && json ? [JSON.parse(json)] : [];
+      });
+      const nativeIdentity = (runtime: any) => ({ incarnation: runtime.runtime_incarnation,
+        host_started_at: runtime.host_started_at, child: runtime.child_pid, child_started_at: runtime.child_started_at,
+        identity: runtime.execution_identity, status: runtime.status, current_hook_event: runtime.current_hook_event });
+      const replaceClaimedSource = async (intent: any) => {
+        // Failover is the real claim/queue lifecycle. OFF and Continue would
+        // remove the old claim without obtaining a claim for the successor.
+        const response = fixture.fixtureOperation("issue.monitor.failover", { number: 43,
+          reason: "T94442 replace the exact source while its old Switch is in flight",
+          claim_id: intent.source.claim_id, window_id: intent.source.window_id,
+          delivery_id: intent.source.assignment.delivery_id });
+        expect(response.ok, JSON.stringify(response)).toBe(true);
+        expect(JSON.parse(response.output).status).toBe("restarting");
+        await sendLiveGwtEvent(page, { kind: "stop_window", id: projectedSource.id });
+        await expect.poll(() => fixture.processAlive(source.pid), { timeout: 30_000 }).toBe(false);
+        await expect.poll(() => fixture.processAlive(idle.tree_child_pid), { timeout: 30_000 }).toBe(false);
+        await expect.poll(async () => (await fixture.launches()).length, { timeout: 30_000 }).toBe(2);
+        const successor = (await fixture.launches())[1];
+        expect(successor.gwt_session_id).not.toBe(source.gwt_session_id);
+        expect(successor.provider_session_id).not.toBe(source.provider_session_id);
+        expect(successor.pid).not.toBe(source.pid);
+        await expect.poll(async () => (await fixture.actorEvents()).some((event: any) => event.stage === "idle"
+          && event.pid === successor.pid && event.gwt_session_id === successor.gwt_session_id),
+        { timeout: 30_000 }).toBe(true);
+        await expect.poll(async () => {
+          const prefs = await preferences();
+          return prefs.launched_claims?.[43] && prefs.launched_claims[43] !== intent.source.claim_id
+            && prefs.launch_confirmations?.[43]?.claim_id === prefs.launched_claims[43];
+        }, { timeout: 30_000 }).toBe(true);
+        const prefs = await preferences();
+        const claim = prefs.launched_claims[43];
+        await expect.poll(() => claims().find(value => value.claim_id === intent.source.claim_id)?.status,
+          { timeout: 30_000 }).toBe("released");
+        expect(claims().find(value => value.claim_id === claim)?.status).toBe("active");
+        const assignment = (await readCanonicalRoster(page)).members.find((value: any) => value.agent_member_id === member.agent_member_id).assignment;
+        expect(assignment).toMatchObject({ issue_number: 43, session_id: successor.gwt_session_id,
+          host_pid: intent.runtime_stop.host_pid, host_started_at: intent.runtime_stop.host_started_at });
+        expect(assignment.reservation_id).not.toBe(intent.source.assignment.reservation_id);
+        const runtimePath = join(fixture.home, ".gwt/sessions/runtime", String(intent.runtime_stop.host_pid), `${successor.gwt_session_id}.json`);
+        const native = JSON.parse(await readFile(runtimePath, "utf8"));
+        expect(native.runtime_incarnation).not.toBe(intent.runtime_stop.runtime_incarnation);
+        expect(native.child_pid).toBe(successor.pid);
+        expect(native.execution_identity).not.toEqual(intent.runtime_stop.execution_identity);
+        expect(native.current_hook_event).toMatchObject({ event: "Stop", outcome: "normal" });
+        expect(fixture.executionStatus(source.cwd).ecr_status).toBe("active");
+        expect(await fixture.launchIssues()).toEqual([43, 43]);
+        const successorWork = async () => (await fixture.workItems()).work_items.find((value: any) =>
+          value.events.some((event: any) => event.agent_session_id === successor.gwt_session_id));
+        await expect.poll(async () => !!await successorWork(), { timeout: 30_000 }).toBe(true);
+        return { successor, claim, assignment, native: nativeIdentity(native), runtimePath,
+          confirmation: prefs.launch_confirmations[43], session: await session(successor.gwt_session_id!),
+          source: fixture.savedSource(source.cwd), work: await successorWork() };
+      };
+      const assertClaimedSuccessor = async (intent: any, replacement: Awaited<ReturnType<typeof replaceClaimedSource>>) => {
+        const prefs = await preferences();
+        expect(prefs.enabled).toBe(true);
+        expect(prefs.launched_claims[43]).toBe(replacement.claim);
+        expect(prefs.launch_confirmations[43]).toEqual(replacement.confirmation);
+        expect(prefs.launch_bindings[replacement.confirmation.window_id]).toBe(43);
+        expect(prefs.launched_issues).toEqual([{ issue_number: 43, window_id: replacement.confirmation.window_id }]);
+        expect(claims().find(value => value.claim_id === replacement.claim)?.status).toBe("active");
+        expect(claims().find(value => value.claim_id === intent.source.claim_id)?.status).toBe("released");
+        expect((await readCanonicalRoster(page)).members.find((value: any) => value.agent_member_id === member.agent_member_id).assignment)
+          .toEqual(replacement.assignment);
+        expect(nativeIdentity(JSON.parse(await readFile(replacement.runtimePath, "utf8")))).toEqual(replacement.native);
+        expect(await session(replacement.successor.gwt_session_id!)).toBe(replacement.session);
+        expect(fixture.executionStatus(source.cwd).ecr_status).toBe("active");
+        expect(fixture.processAlive(replacement.successor.pid)).toBe(true);
+        expect((await fixture.actorEvents()).filter((event: any) => event.pid === replacement.successor.pid
+          && ["checkpoint_before_prompt", "checkpoint_received", "checkpoint_acked"].includes(event.stage))).toEqual([]);
+        expect(await fixture.launchIssues()).toEqual([43, 43]);
+        expect(fixture.savedSource(source.cwd)).toEqual(replacement.source);
+        expect(replacement.work).toBeTruthy();
+        expect((await fixture.workItems()).work_items.find((value: any) => value.id === replacement.work.id))
+          .toEqual(replacement.work);
+        expect(fixture.requests.filter(request => request.method === "POST"
+          && request.url === "/repos/fixture/queue/issues/44/comments")).toEqual([]);
+        const status = fixture.fixtureOperation("issue.monitor.status");
+        expect(status.ok, JSON.stringify(status)).toBe(true);
+        const observation = JSON.parse(status.output);
+        expect(observation.active_launches).toEqual([43]);
+        expect(observation.occupied_slot_count).toBe(1);
+        expect(observation.inbox.find((row: any) => row.issue_number === 43)).toMatchObject({
+          claim_id: replacement.claim, launched_window_id: replacement.confirmation.window_id });
+      };
       await page.locator('.op-rail__surface[data-surface="agents"]').click();
       const agents = page.getByRole("region", { name: "Main pane", exact: true })
         .locator(".agents-surface:not(.agents-surface--preview)");
@@ -775,6 +867,8 @@ with lock_path.open('r+') as lock:
             expect((await preferences()).agent_switch_intents[pending.request.operation_id].stage).toBe("checkpointing");
             await plans.getByRole("button", { name: "Cancel switch", exact: true }).click();
             await expect.poll(async () => (await preferences()).agent_switch_intents[pending.request.operation_id].stage).toBe("cancelled");
+          } else if (afterAck === "claim replaced") {
+            successorState = await replaceClaimedSource(pending);
           } else if (afterAck === "source replaced") {
             // Explicit stop protects the target queue while this test performs a real source replacement.
             await sendLiveGwtEvent(page, { kind: "set_issue_monitor_enabled", enabled: false });
@@ -854,22 +948,26 @@ with lock_path.open('r+') as lock:
               await expect.poll(async () => (await preferences()).agent_switch_intents[pending.request.operation_id].stage,
                 { timeout: 30_000 }).toMatch(/failed|cancelled/);
               current = (await preferences()).agent_switch_intents[pending.request.operation_id];
-              const successor = (await fixture.launches())[1];
-              expect(fixture.executionStatus(source.cwd).ecr_status).toBe("active");
-              const assignment = (await readCanonicalRoster(page)).members.find((value: any) => value.agent_member_id === member.agent_member_id).assignment;
-              expect(assignment.session_id).toBe(successor.gwt_session_id);
-              expect(assignment.reservation_id).not.toBe(pending.source.assignment.reservation_id);
-              expect(assignment).toEqual(successorState.assignment);
-              expect((await preferences()).launched_claims?.[43] ?? null).toBe(successorState.claim);
-              const native = JSON.parse(await readFile(join(fixture.home, ".gwt/sessions/runtime", String(held.parent), `${successor.gwt_session_id}.json`), "utf8"));
-              expect({ incarnation: native.runtime_incarnation, child: native.child_pid, identity: native.execution_identity }).toEqual(successorState.native);
-              expect(fixture.processAlive(successor.pid)).toBe(true);
-              expect(await fixture.launchIssues()).toEqual([43, 43]);
+              if (afterAck === "claim replaced") {
+                await assertClaimedSuccessor(pending, successorState);
+              } else {
+                const successor = (await fixture.launches())[1];
+                expect(fixture.executionStatus(source.cwd).ecr_status).toBe("active");
+                const assignment = (await readCanonicalRoster(page)).members.find((value: any) => value.agent_member_id === member.agent_member_id).assignment;
+                expect(assignment.session_id).toBe(successor.gwt_session_id);
+                expect(assignment.reservation_id).not.toBe(pending.source.assignment.reservation_id);
+                expect(assignment).toEqual(successorState.assignment);
+                expect((await preferences()).launched_claims?.[43] ?? null).toBe(successorState.claim);
+                const native = JSON.parse(await readFile(join(fixture.home, ".gwt/sessions/runtime", String(held.parent), `${successor.gwt_session_id}.json`), "utf8"));
+                expect({ incarnation: native.runtime_incarnation, child: native.child_pid, identity: native.execution_identity }).toEqual(successorState.native);
+                expect(fixture.processAlive(successor.pid)).toBe(true);
+                expect(await fixture.launchIssues()).toEqual([43, 43]);
+              }
             }
             const events = await fixture.actorEvents();
             const originalBytes = Buffer.from(events.filter((entry: any) => entry.stage === "stdin_bytes" && entry.pid === source.pid).flatMap((entry: any) => entry.bytes));
             expect(originalBytes.toString()).toBe("GWT_RAW_MONITOR_PROBE\r");
-            if (afterAck === "source replaced") {
+            if (afterAck === "source replaced" || afterAck === "claim replaced") {
               const successor = (await fixture.launches())[1];
               expect(events.filter((entry: any) => entry.stage === "stdin_bytes" && entry.pid === successor.pid)).toEqual([]);
             }
@@ -880,7 +978,9 @@ with lock_path.open('r+') as lock:
             expect((await preferences()).monitor_runtime_stop_requests || []).toEqual([]);
             const finalSource = fixture.savedSource(source.cwd);
             expect(await readFile(join(source.cwd, "source-in-progress.txt"), "utf8")).toBe(sourceContents);
-            if (afterAck === "source replaced") {
+            if (afterAck === "claim replaced") {
+              expect(finalSource).toMatchObject({ branch: saved.branch, head: saved.head, remoteHead: saved.remoteHead });
+            } else if (afterAck === "source replaced") {
               expect({ ...finalSource, porcelain: saved.porcelain }).toEqual(saved);
               expect(finalSource.porcelain.split("\n")).toEqual(expect.arrayContaining(saved.porcelain.split("\n")));
               const added = finalSource.porcelain.split("\n").filter((line: string) => !saved.porcelain.split("\n").includes(line));
@@ -895,7 +995,8 @@ with lock_path.open('r+') as lock:
             expect(retained.events).toEqual(expect.arrayContaining(work.events));
             expect(retained.status_category).not.toMatch(/done|blocked/);
             expect(fixture.requests.filter(request => request.method === "POST" && request.url === "/repos/fixture/queue/issues/44/comments")).toEqual([]);
-            await info.attach("pre-body-refusal", { body: JSON.stringify({ reached, finished, current, successor: successorState }), contentType: "application/json" });
+            await info.attach("pre-body-refusal", { body: JSON.stringify({ reached, finished, current,
+              successor: successorState && { ...successorState, session: undefined } }), contentType: "application/json" });
             await info.attach(`pre-body-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
             expect(errors).toEqual([]);
             return;
@@ -1259,7 +1360,52 @@ request.catch(() => {});
       expect(fixture.processAlive(source.pid)).toBe(true);
       expect(fixture.processAlive(idle.tree_child_pid)).toBe(true);
       expect(await fixture.launches()).toHaveLength(1);
-      if (afterAck === "restart") {
+      if (afterAck === "stop claim replaced") {
+        const acknowledged = (await preferences()).agent_switch_intents[waiting.operation];
+        expect(acknowledged.stage).toBe("checkpoint_verified");
+        const checkpoint = fixture.savedSource(source.cwd);
+        expect(checkpoint.porcelain).toBe("");
+        const savedWork = (await fixture.workItems()).work_items.find((value: any) => value.id === acknowledged.checkpoint.work_id);
+        expect(savedWork.board_refs).toContain(acknowledged.checkpoint.board_entry_id);
+        // Holding gh issue view also holds the candidate readback used by
+        // the replacement launch. Pause only after that read has completed,
+        // with the genuine N2 and protected input reservation already captured.
+        await writeFile(`${bodyGate}.armed.tmp`, JSON.stringify({ root: fixture.project, operation: waiting.operation,
+          phase: "before_stop", session_id: source.gwt_session_id,
+          incarnation: acknowledged.runtime_stop.runtime_incarnation }));
+        await rename(`${bodyGate}.armed.tmp`, `${bodyGate}.armed`);
+        await releaseNormalStop(waiting.operation);
+        await expect.poll(() => readFile(`${bodyGate}.reached`, "utf8").then(JSON.parse).catch(() => null),
+          { timeout: 30_000 }).toMatchObject({ operation: waiting.operation, phase: "before_stop", body_bytes: 0,
+            host_pid: acknowledged.runtime_stop.host_pid, incarnation: acknowledged.runtime_stop.runtime_incarnation });
+        const held = JSON.parse(await readFile(`${bodyGate}.reached`, "utf8"));
+        const claimed = JSON.parse(await readFile(`${bodyGate}.claimed`, "utf8"));
+        expect(claimed).toMatchObject({ root: fixture.project, operation: waiting.operation,
+          phase: "before_stop", session_id: source.gwt_session_id, incarnation: acknowledged.runtime_stop.runtime_incarnation });
+        await expect.poll(async () => (await fixture.actorEvents()).some((entry: any) =>
+          entry.stage === "normal_n2_hook_returned" && entry.operation === waiting.operation),
+        { timeout: 30_000 }).toBe(true);
+        const replacement = await replaceClaimedSource(acknowledged);
+        expect((await preferences()).agent_switch_intents[waiting.operation].stage).toBe("checkpoint_verified");
+        await writeFile(`${bodyGate}.release`, waiting.operation);
+        await expect.poll(async () => (await preferences()).agent_switch_intents[waiting.operation].stage,
+          { timeout: 30_000 }).toBe("failed");
+        const rejected = (await preferences()).agent_switch_intents[waiting.operation];
+        expect(rejected).toMatchObject({ source: acknowledged.source, checkpoint: acknowledged.checkpoint,
+          runtime_stop: acknowledged.runtime_stop,
+          reason: "Source execution authority changed; no stop was committed" });
+        expect(rejected.runtime_exit_confirmed).not.toBe(true);
+        expect((await preferences()).monitor_runtime_stop_requests || []).toEqual([]);
+        await assertClaimedSuccessor(acknowledged, replacement);
+        expect(replacement.source).toMatchObject({ branch: checkpoint.branch, head: checkpoint.head, remoteHead: checkpoint.remoteHead });
+        const retained = (await fixture.workItems()).work_items.find((value: any) => value.id === savedWork.id);
+        expect(retained.events).toEqual(expect.arrayContaining(savedWork.events));
+        expect(retained.board_refs).toContain(acknowledged.checkpoint.board_entry_id);
+        expect((await fixture.actorEvents()).filter((entry: any) => ["actor_failed", "operation_refused"].includes(entry.stage))).toEqual([]);
+        await info.attach("claim-bearing-post-ack-replacement", { body: JSON.stringify({ acknowledged, held,
+          rejected, replacement: { ...replacement, session: undefined } }), contentType: "application/json" });
+        await info.attach(`claim-bearing-post-ack-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
+      } else if (afterAck === "restart") {
         const acknowledged = (await preferences()).agent_switch_intents[waiting.operation];
         expect(acknowledged.stage).toBe("checkpoint_verified");
         const checkpoint = fixture.savedSource(source.cwd);
@@ -1783,7 +1929,7 @@ request.catch(() => {});
       expect(errors).toEqual([]);
     } finally {
       try {
-        if (gatedInput && bodyGate) {
+        if ((gatedInput || afterAck === "stop claim replaced") && bodyGate) {
           const armed = await readFile(`${bodyGate}.claimed`, "utf8").then(JSON.parse).catch(() => null);
           if (armed) await writeFile(`${bodyGate}.release`, armed.operation);
         }
@@ -1821,7 +1967,7 @@ request.catch(() => {});
             }
           }
         }
-        if (gatedInput || afterAck === "queued body") expect(errors, "zero console/page errors including shutdown").toEqual([]);
+        if (gatedInput || afterAck === "stop claim replaced" || afterAck === "queued body") expect(errors, "zero console/page errors including shutdown").toEqual([]);
       }
     }
     expect(errors).toEqual([]);
