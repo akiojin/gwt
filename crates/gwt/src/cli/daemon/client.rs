@@ -41,28 +41,68 @@ pub struct DaemonClient {
     writer: IpcWriteHalf,
 }
 
+/// Why [`DaemonClient::connect_classified`] did not produce a client.
+#[derive(Debug)]
+pub(crate) enum DaemonConnectError {
+    /// Nothing serves the endpoint's bind; the descriptor is stale.
+    Unreachable(String),
+    /// Any other failure, including a live daemon refusing the handshake.
+    Failed(String),
+}
+
+impl DaemonConnectError {
+    pub(crate) fn into_message(self) -> String {
+        match self {
+            Self::Unreachable(message) | Self::Failed(message) => message,
+        }
+    }
+}
+
 impl DaemonClient {
     /// Connect to the daemon at `endpoint.bind` and complete the
     /// handshake. The returned client is ready for [`Self::send_frame`].
     pub async fn connect(endpoint: &DaemonEndpoint) -> Result<Self, String> {
+        Self::connect_classified(endpoint)
+            .await
+            .map_err(DaemonConnectError::into_message)
+    }
+
+    /// [`Self::connect`], but reports separately an endpoint whose bind
+    /// nobody serves (Unix ECONNREFUSED / missing socket, Windows missing
+    /// pipe). Such a descriptor is stale: no live daemon can be behind it.
+    pub(crate) async fn connect_classified(
+        endpoint: &DaemonEndpoint,
+    ) -> Result<Self, DaemonConnectError> {
         if endpoint.protocol_version != DAEMON_PROTOCOL_VERSION {
-            return Err(format!(
+            return Err(DaemonConnectError::Failed(format!(
                 "incompatible daemon protocol: actual={}, expected={DAEMON_PROTOCOL_VERSION}; use a compatible gwtd build before retrying",
                 endpoint.protocol_version
-            ));
+            )));
         }
-        let stream = IpcStream::connect(&endpoint.bind)
+        let stream = IpcStream::connect(&endpoint.bind).await.map_err(|err| {
+            let message = if crate::process::host_process_liveness(endpoint.pid) == Some(false) {
+                format!(
+                    "daemon owner exited (pid={}, bind={}): {err}; retry after the supervisor restarts the daemon",
+                    endpoint.pid, endpoint.bind
+                )
+            } else {
+                format!("daemon connect failed ({}): {err}", endpoint.bind)
+            };
+            if matches!(
+                err.kind(),
+                std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+            ) {
+                DaemonConnectError::Unreachable(message)
+            } else {
+                DaemonConnectError::Failed(message)
+            }
+        })?;
+        Self::handshake(stream, endpoint)
             .await
-            .map_err(|err| {
-                if crate::process::host_process_liveness(endpoint.pid) == Some(false) {
-                    format!(
-                        "daemon owner exited (pid={}, bind={}): {err}; retry after the supervisor restarts the daemon",
-                        endpoint.pid, endpoint.bind
-                    )
-                } else {
-                    format!("daemon connect failed ({}): {err}", endpoint.bind)
-                }
-            })?;
+            .map_err(DaemonConnectError::Failed)
+    }
+
+    async fn handshake(stream: IpcStream, endpoint: &DaemonEndpoint) -> Result<Self, String> {
         check_server_identity(&stream, endpoint.pid)?;
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
