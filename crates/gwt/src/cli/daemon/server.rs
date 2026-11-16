@@ -23306,23 +23306,16 @@ exit 1
                     ..Default::default()
                 },
             );
-            let blocked =
-                tokio::time::timeout(HANG_GUARD, hub.wait_for_issue_monitor_status()).await;
+            let blocked = hub.wait_for_issue_monitor_status().await;
             let refused = hub.publish_issue_monitor_control(DaemonFrame::Ack).await;
             drop(local_lease);
-            let ready =
-                tokio::time::timeout(HANG_GUARD, hub.wait_for_issue_monitor_control_ready()).await;
+            let ready = hub.wait_for_issue_monitor_control_ready().await;
             let recovered = hub.issue_monitor_status();
             let fence = crate::load_issue_monitor_authority_fence(&prefs_path);
             shutdown.request();
-            tokio::time::timeout(HANG_GUARD, worker)
-                .await
-                .expect("worker shutdown is bounded")
-                .expect("worker exits cleanly");
+            worker.await.expect("worker exits cleanly");
 
-            let blocked = blocked
-                .expect("startup reaches the blocked state")
-                .expect("blocked recovery remains readable");
+            let blocked = blocked.expect("blocked recovery remains readable");
             assert!(blocked["last_error"]
                 .as_str()
                 .is_some_and(|error| error.contains("startup retry budget exhausted")
@@ -23332,7 +23325,7 @@ exit 1
                 Err(super::IssueMonitorControlQueueError::RecoveryBlocked),
                 "controls stay refused until authority is established"
             );
-            assert_eq!(ready.ok(), Some(true), "the lane opens without a restart");
+            assert!(ready, "the lane opens without a restart");
             let recovered = recovered.expect("ready status");
             assert!(
                 !recovered["last_error"]
@@ -23413,8 +23406,7 @@ exit 1
                     ..Default::default()
                 },
             );
-            let retrying =
-                tokio::time::timeout(HANG_GUARD, hub.wait_for_issue_monitor_status()).await;
+            let retrying = hub.wait_for_issue_monitor_status().await;
             fs::write(
                 crate::issue_monitor_authority_fence_path(&prefs_path),
                 "{broken",
@@ -23434,16 +23426,13 @@ exit 1
             let receiver = hub.take_issue_monitor_control_receiver();
             let refused = hub.publish_issue_monitor_control(DaemonFrame::Ack).await;
             shutdown.request();
-            tokio::time::timeout(HANG_GUARD, worker)
-                .await
-                .expect("worker shutdown is bounded")
-                .expect("worker exits cleanly");
+            worker.await.expect("worker exits cleanly");
 
-            assert!(retrying
-                .expect("startup reaches the blocked state")
-                .expect("blocked recovery remains readable")["last_error"]
-                .as_str()
-                .is_some_and(|error| error.contains("retries automatically")));
+            assert!(
+                retrying.expect("blocked recovery remains readable")["last_error"]
+                    .as_str()
+                    .is_some_and(|error| error.contains("retries automatically"))
+            );
             let terminal = terminal.expect("the retry reports the terminal block");
             assert!(
                 !terminal
@@ -23542,10 +23531,7 @@ exit 1
             }
             let mut ready = Vec::new();
             for (hub, _, _) in &workers {
-                ready.push(
-                    tokio::time::timeout(HANG_GUARD, hub.wait_for_issue_monitor_control_ready())
-                        .await,
-                );
+                ready.push(hub.wait_for_issue_monitor_control_ready().await);
             }
             // Startup is over: shutdown settles authority on a real budget.
             drop(startup_budgets);
@@ -23563,16 +23549,13 @@ exit 1
             }
             for (_, shutdown, worker) in workers {
                 shutdown.request();
-                tokio::time::timeout(HANG_GUARD, worker)
-                    .await
-                    .expect("worker shutdown is bounded")
-                    .expect("worker exits cleanly");
+                worker.await.expect("worker exits cleanly");
             }
 
             for (index, (ready, (status, epoch, fence, previous))) in
                 ready.into_iter().zip(observed).enumerate()
             {
-                assert_eq!(ready.ok(), Some(true), "daemon {index} reaches Ready");
+                assert!(ready, "daemon {index} reaches Ready");
                 let status = status.expect("ready status");
                 assert!(
                     !status["last_error"]
