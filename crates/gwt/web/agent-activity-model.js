@@ -298,6 +298,8 @@ export function createMemberTuningModel(projectKey, { onSave = () => {}, schedul
     let reasoning = profile.reasoning?.trim() || null;
     if (role === "pm" && agent_id === "grok" && /^[aA][uU][tT][oO]$/.test(reasoning || "")) reasoning = null;
     return { agent_id, model: profile.model?.trim() || null, reasoning,
+      ...(role === "implementation" ? { runtime_target: profile.runtime_target ?? null,
+        skip_permissions: typeof profile.skip_permissions === "boolean" ? profile.skip_permissions : null } : {}),
       ...(role === "pm" && agent_id === "codex" && profile.codex_speed ? { codex_speed: profile.codex_speed } : {}),
       ...(role === "pm" && agent_id === "claude" && typeof profile.fast_mode === "boolean" ? { fast_mode: profile.fast_mode } : {}) };
   };
@@ -316,9 +318,13 @@ export function createMemberTuningModel(projectKey, { onSave = () => {}, schedul
           request_id: requestId, expected_profile_revision: canonical.revision, ...profile }
         : { kind: "agent_roster", project_key: projectKey, request_id: requestId,
           action: { kind: "set_tuning", member_id: canonical.member_id, model: profile.model,
-            reasoning: profile.reasoning, expected_core_revision: canonical.revision } };
+            reasoning: profile.reasoning, expected_core_revision: canonical.revision,
+            ...(profile.agent_id !== canonical.agent_id ? { agent_id: profile.agent_id } : {}),
+            ...Object.fromEntries(["runtime_target", "skip_permissions"].filter(field =>
+              profile[field] !== values(canonical)[field]).map(field => [field, profile[field]])) } };
       setTarget(key, { ...target, status: "saving", error: "", field: null,
-        pending: { request_id: requestId, profile, baseRevision: canonical.revision } });
+        pending: { request_id: requestId, profile, baseRevision: canonical.revision,
+          fields: canonical.role === "implementation" ? ["runtime_target", "skip_permissions"].filter(field => Object.hasOwn(request.action, field)) : [] } });
       try { onSave(request); } catch (_error) {
         applyTuningError({ project_key: projectKey, role: canonical.role, member_id: canonical.member_id,
           request_id: requestId, message: "Profile could not be sent. Retry when connected." });
@@ -340,7 +346,13 @@ export function createMemberTuningModel(projectKey, { onSave = () => {}, schedul
       if (requestId && current.pending && current.canonical.revision !== current.pending.baseRevision && current.canonical.revision !== snapshot.revision) {
         return { ...current, pending: null, status: "error", blocked: true, error: "This profile changed elsewhere. Reload the current profile, review your draft and retry." };
       }
-      const next = { ...current, available: snapshot.role === "pm" ? current.available : true, canonical: { ...current.canonical, ...snapshot } };
+      if (requestId && (current.pending?.fields || []).some(field => !Object.hasOwn(snapshot, field) || snapshot[field] === undefined)) {
+        return { ...current, pending: null, status: "error", blocked: true,
+          error: "Profile confirmation is incomplete. Reload the current profile, review your draft and retry." };
+      }
+      const next = { ...current, available: snapshot.role === "pm" ? current.available : true, canonical: { ...current.canonical, ...snapshot,
+        ...(snapshot.role === "implementation" ? { runtime_target: snapshot.runtime_target ?? null,
+          skip_permissions: typeof snapshot.skip_permissions === "boolean" ? snapshot.skip_permissions : null } : {}) } };
       if (requestId && current.pending) {
         next.pending = null;
         if (!equal(snapshot, current.pending.profile, snapshot.role)) {
@@ -358,14 +370,18 @@ export function createMemberTuningModel(projectKey, { onSave = () => {}, schedul
 
   function editTuning(role, memberId, patch, { composing = false } = {}) {
     const key = keyFor(role, memberId), target = model.read().targets[key];
-    if (!target || target.available === false || !patch || Object.keys(patch).some(field => !["agent_id", "model", "reasoning", ...(role === "pm" ? ["speed"] : [])].includes(field)
-      || patch[field] !== null && typeof patch[field] !== "string")) return;
-    if (role === "implementation" && patch.agent_id !== undefined && patch.agent_id !== target.canonical.agent_id) return;
+    if (!target || target.available === false || !patch || Object.keys(patch).some(field => !["agent_id", "model", "reasoning", ...(role === "pm" ? ["speed"] : ["runtime_target", "skip_permissions"])].includes(field)
+      || patch[field] !== null && typeof patch[field] !== (field === "skip_permissions" ? "boolean" : "string"))) return;
+    if (patch.runtime_target != null && !["Host", "Docker"].includes(patch.runtime_target)) return;
     const { speed, ...profilePatch } = patch;
     const draft = { ...target.draft, ...profilePatch };
-    if (profilePatch.agent_id !== undefined && profilePatch.agent_id !== target.draft.agent_id) {
+    const toolChanged = profilePatch.agent_id !== undefined && profilePatch.agent_id !== target.draft.agent_id;
+    if (toolChanged) {
       delete draft.codex_speed; delete draft.fast_mode;
+      if (role === "implementation") { draft.model = null; draft.reasoning = null; }
     }
+    if (role === "implementation" && target.composing && !toolChanged
+      && !Object.hasOwn(profilePatch, "model") && !Object.hasOwn(profilePatch, "reasoning")) composing = true;
     if (speed !== undefined) {
       const supported = draft.agent_id === "codex" ? ["", "off", "fast", "ultrafast"] : draft.agent_id === "claude" ? ["", "off", "fast"] : [];
       if (!supported.includes(speed)) return;
@@ -436,7 +452,8 @@ export function createMemberTuningModel(projectKey, { onSave = () => {}, schedul
       const core = member.saved_implementation_core, revision = member.saved_implementation_core_revision;
       const acknowledgement = pending?.canonical.member_id === memberId ? requestId : undefined;
       if (core && revision) applyTuningSnapshot({ project_key: projectKey, role: "implementation", member_id: memberId,
-        agent_id: core.agent_id, model: core.model, reasoning: core.reasoning, revision }, roster.error ? undefined : acknowledgement);
+        agent_id: core.agent_id, model: core.model, reasoning: core.reasoning, revision,
+        ...Object.fromEntries(["runtime_target", "skip_permissions"].filter(field => Object.hasOwn(core, field)).map(field => [field, core[field]])) }, roster.error ? undefined : acknowledgement);
       if (!core || !revision) {
         setTuningAvailable("implementation", memberId, false);
         if (acknowledgement) applyTuningError({ project_key: projectKey, role: "implementation", member_id: memberId,

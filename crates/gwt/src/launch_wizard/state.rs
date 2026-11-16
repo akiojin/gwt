@@ -10,12 +10,6 @@ impl LaunchWizardState {
                 .live_sessions
                 .iter()
                 .find(|session| session.session_id == entry.session_id)
-                .or_else(|| {
-                    context
-                        .live_sessions
-                        .iter()
-                        .find(|session| session.agent_id == entry.agent_id)
-                })
                 .map(|session| session.window_id.clone());
         }
     }

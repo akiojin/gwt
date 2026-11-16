@@ -33,6 +33,10 @@ pub struct AgentProfileCore {
     pub fast_mode: bool,
     #[serde(default)]
     pub codex_speed: gwt_agent::CodexSpeed,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_target: Option<gwt_agent::LaunchRuntimeTarget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_permissions: Option<bool>,
 }
 
 impl AgentProfileCore {
@@ -44,6 +48,8 @@ impl AgentProfileCore {
             version: profile.version.clone(),
             fast_mode: profile.fast_mode,
             codex_speed: profile.codex_speed,
+            runtime_target: None,
+            skip_permissions: None,
         }
     }
 
@@ -54,6 +60,20 @@ impl AgentProfileCore {
         profile.version.clone_from(&self.version);
         profile.fast_mode = self.fast_mode;
         profile.codex_speed = self.codex_speed;
+        if let Some(runtime_target) = self.runtime_target {
+            profile.runtime_target = runtime_target;
+        }
+        if let Some(skip_permissions) = self.skip_permissions {
+            profile.skip_permissions = skip_permissions;
+        }
+    }
+
+    fn retaining_overrides(mut self, previous: Option<&Self>) -> Self {
+        if let Some(previous) = previous {
+            self.runtime_target = previous.runtime_target;
+            self.skip_permissions = previous.skip_permissions;
+        }
+        self
     }
 }
 
@@ -554,6 +574,8 @@ fn ensure_cores(registry: &mut Registry) {
                     version: None,
                     fast_mode: false,
                     codex_speed: gwt_agent::CodexSpeed::Off,
+                    runtime_target: None,
+                    skip_permissions: None,
                 });
         }
     }
@@ -2293,7 +2315,7 @@ pub fn set_member_tuning(request: &crate::agent_names::MemberTuning) -> MemberTu
                 .get(&request.member_id)
                 .ok_or_else(|| invalid("Saved implementation core is unavailable; reload"))?;
             if member.agent_id.as_deref() != Some(core.agent_id.as_str()) {
-                return Err(invalid("The member's fixed implementation tool is inconsistent; inspect agent.registry.status"));
+                return Err(invalid("The member's saved implementation tool is inconsistent; inspect agent.registry.status"));
             }
             if implementation_core_revision(&request.member_id, core)
                 != request.expected_core_revision
@@ -2306,23 +2328,64 @@ pub fn set_member_tuning(request: &crate::agent_names::MemberTuning) -> MemberTu
                     .map(|text| text.trim().to_string())
                     .filter(|text| !text.is_empty())
             };
+            let mut next = core.clone();
+            let agent =
+                gwt_agent::resolve_agent_id(request.agent_id.as_deref().unwrap_or(&core.agent_id))
+                    .ok_or_else(|| invalid("Unknown Agent tool"))?;
+            let custom = if let gwt_agent::AgentId::Custom(id) = &agent {
+                Some(
+                    crate::issue_monitor::custom_coding_agent_definition(id).ok_or_else(|| {
+                        invalid("Choose a known coding tool when editing an Agent")
+                    })?,
+                )
+            } else {
+                None
+            };
             let model = normalize(&request.model);
             let reasoning = normalize(&request.reasoning);
             gwt_agent::validate_native_tuning(
-                &core.agent_id,
+                agent.command(),
                 model.as_deref(),
                 reasoning.as_deref(),
             )
             .map_err(invalid)?;
-            if core.model == model && core.reasoning == reasoning {
+            if next.agent_id != agent.command() {
+                next.agent_id = agent.command().into();
+                next.model = None;
+                next.reasoning = None;
+                next.version = None;
+                next.fast_mode = false;
+                next.codex_speed = gwt_agent::CodexSpeed::Off;
+            } else {
+                next.model = model;
+                next.reasoning = reasoning;
+            }
+            if let Some(runtime) = request.runtime_target {
+                next.runtime_target = runtime;
+            }
+            if let Some(skip) = request.skip_permissions {
+                next.skip_permissions = skip;
+            }
+            if next.skip_permissions == Some(true)
+                && !gwt_agent::provider_skip_mapping(&agent, custom.as_ref()).supported
+            {
+                return Err(invalid("This tool does not support skipping permissions. Choose normal permissions or inherit the project setting."));
+            }
+            if *core == next {
                 return Ok(());
             }
-            let core = current
+            current
                 .profiles
-                .get_mut(&request.member_id)
-                .expect("checked core");
-            core.model = model;
-            core.reasoning = reasoning;
+                .insert(request.member_id.clone(), next.clone());
+            current
+                .roster
+                .as_mut()
+                .expect("checked roster")
+                .members
+                .iter_mut()
+                .find(|member| member.agent_member_id == request.member_id)
+                .expect("checked member")
+                .agent_id = Some(next.agent_id);
             current.revision = current
                 .revision
                 .checked_add(1)
@@ -3019,8 +3082,9 @@ impl RegistryWrite {
                             != AgentProfileCore::from_profile(&profile)
                     });
                 if changed || !next.profiles.contains_key(id) {
-                    next.profiles
-                        .insert(id.clone(), AgentProfileCore::from_profile(&profile));
+                    let core = AgentProfileCore::from_profile(&profile)
+                        .retaining_overrides(next.profiles.get(id));
+                    next.profiles.insert(id.clone(), core);
                 }
             }
         }
@@ -3277,9 +3341,9 @@ fn add_source(
     project_profiles(registry, key, &mut prefs);
     for profile in prefs.launch_profile_pool() {
         if let Some(id) = &profile.agent_member_id {
-            registry
-                .profiles
-                .insert(id.clone(), AgentProfileCore::from_profile(&profile));
+            let core = AgentProfileCore::from_profile(&profile)
+                .retaining_overrides(registry.profiles.get(id));
+            registry.profiles.insert(id.clone(), core);
         }
     }
     project_identity(registry, key, &mut prefs)?;
@@ -4884,6 +4948,9 @@ mod tests {
             model: Some("  private-model  ".into()),
             reasoning: Some("high".into()),
             expected_core_revision: implementation_core_revision(&target, core),
+            agent_id: None,
+            runtime_target: None,
+            skip_permissions: None,
         };
         registry.profiles.insert(
             other.agent_member_id.clone(),
@@ -4894,6 +4961,8 @@ mod tests {
                 version: None,
                 fast_mode: false,
                 codex_speed: gwt_agent::CodexSpeed::Off,
+                runtime_target: None,
+                skip_permissions: None,
             },
         );
         save(&registry).unwrap();
@@ -4907,6 +4976,9 @@ mod tests {
         })
         .unwrap();
         let before = load().unwrap().unwrap();
+        let old_core_json = serde_json::to_value(before.profiles.get(&target).unwrap()).unwrap();
+        assert!(old_core_json.get("runtime_target").is_none());
+        assert!(old_core_json.get("skip_permissions").is_none());
         let mirror_bytes = fs::read(&mirror).unwrap();
         let floor_bytes = fs::read(mirror.with_extension("committed.json")).unwrap();
         let outcome = set_member_tuning(&request);
@@ -4929,6 +5001,86 @@ mod tests {
             fs::read(mirror.with_extension("committed.json")).unwrap(),
             floor_bytes
         );
+        let extended: crate::agent_names::MemberTuning = serde_json::from_value(serde_json::json!({
+            "member_id": target, "model": null, "reasoning": null, "agent_id": "claude",
+            "runtime_target": "Docker", "skip_permissions": false,
+            "expected_core_revision": implementation_core_revision(&target, after.profiles.get(&target).unwrap())
+        })).expect("new execution settings use the same tuning request");
+        assert!(set_member_tuning(&extended).error.is_none());
+        let edited = load().unwrap().unwrap();
+        let core = serde_json::to_value(edited.profiles.get(&target).unwrap()).unwrap();
+        assert_eq!(core["agent_id"], "claude");
+        assert_eq!(core["runtime_target"], "Docker");
+        assert_eq!(core["skip_permissions"], false);
+        assert_eq!(core["version"], serde_json::Value::Null);
+        assert_eq!(core["fast_mode"], false);
+        assert_eq!(edited.project_assignments, after.project_assignments);
+        assert_eq!(
+            edited.profiles.get(&other.agent_member_id),
+            after.profiles.get(&other.agent_member_id)
+        );
+        assert_eq!(fs::read(&mirror).unwrap(), mirror_bytes);
+        let edited_snapshot = SessionMemberSnapshot::load().unwrap();
+        let projected = edited_snapshot
+            .project_snapshot(&gwt_core::paths::project_scope_hash(&root))
+            .unwrap();
+        assert_eq!(projected.launch_profile_pool().len(), 1);
+        let resolved = member_profile(&projected, &target).unwrap();
+        assert_eq!(resolved.agent_id, "claude");
+        assert_eq!(
+            resolved.runtime_target,
+            gwt_agent::LaunchRuntimeTarget::Docker
+        );
+        assert!(!resolved.skip_permissions);
+        let retained: crate::agent_names::MemberTuning =
+            serde_json::from_value(serde_json::json!({
+                "member_id": target, "model": "changed-model", "reasoning": null,
+                "expected_core_revision": edited_snapshot.implementation_core(&target).unwrap().1
+            }))
+            .unwrap();
+        assert!(set_member_tuning(&retained).error.is_none());
+        let retained_snapshot = SessionMemberSnapshot::load().unwrap();
+        let retained_core = retained_snapshot.implementation_core(&target).unwrap().0;
+        assert_eq!(
+            retained_core.runtime_target,
+            Some(gwt_agent::LaunchRuntimeTarget::Docker)
+        );
+        assert_eq!(retained_core.skip_permissions, Some(false));
+        let carried = AgentProfileCore::from_profile(&IssueMonitorLaunchProfile::from(
+            &gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::ClaudeCode).build(),
+        ))
+        .retaining_overrides(Some(&retained_core));
+        assert_eq!(carried.runtime_target, retained_core.runtime_target);
+        assert_eq!(carried.skip_permissions, retained_core.skip_permissions);
+        let reset: crate::agent_names::MemberTuning = serde_json::from_value(serde_json::json!({
+            "member_id": target, "model": null, "reasoning": null,
+            "runtime_target": null, "skip_permissions": null,
+            "expected_core_revision": retained_snapshot.implementation_core(&target).unwrap().1
+        }))
+        .unwrap();
+        assert!(set_member_tuning(&reset).error.is_none());
+        let reset_core = SessionMemberSnapshot::load()
+            .unwrap()
+            .implementation_core(&target)
+            .unwrap()
+            .0;
+        assert!(reset_core.runtime_target.is_none() && reset_core.skip_permissions.is_none());
+        assert!(serde_json::to_value(&reset_core)
+            .unwrap()
+            .get("runtime_target")
+            .is_none());
+        let invalid: crate::agent_names::MemberTuning = serde_json::from_value(serde_json::json!({
+            "member_id": target, "model": null, "reasoning": null, "agent_id": "openclaw",
+            "skip_permissions": true, "expected_core_revision": implementation_core_revision(&target, &reset_core)
+        })).unwrap();
+        let before_invalid = fs::read(path()).unwrap();
+        assert!(set_member_tuning(&invalid)
+            .error
+            .unwrap()
+            .contains("permissions"));
+        assert_eq!(fs::read(path()).unwrap(), before_invalid);
+        // Keep the original invalid/stale regression based on the pre-extension state.
+        save(&after).unwrap();
         let bytes = fs::read(path()).unwrap();
         let stale = set_member_tuning(&request);
         assert!(stale.error.unwrap().contains("changed elsewhere"));
@@ -5089,6 +5241,9 @@ mod tests {
                 .implementation_core(&member.agent_member_id)
                 .unwrap()
                 .1,
+            agent_id: None,
+            runtime_target: None,
+            skip_permissions: None,
         };
         assert!(
             set_member_tuning(&tuning).error.is_none(),

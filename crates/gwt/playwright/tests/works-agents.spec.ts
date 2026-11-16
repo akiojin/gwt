@@ -817,12 +817,24 @@ test.describe("Works and Agents approved baseline", () => {
     await expect(works(page).locator('[data-availability="today"]')).toBeVisible();
     await expect(works(page).locator('[data-availability="fleet"]')).toBeVisible();
     await expect(works(page).locator(".works-source-note")).toBeVisible();
+    await openRail(page, "agents");
+    await roster(page).getByRole("tab", { name: "Team", exact: true }).click();
+    await resting.click();
+    await expect(resting).toHaveAttribute("aria-selected", "true");
     await page.reload();
     await openRail(page, "agents");
     await expect(resting).toBeVisible();
     await expect(resting.locator(".roster-state")).toHaveText("Resting");
     expect(await page.evaluate(() => (window as any).__worksAgentsFixture.members.find(member => member.agent_member_id === "m-added"))).toEqual(restingRecord);
-    await resting.click();
+    await expect(resting).toHaveAttribute("aria-selected", "true");
+    await expect(roster(page).locator(".roster-detail h3")).toHaveText("Dahlia");
+    const beforeReconnect = (await sent(page)).filter(message => message.kind === "agent_roster" && message.action.kind !== "read");
+    const readyBeforeReconnect = (await sent(page)).filter(message => message.kind === "frontend_ready").length;
+    await page.evaluate(() => (window as any).__worksAgentsFixture.reconnectCatalogs());
+    await expect.poll(() => page.evaluate(() => (window as any).__worksAgentsFixture.sent.filter(message => message.kind === "frontend_ready").length)).toBeGreaterThan(readyBeforeReconnect);
+    await expect(resting).toHaveAttribute("aria-selected", "true");
+    expect(await page.evaluate(() => (window as any).__worksAgentsFixture.members.find(member => member.agent_member_id === "m-added"))).toEqual(restingRecord);
+    expect((await sent(page)).filter(message => message.kind === "agent_roster" && message.action.kind !== "read")).toEqual(beforeReconnect);
     await expect(roster(page).locator(".roster-saved-settings")).toContainText("Model: retained-model");
     expect(await roster(page).locator(".roster-history li").allTextContents()).toEqual([
       expect.stringContaining("Later retained"), expect.stringContaining("Earlier retained"),

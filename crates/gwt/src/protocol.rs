@@ -2387,6 +2387,24 @@ pub struct AgentRosterView {
     pub error: Option<String>,
 }
 
+// The view acknowledges inherited settings explicitly; persistence keeps absent
+// overrides omitted so existing core revision tokens remain stable.
+fn serialize_member_core_view<S: serde::Serializer>(
+    core: &Option<crate::agent_registry::AgentProfileCore>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    let mut value = serde_json::to_value(core).map_err(serde::ser::Error::custom)?;
+    if let Some(value) = value.as_object_mut() {
+        value
+            .entry("runtime_target")
+            .or_insert(serde_json::Value::Null);
+        value
+            .entry("skip_permissions")
+            .or_insert(serde_json::Value::Null);
+    }
+    value.serialize(serializer)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentRosterMemberView {
     #[serde(flatten)]
@@ -2403,7 +2421,7 @@ pub struct AgentRosterMemberView {
     /// Content identity of saved manual tuning, not a chronological/CAS counter.
     #[serde(default)]
     pub saved_manual_revision: Option<String>,
-    #[serde(default)]
+    #[serde(default, serialize_with = "serialize_member_core_view")]
     pub saved_implementation_core: Option<crate::agent_registry::AgentProfileCore>,
     #[serde(default)]
     pub saved_implementation_core_revision: Option<String>,
@@ -7575,6 +7593,57 @@ mod member_tuning_wire_tests {
             missing["action"].as_object_mut().unwrap().remove(key);
             assert!(serde_json::from_value::<super::FrontendEvent>(missing).is_err());
         }
+        let mut extended = valid.clone();
+        extended["action"]["agent_id"] = serde_json::json!("claude");
+        extended["action"]["runtime_target"] = serde_json::json!("Docker");
+        extended["action"]["skip_permissions"] = serde_json::json!(false);
+        assert!(serde_json::from_value::<super::FrontendEvent>(extended).is_ok());
+        let mut inherited = valid.clone();
+        inherited["action"]["runtime_target"] = serde_json::Value::Null;
+        inherited["action"]["skip_permissions"] = serde_json::Value::Null;
+        let inherited_event = serde_json::from_value::<super::FrontendEvent>(inherited).unwrap();
+        let super::FrontendEvent::AgentRoster { action, .. } = inherited_event else {
+            panic!("expected roster");
+        };
+        let inherited_wire = serde_json::json!({"action": action});
+        assert!(inherited_wire["action"].get("agent_id").is_none());
+        assert_eq!(
+            inherited_wire["action"]["runtime_target"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            inherited_wire["action"]["skip_permissions"],
+            serde_json::Value::Null
+        );
+        let super::FrontendEvent::AgentRoster { action, .. } =
+            serde_json::from_value::<super::FrontendEvent>(valid.clone()).unwrap()
+        else {
+            panic!("expected roster");
+        };
+        let legacy_wire = serde_json::json!({"action": action});
+        assert!(legacy_wire["action"].get("agent_id").is_none());
+        assert!(legacy_wire["action"].get("runtime_target").is_none());
+        assert!(legacy_wire["action"].get("skip_permissions").is_none());
+        let view: super::AgentRosterMemberView = serde_json::from_value(serde_json::json!({
+            "agent_member_id":"member", "name":"Member", "enabled":true,
+            "created_at":"2026-11-16T00:00:00Z", "provider":"codex", "model":null,
+            "saved_implementation_core": {"agent_id":"codex", "model":null, "reasoning":null,
+                "version":null, "fast_mode":false},
+            "history":[], "issue_count":null, "landed_count":null, "active_seconds":null, "tokens":null
+        })).unwrap();
+        let raw_core =
+            serde_json::to_value(view.saved_implementation_core.as_ref().unwrap()).unwrap();
+        assert!(raw_core.get("runtime_target").is_none());
+        assert!(raw_core.get("skip_permissions").is_none());
+        let rendered = serde_json::to_value(view).unwrap();
+        assert_eq!(
+            rendered["saved_implementation_core"].get("runtime_target"),
+            Some(&serde_json::Value::Null)
+        );
+        assert_eq!(
+            rendered["saved_implementation_core"].get("skip_permissions"),
+            Some(&serde_json::Value::Null)
+        );
         let mut foreign = valid;
         foreign["action"]["version"] = serde_json::json!("old");
         assert!(serde_json::from_value::<super::FrontendEvent>(foreign).is_err());
