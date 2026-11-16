@@ -4265,13 +4265,27 @@ fn agent_roster_view_from_snapshot(
             session_id: session.id.clone(),
             name: session.agent_name.clone(),
             provider: Some(session.agent_id.command().to_string()),
+            role: if gwt::pm_registry::is_canonical_pm_worktree(&session.worktree_path) {
+                Some("pm")
+            } else if session.review_dispatch {
+                Some("review")
+            } else if session.agent_member_id.is_some() || session.execution_binding.is_some() {
+                Some("implementation")
+            } else {
+                None
+            }
+            .map(str::to_string),
             model: session.model.clone(),
             issue_number: session.linked_issue_number,
             title,
             result: Some(format!("{:?}", session.status)),
             started_at: session.created_at.to_rfc3339(),
-            ended_at: (session.status == gwt_agent::AgentStatus::Stopped)
-                .then(|| session.updated_at.to_rfc3339()),
+            ended_at: matches!(
+                session.status,
+                gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
+            )
+            .then(|| session.last_exited_at.map(|exited| exited.to_rfc3339()))
+            .flatten(),
         }
     };
     let members = roster
@@ -6950,8 +6964,9 @@ mod bounded_cache_merge_tests {
         assert_eq!(history["name"], "Recorded name");
         assert_eq!(history["provider"], "codex");
         assert_eq!(history["model"], "recorded-model");
+        assert_eq!(history["role"], "implementation");
         let mut legacy_payload = history.clone();
-        for key in ["name", "provider", "model"] {
+        for key in ["name", "provider", "model", "role"] {
             legacy_payload.as_object_mut().unwrap().remove(key);
         }
         let legacy_payload: gwt::AgentAssignmentHistoryView =
@@ -6960,6 +6975,7 @@ mod bounded_cache_merge_tests {
             legacy_payload.name.is_none()
                 && legacy_payload.provider.is_none()
                 && legacy_payload.model.is_none()
+                && legacy_payload.role.is_none()
         );
         assert_eq!(view.members[0].member.name, "Current name");
         assert_eq!(view.members[0].provider.as_deref(), Some("claude"));
@@ -7051,6 +7067,53 @@ mod bounded_cache_merge_tests {
             .past_contributors
             .iter()
             .any(|entry| entry.session_id == "foreign"));
+
+        // History uses the Session's recorded role and exit receipt, not its
+        // current member settings or a later Session update timestamp.
+        let projected_history = |session: gwt_agent::Session| {
+            serde_json::to_value(
+                agent_roster_view(
+                    &context,
+                    &prefs,
+                    &[Arc::new(session)],
+                    &[],
+                    true,
+                    &gwt_core::paths::gwt_sessions_dir(),
+                )
+                .unwrap()
+                .members
+                .remove(0)
+                .history
+                .remove(0),
+            )
+            .unwrap()
+        };
+        let mut recorded = sessions[0].as_ref().clone();
+        recorded.status = gwt_agent::AgentStatus::Stopped;
+        let exited_at = recorded.created_at + chrono::Duration::seconds(60);
+        recorded.last_exited_at = Some(exited_at);
+        recorded.updated_at = exited_at + chrono::Duration::seconds(60);
+        let stopped = projected_history(recorded.clone());
+        assert_eq!(stopped["role"], "implementation");
+        assert_eq!(stopped["started_at"], recorded.created_at.to_rfc3339());
+        assert_eq!(stopped["ended_at"], exited_at.to_rfc3339());
+        assert_eq!(stopped["result"], "Stopped");
+        recorded.status = gwt_agent::AgentStatus::Interrupted;
+        assert_eq!(
+            projected_history(recorded.clone())["ended_at"],
+            exited_at.to_rfc3339()
+        );
+        recorded.last_exited_at = None;
+        assert!(projected_history(recorded.clone())["ended_at"].is_null());
+        recorded.status = gwt_agent::AgentStatus::Running;
+        recorded.last_exited_at = Some(exited_at);
+        assert!(projected_history(recorded.clone())["ended_at"].is_null());
+        recorded.review_dispatch = true;
+        assert_eq!(projected_history(recorded.clone())["role"], "review");
+        recorded.project_state_root = Some(root);
+        recorded.worktree_path =
+            gwt_core::paths::gwt_project_dir(&context.project_key).join("pm/worktree");
+        assert_eq!(projected_history(recorded)["role"], "pm");
     }
 
     fn retired_activity_fixture(

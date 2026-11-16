@@ -1,6 +1,377 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.166.2] - 2026-11-16
+
+### Bug Fixes
+
+- **agents:** 移行で取り込まれた legacy PM 予約（停止済み Session 束縛）を新規 PM 起動時に reconciliation する
+
+## [9.166.1] - 2026-11-16
+
+### Bug Fixes
+
+- **skills:** 書き込み対象と祖先のsymlinkを共通ガードで拒否する
+- **skills:** Prune対象のないproject共有リンクを保持する
+- **issue-monitor:** Drain解除後の保留claimをretry_backoffと誤報告しない
+- **ci:** Measure completion with skipped required checks
+- **ci:** Leave reversed skipped-only windows unmeasured
+- **agents:** Reactivate a selected resting member
+- **agents:** 未掲載モデルの案内と設定保存の検証を整合する
+- **agents:** Preserve catalog drafts and recorded history facts
+- **agents:** Preserve registration defaults and tool drafts
+- **hooks:** Reject queued notifications from replaced sessions
+- **restore:** Reserve names from the shared registry history
+- **actions:** Nested Bare layout の登録済み PM を workflow policy 操作で受理する
+- **concern:** 拒否時に不足・不正な params 名を返す
+- **agents:** Windows で Grok の managed hook を Git Bash で実行し hook 失敗を即時報告する
+- **daemon:** 到達不能な退役候補 daemon の stale endpoint を除去して新 daemon を起動する
+- **skills:** Symlink検査をworktree配下の管理名前空間に限定する
+- **skills:** 公開docから非公開関数へのリンクを外す
+- **agents:** 消滅した host の未 spawn PM 予約を新規 PM 起動時に reconciliation する
+
+### Features
+
+- **mobile:** Host発行inviteの登録とclaimをregistrationでHost台帳へ結び付ける
+- **agents:** Select model and reasoning during registration
+
+### Miscellaneous Tasks
+
+- **work:** 作業イベントを記録する
+- **work:** 作業イベントを記録する
+- **work:** 作業イベントを記録する
+- **work:** Include final T94431 delivery event
+- **work:** Link T94431 delivery to PR 7430
+- **work:** Link T94432 delivery to PR 7434
+- **work:** Link T94433 delivery to PR 7436
+- **work:** Record native macOS timing audit
+- **work:** Link T94434 delivery to PR 7439
+- **work:** Link T94435 delivery to PR 7443
+- **work:** Record resting member pull request
+- **work:** Link T94436 delivery to PR 7446
+- **work:** T94437の配送をPR 7448へ関連付ける
+- **work:** T25設定検証とPR7452の配送履歴を記録する
+- **work:** Link T94438 delivery to PR 7453
+- **work:** 共有CIビルド案の採否と計測を記録する
+- **work:** Link T94439 delivery to PR 7456
+- **work:** Record PR 7457 delivery history
+- **work:** Link T94440 delivery to PR 7459
+- **work:** Record PR 7458 delivery history
+- **work:** Link T94441 delivery to PR 7461
+- **work:** 作業イベントを記録する
+- **work:** Issue 6877 の作業イベントを記録する
+- **work:** PR 7466 の配送記録を追加する
+- **work:** Issue 4249 の作業イベントを記録する
+- **work:** Issue #7259 の作業イベントを記録する
+- **work:** Issue #7259 の作業イベントを記録する
+- **work:** Issue #7259 の作業イベントを記録する
+- **work:** Issue #7259 の作業イベントを記録する
+- **work:** Issue #7259 の配送完了を記録する
+- **work:** Issue #7465 の作業イベントを記録する
+- **work:** Issue #7463 の作業イベントを記録する
+
+### Performance
+
+- **ci:** Omit Linux build artifact line tables
+- **ci:** MacOSキャッシュの保存元を完全warmに限定する
+- **ci:** Avoid unused binaries in socket preparation
+- **ci:** Share Python runtime for model verification
+- **monitor:** Pace launch-discovery timeline pages across periodic scans
+
+### Testing
+
+- **monitor:** Cancel switch during target revalidation
+- **e2e:** Worksの起動同期と最初の失敗診断を保持する
+- **monitor:** Preserve input during target revalidation
+- **works:** Await measured children before manual fleet launch
+- **works:** Scope census wait to fixed capacity fixtures
+- **works:** Match Windows census against the PTY child identity
+- **monitor:** Revalidate submitted input during target refresh
+- **monitor:** Preserve drafts during the final switch target check
+- **agents:** Verify issue assignments across two projects
+- **monitor:** Preserve cancellation during the final switch check
+- **monitor:** Reject checkpoint body after reserved input
+- **agents:** 休止中の作業終了と名簿保持を検証する
+- **monitor:** 同Host後継を旧Switch完了通知から保全する回帰検証
+- **monitor:** Preserve successors from stale hook and output events
+- **monitor:** Prove input ordering after checkpoint body
+- **monitor:** Prove checkpoint reservation input fences
+- **agents:** 消滅した host incarnation の PM 予約が全起動を塞ぐ回帰テストを追加
+
+## [9.166.0] - 2026-11-15
+
+### Bug Fixes
+
+- **monitor:** Invalidate stale stop observations before prompts
+- **monitor:** Preserve cancellation before prompt acceptance
+- **mobile:** Profileの操作を狭画面で44pxにし環境変数を2列カードで表示する
+- **mobile:** 狭画面のProfile一覧を30vhで頭打ちにしeditorを押し出さない
+- **hook:** Allow scratchpad and temporary artifact operations
+- **mobile:** Launch Wizardの操作を狭画面で44pxのタッチ目標にする
+- **runtime:** 未作成の手動起動をキャンセル時に精算する
+- **launch:** Intake / 新規ブランチ launch で worktree 設定 env を再適用する
+- **mobile:** Notification centerの操作を狭画面で44pxのタッチ目標にする
+- **mobile:** Notification centerのDetailsに開閉マーカーを残す
+- **index:** Retain base metadata during interrupted repair
+- **workspace:** Owner と builtin agent の正規化を統一
+- **mobile:** 全modalの操作を狭画面で44pxのタッチ目標にする
+- **mobile:** Modal内のsummaryを44px行の中央に揃える
+- **runtime:** 同一 Session の restore で残る placeholder 行を退役する
+- **mobile:** 登録数のtest用accessorを利用側と同じunix限定にする
+- **monitor:** Fence stop observations before raw input
+- **mobile:** CoordinatorがHost資格のsecretを解放時に消去する
+- **monitor:** Advance pending switches without read requests
+- **monitor:** 制御再送時の通知履歴を再現可能にする
+- **usage:** モデル別のコンテキスト推定と増分キャッシュを統一
+- **monitor:** 同時刻の通知順と履歴の時系列を保持する
+- **mobile:** Pairing招待のsecretを解放時に消去する
+- **pm:** PM タイトルを自身の操作に限定する
+- **issue-monitor:** Allow keyring-only codex authentication
+- **execution:** Align holder diagnostics and recovery guidance
+- **mobile:** Host資格secretの保持bufferを解放時に消去する
+- **mobile:** Inviteのreplay fenceをHostごと16件に制限する
+- **test:** Unix専用の準備変数を同じcfg内へ移動
+- **monitor:** Recover saved switches when the owner restarts
+- **agents:** 初期復元時の画面選択を保持する
+- **agents:** Preserve shared ownership runtime contracts
+- **works:** Preserve content during surface reactivation
+- **monitor:** Retain accepted owner during materialization recovery
+- **test:** Prepare Windows roster before owner activation
+- **monitor:** 予定保存と起動受付の適合検査を揃える
+- **agents:** Reconcile confirmed display name edits
+- **agents:** 休止メンバーを登録一覧に保持する
+- **works:** 同一端末の表示と所有権を保持する
+- **attachments:** 送信対象と進捗を操作ごとに固定する
+- **pm:** 編集権限を完全な対象プロジェクト状態に限定する
+- **attachments:** 元Sessionの物理書込み結果で完了を確定する
+- **agents:** 登録と起動の権限および設定保持を修復する
+- **pm:** Refresh role cache from the accepted project owner
+- **agents:** Resume exited diagnostic sessions through their owner
+- **agents:** Preserve startup identity and pending roster controls
+- **agents:** Scope shared member assignments by project
+- **agents:** Align shared assignment regression fixtures
+- **agents:** Keep retained Works previews live
+- **agents:** Discount reaped children from admission census
+- **agents:** 未初期化の共通名簿を panic せずエラーで返す
+- **pm:** 所有者と更新番号で古い名簿の PM 表示を防ぐ
+- **launch:** Codex speed の owner 照合を実効設定に揃える
+- 起動拒否理由と既存テストの統合契約を保持する
+- **agents:** モバイルのチェックボックス操作領域を復元
+- **ci:** Restore operational binaries before Windows headed checks
+- **ui:** Preserve workspace order around terminal snapshots
+- **runtime:** Publish retained STOP window before census
+- **works:** Keep coherent successor terminal identity stable
+- **terminal:** Retain tail position across viewport fit
+- **startup:** Retain ready notifications during restore admission
+- **agents:** Wait for fresh census during automatic PM restore
+
+### Documentation
+
+- **mobile:** Coordinatorの無通信期限が遅いhandlerも切ることを明記する
+- **usage:** 公開APIから非公開定数へのrustdocリンクを修正
+- **perf:** Distinguish private native refresh auditing
+
+### Features
+
+- **mobile:** Coordinatorの総接続数を上限化し無通信の接続を閉じる
+- **mobile:** Coordinatorの接続元ごとの同時接続数を上限化する
+- **pm:** タスク詳細から理由付きで追跡を取り消す
+- **mobile:** Coordinatorのrequest bodyを64KiBに制限する
+- **pm:** 不透明キーで選択タスクを再オープンする
+- **mobile:** CoordinatorにHost登録WebSocket入口を追加する
+- **mobile:** Coordinatorの登録をHostごと8件に制限する
+- **pm:** 完了Taskを詳細画面から再オープンする
+- **monitor:** PM向け通知履歴を保持する
+- **pm:** 選択Taskキーで完了を記録する
+- **mobile:** Hostからcoordinatorへ登録WSSで接続しleaseを更新する
+- **mobile:** Host登録WSSでinviteを登録し回復可能な拒否を返す
+- **mobile:** Host登録clientからinviteを登録し結果を返す
+- **mobile:** Browser専用WSSでinviteをclaimしHost終了で閉じる
+- **mobile:** Browser claimと切断をHost登録socketへ通知する
+- **mobile:** Claim済みbrowserとHostの間でsignalを中継する
+- **mobile:** Host登録clientからclaim済みbrowserへsignalを送る
+- **mobile:** Claim通知でclaimされたinviteをHostへ示す
+- **mobile:** 承認済み端末のreconnectを登録中のHostへ中継する
+- **agents:** 共通名簿と割当の所有権を一元化する
+- **agents:** PM と実装メンバーの共通編集を追加する
+- **agents:** PM の登録と起動を共通メンバーに接続する
+- **agents:** メンバーと PM の設定を安全に共通編集する
+- **agents:** Consolidate project PM settings in Agents
+- **mobile:** Browser signalを端末単位のrateで制限する
+- **mobile:** Host socketのmessageをHost単位のrateで制限する
+- **mobile:** Browser開始要求を接続元単位のrateで制限する
+- **mobile:** Host clientのsignal送信をcoordinator通知のrateで自己制限する
+- **mobile:** Pairing要求を端末鍵所持proofと接続peerに結び付ける
+- **mobile:** Pairing要求をPC発行inviteのclaimに一回だけ結び付ける
+
+### Miscellaneous Tasks
+
+- **work:** Issue #5082 AC-22 の作業記録を保存する
+- **work:** Issue #5082 の PM 裁定待ちの作業記録を保存する
+- **work:** Issue #5082 の blocked 精算記録を保存する
+- **work:** Issue #5082 T21-storage slice の作業記録を保存する
+- **work:** Record issue 3165 successor settlement
+- **work:** Record issue 3165 current generation settlement
+- **work:** Record issue 3165 prompt-fence delivery
+- **work:** Record launch test verification
+- **work:** T-005lw の Work イベントを保存する
+- **work:** Issue #3910 の Work event を記録
+- **work:** T-5170-G の Work イベントを保存する
+- **work:** Issue #3441 の PR メタデータを保存
+- **work:** #4735 T-MANUAL-EARLY 配送確認の Work イベントを記録
+- **work:** #4735 RSR 前提 fixture 探索結果の Work イベントを記録
+- **work:** #4735 RSR 同一 Session restore 修正の Work イベントを記録
+- **work:** T-003l1aaのWork eventを記録する
+- **work:** タスク取消PRの関連付けを記録する
+- **work:** 再オープンPRの関連付けを記録する
+- **work:** 作業イベントを記録する
+- **work:** 作業イベントを記録する
+- **work:** 作業イベントを記録する
+- **work:** 診断証跡PRの関連付けを記録する
+- **work:** Reconcile issue 3165 delivery evidence
+- **work:** 作業イベントを記録する
+- **ci:** 必須チェックの完了時間と全緑判定を記録
+- **work:** 再オープンUIのPR関連付けを記録する
+- **work:** PR の作業イベントを記録する
+- **work:** PR #7292 の関連付け履歴を記録
+- **work:** Keyed CompleteのPR関連付けを記録する
+- **work:** 作業イベントを記録する
+- **work:** PR #7293 の配信先を記録する
+- **work:** Record PR 7367 delivery metadata
+- **work:** 作業イベントを記録する
+- **work:** Record Issue #4251 PR association
+- **work:** Record PR 7373 delivery metadata
+- **work:** 作業イベントを記録する
+- **work:** 作業イベントを記録する
+- **work:** Record PR 7376 delivery metadata
+- **work:** Record T94419 delivery PR
+- **work:** Record T94420 delivery PR
+- **work:** Python CI改善のPRを記録
+- **work:** Record T94421 delivery PR
+- **work:** Record PR 7384 delivery
+- **work:** Record T94422 delivery PR
+- **work:** Record T94423 delivery PR
+- **work:** Record PR 7389 delivery
+- **work:** Record PR 7390 delivery
+- **work:** Record T94424 delivery PR
+- **work:** Record PR 7393 delivery
+- **work:** Record PR 7394 delivery
+- **work:** Record PR 7396 delivery
+- **work:** Record PR 7397 delivery
+- **work:** Record PR 7398 delivery
+- **work:** Record PR 7396 merged state
+- **work:** Record PR 7400 delivery
+- **work:** Record PR 7402 delivery
+- **work:** Record PR 7403 delivery
+- **work:** 更新適用の待機状態を記録 [skip ci]
+- **work:** Issue #4777 の再開と検証引継ぎを記録
+- **work:** Issue #4777 の再開待機を保存する
+- **work:** Issue #4777 の容量修復待ちを引き継ぐ
+- **work:** Issue #4777 の再開 checkpoint を保存する
+- **work:** Issue #4777 の窓解放 handoff を保存する
+- **work:** Issue #4777 の検証結果と再開条件を保存する
+- **work:** 共通名簿とWorksの検証結果を記録
+- **work:** Record rejected dependency audit runner experiment
+- **work:** Record PR 7405 delivery
+- **work:** Record PR 7425 delivery
+
+### Performance
+
+- **persistence:** MacOS の atomic write で rename 前の file sync を barrier にする
+- **ci:** Test workflow の gate job を source-sync 1つに統合する
+- **ci:** Omit line tables from Linux workspace tests
+- **index:** Reuse payloads for unchanged canonical trees
+- **ci:** Windows agentの重複ビルドを除去
+- **ci:** MacOSソケット検証のビルドを共有する
+- **test:** 終了済みfixture PIDの照会を省く
+- **ci:** コンパイル対象に合わせてFlakeの再実行を絞る
+- **ci:** Overlap Linux timeout checks with artifact builds
+- **index:** Avoid redundant collection and git startup
+- **ci:** Cancel duplicate Test work after metadata pushes
+- **ci:** Run source classification on ubuntu-slim
+- **ci:** Python検証で不要なCUDA依存を省く
+- **ci:** Skip libraries proven unaffected by changed sources
+- **ci:** Run frontend unit files with two workers
+- **ci:** Use slim runners for required result aggregation
+- **ci:** Windowsブラウザ導入をコンパイルと並行化
+- **ci:** Windows cmd検証とdriver反復を並行化
+- **ci:** Linux infrastructureのデバッグ情報を省く
+- **ci:** Reuse workspace artifacts for front-door tests
+- **ci:** Run dependency audits on a slim runner
+- **ci:** Omit Windows core test line tables
+
+### Testing
+
+- **persistence:** Rename 前 sync のテストから Windows で不成立の read-only ケースを除く
+- **launch:** Harden installed provider fixture assertions
+- **launch:** Isolate the resume assertion fixture home
+- **migration:** Make rollback acceptance deterministic
+- **verify:** Pin inherited PATH and child git resolution
+- **hook:** Keep rejection fixtures outside nested temp roots
+- **workspace:** 修復テスト本体で環境ロックを保持
+- **pm:** コールド復元の診断証跡を保持する
+- **monitor:** Provider終了後のキュー自動配車を検証
+- **monitor:** 状態レスポンスの空履歴を検証する
+- **monitor:** 明示停止中の終了と再開を検証
+- **monitor:** 固定担当の終了後配車を検証
+- **pm:** 操作テストの環境変数を共有ロックで保護する
+- **pm:** 再起動後のタイトルに役割と初期活動を期待する
+- **mobile:** Host登録WSSの64KiB上限と容量503を実routeで固定する
+- **issue-monitor:** Make fifo auth refusal explicit
+- **monitor:** 停止holdの保護と明示復帰を検証
+- **monitor:** 他者claimを守る自然配車を検証
+- **ci:** Pin replacement recovery budget after shutdown timeout
+- **monitor:** 未完依存を守る自然配車を検証
+- **ci:** 初回censusを待って起動設定を比較する
+- **monitor:** Protect checkpoint switch from post-ack input
+- **monitor:** Preserve unsaved source after checkpoint ack
+- **monitor:** Preserve cancellation after checkpoint ack
+- **monitor:** Preserve source after checkpoint target removal
+- **monitor:** ACK後の実ジョブ完了を待って切り替える
+- **monitor:** Preserve cancellation after pending job exits
+- **mobile:** Signal超過時のconnection close試験をイベント待ちにする
+- **monitor:** Preserve source while job cwd is unknown
+- **ci:** Align derived gate command with workspace reuse
+- **agents:** Isolate continuation child Codex homes
+- **agents:** Isolate fake provider config and retain failure phases
+- **agents:** Preserve roster replies and broker admission
+- **agents:** Observe census before failed launch replay baseline
+- **agents:** Cover fleet close caller prefs contention
+- **agents:** 登録と実PMの表示保持を検証する
+- **attachments:** 実添付の物理受信から表示完了まで検証する
+- **ui:** Qualify the native owner before live PM verification
+- **ui:** Observe native owner reap before cold restart
+- **e2e:** PM 設定の受入を更新前 checkpoint に保存 [skip ci]
+- **e2e:** PM 設定の Tool 保存と起動完了の観測を整える
+- **e2e:** Drain owned Host before cold restore
+- **gui:** 添付検証に正規のsource起動を使う
+- **runtime:** Await authority before sibling discovery
+- **issues:** Retain launch authority until exit receipt
+- **terminal:** Await native repaint before reading baseline
+- **notifications:** Isolate synthetic events from live capacity
+- **pm:** 共通 Agents 設定で保存と再起動表示を検証する
+- **pm:** Native renderer の機械入力と診断記録を整える
+- **terminal:** 実 PTY の登録後に入力 probe を開始する
+- **fixture:** Done 操作に provider 自身の識別情報を渡す
+- **terminal:** Native の同期再描画完了を厳密に確認する
+- **e2e:** 保存設定のCodex speed期待を実効値へ揃える
+- **e2e:** 再入場の最新性とPTY起動前提を契約に整合する
+- **agents:** Windowsの5台復元に資源fixtureを使う
+- **terminal:** Handle native quota warning in renderer acceptance
+- **terminal:** Stop native verification on quota warnings
+- **runtime:** Configure the restored agent fixture tool
+- **launch:** Align controls with the active Work entry
+- **ci:** Allow operational restore after shared Windows tests
+- **runtime:** Wait for the durable census fault baseline
+- **daemon:** Initialize registry before normal shutdown checks
+- Align settings and Windows ownership fixtures
+- **runtime:** Retain the observed raw census baseline
+- **issues:** Observe canonical roster and launch receipts
+- **runtime:** Bind admission baseline to durable census
+- **daemon:** Isolate authority retry preferences
+- **monitor:** Preserve unsent draft after checkpoint ack
+- **monitor:** Preserve draft before initial switch request
+
 ## [9.165.0] - 2026-11-14
 
 ### Bug Fixes

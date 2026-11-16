@@ -155,6 +155,8 @@ pub struct IssueMonitorAgentChoices {
     pub name: String,
     pub is_custom: bool,
     pub models: Vec<IssueMonitorModelChoices>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_catalog_warning: Option<String>,
     pub model_suggestions: Vec<String>,
     pub default_model: String,
     pub reasoning_options: Vec<LaunchWizardOptionView>,

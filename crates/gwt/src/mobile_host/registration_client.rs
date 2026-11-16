@@ -18,9 +18,15 @@
 //! WebSocket frame cannot be wiped (as for the bearer). Dropping every invite
 //! sender only ends invite input, not the registration.
 //!
-//! The coordinator announces browser connections that claimed this
-//! registration's invites (naming the invite by [`InviteRequest::invite_id`])
-//! or that reconnect an approved device (naming the unverified device ID),
+//! [`register_invite`] issues an invite on the PC authority's ledger and
+//! registers it. The coordinator announces browser connections that claimed
+//! this registration's invites (naming the invite by
+//! [`InviteRequest::invite_id`]); the client binds each claim to the ledger and
+//! reports it, or closes a connection whose invite this Host did not issue (or
+//! that expired or was already claimed) without reporting the claim. A closed
+//! connection's unapproved pairing is dropped before its close is reported.
+//! Connections may also arrive
+//! that reconnect an approved device (naming the unverified device ID),
 //! the opaque signals each relays and its close; each
 //! becomes a [`ConnectionEvent`] for the caller.
 //! A caller that stopped receiving is ignored, but a full event channel ends
@@ -42,7 +48,7 @@
 //! for a token, which backpressures the caller's bounded channel.
 
 use super::credential::LoadedHostCredential;
-use crate::mobile_connection::{AuthorizationError, MobileAuthorization};
+use crate::mobile_connection::{AuthorizationError, IssuedInvite, MobileAuthorization};
 use base64::Engine as _;
 use futures_util::{SinkExt as _, StreamExt as _};
 use rustls::pki_types::ServerName;
@@ -154,6 +160,49 @@ pub enum InviteRejection {
     AlreadyRegistered,
     HostCapacity,
     Capacity,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum InviteRegistrationError {
+    #[error(transparent)]
+    Authority(#[from] AuthorizationError),
+    #[error("trusted Unix time is unavailable; repair the clock before issuing an invite")]
+    Clock,
+    #[error("the coordinator rejected the invite ({0:?}); issue another invite")]
+    Rejected(InviteRejection),
+    #[error("the coordinator registration ended before the invite was registered")]
+    Closed,
+}
+
+/// Issue a pairing invite on the enabled PC authority and register it over
+/// the live registration behind `invites`. Only an invite issued here can be
+/// claimed: the client binds each claim the coordinator reports to the Host's
+/// invite ledger and closes any other. A rejected invite stays in the ledger,
+/// unclaimable, until it expires.
+pub async fn register_invite(
+    authority: &RwLock<MobileAuthorization>,
+    invites: &mpsc::Sender<InviteRequest>,
+) -> Result<IssuedInvite, InviteRegistrationError> {
+    let now = wall().map_err(|_| InviteRegistrationError::Clock)?;
+    let issued = authority
+        .write()
+        .map_err(|_| AuthorizationError::Unavailable)?
+        .issue_invite(now)?;
+    let (reply, outcome) = oneshot::channel();
+    let request = InviteRequest {
+        secret: issued.secret.clone(),
+        ttl_secs: issued.expires_at.saturating_sub(now),
+        reply,
+    };
+    invites
+        .send(request)
+        .await
+        .map_err(|_| InviteRegistrationError::Closed)?;
+    match outcome.await {
+        Ok(InviteOutcome::Registered) => Ok(issued),
+        Ok(InviteOutcome::Rejected(reason)) => Err(InviteRegistrationError::Rejected(reason)),
+        Err(_) => Err(InviteRegistrationError::Closed),
+    }
 }
 
 #[derive(Serialize)]
@@ -438,7 +487,21 @@ async fn register_and_renew(
                     let mut digest = [0; 32];
                     hex::decode_to_slice(&invite, &mut digest)
                         .map_err(|_| RegistrationClientError::Protocol)?;
-                    report(&events, ConnectionEvent::Claimed { connection_id, invite: digest })?;
+                    // Only an invite this Host issued binds to the connection.
+                    let claimed = write(authority)?.claim_invite(digest, connection_id, wall()?);
+                    match claimed {
+                        Ok(()) => report(
+                            &events,
+                            ConnectionEvent::Claimed { connection_id, invite: digest },
+                        )?,
+                        Err(AuthorizationError::UnknownRequest
+                            | AuthorizationError::Expired
+                            | AuthorizationError::WrongPeer) => {
+                            budget.spend(Instant::now());
+                            send_close(&mut socket, generation, connection_id).await?;
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
                 }
                 CoordinatorMessage::ConnectionReconnect { generation: scoped, connection_id, device_id }
                     if scoped == generation =>
@@ -460,6 +523,7 @@ async fn register_and_renew(
                 CoordinatorMessage::ConnectionClosed { generation: scoped, connection_id }
                     if scoped == generation =>
                 {
+                    write(authority)?.close_pairing_connection(connection_id);
                     report(&events, ConnectionEvent::Closed { connection_id })?;
                 }
                 CoordinatorMessage::RateLimited { generation: scoped } if scoped == generation => {

@@ -787,13 +787,23 @@ pub fn is_active() -> io::Result<bool> {
     load().map(|registry| registry.is_some_and(|registry| registry.phase == RegistryPhase::Active))
 }
 
-/// Identity-only PM selection does not mutate any project execution mirror.
+/// Shared registration and PM selection do not mutate project execution mirrors.
 pub(crate) fn mutate_pm_selection(
     root: &Path,
     action: AgentRosterAction,
     expected_revision: Option<u64>,
 ) -> io::Result<IssueMonitorPrefs> {
     let key = gwt_core::paths::project_scope_hash(root).to_string();
+    let adding = matches!(action, AgentRosterAction::Add { .. });
+    let source_path = prefs_path(&key)?;
+    let _source_guard = if adding && source_path.exists() {
+        Some(NamedFileLock::acquire(
+            &source_path.with_extension("lock"),
+            "Agent registry source",
+        )?)
+    } else {
+        None
+    };
     let _guard = lock()?;
     let mut registry =
         load()?.ok_or_else(|| invalid("Load the Agent roster before changing members"))?;
@@ -805,9 +815,52 @@ pub(crate) fn mutate_pm_selection(
     confirm_durable()?;
     let roster = project_roster(&registry, &key)
         .ok_or_else(|| invalid("Load the Agent roster before changing members"))?;
-    if !matches!(action, AgentRosterAction::Read) && expected_revision != Some(roster.revision) {
+    if !matches!(action, AgentRosterAction::Read)
+        && (if adding && registry.sources.contains_key(&key) {
+            expected_revision.is_some_and(|expected| expected != roster.revision)
+        } else {
+            expected_revision != Some(roster.revision)
+        })
+    {
         return Err(invalid("Agent roster changed; reload before retrying"));
     }
+    let mut default_tool = "codex".to_string();
+    if adding {
+        if let Some(source) = registry.sources.get(&key) {
+            assert_known(&registry, &key, raw(&source_path)?.as_deref())?;
+            assert_known_floor(source, &source_path)?;
+            default_tool = decode(Some(&source.after_json))?
+                .launch_profile_pool()
+                .first()
+                .map(|profile| profile.agent_id.clone())
+                .unwrap_or(default_tool);
+        }
+    }
+    let registration_tuning = if let AgentRosterAction::Add {
+        agent_id,
+        model,
+        reasoning,
+        ..
+    } = &action
+    {
+        let normalize = |value: &Option<String>| {
+            value
+                .as_ref()
+                .map(|text| text.trim().to_string())
+                .filter(|text| !text.is_empty())
+        };
+        let model = normalize(model);
+        let reasoning = normalize(reasoning);
+        gwt_agent::validate_native_tuning(
+            agent_id.as_deref().unwrap_or(&default_tool),
+            model.as_deref(),
+            reasoning.as_deref(),
+        )
+        .map_err(invalid)?;
+        Some((model, reasoning))
+    } else {
+        None
+    };
     let member_id: &str = match &action {
         AgentRosterAction::SetPmEligibility { member_id, .. }
         | AgentRosterAction::SelectPm { member_id } => member_id,
@@ -911,9 +964,12 @@ pub(crate) fn mutate_pm_selection(
             }
             registry.pm_projects.entry(key.clone()).or_default();
         }
-        action => {
-            crate::agent_names::apply_roster_action(&mut roster, &history_path(), "codex", action)?
-        }
+        action => crate::agent_names::apply_roster_action(
+            &mut roster,
+            &history_path(),
+            &default_tool,
+            action,
+        )?,
     }
     store_project_roster(&mut registry, &key, Some(roster))?;
     if project_roster(&registry, &key) != before {
@@ -929,6 +985,12 @@ pub(crate) fn mutate_pm_selection(
             .checked_add(1)
             .ok_or_else(|| invalid("Agent registry revision exhausted"))?;
         ensure_cores(&mut registry);
+        if let Some((model, reasoning)) = registration_tuning {
+            let member = registry.roster.as_ref().unwrap().members.last().unwrap();
+            let core = registry.profiles.get_mut(&member.agent_member_id).unwrap();
+            core.model = model;
+            core.reasoning = reasoning;
+        }
         save(&registry)?;
     }
     let source = registry
@@ -984,6 +1046,82 @@ fn pm_host_matches(assignment: &crate::agent_names::AgentMemberAssignment) -> bo
             started > 0
                 && Some(started) == crate::process::host_process_start_time(std::process::id())
         })
+}
+
+/// Issue #7472: whether a configured PM's existing assignment is a leftover
+/// that a new launch may reconcile. Only an unspawned reservation (no bound
+/// Session) whose reserving host incarnation is provably gone qualifies; the
+/// liveness proof reuses the roster discipline (`assignment_is_busy`), so a
+/// live holder, a bound Session, another host's reservation, and this
+/// process's own in-flight attempt all stay busy and keep blocking.
+///
+/// Issue #7475 extends the same reconciliation to one Session-bound class:
+/// a legacy reservation imported by the registry migration (see
+/// `pm_legacy_assignment_is_dead`). Every other Session-bound assignment
+/// keeps blocking so a resumable conversation is never displaced.
+fn pm_leftover_assignment_is_dead(
+    root: &Path,
+    sessions: &Path,
+    key: &str,
+    registry: &Registry,
+    member_id: &str,
+    assignment: &crate::agent_names::AgentMemberAssignment,
+) -> bool {
+    if assignment.role != AgentAssignmentRole::Pm
+        || assignment.project_key.as_deref() != Some(key)
+        || pm_host_matches(assignment)
+    {
+        return false;
+    }
+    match &assignment.session_id {
+        None => !crate::agent_names::assignment_is_busy(root, assignment, sessions),
+        Some(session_id) => {
+            pm_legacy_assignment_is_dead(registry, sessions, key, member_id, session_id, assignment)
+                && !crate::agent_names::assignment_is_busy(root, assignment, sessions)
+        }
+    }
+}
+
+/// Issue #7475: whether a Session-bound assignment is exactly the legacy
+/// reservation the registry migration imported for this member, bound to a
+/// Session that is provably finished. The stored legacy proof must name
+/// this member for the bound Session and the reservation token must equal
+/// the token recomputed from that proof, so a hand-written `pm-legacy:`
+/// string or another member's proof never qualifies. A legacy reservation
+/// records no reserving host (`host_pid` 0), so no release path can ever
+/// match it; without this proof the assignment wedges every later launch.
+/// The bound Session must load with an exact identity and a finished
+/// status; a missing Session file stays unprovable here and in
+/// `assignment_is_busy`, so it keeps blocking.
+fn pm_legacy_assignment_is_dead(
+    registry: &Registry,
+    sessions: &Path,
+    key: &str,
+    member_id: &str,
+    session_id: &str,
+    assignment: &crate::agent_names::AgentMemberAssignment,
+) -> bool {
+    let Some(proof) = registry
+        .pm_projects
+        .get(key)
+        .and_then(|project| project.legacy_sessions.get(session_id))
+    else {
+        return false;
+    };
+    if proof.member_id != member_id
+        || assignment.reservation_id
+            != legacy_pm_reservation(key, session_id, &proof.session_identity_sha256)
+    {
+        return false;
+    }
+    let Ok(session) = gwt_agent::Session::load(&sessions.join(format!("{session_id}.toml"))) else {
+        return false;
+    };
+    session.id == session_id
+        && matches!(
+            session.status,
+            gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
+        )
 }
 
 fn commit_pm_identity(registry: &mut Registry) -> io::Result<()> {
@@ -1182,7 +1320,26 @@ fn reserve_new_pm_member_inner(
                     prior_assignment: None,
                 });
             }
-            return Err(invalid(format!("Configured PM {} retains a live or unknown reservation; resume its conversation or choose another PM", member.name)));
+            if !pm_leftover_assignment_is_dead(
+                root,
+                sessions,
+                key.as_str(),
+                &registry,
+                &member.agent_member_id,
+                assignment,
+            ) {
+                return Err(invalid(format!("Configured PM {} retains a live or unknown reservation; resume its conversation or choose another PM", member.name)));
+            }
+            // Issue #7472: the reserving gwtd incarnation is gone and no
+            // Session was ever bound, so no owner remains that could cancel
+            // or reap this reservation. Reconcile it as part of this launch
+            // instead of wedging every future PM launch on it; the fresh
+            // assignment is written and committed below.
+            //
+            // Issue #7475: the same holds for a legacy reservation imported
+            // by the registry migration whose bound Session is provably
+            // finished — it records no reserving host, so no cancel, reap,
+            // or adoption path can ever release it.
         }
         member.assignment = Some(expected_assignment);
         set_project_assignment(
@@ -4006,6 +4163,8 @@ mod tests {
             &root,
             &sessions,
             AgentRosterAction::Add {
+                model: Some("pm-only-registration-model".into()),
+                reasoning: Some("high".into()),
                 agent_id: Some("codex".into()),
                 name: Some("Pinned candidate".into()),
                 pm_eligible: true,
@@ -4014,6 +4173,14 @@ mod tests {
         )
         .unwrap();
         let pinned = added.members.last().unwrap().agent_member_id.clone();
+        let core = SessionMemberSnapshot::load()
+            .unwrap()
+            .implementation_core(&pinned)
+            .unwrap()
+            .0;
+        assert_eq!(core.model.as_deref(), Some("pm-only-registration-model"));
+        assert_eq!(core.reasoning.as_deref(), Some("high"));
+        assert!(!monitor_path.exists());
         let mut explicit = provider_only;
         explicit.agent_member_id = Some(pinned.clone());
         write_candidate(&mut load().unwrap().unwrap(), explicit);
@@ -4129,6 +4296,8 @@ mod tests {
             &root,
             &sessions,
             AgentRosterAction::Add {
+                model: None,
+                reasoning: None,
                 agent_id: Some("codex".into()),
                 name: Some("Successor".into()),
                 pm_eligible: true,
@@ -4415,6 +4584,8 @@ mod tests {
             &root,
             &sessions,
             AgentRosterAction::Add {
+                model: None,
+                reasoning: None,
                 agent_id: Some("codex".into()),
                 name: Some("Successor".into()),
                 pm_eligible: true,
@@ -6001,5 +6172,229 @@ mod tests {
             "another project's execution permission is never part of the common saved core"
         );
         assert_eq!(fs::read(&a_path).unwrap(), a_bytes);
+    }
+
+    fn rewrite_pm_assignment(
+        root: &Path,
+        member_id: &str,
+        rewrite: impl FnOnce(&mut crate::agent_names::AgentMemberAssignment),
+    ) {
+        let key = gwt_core::paths::project_scope_hash(root);
+        let mut registry = load().unwrap().unwrap();
+        let mut assignment = project_assignment(&registry, key.as_str(), member_id)
+            .cloned()
+            .expect("PM assignment");
+        rewrite(&mut assignment);
+        set_project_assignment(&mut registry, key.as_str(), member_id, Some(assignment));
+        save(&registry).unwrap();
+    }
+
+    /// Issue #7472: a PM reservation left behind by a gwtd incarnation that
+    /// no longer exists must not wedge every later PM launch. The reserving
+    /// host can never cancel or reap it (every cleanup path requires the
+    /// exact reserving host), so a fresh NEW launch reconciles it.
+    #[test]
+    fn reserve_new_pm_member_reconciles_reservation_from_a_dead_host_incarnation() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let (root, session, _) = pm_only_fixture();
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let worktree = session.worktree_path.clone();
+        let prefs_path = crate::pm_registry::pm_prefs_path_for_repo_path(&root);
+        crate::pm_registry::mutate_pm_prefs(&prefs_path, |prefs| prefs.registration = None)
+            .unwrap();
+
+        let first = reserve_new_pm_member(&root, &sessions, &worktree, "wedged-attempt").unwrap();
+        let member_id = first.member.agent_member_id.clone();
+
+        // Rewrite the durable assignment to the dead incarnation that
+        // reserved it: a pid that cannot exist on any supported host.
+        rewrite_pm_assignment(&root, &member_id, |assignment| {
+            assignment.host_pid = 4_000_000_000;
+            assignment.host_started_at = Some(1);
+        });
+
+        let prepared =
+            reserve_new_pm_member(&root, &sessions, &worktree, "recovery-attempt").unwrap();
+        assert_eq!(prepared.member.agent_member_id, member_id);
+        let assignment = prepared.member.assignment.expect("new PM assignment");
+        assert_eq!(assignment.reservation_id, "recovery-attempt");
+        assert_eq!(assignment.host_pid, std::process::id());
+        assert_eq!(assignment.session_id, None);
+
+        // The cancelled-unspawned cleanup path still owns this process's own
+        // reservation exactly as before.
+        assert!(cancel_unspawned_pm_member(
+            &root,
+            &sessions,
+            &member_id,
+            "recovery-attempt",
+            None,
+            None
+        )
+        .unwrap());
+        assert!(reserve_new_pm_member(&root, &sessions, &worktree, "after-cancel").is_ok());
+    }
+
+    /// Issue #7472: the reconciliation above must never weaken the guard.
+    /// A live reservation, a Session-bound assignment, and another host's
+    /// reservation all keep blocking a new PM launch.
+    #[test]
+    fn reserve_new_pm_member_retains_live_or_unprovable_reservations() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let (root, session, _) = pm_only_fixture();
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let worktree = session.worktree_path.clone();
+        let prefs_path = crate::pm_registry::pm_prefs_path_for_repo_path(&root);
+        crate::pm_registry::mutate_pm_prefs(&prefs_path, |prefs| prefs.registration = None)
+            .unwrap();
+
+        let first = reserve_new_pm_member(&root, &sessions, &worktree, "live-attempt").unwrap();
+        let member_id = first.member.agent_member_id.clone();
+
+        // This process's own live reservation blocks a second NEW launch.
+        let error = reserve_new_pm_member(&root, &sessions, &worktree, "second-attempt")
+            .err()
+            .expect("a live PM reservation must block a new launch");
+        assert!(
+            error
+                .to_string()
+                .contains("retains a live or unknown reservation"),
+            "{error}"
+        );
+
+        // A bound Session is never auto-reconciled, even from a dead host.
+        rewrite_pm_assignment(&root, &member_id, |assignment| {
+            assignment.host_pid = 4_000_000_000;
+            assignment.host_started_at = Some(1);
+            assignment.session_id = Some("bound-session".into());
+        });
+        let error = reserve_new_pm_member(&root, &sessions, &worktree, "third-attempt")
+            .err()
+            .expect("a Session-bound assignment must block a new launch");
+        assert!(
+            error
+                .to_string()
+                .contains("retains a live or unknown reservation"),
+            "{error}"
+        );
+
+        // Another host's reservation cannot be proven dead from this host.
+        rewrite_pm_assignment(&root, &member_id, |assignment| {
+            assignment.host_id = "another-host".into();
+            assignment.session_id = None;
+        });
+        let error = reserve_new_pm_member(&root, &sessions, &worktree, "fourth-attempt")
+            .err()
+            .expect("another host's reservation must block a new launch");
+        assert!(
+            error
+                .to_string()
+                .contains("retains a live or unknown reservation"),
+            "{error}"
+        );
+    }
+
+    /// Issue #7475 fixture: import the pm-only fixture's stopped PM Session
+    /// through the registry migration path so the member holds exactly the
+    /// legacy reservation the migration creates (bound Session, no reserving
+    /// host), then drop the prefs registration — the state a later launch
+    /// observes once the PM pane has been closed.
+    fn legacy_pm_fixture() -> (PathBuf, gwt_agent::Session, String) {
+        let (root, mut session, _) = pm_only_fixture();
+        session.update_status(gwt_agent::AgentStatus::Stopped);
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        session.save(&sessions).unwrap();
+        crate::agent_names::read_project_roster(&root, &sessions).unwrap();
+        let key = gwt_core::paths::project_scope_hash(&root);
+        let registry = load().unwrap().unwrap();
+        let member = selected_pm_member(&registry, key.as_str()).expect("imported PM member");
+        let assignment = member.assignment.clone().expect("legacy assignment");
+        assert!(
+            assignment.reservation_id.starts_with("pm-legacy:"),
+            "{assignment:?}"
+        );
+        assert_eq!(assignment.session_id.as_deref(), Some(session.id.as_str()));
+        assert_eq!(assignment.host_pid, 0);
+        let member_id = member.agent_member_id.clone();
+        let prefs_path = crate::pm_registry::pm_prefs_path_for_repo_path(&root);
+        crate::pm_registry::mutate_pm_prefs(&prefs_path, |prefs| prefs.registration = None)
+            .unwrap();
+        (root, session, member_id)
+    }
+
+    /// Issue #7475: a legacy reservation imported by the registry migration
+    /// records no reserving host, so no cancel, reap, or adoption path can
+    /// ever release it. When its bound Session is provably finished, a fresh
+    /// NEW launch reconciles it instead of wedging every later PM launch.
+    #[test]
+    fn reserve_new_pm_member_reconciles_dead_legacy_reservation() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let (root, session, member_id) = legacy_pm_fixture();
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let worktree = session.worktree_path.clone();
+
+        let prepared =
+            reserve_new_pm_member(&root, &sessions, &worktree, "recovery-attempt").unwrap();
+        assert_eq!(prepared.member.agent_member_id, member_id);
+        let assignment = prepared.member.assignment.expect("new PM assignment");
+        assert_eq!(assignment.reservation_id, "recovery-attempt");
+        assert_eq!(assignment.session_id, None);
+        assert_eq!(assignment.host_pid, std::process::id());
+    }
+
+    /// Issue #7475: the legacy reconciliation must never displace a Session
+    /// that is not provably finished. A legacy reservation bound to a
+    /// running Session keeps blocking a new launch.
+    #[test]
+    fn reserve_new_pm_member_retains_legacy_reservation_for_a_running_session() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let (root, session, _) = legacy_pm_fixture();
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let worktree = session.worktree_path.clone();
+
+        let mut running =
+            gwt_agent::Session::load(&sessions.join(format!("{}.toml", session.id))).unwrap();
+        running.update_status(gwt_agent::AgentStatus::Running);
+        running.save(&sessions).unwrap();
+
+        let error = reserve_new_pm_member(&root, &sessions, &worktree, "blocked-attempt")
+            .err()
+            .expect("a legacy reservation bound to a running Session must block a new launch");
+        assert!(
+            error
+                .to_string()
+                .contains("retains a live or unknown reservation"),
+            "{error}"
+        );
+    }
+
+    /// Issue #7475: only the exact legacy reservation the migration created
+    /// qualifies. The same stopped Session bound under a modern reservation
+    /// token keeps blocking, preserving resume protection for non-legacy
+    /// Session-bound assignments.
+    #[test]
+    fn reserve_new_pm_member_retains_nonlegacy_bound_session_assignment() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let (root, session, member_id) = legacy_pm_fixture();
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let worktree = session.worktree_path.clone();
+
+        rewrite_pm_assignment(&root, &member_id, |assignment| {
+            assignment.reservation_id = "modern-reservation".into();
+        });
+        let error = reserve_new_pm_member(&root, &sessions, &worktree, "blocked-attempt")
+            .err()
+            .expect("a non-legacy Session-bound assignment must block a new launch");
+        assert!(
+            error
+                .to_string()
+                .contains("retains a live or unknown reservation"),
+            "{error}"
+        );
     }
 }

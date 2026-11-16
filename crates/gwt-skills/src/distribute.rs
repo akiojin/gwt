@@ -395,6 +395,15 @@ fn normalize_targets(targets: &[ManagedAssetTarget]) -> Vec<ManagedAssetTarget> 
 }
 
 fn prune_retired_hook_scripts(dest: &Path, plan: &mut DistributePlan) -> io::Result<()> {
+    // This shared directory may belong entirely to the project. Inspect its
+    // names without mutating through a link; only selected gwt leaves require
+    // rejection, and indirect shared roots never receive optional cleanup.
+    let cleanup_shared_roots =
+        match crate::asset_io::ensure_safe_mutation(dest, crate::asset_io::AssetRoute::Delete) {
+            Ok(()) => true,
+            Err(error) if error.kind() == io::ErrorKind::Unsupported => false,
+            Err(error) => return Err(error.into()),
+        };
     if dest.exists() {
         for entry in crate::asset_io::read_dir(dest)? {
             let entry = entry?;
@@ -403,14 +412,23 @@ fn prune_retired_hook_scripts(dest: &Path, plan: &mut DistributePlan) -> io::Res
             if !name.starts_with("gwt-") {
                 continue;
             }
+            crate::asset_io::ensure_safe_mutation(
+                &entry.path(),
+                crate::asset_io::AssetRoute::Delete,
+            )?;
             plan.operations
                 .push(DistributionOperation::Remove(entry.path()));
         }
 
-        plan.operations
-            .push(DistributionOperation::RemoveIfEmpty(dest.to_path_buf()));
+        if cleanup_shared_roots {
+            plan.operations
+                .push(DistributionOperation::RemoveIfEmpty(dest.to_path_buf()));
+        }
     }
 
+    if !cleanup_shared_roots {
+        return Ok(());
+    }
     let Some(parent) = dest.parent() else {
         return Ok(());
     };
@@ -505,6 +523,9 @@ fn prune_dir_against_source(
     if !dest.exists() {
         return Ok(());
     }
+    if root_kind.is_none() {
+        crate::asset_io::ensure_safe_mutation(dest, crate::asset_io::AssetRoute::Delete)?;
+    }
     // A differently-cased bundle directory can resolve to a subtree already
     // scheduled for removal. The old eager prune had removed it before this
     // recursion; planning must likewise avoid scheduling its children twice.
@@ -551,6 +572,10 @@ fn prune_dir_against_source(
             if should_skip_tracked_path(worktree, &entry.path(), tracked_paths) {
                 continue;
             }
+            crate::asset_io::ensure_safe_mutation(
+                &entry.path(),
+                crate::asset_io::AssetRoute::Delete,
+            )?;
             plan.operations
                 .push(DistributionOperation::Remove(entry.path()));
         }

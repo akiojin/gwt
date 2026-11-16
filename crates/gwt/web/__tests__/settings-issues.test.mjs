@@ -721,7 +721,7 @@ test("shared member tuning preserves custom values and target revision without c
   assert.match(panel.textContent, /exact-token/);
 });
 
-test("Codex shared tuning keeps catalog value/label order and warns without replacing saved models", () => {
+test("Codex shared tuning keeps catalog order without treating unlisted models as unsupported", () => {
   const { document, Event } = parseHTML('<section></section>');
   const panel = document.querySelector('section'), edits = [];
   const target = { canonical: { role: 'implementation', member_id: 'm-codex', agent_id: 'codex', revision: 'core-token' },
@@ -736,7 +736,7 @@ test("Codex shared tuning keeps catalog value/label order and warns without repl
   const notice = panel.querySelector('[data-model-unavailable]');
   assert.equal(notice.hidden, false);
   assert.equal(notice.textContent,
-    'Saved model retired-model is no longer offered by Codex. It is kept as saved and not replaced; choose a listed model before launching.');
+    'Model retired-model is not listed in the current Codex catalog. Your value is kept and not replaced; an unlisted model may still be supported.');
   assert.deepEqual(edits, [], 'catalog refresh must not replace a saved model');
   model.value = 'gpt-6-luna'; model.dispatchEvent(new Event('input'));
   assert.deepEqual(edits, [[{ model: 'gpt-6-luna' }, { composing: false }]], 'edits keep the model id, not its display label');
@@ -755,6 +755,32 @@ test("Codex shared tuning warns about a saved model even when the public catalog
   assert.equal(panel.querySelector('[data-member-tuning-field="model"]').value, 'retired-model');
   assert.equal(panel.querySelector('[data-model-unavailable]').hidden, false);
   assert.match(panel.querySelector('[data-model-unavailable]').textContent, /retired-model/);
+  assert.match(panel.querySelector('[data-model-unavailable]').textContent, /an unlisted model may still be supported/);
+});
+
+test("shared tuning reports catalog failure and retries without changing either role's draft", () => {
+  for (const role of ['implementation', 'pm']) {
+    const { document, Event } = parseHTML('<section></section>'), host = document.querySelector('section');
+    const choices = structuredClone(candidateChoices), edits = [];
+    choices.agents[0].model_catalog_warning = 'The live Codex model catalog is unavailable. Saved values are kept.';
+    const target = { canonical: { role, member_id: 'member', revision: 'r1' },
+      draft: { agent_id: 'codex', model: 'private-draft', reasoning: 'high' }, status: 'editing' };
+    let retries = 0;
+    const options = { target, choices, onEdit: patch => edits.push(patch), onReloadCatalog: () => retries++ };
+    const render = load('renderMemberTuningControls'); render(host, options);
+    const input = host.querySelector('[data-member-tuning-field="model"]');
+    input.dispatchEvent(new Event('compositionstart')); edits.length = 0;
+    const status = host.querySelector('[data-model-catalog-status]');
+    assert.equal(status?.getAttribute('role'), 'status');
+    assert.match(status.textContent, /live Codex model catalog is unavailable/);
+    const retry = host.querySelector('[data-action="retry-model-catalog"]');
+    assert.equal(retry.classList.contains('wizard-button'), true);
+    retry.click(); assert.equal(retries, 1); assert.deepEqual(edits, []);
+    delete choices.agents[0].model_catalog_warning; render(host, options);
+    assert.equal(host.querySelector('[data-member-tuning-field="model"]'), input);
+    assert.equal(input.value, 'private-draft'); assert.equal(input.memberComposing, true);
+    assert.equal(status.hidden, true); assert.equal(retry.hidden, true); assert.deepEqual(edits, []);
+  }
 });
 
 test("implementation candidate choices exclude configured or retained PM roles", () => {

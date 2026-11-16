@@ -6048,11 +6048,12 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         onNavigateProject: projectKey => window.location.assign(projectUrlPath(projectKey)),
         onRenameMember: editAgentMemberName,
         onRetryName: retryAgentMemberName,
-        onAddMember: (agentId, name, pmEligible) => {
+        onAddMember: (agentId, name, pmEligible, tuning) => {
           applyAgentRosterError({ project_key: routeProjectKey, message: null });
-          requestAgentRoster({ kind: "add", agent_id: agentId, name, pm_eligible: pmEligible });
+          requestAgentRoster({ kind: "add", agent_id: agentId, name, pm_eligible: pmEligible, ...tuning });
         },
         onRestMember: memberId => requestAgentRoster({ kind: "rest", member_id: memberId }),
+        onActivateMember: memberId => requestAgentRoster({ kind: "activate", member_id: memberId }),
         onSwitch: requestAgentSwitch,
         onOpenSavedWork: () => openSurface("works"),
         onContinueSavedWork: (workId) => continueWorkDispatcher.dispatch(workId),

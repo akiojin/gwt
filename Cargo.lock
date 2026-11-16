@@ -858,9 +858,9 @@ checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 
 [[package]]
 name = "flate2"
-version = "1.1.10"
+version = "1.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6e634e2e0ebac1ee034020da1ca582e17ffe4e0f5e985823721e168928136dcb"
+checksum = "626d4928326b646e70f65ed36fc7cf9f206bdb68a0019ee7c6b4709da4e084c4"
 dependencies = [
  "crc32fast",
  "miniz_oxide 0.9.1",
@@ -1324,7 +1324,7 @@ dependencies = [
 
 [[package]]
 name = "gwt"
-version = "9.165.0"
+version = "9.166.2"
 dependencies = [
  "ammonia",
  "auto-launch",
@@ -1399,7 +1399,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-agent"
-version = "9.165.0"
+version = "9.166.2"
 dependencies = [
  "chrono",
  "dunce",
@@ -1428,7 +1428,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-ai"
-version = "9.165.0"
+version = "9.166.2"
 dependencies = [
  "reqwest",
  "serde",
@@ -1438,7 +1438,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-clipboard"
-version = "9.165.0"
+version = "9.166.2"
 dependencies = [
  "gwt-core",
  "thiserror 2.0.21",
@@ -1446,7 +1446,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-config"
-version = "9.165.0"
+version = "9.166.2"
 dependencies = [
  "dirs 7.0.0",
  "fs2",
@@ -1463,7 +1463,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-core"
-version = "9.165.0"
+version = "9.166.2"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -1505,7 +1505,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-docker"
-version = "9.165.0"
+version = "9.166.2"
 dependencies = [
  "gwt-core",
  "libc",
@@ -1519,7 +1519,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-git"
-version = "9.165.0"
+version = "9.166.2"
 dependencies = [
  "chrono",
  "dirs 7.0.0",
@@ -1535,7 +1535,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-github"
-version = "9.165.0"
+version = "9.166.2"
 dependencies = [
  "chrono",
  "fs2",
@@ -1553,7 +1553,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-skills"
-version = "9.165.0"
+version = "9.166.2"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -1574,7 +1574,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-terminal"
-version = "9.165.0"
+version = "9.166.2"
 dependencies = [
  "gwt-core",
  "libc",
@@ -1590,7 +1590,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-voice"
-version = "9.165.0"
+version = "9.166.2"
 dependencies = [
  "thiserror 2.0.21",
 ]
@@ -3872,9 +3872,9 @@ dependencies = [
 
 [[package]]
 name = "sysinfo"
-version = "0.40.1"
+version = "0.40.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0e8a3edbe0394ce115f3917a00349dd242be09eb5a091ed509eaf67b55cfb8a8"
+checksum = "a86bac2f7d06e6384984118ad727f5694110f0ec44d924d05c8fdec3d030bee6"
 dependencies = [
  "libc",
  "memchr",
@@ -4124,9 +4124,9 @@ dependencies = [
 
 [[package]]
 name = "tokio-rustls"
-version = "0.26.4"
+version = "0.26.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1729aa945f29d91ba541258c8df89027d5792d85a8841fb65e8bf0f4ede4ef61"
+checksum = "c9cc2678c2cdd569ef8215e2afd7954ada2ae20b4fdd2c5fe6139a3b02d105db"
 dependencies = [
  "rustls",
  "tokio",
@@ -4527,9 +4527,9 @@ checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
 
 [[package]]
 name = "uuid"
-version = "1.29.0"
+version = "1.29.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4a0e2d11620c50695fe12bbbfde96b3477fe606e7284c22d505c12ce51214514"
+checksum = "bed99139f7dac9b5cfe5f17be4d66dc7079a34dee1d74bcc77217119240e267c"
 dependencies = [
  "getrandom 0.4.2",
  "js-sys",
@@ -5527,9 +5527,9 @@ dependencies = [
 
 [[package]]
 name = "zeroize"
-version = "1.8.2"
+version = "1.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b97154e67e32c85465826e8bcc1c59429aaaf107c1e4a9e53c8d8ccd5eff88d0"
+checksum = "e13084392c5e4bc371903e2935a5eaeed24905a7511356b883835e18a78f6879"
 
 [[package]]
 name = "zerotrie"
@@ -5595,9 +5595,9 @@ dependencies = [
 
 [[package]]
 name = "zlib-rs"
-version = "0.6.3"
+version = "0.6.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3be3d40e40a133f9c916ee3f9f4fa2d9d63435b5fbe1bfc6d9dae0aa0ada1513"
+checksum = "b268e58e7c693d7c271f93ffc4ba3b380412554231c85bf61ca7af91042a4112"
 
 [[package]]
 name = "zmij"

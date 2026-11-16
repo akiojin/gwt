@@ -1285,6 +1285,27 @@ mod startup_diagnosis_tests {
         assert!(rejected.contains("project policy denied this prompt"));
     }
 
+    /// Issue #7465: a failed managed hook means gwt can never observe the
+    /// initial prompt, so the diagnosis names the hook failure and is
+    /// reported without waiting for the 180s timeout.
+    #[test]
+    fn issue_7465_grok_managed_hook_failure_is_an_immediate_startup_failure() {
+        let screen = "Grok Build\n♦ pre_tool_use hook (project/settings.local) failed, ignored: exit code 1: ParserError: ;\n│ ❯ │";
+        assert!(super::startup_hook_failure_line(screen).is_some());
+        let detail = monitor_startup_failure_detail(7465, Some(screen));
+        assert!(
+            detail.starts_with("Issues startup failed: managed hook failed"),
+            "{detail}"
+        );
+        assert!(detail.contains("ParserError"), "{detail}");
+        assert!(gwt_agent::is_transient_launch_failure(&detail), "{detail}");
+        // A policy denial is the hook working, not failing.
+        assert!(super::startup_hook_failure_line(
+            "PreToolUse:Bash hook error: Agent Workspace identity is required"
+        )
+        .is_none());
+    }
+
     #[test]
     fn grok_startup_reports_authentication_and_confirmation_evidence() {
         let auth =
@@ -1325,8 +1346,28 @@ mod startup_diagnosis_tests {
     }
 }
 
+/// A provider line reporting that a configured hook itself failed to run, as
+/// Grok prints it (`pre_tool_use hook (project/settings.local) failed,
+/// ignored: exit code 1: ...`). Policy denials are the hook working and do
+/// not match.
+pub(crate) fn startup_hook_failure_line(screen: &str) -> Option<&str> {
+    screen.lines().rev().find(|line| {
+        let lower = line.to_ascii_lowercase();
+        lower.contains(" hook (") && lower.contains(") failed")
+    })
+}
+
 pub fn monitor_startup_failure_detail(issue: u64, screen: Option<&str>) -> String {
     let screen = screen.unwrap_or_default();
+    // Issue #7465: gwt observes the initial prompt only through its managed
+    // hooks, so a failing hook would otherwise end in the 180s timeout.
+    if let Some(line) = startup_hook_failure_line(screen) {
+        return format!(
+            "Issues startup failed: managed hook failed before the initial prompt; last output: {}; {}",
+            line.trim().chars().take(800).collect::<String>(),
+            gwt_agent::TRANSIENT_LAUNCH_RETRY_HINT
+        );
+    }
     let owner = format!("#{issue}");
     let mut in_prompt_box = false;
     let unsubmitted = screen.lines().any(|line| {
