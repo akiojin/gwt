@@ -106,9 +106,23 @@ impl Drop for Slot {
     }
 }
 
+/// The remote address of an accepted connection, for handlers that take
+/// `ConnectInfo<PeerAddr>` (axum provides that only for `SocketAddr` on its own
+/// listeners).
+#[derive(Clone, Copy, Debug)]
+pub struct PeerAddr(pub SocketAddr);
+
+impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, TlsListener>>
+    for PeerAddr
+{
+    fn connect_info(stream: axum::serve::IncomingStream<'_, TlsListener>) -> Self {
+        Self(*stream.remote_addr())
+    }
+}
+
 /// IPv4 address, or the /64 prefix of an IPv6 address (one IPv6 host usually
 /// owns a whole /64). IPv4-mapped IPv6 addresses count as IPv4.
-fn peer_key(ip: IpAddr) -> IpAddr {
+pub(super) fn peer_key(ip: IpAddr) -> IpAddr {
     match ip.to_canonical() {
         IpAddr::V6(v6) => {
             let [a, b, c, d, ..] = v6.segments();

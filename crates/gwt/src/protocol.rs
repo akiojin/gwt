@@ -327,6 +327,15 @@ pub enum FileAttachment {
     },
 }
 
+/// Public comparison tuple captured at attachment intent; never grants authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttachmentExpectedTarget {
+    pub project_key: String,
+    pub session_id: String,
+    pub host_id: String,
+    pub runtime_incarnation: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AttachmentProgressPhase {
@@ -335,6 +344,7 @@ pub enum AttachmentProgressPhase {
     Injecting,
     Attached,
     Failed,
+    OutcomeUnknown,
 }
 
 /// Final, client-scoped result of one correlated `Continue work` operation.
@@ -448,6 +458,28 @@ impl AgentResourceSettings {
     }
 }
 
+fn deserialize_roster_revision<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<u64>, D::Error> {
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    let Some(value) = value else { return Ok(None) };
+    let revision = match &value {
+        serde_json::Value::String(text) => text
+            .parse::<u64>()
+            .ok()
+            .filter(|revision| revision.to_string() == *text),
+        serde_json::Value::Number(number) => number
+            .as_u64()
+            .filter(|revision| *revision <= 9_007_199_254_740_991),
+        _ => None,
+    };
+    revision.map(Some).ok_or_else(|| {
+        serde::de::Error::custom(
+            "Agent roster revision must be an exact decimal u64; reload Agents before retrying",
+        )
+    })
+}
+
 /// A browser can reopen or cancel tracking, but cannot supply actor or provenance.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -547,8 +579,10 @@ pub enum FrontendEvent {
     /// Project-bound member controls. The client cannot select a filesystem root.
     AgentRoster {
         action: crate::agent_names::AgentRosterAction,
-        #[serde(default)]
+        #[serde(default, deserialize_with = "deserialize_roster_revision")]
         expected_revision: Option<u64>,
+        #[serde(default)]
+        project_key: Option<String>,
         #[serde(default)]
         request_id: Option<String>,
     },
@@ -588,6 +622,14 @@ pub enum FrontendEvent {
     /// SPEC-3431 FR-026: persist what the NEXT PM start runs as. The running
     /// pane is untouched; applying the change is the explicit restart below.
     SetPmLaunchProfile {
+        #[serde(default)]
+        project_key: Option<String>,
+        #[serde(default)]
+        member_id: Option<String>,
+        #[serde(default)]
+        request_id: Option<String>,
+        #[serde(default)]
+        expected_profile_revision: Option<String>,
         agent_id: String,
         #[serde(default)]
         model: Option<String>,
@@ -786,6 +828,8 @@ pub enum FrontendEvent {
     CompletePmRequestTask {
         id: String,
         request_id: u64,
+        #[serde(default)]
+        task_key: Option<String>,
         request: PmRequestTaskCompleteRequest,
     },
     /// Inject one line of input into the pane bound to the given agent
@@ -825,6 +869,8 @@ pub enum FrontendEvent {
         id: String,
         #[serde(default)]
         operation_id: Option<String>,
+        #[serde(default)]
+        expected_target: Option<AttachmentExpectedTarget>,
         upload_id: String,
         mime_type: String,
         filename: Option<String>,
@@ -840,6 +886,8 @@ pub enum FrontendEvent {
         id: String,
         #[serde(default)]
         operation_id: Option<String>,
+        #[serde(default)]
+        expected_target: Option<AttachmentExpectedTarget>,
         files: Vec<FileAttachment>,
     },
     LoadBranches {
@@ -2322,10 +2370,16 @@ pub struct FleetPaneView {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentRosterView {
+    #[serde(default, skip_deserializing)]
+    pub tuning_choices: Option<Vec<crate::launch_wizard::IssueMonitorAgentChoices>>,
     pub project_key: String,
     pub revision: u64,
+    #[serde(default)]
+    pub revision_decimal: String,
     pub members: Vec<AgentRosterMemberView>,
     pub capacity: usize,
+    #[serde(default)]
+    pub total_enabled: usize,
     pub recommended_capacity: Option<usize>,
     pub past_contributors: Vec<AgentPastContributorView>,
     pub past_complete: bool,
@@ -2339,17 +2393,35 @@ pub struct AgentRosterMemberView {
     pub member: crate::agent_names::AgentMember,
     pub provider: Option<String>,
     pub model: Option<String>,
+    /// Unreleased assignments across projects, for display and navigation only.
+    /// The flattened member assignment remains scoped to the current project.
+    #[serde(default)]
+    pub active_assignments: Vec<AgentRosterAssignmentView>,
     /// Saved manual candidate input, distinct from Auto tiers and Session facts.
     #[serde(default)]
     pub saved_manual_profile: Option<crate::IssueMonitorLaunchProfile>,
     /// Content identity of saved manual tuning, not a chronological/CAS counter.
     #[serde(default)]
     pub saved_manual_revision: Option<String>,
+    #[serde(default)]
+    pub saved_implementation_core: Option<crate::agent_registry::AgentProfileCore>,
+    #[serde(default)]
+    pub saved_implementation_core_revision: Option<String>,
     pub history: Vec<AgentAssignmentHistoryView>,
     pub issue_count: Option<usize>,
     pub landed_count: Option<usize>,
     pub active_seconds: Option<u64>,
     pub tokens: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentRosterAssignmentView {
+    pub project_key: String,
+    pub project_name: String,
+    pub session_id: Option<String>,
+    pub issue_number: Option<u64>,
+    /// Recorded Session status is not proof of a live process or input authority.
+    pub state: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2360,6 +2432,9 @@ pub struct AgentAssignmentHistoryView {
     pub name: Option<String>,
     #[serde(default)]
     pub provider: Option<String>,
+    /// Recorded role evidence; absent legacy evidence remains unknown.
+    #[serde(default)]
+    pub role: Option<String>,
     /// Recorded launch configuration, not observed provider-internal changes.
     #[serde(default)]
     pub model: Option<String>,
@@ -2670,7 +2745,25 @@ pub enum BackendEvent {
     /// the live conversation actually is. They are separate fields on purpose —
     /// the panel's "restart to apply" affordance exists precisely because a
     /// profile change cannot migrate a running conversation.
+    PmLaunchProfileResult {
+        project_key: String,
+        member_id: Option<String>,
+        request_id: Option<String>,
+        success: bool,
+        field: Option<String>,
+        message: Option<String>,
+        retryable: bool,
+        profile_revision: Option<String>,
+        profile: Option<crate::pm_registry::PmLaunchProfile>,
+    },
     PmStatus {
+        project_key: String,
+        configured_member_id: Option<String>,
+        configured_member_name: Option<String>,
+        running_member_id: Option<String>,
+        running_session_id: Option<String>,
+        roster_revision_decimal: Option<String>,
+        profile_revision: Option<String>,
         /// Whether the active tab is a Git project with PM settings.
         /// `false` clears shared Settings mounts after switching to a
         /// non-project surface or closing the final project tab.
@@ -2700,7 +2793,7 @@ pub enum BackendEvent {
         /// Restart cannot clear. `None` means Restart is worth offering —
         /// either the PM is fine, or the last refusal was transient.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        start_block: Option<crate::pm_registry::PmStartBlock>,
+        start_block: Option<Box<crate::pm_registry::PmStartBlock>>,
     },
     IssueMonitorStatus {
         /// Boxed: the view is by far the largest payload in this enum
@@ -2757,6 +2850,8 @@ pub enum BackendEvent {
     AttachmentProgress {
         id: String,
         operation_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_target: Option<AttachmentExpectedTarget>,
         phase: AttachmentProgressPhase,
         file_index: Option<usize>,
         file_count: usize,
@@ -4135,6 +4230,7 @@ impl BackendEvent {
             BackendEvent::FleetPaneCloseResult { .. } => "fleet_pane_close_result",
             BackendEvent::WorkCloseResult { .. } => "work_close_result",
             BackendEvent::PmStatus { .. } => "pm_status",
+            BackendEvent::PmLaunchProfileResult { .. } => "pm_launch_profile_result",
             BackendEvent::IssueMonitorStatus { .. } => "issue_monitor_status",
             BackendEvent::IssueMonitorProfiles { .. } => "issue_monitor_profiles",
             BackendEvent::IssueMonitorProfilesWriteFailed { .. } => {
@@ -4385,6 +4481,17 @@ mod tests {
                 "reason":"Verified the original outcome","task_id":"task",
                 "condition_revision":1,"review_generation":1,"evidence":["fixture:outcome"]}});
         let _: FrontendEvent = serde_json::from_value(complete.clone()).expect("user complete");
+        let mut keyed = complete.clone();
+        keyed["task_key"] = serde_json::json!("opaque-task-key");
+        keyed["request"]["task_id"] = serde_json::json!("");
+        let parsed: FrontendEvent =
+            serde_json::from_value(keyed.clone()).expect("keyed user complete");
+        assert!(
+            matches!(parsed, FrontendEvent::CompletePmRequestTask { task_key: Some(key), .. }
+            if key == "opaque-task-key")
+        );
+        keyed["request"]["actor"] = serde_json::json!({"kind":"pm","id":"claimed"});
+        assert!(serde_json::from_value::<FrontendEvent>(keyed).is_err());
         for field in ["actor", "source", "project_key", "authority"] {
             let mut forged = complete.clone();
             forged["request"][field] = serde_json::json!("claimed");
@@ -4752,6 +4859,13 @@ mod tests {
     #[test]
     fn pm_status_serializes_effective_loop_interval() {
         let event = BackendEvent::PmStatus {
+            project_key: String::new(),
+            configured_member_id: None,
+            configured_member_name: None,
+            running_member_id: None,
+            running_session_id: None,
+            roster_revision_decimal: None,
+            profile_revision: None,
             available: true,
             auto_start: true,
             paused: false,
@@ -5929,6 +6043,7 @@ mod tests {
             serde_json::json!({"kind":"read"}),
             serde_json::json!({"kind":"add"}),
             serde_json::json!({"kind":"rest","member_id":"member-1"}),
+            serde_json::json!({"kind":"activate","member_id":"member-1"}),
             serde_json::json!({"kind":"rename","member_id":"member-1","name":"Maple"}),
         ] {
             let parsed = serde_json::from_value::<FrontendEvent>(serde_json::json!({
@@ -5943,6 +6058,32 @@ mod tests {
         assert!(
             matches!(event, FrontendEvent::AgentRoster { request_id: Some(id), .. } if id == "name-write-1")
         );
+    }
+
+    #[test]
+    fn agent_roster_accepts_lossless_decimal_revision_and_rejects_unsafe_numbers() {
+        let payload = serde_json::json!({
+            "kind": "agent_roster", "action": {"kind": "read"},
+            "expected_revision": u64::MAX.to_string(),
+        });
+        let event: FrontendEvent = serde_json::from_value(payload).unwrap();
+        assert!(matches!(
+            event,
+            FrontendEvent::AgentRoster {
+                expected_revision: Some(u64::MAX),
+                ..
+            }
+        ));
+        for revision in [
+            serde_json::json!(9_007_199_254_740_992_u64),
+            serde_json::json!("01"),
+            serde_json::json!(" 1"),
+        ] {
+            assert!(serde_json::from_value::<FrontendEvent>(serde_json::json!({
+                "kind": "agent_roster", "action": {"kind": "read"}, "expected_revision": revision,
+            }))
+            .is_err());
+        }
     }
 
     #[test]
@@ -6293,6 +6434,7 @@ mod tests {
                     mime_type,
                     filename: Some(filename),
                     size,
+                    ..
                 } if id == "tab-1::agent-1"
                     && operation_id == "attachment-op-1"
                     && upload_id == "upload-1"
@@ -6420,6 +6562,7 @@ mod tests {
                 FrontendEvent::AttachFiles {
                     id,
                     operation_id: Some(operation_id),
+                    expected_target: None,
                     files,
                 }
                     if id == "tab-1::agent-1"
@@ -6468,10 +6611,45 @@ mod tests {
     }
 
     #[test]
+    fn attachment_target_and_unknown_progress_preserve_the_public_contract() {
+        let target = serde_json::json!({"project_key":"0123456789abcdef","session_id":"original-session",
+            "host_id":"42:1234","runtime_incarnation":3});
+        let request = serde_json::from_value::<FrontendEvent>(serde_json::json!({
+            "kind":"attach_files","id":"original-window","operation_id":"original-op",
+            "expected_target":target,"files":[]
+        }))
+        .unwrap();
+        let FrontendEvent::AttachFiles {
+            expected_target: Some(captured),
+            ..
+        } = request
+        else {
+            panic!("captured target")
+        };
+        assert_eq!(serde_json::to_value(&captured).unwrap(), target);
+        let event = BackendEvent::AttachmentProgress {
+            id: "original-window".into(),
+            operation_id: "original-op".into(),
+            expected_target: Some(captured),
+            phase: AttachmentProgressPhase::OutcomeUnknown,
+            file_index: None,
+            file_count: 1,
+            filename: None,
+            bytes_done: None,
+            bytes_total: None,
+            message: Some("Outcome unknown".into()),
+        };
+        let value = serde_json::to_value(event).unwrap();
+        assert_eq!(value["phase"], "outcome_unknown");
+        assert_eq!(value["expected_target"], target);
+    }
+
+    #[test]
     fn backend_event_serializes_attachment_progress_contract() {
         let event = BackendEvent::AttachmentProgress {
             id: "tab-1::agent-1".to_string(),
             operation_id: "attachment-op-3".to_string(),
+            expected_target: None,
             phase: AttachmentProgressPhase::Staging,
             file_index: Some(0),
             file_count: 2,
@@ -7382,5 +7560,23 @@ mod tests {
             event,
             FrontendEvent::RestartWindow { id } if id == "tab-1::agent-1"
         ));
+    }
+}
+#[cfg(test)]
+mod member_tuning_wire_tests {
+    #[test]
+    fn tuning_requires_explicit_nullable_fields_and_rejects_foreign_fields() {
+        let valid = serde_json::json!({"kind":"agent_roster","request_id":"tuning-1",
+            "action":{"kind":"set_tuning","member_id":"a4263a32-14e9-4bb0-ab78-ec3d4816e811",
+                "model":null,"reasoning":null,"expected_core_revision":"implementation-core-v1:test"}});
+        assert!(serde_json::from_value::<super::FrontendEvent>(valid.clone()).is_ok());
+        for key in ["model", "reasoning"] {
+            let mut missing = valid.clone();
+            missing["action"].as_object_mut().unwrap().remove(key);
+            assert!(serde_json::from_value::<super::FrontendEvent>(missing).is_err());
+        }
+        let mut foreign = valid;
+        foreign["action"]["version"] = serde_json::json!("old");
+        assert!(serde_json::from_value::<super::FrontendEvent>(foreign).is_err());
     }
 }

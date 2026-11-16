@@ -3,21 +3,56 @@
 //! A PC Host authenticates with exactly one `Authorization: Bearer` header whose
 //! token is base64url (no padding) JSON naming its credential identity, one
 //! Project, its trusted Host epoch and the 32-byte secret in hex. A request with
-//! any Origin is a browser and is refused; browser signaling is a separate,
-//! later route. The registration exists only while its socket is served: every
+//! any Origin is a browser and is refused; browsers claim invites on the
+//! separate `browser_route`. The registration exists only while its socket is served: every
 //! exit path, including a failed upgrade, logically closes it once.
 //!
-//! The coordinator answers `{"type":"registered","generation","ttl_secs"}` and
+//! The coordinator answers
+//! `{"type":"registered","generation","ttl_secs","messages_per_second","burst"}`
+//! (the Host rate this socket is held to, so the Host can pace itself) and
 //! echoes each `{"type":"renew","generation","nonce"}` as `renewed` with the
 //! remaining lease seconds. The Host's request-start/nonce lease remains its own
 //! contract; this route never extends a lease beyond the domain deadline and
 //! closes the socket when that deadline passes, or when the server stops.
-//! Invites, browser signaling and device authority are out of scope.
+//!
+//! `{"type":"register_invite","generation","nonce","secret","ttl_secs"}` adds a
+//! Host-generated invite (64 hex, never escaped) to the registration's scope
+//! and answers `invite_registered`, or `invite_rejected` with a `reason` for a
+//! rejection the Host can recover from by generating another invite. Any other
+//! failure loses the registration and closes the socket. On the accepted path
+//! the secret is decoded from the borrowed frame text straight into a wiped
+//! buffer; an escaped secret is refused (after serde has made its own
+//! unescaped copies), and neither the frame buffer nor stack copies left by
+//! moves are erased. Device authority is out of scope. Closed invites stay as replay fences until their TTL; they count
+//! toward the global 64-record bound and a per-Host 16-record bound, so one
+//! Host's fences cannot exhaust other Hosts' invites (`host_capacity`).
+//!
+//! When a browser claims one of its invites, the Host is sent
+//! `{"type":"connection_claimed","generation","connection_id","invite"}` (the
+//! 64-hex SHA-256 digest of the claimed invite's secret), each opaque
+//! browser signal as `{"type":"connection_signal",...,"payload"}`, and
+//! `{"type":"connection_closed",...}` once that claimed connection is logically
+//! closed (claimed, signals, then closed). An approved device's reconnect
+//! (`browser_route`) is announced as
+//! `{"type":"connection_reconnect","generation","connection_id","device_id"}`
+//! and then relayed and closed the same way. Only the owning registration
+//! receives them. The Host answers with
+//! `{"type":"signal","generation","connection_id","payload"}`, relayed only to
+//! that connection while it is one of the registration's live claims; any
+//! other connection ID is ignored, and a browser that falls behind is closed.
+//! `{"type":"close_connection","generation","connection_id"}` closes one of
+//! the registration's own claimed connections (others are ignored).
+//!
+//! Every Host data message spends one token of the registration's configured
+//! Host rate (burst, refilled per second); a message beyond it is not served,
+//! and the Host is sent `{"type":"rate_limited","generation"}` before the
+//! registration is logically closed. Nothing is queued or retried.
 //!
 //! Each call reads the real wall clock; a backwards step makes the domain gate
 //! terminal (fail closed) until the operator restarts the coordinator.
 
 use super::{
+    invite::InviteError,
     registration::{CoordinatorSessions, RegistrationError, RegistrationHandle},
     CredentialError, CredentialIdentity,
 };
@@ -33,6 +68,7 @@ use base64::Engine as _;
 use gwt_core::repo_hash::ProjectKey;
 use serde::Deserialize;
 use std::{
+    collections::HashMap,
     sync::{Arc, Mutex},
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
@@ -51,14 +87,165 @@ const UNAUTHORIZED: &str =
 /// the last accepted connection closes.
 pub(super) type SharedSessions = Arc<Mutex<CoordinatorSessions>>;
 
+/// Bound of undelivered connection events per Host: opened and closed for
+/// each of the per-Host 16 invite records and 8 reconnects.
+const EVENT_BACKLOG: usize = 48;
+
+/// A claimed browser connection's lifecycle and signals, announced to its Host.
+#[derive(Debug)]
+pub(super) enum HostEvent {
+    /// A claimed connection and the SHA-256 digest of the claimed invite's
+    /// secret (the registry's key), so the Host can tell which invite it was.
+    Claimed {
+        connection_id: Uuid,
+        invite: [u8; 32],
+    },
+    /// An approved device's reconnect, by the device ID the browser named;
+    /// the Host verifies the device itself.
+    Reconnect {
+        connection_id: Uuid,
+        device_id: Uuid,
+    },
+    /// A complete `connection_signal` frame, already checked against the
+    /// message bound by the browser route.
+    Signal(String),
+    Closed(Uuid),
+}
+
+/// Event senders of live registrations, by registration generation.
+pub(super) type HostEvents = Arc<Mutex<HashMap<Uuid, mpsc::Sender<HostEvent>>>>;
+
+/// Bound of undelivered Host signal frames per claimed browser connection.
+pub(super) const BROWSER_BACKLOG: usize = 32;
+
+/// Live claimed browser connections, by connection ID: the owning registration
+/// generation and the sender of frames for that browser.
+pub(super) type BrowserConnections = Arc<Mutex<HashMap<Uuid, (Uuid, mpsc::Sender<String>)>>>;
+
+/// Relays a Host signal to one of its own live claimed connections. A
+/// connection that is gone or belongs to another registration is ignored (it
+/// may have just closed); a browser that fell behind is dropped from the table,
+/// which closes it. `false` only when the table is unusable.
+fn relay_to_browser(
+    connections: &BrowserConnections,
+    generation: Uuid,
+    connection_id: Uuid,
+    payload: String,
+) -> bool {
+    let Ok(mut table) = connections.lock() else {
+        return false;
+    };
+    let Some((_, sender)) = table
+        .get(&connection_id)
+        .filter(|(owner, _)| *owner == generation)
+    else {
+        return true;
+    };
+    let frame = serde_json::json!({"type": "signal", "payload": payload}).to_string();
+    if sender.try_send(frame).is_err() {
+        table.remove(&connection_id);
+    }
+    true
+}
+
+/// Closes one of the registration's own live claimed connections by dropping
+/// its route (the browser then closes); others are ignored. `false` only when
+/// the table is unusable.
+fn close_browser(connections: &BrowserConnections, generation: Uuid, connection_id: Uuid) -> bool {
+    let Ok(mut table) = connections.lock() else {
+        return false;
+    };
+    if table
+        .get(&connection_id)
+        .is_some_and(|(owner, _)| *owner == generation)
+    {
+        table.remove(&connection_id);
+    }
+    true
+}
+
+/// Queues the `opened` event (a claim or reconnect) for the live registration
+/// `generation` and returns the Host's event sender (for signals) with the slot reserved for
+/// its `connection_closed`, so the close can never be lost to a full backlog.
+/// `None` when the registration is gone or its backlog cannot hold both
+/// events (the caller fails closed).
+pub(super) fn announce_open(
+    events: &HostEvents,
+    generation: Uuid,
+    opened: HostEvent,
+) -> Option<(mpsc::Sender<HostEvent>, mpsc::OwnedPermit<HostEvent>)> {
+    let sender = events.lock().ok()?.get(&generation)?.clone();
+    let closed = sender.clone().try_reserve_owned().ok()?;
+    sender.try_send(opened).ok()?;
+    Some((sender, closed))
+}
+
 /// Route state. `stopping` ends every Host socket when the server stops; each
 /// socket holds an `alive` sender until its registration is logically closed,
 /// so the server can wait for all of them before releasing the registry.
+/// `retired` is notified after each registration's logical close, so claimed
+/// browser sockets of that registration can end. `events` routes claimed
+/// connection events to the owning Host socket, and `connections` routes Host
+/// signals to one claimed browser.
 #[derive(Clone)]
 pub(super) struct HostState {
     pub(super) sessions: SharedSessions,
     pub(super) stopping: watch::Receiver<bool>,
     pub(super) alive: mpsc::Sender<()>,
+    pub(super) retired: Arc<watch::Sender<()>>,
+    pub(super) events: HostEvents,
+    pub(super) connections: BrowserConnections,
+    /// The configured per-device message rate of each claimed browser.
+    pub(super) signal_rate: SignalRate,
+    /// The configured message rate of each Host registration socket.
+    pub(super) host_rate: SignalRate,
+    /// Each source's budget for browser claim/reconnect upgrade requests.
+    pub(super) opens: Arc<super::browser_route::OpenBudgets>,
+}
+
+/// A token-bucket policy: `burst` messages at once, refilled at
+/// `per_second`. Both are positive (validated with the config).
+#[derive(Clone, Copy, Debug)]
+pub(super) struct SignalRate {
+    pub(super) per_second: u16,
+    pub(super) burst: u16,
+}
+
+/// One socket's token bucket for its data messages (a claimed browser's or a
+/// Host registration's).
+pub(super) struct SignalBudget {
+    rate: SignalRate,
+    tokens: f64,
+    refilled: Instant,
+}
+
+impl SignalBudget {
+    pub(super) fn new(rate: SignalRate, now: Instant) -> Self {
+        Self {
+            rate,
+            tokens: f64::from(rate.burst),
+            refilled: now,
+        }
+    }
+
+    /// Whether the bucket has refilled to its burst by `now`.
+    pub(super) fn is_full(&self, now: Instant) -> bool {
+        let elapsed = now.saturating_duration_since(self.refilled).as_secs_f64();
+        self.tokens + elapsed * f64::from(self.rate.per_second) >= f64::from(self.rate.burst)
+    }
+
+    /// Spends one token at `now`; `false` when none is left.
+    pub(super) fn take(&mut self, now: Instant) -> bool {
+        let elapsed = now.saturating_duration_since(self.refilled).as_secs_f64();
+        self.tokens = (self.tokens + elapsed * f64::from(self.rate.per_second))
+            .min(f64::from(self.rate.burst));
+        self.refilled = now;
+        if self.tokens < 1.0 {
+            return false;
+        }
+        self.tokens -= 1.0;
+        true
+    }
 }
 
 #[derive(Deserialize)]
@@ -70,20 +257,8 @@ struct HostToken {
     generation: Uuid,
     project: String,
     host_epoch: Uuid,
-    #[serde(deserialize_with = "borrowed_secret")]
+    #[serde(deserialize_with = "super::borrowed_hex_secret")]
     secret: Zeroizing<[u8; 32]>,
-}
-
-/// Decodes the hex secret straight from the borrowed token bytes, so no owned
-/// copy is left unwiped. An escaped string cannot be borrowed and is refused.
-fn borrowed_secret<'de, D>(deserializer: D) -> Result<Zeroizing<[u8; 32]>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let hex_secret = <&'de str>::deserialize(deserializer)?;
-    let mut secret = Zeroizing::new([0u8; 32]);
-    hex::decode_to_slice(hex_secret, &mut *secret).map_err(serde::de::Error::custom)?;
-    Ok(secret)
 }
 
 struct HostCredentials {
@@ -129,7 +304,7 @@ fn parse_authorization(headers: &HeaderMap) -> Option<HostCredentials> {
 /// Synchronous domain call; the store checkpoint fsyncs at most once per
 /// trusted wall second, so async callers run it on a blocking thread. The
 /// monotonic instant is read under the lock.
-fn call<T>(
+pub(super) fn call<T>(
     sessions: &SharedSessions,
     f: impl FnOnce(&mut CoordinatorSessions, Instant, u64) -> Result<T, RegistrationError>,
 ) -> Result<T, RegistrationError> {
@@ -145,6 +320,9 @@ fn call<T>(
 struct Registration {
     sessions: SharedSessions,
     handle: RegistrationHandle,
+    retired: Arc<watch::Sender<()>>,
+    events: HostEvents,
+    connections: BrowserConnections,
 }
 
 impl Registration {
@@ -156,22 +334,63 @@ impl Registration {
                 .ok_or(RegistrationError::DeadRegistration)
         })
     }
+
+    fn register_invite(&self, secret: &[u8; 32], ttl_secs: u64) -> Result<(), RegistrationError> {
+        call(&self.sessions, |sessions, now, wall| {
+            sessions.register_invite(&self.handle, secret, ttl_secs, now, wall)
+        })
+    }
 }
 
 /// Fallback for paths that cannot await (a failed upgrade); normal socket exits
 /// drop the registration on a blocking thread.
 impl Drop for Registration {
     fn drop(&mut self) {
+        if let Ok(mut events) = self.events.lock() {
+            events.remove(&self.handle.generation());
+        }
         let _ = call(&self.sessions, |sessions, now, wall| {
             sessions.close(&self.handle, now, wall)
         });
+        self.retired.send_modify(|_| {});
     }
 }
 
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum HostMessage {
-    Renew { generation: Uuid, nonce: Uuid },
+    Renew {
+        generation: Uuid,
+        nonce: Uuid,
+    },
+    RegisterInvite {
+        generation: Uuid,
+        nonce: Uuid,
+        #[serde(deserialize_with = "super::borrowed_hex_secret")]
+        secret: Zeroizing<[u8; 32]>,
+        ttl_secs: u64,
+    },
+    Signal {
+        generation: Uuid,
+        connection_id: Uuid,
+        payload: String,
+    },
+    CloseConnection {
+        generation: Uuid,
+        connection_id: Uuid,
+    },
+}
+
+/// Invite rejections that leave the registration intact; the Host recovers by
+/// generating a fresh invite or waiting for a pending one to expire.
+fn recoverable_invite_rejection(error: &RegistrationError) -> Option<&'static str> {
+    match error {
+        RegistrationError::Invite(InviteError::InvalidTtl) => Some("invalid_ttl"),
+        RegistrationError::Invite(InviteError::AlreadyRegistered) => Some("already_registered"),
+        RegistrationError::Invite(InviteError::HostCapacity) => Some("host_capacity"),
+        RegistrationError::Invite(InviteError::Capacity) => Some("capacity"),
+        _ => None,
+    }
 }
 
 /// Remaining lease seconds, rounded up so a fresh lease reports 30.
@@ -235,16 +454,42 @@ pub(super) async fn register(
         Err(_) => return unavailable(),
     };
     let generation = handle.generation();
+    let (sender, events) = mpsc::channel(EVENT_BACKLOG);
     let registration = Registration {
         sessions: state.sessions,
         handle,
+        retired: state.retired,
+        events: state.events,
+        connections: state.connections,
     };
+    // A poisoned route table drops (closes) the registration; the guard is
+    // released before that drop takes the lock again.
+    let routed = registration
+        .events
+        .lock()
+        .map(|mut routes| {
+            routes.insert(generation, sender);
+        })
+        .is_ok();
+    if !routed {
+        return unavailable();
+    }
     let (stopping, alive) = (state.stopping, state.alive);
+    let budget = SignalBudget::new(state.host_rate, Instant::now());
     upgrade
         .max_message_size(MAX_MESSAGE_BYTES)
         .max_frame_size(MAX_MESSAGE_BYTES)
         .on_upgrade(move |socket| {
-            serve_host(socket, registration, generation, deadline, stopping, alive)
+            serve_host(
+                socket,
+                registration,
+                generation,
+                deadline,
+                budget,
+                stopping,
+                alive,
+                events,
+            )
         })
 }
 
@@ -263,59 +508,171 @@ async fn send_json(socket: &mut WebSocket, value: serde_json::Value) -> bool {
         .is_ok()
 }
 
+/// Runs a synchronous domain call on a blocking thread; `None` if it panicked.
+async fn blocking<T: Send + 'static>(
+    registration: Registration,
+    f: impl FnOnce(&Registration) -> T + Send + 'static,
+) -> Option<(Registration, T)> {
+    tokio::task::spawn_blocking(move || {
+        let result = f(&registration);
+        (registration, result)
+    })
+    .await
+    .ok()
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn serve_host(
     mut socket: WebSocket,
     mut registration: Registration,
     generation: Uuid,
     mut deadline: Instant,
+    mut budget: SignalBudget,
     mut stopping: watch::Receiver<bool>,
     alive: mpsc::Sender<()>,
+    mut events: mpsc::Receiver<HostEvent>,
 ) {
     let registered = serde_json::json!({
         "type": "registered", "generation": generation, "ttl_secs": ttl_secs(deadline),
+        "messages_per_second": budget.rate.per_second, "burst": budget.rate.burst,
     });
     if send_json(&mut socket, registered).await {
         loop {
-            let message = tokio::select! {
-                message = socket.recv() => message,
+            enum Input {
+                Socket(Option<Result<Message, axum::Error>>),
+                Event(HostEvent),
+            }
+            let input = tokio::select! {
+                message = socket.recv() => Input::Socket(message),
+                event = events.recv() => match event {
+                    Some(event) => Input::Event(event),
+                    None => break,
+                },
                 _ = tokio::time::sleep_until(deadline.into()) => break,
                 _ = stopping.wait_for(|stopped| *stopped) => break,
             };
+            let message = match input {
+                Input::Socket(message) => message,
+                Input::Event(event) => {
+                    let event = match event {
+                        HostEvent::Claimed {
+                            connection_id,
+                            invite,
+                        } => serde_json::json!({
+                            "type": "connection_claimed", "generation": generation,
+                            "connection_id": connection_id, "invite": hex::encode(invite),
+                        }),
+                        HostEvent::Reconnect {
+                            connection_id,
+                            device_id,
+                        } => serde_json::json!({
+                            "type": "connection_reconnect", "generation": generation,
+                            "connection_id": connection_id, "device_id": device_id,
+                        }),
+                        HostEvent::Closed(connection_id) => serde_json::json!({
+                            "type": "connection_closed", "generation": generation,
+                            "connection_id": connection_id,
+                        }),
+                        HostEvent::Signal(frame) => {
+                            if socket.send(Message::Text(frame.into())).await.is_err() {
+                                break;
+                            }
+                            continue;
+                        }
+                    };
+                    if !send_json(&mut socket, event).await {
+                        break;
+                    }
+                    continue;
+                }
+            };
             let text = match message {
+                Some(Ok(Message::Text(_))) if !budget.take(Instant::now()) => {
+                    let limited = serde_json::json!({
+                        "type": "rate_limited", "generation": generation,
+                    });
+                    let _ = send_json(&mut socket, limited).await;
+                    break;
+                }
                 Some(Ok(Message::Text(text))) => text,
                 Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
                 _ => break,
             };
-            let Ok(HostMessage::Renew {
-                generation: renewed,
-                nonce,
-            }) = serde_json::from_str(text.as_str())
-            else {
+            let Ok(message) = serde_json::from_str::<HostMessage>(text.as_str()) else {
                 break;
             };
-            if renewed != generation {
-                break;
-            }
-            let renewal = tokio::task::spawn_blocking(move || {
-                let result = registration.renew();
-                (registration, result)
-            })
-            .await;
-            // A panicked renewal already dropped (closed) the registration.
-            let Ok((returned, result)) = renewal else {
-                let _ = socket.send(Message::Close(None)).await;
-                return;
+            let reply = match message {
+                HostMessage::Renew {
+                    generation: renewed,
+                    nonce,
+                } if renewed == generation => {
+                    // A panicked call already dropped the registration, which
+                    // closes it unless the panic poisoned the sessions lock.
+                    let Some((returned, result)) = blocking(registration, |r| r.renew()).await
+                    else {
+                        let _ = socket.send(Message::Close(None)).await;
+                        return;
+                    };
+                    registration = returned;
+                    let Ok(next) = result else {
+                        break;
+                    };
+                    deadline = next;
+                    serde_json::json!({
+                        "type": "renewed", "generation": generation, "nonce": nonce,
+                        "ttl_secs": ttl_secs(deadline),
+                    })
+                }
+                HostMessage::RegisterInvite {
+                    generation: scoped,
+                    nonce,
+                    secret,
+                    ttl_secs: invite_ttl,
+                } if scoped == generation => {
+                    let invite = move |r: &Registration| r.register_invite(&secret, invite_ttl);
+                    let Some((returned, result)) = blocking(registration, invite).await else {
+                        let _ = socket.send(Message::Close(None)).await;
+                        return;
+                    };
+                    registration = returned;
+                    match result.as_ref().map_err(recoverable_invite_rejection) {
+                        Ok(()) => serde_json::json!({
+                            "type": "invite_registered", "generation": generation, "nonce": nonce,
+                        }),
+                        Err(Some(reason)) => serde_json::json!({
+                            "type": "invite_rejected", "generation": generation, "nonce": nonce,
+                            "reason": reason,
+                        }),
+                        Err(None) => break,
+                    }
+                }
+                HostMessage::Signal {
+                    generation: scoped,
+                    connection_id,
+                    payload,
+                } if scoped == generation => {
+                    if !relay_to_browser(
+                        &registration.connections,
+                        generation,
+                        connection_id,
+                        payload,
+                    ) {
+                        break;
+                    }
+                    continue;
+                }
+                HostMessage::CloseConnection {
+                    generation: scoped,
+                    connection_id,
+                } if scoped == generation => {
+                    if !close_browser(&registration.connections, generation, connection_id) {
+                        break;
+                    }
+                    continue;
+                }
+                _ => break,
             };
-            registration = returned;
-            let Ok(next) = result else {
-                break;
-            };
-            deadline = next;
-            let renewed = serde_json::json!({
-                "type": "renewed", "generation": generation, "nonce": nonce,
-                "ttl_secs": ttl_secs(deadline),
-            });
-            if !send_json(&mut socket, renewed).await {
+            if !send_json(&mut socket, reply).await {
                 break;
             }
         }
@@ -329,6 +686,7 @@ async fn serve_host(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     fn headers(values: &[&str]) -> HeaderMap {
         let mut headers = HeaderMap::new();
@@ -398,5 +756,28 @@ mod tests {
             base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(escaped)
         );
         assert!(parse_authorization(&headers(&[&escaped])).is_none());
+    }
+
+    #[test]
+    fn signal_budget_allows_the_burst_then_refills_at_the_rate_up_to_the_burst() {
+        let start = Instant::now();
+        let mut budget = SignalBudget::new(
+            SignalRate {
+                per_second: 1,
+                burst: 2,
+            },
+            start,
+        );
+        assert!(budget.take(start));
+        assert!(budget.take(start));
+        assert!(!budget.take(start));
+        let later = start + Duration::from_secs(1);
+        assert!(budget.take(later));
+        assert!(!budget.take(later));
+        // A long idle period refills only up to the burst.
+        let idle = later + Duration::from_secs(60);
+        assert!(budget.take(idle));
+        assert!(budget.take(idle));
+        assert!(!budget.take(idle));
     }
 }

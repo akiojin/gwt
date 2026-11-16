@@ -287,6 +287,10 @@ pub enum TransportEvent {
         >,
     },
     RuntimeHook(RuntimeHookEvent),
+    AuthenticatedRuntimeHook {
+        grant: AgentCapabilityGrant,
+        event: RuntimeHookEvent,
+    },
     WorkspaceProjectionChanged {
         project_root: PathBuf,
     },
@@ -1637,9 +1641,10 @@ async fn hook_live_handler(
     State(state): State<TransportState>,
     Json(mut event): Json<RuntimeHookEvent>,
 ) -> StatusCode {
-    let Some(principal) = agent_capability_principal(&headers, &state) else {
+    let Some(grant) = agent_capability_grant(&headers, &state) else {
         return StatusCode::UNAUTHORIZED;
     };
+    let principal = grant.principal();
     if event.gwt_session_id.as_deref() != Some(principal.session_id()) {
         tracing::warn!(
             target: "gwt_security",
@@ -1679,7 +1684,22 @@ async fn hook_live_handler(
         occurred_at,
         "runtime hook delivery"
     );
-    state.send(TransportEvent::RuntimeHook(event));
+    #[cfg(any(test, feature = "test-gh-guard"))]
+    {
+        let captured = grant.clone();
+        if tokio::task::spawn_blocking(move || {
+            crate::project_runtime::agent_frontend::run_owner_agent_dispatch_test_hook(
+                &captured,
+                crate::project_runtime::agent_frontend::OwnerAgentDispatchTestStage::BeforeHookDispatch,
+            );
+        })
+        .await
+        .is_err()
+        {
+            return StatusCode::INTERNAL_SERVER_ERROR;
+        }
+    }
+    state.send(TransportEvent::AuthenticatedRuntimeHook { grant, event });
     StatusCode::NO_CONTENT
 }
 
@@ -2683,6 +2703,27 @@ impl ClientSessionScope {
     }
 }
 
+/// Malformed tuning can only be correlated on its own authenticated browser project.
+/// Payload identity is never routing authority, and parser diagnostics are not echoed.
+fn rejected_tuning_parse(scope: &ClientSessionScope, text: &str) -> Option<BackendEvent> {
+    let ClientSessionScope::Browser(ClientScope::Project(key)) = scope else {
+        return None;
+    };
+    let raw: serde_json::Value = serde_json::from_str(text).ok()?;
+    if raw.get("kind")?.as_str()? != "agent_roster"
+        || raw.get("action")?.get("kind")?.as_str()? != "set_tuning"
+        || raw.get("project_key")?.as_str()? != key.as_str()
+    {
+        return None;
+    }
+    let request_id = raw.get("request_id")?.as_str()?;
+    if request_id.trim().is_empty() || request_id.len() > 256 {
+        return None;
+    }
+    Some(BackendEvent::AgentRosterError { project_key: key.to_string(), request_id: Some(request_id.to_string()),
+        message: "Invalid tuning request. Reload registered members and retry with explicit model and reasoning fields.".into() })
+}
+
 fn decode_frontend_event(text: &str) -> Result<FrontendEvent, serde_json::Error> {
     let event = serde_json::from_str(text)?;
     if matches!(&event, FrontendEvent::PaneName { .. }) {
@@ -3240,6 +3281,9 @@ async fn client_session_with_scope(
                                 }
                             }
                             Err(error) => {
+                                if let Some(event) = rejected_tuning_parse(&scope, text.as_ref()) {
+                                    send_agent_terminal_result(&mut sender, event, Duration::from_secs(1)).await;
+                                }
                                 if let Some(request_id) = name_request_id {
                                     pending_names.remove(&request_id);
                                     send_agent_terminal_result(&mut sender, BackendEvent::PaneNameResult {
@@ -3617,10 +3661,11 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), reqwest::StatusCode::NO_CONTENT);
         assert!(matches!(
+            // test-hygiene: allow-wall-clock-deadline Bound delivery of the actual authenticated HTTP request; channel receipt establishes progress.
             tokio::time::timeout(std::time::Duration::from_secs(5), received.recv())
                 .await
                 .unwrap(),
-            Some(TransportEvent::RuntimeHook(_))
+            Some(TransportEvent::AuthenticatedRuntimeHook { .. })
         ));
         let text = std::fs::read_to_string(hook_log.path()).unwrap();
         let records: Vec<serde_json::Value> = text
@@ -4458,6 +4503,7 @@ mod tests {
         BackendEvent::AttachmentProgress {
             id: pane.to_string(),
             operation_id: operation_id.to_string(),
+            expected_target: None,
             phase,
             file_index: Some(0),
             file_count: 1,
@@ -5909,5 +5955,30 @@ mod tests {
         assert_eq!(hub.scope("a"), None);
         hub.register("a".into());
         assert_eq!(hub.scope("a"), Some(ClientScope::Hub));
+    }
+}
+
+#[cfg(test)]
+mod tuning_parse_tests {
+    use super::*;
+    #[test]
+    fn malformed_tuning_correlates_only_the_authenticated_browser_project() {
+        let key = gwt_core::repo_hash::ProjectKey::parse("0123456789abcdef").unwrap();
+        let scope = ClientSessionScope::Browser(ClientScope::Project(key.clone()));
+        let request = serde_json::json!({"kind":"agent_roster","project_key":key.as_str(),"request_id":"tune-1",
+            "action":{"kind":"set_tuning","member_id":"member","model":null,"expected_core_revision":"token","authority":"forged"}});
+        assert!(decode_frontend_event(&request.to_string()).is_err());
+        let event = rejected_tuning_parse(&scope, &request.to_string()).unwrap();
+        assert!(
+            matches!(event, BackendEvent::AgentRosterError { project_key, request_id: Some(id), .. } if project_key == key.as_str() && id == "tune-1")
+        );
+        assert!(rejected_tuning_parse(
+            &ClientSessionScope::Browser(ClientScope::Hub),
+            &request.to_string()
+        )
+        .is_none());
+        let mut foreign = request;
+        foreign["project_key"] = serde_json::json!("fedcba9876543210");
+        assert!(rejected_tuning_parse(&scope, &foreign.to_string()).is_none());
     }
 }

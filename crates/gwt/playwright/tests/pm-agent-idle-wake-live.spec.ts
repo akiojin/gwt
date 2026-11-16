@@ -84,6 +84,7 @@ test.describe("Agent idle PM wake (isolated checkout)", () => {
     let hookLog = "";
     const theme = testInfo.project.name.endsWith("light") ? "light" : "dark";
     const fixture = await startExactRelaunchFixture(testInfo, {
+      page,
       async prepare({ home, bin, project }) {
         inputLog = join(home, "provider-input.jsonl");
         hookLog = join(home, "provider-hooks.jsonl");

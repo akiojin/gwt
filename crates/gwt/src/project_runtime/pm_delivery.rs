@@ -1263,26 +1263,86 @@ pub fn has_open_board_escalations(project_root: &Path) -> bool {
 
 pub fn pm_status_from_launch_prefs(
     sessions_dir: &Path,
+    project_root: &Path,
     prefs: &pm_registry::PmPrefs,
     running: Option<&PmRegistration>,
 ) -> BackendEvent {
-    let configured = prefs.settings.launch_profile_or_default();
+    let fresh = crate::agent_registry::pm_profile_status_snapshot(project_root);
+    let reliable = fresh.is_ok();
+    let prefs = fresh.as_ref().map(|(prefs, _)| prefs).unwrap_or(prefs);
+    let key = gwt_core::paths::project_scope_hash(project_root);
+    let snapshot = fresh.as_ref().ok().map(|(_, snapshot)| snapshot);
+    let configured_member = snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.configured_pm_member(&key).ok().flatten());
+    // An async Read may outlive its registration. Retain only the exact captured
+    // registration still saved now; never infer a successor's running identity.
+    let running = running
+        .filter(|registration| reliable && prefs.registration.as_ref() == Some(*registration));
+    let running_session = running.and_then(|registration| {
+        gwt_agent::Session::load(&sessions_dir.join(format!("{}.toml", registration.session_id)))
+            .ok()
+    });
+    let configured = reliable.then(|| prefs.settings.launch_profile_or_default());
     let loop_interval_secs = prefs.settings.loop_interval_secs_clamped();
-    let running_profile =
-        running.map(|registration| pm_running_profile_at(sessions_dir, registration));
-    let agent_options = pm_agent_options(&configured.agent_id);
+    let running_profile = running.map(|registration| {
+        running_session
+            .as_ref()
+            .map(|session| {
+                PmLaunchProfile {
+                    agent_id: session.agent_id.command().to_string(),
+                    model: session.model.clone(),
+                    reasoning: session.reasoning_level.clone(),
+                    version: session.tool_version.clone(),
+                    codex_speed: Some(session.codex_speed()),
+                    fast_mode: Some(session.fast_mode_enabled()),
+                }
+                .normalized()
+            })
+            .unwrap_or_else(|| PmLaunchProfile {
+                agent_id: registration.agent_id.clone(),
+                ..Default::default()
+            })
+    });
+    let agent_options = configured
+        .as_ref()
+        .map(|profile| pm_agent_options(&profile.agent_id))
+        .unwrap_or_default();
     BackendEvent::PmStatus {
-        available: true,
+        project_key: key.to_string(),
+        configured_member_id: configured_member
+            .as_ref()
+            .map(|member| member.agent_member_id.clone()),
+        configured_member_name: configured_member.as_ref().map(|member| member.name.clone()),
+        running_member_id: running_session.as_ref().and_then(|session| {
+            snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.resolve_session(session).ok().flatten())
+        }),
+        running_session_id: running.map(|registration| registration.session_id.clone()),
+        roster_revision_decimal: snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.project_snapshot(&key).ok())
+            .and_then(|prefs| prefs.agent_roster.map(|roster| roster.revision.to_string())),
+        profile_revision: reliable.then(|| pm_registry::pm_profile_revision(prefs)),
+        available: reliable,
         auto_start: prefs.settings.auto_start,
         paused: prefs.settings.paused,
         loop_interval_secs,
         loop_interval_secs_decimal: loop_interval_secs.to_string(),
         agent_options,
-        configured_agent_id: configured.agent_id,
-        configured_model: configured.model,
-        configured_reasoning: configured.reasoning,
-        configured_codex_speed: configured.codex_speed,
-        configured_fast_mode: configured.fast_mode,
+        configured_agent_id: configured
+            .as_ref()
+            .map(|profile| profile.agent_id.clone())
+            .unwrap_or_default(),
+        configured_model: configured
+            .as_ref()
+            .and_then(|profile| profile.model.clone()),
+        configured_reasoning: configured
+            .as_ref()
+            .and_then(|profile| profile.reasoning.clone()),
+        configured_codex_speed: configured.as_ref().and_then(|profile| profile.codex_speed),
+        configured_fast_mode: configured.as_ref().and_then(|profile| profile.fast_mode),
         running_agent_id: running_profile
             .as_ref()
             .map(|profile| profile.agent_id.clone()),
@@ -1298,34 +1358,9 @@ pub fn pm_status_from_launch_prefs(
         start_block: running_profile
             .is_none()
             .then(|| prefs.start_block.clone())
-            .flatten(),
+            .flatten()
+            .map(Box::new),
     }
-}
-
-/// Resolve the launch identity of the conversation that is running now.
-/// The registration deliberately stays small; the durable Session already
-/// owns agent/model/reasoning. Legacy or temporarily unreadable Session
-/// records retain the registered agent and expose unknown tuning.
-fn pm_running_profile_at(sessions_dir: &Path, registration: &PmRegistration) -> PmLaunchProfile {
-    let session_path = sessions_dir.join(format!("{}.toml", registration.session_id));
-    gwt_agent::Session::load(&session_path)
-        .map(|session| {
-            let codex_speed = Some(session.codex_speed());
-            let fast_mode = Some(session.fast_mode_enabled());
-            PmLaunchProfile {
-                agent_id: session.agent_id.command().to_string(),
-                model: session.model,
-                reasoning: session.reasoning_level,
-                version: session.tool_version,
-                codex_speed,
-                fast_mode,
-            }
-            .normalized()
-        })
-        .unwrap_or_else(|_| PmLaunchProfile {
-            agent_id: registration.agent_id.clone(),
-            ..PmLaunchProfile::default()
-        })
 }
 
 /// Selectable PM agents: the ones that can resolve `$gwt-pm`, narrowed to

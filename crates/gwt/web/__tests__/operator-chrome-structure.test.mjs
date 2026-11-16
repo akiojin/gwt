@@ -1076,8 +1076,8 @@ test("Agent window title starts with assigned identity before its current purpos
   assert.equal(displayTitle({ ...data, dynamic_title: null }, agentPreset, "Project Manager"), "Initial task");
   assert.equal(displayTitle({ preset: "agent", title: "Restore cache" }, agentPreset, "Project Manager"), "Restore cache");
   assert.equal(displayTitle({ preset: "agent", branch: "work/task" }, agentPreset, "Project Manager"), "work/task");
-  assert.equal(displayTitle({ ...data, is_pm: true }, agentPreset, "Project Manager"), "Project Manager");
-  assert.equal(displayTitle({ ...data, agent_name: "Yuu", is_pm: true }, agentPreset, "Project Manager"), "Yuu");
+  assert.equal(displayTitle({ ...data, is_pm: true }, agentPreset, "Project Manager"), "Project Manager — Starting");
+  assert.equal(displayTitle({ ...data, agent_name: "Yuu", is_pm: true }, agentPreset, "Project Manager"), "Project Manager · Yuu — Starting");
   assert.equal(displayTitle({ preset: "shell", title: "Shell" }, agentPreset, "Project Manager"), "Shell");
 });
 
@@ -4670,8 +4670,8 @@ test("Hidden window output is gated while PM and Agents retain their VT buffers"
   assert.ok(batcherConfig, "app.js must configure the terminal output batcher");
   assert.match(
     batcherConfig[1],
-    /canWrite:\s*\(windowId\)\s*=>\s*\{\s*const runtime = terminalMap\.get\(windowId\);\s*return runtime\?\.isReady === true\s*&& runtime\.snapshotWriteCoordinator\?\.shouldDeferOutput\(\) !== true\s*&& \(pmChatViews\.has\(windowId\)\s*\|\|\s*\(worksHost\s*&&\s*worksSurface\?\.contains\(windowId\)\)\s*\|\|\s*canRefreshTerminalViewport\(windowId\)\)/,
-    "ready PM and Agents must consume output while missing/unfit/barrier and other hidden windows retain output gating",
+    /canWrite:\s*\(windowId\)\s*=>\s*\{\s*const runtime = terminalMap\.get\(windowId\);\s*return runtime\?\.isReady === true\s*&& runtime\.snapshotWriteCoordinator\?\.shouldDeferOutput\(\) !== true\s*&& \(pmChatViews\.has\(windowId\)\s*\|\|\s*worksSurface\?\.contains\(windowId\)\s*\|\|\s*canRefreshTerminalViewport\(windowId\)\)/,
+    "ready PM and retained Works must consume output without a visible host while missing/unfit/barrier and other hidden windows retain output gating",
   );
 
   const renderWorkspaceBody = extractFunctionBody(appSource, "renderWorkspace");

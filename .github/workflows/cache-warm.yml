@@ -18,7 +18,7 @@ name: Cache Warm
 # a failure.
 #
 # Cache budget (AC-3): three shared keys — linux-workspace, windows-workspace,
-# macos-workspace — at ~540 MB each, held for the develop and main scopes, is
+# macos-workspace-v2 — at ~540 MB each, held for the develop and main scopes, is
 # ~3.2 GB of the repository's 10 GB ceiling. coverage.yml, nightly.yml and
 # release.yml keep their own job-id keys and fit in the remainder. A fourth
 # shared key has to be argued against that budget; consolidating by OS is the
@@ -154,7 +154,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: macos-workspace
+          # Only this full build writes the macOS cache. Clippy/check artifacts
+          # alone cannot populate the linked dependencies needed by socket tests.
+          shared-key: macos-workspace-v2
       # Issue #4522 added `Clippy (macOS)`, which runs the ubuntu clippy gate
       # verbatim (`--workspace --all-targets --all-features`), so the macOS PR
       # surface is now the whole workspace including test targets — the same
