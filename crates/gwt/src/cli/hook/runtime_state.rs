@@ -316,6 +316,47 @@ pub(crate) struct HookCompletionContext {
     initially_missing: bool,
 }
 
+// The native producer regression holds only its own accepted completion, after
+// protocol serialization and before any completion lease is reacquired.
+#[cfg(any(test, feature = "test-gh-guard"))]
+type CompletionTestKey = (PathBuf, String);
+#[cfg(any(test, feature = "test-gh-guard"))]
+type CompletionTestHooks = std::collections::HashMap<CompletionTestKey, Box<dyn FnOnce() + Send>>;
+#[cfg(any(test, feature = "test-gh-guard"))]
+fn completion_test_hooks() -> &'static std::sync::Mutex<CompletionTestHooks> {
+    static HOOKS: std::sync::OnceLock<std::sync::Mutex<CompletionTestHooks>> =
+        std::sync::OnceLock::new();
+    HOOKS.get_or_init(Default::default)
+}
+#[cfg(any(test, feature = "test-gh-guard"))]
+pub struct HookCompletionTestGuard(CompletionTestKey);
+#[cfg(any(test, feature = "test-gh-guard"))]
+impl Drop for HookCompletionTestGuard {
+    fn drop(&mut self) {
+        completion_test_hooks()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.0);
+    }
+}
+#[cfg(any(test, feature = "test-gh-guard"))]
+pub fn set_hook_completion_test_hook(
+    worktree: &Path,
+    session_id: &str,
+    hook: impl FnOnce() + Send + 'static,
+) -> HookCompletionTestGuard {
+    let key = (
+        std::fs::canonicalize(worktree).unwrap(),
+        session_id.to_owned(),
+    );
+    assert!(completion_test_hooks()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(key.clone(), Box::new(hook))
+        .is_none());
+    HookCompletionTestGuard(key)
+}
+
 /// Physical lifecycle evidence for the registered resident PM without an
 /// Execution binding. This permits completion publication only; it never
 /// supplies the execution authority required by `current_hook_context`.
@@ -662,6 +703,16 @@ impl HookCompletionContext {
     /// Keep the existing Session -> writer -> publication lock order. An
     /// unavailable observation leaves the previous pair unchanged.
     pub(crate) fn record(self, outcome: gwt_agent::session::HookCompletionOutcome) {
+        #[cfg(any(test, feature = "test-gh-guard"))]
+        if self.exact.is_some() && self.begin_succeeded.get() && self.pending_bound.get() {
+            let hook = completion_test_hooks()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&(self.worktree.clone(), self.session_id.clone()));
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
         let _ = self.with_current_runtime(self.observation.is_some(), |_, runtime| {
             let Some(runtime) = runtime else {
                 return Ok(());
