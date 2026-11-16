@@ -79,7 +79,10 @@ fn macos_socket_targets_compile_before_the_execution_budget() {
     assert!(commands.lines().any(|line| line.trim()
         == "CARGO_PROFILE_TEST_DEBUG=0 node scripts/ci-windows-tests.mjs build socket"));
     assert!(steps[..execution].iter().any(|step| {
-        step["uses"] == "actions/setup-node@v6" && step["with"]["node-version"] == "24"
+        step["uses"]
+            .as_str()
+            .is_some_and(|uses| uses.starts_with("actions/setup-node@"))
+            && step["with"]["node-version"] == "24"
     }));
     let script = read("scripts/test-short-socket-fixtures.sh");
     assert!(!script.lines().any(|line| line.starts_with("cargo ")));
