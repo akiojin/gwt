@@ -358,7 +358,7 @@ impl DaemonSupervisor {
             is_process_alive,
         )?;
 
-        let retirement = match &action {
+        let retirement_candidate = |action: &DaemonBootstrapAction| match action {
             DaemonBootstrapAction::RetireStaleVersion { endpoint } => Some(endpoint.clone()),
             DaemonBootstrapAction::Reuse(endpoint)
                 if endpoint
@@ -370,10 +370,38 @@ impl DaemonSupervisor {
             }
             _ => None,
         };
-        if let Some(endpoint) = retirement {
+        if let Some(endpoint) = retirement_candidate(&action) {
             let started_at = crate::process::host_process_start_time(endpoint.pid);
             drop(children);
-            let (_probe_runtime, _connection) = authenticate_retirement_candidate(&endpoint)?;
+            let Some(_authenticated) = authenticate_retirement_candidate(&endpoint)? else {
+                // Issue #7463: nothing serves the bind, so no daemon is behind
+                // this descriptor (a live PID is a reused one). Clear it and
+                // start a replacement; never signal the unproven PID.
+                remove_unreachable_endpoint(&gwt_home, &endpoint)?;
+                tracing::warn!(pid = endpoint.pid, bind = %endpoint.bind, project_root = %project_root.display(), "removed unreachable project daemon descriptor before replacement");
+                let mut children = self.children.lock().unwrap_or_else(PoisonError::into_inner);
+                if self.stopped.load(Ordering::SeqCst) {
+                    return Err("daemon supervisor shut down during retirement verification".into());
+                }
+                let action = crate::daemon_publisher::resolve_project_daemon_bootstrap(
+                    &gwt_home,
+                    &scope,
+                    Some(expected_daemon_version),
+                    is_process_alive,
+                )?;
+                if retirement_candidate(&action).is_some() {
+                    return Err("daemon authority changed during retirement verification".into());
+                }
+                return self.start_or_reuse(
+                    project_root,
+                    &endpoint_path,
+                    &child_endpoint,
+                    &mut children,
+                    action,
+                    started_child_pid,
+                    is_process_alive,
+                );
+            };
             let started_at = started_at
                 .filter(|started_at| {
                     Some(*started_at) == crate::process::host_process_start_time(endpoint.pid)
@@ -409,6 +437,32 @@ impl DaemonSupervisor {
             retire_stale_daemon(endpoint.pid);
             return Ok(DaemonEnsureOutcome::RetiringStale { pid: endpoint.pid });
         }
+        self.start_or_reuse(
+            project_root,
+            &endpoint_path,
+            &child_endpoint,
+            &mut children,
+            action,
+            started_child_pid,
+            is_process_alive,
+        )
+    }
+
+    /// Reuse the resolved daemon or start a new child once no retirement is
+    /// pending for this project.
+    #[allow(clippy::too_many_arguments)]
+    fn start_or_reuse(
+        &self,
+        project_root: &Path,
+        endpoint_path: &Path,
+        child_endpoint: &Path,
+        children: &mut HashMap<PathBuf, SupervisedChild>,
+        action: gwt_core::daemon::DaemonBootstrapAction,
+        started_child_pid: Option<u32>,
+        is_process_alive: &dyn Fn(u32) -> bool,
+    ) -> Result<DaemonEnsureOutcome, String> {
+        use gwt_core::daemon::DaemonBootstrapAction;
+
         match action {
             DaemonBootstrapAction::Reuse(endpoint) => {
                 Ok(DaemonEnsureOutcome::AlreadyRunning { pid: endpoint.pid })
@@ -426,7 +480,7 @@ impl DaemonSupervisor {
                     return Ok(DaemonEnsureOutcome::Starting { pid });
                 }
                 let replacement = children
-                    .get(&child_endpoint)
+                    .get(child_endpoint)
                     .and_then(|slot| slot.replacement);
                 if let Some(previous) = replacement {
                     if is_process_alive(previous.pid)
@@ -441,7 +495,7 @@ impl DaemonSupervisor {
                     .unwrap_or(gwt_core::daemon::DaemonStartIntent::GuiManaged);
                 let child = (self.spawn)(&DaemonSpawnContext {
                     project_root,
-                    endpoint_path: &endpoint_path,
+                    endpoint_path,
                     startup_intent,
                 })
                 .map_err(|error| {
@@ -451,9 +505,9 @@ impl DaemonSupervisor {
                     )
                 })?;
                 let pid = child.id();
-                children.remove(&child_endpoint);
+                children.remove(child_endpoint);
                 children.insert(
-                    endpoint_path,
+                    endpoint_path.to_path_buf(),
                     SupervisedChild {
                         project_root: project_root.to_path_buf(),
                         child: Some(child),
@@ -802,31 +856,76 @@ fn report_orphan_fault(project_root: &Path, detail: &str) {
     );
 }
 
+/// `Ok(None)` means nothing serves the candidate's bind (Issue #7463): the
+/// descriptor is stale. Any other failure, including a live daemon refusing
+/// the handshake, stays an error.
 fn authenticate_retirement_candidate(
     endpoint: &gwt_core::daemon::DaemonEndpoint,
 ) -> Result<
-    (
+    Option<(
         tokio::runtime::Runtime,
         crate::cli::daemon::client::DaemonClient,
-    ),
+    )>,
     String,
 > {
+    use crate::cli::daemon::client::{DaemonClient, DaemonConnectError};
+
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|error| format!("retirement verifier runtime failed: {error}"))?;
-    let client = runtime
-        .block_on(async {
-            tokio::time::timeout(
-                std::time::Duration::from_secs(1),
-                crate::cli::daemon::client::DaemonClient::connect(endpoint),
-            )
-            .await
-            .map_err(|_| "daemon retirement authentication timed out".to_string())?
-        })
-        .map_err(|error| format!("daemon retirement candidate was not authenticated: {error}"))?;
-    // Keep the authenticated connection alive through the retirement callback.
-    Ok((runtime, client))
+    let connected = runtime.block_on(async {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            DaemonClient::connect_classified(endpoint),
+        )
+        .await
+        .map_err(|_| {
+            DaemonConnectError::Failed("daemon retirement authentication timed out".to_string())
+        })?
+    });
+    match connected {
+        // Keep the authenticated connection alive through the retirement callback.
+        Ok(client) => Ok(Some((runtime, client))),
+        Err(DaemonConnectError::Unreachable(_)) => Ok(None),
+        Err(DaemonConnectError::Failed(error)) => Err(format!(
+            "daemon retirement candidate was not authenticated: {error}"
+        )),
+    }
+}
+
+/// Remove an unreachable candidate's descriptor, but only while it still
+/// names that candidate: a replacement may already have rewritten it.
+fn remove_unreachable_endpoint(
+    gwt_home: &Path,
+    endpoint: &gwt_core::daemon::DaemonEndpoint,
+) -> Result<(), String> {
+    let path = endpoint.scope.endpoint_path(gwt_home);
+    let current = match std::fs::read(&path) {
+        Ok(payload) => payload,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(format!(
+                "stale daemon descriptor {} is unreadable: {error}",
+                path.display()
+            ))
+        }
+    };
+    if serde_json::from_slice::<gwt_core::daemon::DaemonEndpoint>(&current)
+        .ok()
+        .as_ref()
+        != Some(endpoint)
+    {
+        return Ok(());
+    }
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "stale daemon descriptor {} could not be removed: {error}",
+            path.display()
+        )),
+    }
 }
 
 impl Default for DaemonSupervisor {
@@ -1455,6 +1554,138 @@ mod tests {
             "GUI shutdown cannot signal a live shared daemon"
         );
         supervisor.cleanup_test_children();
+    }
+
+    /// Issue #7463: a retirement candidate whose bind nobody serves (Unix:
+    /// stale socket file → ECONNREFUSED; Windows: no pipe → NotFound) is a
+    /// stale descriptor, not a refusal. The launch proceeds to a new daemon,
+    /// the descriptor is removed, and the unproven PID is never signalled.
+    #[test]
+    fn unreachable_retirement_candidate_is_cleared_and_replaced() {
+        use gwt_core::daemon::{persist_endpoint, DaemonEndpoint, RuntimeScope, RuntimeTarget};
+
+        let gwt_home = gwt_core::test_support::socket_tempdir().expect("gwt home");
+        let project = tempfile::TempDir::new().expect("project");
+        let scope =
+            RuntimeScope::from_project_root(project.path(), RuntimeTarget::Host).expect("scope");
+        let endpoint_path = scope.endpoint_path(gwt_home.path());
+        let bind = gwt_core::daemon::resolve_daemon_socket_path(
+            &gwt_home.path().join("refused-daemon.json"),
+        )
+        .expect("bind")
+        .path;
+        #[cfg(unix)]
+        drop(
+            std::os::unix::net::UnixListener::bind(gwt_core::test_support::checked_socket_path(
+                &bind,
+            ))
+            .expect("bind then abandon the socket"),
+        );
+        let endpoint = DaemonEndpoint::new(
+            scope.clone(),
+            std::process::id(),
+            bind.display().to_string(),
+            "secret-token".into(),
+            "0.0.1-stale".into(),
+        );
+        persist_endpoint(&endpoint_path, &endpoint).expect("persist");
+
+        let supervisor = DaemonSupervisor::with_spawner(move |_context| {
+            Err(std::io::Error::other("replacement-spawn-reached"))
+        });
+        let retired = std::sync::Mutex::new(Vec::new());
+        let error = supervisor
+            .ensure_running_with(
+                project.path(),
+                DaemonEnsureInputs {
+                    gwt_home: gwt_home.path().to_path_buf(),
+                    is_process_alive: &|pid| pid == std::process::id(),
+                    expected_daemon_version: env!("CARGO_PKG_VERSION"),
+                    retire_stale_daemon: &|pid| retired.lock().unwrap().push(pid),
+                },
+            )
+            .expect_err("the fake spawner reports that the replacement was started");
+
+        assert!(
+            error.contains("replacement-spawn-reached"),
+            "launch must proceed to the replacement daemon, got: {error}"
+        );
+        assert!(
+            retired.lock().unwrap().is_empty(),
+            "an unauthenticated PID is never signalled"
+        );
+        assert!(
+            !endpoint_path.exists(),
+            "the stale descriptor is removed so the next launch does not repeat the failure"
+        );
+    }
+
+    /// Issue #7463: a live candidate that refuses authentication keeps the
+    /// pre-existing fail-closed behaviour.
+    #[cfg(unix)]
+    #[test]
+    fn rejected_retirement_candidate_still_blocks_launch() {
+        use gwt_core::daemon::{persist_endpoint, DaemonEndpoint, RuntimeScope, RuntimeTarget};
+
+        let gwt_home = gwt_core::test_support::socket_tempdir().expect("gwt home");
+        let project = tempfile::TempDir::new().expect("project");
+        let scope =
+            RuntimeScope::from_project_root(project.path(), RuntimeTarget::Host).expect("scope");
+        let endpoint_path = scope.endpoint_path(gwt_home.path());
+        let socket_path = gwt_home.path().join("reject.sock");
+        let listener = std::os::unix::net::UnixListener::bind(
+            gwt_core::test_support::checked_socket_path(&socket_path),
+        )
+        .unwrap();
+        let endpoint = DaemonEndpoint::new(
+            scope.clone(),
+            std::process::id(),
+            socket_path.display().to_string(),
+            "secret-token".into(),
+            "0.0.1-stale".into(),
+        );
+        persist_endpoint(&endpoint_path, &endpoint).expect("persist");
+        let server = std::thread::spawn(move || {
+            use std::io::{BufRead, Write};
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            std::io::BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            let request: gwt_core::daemon::IpcHandshakeRequest =
+                serde_json::from_str(&line).unwrap();
+            writeln!(
+                stream,
+                "{}",
+                serde_json::to_string(&gwt_core::daemon::IpcHandshakeResponse {
+                    protocol_version: request.protocol_version,
+                    daemon_version: "0.0.1-stale".into(),
+                    accepted: false,
+                    rejection_reason: Some("auth token mismatch".into()),
+                })
+                .unwrap()
+            )
+            .unwrap();
+        });
+
+        let supervisor = DaemonSupervisor::with_spawner(move |_context| {
+            Err(std::io::Error::other("spawn must not run"))
+        });
+        let error = supervisor
+            .ensure_running_with(
+                project.path(),
+                DaemonEnsureInputs {
+                    gwt_home: gwt_home.path().to_path_buf(),
+                    is_process_alive: &|pid| pid == std::process::id(),
+                    expected_daemon_version: env!("CARGO_PKG_VERSION"),
+                    retire_stale_daemon: &|_| panic!("a rejected candidate is never signalled"),
+                },
+            )
+            .expect_err("a live candidate that refuses authentication blocks the launch");
+        server.join().unwrap();
+
+        assert!(error.contains("was not authenticated"), "got: {error}");
+        assert!(endpoint_path.exists(), "a live daemon's descriptor is kept");
     }
 
     fn supervisor_source_between(start: &str, end: &str) -> &'static str {
