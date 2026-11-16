@@ -12,7 +12,7 @@ const activityPresentation = state => JSON.stringify([state.count, (state.agents
   .sort((left, right) => String(left[0]).localeCompare(String(right[0])))]);
 const date = value => value && Number.isFinite(Date.parse(value)) ? new Date(value).toISOString().replace("T", " ").slice(0, 16) : "—";
 
-export function createAgentsSurface({ document, executionModel, projectTitle, rosterModel, activityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel,
+export function createAgentsSurface({ document, storage, executionModel, projectTitle, rosterModel, activityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel,
   tuningController, pmSettingsPanel, scheduleModel, switchModel, onSwitch = () => {}, onOpenSavedWork = () => {}, onContinueSavedWork = () => {}, isContinuePending = () => false, onReassign = () => {}, onRefreshSchedule = () => {},
   onAddMember = () => {}, onRestMember = () => {}, onActivateMember = () => {}, onRenameMember = () => {}, onRetryName = () => {}, onSetPmEligibility = () => {}, onSelectPm = () => {}, onNavigateProject = () => {}, onReloadProfile = null, onOpenWork = () => {} }) {
   const element = document.createElement("section"); element.className = "agents-surface"; element.setAttribute("aria-label", "Agents");
@@ -121,7 +121,9 @@ export function createAgentsSurface({ document, executionModel, projectTitle, ro
     syncRegistrationTool();
     syncRegistration();
   }
-  let selectedId = null, tab = "team", previewElement = null, disposed = false;
+  const selectionKey = "gwt:ui:agents-selected-member";
+  const savedSelection = storage?.get(selectionKey);
+  let selectedId = typeof savedSelection === "string" && savedSelection ? savedSelection : null, tab = "team", previewElement = null, disposed = false;
   let renderedRoster, renderedActivity, renderedCatalog, renderedSchedule, renderedSwitch;
   let renderedPlans = null;
   let renderedDetail = null;
@@ -184,20 +186,25 @@ export function createAgentsSurface({ document, executionModel, projectTitle, ro
   function avatar(member) {
     const result = document.createElement("span"); result.className = "roster-avatar"; result.setAttribute("aria-hidden", "true"); result.textContent = Array.from(member.name || "?")[0]; return result;
   }
+  function setSelectedMember(memberId) {
+    if (memberId === selectedId) return;
+    if (nameFields.has(selectedId)) nameFields.get(selectedId).composing = false;
+    selectedId = memberId;
+    if (memberId) storage?.set(selectionKey, memberId);
+    else storage?.delete(selectionKey);
+  }
   function selectMember(memberId) {
     if (disposed || !rosterModel.read().members.some(member => member.member_id === memberId)) return false;
     // Removing an IME target is not a commit. Preserve that unfinished draft
     // until a later input explicitly supplies a completed value.
-    if (memberId !== selectedId && nameFields.has(selectedId)) nameFields.get(selectedId).composing = false;
-    selectedId = memberId; tab = "team"; sync();
+    setSelectedMember(memberId); tab = "team"; sync();
     [...element.querySelectorAll(".roster-row")].find(row => row.dataset.memberId === memberId)?.focus({ preventScroll: true });
     return true;
   }
   function openPmSettings(memberId) {
     if (disposed) return;
     if (memberId && !rosterReady(rosterModel.read())) {
-      if (memberId !== selectedId && nameFields.has(selectedId)) nameFields.get(selectedId).composing = false;
-      selectedId = memberId; tab = "team"; sync();
+      setSelectedMember(memberId); tab = "team"; sync();
       return;
     }
     if (memberId && memberId !== selectedId && rosterModel.read().members.some(member => member.member_id === memberId)) {
@@ -574,8 +581,7 @@ export function createAgentsSurface({ document, executionModel, projectTitle, ro
     const members = roster.members || [];
     const enabledCount = enabledMembers.length;
     if (rosterReady(roster) && !members.some(member => member.member_id === selectedId)) {
-      if (nameFields.has(selectedId)) nameFields.get(selectedId).composing = false;
-      selectedId = members[0]?.member_id || null;
+      setSelectedMember(members[0]?.member_id || null);
     }
     const selected = members.find(member => member.member_id === selectedId);
     element.querySelector(".roster-count").textContent = String(enabledCount);

@@ -745,7 +745,7 @@ pub(crate) fn prepare_owner_saved_session_restore(
         restore.member_reservation = Some((member.agent_member_id, token));
     } else if let Some(member_root) = member_root {
         let token = uuid::Uuid::new_v4().to_string();
-        let member = crate::agent_names::reserve_project_member_for_agent(
+        let member = crate::agent_names::reserve_project_member_for_session(
             member_root,
             sessions_dir,
             &token,
@@ -753,13 +753,7 @@ pub(crate) fn prepare_owner_saved_session_restore(
             config.linked_issue_number.and_then(|number| {
                 crate::issue_monitor_worker::cached_agent_member_spec_owner(root, number)
             }),
-            None,
-            config
-                .env_vars
-                .get("GWT_AGENT_MEMBER_ID")
-                .map(String::as_str),
-            restore.source.agent_id.command(),
-            None,
+            &restore.source,
         )?;
         let reservation = member
             .assignment
@@ -3048,6 +3042,11 @@ pub(crate) fn prepare_owner_agent_admission(
                             && expected.runtime_target == config.runtime_target
                             && expected.fast_mode == config.fast_mode
                             && expected.codex_speed == config.codex_speed
+                            && config
+                                .permission_decision
+                                .requested_skip_permissions
+                                .unwrap_or(false)
+                                == profile.skip_permissions
                     },
                 );
                 if !matches {
@@ -3390,23 +3389,77 @@ pub(crate) fn prepare_owner_agent_admission(
             .filter(|_| inherited_agent_name.is_some())
             .cloned()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        let member = crate::agent_names::reserve_project_member_for_agent(
-            input.project_root,
-            input.sessions_dir,
-            &reservation_id,
-            config.linked_issue_number,
-            roster_spec_number,
-            launch_feedback_context
-                .as_ref()
-                .and_then(|feedback| feedback.issue_monitor_delivery_id.as_deref()),
+        // Quick Start Resume carries an exact predecessor but does not use the
+        // saved-window restore entrypoint. Bind it to the same persisted member,
+        // including when that member now has a different tool for future work.
+        let quick_start_source = if input.restore_source.is_none()
+            && config.session_mode == gwt_agent::SessionMode::Resume
+        {
             config
-                .env_vars
-                .get("GWT_AGENT_MEMBER_ID")
-                .filter(|_| inherited_agent_name.is_some() || input.is_continue_work)
-                .map(String::as_str),
-            config.agent_id.command(),
-            selected_agent_member_id.as_deref(),
-        )?;
+                .predecessor_session_id
+                .as_deref()
+                .map(|id| -> Result<Option<gwt_agent::Session>, String> {
+                    gwt_agent::validate_session_id_path_component(id)?;
+                    let source =
+                        gwt_agent::Session::load(&input.sessions_dir.join(format!("{id}.toml")))
+                            .map_err(|error| error.to_string())?;
+                    let same_handle = source
+                        .exact_resume_session_id()
+                        .zip(config.resume_session_id.as_deref())
+                        .is_some_and(|(saved, requested)| saved == requested);
+                    let same_worktree = config
+                        .working_dir
+                        .as_ref()
+                        .and_then(|path| std::fs::canonicalize(path).ok())
+                        .zip(std::fs::canonicalize(&source.worktree_path).ok())
+                        .is_some_and(|(requested, saved)| requested == saved);
+                    if source.id != id
+                        || source.agent_id != config.agent_id
+                        || !same_handle
+                        || !same_worktree
+                    {
+                        return Err(
+                            "Saved conversation changed. Reload Quick Start and retry Resume."
+                                .into(),
+                        );
+                    }
+                    // Sessions predating registered members keep the existing
+                    // generic allocation path; they cannot claim this exemption.
+                    Ok(crate::agent_names::registered_session_member_id(&source)?.map(|_| source))
+                })
+                .transpose()?
+                .flatten()
+        } else {
+            None
+        };
+        let member = if let Some(source) = input.restore_source.or(quick_start_source.as_ref()) {
+            crate::agent_names::reserve_project_member_for_session(
+                input.project_root,
+                input.sessions_dir,
+                &reservation_id,
+                config.linked_issue_number,
+                roster_spec_number,
+                source,
+            )?
+        } else {
+            crate::agent_names::reserve_project_member_for_agent(
+                input.project_root,
+                input.sessions_dir,
+                &reservation_id,
+                config.linked_issue_number,
+                roster_spec_number,
+                launch_feedback_context
+                    .as_ref()
+                    .and_then(|feedback| feedback.issue_monitor_delivery_id.as_deref()),
+                config
+                    .env_vars
+                    .get("GWT_AGENT_MEMBER_ID")
+                    .filter(|_| inherited_agent_name.is_some() || input.is_continue_work)
+                    .map(String::as_str),
+                config.agent_id.command(),
+                selected_agent_member_id.as_deref(),
+            )?
+        };
         let assignment = member.assignment.as_ref().expect("reserved assignment");
         config
             .env_vars
@@ -4658,6 +4711,58 @@ mod owner_admission_tests {
             ),
             "a stale selected member speed must be rejected before allocation"
         );
+        let mut stale_permissions = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .working_dir(&root)
+            .model("new-model")
+            .reasoning_level("medium")
+            .skip_permissions(true)
+            .build();
+        stale_permissions.branch = Some("work/issue-43".into());
+        assert!(
+            matches!(prepare_owner_agent_admission(make_input(), &mut stale_permissions),
+                Err(ref error) if error.contains(ISSUE_MONITOR_SPAWN_ADMISSION_STALE)),
+            "a changed member permission preference must be rejected before allocation"
+        );
+        for (runtime, skip) in [
+            (gwt_agent::LaunchRuntimeTarget::Host, false),
+            (gwt_agent::LaunchRuntimeTarget::Docker, true),
+        ] {
+            let core = crate::agent_registry::SessionMemberSnapshot::load()
+                .unwrap()
+                .implementation_core(&id)
+                .unwrap();
+            let tuning = serde_json::from_value(serde_json::json!({"member_id":id,
+                "model":"new-model", "reasoning":"medium", "runtime_target":runtime,
+                "skip_permissions":skip, "expected_core_revision":core.1}))
+            .unwrap();
+            assert!(crate::agent_registry::set_member_tuning(&tuning)
+                .error
+                .is_none());
+            let prefs = crate::load_issue_monitor_prefs(&prefs_path).unwrap();
+            let profile = crate::agent_registry::member_profile(&prefs, &id).unwrap();
+            let mut configured = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+                .working_dir(&root)
+                .model(profile.model.unwrap())
+                .reasoning_level(profile.reasoning.unwrap())
+                .runtime_target(profile.runtime_target)
+                .skip_permissions(profile.skip_permissions)
+                .build();
+            configured.branch = Some("work/issue-43".into());
+            assert_eq!(configured.runtime_target, runtime);
+            assert_eq!(configured.args.iter().any(|arg| arg == "--yolo"), skip);
+            let result = prepare_owner_agent_admission(make_input(), &mut configured);
+            assert!(
+                result.is_ok(),
+                "fresh saved runtime and permissions must be admitted: {:?}",
+                result.err()
+            );
+            let reservation = configured
+                .env_vars
+                .remove("GWT_AGENT_RESERVATION_ID")
+                .unwrap();
+            crate::agent_names::release_project_member(&root, &sessions, &id, &reservation)
+                .unwrap();
+        }
         // Unspecified saved tuning must match the effective values produced by
         // the same wizard used for a fresh Monitor launch.
         for agent_id in [gwt_agent::AgentId::Codex, gwt_agent::AgentId::ClaudeCode] {
@@ -4781,6 +4886,113 @@ mod owner_admission_tests {
             "canonical Grok normalization must remain admissible: {:?}",
             result.err()
         );
+    }
+
+    #[test]
+    fn owner_preserves_exact_session_after_future_provider_change() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path());
+        let root = temp.path().join("project");
+        std::fs::create_dir_all(&root).unwrap();
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let member = crate::agent_names::reserve_project_member(
+            &root, &sessions, "original", None, None, None, None,
+        )
+        .unwrap();
+        let mut source = gwt_agent::Session::new(&root, "main", gwt_agent::AgentId::Codex);
+        source.agent_member_id = Some(member.agent_member_id.clone());
+        source.agent_name = Some(member.name.clone());
+        source.agent_session_id = Some("original-native".into());
+        source.update_status(gwt_agent::AgentStatus::Stopped);
+        source.save(&sessions).unwrap();
+        crate::agent_names::bind_project_member_session(
+            &root,
+            &member.agent_member_id,
+            "original",
+            &source.id,
+        )
+        .unwrap();
+        let revision = crate::agent_registry::SessionMemberSnapshot::load()
+            .unwrap()
+            .implementation_core(&member.agent_member_id)
+            .unwrap()
+            .1;
+        let tuning = serde_json::from_value(serde_json::json!({"member_id": member.agent_member_id,
+            "model": null, "reasoning": null, "agent_id":"claude", "expected_core_revision":revision})).unwrap();
+        assert!(crate::agent_registry::set_member_tuning(&tuning)
+            .error
+            .is_none());
+        let mut config = crate::session_launch::launch_config_from_persisted_session(&source);
+        config.suppress_execution_control = true;
+        let roots = vec![root.clone()];
+        let runtime_handles = std::collections::HashMap::new();
+        let names = std::collections::HashSet::new();
+        let before = std::fs::read(sessions.join(format!("{}.toml", source.id))).unwrap();
+        let input = |saved_restore: bool| OwnerAgentAdmissionInput {
+            project_root: &root,
+            sessions_dir: &sessions,
+            issue_link_cache_dir: temp.path(),
+            window_id: "restore",
+            materializer_id: "test",
+            host_project_roots: &roots,
+            snapshot: crate::IssueMonitorWindowSnapshot {
+                project_tab_id: "tab".into(),
+                observed_at: chrono::Utc::now().to_rfc3339(),
+                windows: vec![],
+            },
+            snapshot_tabs: Default::default(),
+            runtime_handles: &runtime_handles,
+            known_names: &names,
+            metadata: OwnerLaunchMetadata {
+                inherited_agent_name: saved_restore.then(|| member.name.clone()),
+                ..Default::default()
+            },
+            is_continue_work: false,
+            restore_source: saved_restore.then_some(&source),
+        };
+        for invalid in ["provider", "native", "worktree", "missing", "unsafe"] {
+            let mut rejected = config.clone();
+            match invalid {
+                "provider" => rejected.agent_id = gwt_agent::AgentId::ClaudeCode,
+                "native" => rejected.resume_session_id = Some("different-conversation".into()),
+                "worktree" => rejected.working_dir = Some(temp.path().into()),
+                "missing" => rejected.resume_session_id = None,
+                "unsafe" => rejected.predecessor_session_id = Some("../outside".into()),
+                _ => unreachable!(),
+            }
+            assert!(
+                prepare_owner_agent_admission(input(false), &mut rejected).is_err(),
+                "{invalid} must not authorize an exact member reservation"
+            );
+        }
+        for saved_restore in [true, false] {
+            let mut config = config.clone();
+            let result = prepare_owner_agent_admission(input(saved_restore), &mut config);
+            assert!(
+                result.is_ok(),
+                "exact owner restore (saved={saved_restore}) must retain old provider: {:?}",
+                result.err()
+            );
+            assert_eq!(config.agent_id, gwt_agent::AgentId::Codex);
+            assert_eq!(
+                config.env_vars.get("GWT_AGENT_MEMBER_ID"),
+                Some(&member.agent_member_id)
+            );
+            assert_eq!(
+                std::fs::read(sessions.join(format!("{}.toml", source.id))).unwrap(),
+                before
+            );
+            crate::agent_names::release_project_member(
+                &root,
+                &sessions,
+                &member.agent_member_id,
+                config.env_vars.get("GWT_AGENT_RESERVATION_ID").unwrap(),
+            )
+            .unwrap();
+        }
     }
 
     #[test]

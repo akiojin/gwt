@@ -1845,6 +1845,38 @@ mod tests {
             }],
         );
 
+        let mut unrelated_context = state.context.clone();
+        unrelated_context.live_sessions[0].session_id = "another-codex-session".into();
+        let mut resume = LaunchWizardState::open_with(
+            unrelated_context,
+            sample_agent_options(),
+            state.quick_start_entries.clone(),
+        );
+        assert_eq!(
+            resume.view().quick_start_entries[0]
+                .reuse_action_label
+                .as_deref(),
+            Some("Resume")
+        );
+        resume.apply(LaunchWizardAction::ApplyQuickStart {
+            index: 0,
+            mode: QuickStartLaunchMode::Resume,
+        });
+        match resume.completion.as_ref() {
+            Some(LaunchWizardCompletion::Launch(request)) => match request.as_ref() {
+                LaunchWizardLaunchRequest::Agent(config) => {
+                    assert_eq!(config.session_mode, gwt_agent::SessionMode::Resume);
+                    assert_eq!(config.resume_session_id.as_deref(), Some("resume-1"));
+                    assert_eq!(
+                        config.predecessor_session_id.as_deref(),
+                        Some("gwt-session-1")
+                    );
+                }
+                other => panic!("expected exact Resume launch, got {other:?}"),
+            },
+            other => panic!("another same-provider window must not replace Resume: {other:?}"),
+        }
+
         let view = state.view();
         assert_eq!(
             view.quick_start_entries[0].reuse_action_label.as_deref(),

@@ -117,7 +117,7 @@ pub enum AgentRosterAction {
     SetTuning(MemberTuning),
 }
 
-/// Only these two future-launch inputs may be changed by an individual editor.
+/// Sparse future-launch changes share the target core revision. Omitted fields are retained.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MemberTuning {
@@ -127,6 +127,28 @@ pub struct MemberTuning {
     #[serde(deserialize_with = "required_nullable_text")]
     pub reasoning: Option<String>,
     pub expected_core_revision: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "present_nullable",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub runtime_target: Option<Option<gwt_agent::LaunchRuntimeTarget>>,
+    #[serde(
+        default,
+        deserialize_with = "present_nullable",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub skip_permissions: Option<Option<bool>>,
+}
+
+fn present_nullable<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
 }
 
 fn required_nullable_text<'de, D: serde::Deserializer<'de>>(
@@ -336,9 +358,12 @@ fn synchronize_roster_tools(
             if let Some(fixed) = member.agent_id.as_deref() {
                 let fixed = canonical_tool(fixed)?;
                 let observed = session.agent_id.command();
-                if fixed != observed {
+                if fixed != observed
+                    && registered_session_member_id(&session)?.as_deref()
+                        != Some(member.agent_member_id.as_str())
+                {
                     return Err(format!(
-                        "Agent {} in project {project} has fixed tool {fixed}, but its exact Session {id} records {observed}; close or restore its owning Session before retrying",
+                        "Agent {} in project {project} has configured tool {fixed}, but Session {id} recording {observed} has no matching member identity",
                         member.name
                     ));
                 }
@@ -1260,6 +1285,7 @@ pub fn reserve_project_member(
         inherited_member_id,
         None,
         None,
+        None,
     )
 }
 
@@ -1286,7 +1312,68 @@ pub fn reserve_project_member_for_agent(
         inherited_member_id,
         Some(requested_tool),
         selected_member_id,
+        None,
     )
+}
+
+/// Reserve an existing member only from the exact persisted Session being restored.
+/// Future configuration never changes the provider of an existing conversation.
+pub fn reserve_project_member_for_session(
+    root: &Path,
+    sessions_dir: &Path,
+    reservation_id: &str,
+    issue_number: Option<u64>,
+    spec_number: Option<u64>,
+    session: &gwt_agent::Session,
+) -> Result<AgentMember, String> {
+    crate::agent_registry::ensure_active_for_project(root).map_err(|error| error.to_string())?;
+    gwt_agent::with_session_path_lease(sessions_dir, &session.id, |state| {
+        let gwt_agent::SessionPathState::Present(saved) = state else {
+            return Err(std::io::Error::other(
+                "Exact restored Session is unavailable",
+            ));
+        };
+        if serde_json::to_value(&*saved).ok() != serde_json::to_value(session).ok()
+            || !session_belongs_to_project(root, session)
+        {
+            return Err(std::io::Error::other(
+                "Exact restored Session changed or belongs to another project",
+            ));
+        }
+        let member = registered_session_member_id(session)
+            .map_err(std::io::Error::other)?
+            .ok_or_else(|| {
+                std::io::Error::other("Exact restored Session has no registered member")
+            })?;
+        reserve_project_member_inner(
+            root,
+            sessions_dir,
+            reservation_id,
+            issue_number,
+            spec_number,
+            None,
+            Some(&member),
+            Some(session.agent_id.command()),
+            None,
+            Some(session),
+        )
+        .map_err(std::io::Error::other)
+    })
+    .map_err(|error| error.to_string())
+}
+
+fn session_belongs_to_project(root: &Path, session: &gwt_agent::Session) -> bool {
+    let expected = gwt_core::paths::project_scope_hash(root);
+    session
+        .repo_hash
+        .as_deref()
+        .is_none_or(|key| key == expected.as_str())
+        && gwt_core::paths::project_scope_hash(
+            session
+                .project_state_root
+                .as_deref()
+                .unwrap_or(&session.worktree_path),
+        ) == expected
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1300,6 +1387,7 @@ fn reserve_project_member_inner(
     inherited_member_id: Option<&str>,
     requested_tool: Option<&str>,
     selected_member_id: Option<&str>,
+    restored_session: Option<&gwt_agent::Session>,
 ) -> Result<AgentMember, String> {
     crate::agent_registry::ensure_active_for_project(root).map_err(|error| error.to_string())?;
     let inherited = inherited_member_id
@@ -1315,9 +1403,13 @@ fn reserve_project_member_inner(
     let requested_tool = requested_tool.map(canonical_tool).transpose()?;
     let matches_tool = |member: &AgentMember| {
         member.implementation_eligible()
-            && requested_tool
-                .as_ref()
-                .is_none_or(|tool| member.agent_id.as_ref() == Some(tool))
+            && requested_tool.as_ref().is_none_or(|tool| {
+                member.agent_id.as_ref() == Some(tool)
+                    || restored_session.is_some_and(|session| {
+                        inherited_member_id == Some(member.agent_member_id.as_str())
+                            && session.agent_id.command() == tool
+                    })
+            })
             && selected_member_id.is_none_or(|id| member.agent_member_id == id)
     };
     let path = crate::issue_monitor_prefs_path_for_repo_path(root);
@@ -1335,7 +1427,7 @@ fn reserve_project_member_inner(
         if selected_member_id.is_some_and(|id| !prefs.launch_profile_pool().iter().any(|profile| profile.agent_member_id.as_deref() == Some(id) && requested_tool.as_ref() == Some(&profile.agent_id))) {
             return Err(std::io::Error::other("Selected registered Agent profile changed; wait and reload before launching"));
         }
-        let selected_member_id = selected_member_id.map(str::to_string).or_else(|| requested_tool.as_ref().and_then(|tool| prefs.launch_profile_pool().into_iter()
+        let selected_member_id = selected_member_id.map(str::to_string).or_else(|| requested_tool.as_ref().filter(|_| restored_session.is_none()).and_then(|tool| prefs.launch_profile_pool().into_iter()
             .find(|profile| &profile.agent_id == tool && profile.agent_member_id.as_ref().is_some_and(|id| prefs.agent_roster.as_ref().is_some_and(|roster| roster.members.iter().any(|member| &member.agent_member_id == id && member.enabled && member.assignment.is_none()))))
             .or_else(|| prefs.launch_profile_pool().into_iter().find(|profile| &profile.agent_id == tool))
             .and_then(|profile| profile.agent_member_id)));
@@ -1553,8 +1645,14 @@ pub fn adopt_project_member_session(
             .iter()
             .find(|member| member.agent_member_id == resolved)
             .ok_or("Registered Agent is missing")?;
-        if member.agent_id.as_deref() != Some(session.agent_id.command()) {
-            return Err("Exact restored Agent has a different fixed tool".into());
+        if member.agent_id.as_deref() != Some(session.agent_id.command())
+            && (!session_belongs_to_project(root, session)
+                || !gwt_agent::Session::load(&sessions_dir.join(format!("{}.toml", session.id)))
+                    .is_ok_and(|saved| {
+                        serde_json::to_value(saved).ok() == serde_json::to_value(&*session).ok()
+                    }))
+        {
+            return Err("Exact restored Agent has no matching persisted Session identity".into());
         }
         return Ok(Some(resolved));
     }
@@ -2892,11 +2990,15 @@ mod tests {
             "a same-id Session belonging to another project must retain the assignment"
         );
         session.project_state_root = None;
+        // Future provider is mutable; an exact Session still must resolve to
+        // the assigned member, not merely share its name or Session filename.
+        session.agent_member_id = Some(uuid::Uuid::new_v4().to_string());
         session.save(&sessions).unwrap();
         assert!(
             read_project_roster(&root, &sessions).is_err(),
-            "a same-project Session with a different tool still refuses synchronization"
+            "a same-project Session with a different member refuses synchronization"
         );
+        session.agent_member_id = Some(member.agent_member_id.clone());
         session.agent_id = gwt_agent::AgentId::Codex;
         session.save(&sessions).unwrap();
         let restarted = reserve_project_member(
@@ -2916,6 +3018,81 @@ mod tests {
                 .status,
             gwt_agent::AgentStatus::Idle
         );
+    }
+
+    #[test]
+    fn configured_tool_changes_preserve_exact_saved_session_restore() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let root = temp.path().join("project");
+        std::fs::create_dir_all(&root).unwrap();
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let member =
+            reserve_project_member(&root, &sessions, "first", None, None, None, None).unwrap();
+        let mut session = gwt_agent::Session::new(&root, "main", gwt_agent::AgentId::Codex);
+        session.agent_member_id = Some(member.agent_member_id.clone());
+        session.agent_name = Some(member.name);
+        session.update_status(gwt_agent::AgentStatus::Stopped);
+        session.save(&sessions).unwrap();
+        bind_project_member_session(&root, &member.agent_member_id, "first", &session.id).unwrap();
+        let session_path = sessions.join(format!("{}.toml", session.id));
+        let before = std::fs::read(&session_path).unwrap();
+        let revision = crate::agent_registry::SessionMemberSnapshot::load()
+            .unwrap()
+            .implementation_core(&member.agent_member_id)
+            .unwrap()
+            .1;
+        let request: MemberTuning = serde_json::from_value(serde_json::json!({
+            "member_id": member.agent_member_id, "model": null, "reasoning": null,
+            "expected_core_revision": revision, "agent_id": "claude"
+        }))
+        .unwrap();
+        assert!(crate::agent_registry::set_member_tuning(&request)
+            .error
+            .is_none());
+        assert_eq!(
+            adopt_project_member_session(&root, &sessions, &mut session).unwrap(),
+            Some(member.agent_member_id.clone())
+        );
+        assert_eq!(
+            read_project_roster(&root, &sessions).unwrap().members[0]
+                .agent_id
+                .as_deref(),
+            Some("claude")
+        );
+        assert!(
+            reserve_project_member_for_agent(
+                &root,
+                &sessions,
+                "unproven",
+                None,
+                None,
+                None,
+                Some(&member.agent_member_id),
+                "codex",
+                None
+            )
+            .is_err(),
+            "member ID alone cannot grant old-tool admission"
+        );
+        let mut changed = session.clone();
+        changed.agent_member_id = Some(uuid::Uuid::new_v4().to_string());
+        assert!(reserve_project_member_for_session(
+            &root, &sessions, "changed", None, None, &changed
+        )
+        .is_err());
+        let foreign = temp.path().join("foreign");
+        std::fs::create_dir_all(&foreign).unwrap();
+        assert!(reserve_project_member_for_session(
+            &foreign, &sessions, "foreign", None, None, &session
+        )
+        .is_err());
+        let restored =
+            reserve_project_member_for_session(&root, &sessions, "restored", None, None, &session)
+                .unwrap();
+        assert_eq!(restored.agent_member_id, member.agent_member_id);
+        assert_eq!(std::fs::read(session_path).unwrap(), before);
+        assert_eq!(session.agent_id, gwt_agent::AgentId::Codex);
     }
 
     #[test]

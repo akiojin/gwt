@@ -467,14 +467,53 @@ export function renderMemberTuningControls(host, options) {
     for (const [key, caption] of [["agent_id", "Tool"], ["model", "Model"], ["reasoning", "Reasoning"]]) {
       const label = document.createElement("label"); label.className = "settings-field";
       const text = document.createElement("span"); text.textContent = caption;
-      const input = document.createElement("input"); input.type = "text"; input.className = "settings-input";
+      const selectTool = key === "agent_id" && target?.canonical.role === "implementation";
+      const input = document.createElement(selectTool ? "select" : "input");
+      if (!selectTool) input.type = "text";
+      input.className = selectTool ? "settings-select" : "settings-input";
       input.dataset.memberTuningField = key; input.setAttribute("aria-label", caption);
+      if (selectTool) {
+        input.addEventListener("change", () => {
+          if (!owns(input) || input.disabled || ![...input.options].some(option => option.value === input.value && !option.disabled)) return;
+          if (input.value !== host.memberTuningAgentId) for (const field of host.querySelectorAll('input[data-member-tuning-field]')) { field.memberComposing = false; field.value = ""; }
+          host.memberTuningOptions.onEdit({ agent_id: input.value });
+        });
+        label.append(text, input); host.append(label); continue;
+      }
       const list = document.createElement("datalist"); list.id = `member-tuning-${key}-${Math.random().toString(36).slice(2)}`;
       input.setAttribute("list", list.id); label.append(text, input, list); host.append(label);
       const edit = composing => { if (owns(input) && !input.disabled) host.memberTuningOptions.onEdit({ [key]: input.value }, { composing }); };
       input.addEventListener("compositionstart", () => { input.memberComposing = owns(input); if (input.memberComposing) edit(true); });
       input.addEventListener("compositionend", () => { const completed = input.memberComposing && owns(input); input.memberComposing = false; if (completed) edit(false); });
       input.addEventListener("input", event => edit(input.memberComposing || event.isComposing === true));
+    }
+    if (target?.canonical.role === "implementation") {
+      for (const [key, caption, choices] of [
+        ["runtime_target", "Runtime", [["", "Inherit launch runtime"], ["Host", "Host"], ["Docker", "Docker"]]],
+        ["skip_permissions", "Permissions", [["", "Inherit launch permissions"], ["false", "Require permission prompts"], ["true", "Skip permission prompts"]]],
+      ]) {
+        const label = document.createElement("label"); label.className = "settings-field";
+        const text = document.createElement("span"); text.textContent = caption;
+        const control = document.createElement("select"); control.className = "settings-select";
+        control.dataset.memberTuningField = key; control.setAttribute("aria-label", caption);
+        for (const [value, name] of choices) { const option = document.createElement("option"); option.value = value; option.textContent = name; control.append(option); }
+        control.addEventListener("change", () => {
+          if (!owns(control) || control.disabled || [...control.options].some(option => option.value === control.value && option.disabled)) return;
+          host.memberTuningOptions.onEdit({ [key]: control.value === "" ? null : key === "skip_permissions" ? control.value === "true" : control.value });
+        });
+        label.append(text, control); host.append(label);
+      }
+      const support = document.createElement("p"); support.className = "settings-help"; support.dataset.permissionsSupport = ""; support.setAttribute("role", "status"); host.append(support);
+      const scope = document.createElement("p"); scope.className = "settings-help";
+      scope.textContent = "Saved member settings apply to new saved-profile candidate launches. Launch Agent uses its current form and keeps its prompt-free permission policy; Auto uses tier settings. Current work, history and resumed conversations keep their recorded settings. Inherit uses each route's existing defaults; Docker availability is checked at launch."; host.append(scope);
+      const tools = document.createElement("button"); tools.type = "button"; tools.className = "wizard-button"; tools.dataset.action = "manage-tools"; tools.textContent = "Manage tools";
+      tools.title = "Open supported tools to manage installation and updates.";
+      tools.addEventListener("click", () => { if (owns(tools) && !tools.disabled) document.dispatchEvent(new document.defaultView.CustomEvent("settings:open", { detail: { target: "supported-agents" } })); });
+      host.append(tools);
+      const signIn = document.createElement("button"); signIn.type = "button"; signIn.className = "wizard-button"; signIn.dataset.action = "sign-in-shell"; signIn.textContent = "Open shell for sign-in";
+      signIn.title = "Open a shell and use your tool's native sign-in command. No command runs automatically.";
+      signIn.addEventListener("click", () => { if (owns(signIn) && !signIn.disabled) document.dispatchEvent(new document.defaultView.CustomEvent("op:command", { detail: { id: "spawn-shell" } })); });
+      host.append(signIn);
     }
     if (target?.canonical.role === "pm") {
       const label = document.createElement("label"); label.className = "settings-field";
@@ -505,6 +544,7 @@ export function renderMemberTuningControls(host, options) {
     reload.addEventListener("click", () => { if (owns(reload) && !reload.disabled) host.memberTuningOptions.onReload?.(); }); host.append(reload);
   }
   host.memberTuningOptions = { onEdit, onRetry, onReload, onReloadCatalog };
+  host.memberTuningAgentId = target?.draft.agent_id;
   const catalog = Array.isArray(choices) ? choices : choices?.agents || [];
   const agentChoices = target?.canonical.role === "pm" && target.canonical.agent_options
     ? target.canonical.agent_options.map(option => catalog.find(agent => agent.id === option.id) || option) : catalog;
@@ -513,7 +553,7 @@ export function renderMemberTuningControls(host, options) {
   for (const input of host.querySelectorAll("input[data-member-tuning-field]")) {
     const key = input.dataset.memberTuningField, value = target?.draft[key] ?? "";
     if (!input.memberComposing && input.value !== value) input.value = value;
-    input.disabled = !target || !editable || (key === "agent_id" && target.canonical.role === "implementation");
+    input.disabled = !target || !editable;
     input.setAttribute("aria-invalid", String(!!target?.error && (!target.field || target.field === key)));
     const suggestions = key === "agent_id" ? agentChoices.map(agent => agent.id)
       : key === "model" ? [...(entry?.models || []).map(model => model.value), ...(entry?.model_suggestions || [])]
@@ -524,6 +564,30 @@ export function renderMemberTuningControls(host, options) {
       if (key === "model") option.label = entry?.models?.find(model => model.value === value)?.label || value;
       list.append(option);
     }
+  }
+  const tool = host.querySelector('select[data-member-tuning-field="agent_id"]');
+  if (tool) {
+    const current = target?.draft.agent_id || "";
+    tool.replaceChildren();
+    for (const agent of agentChoices) { const option = document.createElement("option"); option.value = agent.id; option.textContent = agent.name || agent.id; tool.append(option); }
+    if (!agentChoices.some(agent => agent.id === current)) {
+      const option = document.createElement("option"); option.value = current; option.textContent = `${current || "Tool"} · Catalog unavailable`; option.selected = true; option.disabled = true; tool.append(option);
+    }
+    const selectedTool = [...tool.options].find(option => option.value === current);
+    if (selectedTool) selectedTool.selected = true;
+    tool.disabled = !target || !editable || !agentChoices.length;
+    tool.setAttribute("aria-invalid", String(!!target?.error && (!target.field || target.field === "agent_id")));
+    for (const key of ["runtime_target", "skip_permissions"]) {
+      const control = host.querySelector(`[data-member-tuning-field="${key}"]`), value = target?.draft[key];
+      for (const option of control.options) option.disabled = key === "skip_permissions" && option.value === "true" && entry?.supports_skip_permissions !== true;
+      const selected = [...control.options].find(option => option.value === (value == null ? "" : String(value)));
+      if (selected) selected.selected = true;
+      control.disabled = !target || !editable;
+      control.setAttribute("aria-invalid", String(!!target?.error && (!target.field || target.field === key)));
+    }
+    const support = host.querySelector('[data-permissions-support]');
+    support.textContent = entry?.supports_skip_permissions === true ? "" : entry ? "This tool does not support skipping permission prompts. Use inherited settings or require prompts." : "Permission support is unavailable until the tool catalog loads. Inherited settings and required prompts remain available.";
+    support.hidden = !support.textContent;
   }
   const speed = host.querySelector('[data-member-tuning-field="speed"]');
   if (speed) {

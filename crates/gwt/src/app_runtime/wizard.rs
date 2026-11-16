@@ -1747,6 +1747,8 @@ impl AppRuntime {
                 slot.reasoning = saved.reasoning;
                 slot.version = saved.version;
                 slot.fast_mode = saved.fast_mode;
+                slot.runtime_target = saved.runtime_target;
+                slot.skip_permissions = saved.skip_permissions;
                 true
             }
             gwt::LaunchWizardAction::SetAgent { agent_id } => {
@@ -1829,6 +1831,8 @@ impl AppRuntime {
                 added.reasoning = saved.reasoning;
                 added.version = saved.version;
                 added.fast_mode = saved.fast_mode;
+                added.runtime_target = saved.runtime_target;
+                added.skip_permissions = saved.skip_permissions;
                 added.agent_member_id = Some(member.agent_member_id);
                 profiles.push(added);
                 sets.active = profiles.len() - 1;

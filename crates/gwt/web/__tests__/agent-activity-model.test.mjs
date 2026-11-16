@@ -135,6 +135,43 @@ test("shared member tuning serializes each role and preserves drafts through con
   assert.equal(model.read().targets["pm:m1"].draft.model, "pm/model");
 });
 
+test("implementation tuning changes tool and nullable execution overrides through the same CAS", () => {
+  const sent = [], controller = createMemberTuningModel("project", { onSave: request => sent.push(request) });
+  const saved = (revision, extra = {}) => ({ project_key: "project", role: "implementation", member_id: "m",
+    agent_id: "codex", model: "old-model", reasoning: "high", revision, ...extra });
+  const target = () => controller.model.read().targets["implementation:m"];
+  controller.applyTuningSnapshot(saved("r1"));
+  controller.editTuning("implementation", "m", { agent_id: "claude" });
+  assert.deepEqual(sent[0].action, { kind: "set_tuning", member_id: "m", agent_id: "claude",
+    model: null, reasoning: null, expected_core_revision: "r1" });
+  controller.applyTuningSnapshot(saved("r2", { agent_id: "claude", model: null, reasoning: null }), sent[0].request_id);
+  controller.editTuning("implementation", "m", { runtime_target: "Docker", skip_permissions: false });
+  assert.deepEqual(sent[1].action, { kind: "set_tuning", member_id: "m", model: null, reasoning: null,
+    runtime_target: "Docker", skip_permissions: false, expected_core_revision: "r2" });
+  controller.applyTuningSnapshot(saved("r3", { agent_id: "claude", model: null, reasoning: null }), sent[1].request_id);
+  assert.equal(target().status, "error", "an incomplete ACK cannot certify requested overrides");
+  controller.retryTuning("implementation", "m");
+  controller.applyTuningSnapshot(saved("r4", { agent_id: "claude", model: null, reasoning: null,
+    runtime_target: "Docker", skip_permissions: false }), sent[2].request_id);
+  assert.equal(target().status, "saved");
+  controller.editTuning("implementation", "m", { runtime_target: null, skip_permissions: null });
+  assert.equal(sent[3].action.runtime_target, null); assert.equal(sent[3].action.skip_permissions, null);
+  controller.applyTuningSnapshot(saved("r5", { agent_id: "claude", model: null, reasoning: null }), sent[3].request_id);
+  assert.equal(target().status, "error", "clearing an override also requires an explicit ACK");
+  assert.equal(target().canonical.runtime_target, "Docker", "an incomplete ACK cannot erase the last confirmed override");
+  controller.retryTuning("implementation", "m");
+  assert.equal(sent[4].action.runtime_target, null); assert.equal(sent[4].action.skip_permissions, null);
+  controller.applyRosterTuningSnapshot({ project_key: "project", members: [{ agent_member_id: "m",
+    saved_implementation_core_revision: "r6", saved_implementation_core: { agent_id: "claude", model: null,
+      reasoning: null, runtime_target: null, skip_permissions: null } }] }, undefined, { accepted: true });
+  assert.equal(target().canonical.runtime_target, null); assert.equal(target().canonical.skip_permissions, null);
+  const beforeComposition = sent.length;
+  controller.editTuning("implementation", "m", { model: "未" }, { composing: true });
+  controller.editTuning("implementation", "m", { runtime_target: "Host" });
+  assert.equal(sent.length, beforeComposition, "changing runtime cannot commit an unfinished model");
+  assert.equal(target().composing, true);
+});
+
 test("PM tuning normalizes Grok auto and retains newer observed canonical against a late ACK", () => {
   const sent = [], c = createMemberTuningModel("project", { onSave: request => sent.push(request) });
   const saved = (revision, model, reasoning = null) => ({ project_key: "project", role: "pm", member_id: "m", agent_id: "grok", revision, model, reasoning });
