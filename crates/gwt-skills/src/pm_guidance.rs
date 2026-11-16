@@ -2803,10 +2803,10 @@ fn write_skill_md(skills_root: &Path, provider: ManagedAssetTarget) -> io::Resul
         )?;
     }
     let policy_path = leaf.join("references/project-policy.md");
-    match std::fs::remove_file(&policy_path) {
+    match crate::asset_io::remove_file(&policy_path) {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
+        Err(error) => return Err(error.into()),
     }
     GUIDANCE.write(skills_root, provider)
 }
@@ -2894,6 +2894,43 @@ mod tests {
                 .exists(),
             "opting out must remove previously copied project policy"
         );
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn pm_policy_cleanup_rejects_symlink_mutation() {
+        let root = TempDir::new().unwrap();
+        generate_pm_guidance_for_codex(root.path()).unwrap();
+        let external = TempDir::new().unwrap();
+        let sentinel = external.path().join("policy.md");
+        std::fs::write(&sentinel, "sentinel").unwrap();
+        let references = root
+            .path()
+            .join(".codex/skills/gwt-pm/references")
+            .components()
+            .collect::<PathBuf>();
+        let target = references.join("project-policy.md");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&sentinel, &target).unwrap();
+        #[cfg(windows)]
+        {
+            let output = gwt_core::process::hidden_command("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(target.components().collect::<PathBuf>())
+                .arg(external.path().components().collect::<PathBuf>())
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+        }
+
+        let error = generate_pm_guidance_for_codex(root.path()).unwrap_err();
+        assert!(error.to_string().contains("delete"), "{error}");
+        assert!(
+            error.to_string().contains(&target.display().to_string()),
+            "{error}"
+        );
+        assert!(std::fs::symlink_metadata(target).is_ok());
+        assert_eq!(std::fs::read_to_string(sentinel).unwrap(), "sentinel");
     }
 
     #[test]
