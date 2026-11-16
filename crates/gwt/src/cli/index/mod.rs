@@ -163,12 +163,11 @@ fn run_status<E: CliEnv>(env: &mut E, out: &mut String) -> Result<i32, SpecOpsEr
         return Ok(1);
     }
 
-    let payload = parse_runner_json(&output.stdout)?;
+    let mut payload = parse_runner_json(&output.stdout)?;
+    let resources = crate::index_resources::collect_index_resources();
+    runtime::apply_search_readiness(&mut payload, &resources);
     render_index_status(out, &report, &payload);
-    crate::index_resources::render_index_resources(
-        out,
-        &crate::index_resources::collect_index_resources(),
-    );
+    crate::index_resources::render_index_resources(out, &resources);
     let log_dir = audit_log_dir(&context);
     let _ = audit_status(&log_dir, &context, &report, &payload, 0);
     Ok(0)
@@ -630,6 +629,57 @@ mod tests {
         assert!(out
             .contains("files: unhealthy reason=build_incomplete documents=0 repair_required=true"));
         assert!(out.contains("files: build phase=base done=16 total=64 resumable=true"));
+    }
+
+    #[test]
+    fn runtime_readiness_matches_the_query_worker_and_search_admission() {
+        let report = gwt_core::runtime::ProjectIndexRuntimeReport::default();
+        for (model_state, heavy_held, healthy, reason) in [
+            ("cold", false, false, "query_worker_cold"),
+            ("warming", true, false, "query_worker_warming"),
+            ("warm", true, false, "search_heavy_lease_unavailable"),
+            ("warm", false, true, "ready"),
+        ] {
+            let mut payload = serde_json::json!({
+                "runtime": {"healthy": true, "reason": "ready", "asset_hash": "asset", "smoke_test": "passed"}
+            });
+            let resources = crate::index_resources::IndexResourceDiagnostics {
+                query_worker: crate::index_resources::QueryWorkerStatus {
+                    model_state,
+                    ..Default::default()
+                },
+                heavy_held,
+                ..Default::default()
+            };
+            runtime::apply_search_readiness(&mut payload, &resources);
+            assert_eq!(payload["runtime"]["healthy"], healthy, "{model_state}");
+            assert_eq!(payload["runtime"]["reason"], reason);
+            let mut out = String::new();
+            render_index_status(&mut out, &report, &payload);
+            if healthy {
+                assert!(
+                    out.contains("runtime: ready asset=asset smoke=passed"),
+                    "{out}"
+                );
+            } else {
+                assert!(out.contains("runtime: not_ready"), "{out}");
+                assert!(out.contains(&format!("reason={reason}")), "{out}");
+                assert!(out.contains("asset=asset smoke=passed"), "{out}");
+            }
+        }
+    }
+
+    #[test]
+    fn query_readiness_preserves_a_runtime_smoke_failure() {
+        let mut payload = serde_json::json!({
+            "runtime": {"healthy": false, "reason": "smoke_failed", "smoke_test": "failed"}
+        });
+        let original = payload.clone();
+        runtime::apply_search_readiness(
+            &mut payload,
+            &crate::index_resources::IndexResourceDiagnostics::default(),
+        );
+        assert_eq!(payload, original);
     }
 
     #[test]
