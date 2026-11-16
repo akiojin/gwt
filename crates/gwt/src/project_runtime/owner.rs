@@ -10539,6 +10539,20 @@ impl OwnerState {
                 .ok()
                 .map(|pane| pane.screen().contents())
         });
+        // Issue #7465: a failed managed hook hides every startup signal, so
+        // report it now instead of at the 180s deadline. Only the original
+        // deadline is pulled in; the 60s post-report watch is left alone.
+        if let Some(agent) = runtime.agent.as_mut() {
+            if agent.monitor_startup_at.is_some_and(|at| {
+                at > monotonic_now + std::time::Duration::from_secs(60)
+                    && screen
+                        .as_deref()
+                        .and_then(super::monitor::startup_hook_failure_line)
+                        .is_some()
+            }) {
+                agent.monitor_startup_at = Some(monotonic_now);
+            }
+        }
         let approval_settle_due = runtime
             .policy
             .approval_settle_at

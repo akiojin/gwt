@@ -1122,6 +1122,11 @@ fn issue_3706_grok_accepted_work_cancels_startup_deadline() {
     }
 }
 
+#[test]
+fn issue_7465_grok_managed_hook_failure_pulls_startup_deadline_to_now() {
+    assert_grok_startup_progress(Some("hook-failure"));
+}
+
 fn assert_grok_startup_progress(accepted: Option<&str>) {
     use gwt::project_runtime::events::{OwnerCommand, OwnerEvent};
     let _env_lock = env_test_lock()
@@ -1193,6 +1198,35 @@ fn assert_grok_startup_progress(accepted: Option<&str>) {
         gwt_agent::AgentId::GrokBuild
     );
     let due = pane.monitor_startup_at.expect("original startup deadline");
+    if accepted == Some("hook-failure") {
+        pane.pane.lock().unwrap().process_bytes(
+            "♦ pre_tool_use hook (project/settings.local) failed, ignored: exit code 1: ParserError: ;\r\n"
+                .as_bytes(),
+        );
+        let observed_at = Instant::now();
+        fixture
+            .executor
+            .block_on(fixture.owner.observe_runtime_policy(
+                &id,
+                incarnation,
+                chrono::Utc::now(),
+                observed_at,
+            ))
+            .unwrap();
+        let observed = fixture
+            .executor
+            .block_on(fixture.owner.probe(&id, incarnation))
+            .unwrap()
+            .monitor_startup_at;
+        fixture.shutdown();
+        // The pulled-in deadline fires at once and leaves only the 60s
+        // post-report watch, which is earlier than the original deadline.
+        assert!(
+            observed.is_some_and(|at| at < due && at >= observed_at),
+            "a failed managed hook is reported now, not at the 180s deadline: {observed:?} vs {due:?}"
+        );
+        return;
+    }
     for source in ["UserPromptSubmit", "Stop"] {
         let mut hook = runtime_hook_coordination_event(&fixture.pending.binding.session_id);
         hook.source_event = Some(source.into());
