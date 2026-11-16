@@ -6078,4 +6078,126 @@ mod tests {
         );
         assert_eq!(fs::read(&a_path).unwrap(), a_bytes);
     }
+
+    fn rewrite_pm_assignment(
+        root: &Path,
+        member_id: &str,
+        rewrite: impl FnOnce(&mut crate::agent_names::AgentMemberAssignment),
+    ) {
+        let key = gwt_core::paths::project_scope_hash(root);
+        let mut registry = load().unwrap().unwrap();
+        let mut assignment = project_assignment(&registry, key.as_str(), member_id)
+            .cloned()
+            .expect("PM assignment");
+        rewrite(&mut assignment);
+        set_project_assignment(&mut registry, key.as_str(), member_id, Some(assignment));
+        save(&registry).unwrap();
+    }
+
+    /// Issue #7472: a PM reservation left behind by a gwtd incarnation that
+    /// no longer exists must not wedge every later PM launch. The reserving
+    /// host can never cancel or reap it (every cleanup path requires the
+    /// exact reserving host), so a fresh NEW launch reconciles it.
+    #[test]
+    fn reserve_new_pm_member_reconciles_reservation_from_a_dead_host_incarnation() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let (root, session, _) = pm_only_fixture();
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let worktree = session.worktree_path.clone();
+        let prefs_path = crate::pm_registry::pm_prefs_path_for_repo_path(&root);
+        crate::pm_registry::mutate_pm_prefs(&prefs_path, |prefs| prefs.registration = None)
+            .unwrap();
+
+        let first = reserve_new_pm_member(&root, &sessions, &worktree, "wedged-attempt").unwrap();
+        let member_id = first.member.agent_member_id.clone();
+
+        // Rewrite the durable assignment to the dead incarnation that
+        // reserved it: a pid that cannot exist on any supported host.
+        rewrite_pm_assignment(&root, &member_id, |assignment| {
+            assignment.host_pid = 4_000_000_000;
+            assignment.host_started_at = Some(1);
+        });
+
+        let prepared =
+            reserve_new_pm_member(&root, &sessions, &worktree, "recovery-attempt").unwrap();
+        assert_eq!(prepared.member.agent_member_id, member_id);
+        let assignment = prepared.member.assignment.expect("new PM assignment");
+        assert_eq!(assignment.reservation_id, "recovery-attempt");
+        assert_eq!(assignment.host_pid, std::process::id());
+        assert_eq!(assignment.session_id, None);
+
+        // The cancelled-unspawned cleanup path still owns this process's own
+        // reservation exactly as before.
+        assert!(cancel_unspawned_pm_member(
+            &root,
+            &sessions,
+            &member_id,
+            "recovery-attempt",
+            None,
+            None
+        )
+        .unwrap());
+        assert!(reserve_new_pm_member(&root, &sessions, &worktree, "after-cancel").is_ok());
+    }
+
+    /// Issue #7472: the reconciliation above must never weaken the guard.
+    /// A live reservation, a Session-bound assignment, and another host's
+    /// reservation all keep blocking a new PM launch.
+    #[test]
+    fn reserve_new_pm_member_retains_live_or_unprovable_reservations() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let (root, session, _) = pm_only_fixture();
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let worktree = session.worktree_path.clone();
+        let prefs_path = crate::pm_registry::pm_prefs_path_for_repo_path(&root);
+        crate::pm_registry::mutate_pm_prefs(&prefs_path, |prefs| prefs.registration = None)
+            .unwrap();
+
+        let first = reserve_new_pm_member(&root, &sessions, &worktree, "live-attempt").unwrap();
+        let member_id = first.member.agent_member_id.clone();
+
+        // This process's own live reservation blocks a second NEW launch.
+        let error = reserve_new_pm_member(&root, &sessions, &worktree, "second-attempt")
+            .err()
+            .expect("a live PM reservation must block a new launch");
+        assert!(
+            error
+                .to_string()
+                .contains("retains a live or unknown reservation"),
+            "{error}"
+        );
+
+        // A bound Session is never auto-reconciled, even from a dead host.
+        rewrite_pm_assignment(&root, &member_id, |assignment| {
+            assignment.host_pid = 4_000_000_000;
+            assignment.host_started_at = Some(1);
+            assignment.session_id = Some("bound-session".into());
+        });
+        let error = reserve_new_pm_member(&root, &sessions, &worktree, "third-attempt")
+            .err()
+            .expect("a Session-bound assignment must block a new launch");
+        assert!(
+            error
+                .to_string()
+                .contains("retains a live or unknown reservation"),
+            "{error}"
+        );
+
+        // Another host's reservation cannot be proven dead from this host.
+        rewrite_pm_assignment(&root, &member_id, |assignment| {
+            assignment.host_id = "another-host".into();
+            assignment.session_id = None;
+        });
+        let error = reserve_new_pm_member(&root, &sessions, &worktree, "fourth-attempt")
+            .err()
+            .expect("another host's reservation must block a new launch");
+        assert!(
+            error
+                .to_string()
+                .contains("retains a live or unknown reservation"),
+            "{error}"
+        );
+    }
 }
