@@ -139,6 +139,39 @@ fn the_change_classifier_publishes_the_changed_test_targets() {
     );
 }
 
+/// Issue #5170: GitHub's pull request file listing and `base.sha` stay at the
+/// base tip from when the PR was opened. PR #7413's head had merged a base 52
+/// merges newer, so 491 files (37 under `crates/gwt/src`) were classified
+/// instead of its 3, and the flake job repeated the whole `gwt` library. The
+/// classifier must read the merge commit CI tests, guarded by the event head,
+/// and keep the listing only as the fallback.
+#[test]
+fn the_change_classifier_compares_the_tested_merge_commit_before_the_pr_listing() {
+    let doc = test_workflow();
+    let classifier = job(&doc, CHANGES_JOB);
+    let step = classifier["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|step| step["id"].as_str() == Some("classify"))
+        .expect("the classification job must keep its `classify` step");
+    assert_eq!(
+        step["env"]["PR_HEAD"],
+        "${{ github.event.pull_request.head.sha }}"
+    );
+    let run = step["run"].as_str().unwrap();
+    let guard = run
+        .find("\"$(git rev-parse --verify --quiet 'HEAD^2')\" = \"$PR_HEAD\"")
+        .expect("only the merge commit of this exact PR head may replace the listing");
+    let diff = run
+        .find("git diff --name-only --no-renames 'HEAD^1...HEAD^2'")
+        .expect("pull requests must be compared against the current base tip");
+    let listing = run
+        .find("[ -n \"$files\" ] || files=$(gh api \"repos/$REPO/pulls/$PR_NUMBER/files\"")
+        .expect("the PR file listing may only fill an empty comparison");
+    assert!(guard < diff && diff < listing);
+}
+
 /// T-055 / AC-6: the job exists, is fed by the classifier, and runs the
 /// repeat-until-it-wobbles script.
 #[test]

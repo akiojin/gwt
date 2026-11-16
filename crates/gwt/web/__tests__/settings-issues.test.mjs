@@ -714,11 +714,55 @@ test("shared member tuning preserves custom values and target revision without c
   assert.ok(model.parentElement.querySelector('datalist option[value=haiku]'), 'roster tuning choices use the shared list projection');
   assert.equal(model.parentElement.querySelector('datalist option[value=haiku]').label, 'Haiku');
   assert.equal(panel.querySelector('[data-member-tuning-field="reasoning"]').value, 'custom-effort');
-  assert.equal(panel.querySelector('[data-member-tuning-field="agent_id"]').disabled, true);
+  assert.equal(panel.querySelector('[data-member-tuning-field="agent_id"]').disabled, false);
   model.value = 'unlisted'; model.dispatchEvent(new Event('input'));
   assert.deepEqual(edits[0], [{ model: 'unlisted' }, { composing: false }]);
   assert.equal(panel.querySelector('[data-profile-field]'), null);
   assert.match(panel.textContent, /exact-token/);
+});
+
+test("implementation execution controls preserve inheritance and offer only supported permission skipping", () => {
+  const { document, Event } = parseHTML('<section></section>');
+  const panel = document.querySelector('section'), edits = [], navigations = [], commands = [];
+  document.addEventListener('settings:open', event => navigations.push(event.detail));
+  document.addEventListener('op:command', event => commands.push(event.detail));
+  const target = { canonical: { role: 'implementation', member_id: 'm', revision: 'r1' },
+    draft: { agent_id: 'codex', model: null, reasoning: null, runtime_target: null, skip_permissions: null }, status: 'saved' };
+  const render = () => load('renderMemberTuningControls')(panel, { target, choices: candidateChoices, onEdit: patch => edits.push(patch) });
+  render();
+  const tool = panel.querySelector('[data-member-tuning-field="agent_id"]');
+  const runtime = panel.querySelector('[data-member-tuning-field="runtime_target"]');
+  const permissions = panel.querySelector('[data-member-tuning-field="skip_permissions"]');
+  assert.equal(tool.tagName, 'SELECT'); assert.equal(tool.disabled, false);
+  assert.deepEqual([...tool.options].map(option => option.value), candidateChoices.agents.map(agent => agent.id));
+  assert.equal(runtime.value, ''); assert.equal(permissions.value, '');
+  selectValue(runtime, 'Docker'); runtime.dispatchEvent(new Event('change'));
+  selectValue(permissions, 'false'); permissions.dispatchEvent(new Event('change'));
+  selectValue(tool, 'claude'); tool.dispatchEvent(new Event('change'));
+  assert.deepEqual(edits, [{ runtime_target: 'Docker' }, { skip_permissions: false }, { agent_id: 'claude' }]);
+  target.draft = { ...target.draft, agent_id: 'custom', runtime_target: 'Docker', skip_permissions: true }; render();
+  assert.equal(panel.querySelector('[data-member-tuning-field="runtime_target"]'), runtime);
+  assert.equal([...permissions.options].find(option => option.value === 'true').disabled, true);
+  assert.equal(permissions.disabled, false, 'inherit and require remain available to clear unsupported skipping');
+  assert.match(panel.querySelector('[data-permissions-support]').textContent, /does not support/i);
+  selectValue(permissions, 'true'); permissions.dispatchEvent(new Event('change'));
+  assert.equal(edits.length, 3, 'unsupported synthetic selection is refused');
+  selectValue(permissions, ''); permissions.dispatchEvent(new Event('change'));
+  assert.deepEqual(edits.at(-1), { skip_permissions: null });
+  const model = panel.querySelector('[data-member-tuning-field="model"]');
+  model.dispatchEvent(new Event('compositionstart')); edits.length = 0;
+  selectValue(tool, 'claude'); tool.dispatchEvent(new Event('change'));
+  model.dispatchEvent(new Event('compositionend'));
+  assert.deepEqual(edits, [{ agent_id: 'claude' }], 'a provider change retires the previous model composition');
+  panel.querySelector('[data-action="manage-tools"]').click();
+  assert.deepEqual(navigations, [{ target: 'supported-agents' }]);
+  const signIn = panel.querySelector('[data-action="sign-in-shell"]');
+  assert.ok(signIn, 'member settings provide the existing shell route for native sign-in');
+  signIn.click();
+  assert.deepEqual(commands, [{ id: 'spawn-shell' }]);
+  assert.deepEqual(edits, [{ agent_id: 'claude' }], 'navigation never changes settings or sends a command');
+  panel.remove(); signIn.click();
+  assert.equal(commands.length, 1, 'a detached editor cannot open a shell');
 });
 
 test("Codex shared tuning keeps catalog order without treating unlisted models as unsupported", () => {

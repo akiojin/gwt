@@ -345,6 +345,14 @@ impl ProjectOwnerHarness {
         self.owner.test_agent_dispatch_barrier(true).await
     }
 
+    /// Drain the current census writer and pause the next one until the guard
+    /// drops. Dispatch barriers alone do not synchronize this background worker.
+    pub async fn pause_runtime_reconciliation(
+        &self,
+    ) -> Result<crate::monitor_duplicate_runtime::RuntimeReconciliationPause, String> {
+        self.owner.test_pause_runtime_reconciliation().await
+    }
+
     pub fn commit_self_close(
         &self,
         ticket: crate::agent_capability::AgentSelfCloseCapabilityTicket,

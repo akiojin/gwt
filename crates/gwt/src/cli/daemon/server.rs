@@ -90,6 +90,24 @@ const ISSUE_MONITOR_PREFS_BUDGET: gwt_core::deadline_budget::DeadlineBudget =
         Duration::from_millis(250),
     );
 const ISSUE_MONITOR_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
+/// What one startup authority retry may spend (Issue #7483).
+///
+/// The first attempt runs before the endpoint binds and keeps the short prefs
+/// budget. A retry runs off the async worker, so it can wait out the other
+/// daemons a GUI start launches at the same moment: they all serialize on the
+/// shared Agent registry lock, and an attempt that gives up mid-way only
+/// spends that lock without leaving progress behind. The startup-wide timeout
+/// above still bounds every attempt.
+const ISSUE_MONITOR_STARTUP_ATTEMPT_BUDGET: gwt_core::deadline_budget::DeadlineBudget =
+    gwt_core::deadline_budget::DeadlineBudget::new(
+        "ISSUE_MONITOR_STARTUP_ATTEMPT",
+        Duration::from_secs(5),
+    );
+/// Issue #7483: once the startup budget is spent the worker keeps retrying
+/// at this pace, doubling up to the ceiling, instead of staying blocked until
+/// someone restarts the daemon.
+const ISSUE_MONITOR_AUTHORITY_RECOVERY_RETRY_DELAY: Duration = Duration::from_secs(5);
+const ISSUE_MONITOR_AUTHORITY_RECOVERY_RETRY_CEILING: Duration = Duration::from_secs(60);
 /// Issue #6877 AC-2: how old a GitHub read may be for a timer-only scan. A
 /// test that drives the fake `gh` through consecutive timer scans pins it to
 /// zero (`GWT_TEST_BUDGET_ISSUE_MONITOR_PERIODIC_READ_MAX_AGE_MS=0`) so every
@@ -111,6 +129,9 @@ const ISSUE_MONITOR_AUTHORITY_RECOVERY_GUIDANCE: &str =
     "Recovery: preserve the prefs and authority marker, resolve the reported lock or invalid \
      durable state with the PM, then restart only this project's daemon. Do not delete the \
      authority marker or pending effects.";
+const ISSUE_MONITOR_AUTHORITY_RETRY_GUIDANCE: &str =
+    "Recovery: the daemon retries automatically with backoff and resumes without a restart \
+     once the lock is free. Do not delete the authority marker or pending effects.";
 
 /// Pin the prefs budget for the current test thread until dropped.
 ///
@@ -121,6 +142,7 @@ const ISSUE_MONITOR_AUTHORITY_RECOVERY_GUIDANCE: &str =
 #[cfg(test)]
 pub(super) struct ScopedIssueMonitorPrefsTimeout(
     // Retain the guard until scope exit so Drop restores the budget; no field read is needed.
+    #[allow(dead_code)] gwt_core::deadline_budget::ScopedDeadlineBudget,
     #[allow(dead_code)] gwt_core::deadline_budget::ScopedDeadlineBudget,
     #[allow(dead_code)] gwt_core::deadline_budget::ScopedDeadlineBudget,
 );
@@ -135,6 +157,10 @@ impl ScopedIssueMonitorPrefsTimeout {
             ),
             gwt_core::deadline_budget::ScopedDeadlineBudget::pin(
                 &crate::daemon_publisher::DURABLE_ISSUE_MONITOR_CONTROL_BUDGET,
+                timeout,
+            ),
+            gwt_core::deadline_budget::ScopedDeadlineBudget::pin(
+                &ISSUE_MONITOR_STARTUP_ATTEMPT_BUDGET,
                 timeout,
             ),
         )
@@ -528,6 +554,8 @@ impl OwnerDaemonFixture {
             startup_retry_submitted: None,
             #[cfg(all(test, unix))]
             startup_retry_started: None,
+            #[cfg(all(test, unix))]
+            recovery_retry_delay: None,
         };
         let hub = BroadcastHub::new();
         let initial_scan = hub.clone();
@@ -1545,6 +1573,9 @@ struct IssueMonitorWorkerTestHooks {
     startup_retry_submitted: Option<Arc<tokio::sync::Notify>>,
     #[cfg(all(test, unix))]
     startup_retry_started: Option<Arc<tokio::sync::Notify>>,
+    /// Pace of the retries that follow an exhausted startup budget.
+    #[cfg(all(test, unix))]
+    recovery_retry_delay: Option<Duration>,
 }
 
 #[cfg(any(test, feature = "test-gh-guard"))]
@@ -1695,6 +1726,111 @@ fn issue_monitor_needs_periodic_scan(
         .unwrap_or(true)
 }
 
+/// The pause before the next background authority attempt: doubled, and
+/// never longer than the ceiling, so a freed lock is noticed within a minute.
+fn next_issue_monitor_authority_recovery_delay(current: Duration) -> Duration {
+    current
+        .saturating_mul(2)
+        .min(ISSUE_MONITOR_AUTHORITY_RECOVERY_RETRY_CEILING)
+}
+
+enum IssueMonitorAuthorityRetry {
+    Loaded(Box<LoadedDaemonIssueMonitorState>),
+    /// `deadline` passed before the attempt produced a state.
+    Expired,
+    /// Shutdown was requested, or the attempt's thread failed.
+    Stopped,
+}
+
+/// Run one authority attempt off the async worker.
+///
+/// `deadline` bounds both the wait for a blocking-pool thread and the attempt
+/// itself; `None` leaves the attempt bounded by its own budget only.
+async fn run_issue_monitor_authority_retry(
+    prefs_path: &Path,
+    config: &crate::IssueMonitorConfig,
+    // A cancelled blocking-pool task must not release the pre-bind lease
+    // while this worker continues serving read-only diagnostics.
+    authority_lease: Option<Arc<crate::IssueMonitorAuthorityLease>>,
+    authority_fence: &crate::IssueMonitorAuthorityFence,
+    deadline: Option<Instant>,
+    shutdown: &DaemonShutdown,
+    #[cfg_attr(not(all(test, unix)), allow(unused_variables))]
+    test_hooks: &IssueMonitorWorkerTestHooks,
+) -> IssueMonitorAuthorityRetry {
+    let retry_prefs_path = prefs_path.to_path_buf();
+    let retry_config = config.clone();
+    let retry_fence = authority_fence.clone();
+    // The first claimant either starts the synchronous attempt or cancels it
+    // before it can touch authority. A queued abort alone is not joinable
+    // until a blocking-pool thread becomes available.
+    let retry_claimed = Arc::new(AtomicBool::new(false));
+    let run_claim = Arc::clone(&retry_claimed);
+    #[cfg(all(test, unix))]
+    let retry_started = test_hooks.startup_retry_started.clone();
+    let mut retry = tokio::task::spawn_blocking(move || {
+        if run_claim.swap(true, Ordering::AcqRel) {
+            return None;
+        }
+        #[cfg(all(test, unix))]
+        if let Some(started) = retry_started {
+            started.notify_one();
+        }
+        let _deadline = deadline.map(gwt_core::operation_deadline::ScopedOperationDeadline::enter);
+        Some(load_issue_monitor_state_for_daemon_attempt(
+            &retry_prefs_path,
+            retry_config,
+            authority_lease,
+            retry_fence,
+            ISSUE_MONITOR_STARTUP_ATTEMPT_BUDGET.resolve(),
+        ))
+    });
+    #[cfg(all(test, unix))]
+    if let Some(submitted) = &test_hooks.startup_retry_submitted {
+        submitted.notify_one();
+    }
+    let expired = async {
+        match deadline {
+            Some(deadline) => {
+                tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await
+            }
+            None => std::future::pending().await,
+        }
+    };
+    let result = tokio::select! {
+        biased;
+        _ = shutdown.notified() => {
+            let running = retry_claimed.swap(true, Ordering::AcqRel);
+            retry.abort();
+            if running {
+                // Started blocking tasks cannot be aborted. Drain the bounded
+                // attempt before reporting worker termination.
+                let _ = retry.await;
+            }
+            return IssueMonitorAuthorityRetry::Stopped;
+        }
+        _ = expired => {
+            let running = retry_claimed.swap(true, Ordering::AcqRel);
+            retry.abort();
+            if !running {
+                return IssueMonitorAuthorityRetry::Expired;
+            }
+            // It inherits this same absolute deadline. No running attempt may
+            // outlive the caller's terminal transition.
+            retry.await
+        }
+        result = &mut retry => result,
+    };
+    match result {
+        Ok(Some(loaded)) => IssueMonitorAuthorityRetry::Loaded(Box::new(loaded)),
+        Ok(None) => IssueMonitorAuthorityRetry::Stopped,
+        Err(error) => {
+            tracing::error!(%error, "Issues authority retry worker failed");
+            IssueMonitorAuthorityRetry::Stopped
+        }
+    }
+}
+
 fn spawn_issue_monitor_worker_with_lease(
     scope: RuntimeScope,
     hub: BroadcastHub,
@@ -1715,25 +1851,31 @@ fn spawn_issue_monitor_worker_with_lease(
     #[cfg(all(test, unix))]
     let startup_timeout = test_hooks.startup_timeout.unwrap_or(startup_timeout);
     let startup_deadline = Instant::now() + startup_timeout;
+    let recovery_retry_delay = ISSUE_MONITOR_AUTHORITY_RECOVERY_RETRY_DELAY;
+    #[cfg(all(test, unix))]
+    let recovery_retry_delay = test_hooks
+        .recovery_retry_delay
+        .unwrap_or(recovery_retry_delay);
+    // One identity for every attempt of this startup, so a retry recognizes
+    // the fence an exhausted attempt already persisted (Issue #7483).
+    let authority_fence = crate::IssueMonitorAuthorityFence::current_process();
     let loaded = {
         let _deadline =
             gwt_core::operation_deadline::ScopedOperationDeadline::enter(startup_deadline);
-        load_issue_monitor_state_for_daemon_with_lease(&prefs_path, config.clone(), authority_lease)
+        load_issue_monitor_state_for_daemon_attempt(
+            &prefs_path,
+            config.clone(),
+            authority_lease,
+            authority_fence.clone(),
+            issue_monitor_prefs_timeout(),
+        )
     };
     tokio::spawn(async move {
         let mut loaded = loaded;
+        let mut startup_budget_spent = false;
         while loaded.authority_retry_pending {
             if Instant::now() >= startup_deadline {
-                loaded.authority_retry_pending = false;
-                loaded.recovery_blocked = true;
-                loaded.monitor.record_authority_recovery_blocked(
-                    format!(
-                        "Issues authority recovery is blocked: startup retry budget exhausted; prefs={} authority_marker={}; automation disabled and durable state preserved. {}",
-                        prefs_path.display(),
-                        issue_monitor_shutdown_revoke_marker_path(&prefs_path).display(),
-                        ISSUE_MONITOR_AUTHORITY_RECOVERY_GUIDANCE,
-                    ),
-                );
+                startup_budget_spent = true;
                 break;
             }
             tokio::select! {
@@ -1748,75 +1890,90 @@ fn spawn_issue_monitor_worker_with_lease(
             if Instant::now() >= startup_deadline {
                 continue;
             }
-            let retry_prefs_path = prefs_path.clone();
-            let retry_config = config.clone();
-            // A cancelled blocking-pool task must not release the pre-bind
-            // lease while this worker continues serving read-only diagnostics.
-            let retry_lease = loaded.authority_lease.clone();
-            // The first claimant either starts the synchronous attempt or
-            // cancels it before it can touch authority. A queued abort alone
-            // is not joinable until a blocking-pool thread becomes available.
-            let retry_claimed = Arc::new(AtomicBool::new(false));
-            let run_claim = Arc::clone(&retry_claimed);
-            #[cfg(all(test, unix))]
-            let retry_started = test_hooks.startup_retry_started.clone();
-            let mut retry = tokio::task::spawn_blocking(move || {
-                if run_claim.swap(true, Ordering::AcqRel) {
-                    return None;
+            match run_issue_monitor_authority_retry(
+                &prefs_path,
+                &config,
+                loaded.authority_lease.clone(),
+                &authority_fence,
+                Some(startup_deadline),
+                &shutdown,
+                &test_hooks,
+            )
+            .await
+            {
+                IssueMonitorAuthorityRetry::Loaded(next) => loaded = *next,
+                IssueMonitorAuthorityRetry::Expired => {}
+                IssueMonitorAuthorityRetry::Stopped => {
+                    hub.close_issue_monitor_controls();
+                    return;
                 }
-                #[cfg(all(test, unix))]
-                if let Some(started) = retry_started {
-                    started.notify_one();
-                }
-                let _deadline =
-                    gwt_core::operation_deadline::ScopedOperationDeadline::enter(startup_deadline);
-                Some(load_issue_monitor_state_for_daemon_with_lease(
-                    &retry_prefs_path,
-                    retry_config,
-                    retry_lease,
-                ))
-            });
-            #[cfg(all(test, unix))]
-            if let Some(submitted) = &test_hooks.startup_retry_submitted {
-                submitted.notify_one();
             }
-            let result = tokio::select! {
-                biased;
-                _ = shutdown.notified() => {
-                    let running = retry_claimed.swap(true, Ordering::AcqRel);
-                    retry.abort();
-                    if running {
-                        // Started blocking tasks cannot be aborted. Drain the
-                        // bounded attempt before reporting worker termination.
-                        let _ = retry.await;
+        }
+        if startup_budget_spent {
+            // Issue #7483: an exhausted budget proves only that the locks
+            // stayed busy. Refuse controls and keep the diagnosis readable,
+            // but keep retrying so the lane opens without a daemon restart.
+            loaded.monitor.record_authority_recovery_blocked(format!(
+                "Issues authority recovery is blocked: startup retry budget exhausted; prefs={} authority_marker={}; automation disabled and durable state preserved. {}",
+                prefs_path.display(),
+                issue_monitor_shutdown_revoke_marker_path(&prefs_path).display(),
+                ISSUE_MONITOR_AUTHORITY_RETRY_GUIDANCE,
+            ));
+            loaded.monitor.set_wait_project_root(&scope.project_root);
+            refresh_issue_monitor_agent_status(&hub, &loaded.monitor);
+            hub.mark_issue_monitor_control_recovery_retrying();
+            publish_issue_monitor_read_only_payloads(&hub, &loaded.monitor, &project_store);
+            let mut retry_delay = recovery_retry_delay;
+            let mut next_attempt = tokio::time::Instant::now() + retry_delay;
+            // BroadcastHub has no replay buffer: keep the diagnosis visible
+            // to clients that connect between attempts.
+            let mut recovery_status_tick = tokio::time::interval(Duration::from_secs(1));
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = shutdown.notified() => {
+                        hub.close_issue_monitor_controls();
+                        return;
                     }
-                    hub.close_issue_monitor_controls();
-                    return;
-                }
-                _ = tokio::time::sleep_until(tokio::time::Instant::from_std(startup_deadline)) => {
-                    let running = retry_claimed.swap(true, Ordering::AcqRel);
-                    retry.abort();
-                    if running {
-                        // It inherits this same absolute deadline. No running
-                        // attempt may outlive the terminal startup transition.
-                        let _ = retry.await;
+                    _ = tokio::time::sleep_until(next_attempt) => {}
+                    _ = recovery_status_tick.tick() => {
+                        publish_issue_monitor_read_only_payloads(
+                            &hub,
+                            &loaded.monitor,
+                            &project_store,
+                        );
+                        continue;
                     }
-                    continue;
                 }
-                result = &mut retry => result,
-            };
-            loaded = match result {
-                Ok(Some(loaded)) => loaded,
-                Ok(None) => {
-                    hub.close_issue_monitor_controls();
-                    return;
+                match run_issue_monitor_authority_retry(
+                    &prefs_path,
+                    &config,
+                    loaded.authority_lease.clone(),
+                    &authority_fence,
+                    None,
+                    &shutdown,
+                    &test_hooks,
+                )
+                .await
+                {
+                    IssueMonitorAuthorityRetry::Loaded(next) if next.authority_retry_pending => {
+                        // Keep the blocked projection; only carry a lease the
+                        // attempt may have reserved.
+                        loaded.authority_lease = next.authority_lease;
+                    }
+                    IssueMonitorAuthorityRetry::Loaded(next) => {
+                        loaded = *next;
+                        break;
+                    }
+                    IssueMonitorAuthorityRetry::Expired => {}
+                    IssueMonitorAuthorityRetry::Stopped => {
+                        hub.close_issue_monitor_controls();
+                        return;
+                    }
                 }
-                Err(error) => {
-                    tracing::error!(%error, "Issues authority retry worker failed");
-                    hub.close_issue_monitor_controls();
-                    return;
-                }
-            };
+                retry_delay = next_issue_monitor_authority_recovery_delay(retry_delay);
+                next_attempt = tokio::time::Instant::now() + retry_delay;
+            }
         }
         loaded.monitor.set_wait_project_root(&scope.project_root);
         // Publish the initial projection before Ready becomes observable.
@@ -2957,15 +3114,36 @@ fn load_issue_monitor_state_for_daemon(
     load_issue_monitor_state_for_daemon_with_lease(prefs_path, config, None)
 }
 
+#[cfg(test)]
 fn load_issue_monitor_state_for_daemon_with_lease(
     prefs_path: &Path,
     config: crate::IssueMonitorConfig,
+    authority_lease: Option<Arc<crate::IssueMonitorAuthorityLease>>,
+) -> LoadedDaemonIssueMonitorState {
+    load_issue_monitor_state_for_daemon_attempt(
+        prefs_path,
+        config,
+        authority_lease,
+        crate::IssueMonitorAuthorityFence::current_process(),
+        issue_monitor_prefs_timeout(),
+    )
+}
+
+/// One bounded attempt to establish this daemon's authority.
+///
+/// Issue #7483: every attempt of one startup passes the same
+/// `authority_fence`, so an attempt that persisted the fence and then ran out
+/// of budget is recognized by its retry instead of being revoked again.
+fn load_issue_monitor_state_for_daemon_attempt(
+    prefs_path: &Path,
+    config: crate::IssueMonitorConfig,
     mut authority_lease: Option<Arc<crate::IssueMonitorAuthorityLease>>,
+    authority_fence: crate::IssueMonitorAuthorityFence,
+    attempt_budget: Duration,
 ) -> LoadedDaemonIssueMonitorState {
     let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-        gwt_core::operation_deadline::now() + issue_monitor_prefs_timeout(),
+        gwt_core::operation_deadline::now() + attempt_budget,
     );
-    let authority_fence = crate::IssueMonitorAuthorityFence::current_process();
     let result = (|| {
         if authority_lease.is_none() {
             authority_lease = Some(Arc::new(
@@ -22961,6 +23139,9 @@ exit 1
             super::ISSUE_MONITOR_SCAN_TIMEOUT,
             super::IssueMonitorWorkerTestHooks {
                 startup_timeout: Some(Duration::ZERO),
+                // This test is about the terminal transition, not the
+                // background recovery that follows it (Issue #7483).
+                recovery_retry_delay: Some(HANG_GUARD),
                 ..Default::default()
             },
         );
@@ -23039,6 +23220,7 @@ exit 1
                 super::IssueMonitorWorkerTestHooks {
                     startup_timeout: Some(Duration::from_secs(1)),
                     startup_retry_submitted: Some(Arc::clone(&submitted)),
+                    recovery_retry_delay: Some(HANG_GUARD),
                     ..Default::default()
                 },
             );
@@ -23072,6 +23254,328 @@ exit 1
                 crate::load_issue_monitor_authority_fence(&prefs_path).expect("fence"),
                 crate::IssueMonitorAuthorityFenceState::Missing
             ));
+        });
+    }
+
+    /// Issue #7483 AC-2: an exhausted startup budget is not terminal. The
+    /// daemon keeps refusing controls while it is blocked, then opens the lane
+    /// by itself once the lock is free, with no restart.
+    #[test]
+    fn exhausted_startup_budget_recovers_without_a_daemon_restart() {
+        // The recovered worker may scan. Keep sibling fixtures' process-wide
+        // fake-gh configuration out until shutdown has joined it.
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _prefs_budget = pin_prefs_hang_guard();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .on_thread_start(|| std::mem::forget(pin_prefs_hang_guard()))
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let temp = TempDir::new().expect("tempdir");
+            let _home = ScopedGwtHome::set(temp.path().join("home"));
+            let repo = temp.path().join("repo");
+            fs::create_dir_all(&repo).expect("repo");
+            init_git_repo(&repo);
+            commit_initial_branch(&repo);
+            let scope = RuntimeScope::new(
+                "abcdef0123456789",
+                "feedfacecafebeef",
+                repo,
+                RuntimeTarget::Host,
+            )
+            .expect("scope");
+            let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root);
+            crate::save_issue_monitor_prefs(&prefs_path, &crate::IssueMonitorPrefs::default())
+                .expect("seed prefs");
+            let local_lease = crate::try_acquire_issue_monitor_local_fallback_lease(&prefs_path)
+                .expect("hold GUI fallback authority");
+            let hub = BroadcastHub::new();
+            let shutdown = Arc::new(DaemonShutdown::new());
+            let worker = super::spawn_issue_monitor_worker_with_config_timeout_and_hooks(
+                scope,
+                hub.clone(),
+                Arc::clone(&shutdown),
+                crate::IssueMonitorConfig::default(),
+                super::ISSUE_MONITOR_SCAN_TIMEOUT,
+                super::IssueMonitorWorkerTestHooks {
+                    startup_timeout: Some(Duration::ZERO),
+                    recovery_retry_delay: Some(Duration::from_millis(100)),
+                    ..Default::default()
+                },
+            );
+            let blocked = hub.wait_for_issue_monitor_status().await;
+            let refused = hub.publish_issue_monitor_control(DaemonFrame::Ack).await;
+            drop(local_lease);
+            let ready = hub.wait_for_issue_monitor_control_ready().await;
+            let recovered = hub.issue_monitor_status();
+            let fence = crate::load_issue_monitor_authority_fence(&prefs_path);
+            shutdown.request();
+            worker.await.expect("worker exits cleanly");
+
+            let blocked = blocked.expect("blocked recovery remains readable");
+            assert!(blocked["last_error"]
+                .as_str()
+                .is_some_and(|error| error.contains("startup retry budget exhausted")
+                    && error.contains("retries automatically")));
+            assert_eq!(
+                refused,
+                Err(super::IssueMonitorControlQueueError::RecoveryBlocked),
+                "controls stay refused until authority is established"
+            );
+            assert!(ready, "the lane opens without a restart");
+            let recovered = recovered.expect("ready status");
+            assert!(
+                !recovered["last_error"]
+                    .as_str()
+                    .is_some_and(|error| error.contains("authority recovery is blocked")),
+                "the blocked diagnosis must not outlive recovery: {recovered}"
+            );
+            assert!(matches!(
+                fence.expect("fence"),
+                crate::IssueMonitorAuthorityFenceState::Active(fence)
+                    if fence.pid == std::process::id()
+            ));
+        });
+    }
+
+    /// Issue #7483: the background retry backs off, but its pause is capped.
+    #[test]
+    fn authority_recovery_retry_delay_doubles_up_to_the_ceiling() {
+        let mut delay = super::ISSUE_MONITOR_AUTHORITY_RECOVERY_RETRY_DELAY;
+        let mut delays = vec![delay];
+        for _ in 0..6 {
+            delay = super::next_issue_monitor_authority_recovery_delay(delay);
+            delays.push(delay);
+        }
+        assert_eq!(
+            delays,
+            [5, 10, 20, 40, 60, 60, 60].map(Duration::from_secs),
+            "the pause doubles and then stays at the ceiling"
+        );
+    }
+
+    /// Issue #7483: only an exhausted budget is retried. Durable state the
+    /// daemon cannot interpret stays terminal and fail-closed, also when a
+    /// background retry is the one that meets it.
+    #[test]
+    fn background_retry_stops_at_a_terminal_authority_block() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _prefs_budget = pin_prefs_hang_guard();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .on_thread_start(|| std::mem::forget(pin_prefs_hang_guard()))
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let temp = TempDir::new().expect("tempdir");
+            let _home = ScopedGwtHome::set(temp.path().join("home"));
+            let repo = temp.path().join("repo");
+            fs::create_dir_all(&repo).expect("repo");
+            init_git_repo(&repo);
+            commit_initial_branch(&repo);
+            let scope = RuntimeScope::new(
+                "abcdef0123456789",
+                "feedfacecafebeef",
+                repo,
+                RuntimeTarget::Host,
+            )
+            .expect("scope");
+            let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root);
+            crate::save_issue_monitor_prefs(&prefs_path, &crate::IssueMonitorPrefs::default())
+                .expect("seed prefs");
+            let before = fs::read(&prefs_path).expect("seeded bytes");
+            let local_lease = crate::try_acquire_issue_monitor_local_fallback_lease(&prefs_path)
+                .expect("hold GUI fallback authority");
+            let hub = BroadcastHub::new();
+            let mut status_rx = hub.subscribe(crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL);
+            let shutdown = Arc::new(DaemonShutdown::new());
+            let worker = super::spawn_issue_monitor_worker_with_config_timeout_and_hooks(
+                scope,
+                hub.clone(),
+                Arc::clone(&shutdown),
+                crate::IssueMonitorConfig::default(),
+                super::ISSUE_MONITOR_SCAN_TIMEOUT,
+                super::IssueMonitorWorkerTestHooks {
+                    startup_timeout: Some(Duration::ZERO),
+                    recovery_retry_delay: Some(Duration::from_millis(100)),
+                    ..Default::default()
+                },
+            );
+            let retrying = hub.wait_for_issue_monitor_status().await;
+            fs::write(
+                crate::issue_monitor_authority_fence_path(&prefs_path),
+                "{broken",
+            )
+            .expect("malformed fence");
+            let terminal =
+                recv_issue_monitor_status_matching(&mut status_rx, HANG_GUARD, |status| {
+                    status
+                        .last_error
+                        .as_deref()
+                        .is_some_and(|error| error.contains("restart only this project's daemon"))
+                })
+                .await;
+            // The terminal block gave up the receiver: no later attempt can
+            // open the lane, even once the lock is free.
+            drop(local_lease);
+            let receiver = hub.take_issue_monitor_control_receiver();
+            let refused = hub.publish_issue_monitor_control(DaemonFrame::Ack).await;
+            shutdown.request();
+            worker.await.expect("worker exits cleanly");
+
+            assert!(
+                retrying.expect("blocked recovery remains readable")["last_error"]
+                    .as_str()
+                    .is_some_and(|error| error.contains("retries automatically"))
+            );
+            let terminal = terminal.expect("the retry reports the terminal block");
+            assert!(
+                !terminal
+                    .last_error
+                    .as_deref()
+                    .is_some_and(|error| error.contains("retries automatically")),
+                "a terminal block must not promise recovery: {:?}",
+                terminal.last_error
+            );
+            assert!(receiver.is_none(), "a terminal block never becomes Ready");
+            assert_eq!(
+                refused,
+                Err(super::IssueMonitorControlQueueError::RecoveryBlocked)
+            );
+            assert_eq!(fs::read(&prefs_path).expect("unchanged prefs"), before);
+        });
+    }
+
+    /// Issue #7483 AC-1/AC-3/AC-4: a GUI start launches every project's
+    /// daemon at once, and each inherits the durable state the incident left
+    /// behind (epoch 876, a fence naming a previous daemon). The short prefs
+    /// budget is spent on arrival for every one of them, as it is when they
+    /// queue on the shared registry lock; the startup attempt budget is what
+    /// lets each retry finish. Every daemon must reach Ready, revoking the
+    /// previous owner exactly once.
+    #[test]
+    fn simultaneous_daemon_startups_reach_ready_from_retained_fences() {
+        const DAEMONS: usize = 7;
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        fn pin_startup_budgets() -> impl Sized {
+            (
+                gwt_core::deadline_budget::ScopedDeadlineBudget::pin(
+                    &super::ISSUE_MONITOR_PREFS_BUDGET,
+                    Duration::ZERO,
+                ),
+                gwt_core::deadline_budget::ScopedDeadlineBudget::pin(
+                    &super::ISSUE_MONITOR_STARTUP_ATTEMPT_BUDGET,
+                    HANG_GUARD,
+                ),
+            )
+        }
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .on_thread_start(|| std::mem::forget(pin_startup_budgets()))
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let temp = TempDir::new().expect("tempdir");
+            let _home = ScopedGwtHome::set(temp.path().join("home"));
+            let mut daemons = Vec::new();
+            for index in 0..DAEMONS {
+                let repo = temp.path().join(format!("repo-{index}"));
+                fs::create_dir_all(&repo).expect("repo");
+                init_git_repo(&repo);
+                commit_initial_branch(&repo);
+                let scope = RuntimeScope::new(
+                    format!("abcdef012345678{index}"),
+                    format!("feedfacecafebee{index}"),
+                    repo,
+                    RuntimeTarget::Host,
+                )
+                .expect("scope");
+                let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root);
+                crate::save_issue_monitor_prefs(
+                    &prefs_path,
+                    &crate::IssueMonitorPrefs {
+                        effect_authority_epoch: 876,
+                        ..crate::IssueMonitorPrefs::default()
+                    },
+                )
+                .expect("seed prefs");
+                let previous = crate::IssueMonitorAuthorityFence::current_process();
+                crate::persist_issue_monitor_authority_fence(&prefs_path, &previous)
+                    .expect("seed the fence the previous daemon left behind");
+                daemons.push((scope, prefs_path, previous));
+            }
+            let startup_budgets = pin_startup_budgets();
+            let mut workers = Vec::new();
+            for (scope, _, _) in &daemons {
+                let hub = BroadcastHub::new();
+                let shutdown = Arc::new(DaemonShutdown::new());
+                let worker = super::spawn_issue_monitor_worker_with_config_timeout_and_hooks(
+                    scope.clone(),
+                    hub.clone(),
+                    Arc::clone(&shutdown),
+                    crate::IssueMonitorConfig::default(),
+                    super::ISSUE_MONITOR_SCAN_TIMEOUT,
+                    super::IssueMonitorWorkerTestHooks {
+                        startup_timeout: Some(HANG_GUARD),
+                        ..Default::default()
+                    },
+                );
+                workers.push((hub, shutdown, worker));
+            }
+            let mut ready = Vec::new();
+            for (hub, _, _) in &workers {
+                ready.push(hub.wait_for_issue_monitor_control_ready().await);
+            }
+            // Startup is over: shutdown settles authority on a real budget.
+            drop(startup_budgets);
+            let _settle_budget = pin_prefs_hang_guard();
+            let mut observed = Vec::new();
+            for ((hub, _, _), (_, prefs_path, previous)) in workers.iter().zip(&daemons) {
+                observed.push((
+                    hub.issue_monitor_status(),
+                    crate::load_issue_monitor_prefs(prefs_path)
+                        .expect("prefs")
+                        .effect_authority_epoch,
+                    crate::load_issue_monitor_authority_fence(prefs_path).expect("fence"),
+                    previous.clone(),
+                ));
+            }
+            for (_, shutdown, worker) in workers {
+                shutdown.request();
+                worker.await.expect("worker exits cleanly");
+            }
+
+            for (index, (ready, (status, epoch, fence, previous))) in
+                ready.into_iter().zip(observed).enumerate()
+            {
+                assert!(ready, "daemon {index} reaches Ready");
+                let status = status.expect("ready status");
+                assert!(
+                    !status["last_error"]
+                        .as_str()
+                        .is_some_and(|error| error.contains("authority recovery is blocked")),
+                    "daemon {index} must not fall into blocked recovery: {status}"
+                );
+                assert_eq!(
+                    epoch, 877,
+                    "daemon {index} revokes the previous owner exactly once"
+                );
+                assert!(
+                    matches!(
+                        &fence,
+                        crate::IssueMonitorAuthorityFenceState::Active(current)
+                            if current.pid == std::process::id() && *current != previous
+                    ),
+                    "daemon {index} owns the fence: {fence:?}"
+                );
+            }
         });
     }
 

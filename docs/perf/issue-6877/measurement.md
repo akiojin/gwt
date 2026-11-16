@@ -18,6 +18,91 @@ User Verification Result: n/a (autonomous)
 
 Agent Visual Check: n/a (no UI surface)
 
+## 2026-11-16: 配備済み v9.166.1 の実測（AC-2 / AC-5 達成、AC-4 未測定）（小田 洋平）
+
+fetch 後の `origin/main` は `10e48f19b150abeec1e6d7f64a90fff8527a6ca2`
+（v9.166.1）で、PR #7466 の timeline 読み取りの間引きを包含する。
+work branch に未配送の source は無く、今回の変更は計測記録だけである。
+
+- Host: macOS 27.2.1（Apple M5 Max、18 core）、`/Applications/GWT.app`
+  （installed gwtd 9.166.1）。GUI binary SHA-256
+  `19d49e23fbf8df628cc9c2a53f059e0d0a23779158eb75bffae394d326589345`。
+- 対象 process: GUI PID 78590、2026-11-16 19:27:38 JST 起動
+  （自動更新による v9.166.1 への再起動）。観測は読み取り専用で、fleet の
+  再起動・置換・agent の追加起動は行っていない。
+
+### gh 起動数（AC-2）
+
+資料は `~/.gwt/logs/gwt.log.2026-11-16` の `gwt.process.summary`
+（`kind=gh`、`phase=start`、span `issue_monitor_scan`）。scan 対象の
+project_root は `/Users/akio-jinsenji/Repos/gwt` の 1 件のみ。
+
+| 窓（JST、600 秒） | scan の gh 起動 | timeline | issues | open pulls | closed pulls |
+| --- | --- | --- | --- | --- | --- |
+| 19:30 | 16 | 10 | 4 | 1 | 1 |
+| 19:40 | 17 | 10 | 5 | 1 | 1 |
+| 19:50 | 17 | 10 | 5 | 1 | 1 |
+| 20:00 | 17 | 10 | 5 | 1 | 1 |
+| 20:10 | 17 | 10 | 5 | 1 | 1 |
+| 20:20 | 16 | 9 | 5 | 1 | 1 |
+| 20:30 | 17 | 10 | 5 | 1 | 1 |
+
+連続 7 窓すべてが 16〜17 回で、閾値 20 回以下を満たす。v9.166.0 の定常値
+27 回からの差は timeline の 20 回 → 10 回で、変更前の見込み（約 17 回）と
+一致する。この 70 分の timeline 呼出 69 回の所要時間は p50 814 ms、
+p95 2658 ms、最大 3224 ms、失敗 0。
+
+起動直後の 19:27:38〜19:30:00 は cold cache の一覧再読を含むため窓から
+除外した。この 70 分に `gh pr view` と制御操作起点の一覧再読は発生して
+いない。v9.166.0 で観測した「制御操作の直後に `gh api issues` の再読が
+重なる窓」は今回の観測では再現しておらず、その窓の上限は未測定である。
+
+### GUI の CPU（AC-5、AC-4）
+
+資料は [5 秒間隔の累積 CPU 時間](v9.166.1-gui-cpu-samples.txt)
+（`ps -o time=`、起動後 100 秒〜4598 秒の 895 行、列は epoch 秒・累積 CPU
+時間・稼働中の実装 agent 数。SHA-256
+`d747aed09e3418ae7f8abde5cf536677c257a19fc6deb55ad6fe9b9d830f285b`）。
+割合は 1 core = 100%。
+
+| 区間（起動からの秒） | CPU 平均 |
+| --- | --- |
+| 5 分時点（240〜356） | 4.3% |
+| 60 分時点（3541〜3657） | 4.4% |
+| 5〜10 分 | 4.4% |
+| 55〜60 分 | 4.5% |
+| 60〜65 分 | 4.4% |
+| 70〜80 分（計測終端まで） | 4.5% |
+
+- AC-5: 5 分時点 4.3% と 60 分時点 4.4% の差は 0.1 ポイントで、20 ポイント
+  以内を満たす。10 分刻みの平均も 10 分以降 4.3〜4.9% で推移し、時間経過に
+  よる悪化は無い。
+- 起動後 300 秒以降の 5 秒平均は 855 件すべて 100% 以下（最大 31.6%、
+  平均 4.5%）。100% を超えた 9 件は起動後 110〜175 秒の起動処理に限られる
+  （最大 176.8%）。
+- **負荷条件:** 観測中に稼働していた実装 agent は 0〜1 本（計測した本
+  agent のみ）。AC-4 の「実装 agent 6 本が動いている状態」は成立しておらず、
+  AC-4 は未測定である。上の 5 秒平均を AC-4 の達成証拠として扱わない。
+- AC-5 の値も agent 0〜1 本・scan 対象 1 project の条件での実測である。
+  起票時の Windows 6 project 構成での再実測は行っていない。
+
+### Owner の受け入れ条件
+
+| AC | 判定 |
+| --- | --- |
+| AC-2 | 達成。v9.166.1 の連続 7 窓が 16〜17 回 / 600 秒 / project。 |
+| AC-4 | 未測定（実装 agent 6 本の稼働条件が成立していない）。 |
+| AC-5 | 達成。5 分時点 4.3%、60 分時点 4.4%、差 0.1 ポイント。 |
+
+AC-4 は 6 本の実装 agent が稼働する fleet での 5 秒 CPU 実測が必要で、
+Issue #6877 は close しない。
+
+Acceptance Surface: non-user-facing (measurement records only).
+
+User Verification Result: n/a (autonomous)
+
+Agent Visual Check: n/a (no UI surface)
+
 ## 2026-11-16: 配備済み v9.166.0 の定常 gh 起動数と timeline 読み取りの間引き（小田 洋平）
 
 ### 配備済み runtime の実測（AC-2 未達）

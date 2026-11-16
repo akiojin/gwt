@@ -697,7 +697,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -801,7 +801,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1324,7 +1324,7 @@ dependencies = [
 
 [[package]]
 name = "gwt"
-version = "9.166.2"
+version = "9.167.0"
 dependencies = [
  "ammonia",
  "auto-launch",
@@ -1399,7 +1399,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-agent"
-version = "9.166.2"
+version = "9.167.0"
 dependencies = [
  "chrono",
  "dunce",
@@ -1428,7 +1428,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-ai"
-version = "9.166.2"
+version = "9.167.0"
 dependencies = [
  "reqwest",
  "serde",
@@ -1438,7 +1438,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-clipboard"
-version = "9.166.2"
+version = "9.167.0"
 dependencies = [
  "gwt-core",
  "thiserror 2.0.21",
@@ -1446,7 +1446,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-config"
-version = "9.166.2"
+version = "9.167.0"
 dependencies = [
  "dirs 7.0.0",
  "fs2",
@@ -1463,7 +1463,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-core"
-version = "9.166.2"
+version = "9.167.0"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -1505,7 +1505,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-docker"
-version = "9.166.2"
+version = "9.167.0"
 dependencies = [
  "gwt-core",
  "libc",
@@ -1519,7 +1519,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-git"
-version = "9.166.2"
+version = "9.167.0"
 dependencies = [
  "chrono",
  "dirs 7.0.0",
@@ -1535,7 +1535,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-github"
-version = "9.166.2"
+version = "9.167.0"
 dependencies = [
  "chrono",
  "fs2",
@@ -1553,7 +1553,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-skills"
-version = "9.166.2"
+version = "9.167.0"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -1574,7 +1574,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-terminal"
-version = "9.166.2"
+version = "9.167.0"
 dependencies = [
  "gwt-core",
  "libc",
@@ -1590,7 +1590,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-voice"
-version = "9.166.2"
+version = "9.167.0"
 dependencies = [
  "thiserror 2.0.21",
 ]
@@ -2379,7 +2379,7 @@ dependencies = [
  "once_cell",
  "png",
  "thiserror 2.0.21",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -2454,9 +2454,9 @@ dependencies = [
 
 [[package]]
 name = "notify"
-version = "8.2.1"
+version = "8.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "82f812702fbc75d35416d3f884e04925be7e9498f4eceea2e24ba34559284674"
+checksum = "c41a04a5f59df9322cc657286dd2d79f90816119b22c5f847607c850110205ab"
 dependencies = [
  "bitflags 2.11.1",
  "inotify",
@@ -2507,7 +2507,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -2586,6 +2586,7 @@ dependencies = [
  "objc2",
  "objc2-core-foundation",
  "objc2-foundation",
+ "objc2-uniform-type-identifiers",
 ]
 
 [[package]]
@@ -2784,6 +2785,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "objc2-uniform-type-identifiers"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7902ac02859fc1f7045f8b598c63f1ae0cc7efeaa06a9bc9f3d9a3c955974fa4"
+dependencies = [
+ "objc2",
+ "objc2-foundation",
+]
+
+[[package]]
 name = "objc2-user-notifications"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2978,9 +2989,9 @@ dependencies = [
 
 [[package]]
 name = "pollster"
-version = "0.4.0"
+version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f3a9f18d041e6d0e102a0a46750538147e5e8992d3b4873aaafee2520b00ce3"
+checksum = "bc6355899e1c9462875b6757c79f3caa011a1fdae12bbb1a2e72dd1f234f8336"
 
 [[package]]
 name = "portable-pty"
@@ -3387,9 +3398,9 @@ dependencies = [
 
 [[package]]
 name = "rfd"
-version = "0.17.2"
+version = "0.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "20dafead71c16a34e1ff357ddefc8afc11e7d51d6d2b9fbd07eaa48e3e540220"
+checksum = "c4b9d4857b10297ffb0f64cae711e983a7aeaee561848d56d429d3858bd8ed93"
 dependencies = [
  "block2",
  "dispatch2",
@@ -3400,6 +3411,7 @@ dependencies = [
  "objc2-app-kit",
  "objc2-core-foundation",
  "objc2-foundation",
+ "objc2-uniform-type-identifiers",
  "percent-encoding",
  "pollster",
  "raw-window-handle",
@@ -3460,7 +3472,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3773,7 +3785,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -3975,7 +3987,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4406,7 +4418,7 @@ dependencies = [
  "once_cell",
  "png",
  "thiserror 2.0.21",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -4869,7 +4881,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

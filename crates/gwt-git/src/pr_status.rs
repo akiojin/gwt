@@ -4280,6 +4280,76 @@ where
         .flatten()
 }
 
+/// Issue #7300: `gh pr diff` answers HTTP 406 for a pull request that changes
+/// more than 300 files. That is a property of the head, not an outage, so a
+/// retry of the same call can never succeed.
+pub fn pr_diff_exceeds_github_limit(detail: &str) -> bool {
+    detail.contains("HTTP 406")
+        && (detail.contains("maximum number of files") || detail.contains("too_large"))
+}
+
+/// Issue #7300: the diff of a pull request too large for `gh pr diff`, rebuilt
+/// from the paged pull-request files API (`core` budget, 100 files a request).
+/// The read stops at the shared page cap and says so in the text, so a reader
+/// never mistakes a capped listing for the whole change.
+pub fn try_fetch_pr_files_diff(repo_path: &Path, number: u64, max_bytes: usize) -> Result<String> {
+    try_fetch_pr_files_diff_with(repo_path, number, max_bytes, run_gh_command)
+}
+
+fn try_fetch_pr_files_diff_with<F>(
+    repo_path: &Path,
+    number: u64,
+    max_bytes: usize,
+    mut run_gh: F,
+) -> Result<String>
+where
+    F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
+{
+    let endpoint = format!("repos/{{owner}}/{{repo}}/pulls/{number}/files");
+    let pages = crate::gh_rest::read_pages_with(&endpoint, |path| {
+        let output =
+            run_gh(repo_path, &["api", path, "--include"]).map_err(|error| error.to_string())?;
+        if output.success {
+            Ok(output.stdout)
+        } else {
+            Err(output.stderr.trim().to_string())
+        }
+    })
+    .map_err(|error| GwtError::Git(format!("gh api pulls files: {error}")))?;
+    let text = |file: &serde_json::Value, key: &str| {
+        file.get(key)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let mut diff = String::new();
+    for file in &pages.rows {
+        let name = text(file, "filename");
+        let previous = match text(file, "previous_filename") {
+            previous if previous.is_empty() => name.clone(),
+            previous => previous,
+        };
+        diff.push_str(&format!(
+            "diff --git a/{previous} b/{name}\n# status: {}\n",
+            text(file, "status")
+        ));
+        match text(file, "patch") {
+            patch if patch.is_empty() => diff.push_str("# patch not provided by GitHub\n"),
+            patch => {
+                diff.push_str(&patch);
+                diff.push('\n');
+            }
+        }
+    }
+    if pages.capped {
+        diff.push_str(&format!(
+            "... [file list capped at {} files] ...\n",
+            pages.rows.len()
+        ));
+    }
+    Ok(truncate_diff(&diff, max_bytes))
+}
+
 fn truncate_diff(diff: &str, max_bytes: usize) -> String {
     if diff.len() <= max_bytes {
         return diff.to_string();
@@ -6181,6 +6251,62 @@ mod tests {
             })
         });
         assert_eq!(failed, None, "gh failure → None");
+    }
+
+    /// Issue #7300 AC-1: a pull request over GitHub's 300-file diff limit is
+    /// read through the paged files API instead of failing forever.
+    #[test]
+    fn oversized_pr_diff_is_rebuilt_from_the_paged_files_api() {
+        assert!(pr_diff_exceeds_github_limit(
+            "gh pr diff: could not find pull request diff: HTTP 406: Sorry, the diff exceeded \
+             the maximum number of files (300). Consider using 'List pull requests files' API"
+        ));
+        assert!(!pr_diff_exceeds_github_limit("gh pr diff: HTTP 502"));
+        assert!(!pr_diff_exceeds_github_limit("gh pr diff: no pr"));
+
+        let repo = Path::new("/tmp/repo");
+        let mut paths = Vec::new();
+        let diff = try_fetch_pr_files_diff_with(repo, 7, 200_000, |_p, args| {
+            paths.push(args[1].to_string());
+            let (link, body) = if args[1].ends_with("page=1") {
+                (
+                    "Link: <repos/o/r/pulls/7/files?per_page=100&page=2>; rel=\"next\"\r\n",
+                    r#"[{"filename":"a.rs","status":"modified","patch":"@@ -1 +1 @@\n-old\n+new"}]"#,
+                )
+            } else {
+                (
+                    "",
+                    r#"[{"filename":"b.rs","previous_filename":"z.rs","status":"renamed"}]"#,
+                )
+            };
+            Ok(GhCliOutput {
+                success: true,
+                stdout: format!("HTTP/2.0 200 OK\r\n{link}\r\n{body}"),
+                stderr: String::new(),
+            })
+        })
+        .expect("files diff");
+        assert_eq!(
+            paths,
+            [
+                "repos/{owner}/{repo}/pulls/7/files?per_page=100&page=1",
+                "repos/o/r/pulls/7/files?per_page=100&page=2",
+            ]
+        );
+        assert_eq!(
+            diff,
+            "diff --git a/a.rs b/a.rs\n# status: modified\n@@ -1 +1 @@\n-old\n+new\n\
+             diff --git a/z.rs b/b.rs\n# status: renamed\n# patch not provided by GitHub\n"
+        );
+
+        let failed = try_fetch_pr_files_diff_with(repo, 7, 200_000, |_p, _a| {
+            Ok(GhCliOutput {
+                success: false,
+                stdout: String::new(),
+                stderr: "HTTP 502".to_string(),
+            })
+        });
+        assert!(failed.is_err(), "a failed page fails the whole read");
     }
 
     fn sample_inventory_fields() -> PrInventoryFields {

@@ -1279,6 +1279,20 @@ fn app_runtime_add_settings_set_preserves_unused_same_tool_member_core() {
         Ok(())
     })
     .unwrap();
+    let core_revision = gwt::agent_registry::SessionMemberSnapshot::load()
+        .unwrap()
+        .implementation_core(&id)
+        .unwrap()
+        .1;
+    let tuning = serde_json::from_value(serde_json::json!({
+        "member_id": id, "model": b.model, "reasoning": b.reasoning,
+        "runtime_target": "Docker", "skip_permissions": false,
+        "expected_core_revision": core_revision,
+    }))
+    .unwrap();
+    assert!(gwt::agent_registry::set_member_tuning(&tuning)
+        .error
+        .is_none());
     runtime.handle_frontend_event(
         "client-1".into(),
         FrontendEvent::IssueMonitorConfigureProfile,
@@ -1289,6 +1303,7 @@ fn app_runtime_add_settings_set_preserves_unused_same_tool_member_core() {
     );
     let view = agent_settings_view(&events);
     assert_eq!(view.selected_agent_member_id.as_deref(), Some(id.as_str()));
+    assert!(!view.skip_permissions);
     let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(Instant::now());
     save_agent_settings_sets(&mut runtime, &recorded);
     let prefs = gwt::load_issue_monitor_prefs(&path).unwrap();
@@ -1297,6 +1312,8 @@ fn app_runtime_add_settings_set_preserves_unused_same_tool_member_core() {
         (saved.model, saved.reasoning, saved.version, saved.fast_mode),
         (b.model, b.reasoning, b.version, b.fast_mode)
     );
+    assert_eq!(saved.runtime_target, gwt_agent::LaunchRuntimeTarget::Docker);
+    assert!(!saved.skip_permissions);
 }
 
 #[test]
