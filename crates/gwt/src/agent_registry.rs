@@ -960,6 +960,9 @@ pub fn restore_schema3() -> io::Result<RegistryStatus> {
         ));
     }
     if !registry.store.split {
+        if unconfirmed_path().try_exists()? {
+            confirm_durable()?;
+        }
         return status(None);
     }
     if registry.phase != RegistryPhase::Active {
@@ -7570,6 +7573,20 @@ mod tests {
         drop(failure);
         restore_schema3().unwrap();
         assert_eq!(storage_schema(), 3);
+        // A crash after the atomic rename can leave schema 3 visible without
+        // a successful directory sync. Retrying must confirm it before ACK.
+        fs::write(unconfirmed_path(), b"").unwrap();
+        let failure = ScopedEnvVar::set(
+            "GWT_TEST_FAIL_ISSUE_MONITOR_PREFS_PARENT_SYNC_ONCE",
+            super::path(),
+        );
+        fs::write(super::path().with_extension("parent-sync-fail-once"), b"").unwrap();
+        assert!(restore_schema3().is_err());
+        assert!(unconfirmed_path().exists());
+        drop(failure);
+        restore_schema3().unwrap();
+        assert!(!unconfirmed_path().exists());
+        assert_eq!(crate::load_issue_monitor_prefs(&a_path).unwrap(), prefs);
     }
 
     #[test]
