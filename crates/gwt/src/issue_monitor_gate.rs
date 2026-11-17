@@ -77,6 +77,38 @@ impl AcceptanceCriteria {
             })
     }
 
+    /// External verification is opt-in. Never infer a release or host wait
+    /// from prose that could also describe implementation work.
+    pub fn only_external_verification_remaining(&self) -> bool {
+        let mut external = false;
+        self.machine_checkable
+            && !self.unchecked.is_empty()
+            && self.unchecked.iter().all(|id| {
+                let mut matching = self
+                    .criterion_texts
+                    .iter()
+                    .filter(|(criterion_id, _)| criterion_id == id)
+                    .peekable();
+                matching.peek().is_some()
+                    && matching.all(|(_, text)| {
+                        let text = text.to_ascii_lowercase();
+                        let tagged = [
+                            "(release-verification)",
+                            "[release-verification]",
+                            "(main-verification)",
+                            "[main-verification]",
+                            "(host-verification)",
+                            "[host-verification]",
+                        ]
+                        .iter()
+                        .any(|tag| text.contains(tag));
+                        external |= tagged;
+                        tagged || text.contains("(measurement)") || text.contains("[measurement]")
+                    })
+            })
+            && external
+    }
+
     /// Actionable rejection reason naming the missing element (Issue #3930
     /// AC-2), or `None` when the criteria are machine-checkable.
     pub fn rejection_reason(&self) -> Option<String> {
@@ -584,6 +616,22 @@ pub fn route_autonomous_gate(inputs: &AutonomousGateInputs) -> GateAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn issue_7536_only_explicit_external_verification_can_wait() {
+        let source = "## Acceptance Criteria\n- [x] AC-1: implement\n- [ ] AC-2: PM checks main [main-verification]\n- [ ] AC-3: owner checks Windows (host-verification)\n- [ ] AC-4: observe release [release-verification]\n- [ ] AC-5: observe results (measurement)\n";
+        assert!(classify_acceptance_criteria(source).only_external_verification_remaining());
+        for replacement in ["implement remaining work", "check main after release"] {
+            let changed = source.replace("PM checks main [main-verification]", replacement);
+            assert!(!classify_acceptance_criteria(&changed).only_external_verification_remaining());
+        }
+        let duplicate = "## Acceptance Criteria\n- [x] AC-1: [release-verification] check release\n- [ ] AC-1: implement\n";
+        assert!(!classify_acceptance_criteria(duplicate).only_external_verification_remaining());
+        assert!(!classify_acceptance_criteria(
+            "## Acceptance Criteria\n- [ ] AC-1: (measurement) observe\n"
+        )
+        .only_external_verification_remaining());
+    }
 
     #[test]
     fn issue_6994_duplicate_ids_cannot_borrow_a_measurement_tag() {

@@ -202,10 +202,12 @@ export function createPmSettingsPanel({ document, executionModel, projectTitle, 
     const block = state.available ? state.startBlock : null;
     const blockHoldsRestart = Boolean(block) && !block.restartClearsIt;
     view.startBlockLine.hidden = !block;
-    view.startBlockLine.textContent = block
-      ? `The Project Manager cannot start: ${block.reason}. ` +
-        `Restarting will not clear this. ${block.requiredOperation}`
-      : "";
+    view.startBlockLine.textContent = !block
+      ? ""
+      : block.restartClearsIt
+        ? `The Project Manager is not running: ${block.reason}. ${block.requiredOperation}`
+        : `The Project Manager cannot start: ${block.reason}. ` +
+          `Restarting will not clear this. ${block.requiredOperation}`;
     if (blockHoldsRestart) view.restart.disabled = true;
     view.intervalError.hidden = true;
     view.intervalError.textContent = "";

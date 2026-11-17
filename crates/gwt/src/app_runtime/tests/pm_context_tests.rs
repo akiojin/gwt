@@ -3523,6 +3523,46 @@ fn set_pm_launch_profile_rejects_an_unsupported_agent() {
 /// SPEC-3431 FR-026: a restart swaps the agent, so it must end the old pane and
 /// bring a new one up — but the PM worktree holds the PM's own notes, and an
 /// intentional close reaps a clean one. The restart path must keep it.
+/// Issue #7542: a failed PM launch is reported as "the PM is not running"
+/// with a recovery the operator can run, not only as an Agent launch error.
+#[test]
+fn a_failed_pm_launch_is_reported_as_a_restartable_pm_start_block() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let (runtime, _events) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let context = runtime.project_context("tab-1").expect("project context");
+
+    assert!(runtime.record_pm_launch_failure(&context, "tab-1::pm", "the launch was refused"));
+
+    let BackendEvent::PmStatus {
+        is_running,
+        start_block,
+        ..
+    } = runtime.pm_status_event(&context)
+    else {
+        panic!("expected a pm_status event");
+    };
+    assert!(!is_running);
+    let block = start_block.expect("the failed launch is surfaced as a start block");
+    assert_eq!(block.kind, gwt::pm_registry::PmStartBlockKind::LaunchFailed);
+    assert!(block.restart_clears_it);
+    assert_eq!(block.reason, "the launch was refused");
+    assert!(block.required_operation.contains("Restart Project Manager"));
+}
+
 #[test]
 fn restart_pm_agent_keeps_the_worktree_and_respawns() {
     let _pm_gate = super::super::pm::test_gate::PmEnsureTestGuard::enable();

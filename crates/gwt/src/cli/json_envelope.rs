@@ -106,17 +106,30 @@ pub(super) fn dispatch_input<E: CliEnv>(
     let parsed = match parse(input) {
         Ok(parsed) => parsed,
         Err(err) => {
-            if !matches!(
+            let redact = !matches!(
                 err,
                 CliParseError::InvalidVerificationMode | CliParseError::InvalidParams(_)
-            ) && super::feedback::safe_intake_required(env.repo_path())
-            {
-                // A malformed envelope cannot reliably identify its operation.
-                // Never echo serde's caller-controlled keys/values in Auto.
-                let _ = writeln!(env.stderr(), "{prog}: invalid JSON envelope");
+            ) && super::feedback::safe_intake_required(env.repo_path());
+            let (code, message) = if redact {
+                // Malformed input cannot reliably identify an operation, and
+                // serde diagnostics may contain secrets supplied by the caller.
+                ("INPUT_INVALID_ENVELOPE", "invalid JSON envelope; check schema_version, operation and params with gwtd --help".into())
             } else {
-                let _ = writeln!(env.stderr(), "{prog}: {err}");
+                let code = match err {
+                    CliParseError::UnknownSubcommand(_) => "INPUT_UNKNOWN_OPERATION",
+                    CliParseError::InvalidJson(_) => "INPUT_INVALID_ENVELOPE",
+                    _ => "INPUT_INVALID_PARAMS",
+                };
+                (code, err.to_string())
+            };
+            let payload = serde_json::json!({
+                "ok": false, "operation": null, "exit_code": 2,
+                "error_category": "input", "error_code": code, "error": message,
+            });
+            if let Err(error) = write_dispatch_response(env, &mut captured, &payload) {
+                return report_undelivered_response(env, prog, "envelope", &error);
             }
+            let _ = writeln!(env.stderr(), "{prog}: {message}");
             return 2;
         }
     };
@@ -133,8 +146,35 @@ pub(super) fn dispatch_input<E: CliEnv>(
     // operation on this thread left behind before this one runs.
     super::operation_warnings::take();
     let mut pr_checks_data = None;
+    let mut operation_data = None;
     let mut verification_response = None;
     let outcome = match parsed.command {
+        command @ (CliCommand::Issue(_) | CliCommand::Pr(_))
+            if !matches!(command, CliCommand::Pr(PrCommand::Checks { .. })) =>
+        {
+            let mut output = String::new();
+            let result = match command {
+                CliCommand::Issue(command) => {
+                    super::issue::run_with_data(env, command, &mut output, &mut operation_data)
+                }
+                CliCommand::Pr(command) => {
+                    super::pr::run_with_data(env, command, &mut output, &mut operation_data)
+                }
+                _ => unreachable!(),
+            };
+            result
+                .map(|exit_code| super::governance::GovernedCommandOutput {
+                    exit_code,
+                    output,
+                    refusal: None,
+                })
+                .map_err(|error| {
+                    Box::new(super::governance::GovernedCommandFailure {
+                        error,
+                        refusal: None,
+                    })
+                })
+        }
         CliCommand::Verify(command) => {
             let mut output = String::new();
             super::verification_record::run_with_response(
@@ -191,6 +231,13 @@ pub(super) fn dispatch_input<E: CliEnv>(
                 "exit_code": code,
                 "output": output,
             });
+            if let Some(data) = operation_data.or_else(|| {
+                serde_json::from_str::<Value>(&output)
+                    .ok()
+                    .filter(|data| data.is_object() || data.is_array())
+            }) {
+                payload["data"] = data;
+            }
             if code == 0 {
                 crate::pm_activity::record_successful_operation(
                     requested_project_root
@@ -246,6 +293,9 @@ pub(super) fn dispatch_input<E: CliEnv>(
                     }
                 }
             }
+            if code != 0 {
+                attach_error_metadata(&mut payload, None);
+            }
             attach_project_store(&mut payload);
             if let Err(err) = write_dispatch_response(env, &mut captured, &payload) {
                 return report_undelivered_response(env, prog, &operation, &err);
@@ -300,6 +350,7 @@ pub(super) fn dispatch_input<E: CliEnv>(
                 payload["refusal"] = serde_json::to_value(refusal)
                     .expect("operation refusal metadata must serialize");
             }
+            attach_error_metadata(&mut payload, Some(&failure.error));
             attach_project_store(&mut payload);
             if let Err(err) = write_dispatch_response(env, &mut captured, &payload) {
                 return report_undelivered_response(env, prog, &operation, &err);
@@ -319,6 +370,79 @@ pub(super) fn dispatch_input<E: CliEnv>(
             }
             1
         }
+    }
+}
+
+/// Stable categories come from typed failures, never human-message matching.
+/// Keep operation-specific codes and refusal/recovery metadata additive.
+fn attach_error_metadata(payload: &mut Value, error: Option<&gwt_github::SpecOpsError>) {
+    use gwt_github::{ApiError, SpecOpsError};
+    let (category, code) = match error {
+        Some(SpecOpsError::LocalIo(error)) => match error.kind() {
+            std::io::ErrorKind::NotFound => ("not_found", "NOT_FOUND_LOCAL_RESOURCE"),
+            std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::WouldBlock => {
+                ("conflict", "CONFLICT_LOCAL_STATE")
+            }
+            std::io::ErrorKind::PermissionDenied => ("permission", "PERMISSION_DENIED"),
+            std::io::ErrorKind::InvalidInput => ("input", "INPUT_INVALID_PARAMS"),
+            _ => ("internal", "INTERNAL_LOCAL_IO"),
+        },
+        Some(SpecOpsError::Api(ApiError::NotFound(_))) => ("not_found", "NOT_FOUND_ISSUE"),
+        Some(SpecOpsError::Api(ApiError::CommentNotFound(_))) => ("not_found", "NOT_FOUND_COMMENT"),
+        Some(SpecOpsError::SectionNotFound(_)) => ("not_found", "NOT_FOUND_SECTION"),
+        Some(SpecOpsError::CacheConflict(_)) => ("conflict", "ISSUE_CACHE_CONFLICT"),
+        Some(SpecOpsError::ConcurrentWrite) => ("conflict", "CONFLICT_CONCURRENT_WRITE"),
+        Some(SpecOpsError::ReadbackMismatch { .. }) => ("conflict", "CONFLICT_READBACK_MISMATCH"),
+        Some(SpecOpsError::Api(ApiError::Unauthorized)) => {
+            ("permission", "PERMISSION_AUTHENTICATION_REQUIRED")
+        }
+        Some(SpecOpsError::Api(ApiError::PermissionDenied { .. })) => {
+            ("permission", "PERMISSION_DENIED")
+        }
+        Some(SpecOpsError::Api(ApiError::RepositoryMismatch { .. })) => {
+            ("permission", "PERMISSION_REPOSITORY_MISMATCH")
+        }
+        Some(SpecOpsError::Validation(_)) => ("input", "INPUT_VALIDATION_FAILED"),
+        Some(SpecOpsError::Api(ApiError::BodyTooLarge)) => ("input", "INPUT_BODY_TOO_LARGE"),
+        Some(SpecOpsError::Api(ApiError::PullRequestInsteadOfIssue(_))) => {
+            ("input", "INPUT_RESOURCE_KIND")
+        }
+        Some(SpecOpsError::Api(ApiError::RateLimited { .. })) => {
+            ("external", "EXTERNAL_RATE_LIMITED")
+        }
+        Some(SpecOpsError::Api(ApiError::Timeout { .. })) => ("external", "EXTERNAL_TIMEOUT"),
+        Some(SpecOpsError::Api(ApiError::Network(_))) => ("external", "EXTERNAL_NETWORK"),
+        Some(SpecOpsError::Api(ApiError::PartialPage { .. })) => {
+            ("external", "EXTERNAL_PARTIAL_PAGE")
+        }
+        Some(SpecOpsError::IndexIntegrity(_)) => ("internal", "INTERNAL_INDEX_INTEGRITY"),
+        Some(SpecOpsError::Cache(_)) => ("internal", "INTERNAL_CACHE"),
+        Some(_) => ("internal", "INTERNAL_OPERATION_FAILED"),
+        None => match payload["error_code"].as_str() {
+            Some("invalid_request") => ("input", "INPUT_INVALID_REQUEST"),
+            Some("identity_conflict" | "transaction_conflict") => ("conflict", "CONFLICT_STATE"),
+            Some(
+                "primary_actor_required" | "execution_binding_mismatch" | "provenance_mismatch",
+            ) => ("permission", "PERMISSION_AUTHORITY"),
+            Some("internal") => ("internal", "INTERNAL_OPERATION_FAILED"),
+            _ => ("operation", "OPERATION_FAILED"),
+        },
+    };
+    // Governance is authoritative even when a legacy error wrapper has lost
+    // the underlying cause (for example an identity refusal in Unexpected).
+    let (category, code) = match payload["refusal"]["governance"]["cause"].as_str() {
+        Some("authority" | "managed_identity" | "structural_governance") => {
+            ("permission", "PERMISSION_AUTHORITY")
+        }
+        Some("integrity") => ("internal", "INTERNAL_INTEGRITY"),
+        Some("domain_invalid") => ("input", "INPUT_DOMAIN_INVALID"),
+        Some("transient_governance" | "not_ready") => ("conflict", "CONFLICT_NOT_READY"),
+        Some("external_wait") => ("external", "EXTERNAL_WAIT"),
+        _ => (category, code),
+    };
+    payload["error_category"] = category.into();
+    if payload.get("error_code").is_none() {
+        payload["error_code"] = code.into();
     }
 }
 
@@ -521,6 +645,10 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
     let params = params_object(&envelope.params)?;
     let recording = param_audit::Recording::start();
     let command = match envelope.operation.as_str() {
+        "agent.registry.restore_schema3" => {
+            reject_unknown_params(params, &[], &envelope.operation)?;
+            CliCommand::AgentRegistry(super::AgentRegistryCommand::RestoreSchema3)
+        }
         "agent.registry.status" => {
             reject_unknown_params(params, &["source_key"], &envelope.operation)?;
             let source_key: Option<String> = serde_json::from_value(
@@ -979,6 +1107,29 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 provider: required_string(params, "provider")?,
                 // An unexplained release of a provider hold is not auditable.
                 reason: required_string(params, "reason")?,
+            })
+        }
+        "issue.monitor.verification.declare" => {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Assignment {
+                id: String,
+                verifier: String,
+            }
+            let criteria: Vec<Assignment> =
+                serde_json::from_value(lookup(params, "criteria").cloned().unwrap_or(Value::Null))
+                    .map_err(|error| {
+                        CliParseError::InvalidJson(format!(
+                            "criteria must contain {{id, verifier}} assignments: {error}"
+                        ))
+                    })?;
+            CliCommand::Issue(IssueCommand::MonitorVerificationDeclare {
+                project_root: optional_path(params, "project_root")?,
+                number: required_u64(params, "number")?,
+                criteria: criteria
+                    .into_iter()
+                    .map(|entry| (entry.id, entry.verifier))
+                    .collect(),
             })
         }
         "issue.monitor.wait" => {
@@ -3340,8 +3491,12 @@ mod tests {
             r#"{"schema_version":1,"operation":"search","params":{"query":"admission","project_root":"/elsewhere"}}"#,
         ] {
             assert_eq!(dispatch_json_input(&mut env, "gwtd", input), 2);
-            assert!(env.stdout.is_empty());
+            let reply: Value = serde_json::from_slice(&env.stdout).unwrap();
+            assert_eq!(reply["ok"], false);
+            assert_eq!(reply["error_category"], "input");
+            assert!(reply["error_code"].as_str().is_some());
             assert!(String::from_utf8_lossy(&env.stderr).starts_with("gwtd: "));
+            env.stdout.clear();
             env.stderr.clear();
         }
 
@@ -3450,6 +3605,8 @@ mod tests {
         );
         let reply: Value = serde_json::from_slice(&env.stdout).unwrap();
         let result: Value = serde_json::from_str(reply["output"].as_str().unwrap()).unwrap();
+        assert_eq!(reply["data"], result);
+        assert_eq!(reply["data"]["after"]["data"]["dry_run"], true);
         assert_eq!(result["after"]["operation"], "worktree.gc_build_artifacts");
         assert_eq!(result["after"]["ok"], true);
         let report: Value =
@@ -3565,8 +3722,121 @@ mod tests {
             assert_eq!(super::dispatch(&mut env, "gwtd"), 0);
             let response: Value = serde_json::from_slice(&env.stdout).unwrap();
             assert_eq!(response["kind"], kind);
+            assert_eq!(response["data"]["number"], number);
+            assert_eq!(response["data"]["title"], "typed resource");
             assert!(response["output"].as_str().unwrap().starts_with(header));
         }
+    }
+
+    #[test]
+    fn issue_7521_status_and_list_expose_json_data_without_changing_output() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let mut env = TestEnv::new(temp.path().join("repo"));
+        for operation in ["execution.status", "pr.list", "board.show"] {
+            env.stdout.clear();
+            env.stdin = envelope(operation, json!({}));
+            assert_eq!(super::dispatch(&mut env, "gwtd"), 0, "{operation}");
+            let reply: Value = serde_json::from_slice(&env.stdout).unwrap();
+            let legacy: Value = serde_json::from_str(reply["output"].as_str().unwrap()).unwrap();
+            assert!(legacy.is_object() || legacy.is_array(), "{operation}");
+            assert_eq!(reply["data"], legacy, "{operation}");
+        }
+    }
+
+    #[test]
+    fn issue_7521_typed_failures_have_stable_categories_and_preserve_legacy_codes() {
+        use gwt_github::{ApiError, IssueNumber, SpecOpsError};
+        for (error, category, code) in [
+            (
+                SpecOpsError::Api(ApiError::NotFound(IssueNumber(1))),
+                "not_found",
+                "NOT_FOUND_ISSUE",
+            ),
+            (
+                SpecOpsError::ConcurrentWrite,
+                "conflict",
+                "CONFLICT_CONCURRENT_WRITE",
+            ),
+            (
+                SpecOpsError::Api(ApiError::PermissionDenied {
+                    message: "policy".into(),
+                }),
+                "permission",
+                "PERMISSION_DENIED",
+            ),
+            (
+                SpecOpsError::Validation("body".into()),
+                "input",
+                "INPUT_VALIDATION_FAILED",
+            ),
+            (
+                SpecOpsError::IndexIntegrity("index".into()),
+                "internal",
+                "INTERNAL_INDEX_INTEGRITY",
+            ),
+        ] {
+            let mut reply = json!({"ok":false,"error":error.to_string()});
+            super::attach_error_metadata(&mut reply, Some(&error));
+            assert_eq!(reply["error_category"], category);
+            assert_eq!(reply["error_code"], code);
+        }
+        let mut reply = json!({"ok":false,"error_code":"ISSUE_CACHE_CONFLICT"});
+        super::attach_error_metadata(
+            &mut reply,
+            Some(&SpecOpsError::CacheConflict(IssueNumber(1))),
+        );
+        assert_eq!(reply["error_category"], "conflict");
+        assert_eq!(reply["error_code"], "ISSUE_CACHE_CONFLICT");
+        let legacy = SpecOpsError::Api(ApiError::Unexpected("missing identity".into()));
+        for error in [None, Some(&legacy)] {
+            let refusal = json!({"governance":{"cause":"managed_identity"}});
+            let mut reply = json!({"ok":false,"refusal":refusal});
+            super::attach_error_metadata(&mut reply, error);
+            assert_eq!(reply["error_category"], "permission");
+            assert_eq!(reply["error_code"], "PERMISSION_AUTHORITY");
+            assert_eq!(reply["refusal"], refusal);
+        }
+    }
+
+    #[test]
+    fn issue_7521_stale_queue_order_is_a_conflict_through_the_handler() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let repo = temp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(&path, &Default::default()).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let mut env = TestEnv::new(repo);
+        env.stdin = envelope(
+            "issue.monitor.queue.move",
+            json!({
+                "number":42, "position":0, "expected_queue_order":[42]
+            }),
+        );
+        assert_eq!(super::dispatch(&mut env, "gwtd"), 1);
+        let reply: Value = serde_json::from_slice(&env.stdout).unwrap();
+        assert_eq!(reply["error_category"], "conflict");
+        assert_eq!(reply["error_code"], "CONFLICT_LOCAL_STATE");
+        assert!(reply["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("network error: queue_order changed"));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn issue_7521_linked_pr_transport_failure_remains_external() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let mut env = TestEnv::new(temp.path().join("repo"));
+        env.linked_pr_errors.insert(42, "connection reset".into());
+        env.stdin = envelope("issue.linked_prs", json!({"number":42,"refresh":true}));
+        assert_eq!(super::dispatch(&mut env, "gwtd"), 1);
+        let reply: Value = serde_json::from_slice(&env.stdout).unwrap();
+        assert_eq!(reply["error_category"], "external");
+        assert_eq!(reply["error_code"], "EXTERNAL_NETWORK");
     }
 
     #[test]
@@ -4256,6 +4526,8 @@ mod tests {
 
     #[test]
     fn agent_registry_operations_parse_strict_recovery_identity() {
+        assert!(parse_operation("agent.registry.restore_schema3", &json!({})).is_ok());
+        assert!(parse_operation("agent.registry.restore_schema3", &json!({"force":true})).is_err());
         assert!(parse_operation("agent.registry.status", &json!({})).is_ok());
         assert!(parse_operation(
             "agent.registry.status",
@@ -4684,6 +4956,8 @@ mod tests {
         assert_eq!(payload["ok"], json!(false));
         assert_eq!(payload["operation"], json!("issue.view"));
         assert_eq!(payload["exit_code"], json!(1));
+        assert_eq!(payload["error_category"], "not_found");
+        assert_eq!(payload["error_code"], "NOT_FOUND_ISSUE");
         assert!(
             payload["error"]
                 .as_str()
@@ -6698,6 +6972,29 @@ mod tests {
             err("issue.monitor.wait", json!({"reason": "x"})),
             CliParseError::MissingFlag("resume_condition")
         ));
+    }
+
+    #[test]
+    fn issue_7536_verification_declaration_requires_typed_assignments() {
+        assert_eq!(
+            ok(
+                "issue.monitor.verification.declare",
+                json!({"number":42,"criteria":[{"id":"AC-1","verifier":"PM"}]})
+            ),
+            CliCommand::Issue(IssueCommand::MonitorVerificationDeclare {
+                project_root: None,
+                number: 42,
+                criteria: vec![("AC-1".into(), "PM".into())]
+            })
+        );
+        for params in [
+            json!({"number":42}),
+            json!({"number":42,"criteria":[{"id":"AC-1"}]}),
+            json!({"number":42,"criteria":[{"id":"AC-1","verifier":"PM","text":"caller supplied"}]}),
+            json!({"number":42,"criteria":[{"id":"AC-1","verifier":"PM"}],"verifier":"extra"}),
+        ] {
+            let _ = err("issue.monitor.verification.declare", params);
+        }
     }
 
     /// Issue #4286 AC-1/AC-2: the PM invalidates one wait declaration. The

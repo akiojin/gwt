@@ -387,6 +387,8 @@ pub enum MergedIssueSettlementAction {
     ContinueWork { unmet: Vec<String> },
     /// Only explicitly tagged production measurement criteria remain.
     AwaitMeasurement { unmet: Vec<String> },
+    /// Delivered implementation awaits an explicitly tagged release or host check.
+    AwaitVerification { unmet: Vec<String> },
 }
 
 /// One merged pull request for an Issue's work branch, as the scan saw it.
@@ -407,6 +409,22 @@ pub struct MergedIssueSettlement {
     pub merge_sha: Option<String>,
     pub action: MergedIssueSettlementAction,
     pub settled_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification_declaration: Option<IssueMonitorVerificationDeclaration>,
+}
+
+/// An explicit assignment of the delivered owner's remaining external checks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorVerificationDeclaration {
+    pub criteria: Vec<IssueMonitorVerificationCriterion>,
+    pub declared_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorVerificationCriterion {
+    pub id: String,
+    pub text: String,
+    pub verifier: String,
 }
 
 impl MergedIssueSettlement {
@@ -414,7 +432,8 @@ impl MergedIssueSettlement {
         let unmet = match &self.action {
             MergedIssueSettlementAction::UnmetAcceptance { unmet }
             | MergedIssueSettlementAction::ContinueWork { unmet }
-            | MergedIssueSettlementAction::AwaitMeasurement { unmet } => unmet,
+            | MergedIssueSettlementAction::AwaitMeasurement { unmet }
+            | MergedIssueSettlementAction::AwaitVerification { unmet } => unmet,
             _ => return false,
         };
         let detail = if unmet.is_empty() {
@@ -3071,6 +3090,8 @@ pub enum MonitorInboxState {
     SourceExcluded,
     /// Delivered implementation awaits production measurements, not a decision.
     AwaitingMeasurement,
+    /// Delivered implementation awaits release or verification on another host.
+    AwaitingVerification,
     Launching,
     Launched,
     /// Current Issue generation is complete. The GitHub Issue may still be
@@ -3104,6 +3125,7 @@ impl MonitorInboxState {
                 | MonitorInboxState::AgentFailed
                 | MonitorInboxState::NeedsHuman
                 | MonitorInboxState::AwaitingMeasurement
+                | MonitorInboxState::AwaitingVerification
         )
     }
 }
@@ -5236,6 +5258,8 @@ pub struct IssueMonitorInboxSummary {
     /// so a silent row can be told apart from a stalled one by its reader.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting: Option<IssueMonitorWaitSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification_declaration: Option<IssueMonitorVerificationDeclaration>,
     /// Issue #4084 AC-1: why the bound window is idle, when it is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_kind: Option<IssueMonitorIdleKind>,
@@ -6814,6 +6838,21 @@ pub enum OwnerBranchDelivery {
     Undelivered,
 }
 
+/// Issues produce integration work independently of the PM's checked-out
+/// branch. Projects without develop keep the normal Launch Agent selection.
+pub fn issue_monitor_implementation_base_branch(project_root: &Path) -> Result<String, String> {
+    let develop_ref = "refs/remotes/origin/develop";
+    let git_root = gwt_git::worktree::main_worktree_root(project_root)
+        .map_err(|error| format!("Issues integration branch is unavailable: {error}"))?;
+    let refs = gwt_git::list_existing_refs(&git_root, &[develop_ref])
+        .map_err(|error| format!("Issues integration branch is unavailable: {error}"))?;
+    if refs.contains(develop_ref) {
+        Ok("develop".to_string())
+    } else {
+        crate::start_work::resolve_launch_agent_base_branch(project_root)
+    }
+}
+
 /// Classify the owner branch from the refs already on disk. It does not
 /// fetch: a launch must not wait on the network, and a stale base only errs
 /// toward [`OwnerBranchDelivery::Undelivered`], whose prompt tells the agent
@@ -6848,7 +6887,7 @@ pub fn issue_monitor_launch_prompt_for_base(
     let provenance = ISSUE_MONITOR_LAUNCH_PROVENANCE;
     let base = base.strip_prefix("origin/").unwrap_or(base);
     let base_ref = format!("origin/{base}");
-    match (kind, delivery) {
+    let mut prompt = match (kind, delivery) {
         (LinkedIssueKind::Spec, _) => format!("$gwt-execute #{number}\n\n{provenance}"),
         (LinkedIssueKind::Issue, OwnerBranchDelivery::Delivered) => format!(
             "$gwt-execute #{number}\n\n{provenance}\n\nBefore changing code, evaluate every remaining acceptance criterion against {base_ref}, not against your work branch. A commit that exists only on the work branch is not delivered and does not satisfy a criterion. If {base_ref} already satisfies all criteria, close Issue #{number} and finish without creating another implementation PR. Otherwise, implement only the remaining criteria."
@@ -6856,7 +6895,11 @@ pub fn issue_monitor_launch_prompt_for_base(
         (LinkedIssueKind::Issue, OwnerBranchDelivery::Undelivered) => format!(
             "$gwt-execute #{number}\n\n{provenance}\n\nThe work branch for Issue #{number} is ahead of {base_ref} with source that has not been delivered. Undelivered commits do not satisfy any acceptance criterion, so do not close Issue #{number} on their account. Evaluate every remaining acceptance criterion against {base_ref}, implement only what the branch still misses, then deliver the existing source through verify.run, a pull request, and its merge into {base}. If, after fetching, the branch has nothing that {base_ref} lacks, evaluate the criteria against {base_ref} alone."
         ),
+    };
+    if base == "develop" {
+        prompt.push_str("\n\nImplementation finishes after merge into develop and execution settlement. Release owns promotion to main. Leave release, main, and other-host verification criteria unchecked until their evidence is available; they do not require another implementation PR.");
     }
+    prompt
 }
 
 /// Issue #4630 AC-6: the most characters of an operator's requeue reason a
@@ -14225,6 +14268,9 @@ impl IssueMonitorState {
                                                 MergedIssueSettlementAction::ContinueWork { unmet }
                                                 | MergedIssueSettlementAction::AwaitMeasurement {
                                                     unmet,
+                                                }
+                                                | MergedIssueSettlementAction::AwaitVerification {
+                                                    unmet,
                                                 },
                                                 MergedIssueSettlementAction::UnmetAcceptance {
                                                     unmet: prior_unmet,
@@ -14233,6 +14279,9 @@ impl IssueMonitorState {
                                                     unmet: prior_unmet,
                                                 }
                                                 | MergedIssueSettlementAction::AwaitMeasurement {
+                                                    unmet: prior_unmet,
+                                                }
+                                                | MergedIssueSettlementAction::AwaitVerification {
                                                     unmet: prior_unmet,
                                                 },
                                             ) => unmet == prior_unmet,
@@ -16193,6 +16242,9 @@ impl IssueMonitorState {
                         waiting: self
                             .autonomous_record(item.issue.number)
                             .and_then(|record| self.wait_summary(record, now)),
+                        verification_declaration: self
+                            .verification_declaration(item.issue.number)
+                            .cloned(),
                         steering: self
                             .autonomous_record(item.issue.number)
                             .and_then(|record| record.steering.clone()),
@@ -16611,6 +16663,113 @@ impl IssueMonitorState {
         self.merged_issue_settlements.get(&issue_number)
     }
 
+    /// Metadata only: declaring a verifier cannot park undelivered or runnable work.
+    pub fn declare_verification(
+        &mut self,
+        number: u64,
+        source: &str,
+        assignments: &[(String, String)],
+        now: &str,
+    ) -> Result<IssueMonitorVerificationDeclaration, String> {
+        let settlement = self.merged_issue_settlements.get(&number).ok_or(
+            "no delivered, settled owner; await the merged PR's settlement before declaring verification",
+        )?;
+        let MergedIssueSettlementAction::AwaitVerification { unmet } = &settlement.action else {
+            return Err("the settled owner must be awaiting_verification; implementation or settlement remains".into());
+        };
+        if settlement.pr_number == 0
+            || settlement
+                .merge_sha
+                .as_deref()
+                .is_none_or(|sha| sha.trim().is_empty())
+        {
+            return Err("the settlement has no merged delivery evidence".into());
+        }
+        let acceptance = crate::issue_monitor_gate::classify_acceptance_criteria(source);
+        if !acceptance.only_external_verification_remaining() || acceptance.unchecked != *unmet {
+            return Err("remaining criteria must match the settled external verification criteria; refresh acceptance and settlement first".into());
+        }
+        let assignees: BTreeMap<_, _> = assignments
+            .iter()
+            .map(|(id, verifier)| (id.as_str(), verifier.trim()))
+            .collect();
+        if assignments.len() != acceptance.unchecked.len()
+            || assignees.len() != assignments.len()
+            || assignees.values().any(|verifier| verifier.is_empty())
+            || acceptance
+                .unchecked
+                .iter()
+                .any(|id| !assignees.contains_key(id.as_str()))
+        {
+            return Err(
+                "criteria must name every remaining AC exactly once with a non-empty verifier"
+                    .into(),
+            );
+        }
+        let criteria = acceptance
+            .unchecked
+            .iter()
+            .map(|id| {
+                let mut matches = acceptance
+                    .criterion_texts
+                    .iter()
+                    .filter(|(criterion, _)| criterion == id);
+                let (_, text) = matches
+                    .next()
+                    .ok_or("remaining criterion text is unavailable")?;
+                if matches.next().is_some() {
+                    return Err("remaining AC ids must be unique");
+                }
+                Ok(IssueMonitorVerificationCriterion {
+                    id: id.clone(),
+                    text: text.clone(),
+                    verifier: assignees[id.as_str()].to_string(),
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(str::to_string)?;
+        let declaration = IssueMonitorVerificationDeclaration {
+            criteria,
+            declared_at: now.into(),
+        };
+        let settlement = self
+            .merged_issue_settlements
+            .get_mut(&number)
+            .expect("settlement checked");
+        settlement.settled_at = parse_rfc3339_utc(&settlement.settled_at)
+            .zip(parse_rfc3339_utc(now))
+            .map(|(previous, now)| {
+                now.max(previous + chrono::Duration::nanoseconds(1))
+                    .to_rfc3339()
+            })
+            .ok_or("declaration or settlement timestamp is invalid")?;
+        settlement.verification_declaration = Some(declaration.clone());
+        Ok(declaration)
+    }
+
+    fn verification_declaration(
+        &self,
+        number: u64,
+    ) -> Option<&IssueMonitorVerificationDeclaration> {
+        let settlement = self.merged_issue_settlements.get(&number)?;
+        let MergedIssueSettlementAction::AwaitVerification { unmet } = &settlement.action else {
+            return None;
+        };
+        let declaration = settlement.verification_declaration.as_ref()?;
+        let item = self.inbox_item(number)?;
+        let acceptance = crate::issue_monitor_gate::classify_acceptance_criteria(
+            item.issue.body.as_deref().unwrap_or(""),
+        );
+        (acceptance.only_external_verification_remaining()
+            && acceptance.unchecked == *unmet
+            && declaration.criteria.iter().all(|criterion| {
+                acceptance
+                    .criterion_texts
+                    .contains(&(criterion.id.clone(), criterion.text.clone()))
+            }))
+        .then_some(declaration)
+    }
+
     /// Issue #3917: Open rows whose work branch has a merged delivery that is
     /// not settled yet. A pure join over the inbox; the caller decides the
     /// action with [`decide_merged_issue_settlement`].
@@ -16719,9 +16878,16 @@ impl IssueMonitorState {
         if self.issue_is_closed(issue_number) {
             return false;
         }
+        let external_verification_only = self.inbox_item(issue_number).is_some_and(|item| {
+            crate::issue_monitor_gate::classify_acceptance_criteria(
+                item.issue.body.as_deref().unwrap_or(""),
+            )
+            .only_external_verification_remaining()
+        });
         // Issue #5414: the producing launch owns acceptance readback through
         // merge. Do not park it while it can still finish that settlement.
-        if self.auto_close_merged_issues_enabled()
+        if (self.auto_close_merged_issues_enabled()
+            || (self.autonomous_mode && external_verification_only))
             && (self.process_held_issues.contains(&issue_number)
                 || self.has_observed_monitor_runtime(issue_number))
             && self.inbox_item(issue_number).is_some_and(|item| {
@@ -16757,16 +16923,22 @@ impl IssueMonitorState {
                     Some(MergedIssueSettlementAction::AwaitMeasurement { .. }) => {
                         !criteria.only_measurement_remaining()
                     }
+                    Some(MergedIssueSettlementAction::AwaitVerification { unmet }) => {
+                        !criteria.only_external_verification_remaining()
+                            || criteria.unchecked != *unmet
+                    }
                     Some(MergedIssueSettlementAction::ContinueWork { unmet }) => {
                         criteria.all_checked()
                             || (criteria.only_measurement_remaining()
                                 && criteria.unchecked != *unmet)
+                            || criteria.only_external_verification_remaining()
                     }
                     _ => false,
                 }
             });
             if !((awaiting_only || acceptance_progressed)
-                && self.auto_close_merged_issues_enabled())
+                && (self.auto_close_merged_issues_enabled()
+                    || (self.autonomous_mode && external_verification_only)))
             {
                 return false;
             }
@@ -16869,6 +17041,30 @@ impl IssueMonitorState {
             return;
         }
         let action = self.remaining_acceptance_action(issue_number, action);
+        let verification_declaration = self
+            .merged_issue_settlements
+            .get(&issue_number)
+            .filter(|previous| {
+                previous.pr_number == pr_number
+                    && previous.merge_sha == merge_sha
+                    && matches!(
+                        action,
+                        MergedIssueSettlementAction::AwaitVerification { .. }
+                    )
+            })
+            .and_then(|_| self.verification_declaration(issue_number))
+            .cloned();
+        let settled_at = if verification_declaration.is_some() {
+            self.merged_issue_settlements
+                .get(&issue_number)
+                .filter(|previous| {
+                    parse_rfc3339_utc(&previous.settled_at) > parse_rfc3339_utc(settled_at)
+                })
+                .map_or(settled_at, |previous| previous.settled_at.as_str())
+        } else {
+            settled_at
+        }
+        .to_string();
         self.merged_issue_settlements.insert(
             issue_number,
             MergedIssueSettlement {
@@ -16876,7 +17072,8 @@ impl IssueMonitorState {
                 pr_number,
                 merge_sha,
                 action: action.clone(),
-                settled_at: settled_at.to_string(),
+                settled_at: settled_at.clone(),
+                verification_declaration,
             },
         );
         match action {
@@ -16904,7 +17101,8 @@ impl IssueMonitorState {
                 );
             }
             MergedIssueSettlementAction::ContinueWork { .. }
-            | MergedIssueSettlementAction::AwaitMeasurement { .. } => {
+            | MergedIssueSettlementAction::AwaitMeasurement { .. }
+            | MergedIssueSettlementAction::AwaitVerification { .. } => {
                 // Completed SPEC tasks do not settle its remaining acceptance.
                 // Use the existing reopen fence without resetting retry history.
                 let retry_record = self.autonomous_records.get(&issue_number).cloned();
@@ -16917,7 +17115,7 @@ impl IssueMonitorState {
                 self.fence_relaunch_preserving_attempts(
                     issue_number,
                     "merged slice; remaining acceptance",
-                    settled_at,
+                    &settled_at,
                     false,
                 );
                 self.enforce_measurement_waits();
@@ -16961,7 +17159,20 @@ impl IssueMonitorState {
     ) -> MergedIssueSettlementAction {
         let unmet = match action {
             MergedIssueSettlementAction::UnmetAcceptance { unmet }
-            | MergedIssueSettlementAction::AwaitMeasurement { unmet } => unmet,
+            | MergedIssueSettlementAction::AwaitMeasurement { unmet }
+            | MergedIssueSettlementAction::AwaitVerification { unmet } => unmet,
+            MergedIssueSettlementAction::AwaitClose { unmet }
+                if self.autonomous_mode
+                    && self.inbox_item(issue_number).is_some_and(|item| {
+                        let criteria = crate::issue_monitor_gate::classify_acceptance_criteria(
+                            item.issue.body.as_deref().unwrap_or(""),
+                        );
+                        criteria.unchecked == unmet
+                            && criteria.only_external_verification_remaining()
+                    }) =>
+            {
+                unmet
+            }
             // The executor may have downgraded a planned measurement wait
             // using a newer live checklist. Never restore it from stale inbox text.
             MergedIssueSettlementAction::ContinueWork { unmet } if self.autonomous_mode => {
@@ -16983,6 +17194,13 @@ impl IssueMonitorState {
         });
         if measurement_only {
             MergedIssueSettlementAction::AwaitMeasurement { unmet }
+        } else if self.inbox_item(issue_number).is_some_and(|item| {
+            let criteria = crate::issue_monitor_gate::classify_acceptance_criteria(
+                item.issue.body.as_deref().unwrap_or(""),
+            );
+            criteria.unchecked == unmet && criteria.only_external_verification_remaining()
+        }) {
+            MergedIssueSettlementAction::AwaitVerification { unmet }
         } else {
             MergedIssueSettlementAction::ContinueWork { unmet }
         }
@@ -16990,31 +17208,42 @@ impl IssueMonitorState {
 
     fn enforce_measurement_waits(&mut self) {
         for item in &mut self.inbox {
-            if self.autonomous_mode
-                && item.issue.state == IssueMonitorIssueState::Open
-                && matches!(
+            if !self.autonomous_mode
+                || item.issue.state != IssueMonitorIssueState::Open
+                || !matches!(
                     item.state,
-                    MonitorInboxState::Queued | MonitorInboxState::AwaitingMeasurement
+                    MonitorInboxState::Queued
+                        | MonitorInboxState::AwaitingMeasurement
+                        | MonitorInboxState::AwaitingVerification
                 )
-                && self
-                    .merged_issue_settlements
-                    .get(&item.issue.number)
-                    .is_some_and(|settlement| {
-                        matches!(
-                            settlement.action,
-                            MergedIssueSettlementAction::AwaitMeasurement { .. }
-                        )
-                    })
-                && crate::issue_monitor_gate::classify_acceptance_criteria(
-                    item.issue.body.as_deref().unwrap_or(""),
-                )
-                .only_measurement_remaining()
             {
-                item.state = MonitorInboxState::AwaitingMeasurement;
-                item.error_message = None;
-                item.exclusion_reason = Some("Only measurement evidence remains; update acceptance after measurement or explicitly return to queue.".into());
-                self.queue.retain(|number| *number != item.issue.number);
+                continue;
             }
+            let criteria = crate::issue_monitor_gate::classify_acceptance_criteria(
+                item.issue.body.as_deref().unwrap_or(""),
+            );
+            let (state, reason) = match self
+                .merged_issue_settlements
+                .get(&item.issue.number)
+                .map(|settlement| &settlement.action)
+            {
+                Some(MergedIssueSettlementAction::AwaitMeasurement { .. })
+                    if criteria.only_measurement_remaining() => (
+                        MonitorInboxState::AwaitingMeasurement,
+                        "Only measurement evidence remains; update acceptance after measurement or explicitly return to queue.",
+                    ),
+                Some(MergedIssueSettlementAction::AwaitVerification { unmet })
+                    if criteria.unchecked == *unmet
+                        && criteria.only_external_verification_remaining() => (
+                        MonitorInboxState::AwaitingVerification,
+                        "Implementation delivered; only release or other-host verification remains. Update acceptance after verification or explicitly return to queue.",
+                    ),
+                _ => continue,
+            };
+            item.state = state;
+            item.error_message = None;
+            item.exclusion_reason = Some(reason.into());
+            self.queue.retain(|number| *number != item.issue.number);
         }
     }
 
@@ -19125,6 +19354,7 @@ impl IssueMonitorState {
                 | Some(MonitorInboxState::NotReady)
                 | Some(MonitorInboxState::SourceExcluded)
                 | Some(MonitorInboxState::AwaitingMeasurement)
+                | Some(MonitorInboxState::AwaitingVerification)
                 | Some(MonitorInboxState::Skipped)
                 | None => MonitorInboxState::Queued,
                 Some(other) => other,
@@ -19226,7 +19456,8 @@ impl IssueMonitorState {
                 let unmet = match settlement.action {
                     MergedIssueSettlementAction::UnmetAcceptance { unmet }
                     | MergedIssueSettlementAction::ContinueWork { unmet }
-                    | MergedIssueSettlementAction::AwaitMeasurement { unmet } => unmet,
+                    | MergedIssueSettlementAction::AwaitMeasurement { unmet }
+                    | MergedIssueSettlementAction::AwaitVerification { unmet } => unmet,
                     _ => unreachable!("matched an acceptance failure"),
                 };
                 self.record_merged_issue_settlement(
@@ -24052,11 +24283,13 @@ impl IssueMonitorState {
                     matches!(
                         settlement.action,
                         MergedIssueSettlementAction::AwaitMeasurement { .. }
+                            | MergedIssueSettlementAction::AwaitVerification { .. }
                     )
                 })
             {
                 if let Some(settlement) = self.merged_issue_settlements.get_mut(&issue_number) {
-                    if let MergedIssueSettlementAction::AwaitMeasurement { unmet } =
+                    if let MergedIssueSettlementAction::AwaitMeasurement { unmet }
+                    | MergedIssueSettlementAction::AwaitVerification { unmet } =
                         &settlement.action
                     {
                         settlement.action = MergedIssueSettlementAction::ContinueWork {
@@ -24804,6 +25037,7 @@ impl IssueMonitorState {
                         settlement.action,
                         MergedIssueSettlementAction::ContinueWork { .. }
                             | MergedIssueSettlementAction::AwaitMeasurement { .. }
+                            | MergedIssueSettlementAction::AwaitVerification { .. }
                     )
                 })
                 .map(|settlement| settlement.settled_at.clone())
@@ -25654,19 +25888,27 @@ impl IssueMonitorState {
                     observation.holder_host_dead
                         // Inbox payloads are not persisted. At startup wait
                         // for the candidate read before deciding whether this
-                        // Completed generation finished its owner or one slice.
-                        && (observation.settlement != IssueMonitorExecutionSettlement::Completed
+                        // Completed generation finished its owner or one slice,
+                        // or whether an Interrupted owner may be requeued.
+                        && (!matches!(observation.settlement,
+                            IssueMonitorExecutionSettlement::Completed
+                                | IssueMonitorExecutionSettlement::Interrupted)
                             || self.inbox_item(**number).is_some())
                         && matches!(
                             observation.settlement,
                             IssueMonitorExecutionSettlement::Completed
                                 | IssueMonitorExecutionSettlement::Blocked
+                                | IssueMonitorExecutionSettlement::Interrupted
+                                | IssueMonitorExecutionSettlement::RecoveryExhausted
                         )
                 }) && !self.binding_recovery_pending(**number, now, settlements)
                     // A fresh ordered absence already has its own unfinished
                     // recovery policy. Only bypass missing/stale canvas proof
                     // or a retained obsolete pane identity (Issue #4446).
-                    && !self.fresh_window_snapshot(now).is_some_and(|snapshot| {
+                    // Exhausted recovery releases capacity without retrying,
+                    // even when the new canvas confirms the old pane absent.
+                    && !(settlements[number].settlement != IssueMonitorExecutionSettlement::RecoveryExhausted
+                        && self.fresh_window_snapshot(now).is_some_and(|snapshot| {
                         issue_monitor_qualified_window_id(window).is_some_and(|(tab, _)| {
                             self.window_snapshot_tabs.contains(tab)
                                 || self.window_snapshot_host.is_some()
@@ -25677,7 +25919,7 @@ impl IssueMonitorState {
                         ) && !snapshot.windows.iter().any(|observed| {
                             issue_monitor_window_ids_match(window, &observed.window_id)
                         })
-                    })
+                    }))
             })
             .map(|(number, window)| IssueMonitorIdleWindow {
                 window_id: window.clone(),
@@ -25689,7 +25931,11 @@ impl IssueMonitorState {
                 // can belong to a new pane, so never issue a GUI close.
                 pane_present: false,
                 rebind_to: None,
-                requeue_on_release: false,
+                requeue_on_release: settlements[number].settlement
+                    == IssueMonitorExecutionSettlement::Interrupted
+                    && !self.issue_is_closed(*number)
+                    && !self.merged_issues.contains(number)
+                    && !self.failed_issues.contains_key(number),
             })
             .collect::<Vec<_>>();
         let Some(snapshot) = self.fresh_window_snapshot(now) else {
@@ -26159,12 +26405,18 @@ impl IssueMonitorState {
                                 observation.settlement,
                                 IssueMonitorExecutionSettlement::Completed
                                     | IssueMonitorExecutionSettlement::Blocked
+                                    | IssueMonitorExecutionSettlement::Interrupted
+                                    | IssueMonitorExecutionSettlement::RecoveryExhausted
                             )
                     })
             }) else {
                 continue;
             };
-            if self.finish_terminal_launch_release(number, settlements[&number].settlement, now) {
+            // The interrupted launch was already requeued by apply_idle_release.
+            // Do not retire that fresh successor's queue entry as finished work.
+            if settlements[&number].settlement != IssueMonitorExecutionSettlement::Interrupted
+                && self.finish_terminal_launch_release(number, settlements[&number].settlement, now)
+            {
                 outcome.requeued.push(number);
             }
             if let Some(snapshot) = &mut self.window_snapshot {
@@ -28969,6 +29221,7 @@ mod tests {
                     claim_id: None,
                     delivery_id: None,
                     waiting: None,
+                    verification_declaration: None,
                     steering: None,
                     idle_kind: None,
                     idle_since: None,
@@ -29231,6 +29484,46 @@ mod tests {
     }
 
     #[test]
+    fn issue_7536_implementation_base_prefers_develop_over_main_checkout() {
+        let repo = relaunch_repo();
+        let path = repo.path();
+        git_in(path, &["branch", "-m", "main"]);
+        assert_eq!(
+            crate::start_work::resolve_launch_agent_base_branch(path).unwrap(),
+            "main"
+        );
+        assert_eq!(
+            issue_monitor_implementation_base_branch(path).unwrap(),
+            "develop"
+        );
+        git_in(path, &["update-ref", "-d", "refs/remotes/origin/develop"]);
+        assert_eq!(
+            issue_monitor_implementation_base_branch(path).unwrap(),
+            "main"
+        );
+    }
+
+    #[test]
+    fn issue_7536_launch_guidance_assigns_main_promotion_to_release() {
+        for kind in [LinkedIssueKind::Issue, LinkedIssueKind::Spec] {
+            for delivery in [
+                OwnerBranchDelivery::Delivered,
+                OwnerBranchDelivery::Undelivered,
+            ] {
+                let prompt = issue_monitor_launch_prompt_for_base(kind, 42, "develop", delivery);
+                assert!(
+                    prompt.contains("Implementation finishes after merge into develop and execution settlement."),
+                    "{prompt}"
+                );
+                assert!(
+                    prompt.contains("Release owns promotion to main."),
+                    "{prompt}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn launch_plan_uses_unified_execute_prompt_and_work_issue_branch() {
         let mut spec_issue = issue(3164);
         spec_issue.labels.push("gwt-spec".to_string());
@@ -29239,7 +29532,7 @@ mod tests {
         assert_eq!(spec_plan.branch_name, "work/issue-3164");
         assert_eq!(
             spec_plan.prompt,
-            "$gwt-execute #3164\n\nThis prompt was generated by Issues. It is not a statement, approval, or visual confirmation by a human user."
+            "$gwt-execute #3164\n\nThis prompt was generated by Issues. It is not a statement, approval, or visual confirmation by a human user.\n\nImplementation finishes after merge into develop and execution settlement. Release owns promotion to main. Leave release, main, and other-host verification criteria unchecked until their evidence is available; they do not require another implementation PR."
         );
         assert_eq!(spec_plan.linked_issue_kind, LinkedIssueKind::Spec);
 
@@ -29247,7 +29540,7 @@ mod tests {
         assert_eq!(plain_plan.branch_name, "work/issue-42");
         assert_eq!(
             plain_plan.prompt,
-            "$gwt-execute #42\n\nThis prompt was generated by Issues. It is not a statement, approval, or visual confirmation by a human user.\n\nBefore changing code, evaluate every remaining acceptance criterion against origin/develop, not against your work branch. A commit that exists only on the work branch is not delivered and does not satisfy a criterion. If origin/develop already satisfies all criteria, close Issue #42 and finish without creating another implementation PR. Otherwise, implement only the remaining criteria."
+            "$gwt-execute #42\n\nThis prompt was generated by Issues. It is not a statement, approval, or visual confirmation by a human user.\n\nBefore changing code, evaluate every remaining acceptance criterion against origin/develop, not against your work branch. A commit that exists only on the work branch is not delivered and does not satisfy a criterion. If origin/develop already satisfies all criteria, close Issue #42 and finish without creating another implementation PR. Otherwise, implement only the remaining criteria.\n\nImplementation finishes after merge into develop and execution settlement. Release owns promotion to main. Leave release, main, and other-host verification criteria unchecked until their evidence is available; they do not require another implementation PR."
         );
         assert_eq!(plain_plan.linked_issue_kind, LinkedIssueKind::Issue);
     }
@@ -42316,6 +42609,57 @@ mod tests {
     }
 
     #[test]
+    fn issue_7526_dead_restart_holder_releases_waiting_reservation_without_canvas() {
+        for settlement in [
+            IssueMonitorExecutionSettlement::Interrupted,
+            IssueMonitorExecutionSettlement::RecoveryExhausted,
+        ] {
+            let mut previous = launched_monitor(42, "previous-tab::stopped");
+            previous.declare_autonomous_wait(42, "CI / auto-merge", "PR merged", IDLE_NOW);
+            let mut monitor = test_monitor_with_prefs(previous.config.clone(), previous.prefs());
+            monitor.record_candidate(issue(42));
+            let mut observed = settlements(&[(42, settlement)]);
+            observed.get_mut(&42).unwrap().holder_host_dead = true;
+            let mut held = observed.clone();
+            held.get_mut(&42).unwrap().process_held = true;
+            assert!(monitor
+                .reconcile_dead_terminal_launches(&held, IDLE_NOW)
+                .released
+                .is_empty());
+            assert_eq!(
+                monitor.active_count(),
+                1,
+                "live or uncertain successor stays protected"
+            );
+
+            let outcome = monitor.reconcile_dead_terminal_launches(&observed, IDLE_NOW);
+
+            assert_eq!(outcome.released, vec![42], "{settlement:?}");
+            assert!(outcome.pane_closes.is_empty());
+            assert_eq!(monitor.occupied_slot_count(), 0);
+            assert_eq!(monitor.attempt_count(42), previous.attempt_count(42));
+            assert_eq!(
+                outcome.requeued,
+                if settlement == IssueMonitorExecutionSettlement::Interrupted {
+                    vec![42]
+                } else {
+                    vec![]
+                }
+            );
+            assert_eq!(monitor.queued_issue_numbers(), outcome.requeued);
+            monitor.rebase_daemon_driver_prefs(&previous.prefs());
+            // Prefs merge is a union; the commit path reapplies the exact
+            // execution observations before publishing its capacity.
+            monitor.reconcile_dead_terminal_launches(&observed, IDLE_NOW);
+            assert_eq!(
+                monitor.occupied_slot_count(),
+                0,
+                "reconciliation retires a stale merged reservation"
+            );
+        }
+    }
+
+    #[test]
     fn issue_4131_restored_sessions_rebind_two_windows_after_restart() {
         for old_tab in ["tab-1", "previous-tab"] {
             let old_windows = [format!("{old_tab}::old-42"), format!("{old_tab}::old-43")];
@@ -42349,6 +42693,15 @@ mod tests {
                 BTreeSet::new(),
             );
             restored.record_verified_live_launch_owners(&owners, IDLE_NOW);
+            // Issue #7526: the new GUI's exact process census must replace
+            // each old reservation rather than add a second slot for it.
+            restored.record_monitor_runtime_windows(
+                123,
+                1,
+                BTreeMap::from([(42, 1), (43, 1)]),
+                owners,
+                IDLE_NOW,
+            );
 
             let outcome = restored.reconcile_idle_windows(&observed, IDLE_NOW);
 
@@ -53165,6 +53518,191 @@ mod tests {
         );
         assert!(!cold.agent_status().needs_human.contains(&42));
         assert_eq!(cold.attempt_count(42), 2);
+    }
+
+    #[test]
+    fn issue_7536_verification_declaration_refuses_unsettled_or_inexact_checks() {
+        let source = "## Acceptance Criteria\n- [ ] AC-1: verify main [main-verification]\n";
+        let assignments = vec![("AC-1".into(), "PM".into())];
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
+        monitor.set_autonomous_mode(true);
+        let mut candidate = issue(42);
+        candidate.body = Some(source.into());
+        monitor.record_candidate(candidate);
+        assert!(monitor
+            .declare_verification(42, source, &assignments, "2026-11-17T01:00:00Z")
+            .is_err());
+        monitor.record_merged_issue_settlement(
+            42,
+            7,
+            Some("aaa".into()),
+            MergedIssueSettlementAction::AwaitVerification {
+                unmet: vec!["AC-1".into()],
+            },
+            "2026-11-17T00:00:00Z",
+        );
+        let before = serde_json::to_value(monitor.prefs()).unwrap();
+        for (body, requested) in [
+            (source.to_string(), vec![("AC-1".into(), " ".into())]),
+            (source.to_string(), vec![("AC-2".into(), "PM".into())]),
+            (source.to_string(), vec![]),
+            (
+                source.replace(" [main-verification]", ""),
+                assignments.clone(),
+            ),
+            (
+                format!("{source}- [ ] AC-2: implement another fix\n"),
+                assignments.clone(),
+            ),
+        ] {
+            assert!(monitor
+                .declare_verification(42, &body, &requested, "2026-11-17T01:00:00Z")
+                .is_err());
+            assert_eq!(serde_json::to_value(monitor.prefs()).unwrap(), before);
+        }
+        monitor
+            .merged_issue_settlements
+            .get_mut(&42)
+            .unwrap()
+            .merge_sha = None;
+        assert!(monitor
+            .declare_verification(42, source, &assignments, "2026-11-17T01:00:00Z")
+            .is_err());
+    }
+
+    #[test]
+    fn issue_7536_external_verification_wait_survives_scan_without_slots() {
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
+        monitor.set_autonomous_mode(true);
+        let mut candidate = issue(42);
+        candidate.body = Some("## Acceptance Criteria\n- [x] AC-1: implementation\n- [ ] AC-2: verify main [main-verification]\n".into());
+        scan_queued_candidates(&mut monitor, &[candidate.clone()], "2026-09-01T00:00:00Z");
+        monitor.autonomous_record_mut(42).attempts = 2;
+        monitor.active_launches.push(42);
+        monitor.launched_windows.insert(42, "window-42".into());
+        let before = monitor.prefs();
+        monitor.record_merged_issue_settlement(
+            42,
+            7,
+            Some("aaa".into()),
+            MergedIssueSettlementAction::UnmetAcceptance {
+                unmet: vec!["AC-2".into()],
+            },
+            "2026-09-01T01:00:00Z",
+        );
+        monitor.rebase_daemon_driver_prefs(&before);
+        let mut restored = test_monitor_with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        scan_issue_monitor_candidates(&mut restored, &[candidate.clone()], "2026-09-01T01:01:00Z");
+        assert_eq!(
+            serde_json::to_value(restored.inbox_item(42).unwrap().state).unwrap(),
+            "awaiting_verification"
+        );
+        assert!(restored.queue.is_empty());
+        assert_eq!(restored.occupied_slot_count(), 0);
+        assert!(!restored.agent_status().needs_human.contains(&42));
+        assert_eq!(restored.attempt_count(42), 2);
+
+        candidate.body = Some("## Acceptance Criteria\n- [x] AC-1: implementation\n- [ ] AC-2: verify main [main-verification]\n- [ ] AC-3: fix another defect\n".into());
+        restored.record_candidate(candidate);
+        assert_eq!(
+            restored.inbox_item(42).unwrap().state,
+            MonitorInboxState::Queued
+        );
+        assert!(restored.queue.contains(&42));
+    }
+
+    #[test]
+    fn issue_7536_operator_requeue_releases_external_verification_wait() {
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
+        monitor.set_autonomous_mode(true);
+        let mut candidate = issue(42);
+        candidate.body =
+            Some("## Acceptance Criteria\n- [ ] AC-1: verify Windows [host-verification]\n".into());
+        scan_queued_candidates(&mut monitor, &[candidate.clone()], "2026-09-01T00:00:00Z");
+        monitor.record_merged_issue_settlement(
+            42,
+            7,
+            Some("aaa".into()),
+            MergedIssueSettlementAction::UnmetAcceptance {
+                unmet: vec!["AC-1".into()],
+            },
+            "2026-09-01T01:00:00Z",
+        );
+        let mut cold = test_monitor_with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        assert!(matches!(
+            cold.requeue_failed_issue(42, "verification ready", "2026-09-01T01:00:00Z"),
+            IssueMonitorRequeueOutcome::Requeued { .. }
+        ));
+        monitor.rebase_daemon_driver_prefs(&cold.prefs());
+        monitor.record_merged_issue_settlement(
+            42,
+            7,
+            Some("aaa".into()),
+            MergedIssueSettlementAction::UnmetAcceptance {
+                unmet: vec!["AC-1".into()],
+            },
+            "2026-09-01T01:01:00Z",
+        );
+        monitor.record_candidate(candidate);
+        assert_eq!(
+            monitor.inbox_item(42).unwrap().state,
+            MonitorInboxState::Queued
+        );
+        assert!(matches!(
+            monitor.merged_issue_settlement(42).unwrap().action,
+            MergedIssueSettlementAction::ContinueWork { .. }
+        ));
+    }
+
+    #[test]
+    fn issue_7536_new_external_tags_park_prior_delivery_with_auto_close_disabled() {
+        for prior_action in [
+            MergedIssueSettlementAction::ContinueWork {
+                unmet: vec!["AC-1".into()],
+            },
+            MergedIssueSettlementAction::AwaitClose {
+                unmet: vec!["AC-1".into()],
+            },
+        ] {
+            let mut monitor = test_monitor(IssueMonitorConfig::default());
+            monitor.set_autonomous_mode(true);
+            monitor.set_auto_close_merged_issues_with_effect_revocation(Some(false));
+            let mut candidate = issue(42);
+            candidate.body =
+                Some("## Acceptance Criteria\n- [ ] AC-1: verification remains\n".into());
+            scan_queued_candidates(&mut monitor, &[candidate.clone()], "2026-09-01T00:00:00Z");
+            monitor.record_merged_issue_settlement(
+                42,
+                7,
+                Some("aaa".into()),
+                prior_action,
+                "2026-09-01T01:00:00Z",
+            );
+            let delivery = merged_delivery(7, "aaa", "2026-09-01T01:00:00Z");
+            assert!(!monitor.merged_issue_settlement_applies(42, &delivery));
+
+            candidate.body = Some(
+                "## Acceptance Criteria\n- [ ] AC-1: verify release [release-verification]\n"
+                    .into(),
+            );
+            monitor.record_candidate(candidate);
+            assert!(monitor.merged_issue_settlement_applies(42, &delivery));
+            monitor.record_merged_issue_settlement(
+                42,
+                7,
+                Some("aaa".into()),
+                MergedIssueSettlementAction::AwaitClose {
+                    unmet: vec!["AC-1".into()],
+                },
+                "2026-09-01T01:01:00Z",
+            );
+            assert_eq!(
+                monitor.inbox_item(42).unwrap().state,
+                MonitorInboxState::AwaitingVerification
+            );
+            assert!(monitor.queue.is_empty());
+            assert!(!monitor.merged_issue_settlement_applies(42, &delivery));
+        }
     }
 
     #[test]

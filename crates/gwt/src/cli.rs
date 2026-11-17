@@ -179,6 +179,7 @@ pub enum CliCommand {
 pub enum AgentRegistryCommand {
     Status { source_key: Option<String> },
     Reconcile(Box<crate::agent_registry::RegistryReconcileRequest>),
+    RestoreSchema3,
 }
 
 /// SPEC-2077 command model for `daemon.*` JSON operations.
@@ -588,6 +589,7 @@ pub(crate) fn run_collect<E: CliEnv>(
                 AgentRegistryCommand::Reconcile(request) => {
                     crate::agent_registry::reconcile(&request)
                 }
+                AgentRegistryCommand::RestoreSchema3 => crate::agent_registry::restore_schema3(),
             }
             .map_err(io_as_api_error)?;
             out.push_str(&serde_json::to_string_pretty(&status).map_err(serde_as_api_error)?);

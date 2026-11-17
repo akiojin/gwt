@@ -185,10 +185,8 @@ pub fn prepare_manual_successor_before_pane(
             }
         };
         if attempt.status != gwt::cli::execution_state::ContinuationAttemptStatus::Prepared {
-            return Err(format!(
-                "Manual successor operation is {:?}; reconcile before retrying",
-                attempt.status
-            ));
+            tracing::warn!(status = ?attempt.status, "manual successor is not prepared");
+            return Err("The next agent launch is not ready. No new agent was launched. Open Logs and review the previous launch before retrying.".into());
         }
         let identity = gwt::cli::execution_state::prepared_successor_execution_binding(
             &worktree,
@@ -2818,9 +2816,10 @@ impl ContinueWorkCoordinator<'_> {
                         ));
                     }
                     Ok((resolution, _)) => {
-                        return Err(ContinueWorkFailure::conflict(format!(
-                            "The committed continuation has no matching Work transaction: {resolution:?}"
-                        )));
+                        tracing::warn!(?resolution, "committed continuation has no matching Work transaction");
+                        return Err(ContinueWorkFailure::conflict(
+                            "The continuation could not be confirmed in Work history. Further continuation is paused. Open Logs and review the continuation error before retrying."
+                        ));
                     }
                     Err(error) => {
                         return Err(ContinueWorkFailure::conflict(format!(

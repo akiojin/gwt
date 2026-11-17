@@ -6634,9 +6634,13 @@ impl OwnerState {
                         Ok(true) => {}
                         outcome => {
                             restore_cleanup_complete = false;
+                            tracing::warn!(
+                                ?outcome,
+                                "failed restore candidate cleanup remains unconfirmed"
+                            );
                             if let Some(restore) = restore.as_mut() {
                                 restore.refuse("restore_reconciliation_required",
-                                    format!("Failed restore candidate cleanup remains unconfirmed: {outcome:?}"), true);
+                                    "The restored window could not be cleaned up. Restore is paused. Open Logs and review the restore error before reopening the window.", true);
                             }
                         }
                     }

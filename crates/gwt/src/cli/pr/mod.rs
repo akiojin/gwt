@@ -457,6 +457,15 @@ pub(super) fn run<E: CliEnv>(
     cmd: PrCommand,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
+    run_with_data(env, cmd, out, &mut None)
+}
+
+pub(super) fn run_with_data<E: CliEnv>(
+    env: &mut E,
+    cmd: PrCommand,
+    out: &mut String,
+    data: &mut Option<serde_json::Value>,
+) -> Result<i32, SpecOpsError> {
     if matches!(
         cmd,
         PrCommand::Create { draft: true, .. } | PrCommand::CreateBody { draft: true, .. }
@@ -735,8 +744,12 @@ pub(super) fn run<E: CliEnv>(
             match env.fetch_current_pr().map_err(super::io_as_api_error)? {
                 Some(pr) => {
                     render_pr(out, &pr);
+                    *data = Some(serde_json::to_value(&pr).map_err(super::serde_as_api_error)?);
                 }
-                None => out.push_str("no current pull request\n"),
+                None => {
+                    out.push_str("no current pull request\n");
+                    *data = Some(serde_json::Value::Null);
+                }
             }
             0
         }
@@ -914,6 +927,7 @@ pub(super) fn run<E: CliEnv>(
         PrCommand::View { number } => {
             let pr = env.fetch_pr(number).map_err(super::io_as_api_error)?;
             render_pr(out, &pr);
+            *data = Some(serde_json::to_value(&pr).map_err(super::serde_as_api_error)?);
             let retained = env
                 .fetch_pr_quarantine_context(number)
                 .ok()

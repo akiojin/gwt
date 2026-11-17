@@ -394,9 +394,18 @@ pub enum PmStartBlockKind {
     /// PM. The singleton is per repository, and the other store's `pm.json`
     /// is invisible from here.
     AnotherStoreOwnsThePm,
+    /// Issue #7542: the PM launch itself failed. Unlike the others this one
+    /// is not permanent — a Restart starts a new launch, which also discards
+    /// a reservation left by a dead PM.
+    LaunchFailed,
 }
 
 impl PmStartBlockKind {
+    /// Whether pressing Restart can get past this block.
+    pub const fn restart_clears_it(self) -> bool {
+        matches!(self, Self::LaunchFailed)
+    }
+
     /// What the operator has to do. A block is only useful if it names the
     /// next action; "the PM did not start" alone sends people back to the
     /// Restart button that cannot help them.
@@ -411,6 +420,11 @@ impl PmStartBlockKind {
             Self::AnotherStoreOwnsThePm => {
                 "Stop the PM held by the other project store with `pm.stop`, \
                  passing the session id listed in `repository_registrations`."
+            }
+            Self::LaunchFailed => {
+                "Close any Project Manager window that is still open, then press \
+                 Restart Project Manager in Settings. Restarting discards the \
+                 reservation of a Project Manager that is no longer running."
             }
         }
     }
@@ -437,8 +451,8 @@ impl PmStartBlock {
     pub fn new(kind: PmStartBlockKind, reason: impl Into<String>) -> Self {
         Self {
             kind,
-            permanent: true,
-            restart_clears_it: false,
+            permanent: !kind.restart_clears_it(),
+            restart_clears_it: kind.restart_clears_it(),
             reason: reason.into(),
             required_operation: kind.required_operation().to_string(),
             observed_at: pm_refresh_checked_at(),
@@ -5825,6 +5839,19 @@ mod tests {
             .expect("prior bytes remain in a same-parent recovery file");
         assert_eq!(fs::read(&recovery).expect("recovery bytes"), b"{}\n");
         assert!(error.to_string().contains(&recovery.display().to_string()));
+    }
+
+    /// Issue #7542: a failed PM launch is the one block a Restart clears, so
+    /// it must say so and name Restart as the recovery.
+    #[test]
+    fn a_failed_pm_launch_block_is_cleared_by_restart() {
+        let block = PmStartBlock::new(PmStartBlockKind::LaunchFailed, "launch refused");
+        assert!(block.restart_clears_it);
+        assert!(!block.permanent);
+        assert!(block.required_operation.contains("Restart Project Manager"));
+        let wire = serde_json::to_value(&block).expect("serialize");
+        assert_eq!(wire["kind"], "launch_failed");
+        assert_eq!(wire["restart_clears_it"], true);
     }
 
     /// #4486 AC-7: every block must name a distinct, non-empty next action.

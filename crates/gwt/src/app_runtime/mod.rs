@@ -16308,6 +16308,26 @@ impl AppRuntime {
                     .insert(window_id.clone(), pending);
             }
         }
+        // Issue #7542: a failed PM launch leaves the project without a PM.
+        // Say so as a PM failure instead of leaving it among Agent errors.
+        let pm_launch_failed = self.project_state(&context).is_some_and(|state| {
+            state.pending_pm_launches.get(&window_id) == Some(&context.project_root)
+        }) && match &result {
+            Ok(RemoteOwnerLaunchOutcome::RetainedManualFailure(failure)) => {
+                self.record_pm_launch_failure(&context, &window_id, &failure.detail)
+            }
+            Ok(RemoteOwnerLaunchOutcome::MonitorFailureClosed { detail }) => {
+                self.record_pm_launch_failure(&context, &window_id, detail)
+            }
+            Ok(RemoteOwnerLaunchOutcome::CompensatedFailure(failure)) => {
+                self.record_pm_launch_failure(&context, &window_id, &failure.error)
+            }
+            Ok(RemoteOwnerLaunchOutcome::Failed { failure, .. }) => {
+                self.record_pm_launch_failure(&context, &window_id, &failure.detail)
+            }
+            Err(error) => self.record_pm_launch_failure(&context, &window_id, error),
+            _ => false,
+        };
         let owner_events = (|| {
             match result {
                 Ok(RemoteOwnerLaunchOutcome::RetainedManualFailure(failure)) => self
@@ -16714,6 +16734,9 @@ impl AppRuntime {
             }
         })();
         wizard_events.extend(owner_events);
+        if pm_launch_failed {
+            wizard_events.extend(self.pm_status_broadcast_events(&context));
+        }
         wizard_events
     }
 

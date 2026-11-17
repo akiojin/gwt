@@ -500,6 +500,31 @@ gwtd <<'JSON'
 JSON
 ```
 
+応答は `ok`、`operation`、`exit_code` と従来の人間向け `output` 文字列を維持します。
+JSON object/array のレポートは `data` にも直接入ります。対象には `execution.status`、
+`board.show`、`pr.list`、PM の status operation などが含まれます。`issue.view` は Issue の
+各フィールド、`pr.view` / `pr.current` は PR snapshot を `data` に返します。
+PR が無い `pr.current` は `data:null` です。`pr.checks` と verify 系の既存 data 契約も
+維持します。テキストのみの operation は `data` を省略する場合があります。
+新規の呼び出し側では `output` の解析より `data` を優先してください。
+
+失敗応答には `error_category` と安定した `error_code` を付与します。カテゴリは
+`not_found`（例: `NOT_FOUND_ISSUE`）、`conflict`（`CONFLICT_CONCURRENT_WRITE`）、
+`permission`（`PERMISSION_DENIED`）、`input`（`INPUT_VALIDATION_FAILED`）、
+`internal`（`INTERNAL_INDEX_INTEGRITY`）、`external`（`EXTERNAL_NETWORK`）、
+`operation`（分類情報の無い非ゼロ結果: `OPERATION_FAILED`）です。
+`ISSUE_CACHE_CONFLICT` など既存の固有コードは維持します。型情報で分類し、型情報が
+失われた従来の失敗はメッセージの文言から推測せず fallback を使います。
+`refusal` と復旧フィールドの意味は変わりません。不正 envelope も終了コード 2 の
+JSON 応答を返し、`error_category:"input"`、`INPUT_*` コード、`operation:null` を
+含みます。入力を伏せる intake 診断では、呼び出し側の秘密情報を出力しません。
+
+入れ子の operation も `data` 内では JSON object です。応答を一度デコードすれば、
+`pm.operation.execute` の監査結果は `data`、内側の envelope は `data.after`、
+内側の JSON レポートは `data.after.data` で直接読めます。互換性のため従来の入れ子の
+`output` 文字列も維持します。error code は失敗の分類であり、再試行の許可や
+リモート更新が確定したことの証明ではありません。
+
 [operation catalog](crates/gwt/src/cli/operation_catalog.rs) の `OPERATIONS` は、
 v9.167.1 時点で **36 系統・230 件の canonical operation** と **40 件の alias**
 （受理する表記は合計 270 件）を定義します。系統は最初のドットより前の名前で数え、
@@ -525,9 +550,30 @@ PY
 ```
 
 ヘルプには `gwtd --help` / `gwtd --help daemon` を使います。
+`gwtd --help` は全系統を列挙し、各 `gwtd --help <family>` の末尾には
+同じカタログから生成したその系統の全 operation 一覧が付きます。
 通常の operation を argv で渡す `gwtd daemon start` 等は拒否されるため、
 `daemon.start` を envelope で送ります。managed hook は専用 argv transport の
 `gwtd hook event <Event>` / `gwtd hook provider-event <provider> <native-event>` を維持します。
+
+Agent registry の schema 3 だけを読める旧 binary へ戻す場合は、すべての Agent、
+デスクトップ app、daemon を終了してから、**新しい** `gwtd` で次を実行します。
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"agent.registry.restore_schema3","params":{}}
+JSON
+```
+
+移行時の backup へ戻すのではなく、現在の共有 registry と全 project の確定済み prefs を
+schema 3 に書き戻します。Agent の割当が残る場合、Session が稼働中または不在を確認できない場合、
+record の欠落・破損、未知の mirror 内容がある場合は拒否します。Agent の終了と予約解除は
+通常の操作で行い、mirror の競合は `agent.registry.status` / `agent.registry.reconcile` で
+確認・解消してから再実行してください。拒否を回避するために record を削除しないでください。
+registry の置換は原子的で、中断しても完全な schema 4 または完全な schema 3 が残ります。
+record と移行時の `agent-registry.schema3-backup.json` は保持します。成功後は旧 binary を直接
+起動してください。新しいデスクトップ app を起動すると schema 4 に再移行します。
+schema 3 で再実行しても変更はありません。
 
 runtime daemon は macOS/Linux の Unix domain socket と Windows の named pipe に対応します。
 GUI はプロジェクト daemon を監督し、必要に応じて起動・置換するため、通常の GUI 利用で
@@ -1183,6 +1229,23 @@ queue に戻す旨をコメントします。未達の基準がすべて `(measu
 **Awaiting measurement** として実測を待ち、コメントにも `awaiting_measurement` を示します。
 測定後に受け入れ基準をチェックすると
 close を再評価でき、**Return to queue** で作業を再開することもできます。
+リリース、main、別ホストでの確認を待つ場合は、残条件に
+`(release-verification)`、`(main-verification)`、`(host-verification)` を
+明示します（角括弧も使用可）。Autonomous が on で残条件がこれらと任意の実測条件だけなら、
+配信済み Issue は **Awaiting verification** (`awaiting_verification`) となり、
+active slot と NeedsHuman に含めず確認を待ちます。確認主体も各条件に記録してください。
+リリース公開後や対象ホストが利用可能になったら **Return to queue**、または理由を付けた
+`issue.monitor.requeue` で確認を起動できます。タグのない実装条件があれば通常の queue を継続します。
+外部確認だけが残る配信の精算後、残条件すべての確認主体を
+`issue.monitor.verification.declare` で登録できます。
+
+```json
+{"schema_version":1,"operation":"issue.monitor.verification.declare","params":{"number":42,"criteria":[{"id":"AC-2","verifier":"PM on release host"}]}}
+```
+
+`issue.monitor.status` の `verification_declaration` に元の条件本文、確認主体、
+宣言日時が残ります。各未達 AC を一度ずつ指定してください。未配信・未精算、実装残件を
+含む条件、空の確認主体は拒否します。この宣言で Autonomous mode は変更しません。
 Autonomous が off の場合は `merge 済み・未達 AC あり` とコメントして
 従来どおり `NeedsHuman` にします。`gwt-spec` Issue は
 全 Phase の tasks が完了したときだけ close します。残りの基準を別 Issue に

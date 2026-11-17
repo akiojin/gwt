@@ -421,10 +421,12 @@ impl AppRuntime {
             Self::record_pm_start_block(
                 &tab.project_root,
                 pm_registry::PmStartBlockKind::MigrationPending,
-                format!(
-                    "the tab is not a migration-clear Git project (kind={:?}, migration_pending={})",
-                    tab.kind, tab.migration_pending
-                ),
+                if tab.kind != gwt::ProjectKind::Git {
+                    "The PM cannot start in this project. Open a Git project to use the PM."
+                        .to_string()
+                } else {
+                    "The PM cannot start until project migration finishes. Complete the migration before starting the PM.".to_string()
+                },
             );
             return Vec::new();
         }
@@ -579,6 +581,42 @@ impl AppRuntime {
         ) {
             tracing::warn!(%error, "failed to record the PM start block");
         }
+    }
+
+    /// Issue #7542: a PM launch failed, so this project has no PM. Report it
+    /// as a PM failure in the log, the error ledger notification, and the PM
+    /// settings panel, with the operation that recovers it. Always `true`.
+    pub(super) fn record_pm_launch_failure(
+        &self,
+        context: &super::ProjectContext,
+        window_id: &str,
+        detail: &str,
+    ) -> bool {
+        let detail = Self::user_facing_launch_error_detail(detail);
+        tracing::error!(
+            project_root = %context.project_root.display(),
+            window_id,
+            error = %detail,
+            "Project Manager failed to start; this project has no running PM"
+        );
+        Self::record_pm_start_block(
+            &context.project_root,
+            pm_registry::PmStartBlockKind::LaunchFailed,
+            detail.clone(),
+        );
+        gwt::error_report::report_error_and_publish(
+            gwt_core::error_ledger::ErrorKind::LaunchFailure,
+            format!(
+                "Project Manager failed to start; this project has no running PM: {detail}. {}",
+                pm_registry::PmStartBlockKind::LaunchFailed.required_operation()
+            ),
+            gwt_core::error_ledger::ErrorTarget {
+                window_id: Some(window_id.to_string()),
+                project_root: Some(context.project_root.display().to_string()),
+                ..Default::default()
+            },
+        );
+        true
     }
 
     /// Drop a recorded block once the gate reaches a live, resumed, or
