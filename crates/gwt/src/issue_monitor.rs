@@ -906,8 +906,8 @@ pub struct IssueCompletionRecord {
     pub issue_updated_at: Option<String>,
     #[serde(default)]
     pub evidence: IssueCompletionEvidence,
-    /// An exact launch reclaimed after its canonical execution completed.
-    /// Separate from GitHub closure or a merged delivery; old readers ignore it.
+    /// An exact launch reclaimed after execution completion or proven slice
+    /// delivery. Separate from GitHub closure; old readers ignore it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub released_reason: Option<String>,
 }
@@ -3349,6 +3349,10 @@ pub struct IssueMonitorWindowSnapshot {
 pub enum IssueMonitorExecutionSettlement {
     Active,
     Completed,
+    /// The exact launch's source is delivered by a merged owner PR, while its
+    /// local execution may still be Active/Blocked. Stop cleanup only; this
+    /// never changes the generation to Completed or closes its parent owner.
+    Delivered,
     Blocked,
     /// Issue #4131: the record reads `Blocked`, but the Host's Active reaper
     /// wrote it because the holder died without settling — an auto-update
@@ -6944,6 +6948,17 @@ thread_local! {
 }
 
 #[cfg(test)]
+thread_local! {
+    static PREFS_LOCK_HELD_MS: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
+}
+
+/// The `held_ms` of this thread's latest "Issues prefs lock released" record.
+#[cfg(test)]
+pub(crate) fn prefs_lock_held_ms_for_test() -> f64 {
+    PREFS_LOCK_HELD_MS.get()
+}
+
+#[cfg(test)]
 pub(crate) fn prefs_io_counts_for_test() -> (usize, usize) {
     PREFS_IO_COUNTS.get()
 }
@@ -7914,13 +7929,16 @@ fn with_issue_monitor_prefs_lock_observed<T>(
     let result = crate::agent_registry::RegistryWrite::acquire(path)
         .and_then(|mut registry| operation(&mut registry));
     let unlock_result = lock.unlock();
+    let held_ms = held.elapsed().as_secs_f64() * 1000.0;
+    #[cfg(test)]
+    PREFS_LOCK_HELD_MS.set(held_ms);
     tracing::info!(
         target: "gwt.issue_monitor.prefs",
         caller = %caller,
         path = %path.display(),
         pid = std::process::id(),
         wait_ms,
-        held_ms = held.elapsed().as_secs_f64() * 1000.0,
+        held_ms,
         success = result.is_ok() && unlock_result.is_ok(),
         "Issues prefs lock released"
     );
@@ -23608,7 +23626,11 @@ impl IssueMonitorState {
         self.record_autonomous_heartbeat(issue_number, now);
         // A pending delivery has no executing Session yet: its owner's terminal
         // ledger can still describe the predecessor, never this new launch.
-        if settlement == IssueMonitorExecutionSettlement::Completed && live_window.is_some() {
+        if matches!(
+            settlement,
+            IssueMonitorExecutionSettlement::Completed | IssueMonitorExecutionSettlement::Delivered
+        ) && live_window.is_some()
+        {
             let updated_at = self
                 .inbox_item(issue_number)
                 .and_then(|item| item.issue.updated_at.clone());
@@ -23616,12 +23638,22 @@ impl IssueMonitorState {
                 issue_number,
                 IssueCompletionState::Completed,
                 updated_at,
-                IssueCompletionEvidence::Legacy,
+                if settlement == IssueMonitorExecutionSettlement::Delivered {
+                    IssueCompletionEvidence::LinkedPr
+                } else {
+                    IssueCompletionEvidence::Legacy
+                },
             );
             self.completion_records
                 .get_mut(&issue_number)
                 .unwrap()
-                .released_reason = Some(reason.into());
+                .released_reason = Some(
+                if settlement == IssueMonitorExecutionSettlement::Delivered {
+                    format!("delivered slice: {reason}")
+                } else {
+                    reason.into()
+                },
+            );
             self.apply_merged_terminal_state(issue_number);
             return IssueMonitorStopOutcome::Released {
                 window_id: live_window.unwrap_or_default(),

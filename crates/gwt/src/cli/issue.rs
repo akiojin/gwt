@@ -3461,7 +3461,7 @@ fn issues_held_by_provider(
 /// stop reports `refused` / `not_running` for the row it did not find, and
 /// `released` for the generation it did.
 fn run_monitor_stop<E: CliEnv>(
-    env: &E,
+    env: &mut E,
     project_root: Option<&std::path::Path>,
     number: u64,
     reason: &str,
@@ -3550,6 +3550,82 @@ fn run_monitor_stop<E: CliEnv>(
     } else {
         None
     };
+    // Capture the runtime before the external delivery reads: otherwise an
+    // in-place continuation could make old delivery evidence stop its successor.
+    let observed_execution_identity = target_session.as_deref().and_then(|session_id| {
+        gwt_agent::validate_session_id_path_component(session_id).ok()?;
+        let session = gwt_agent::Session::load(
+            &gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml")),
+        )
+        .ok()?;
+        gwt_agent::SessionExecutionIdentity::from_session(&session).ok()?
+    });
+    let delivery_inspected = observed_execution_identity.is_some()
+        && matches!(
+            settlement,
+            crate::IssueMonitorExecutionSettlement::Active
+                | crate::IssueMonitorExecutionSettlement::Blocked
+        );
+    if delivery_inspected
+        && captured_runtime_stop_request
+            .as_ref()
+            .is_some_and(|request| {
+                Some(&request.execution_identity) != observed_execution_identity.as_ref()
+            })
+    {
+        return Err(io_as_api_error(io::Error::other(
+            "Monitor execution identity changed before delivery inspection; refresh the snapshot before retrying",
+        )));
+    }
+    let delivered_identity = if delivery_inspected {
+        monitor_delivered_execution_identity(
+            env,
+            &project_root,
+            number,
+            target_session.as_deref(),
+            observed_execution_identity.as_ref(),
+        )
+    } else {
+        None
+    };
+    if delivery_inspected {
+        if !observed_execution_identity
+            .as_ref()
+            .is_some_and(monitor_delivered_identity_is_current)
+        {
+            return Err(io_as_api_error(io::Error::other(
+                "Monitor execution identity changed during delivery inspection; refresh the snapshot before retrying",
+            )));
+        }
+        let current_runtime_stop_request = crate::monitor_duplicate_runtime::capture_stop_request(
+            &project_root,
+            number,
+            observed_identity.window_id.as_deref().unwrap_or_default(),
+            target_session.as_deref(),
+            &now,
+        )
+        .map_err(io_as_api_error)?;
+        if current_runtime_stop_request != captured_runtime_stop_request {
+            return Err(io_as_api_error(io::Error::other(
+                "Monitor runtime changed during delivery inspection; refresh the snapshot before retrying",
+            )));
+        }
+    }
+    if delivered_identity.as_ref().is_some_and(|delivered| {
+        !matches!(
+            crate::cli::delivered_owner::probe_source_surface(&delivered.worktree_path),
+            crate::cli::delivered_owner::SourceSurface::Zero { .. }
+        )
+    }) {
+        return Err(io_as_api_error(io::Error::other(
+            "Monitor source changed during delivery inspection; refresh the snapshot before retrying",
+        )));
+    }
+    let settlement = if delivered_identity.is_some() {
+        crate::IssueMonitorExecutionSettlement::Delivered
+    } else {
+        settlement
+    };
     let (_, (outcome, identity, runtime_stop_request)) =
         crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
             let mut monitor = crate::IssueMonitorState::with_prefs(
@@ -3563,6 +3639,14 @@ fn run_monitor_stop<E: CliEnv>(
                 return Err(std::io::Error::other(
                     "Monitor launch identity changed during stop inspection; refresh the snapshot before retrying",
                 ));
+            }
+            if let Some(inspected) = observed_execution_identity.as_ref().filter(|_| delivery_inspected) {
+                if !monitor_delivered_session_matches(inspected)
+                {
+                    return Err(io::Error::other(
+                        "Monitor delivery authority or source changed during stop inspection; refresh the snapshot before retrying",
+                    ));
+                }
             }
             let outcome = monitor.stop_only_with_settlement(&target, reason, &now, settlement);
             let mut runtime_stop_request = None;
@@ -3729,6 +3813,132 @@ fn monitor_execution_settlement(
         Some(ExecutionControlStatus::Active) => Settlement::Active,
         None => Settlement::Unknown,
     }
+}
+
+/// Delivery and local lifecycle settlement are independent. A merged slice can
+/// leave an OPEN parent owner and an Active/Blocked generation behind. Only
+/// inspect the exact persisted launch holder; a pending launch cannot borrow
+/// its predecessor's delivery.
+fn monitor_delivered_execution_identity<E: CliEnv>(
+    env: &mut E,
+    project_root: &Path,
+    number: u64,
+    target_session: Option<&str>,
+    captured_identity: Option<&gwt_agent::SessionExecutionIdentity>,
+) -> Option<gwt_agent::SessionExecutionIdentity> {
+    use crate::cli::{delivered_owner, execution_state};
+    let session_id = target_session?;
+    gwt_agent::validate_session_id_path_component(session_id).ok()?;
+    let session = gwt_agent::Session::load(
+        &gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml")),
+    )
+    .ok()?;
+    let identity = gwt_agent::SessionExecutionIdentity::from_session(&session).ok()??;
+    if session.id != session_id
+        || session.linked_issue_number != Some(number)
+        || gwt_core::repo_hash::detect_repo_hash(project_root)?.as_str()
+            != identity.repo_hash.as_deref()?
+        || captured_identity.is_some_and(|captured| captured != &identity)
+    {
+        return None;
+    }
+    let record = execution_state::load(&session.worktree_path).ok()??;
+    if record.owner_number != number
+        || record.primary_session_id != session_id
+        || !execution_state::integrity_ok(&record)
+    {
+        return None;
+    }
+    let owner = execution_state::ExecutionOwnerKey {
+        kind: record.owner_kind,
+        number,
+    };
+    if !execution_state::execution_binding_authorizes_current_generation(
+        &session.worktree_path,
+        owner,
+        session_id,
+        &identity.execution_binding.identity,
+    )
+    .ok()?
+    {
+        return None;
+    }
+    // Refresh both owner and relationship evidence, rather than treating a
+    // stale CLOSED cache entry or any historic completion as delivery.
+    let gwt_github::FetchResult::Updated(snapshot) =
+        env.client().fetch(IssueNumber(number), None).ok()?
+    else {
+        return None;
+    };
+    if snapshot.number.0 != number
+        || !env
+            .fetch_linked_prs(IssueNumber(number))
+            .ok()?
+            .iter()
+            .any(|pr| {
+                pr.state.eq_ignore_ascii_case("merged")
+                    && pr
+                        .merged_at
+                        .as_deref()
+                        .is_some_and(|at| !at.trim().is_empty())
+            })
+    {
+        return None;
+    }
+    if !crate::issue_monitor_settlement::fetched_issue_owner_delivery(project_root, number)
+        .ok()?
+        .is_empty()
+        || !matches!(
+            delivered_owner::probe_source_surface(&session.worktree_path),
+            delivered_owner::SourceSurface::Zero { .. }
+        )
+        || !monitor_delivered_identity_is_current(&identity)
+    {
+        return None;
+    }
+    Some(identity)
+}
+
+fn monitor_delivered_identity_is_current(expected: &gwt_agent::SessionExecutionIdentity) -> bool {
+    use crate::cli::execution_state;
+    let inspect = || -> Option<()> {
+        if !monitor_delivered_session_matches(expected) {
+            return None;
+        }
+        let binding = &expected.execution_binding;
+        let kind = match binding.owner_kind.as_str() {
+            "issue" => execution_state::ExecutionOwnerKind::Issue,
+            "spec" => execution_state::ExecutionOwnerKind::Spec,
+            _ => return None,
+        };
+        execution_state::execution_binding_authorizes_current_generation(
+            &expected.worktree_path,
+            execution_state::ExecutionOwnerKey {
+                kind,
+                number: binding.owner_number,
+            },
+            &expected.session_id,
+            &binding.identity,
+        )
+        .ok()?
+        .then_some(())
+    };
+    inspect().is_some()
+}
+
+/// Pure durable Session read, safe inside the shared Monitor preferences lock.
+fn monitor_delivered_session_matches(expected: &gwt_agent::SessionExecutionIdentity) -> bool {
+    gwt_agent::Session::load(
+        &gwt_core::paths::gwt_sessions_dir().join(format!("{}.toml", expected.session_id)),
+    )
+    .ok()
+    .and_then(|session| {
+        gwt_agent::SessionExecutionIdentity::from_session(&session)
+            .ok()
+            .flatten()
+    })
+    .as_ref()
+        == Some(expected)
 }
 
 /// Issue #4200: release the execution generation `number` still holds, if any.
@@ -18907,6 +19117,226 @@ command = "my-agent-cli"
             assert!(recovered.released_completed_reason(42).is_none());
             assert!(recovered.agent_status().released.is_empty());
         }
+    }
+
+    fn delivered_stop_fixture(root: &Path, status: &str) -> (crate::cli::TestEnv, PathBuf) {
+        use crate::cli::execution_state::{self, ExecutionOwnerKey, ExecutionOwnerKind};
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(&repo);
+        let remote = root.join("origin.git");
+        git_in(&repo, &["clone", "--bare", ".", remote.to_str().unwrap()]);
+        git_in(
+            &repo,
+            &["remote", "set-url", "origin", remote.to_str().unwrap()],
+        );
+        git_in(&repo, &["branch", "-M", "work/issue-42"]);
+        git_in(
+            &repo,
+            &["push", "origin", "HEAD:develop", "HEAD:work/issue-42"],
+        );
+        git_in(&repo, &["fetch", "origin"]);
+        let repo = std::fs::canonicalize(repo).unwrap();
+        let owner = ExecutionOwnerKey {
+            kind: ExecutionOwnerKind::Issue,
+            number: 42,
+        };
+        let record = serde_json::from_value(serde_json::json!({
+            "owner_kind": "issue", "owner_number": 42,
+            "primary_session_id": "delivered-holder", "entrypoint": "gwt-execute",
+            "status": status, "launched_at": "2026-11-16T00:00:00Z",
+            "settled_at": if status == "blocked" { Some("2026-11-16T01:00:00Z") } else { None }
+        }))
+        .unwrap();
+        execution_state::save(&repo, &record).unwrap();
+        execution_state::ensure_generation_ledger(
+            &repo,
+            owner,
+            execution_state::LegacyActiveDisposition::Live,
+        )
+        .unwrap();
+        let mut session =
+            gwt_agent::Session::new(&repo, "work/issue-42", gwt_agent::AgentId::Codex);
+        session.id = "delivered-holder".into();
+        session.linked_issue_number = Some(42);
+        session
+            .set_execution_binding(Some(gwt_agent::SessionExecutionBinding {
+                schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+                session_id: session.id.clone(),
+                repo_hash: session.repo_hash.clone().unwrap(),
+                owner_kind: "issue".into(),
+                owner_number: 42,
+                identity: execution_state::current_execution_binding(&repo, owner)
+                    .unwrap()
+                    .unwrap(),
+                capability_generation: 1,
+            }))
+            .unwrap();
+        session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+        let mut workspace = crate::persistence::empty_workspace_state();
+        let mut window = crate::persistence::default_workspace_state()
+            .windows
+            .remove(0);
+        window.id = "tab::delivered".into();
+        window.preset = crate::WindowPreset::Agent;
+        window.session_id = Some(session.id);
+        window.linked_issue_number = Some(42);
+        workspace.windows.push(window);
+        crate::persistence::save_workspace_state(
+            &crate::persistence::workspace_state_path(&repo),
+            &workspace,
+        )
+        .unwrap();
+        crate::save_issue_monitor_prefs(
+            &crate::issue_monitor_prefs_path_for_repo_path(&repo),
+            &crate::IssueMonitorPrefs {
+                launched_issues: vec![crate::IssueMonitorLaunchedIssue {
+                    issue_number: 42,
+                    window_id: "tab::delivered".into(),
+                }],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        env.client.seed(sample_issue_snapshot()); // The parent owner remains OPEN after this slice.
+        env.seed_linked_prs(
+            42,
+            vec![LinkedPrSummary {
+                number: 128,
+                title: "delivered slice".into(),
+                state: "MERGED".into(),
+                url: "https://github.com/akiojin/gwt/pull/128".into(),
+                will_close_target: false,
+                merged_at: Some("2026-11-16T01:00:00Z".into()),
+            }],
+        );
+        (env, repo)
+    }
+
+    #[test]
+    fn issue_7507_stop_releases_delivered_active_and_blocked_slices() {
+        for status in ["active", "blocked"] {
+            let tmp = TempDir::new().unwrap();
+            let _home = ScopedGwtHome::set(tmp.path().join("home"));
+            let (mut env, repo) = delivered_stop_fixture(tmp.path(), status);
+            let mut out = String::new();
+            assert_eq!(
+                run(
+                    &mut env,
+                    IssueCommand::MonitorStop {
+                        project_root: Some(repo.clone()),
+                        number: 42,
+                        reason: "collect delivered slice".into(),
+                        remove_from_queue: true,
+                        claim_id: None,
+                        delivery_id: None,
+                        window_id: Some("tab::delivered".into()),
+                    },
+                    &mut out
+                )
+                .unwrap(),
+                0,
+                "{out}"
+            );
+            let response: serde_json::Value = serde_json::from_str(&out).unwrap();
+            assert_eq!(response["status"], "released", "{status}: {out}");
+            let restored = crate::IssueMonitorState::with_prefs(
+                Default::default(),
+                crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(
+                    &repo,
+                ))
+                .unwrap(),
+            );
+            assert!(restored.agent_status().needs_human.is_empty());
+            assert_eq!(restored.agent_status().released, vec![42]);
+            assert_ne!(
+                crate::cli::execution_state::load(&repo)
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                crate::cli::execution_state::ExecutionControlStatus::Completed
+            );
+        }
+    }
+
+    #[test]
+    fn issue_7507_stop_preserves_hold_without_delivery_or_with_dirty_source() {
+        for dirty in [false, true] {
+            let tmp = TempDir::new().unwrap();
+            let _home = ScopedGwtHome::set(tmp.path().join("home"));
+            let (mut env, repo) = delivered_stop_fixture(tmp.path(), "active");
+            if dirty {
+                std::fs::write(repo.join("pending.rs"), "undelivered source").unwrap();
+            } else {
+                env.seed_linked_prs(42, vec![]);
+            }
+            let mut out = String::new();
+            assert_eq!(
+                run(
+                    &mut env,
+                    IssueCommand::MonitorStop {
+                        project_root: Some(repo.clone()),
+                        number: 42,
+                        reason: "operator stop".into(),
+                        remove_from_queue: true,
+                        claim_id: None,
+                        delivery_id: None,
+                        window_id: Some("tab::delivered".into()),
+                    },
+                    &mut out
+                )
+                .unwrap(),
+                0,
+                "{out}"
+            );
+            let response: serde_json::Value = serde_json::from_str(&out).unwrap();
+            assert_eq!(response["status"], "stopped");
+            let restored = crate::IssueMonitorState::with_prefs(
+                Default::default(),
+                crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(
+                    &repo,
+                ))
+                .unwrap(),
+            );
+            assert_eq!(restored.agent_status().needs_human, vec![42]);
+        }
+    }
+
+    #[test]
+    fn issue_7507_delivery_proof_does_not_authorize_a_new_session_incarnation() {
+        let tmp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let (mut env, repo) = delivered_stop_fixture(tmp.path(), "active");
+        let session_path = gwt_core::paths::gwt_sessions_dir().join("delivered-holder.toml");
+        let mut session = gwt_agent::Session::load(&session_path).unwrap();
+        let proof = monitor_delivered_execution_identity(
+            &mut env,
+            &repo,
+            42,
+            Some("delivered-holder"),
+            None,
+        )
+        .unwrap();
+        assert!(monitor_delivered_identity_is_current(&proof));
+        session
+            .execution_binding
+            .as_mut()
+            .unwrap()
+            .capability_generation += 1;
+        session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+        assert!(!monitor_delivered_identity_is_current(&proof));
+        assert!(
+            monitor_delivered_execution_identity(
+                &mut env,
+                &repo,
+                42,
+                Some("delivered-holder"),
+                Some(&proof),
+            )
+            .is_none(),
+            "the captured runtime's old authority cannot prove delivery for its replacement"
+        );
     }
 
     #[test]

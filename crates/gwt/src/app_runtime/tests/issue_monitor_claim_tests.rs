@@ -6397,10 +6397,10 @@ fn issue_7087_open_project_reconnects_after_daemon_restart_and_materializes_deli
         .unwrap();
     let context = fixture.runtime.test_context();
     let recorded = fixture.recorded_events.clone();
-    let status = || {
-        gwt::daemon_publisher::read_issue_monitor_status(&root)
-            .unwrap()
-            .unwrap()
+    let status = |owner: &gwt::project_runtime::test_support::ProjectOwnerHarness| {
+        owner
+            .monitor_status()
+            .expect("the actual daemon projection")
     };
     let scan_until = |owner: &gwt::project_runtime::test_support::ProjectOwnerHarness,
                       label: &str,
@@ -6446,7 +6446,9 @@ fn issue_7087_open_project_reconnects_after_daemon_restart_and_materializes_deli
     let mut subscribers = crate::BoardDaemonSubscriberRegistry::default();
     subscribers.sync(&fixture.runtime, fixture.runtime.proxy.clone());
     scan_until(&original_owner, "the original GUI observer", &|| {
-        status()["gui_action"] == gwt::issue_monitor::GUI_MATERIALIZER_RECONNECT_ACTION
+        status(&original_owner).is_some_and(|status| {
+            status["gui_action"] == gwt::issue_monitor::GUI_MATERIALIZER_RECONNECT_ACTION
+        })
     });
     assert!(!fixture.runtime.issue_monitor_materializer_ready());
     assert!(subscribers.subscribers.values().all(|(_, ready, _)| !ready));
@@ -6470,9 +6472,16 @@ fn issue_7087_open_project_reconnects_after_daemon_restart_and_materializes_deli
     scan_until(
         &restarted_owner,
         "the GUI observer after host restart",
-        &|| status()["gui_action"] == gwt::issue_monitor::GUI_MATERIALIZER_RECONNECT_ACTION,
+        &|| {
+            status(&restarted_owner).is_some_and(|status| {
+                status["gui_action"] == gwt::issue_monitor::GUI_MATERIALIZER_RECONNECT_ACTION
+            })
+        },
     );
-    assert_eq!(status()["stall_reason"], "gui_disconnected");
+    assert_eq!(
+        status(&restarted_owner).expect("reconnected observer status")["stall_reason"],
+        "gui_disconnected"
+    );
     assert!(fixture.runtime.runtimes.is_empty());
     assert!(!has_delivery(), "an observer cannot authorize a launch");
 
@@ -6525,7 +6534,10 @@ fn issue_7087_open_project_reconnects_after_daemon_restart_and_materializes_deli
         "the promoted materializer delivery",
         &has_delivery,
     );
-    assert_ne!(status()["stall_reason"], "gui_disconnected");
+    assert_ne!(
+        status(&restarted_owner).expect("promoted materializer status")["stall_reason"],
+        "gui_disconnected"
+    );
     let launch = {
         let mut events = recorded.lock().unwrap();
         let index = events

@@ -62,6 +62,10 @@ use super::transport::{
 mod issue_monitor_admission;
 
 #[cfg(test)]
+#[path = "issue_monitor_scan_frequency_tests.rs"]
+mod issue_monitor_scan_frequency_tests;
+
+#[cfg(test)]
 fn test_monitor(config: crate::IssueMonitorConfig) -> crate::IssueMonitorState {
     let mut monitor = crate::IssueMonitorState::new(config);
     monitor.set_source_repository(Some(("example", "repo")));
@@ -467,6 +471,7 @@ pub(crate) struct OwnerDaemonFixture {
     pub(crate) scan: Arc<OwnerMonitorScanGate>,
     pub(crate) monitor_snapshot:
         tokio::sync::watch::Receiver<Option<crate::IssueMonitorWindowSnapshot>>,
+    pub(crate) hub: BroadcastHub,
     endpoint_path: PathBuf,
     socket_path: PathBuf,
     shutdown: Arc<DaemonShutdown>,
@@ -562,7 +567,7 @@ impl OwnerDaemonFixture {
         let server = run_bound_server(
             endpoint.clone(),
             endpoint_path.into(),
-            hub,
+            hub.clone(),
             shutdown.clone(),
             crate::IssueMonitorConfig {
                 poll_interval_secs: 3600,
@@ -594,6 +599,7 @@ impl OwnerDaemonFixture {
             owner,
             scan,
             monitor_snapshot,
+            hub,
             endpoint_path: endpoint_path.into(),
             socket_path,
             shutdown,
@@ -813,6 +819,14 @@ async fn automatic_scan_retry_reuses_periodic_reads_but_explicit_scan_stays_fres
     let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
     let root = temp.path().join("project");
     fs::create_dir_all(&root).unwrap();
+    crate::save_issue_monitor_prefs(
+        &crate::issue_monitor_prefs_path_for_repo_path(&root),
+        &crate::IssueMonitorPrefs {
+            enabled: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
     let scope = RuntimeScope::new(
         "abcdef0123456789",
         "feedfacecafebeef",
@@ -830,7 +844,11 @@ async fn automatic_scan_retry_reuses_periodic_reads_but_explicit_scan_stays_fres
         scope,
         hub.clone(),
         shutdown.clone(),
-        crate::IssueMonitorConfig::default(),
+        crate::IssueMonitorConfig {
+            enabled: true,
+            poll_interval_secs: 1,
+            ..Default::default()
+        },
         gwt_core::deadline_budget::HANG_GUARD,
         IssueMonitorWorkerTestHooks {
             scan_override: Some(Arc::new(move |monitor| {
@@ -838,10 +856,10 @@ async fn automatic_scan_retry_reuses_periodic_reads_but_explicit_scan_stays_fres
                 observed
                     .send(gwt_git::gh_rest::monitor_read_max_age_secs())
                     .unwrap();
-                if index == 0 {
+                if index <= 1 {
                     gwt_core::test_support::recv_event(
                         &release_rx.lock().unwrap(),
-                        "release first scan",
+                        "release scan after its ordered control",
                     );
                 }
                 Ok(monitor)
@@ -864,7 +882,6 @@ async fn automatic_scan_retry_reuses_periodic_reads_but_explicit_scan_stays_fres
     };
     // test-hygiene: allow-wall-clock-deadline Channels order the real driver; this timeout only bounds a broken fixture.
     let result = tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
-        publish(serde_json::json!({"scan_now": {}})).await.ok()?;
         let first = observations.recv().await?;
         // Change the revision while the first scan is blocked, without asking
         // for a fresh remote read. Its proposal must be rejected and retried.
@@ -876,6 +893,7 @@ async fn automatic_scan_retry_reuses_periodic_reads_but_explicit_scan_stays_fres
         release_tx.send(()).ok()?;
         let retry = observations.recv().await?;
         publish(serde_json::json!({"scan_now": {}})).await.ok()?;
+        release_tx.send(()).ok()?;
         let explicit = observations.recv().await?;
         Some((first, retry, explicit))
     })
@@ -883,7 +901,7 @@ async fn automatic_scan_retry_reuses_periodic_reads_but_explicit_scan_stays_fres
     let _ = release_tx.send(());
     shutdown.request();
     worker.await.unwrap();
-    assert_eq!(result.unwrap(), Some((None, Some(600), None)));
+    assert_eq!(result.unwrap(), Some((Some(600), Some(600), None)));
 }
 
 /// A failed effect must not make its rejected concurrent scan retry it again.
@@ -1208,7 +1226,7 @@ fn periodic_read_max_age_defaults_to_the_production_budget_and_zero_means_fresh(
 
 #[cfg(test)]
 #[test]
-fn periodic_scan_guard_keeps_late_cleanup_and_unknown_disk_state() {
+fn periodic_scan_guard_keeps_late_cleanup_but_skips_idle_unknown_disk_state() {
     let temp = tempfile::tempdir().unwrap();
     let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
     let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(temp.path());
@@ -1253,7 +1271,7 @@ fn periodic_scan_guard_keeps_late_cleanup_and_unknown_disk_state() {
     assert!(issue_monitor_needs_periodic_scan(&monitor, &prefs_path));
 
     fs::write(&prefs_path, "invalid preferences").unwrap();
-    assert!(issue_monitor_needs_periodic_scan(&monitor, &prefs_path));
+    assert!(!issue_monitor_needs_periodic_scan(&monitor, &prefs_path));
 }
 
 fn acquire_daemon_startup_lease(
@@ -1720,10 +1738,11 @@ fn issue_monitor_needs_periodic_scan(
         return true;
     }
     // Hooks and sibling processes can add cleanup after our last rebase.
-    // Unknown disk state must retain the normal scan and its diagnostics.
+    // An unreadable snapshot cannot grant background work to an otherwise
+    // idle disabled monitor. Explicit controls retain their own diagnostics.
     crate::load_issue_monitor_prefs(prefs_path)
         .map(|prefs| prefs_have_driver_work(&prefs))
-        .unwrap_or(true)
+        .unwrap_or(false)
 }
 
 /// The pause before the next background authority attempt: doubled, and
@@ -2478,7 +2497,7 @@ fn spawn_issue_monitor_worker_with_lease(
                 }
                 _ = wait_for_issue_monitor_deadline(scan_retry_at) => {
                     scan_retry_at = None;
-                    periodic_scan_requested = true;
+                    periodic_scan_requested = issue_monitor_needs_periodic_scan(&monitor, &prefs_path);
                 }
                 _ = wait_for_issue_monitor_deadline(admission_watchdog_deadline) => {
                     if let Some(admission) = in_flight_admission.as_mut() {
@@ -2618,7 +2637,9 @@ fn spawn_issue_monitor_worker_with_lease(
                                 // Preserve deliveries until a fresh scan commits. In particular,
                                 // a host-drain deferral must not immediately emit itself again.
                                 publish_issue_monitor_read_only_payloads(&hub, &monitor, &project_store);
-                                periodic_scan_requested = true;
+                                // Rejection does not create new work. The existing poll timer
+                                // rechecks eligibility, so contention cannot sustain its own
+                                // scan loop or keep an idle disabled project scanning.
                                 #[cfg(test)]
                                 if let Some(observe) = &test_hooks.rejected_scan_observer {
                                     observe(effect_execution_requested);
