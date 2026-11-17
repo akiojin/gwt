@@ -1850,16 +1850,16 @@ const at = new Date().toISOString();`);
 const directory = path.join(process.env.HOME, '.claude', 'projects', 'works-fixture');
 fs.mkdirSync(directory, {recursive:true});
 const rollout = path.join(directory, native + '.jsonl');
-for (const age of [60000, 0]) fs.appendFileSync(rollout, JSON.stringify({
+for (const age of [300000, 60000, 0]) fs.appendFileSync(rollout, JSON.stringify({
   type:'assistant',sessionId:native,cwd:process.cwd(),timestamp:new Date(Date.now()-age).toISOString(),
   message:{id:require('node:crypto').randomUUID(),model:'claude-sonnet-4-5',usage:{
     input_tokens:80,output_tokens:12,cache_read_input_tokens:40,cache_creation_input_tokens:5}}}) + '\\n');
 ` + claude.slice(transcriptEnd);
         await writeFixtureNodeCommand(bin, "claude", claude);
         execFileSync(process.execPath, ["--check", claudeScript]);
-        // All five real children need measured transcript data before a fleet total is known.
+        // Seed five completed minutes of transcript coverage for every participant.
         provider = provider.replace("// Like the real provider,", `
-for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON.stringify({
+for (const [index, age] of [300000, 60000, 0].entries()) fs.appendFileSync(rollout, JSON.stringify({
   timestamp:new Date(Date.now()-age).toISOString(),type:'event_msg',payload:{type:'token_count',info:{
     total_token_usage:{input_tokens:100*(index+1),cached_input_tokens:20*(index+1),output_tokens:10*(index+1)},
     last_token_usage:{input_tokens:100,cached_input_tokens:20,output_tokens:10},model_context_window:1000}}
@@ -1944,12 +1944,14 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
         const input = sum("today_input_tokens"), output = sum("today_output_tokens");
         const cache = sum("today_cache_read_tokens") + usage.filter((session: any) => session.provider === "claude_code")
           .reduce((total: number, session: any) => total + session.telemetry.today_cache_creation_tokens, 0);
-        const buckets = activity?.agents.map((agent: any) => usage.find((session: any) => session.session_id === agent.session_id)
-          ?.telemetry.minute_buckets.at(-1)) ?? [];
-        if (buckets.length !== 5 || buckets.some((bucket: any) => !Number.isFinite(bucket?.tokens))
-          || new Set(buckets.map((bucket: any) => bucket.started_at)).size !== 1) return false;
+        const fleetWindows = activity?.agents.map((agent: any) => usage.find((session: any) => session.session_id === agent.session_id)
+          ?.telemetry.minute_buckets.slice(-6, -1)) ?? [];
+        if (fleetWindows.length !== 5 || fleetWindows.some((buckets: any[]) => buckets?.length !== 5
+          || buckets.some(bucket => !Number.isFinite(bucket.tokens)))) return false;
+        const minuteStarts = (buckets: any[]) => buckets.map(bucket => bucket.started_at).join(",");
+        if (new Set(fleetWindows.map(minuteStarts)).size !== 1) return false;
         const expected = { "today-total": input + output, "today-input": input, "today-cache": cache,
-          "today-output": output, "fleet-now": buckets.reduce((total: number, bucket: any) => total + bucket.tokens, 0) };
+          "today-output": output, "fleet-now": fleetWindows.flat().reduce((total: number, bucket: any) => total + bucket.tokens, 0) / 5 };
         for (const [metric, value] of Object.entries(expected)) {
           if (await main.locator('[data-metric="' + metric + '"]').textContent() !== format(value)) return false;
         }
@@ -2003,7 +2005,6 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
       await expect(first.locator(".work-identity")).toHaveText("PM · claude");
       await expect(first).toHaveAttribute("data-state", "running");
       await expect(main.locator('[data-count="running"]')).toHaveText("5");
-      await expect(main.locator(".works-active")).toHaveText("Active 5");
       await expect(first.locator(".work-model")).toHaveText("claude-sonnet-4-5", { timeout: 45_000 });
       for (const metric of ["input", "cache", "output"]) await expect(first.locator(`[data-stat="${metric}"]`)).toHaveText(/^[1-9]/);
       await assertAggregates();
@@ -2033,7 +2034,7 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
       await expect(rows.first().locator(".work-purpose")).toHaveText(purpose);
       await expect(rows.first().locator(".work-identity")).toHaveText("PM · claude");
       await expect(rows.first()).toHaveAttribute("data-state", "running");
-      await expect(main.locator(".works-active")).toHaveText("Active 5");
+      await expect(main.locator('[data-count="running"]')).toHaveText("5");
       await assertAggregates();
       await expect.poll(async () => {
         const capacity = JSON.parse(await readFile(join(fixture.home, ".gwt", "machine-state", "agent-capacity.json"), "utf8"));

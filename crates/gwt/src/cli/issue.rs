@@ -758,16 +758,17 @@ pub(crate) fn merge_board_escalations_into_needs_human(
     project_root: &std::path::Path,
     status: &mut crate::IssueMonitorAgentStatus,
 ) -> serde_json::Value {
-    let escalation_store = match gwt_core::coordination::load_escalation_store(project_root) {
-        Ok(store) => store,
-        Err(error) => {
-            tracing::warn!(
-                %error,
-                "could not read the Board escalation index for issue.monitor.status"
-            );
-            Default::default()
-        }
-    };
+    let (escalation_store, board_available) =
+        match gwt_core::coordination::load_escalation_store(project_root) {
+            Ok(store) => (store, true),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "could not read the Board escalation index for issue.monitor.status"
+                );
+                (Default::default(), false)
+            }
+        };
     let escalated = escalation_store.open_owner_issue_numbers();
     let cache =
         Cache::new(crate::issue_cache::issue_cache_root_for_repo_path_or_detached(project_root));
@@ -861,6 +862,8 @@ pub(crate) fn merge_board_escalations_into_needs_human(
         }
     }
     status.needs_human.sort_unstable();
+    status.needs_human.dedup();
+    status.refresh_needs_human_count(board_available && status.needs_human_count.is_some());
     // Issue #4363: an unbound window has no runtime inbox row carrying its
     // reason. Keep the Board request visible without changing runtime state.
     let mut board_escalation_details = Vec::new();
@@ -1374,6 +1377,7 @@ fn refresh_monitor_capacity(
 /// fleet outage while thirteen agent windows were committing and a PR landed.
 fn mark_degraded_cache_projection(status: &mut crate::IssueMonitorAgentStatus) {
     status.source = crate::IssueMonitorStatusSource::DegradedCache;
+    status.refresh_needs_human_count(false);
     // AC-3: preferences are what a stopped monitor stops maintaining, so an
     // empty list here is "no launch recorded", not "no launch running".
     status.active_launches_incomplete = true;
@@ -1507,6 +1511,7 @@ fn attach_monitor_control_identity(
             .into_iter()
             .filter(|number| changed.contains(number)),
     );
+    status.refresh_needs_human_count(status.needs_human_count.is_some());
 }
 
 /// Issue #3478 (AC-9): the questions autonomous executions are parked on.
@@ -13266,6 +13271,14 @@ mod tests {
             serde_json::json!([2338]),
             "an agent blocked on #2338 must be findable without reading its pane: {out}"
         );
+        assert_eq!(
+            status.get("needs_human_count"),
+            Some(&serde_json::Value::Null)
+        );
+        assert_eq!(
+            status["gui_status"].get("needs_human_count"),
+            Some(&serde_json::Value::Null)
+        );
         assert_eq!(status["reliability"]["available"], true);
         assert_eq!(
             status["reliability"]["days"]
@@ -13910,6 +13923,7 @@ mod tests {
             usage_threshold_percent: 80,
             provider_quota_holds: Vec::new(),
             needs_human: vec![2338],
+            needs_human_count: Some(1),
             released: Vec::new(),
             inbox: Vec::new(),
             inbox_coverage: None,
@@ -13976,6 +13990,7 @@ mod tests {
             usage_threshold_percent: 80,
             provider_quota_holds: Vec::new(),
             needs_human: vec![2338],
+            needs_human_count: Some(1),
             released: Vec::new(),
             inbox: vec![crate::issue_monitor::IssueMonitorInboxSummary {
                 needs_human_reason: None,
@@ -14133,6 +14148,7 @@ mod tests {
                 usage_threshold_percent: 80,
                 provider_quota_holds: Vec::new(),
                 needs_human: vec![2338],
+                needs_human_count: Some(1),
                 released: Vec::new(),
                 inbox: vec![crate::issue_monitor::IssueMonitorInboxSummary {
                     needs_human_reason: None,
@@ -14264,6 +14280,7 @@ mod tests {
             usage_threshold_percent: 80,
             provider_quota_holds: Vec::new(),
             needs_human: vec![2338],
+            needs_human_count: Some(1),
             released: Vec::new(),
             inbox: Vec::new(),
             inbox_coverage: None,
@@ -14299,6 +14316,7 @@ mod tests {
 
         assert!(published.queue.is_empty());
         assert!(published.needs_human.is_empty());
+        assert_eq!(published.needs_human_count, Some(0));
         assert_eq!(published.last_error, None);
     }
 
@@ -19037,6 +19055,7 @@ command = "my-agent-cli"
             usage_threshold_percent: 80,
             provider_quota_holds: Vec::new(),
             needs_human: Vec::new(),
+            needs_human_count: Some(0),
             released: Vec::new(),
             inbox: vec![crate::issue_monitor::IssueMonitorInboxSummary {
                 needs_human_reason: None,

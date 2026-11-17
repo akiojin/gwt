@@ -162,7 +162,6 @@ test.describe("Issue #3590 closed owner terminal convergence", () => {
       await expect(currentWorks.locator(".work-row")).toHaveCount(1, { timeout: 30_000 });
       await expect(currentWorks.locator('.work-row[data-window-id="' + sourceId + '"]')).toHaveCount(0);
       await expect(currentWorks.locator('.work-row[data-window-id="' + companionId + '"]')).toBeVisible();
-      await expect(page.locator(".works-active")).toHaveText("Active 1");
       await info.attach("closed-owner-convergence-" + theme, {
         body: await page.screenshot(), contentType: "image/png",
       });
@@ -193,7 +192,7 @@ test.describe("Issue #3590 closed owner terminal convergence", () => {
             rows: Array.from(document.querySelectorAll(".work-row"), row => ({
               windowId: row.getAttribute("data-window-id"), text: row.textContent,
             })),
-            active: document.querySelector(".works-active")?.textContent,
+            running: document.querySelector('.works-counts [data-count="running"]')?.textContent,
           };
         });
         await info.attach("closed-owner-projection-events-" + theme, {

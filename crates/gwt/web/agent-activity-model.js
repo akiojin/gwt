@@ -507,6 +507,10 @@ export function createMemberTuningModel(projectKey, { onSave = () => {}, schedul
   return { model, applyTuningSnapshot, editTuning, applyTuningError, retryTuning, disconnectTuning, setPmMember, setTuningAvailable, setPmProfileAvailable, applyPmTuningStatus, applyRosterTuningSnapshot, applyRosterTuningError, applyPmTuningResult };
 }
 
+export const FLEET_RATE_WINDOW_MINUTES = 5;
+const COMPLETED_USAGE_MINUTES = 29; // The producer supplies 30 buckets, including the current minute.
+export const FLEET_RATE_POINTS = COMPLETED_USAGE_MINUTES - FLEET_RATE_WINDOW_MINUTES + 1;
+
 // Inputs are session-attributed measurements, never provider account totals.
 export function selectWorksTelemetry({ sessions = [], projectRoot, agents = [], works = [], bySession = {} }) {
   const seen = new Set();
@@ -563,13 +567,25 @@ export function selectWorksTelemetry({ sessions = [], projectRoot, agents = [], 
       model: usage?.model ?? bySession[agent.session_id]?.model ?? null,
     };
   }
-  // Each bucket needs evidence for every live participant at the same timestamp.
+  // The last bucket in each observation is still open. Align completed buckets
+  // by timestamp so a delayed row cannot shift its usage into another minute.
   const liveSessions = agents.map(agent => projectSessions.find(session => session.session_id === agent.session_id && session.active !== false));
-  const series = liveSessions.map(session => session?.telemetry?.minute_buckets);
-  const fleet = Array.from({ length: 30 }, (_, index) => {
-    const starts = series.map(buckets => buckets?.[index]?.started_at);
-    return starts.length && starts[0] && starts.every(start => start === starts[0])
-      ? sumKnown(series.map(buckets => buckets?.[index]?.tokens)) : null;
+  const series = liveSessions.map(session => {
+    const buckets = session?.state?.kind === "ok" ? session.telemetry?.minute_buckets ?? [] : [];
+    const openMinute = Date.parse(buckets.at(-1)?.started_at);
+    return {
+      openMinute: Number.isFinite(openMinute) ? openMinute : -Infinity,
+      completed: new Map(buckets.slice(0, -1).map(bucket => [Date.parse(bucket.started_at), bucket.tokens])),
+    };
+  });
+  const latestOpenMinute = Math.max(...series.map(row => row.openMinute));
+  const totals = Array.from({ length: COMPLETED_USAGE_MINUTES }, (_, index) => {
+    const minute = latestOpenMinute - (COMPLETED_USAGE_MINUTES - index) * 60_000;
+    return sumKnown(series.map(row => row.completed.get(minute)));
+  });
+  const fleet = Array.from({ length: FLEET_RATE_POINTS }, (_, index) => {
+    const total = sumKnown(totals.slice(index, index + FLEET_RATE_WINDOW_MINUTES));
+    return total === null ? null : total / FLEET_RATE_WINDOW_MINUTES;
   });
   const todayTotals = { input_tokens: today("today_input_tokens"), output_tokens: today("today_output_tokens"),
     cache_tokens: sumKnown(projectSessions.map(session => cache(session.provider,

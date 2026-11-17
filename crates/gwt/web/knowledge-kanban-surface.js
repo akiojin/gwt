@@ -1196,7 +1196,7 @@ export function createKnowledgeKanbanSurface({
           maxActive: count(status.max_active_agents ?? 1) };
       }
 
-      const issueMonitorModel = createUiStateStore({ inboxByIssue: {}, counts: issueMonitorCounts(),
+      const issueMonitorModel = createUiStateStore({ inboxByIssue: {}, inboxObserved: false, counts: issueMonitorCounts(),
         humanAttention: { count: null, summary: "", byIssue: {} },
         steeringAttention: { count: null, summary: "", byIssue: {} },
         reviewAttention: { count: null, summary: "", byIssue: {} },
@@ -1549,10 +1549,13 @@ export function createKnowledgeKanbanSurface({
         const decisions = model.pmDecisionAttention?.count != null ? model.pmDecisionAttention : null;
         const parts = decisions ? [...issueParts, decisions] : issueParts;
         if (!parts.length) return { ...model, decisionAttention: { count: null, summary: "" } };
-        const count = new Set(issueParts.flatMap(part => Object.keys(part.byIssue || {}))).size
-          + (decisions?.count ?? 0);
+        const human = model.humanAttention;
+        // A status snapshot can include escalation IDs absent from the Inbox.
+        // Without those IDs the union cannot deduplicate other attention sources.
+        const count = human.count != null && human.count !== Object.keys(human.byIssue).length
+          ? null : new Set(issueParts.flatMap(part => Object.keys(part.byIssue || {}))).size + (decisions?.count ?? 0);
         return { ...model, decisionAttention: { count,
-          summary: [`Awaiting attention ${count}`, ...parts.map(part => part.summary)].join(" | ") } };
+          summary: [count == null ? "" : `Awaiting attention ${count}`, ...parts.map(part => part.summary)].filter(Boolean).join(" | ") } };
       }
 
       // SPEC #5016 HSK: pm-chat publishes the unanswered decisions of one PM
@@ -1592,12 +1595,16 @@ export function createKnowledgeKanbanSurface({
       }
 
       function withMonitorAttention(model) {
-        return withDecisionAttention(withMonitorHolds(model));
+        const { byIssue } = model.humanAttention;
+        const count = model.status.needs_human_count === undefined && model.inboxObserved
+          ? Object.keys(byIssue).length : model.status.needs_human_count ?? null;
+        return withDecisionAttention(withMonitorHolds({ ...model,
+          humanAttention: { count, summary: count == null ? "" : `Needs human ${count}`, byIssue } }));
       }
 
       function withMonitorHolds(model) {
         const records = model.status.autonomous_issues;
-        if (!Array.isArray(records) || model.humanAttention.count === null) return model;
+        if (!Array.isArray(records) || !model.inboxObserved) return model;
         // Dispatch holds include automatic capacity/retry waits, not just
         // human decisions. Join the two current snapshots once for every view.
         const current = Object.fromEntries(records.filter(record => Number.isFinite(record?.issue_number))
@@ -1630,6 +1637,7 @@ export function createKnowledgeKanbanSurface({
 
       function applyIssueMonitorStatus(nextStatus) {
         issueMonitorModel.update(model => {
+          const needsHumanCount = nextStatus?.needs_human_count;
           const status = {
             ...model.status,
             ...(nextStatus || {}),
@@ -1637,6 +1645,8 @@ export function createKnowledgeKanbanSurface({
             agent_roster_capacity: nextStatus?.agent_roster_capacity ?? null,
             agent_capacity: nextStatus?.agent_capacity ?? null,
             verification_capacity: nextStatus?.verification_capacity ?? null,
+            needs_human_count: needsHumanCount === undefined || (Number.isSafeInteger(needsHumanCount) && needsHumanCount >= 0)
+              ? needsHumanCount : null,
             quota_hold: normalizedIssueMonitorQuotaHold(nextStatus),
             github_budget: nextStatus?.github_budget ?? null,
             // Issue #4366 AC-6b: omitted once the hold clears, so it must not
@@ -1658,17 +1668,16 @@ export function createKnowledgeKanbanSurface({
         const inboxByIssue = Object.fromEntries((Array.isArray(items) ? items : [])
           .filter(item => Number.isFinite(item?.issue?.number))
           .map(item => [item.issue.number, item]));
-        // SPEC #5016 AC-HS1/HS2: derive once from the complete, deduplicated
-        // inbox. A deliberate stop is Held, not a pending human decision.
+        // SPEC #5016 AC-HS1/HS2: project reasons from the deduplicated Inbox.
+        // A deliberate stop is Held, not a pending human decision.
         const byIssue = Object.fromEntries(Object.values(inboxByIssue)
           .filter(item => item.state === "needs_human" && issueEntryStateKey(item.issue) === "open"
             && issueStopReason({ monitor_state: item.state, error_message: item.error_message }) === null)
           .map(item => [item.issue.number, {
             reason: String(item.error_message || "").trim() || "Human decision required",
           }]));
-        const count = Object.keys(byIssue).length;
-        issueMonitorModel.update(model => withMonitorAttention({ ...model, inboxByIssue,
-          humanAttention: { count, summary: `Needs human ${count}`, byIssue } }));
+        issueMonitorModel.update(model => withMonitorAttention({ ...model, inboxByIssue, inboxObserved: true,
+          humanAttention: { ...model.humanAttention, byIssue } }));
       }
 
       function applyIssueMonitorQueueResult(event) {

@@ -4165,6 +4165,10 @@ pub struct IssueMonitorStatusView {
     #[serde(default)]
     pub other_terminal_queue_count: usize,
     pub active_count: usize,
+    /// Distinct Issues requiring a human response in the current observation.
+    /// Missing on older publishers and null when coverage is unavailable.
+    #[serde(default)]
+    pub needs_human_count: Option<usize>,
     pub max_active_agents: usize,
     #[serde(default)]
     pub max_active_agents_override: Option<usize>,
@@ -4430,6 +4434,9 @@ pub struct IssueMonitorAgentStatus {
     /// escalation unrecoverable for an unattended reader.
     #[serde(default)]
     pub needs_human: Vec<u64>,
+    /// Cardinality of the current needs_human observation, when available.
+    #[serde(default)]
+    pub needs_human_count: Option<usize>,
     /// Completed launches explicitly reclaimed with issue.monitor.stop.
     #[serde(default)]
     pub released: Vec<u64>,
@@ -4586,6 +4593,15 @@ pub struct IssueMonitorAgentStatus {
     /// instead of the queue head.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slot_occupancy: Option<IssueMonitorSlotOccupancy>,
+}
+
+impl IssueMonitorAgentStatus {
+    pub(crate) fn refresh_needs_human_count(&mut self, available: bool) {
+        self.needs_human_count = available.then_some(self.needs_human.len());
+        if let Some(view) = &mut self.gui_status {
+            view.needs_human_count = self.needs_human_count;
+        }
+    }
 }
 
 /// Issue #5047 AC-8: the `max_active` budget broken down by what holds it.
@@ -15604,7 +15620,7 @@ impl IssueMonitorState {
 
     pub fn status_view(&self) -> IssueMonitorStatusView {
         let now = format_rfc3339_utc(chrono::Utc::now());
-        self.status_view_with_quota_hold(&now, self.provider_quota_hold_at(&now))
+        self.status_view_without_scan_at(&now)
     }
 
     /// Issue #5077: status phase mapping (the stored lifecycle is unchanged):
@@ -15676,11 +15692,17 @@ impl IssueMonitorState {
             .or_else(|| self.first_failed_issue_banner().map(|message| (message, "failed_issues"))))
     }
 
-    fn status_view_with_quota_hold(
+    fn status_view_without_scan_at(&self, now: &str) -> IssueMonitorStatusView {
+        let needs_human = self.needs_human_issue_numbers(self.failure_surge().as_ref());
+        self.status_view_with_needs_human_count(now, self.needs_human_count(&needs_human))
+    }
+
+    fn status_view_with_needs_human_count(
         &self,
         now: &str,
-        quota_hold: Option<IssueMonitorProviderQuotaHold>,
+        needs_human_count: Option<usize>,
     ) -> IssueMonitorStatusView {
+        let quota_hold = self.provider_quota_hold_at(now);
         let last_error = self.selected_status_error().map(|(message, _)| message);
         let update_drain = self.update_drain();
         // Issue #5321 AC-3: Issue failures remain diagnostic history, while
@@ -15768,6 +15790,7 @@ impl IssueMonitorState {
             unqueued_open_count,
             other_terminal_queue_count,
             active_count: self.active_count(),
+            needs_human_count,
             max_active_agents: self.effective_max_active_agents(),
             max_active_agents_override: self.max_active_agents_policy().0,
             max_active_last_change: self.max_active_agents_policy().1,
@@ -15972,6 +15995,32 @@ impl IssueMonitorState {
         })
     }
 
+    fn needs_human_issue_numbers(
+        &self,
+        failure_surge: Option<&IssueMonitorFailureSurge>,
+    ) -> Vec<u64> {
+        // Issue #4207 AC-5: report failed rows while a surge is in force.
+        // This doesn't park them or change their retry state.
+        self.autonomous_records
+            .values()
+            .filter(|record| record.phase == AutonomousPhase::NeedsHuman)
+            .map(|record| record.issue_number)
+            .chain(
+                failure_surge
+                    .into_iter()
+                    .flat_map(|surge| surge.issues.iter().copied()),
+            )
+            .filter(|number| !self.label_excluded_issues.contains(number))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    fn needs_human_count(&self, issue_numbers: &[u64]) -> Option<usize> {
+        (self.scan_recovery_error.is_none() && self.last_prefs_reset.is_none())
+            .then_some(issue_numbers.len())
+    }
+
     /// Issue #4918 AC-4: the queued rows the retry ladder is holding at `now`,
     /// with the cause kind of each.
     ///
@@ -16051,8 +16100,10 @@ impl IssueMonitorState {
     }
 
     fn agent_status_without_scan_at(&self, now: &str) -> IssueMonitorAgentStatus {
-        let status = self.status_view_with_quota_hold(now, self.provider_quota_hold_at(now));
         let failure_surge = self.failure_surge();
+        let needs_human = self.needs_human_issue_numbers(failure_surge.as_ref());
+        let needs_human_count = self.needs_human_count(&needs_human);
+        let status = self.status_view_with_needs_human_count(now, needs_human_count);
         let launch_failures = self.launch_failures_at(now);
         let stall_reason = self.stall_reason_at(now);
         IssueMonitorAgentStatus {
@@ -16085,25 +16136,8 @@ impl IssueMonitorState {
             effective_launch_profile: status.effective_launch_profile.clone(),
             usage_threshold_percent: status.usage_threshold_percent,
             provider_quota_holds: self.active_provider_quota_holds_at(now),
-            // Issue #4207 AC-5: while a surge is in force the failed rows are
-            // listed here too. This is projection only — nothing is parked,
-            // no phase changes, and the retry path is untouched — but a reader
-            // can no longer see nine failures beside an empty `needs_human`
-            // and conclude that nothing needs them.
-            needs_human: status
-                .autonomous_issues
-                .iter()
-                .filter(|summary| summary.needs_human)
-                .map(|summary| summary.issue_number)
-                .chain(
-                    failure_surge
-                        .iter()
-                        .flat_map(|surge| surge.issues.iter().copied()),
-                )
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .filter(|number| !self.label_excluded_issues.contains(number))
-                .collect(),
+            needs_human,
+            needs_human_count,
             released: self
                 .completion_records
                 .keys()
@@ -16374,7 +16408,9 @@ impl IssueMonitorState {
     /// whether a project is being driven.
     pub fn agent_status_at(&self, now: &str) -> IssueMonitorAgentStatus {
         let mut status = self.agent_status_without_scan_at(now);
-        status.gui_status = Some(self.status_view_at(now));
+        if let Some(gui_status) = &mut status.gui_status {
+            self.apply_status_view_scan_diagnostics(gui_status, now);
+        }
         status.scan_stall = self.scan_stall_at(now);
         status.agent_blackout = self.agent_blackout_at(now);
         if self.scan_recovery_error.is_some() && status.enabled {
@@ -16562,21 +16598,26 @@ impl IssueMonitorState {
     /// Project scan staleness onto the existing status error surface using a
     /// caller-supplied clock so daemon publication and tests stay deterministic.
     pub fn status_view_at(&self, now: &str) -> IssueMonitorStatusView {
-        let mut status = self.status_view_with_quota_hold(now, self.provider_quota_hold_at(now));
+        let mut status = self.status_view_without_scan_at(now);
+        self.apply_status_view_scan_diagnostics(&mut status, now);
+        status
+    }
+
+    fn apply_status_view_scan_diagnostics(&self, status: &mut IssueMonitorStatusView, now: &str) {
         // Fleet blackout is independent of the current scan/error state.
         status.agent_blackout = self.agent_blackout_at(now);
         if !status.enabled || self.scan_recovery_error.is_some() || status.state == "auth_required"
         {
-            return status;
+            return;
         }
         let Some(last_scan_at) = status.last_scan_at.as_deref() else {
-            return status;
+            return;
         };
         let Some(elapsed_secs) = rfc3339_elapsed_secs(last_scan_at, now) else {
-            return status;
+            return;
         };
         let Ok(elapsed_secs) = u64::try_from(elapsed_secs) else {
-            return status;
+            return;
         };
         if elapsed_secs >= self.config.poll_interval_secs.saturating_mul(3) {
             status.state = "error".to_string();
@@ -16586,7 +16627,6 @@ impl IssueMonitorState {
                 None => diagnosis,
             });
         }
-        status
     }
 
     /// SPEC #3200 T-001/FR-001: read the opt-in autonomous mode flag.
@@ -29256,6 +29296,7 @@ mod tests {
                 usage_threshold_percent: 80,
                 provider_quota_holds: Vec::new(),
                 needs_human: Vec::new(),
+                needs_human_count: Some(0),
                 released: Vec::new(),
                 inbox: vec![IssueMonitorInboxSummary {
                     needs_human_reason: None,
@@ -29386,6 +29427,13 @@ mod tests {
             status.needs_human,
             vec![7],
             "an escalated issue must be visible without subscribing"
+        );
+        let wire = serde_json::to_value(&status).unwrap();
+        assert_eq!(wire["needs_human_count"], 1);
+        assert_eq!(wire["gui_status"]["needs_human_count"], 1);
+        assert_eq!(
+            serde_json::to_value(monitor.status_view()).unwrap()["needs_human_count"],
+            1
         );
         let escalated_row = status
             .inbox
@@ -38796,6 +38844,8 @@ mod tests {
             vec![4190, 4191, 4192, 4193, 4196, 4197, 4198, 4199, 4200],
             "the failed rows are visible to a human instead of an empty list"
         );
+        assert_eq!(status.needs_human_count, Some(9));
+        assert_eq!(status.gui_status.unwrap().needs_human_count, Some(9));
         // The surge is a reading, not a park: nothing left the retry path.
         for number in surge.issues.iter().copied() {
             assert!(
