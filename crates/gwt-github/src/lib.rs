@@ -25,6 +25,7 @@ pub mod sections;
 pub mod spec_ops;
 pub mod spec_structured;
 pub mod spec_validate;
+mod timestamp;
 
 pub use body::{ParseError as BodyParseError, SectionLocation, SectionsIndex, SpecBody, SpecMeta};
 pub use cache::{
