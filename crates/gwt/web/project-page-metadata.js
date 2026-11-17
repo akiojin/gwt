@@ -3,7 +3,7 @@ import { createUiStateStore } from "./ui-state-store.js";
 const count = (value) => (Number.isInteger(value) && value >= 0 ? value : 0);
 
 // SPEC 5016 AC-HS1: the single projection of the server aggregate. The tab
-// title, the status strip and the Works heading read only this value; no
+// title, the status strip and the Works and Agents headings read this value; no
 // surface recounts agents from its own input.
 export function projectAgentSummary(aggregate = {}) {
   return Object.freeze({

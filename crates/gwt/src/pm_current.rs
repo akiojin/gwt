@@ -65,7 +65,7 @@ fn facts_from_monitor(
             title: title(*number),
             last_activity_at: None,
         }),
-        needs_human_count: Some(status.needs_human.len()),
+        needs_human_count: status.needs_human_count,
         ..Default::default()
     }
 }
@@ -689,6 +689,7 @@ mod tests {
         let mut status = crate::IssueMonitorState::new(Default::default()).agent_status();
         status.queue = vec![5342, 5341];
         status.needs_human = vec![20, 21];
+        status.refresh_needs_human_count(true);
         let windows = vec![PmIssueFact {
             issue_number: Some(5349),
             title: Some("Current PM".into()),

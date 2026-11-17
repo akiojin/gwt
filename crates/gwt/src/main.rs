@@ -3589,6 +3589,7 @@ mod tests {
             unqueued_open_count: 0,
             other_terminal_queue_count: 0,
             active_count: 0,
+            needs_human_count: Some(0),
             max_active_agents: 1,
             total_candidates: 1,
             active_issue_number: None,

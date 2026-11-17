@@ -2603,7 +2603,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       function recomputeOperatorTelemetry() {
         if (!window.__operatorShell?.applyTelemetryCounts) return;
         // RUNNING / BLOCK / IDLE / ERROR come only from the server aggregate
-        // summary, the same value the tab title and the Works heading render.
+        // summary, also used by the tab title, Works and Agents.
         const summary = projectAgentSummaryModel?.read() ?? projectAgentSummary();
         const counts = {
           running: summary.running,
@@ -6057,7 +6057,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         openSurface("works");
         return worksSurface.openWork(live);
       }
-      agentsSurface = createAgentsSurface({ document, storage: createBrowserEnv(document, window).storage, executionModel: projectExecutionPolicy.model, projectTitle: () => activeProjectTab()?.title || routeProjectKey, rosterModel, tuningController, pmSettingsPanel, scheduleModel, switchModel, activityModel: agentActivityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel,
+      agentsSurface = createAgentsSurface({ document, storage: createBrowserEnv(document, window).storage, executionModel: projectExecutionPolicy.model, projectTitle: () => activeProjectTab()?.title || routeProjectKey, rosterModel, tuningController, pmSettingsPanel, scheduleModel, switchModel, activityModel: agentActivityModel, summaryModel: projectAgentSummaryModel, windowCatalogModel, supportedAgentsModel, customAgentsModel,
         onReloadProfile: () => requestAgentRoster(),
         onSetPmEligibility: (memberId, eligible) => requestAgentRoster({ kind: "set_pm_eligibility", member_id: memberId, eligible }),
         onSelectPm: memberId => requestAgentRoster({ kind: "select_pm", member_id: memberId }),
