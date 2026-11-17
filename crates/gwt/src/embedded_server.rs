@@ -32,9 +32,7 @@ use crate::app_runtime::ClientScope;
 #[cfg(test)]
 use crate::DispatchTarget;
 use axum::{
-    extract::{
-        rejection::JsonRejection, ws::WebSocketUpgrade, DefaultBodyLimit, Query, Request, State,
-    },
+    extract::{ws::WebSocketUpgrade, DefaultBodyLimit, FromRequest, Query, Request, State},
     http::{
         header::{AUTHORIZATION, HOST, ORIGIN},
         HeaderMap, StatusCode,
@@ -793,14 +791,14 @@ async fn project_open_control_handler(
 
 async fn pane_layout_place_control_handler(
     State(state): State<ServerState>,
-    headers: HeaderMap,
-    body: Result<Json<gwt::project_open_control::PaneLayoutPlaceRequest>, JsonRejection>,
+    request: Request,
 ) -> Response {
     let refuse = |status, message: &str| {
         (status, Json(serde_json::json!({ "error": message }))).into_response()
     };
     if gwt::project_open_control::authorize_control_request(
-        headers
+        request
+            .headers()
             .get(AUTHORIZATION)
             .and_then(|value| value.to_str().ok()),
         state.control_token.as_deref(),
@@ -809,9 +807,12 @@ async fn pane_layout_place_control_handler(
     {
         return refuse(StatusCode::UNAUTHORIZED, "missing or invalid control token");
     }
-    let Json(request) = match body {
-        Ok(body) => body,
-        Err(error) => return refuse(error.status(), "invalid pane placement request"),
+    let body =
+        Json::<gwt::project_open_control::PaneLayoutPlaceRequest>::from_request(request, &state);
+    let Json(request) = match tokio::time::timeout(Duration::from_secs(5), body).await {
+        Ok(Ok(body)) => body,
+        Ok(Err(error)) => return refuse(error.status(), "invalid pane placement request"),
+        Err(_) => return refuse(StatusCode::REQUEST_TIMEOUT, "pane placement body timed out"),
     };
     let (reply, mut result) = tokio::sync::mpsc::channel(1);
     if state
