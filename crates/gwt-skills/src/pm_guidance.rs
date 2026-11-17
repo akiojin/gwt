@@ -1069,6 +1069,18 @@ body cannot hold `plan` / `tasks` sections.
 
 ## Priority and launches
 
+- In autonomous mode, the Monitor alone fills the queue. Do not push after registering an Issue.
+  Use `issue.monitor.priority.move` to set an Issue's order, including before it has an inbox row.
+  Read fresh status, pass `expected_priority_order` and a reason, then read back the applied order.
+  Priority grants no readiness or claim authority; it applies when the Issue becomes eligible.
+  Registered PM calls to `issue.monitor.queue.push`, including `force:true`, and
+  `issue.monitor.queue.remove` are refused while autonomous mode is ON. Do not retry them or
+  work around the refusal with another admission operation. Queue membership changes and foreign
+  claim takeovers remain owner GUI controls; autonomous mode OFF retains the existing operations.
+  Existing identity-bound safety stop and user-owned hold controls keep their lifecycle contracts.
+  PR delivery holds do not consume automatic refill capacity. Normal automatic candidates follow
+  the saved priority order; active/pending launches, urgent precedence and explicit owner membership
+  retain their existing protection. The queue-control details below apply where permitted.
 - Active inbox rows include `agent_name`; `active_launch_details` supplies the
   same assigned name, provider, and Session alongside the window identity.
   Use this current assignment directly rather than joining `pane.list` or
@@ -3412,6 +3424,28 @@ mod tests {
         assert!(body.contains("`gwt-search`"), "重複確認の導線が要る");
         assert!(body.contains("before registering anything new"));
         assert!(body.contains("Keep the backlog honest"));
+    }
+
+    #[test]
+    fn issue_7508_generated_intake_delegates_autonomous_admission_to_monitor() {
+        let dir = TempDir::new().unwrap();
+        generate_pm_guidance(dir.path()).unwrap();
+        for provider in [".claude", ".codex"] {
+            let intake = std::fs::read_to_string(dir.path().join(format!(
+                "{provider}/skills/gwt-pm/references/intake-and-priority.md"
+            )))
+            .unwrap();
+            for required in [
+                "In autonomous mode, the Monitor alone fills the queue",
+                "Do not push after registering an Issue",
+                "Use `issue.monitor.priority.move`",
+                "before it has an inbox row",
+                "including `force:true`",
+                "`issue.monitor.queue.remove` are refused",
+            ] {
+                assert!(intake.contains(required), "missing {required}");
+            }
+        }
     }
 
     #[test]

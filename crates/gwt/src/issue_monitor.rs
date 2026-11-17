@@ -20047,16 +20047,65 @@ impl IssueMonitorState {
         if !self.terminal_queue_auto_refill || self.terminal_queue_auto_refill_limit == 0 {
             return 0;
         }
-        let candidates = candidates
+        let mut candidates = candidates
             .iter()
             .copied()
             .filter(|number| {
                 !self.issue_is_closed(*number)
                     && !self.merged_issues.contains(number)
                     && !self.label_excluded_issues.contains(number)
+                    && !self.open_pr_launch_held(*number)
             })
             .collect::<Vec<_>>();
+        let rank = |number: &u64| {
+            self.priority_order
+                .iter()
+                .position(|priority| priority == number)
+                .unwrap_or(usize::MAX)
+        };
+        candidates.sort_by_key(rank);
         let host = crate::process::current_hostname();
+        // Reordering may replace only an unstarted automatic selection. A
+        // claim, pane, delivery, or urgent assignment retains its admission.
+        let mut protected = self
+            .active_issue_numbers()
+            .into_iter()
+            .chain(self.pending_claim_issue_numbers())
+            .chain(self.launched_windows.keys().copied())
+            .chain(self.process_held_issues.iter().copied())
+            .chain(
+                self.pending_launches
+                    .iter()
+                    .map(|launch| launch.issue_number),
+            )
+            .chain(
+                self.pending_launch_deliveries
+                    .iter()
+                    .map(|launch| launch.issue_number),
+            )
+            .collect::<BTreeSet<_>>();
+        let parked = self
+            .open_pr_observations
+            .iter()
+            .filter_map(|(&number, observation)| {
+                (observation.hold.is_some() && !protected.contains(&number)).then_some(number)
+            })
+            .collect::<BTreeSet<_>>();
+        protected.extend(
+            self.autonomous_records
+                .iter()
+                .filter_map(|(&number, record)| {
+                    (record.reviewed_sha.is_some()
+                        || record.pending_cancelled_claim_phase().is_some())
+                    .then_some(number)
+                }),
+        );
+        protected.extend(
+            self.urgent_queue
+                .grants
+                .iter()
+                .filter_map(|(&number, grant)| grant.label_present.then_some(number)),
+        );
         let excluded = self
             .terminal_queue_exclusions
             .get(&host)
@@ -20064,30 +20113,57 @@ impl IssueMonitorState {
             .unwrap_or_default();
         let queue = self.terminal_queues.entry(host).or_default();
         let mut added = 0;
-        let eligible_len = queue
+        let mut eligible_len = queue
             .entries
             .iter()
-            .filter(|entry| !self.label_excluded_issues.contains(&entry.number))
+            .filter(|entry| {
+                !self.label_excluded_issues.contains(&entry.number)
+                    && !parked.contains(&entry.number)
+            })
             .count();
+        let mut displaced = Vec::new();
         for number in &candidates {
-            if eligible_len + added >= self.terminal_queue_auto_refill_limit {
-                break;
-            }
-            if !excluded.contains(number)
-                && !queue.entries.iter().any(|entry| entry.number == *number)
+            if excluded.contains(number)
+                || queue.entries.iter().any(|entry| entry.number == *number)
             {
-                self.terminal_queue_retirements.remove(number);
-                queue.entries.push(IssueMonitorTerminalQueueEntry {
-                    number: *number,
-                    queued_at: now.to_string(),
-                    queued_by: "auto-refill".to_string(),
-                    ..Default::default()
-                });
-                added += 1;
+                continue;
             }
+            if eligible_len >= self.terminal_queue_auto_refill_limit {
+                let replacement = queue
+                    .entries
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, entry)| {
+                        entry.queued_by == "auto-refill"
+                            && !protected.contains(&entry.number)
+                            && !parked.contains(&entry.number)
+                            && !self.label_excluded_issues.contains(&entry.number)
+                            && rank(&entry.number) > rank(number)
+                    })
+                    .max_by_key(|(_, entry)| rank(&entry.number))
+                    .map(|(index, _)| index);
+                let Some(index) = replacement else {
+                    continue;
+                };
+                displaced.push(queue.entries.remove(index).number);
+                eligible_len -= 1;
+            }
+            self.terminal_queue_retirements.remove(number);
+            queue.entries.push(IssueMonitorTerminalQueueEntry {
+                number: *number,
+                queued_at: now.to_string(),
+                queued_by: "auto-refill".to_string(),
+                ..Default::default()
+            });
+            eligible_len += 1;
+            added += 1;
         }
+        queue.entries.sort_by_key(|entry| rank(&entry.number));
         if added > 0 {
             queue.last_seen_at = Some(now.to_string());
+        }
+        for number in displaced {
+            self.clear_provisional_implementation(number);
         }
         added
     }
@@ -50706,6 +50782,118 @@ mod tests {
         );
         assert_eq!(queue.last_seen_at.as_deref(), Some(now));
         assert!(monitor.terminal_queue_orphans().is_empty());
+    }
+
+    #[test]
+    fn issue_7508_priority_orders_refill_before_an_inbox_row_exists() {
+        let now = "2026-11-18T00:00:00Z";
+        let mut monitor = test_monitor(IssueMonitorConfig {
+            enabled: true,
+            ..Default::default()
+        });
+        monitor.set_gui_connected(true);
+        monitor.set_max_active_agents(1);
+        monitor.set_terminal_queue_auto_refill(true, 1);
+        monitor.set_priority_order(vec![2, 1]);
+        let mut restored = test_monitor_with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        restored.set_gui_connected(true);
+        assert!(restored.inbox_item(2).is_none());
+        scan_issue_monitor_candidates(&mut restored, &[issue(1), issue(2)], now);
+        assert_eq!(restored.local_terminal_queue_numbers(), vec![2]);
+        assert_eq!(
+            restored
+                .clone()
+                .next_launch_request(now)
+                .unwrap()
+                .issue_number,
+            2
+        );
+        assert_eq!(
+            restored.prepare_claim_effects_with_probe("host/session", now, 1, |_| false),
+            1
+        );
+        assert_eq!(restored.pending_claim_issue_numbers(), BTreeSet::from([2]));
+    }
+
+    #[test]
+    fn issue_7508_priority_replaces_only_unstarted_auto_refill_work_and_survives_rebase() {
+        let now = "2026-11-18T00:00:00Z";
+        let mut monitor = test_monitor(IssueMonitorConfig {
+            enabled: true,
+            ..Default::default()
+        });
+        monitor.set_gui_connected(true);
+        monitor.set_max_active_agents(1);
+        monitor.set_terminal_queue_auto_refill(true, 1);
+        scan_issue_monitor_candidates(&mut monitor, &[issue(1)], now);
+        monitor.set_priority_order(vec![2, 1]);
+        let disk = monitor.prefs();
+        scan_issue_monitor_candidates(&mut monitor, &[issue(1), issue(2)], now);
+        assert_eq!(monitor.local_terminal_queue_numbers(), vec![2]);
+        monitor.rebase_daemon_driver_prefs(&disk);
+        assert_eq!(monitor.local_terminal_queue_numbers(), vec![2]);
+        assert_eq!(monitor.next_launch_request(now).unwrap().issue_number, 2);
+
+        let mut explicit = test_monitor_with_prefs(IssueMonitorConfig::default(), disk);
+        explicit
+            .terminal_queues
+            .get_mut(&crate::process::current_hostname())
+            .unwrap()
+            .entries[0]
+            .queued_by = "operator".into();
+        scan_issue_monitor_candidates(&mut explicit, &[issue(1), issue(2)], now);
+        assert_eq!(explicit.local_terminal_queue_numbers(), vec![1]);
+    }
+
+    #[test]
+    fn issue_7508_priority_keeps_active_pending_and_urgent_refill_work() {
+        let now = "2026-11-18T00:00:00Z";
+        let mut monitor = test_monitor(IssueMonitorConfig {
+            enabled: true,
+            ..Default::default()
+        });
+        monitor.set_gui_connected(true);
+        monitor.set_max_active_agents(2);
+        monitor.set_terminal_queue_auto_refill(true, 3);
+        scan_issue_monitor_candidates(&mut monitor, &[issue(1), issue(2), issue(3)], now);
+        monitor.complete_active_launch_at(1, "tab::active", now);
+        assert_eq!(
+            monitor.prepare_claim_effects_with_probe("host/session", now, 2, |_| false),
+            1
+        );
+        assert_eq!(monitor.pending_claim_issue_numbers(), BTreeSet::from([2]));
+        let mut urgent = issue(3);
+        urgent.labels.push("urgent".into());
+        monitor.observe_urgent_issue(&urgent, now);
+        monitor.set_priority_order(vec![4]);
+        scan_issue_monitor_candidates(&mut monitor, &[issue(1), issue(2), urgent, issue(4)], now);
+        assert_eq!(monitor.local_terminal_queue_numbers(), vec![3, 1, 2]);
+        assert_eq!(monitor.pending_claim_issue_numbers(), BTreeSet::from([2]));
+        assert!(monitor.active_launches.contains(&1));
+        assert!(monitor.inbox_item(4).is_none());
+    }
+
+    #[test]
+    fn issue_7508_pr_delivery_holds_do_not_consume_auto_refill_capacity() {
+        let now = "2026-11-18T00:00:00Z";
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
+        monitor.set_terminal_queue_auto_refill(true, 1);
+        monitor.terminal_queue_push(&[1], "operator", now);
+        monitor.begin_review(1, 7, "reviewed-head");
+        monitor.reconcile_open_pr_holds(
+            &BTreeMap::from([(
+                1,
+                Some(IssueMonitorOpenPrHold {
+                    pr_number: 7,
+                    lifecycle: "MERGE-CANDIDATE".into(),
+                }),
+            )]),
+            now,
+        );
+        scan_issue_monitor_candidates(&mut monitor, &[issue(1), issue(2)], now);
+        assert_eq!(monitor.local_terminal_queue_numbers(), vec![1, 2]);
+        assert_eq!(monitor.auto_refill_terminal_queue(&[3], now), 0);
+        assert!(monitor.open_pr_launch_held(1));
     }
 
     #[test]

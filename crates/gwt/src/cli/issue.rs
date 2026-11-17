@@ -1962,6 +1962,22 @@ fn monitor_queue_reply(
     projection
 }
 
+fn guard_autonomous_pm_queue_membership(root: &Path, operation: &str) -> Result<(), SpecOpsError> {
+    if super::pm::caller_is_registered_pm(root)
+        && crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(root))
+            .map_err(io_as_api_error)?
+            .autonomous_mode
+    {
+        return Err(SpecOpsError::Validation(format!(
+            "{operation} is refused for the registered PM in autonomous mode: the Monitor owns \
+             queue admission; use issue.monitor.priority.move with number, position and reason \
+             to set the next launch order, including before an inbox row exists. \
+             Queue membership changes and force takeovers require the GUI owner or autonomous mode OFF"
+        )));
+    }
+    Ok(())
+}
+
 /// Push Issues onto this host's terminal queue, naming every number it would
 /// not add.
 ///
@@ -1990,6 +2006,8 @@ fn run_monitor_queue_push<E: CliEnv>(
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let root = issue_monitor_project_root(env, project_root)?;
+    // Refuse before fetching or publishing any advisory GitHub claim.
+    guard_autonomous_pm_queue_membership(&root, "issue.monitor.queue.push")?;
     let path = crate::issue_monitor_prefs_path_for_repo_path(&root);
     let now = chrono::Utc::now().to_rfc3339();
     let queued_expires_at = (chrono::Utc::now() + chrono::Duration::minutes(15)).to_rfc3339();
@@ -2449,6 +2467,7 @@ fn run_monitor_queue_remove<E: CliEnv>(
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let root = issue_monitor_project_root(env, project_root)?;
+    guard_autonomous_pm_queue_membership(&root, "issue.monitor.queue.remove")?;
     let path = crate::issue_monitor_prefs_path_for_repo_path(&root);
     let now = chrono::Utc::now().to_rfc3339();
     let (prefs, _) = crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
@@ -12573,6 +12592,96 @@ mod tests {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default()
+    }
+
+    #[test]
+    fn issue_7508_autonomous_pm_orders_instead_of_mutating_queue_membership() {
+        let tmp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        queue_push_issue(&mut env, 42, None);
+        crate::pm_registry::try_register_pm(
+            &crate::pm_registry::pm_prefs_path_for_repo_path(&repo),
+            crate::pm_registry::PmRegistration {
+                session_id: "queue-pm".into(),
+                agent_id: "codex".into(),
+                worktree_path: repo.to_string_lossy().into_owned(),
+                created_at: None,
+                consecutive_crashes: 0,
+                next_not_before: None,
+            },
+            |_| false,
+        )
+        .unwrap();
+        let _pm =
+            gwt_core::test_support::ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "queue-pm");
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        let prefs = crate::IssueMonitorPrefs {
+            autonomous_mode: true,
+            ..Default::default()
+        };
+        crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let calls_before = env.client.call_log();
+        for command in [
+            IssueCommand::MonitorQueuePush {
+                project_root: None,
+                issue_numbers: vec![42],
+                position: None,
+                force: false,
+            },
+            IssueCommand::MonitorQueuePush {
+                project_root: None,
+                issue_numbers: vec![42],
+                position: None,
+                force: true,
+            },
+            IssueCommand::MonitorQueueRemove {
+                project_root: None,
+                expected_queue_order: None,
+                issue_numbers: vec![42],
+                all_terminals: false,
+            },
+        ] {
+            let error = run(&mut env, command, &mut String::new())
+                .expect_err("autonomous PM must use priority.move");
+            let message = error.to_string();
+            assert!(message.contains("autonomous"), "{message}");
+            assert!(message.contains("issue.monitor.priority.move"), "{message}");
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+        }
+        assert_eq!(env.client.call_log(), calls_before);
+        let mut priority = String::new();
+        run_monitor_priority_move(
+            &env,
+            None,
+            Some(&[]),
+            Some("next eligible Issue"),
+            42,
+            IssueMonitorPriorityPosition::Head,
+            &mut priority,
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&priority).unwrap()["priority_order"],
+            serde_json::json!([42])
+        );
+        assert!(queued_numbers(&repo).is_empty());
+        // The same registered PM retains manual admission with autonomous OFF.
+        crate::save_issue_monitor_prefs(&path, &crate::IssueMonitorPrefs::default()).unwrap();
+        assert_eq!(run_queue_push(&mut env, vec![42], false).0, 0);
+        // A non-PM/owner caller keeps autonomous admission and removal.
+        let _owner = gwt_core::test_support::ScopedEnvVar::set(
+            gwt_agent::GWT_SESSION_ID_ENV,
+            "owner-session",
+        );
+        crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
+        assert_eq!(run_queue_push(&mut env, vec![42], false).0, 0);
+        assert_eq!(queued_numbers(&repo), vec![42]);
+        run_monitor_queue_remove(&env, None, None, &[42], false, &mut String::new()).unwrap();
+        assert!(queued_numbers(&repo).is_empty());
     }
 
     #[test]
