@@ -1123,11 +1123,16 @@ pub(crate) fn read_execution_observations_from_inventory(
                 settlement
             };
             let dead_holder_hosts = if !process_held
-                && diagnosis.holder_runtime.as_deref() == Some("host_dead")
+                && matches!(
+                    diagnosis.holder_runtime.as_deref(),
+                    Some("host_dead" | "terminal" | "defunct" | "child_exited")
+                )
                 && matches!(
                     settlement,
                     IssueMonitorExecutionSettlement::Completed
                         | IssueMonitorExecutionSettlement::Blocked
+                        | IssueMonitorExecutionSettlement::Interrupted
+                        | IssueMonitorExecutionSettlement::RecoveryExhausted
                 ) {
                 dead_holder_hosts(&sessions_dir, &diagnosis)
             } else {
@@ -1138,7 +1143,10 @@ pub(crate) fn read_execution_observations_from_inventory(
                 crate::issue_monitor::IssueMonitorExecutionObservation {
                     settlement,
                     process_held,
-                    holder_host_dead: diagnosis.holder_runtime.as_deref() == Some("host_dead"),
+                    // A terminal sidecar can outlive its GUI host. Its exact
+                    // PID/start-time death remains independent runtime evidence.
+                    holder_host_dead: diagnosis.holder_runtime.as_deref() == Some("host_dead")
+                        || !dead_holder_hosts.is_empty(),
                     exited_holder_session_id: diagnosis.holder_session_id.clone().filter(|_| {
                         matches!(
                             diagnosis.holder_runtime.as_deref(),
@@ -7687,6 +7695,94 @@ pub(crate) mod tests {
         .save(&gwt_agent::runtime_state_path(&sessions_dir, session_id))
         .unwrap();
         (owner, session_id.to_string(), host_started)
+    }
+
+    #[test]
+    fn issue_7526_ci_wait_terminal_sidecar_preserves_dead_host_recovery() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for provider in [gwt_agent::AgentId::Codex, gwt_agent::AgentId::ClaudeCode] {
+            let home = tempfile::tempdir().unwrap();
+            let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+            let _userprofile =
+                gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+            let _session_env = [
+                gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV),
+                gwt_core::test_support::ScopedEnvVar::unset(
+                    gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV,
+                ),
+            ];
+            let worktree = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+            let (_, session_id, _) = completed_child_exit_fixture(worktree.path());
+            let sessions = gwt_core::paths::gwt_sessions_dir();
+            let mut session =
+                gwt_agent::Session::load(&sessions.join(format!("{session_id}.toml"))).unwrap();
+            session.agent_id = provider.clone();
+            session.update_status(gwt_agent::AgentStatus::Stopped);
+            session.save(&sessions).unwrap();
+            std::fs::remove_file(gwt_agent::runtime_state_path(&sessions, &session_id)).unwrap();
+            let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
+                .unwrap()
+                .unwrap();
+            let dead_pid = i32::MAX as u32;
+            gwt_agent::SessionRuntimeState::for_execution_process(
+                gwt_agent::AgentStatus::Stopped,
+                &identity,
+                41,
+                1,
+                dead_pid,
+                1,
+            )
+            .save(&gwt_agent::runtime_state_path_for_pid(
+                &sessions,
+                dead_pid,
+                &session_id,
+            ))
+            .unwrap();
+
+            let now = "2026-09-07T04:10:00Z";
+            let mut monitor = test_monitor(IssueMonitorConfig {
+                enabled: true,
+                max_active: 1,
+                ..Default::default()
+            });
+            monitor.record_candidate(issue(42));
+            monitor.complete_active_launch_at(42, "previous-tab::finished", "2026-09-07T04:00:00Z");
+            monitor.declare_autonomous_wait(42, "PR CI / auto-merge", "PR merged", now);
+            let prefs = monitor.prefs();
+            let mut restarted = test_monitor_with_prefs(monitor.config.clone(), prefs);
+            restarted.record_candidate(issue(42));
+            assert!(restarted.autonomous_wait(42).is_some());
+            let observed = read_execution_observations(worktree.path(), &[42]);
+            assert!(!observed[&42].process_held);
+            assert!(
+                observed[&42].holder_host_dead,
+                "{provider:?}: terminal proof retains host death"
+            );
+            assert_eq!(
+                observed[&42].dead_holder_hosts,
+                std::collections::BTreeSet::from([(dead_pid, 1)])
+            );
+
+            let outcome = reconcile_issue_monitor_windows(&mut restarted, worktree.path(), now);
+            assert_eq!(outcome.released, vec![42], "{provider:?}");
+            assert!(
+                outcome.pane_closes.is_empty(),
+                "the old GUI no longer exists"
+            );
+            assert_eq!(restarted.active_count(), 0);
+            assert_eq!(restarted.agent_status_at(now).occupied_slot_count, Some(0));
+            assert_eq!(restarted.attempt_count(42), monitor.attempt_count(42));
+            restarted.rebase_daemon_driver_prefs(&monitor.prefs());
+            reconcile_issue_monitor_windows(&mut restarted, worktree.path(), now);
+            assert_eq!(
+                restarted.active_count(),
+                0,
+                "fresh evidence retires a stale merged reservation"
+            );
+        }
     }
 
     #[test]
