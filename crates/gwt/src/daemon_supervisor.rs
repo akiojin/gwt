@@ -28,6 +28,7 @@ use std::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex, PoisonError,
     },
+    time::{Duration, Instant},
 };
 
 /// What one [`DaemonSupervisor::ensure_running`] call did.
@@ -42,8 +43,11 @@ pub enum DaemonEnsureOutcome {
     /// two drivers for one project.
     Starting { pid: u32 },
     /// Issue #4038 (AC-6): a live daemon of another gwt version serves this
-    /// scope. It was asked to terminate; nothing is spawned until its
-    /// descriptor is gone, so the next ensure tick starts the replacement.
+    /// scope. It was asked to terminate; nothing is spawned until its death
+    /// is confirmed, so the next ensure tick starts the replacement.
+    /// Issue #7541: the ask is a bounded state machine (cooperative signal,
+    /// grace, forced signal, grace) advanced by later ensure ticks, not a
+    /// one-shot signal that can be ignored forever.
     RetiringStale { pid: u32 },
 }
 
@@ -106,6 +110,15 @@ pub fn daemon_stderr_log_path(endpoint_path: &Path) -> PathBuf {
     endpoint_path.with_file_name(file_name)
 }
 
+/// The signal one retirement step sends to a stale daemon (Issue #7541).
+/// Retirement always starts with `Term`; `Kill` is sent only after the
+/// cooperative grace elapsed with the captured identity still alive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DaemonRetireSignal {
+    Term,
+    Kill,
+}
+
 /// Ambient inputs for one ensure pass.
 ///
 /// Production reads the real gwt home and the shared liveness probe; tests
@@ -116,9 +129,12 @@ pub struct DaemonEnsureInputs<'a> {
     pub is_process_alive: &'a dyn Fn(u32) -> bool,
     /// Issue #4038 (AC-6): the version a reusable daemon must report.
     pub expected_daemon_version: &'a str,
-    /// Issue #4038 (AC-6): asked to terminate a live daemon of another
-    /// version (SIGTERM in production so it unlinks its own descriptor).
-    pub retire_stale_daemon: &'a dyn Fn(u32),
+    /// Issue #4038 (AC-6) + Issue #7541: retire a live daemon of another
+    /// version. Called with [`DaemonRetireSignal::Term`] first; if the
+    /// captured identity is still alive after the cooperative grace, called
+    /// again with [`DaemonRetireSignal::Kill`]. Only ever called for a
+    /// process whose PID + start-time identity was just verified.
+    pub retire_stale_daemon: &'a dyn Fn(u32, DaemonRetireSignal),
 }
 
 /// Owns the daemon children this process started.
@@ -132,7 +148,30 @@ struct PendingReplacement {
     startup_intent: gwt_core::daemon::DaemonStartIntent,
     pid: u32,
     started_at: u64,
+    stage: RetireStage,
+    deadline: Instant,
 }
+
+/// One stage of the bounded retirement driven by
+/// [`DaemonSupervisor::ensure_running`] (Issue #7541). The staging mirrors
+/// `owner_recovery::terminate_with_grace` — cooperative request first,
+/// forced termination only after its grace — but it advances across ensure
+/// ticks instead of blocking one call on the wait, so a GUI tick never
+/// stalls behind a daemon that ignores the cooperative signal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RetireStage {
+    TermSent,
+    KillSent,
+}
+
+/// Grace for a daemon to exit after the cooperative retirement signal
+/// before the supervisor escalates (Issue #7541). Matches the 5 s
+/// cooperative grace in `owner_recovery::terminate_with_grace`.
+const RETIRE_TERM_GRACE: Duration = Duration::from_secs(5);
+/// Grace for a daemon to exit after forced termination before the
+/// supervisor reports the retirement as failed instead of spawning a
+/// replacement into a still-held authority lease (Issue #7541).
+const RETIRE_KILL_GRACE: Duration = Duration::from_secs(5);
 struct SupervisedChild {
     project_root: PathBuf,
     child: Option<Child>,
@@ -309,7 +348,7 @@ impl DaemonSupervisor {
                 gwt_home: gwt_core::paths::gwt_home(),
                 is_process_alive: &crate::process::is_process_alive,
                 expected_daemon_version: env!("CARGO_PKG_VERSION"),
-                retire_stale_daemon: &terminate_pid_gracefully,
+                retire_stale_daemon: &terminate_pid_with_signal,
             },
         );
         if let Err(ref error) = result {
@@ -400,6 +439,7 @@ impl DaemonSupervisor {
                     action,
                     started_child_pid,
                     is_process_alive,
+                    retire_stale_daemon,
                 );
             };
             let started_at = started_at
@@ -421,20 +461,55 @@ impl DaemonSupervisor {
             {
                 return Err("daemon authority changed during retirement verification".into());
             }
-            children
-                .entry(child_endpoint)
-                .or_insert(SupervisedChild {
-                    project_root: project_root.to_path_buf(),
-                    child: None,
-                    replacement: None,
-                })
-                .replacement = Some(PendingReplacement {
-                startup_intent: endpoint.startup_intent,
-                pid: endpoint.pid,
-                started_at,
+            let slot = children.entry(child_endpoint).or_insert(SupervisedChild {
+                project_root: project_root.to_path_buf(),
+                child: None,
+                replacement: None,
             });
-            tracing::warn!(pid = endpoint.pid, project_root = %project_root.display(), "retiring authenticated incompatible project daemon before replacement");
-            retire_stale_daemon(endpoint.pid);
+            // Issue #7541: retirement is a bounded state machine, not a
+            // one-shot signal. The stage is kept across ensure ticks for the
+            // same captured identity (PID + start time); a different
+            // identity restarts the machine from the cooperative signal.
+            let now = Instant::now();
+            let mut signal = None;
+            match slot.replacement {
+                Some(previous)
+                    if previous.pid == endpoint.pid && previous.started_at == started_at =>
+                {
+                    if now >= previous.deadline {
+                        match previous.stage {
+                            RetireStage::TermSent => {
+                                slot.replacement = Some(PendingReplacement {
+                                    stage: RetireStage::KillSent,
+                                    deadline: now + RETIRE_KILL_GRACE,
+                                    ..previous
+                                });
+                                signal = Some(DaemonRetireSignal::Kill);
+                            }
+                            RetireStage::KillSent => {
+                                return Err(format!(
+                                    "daemon (pid {}) did not exit after forced termination; replacement is paused until it exits",
+                                    endpoint.pid
+                                ));
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    slot.replacement = Some(PendingReplacement {
+                        startup_intent: endpoint.startup_intent,
+                        pid: endpoint.pid,
+                        started_at,
+                        stage: RetireStage::TermSent,
+                        deadline: now + RETIRE_TERM_GRACE,
+                    });
+                    signal = Some(DaemonRetireSignal::Term);
+                }
+            }
+            if let Some(signal) = signal {
+                tracing::warn!(pid = endpoint.pid, ?signal, project_root = %project_root.display(), "retiring authenticated incompatible project daemon before replacement");
+                retire_stale_daemon(endpoint.pid, signal);
+            }
             return Ok(DaemonEnsureOutcome::RetiringStale { pid: endpoint.pid });
         }
         self.start_or_reuse(
@@ -445,6 +520,7 @@ impl DaemonSupervisor {
             action,
             started_child_pid,
             is_process_alive,
+            retire_stale_daemon,
         )
     }
 
@@ -460,6 +536,7 @@ impl DaemonSupervisor {
         action: gwt_core::daemon::DaemonBootstrapAction,
         started_child_pid: Option<u32>,
         is_process_alive: &dyn Fn(u32) -> bool,
+        retire_stale_daemon: &dyn Fn(u32, DaemonRetireSignal),
     ) -> Result<DaemonEnsureOutcome, String> {
         use gwt_core::daemon::DaemonBootstrapAction;
 
@@ -483,10 +560,42 @@ impl DaemonSupervisor {
                     .get(child_endpoint)
                     .and_then(|slot| slot.replacement);
                 if let Some(previous) = replacement {
+                    // Issue #7541: the captured identity (PID + start time)
+                    // is the only process that may ever be signalled. A
+                    // start-time mismatch means the PID was reused by an
+                    // unrelated process; that process is not the daemon,
+                    // retirement is over, and the spawn below proceeds
+                    // without signalling it.
                     if is_process_alive(previous.pid)
                         && crate::process::host_process_start_time(previous.pid)
                             == Some(previous.started_at)
                     {
+                        // The descriptor is already gone (the daemon
+                        // unlinked it, or it was never published) but the
+                        // process itself lingers and still holds the
+                        // authority lease. Advance the same bounded
+                        // retirement the authenticated path started.
+                        let now = Instant::now();
+                        if now >= previous.deadline {
+                            match previous.stage {
+                                RetireStage::TermSent => {
+                                    if let Some(slot) = children.get_mut(child_endpoint) {
+                                        slot.replacement = Some(PendingReplacement {
+                                            stage: RetireStage::KillSent,
+                                            deadline: now + RETIRE_KILL_GRACE,
+                                            ..previous
+                                        });
+                                    }
+                                    retire_stale_daemon(previous.pid, DaemonRetireSignal::Kill);
+                                }
+                                RetireStage::KillSent => {
+                                    return Err(format!(
+                                        "daemon (pid {}) did not exit after forced termination; replacement is paused until it exits",
+                                        previous.pid
+                                    ));
+                                }
+                            }
+                        }
                         return Ok(DaemonEnsureOutcome::RetiringStale { pid: previous.pid });
                     }
                 }
@@ -1023,33 +1132,38 @@ fn last_daemon_stderr_line(endpoint_path: &Path) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Issue #4038 (AC-6): SIGTERM a daemon named by a live endpoint descriptor so
-/// its serve loop unlinks the socket and descriptor. Liveness was just
-/// checked by the caller through the same descriptor, which is the strongest
-/// identity the endpoint contract offers for a process this GUI did not spawn.
+/// Issue #4038 (AC-6): signal a daemon named by a live endpoint descriptor so
+/// its serve loop unlinks the socket and descriptor. Liveness and identity
+/// were just verified by the caller through the same descriptor, which is the
+/// strongest identity the endpoint contract offers for a process this GUI did
+/// not spawn. Issue #7541: the signal is one stage of the bounded retirement
+/// state machine — `Term` first, `Kill` only after the cooperative grace
+/// elapsed with the captured identity still alive.
 #[cfg(unix)]
-fn terminate_pid_gracefully(pid: u32) {
+fn terminate_pid_with_signal(pid: u32, signal: DaemonRetireSignal) {
     if pid == 0 || pid > i32::MAX as u32 {
         return;
     }
+    let signo = match signal {
+        DaemonRetireSignal::Term => libc::SIGTERM,
+        DaemonRetireSignal::Kill => libc::SIGKILL,
+    };
     // SAFETY: plain signal send; `kill` has no memory-safety preconditions.
     unsafe {
-        libc::kill(pid as libc::pid_t, libc::SIGTERM);
+        libc::kill(pid as libc::pid_t, signo);
     }
 }
 
 /// Windows has no cross-process cooperative signal for a windowless child
 /// (console control events need a shared console, which a `CREATE_NO_WINDOW`
-/// child does not have), so the supervisor terminates the daemon outright.
-/// The endpoint descriptor and authority fence it leaves behind are exactly
-/// what a crashed daemon leaves, and both are reclaimed by the liveness
-/// probes in `resolve_bootstrap_action` and the fence recovery (Issue #3526).
-/// Issue #4038 (AC-6): Windows counterpart for a stale-version daemon this
-/// GUI did not spawn (no `Child` handle). Terminated outright like
-/// a crashed daemon; the descriptor and fence it leaves behind are
-/// reclaimed by the same liveness-driven recovery a crashed daemon needs.
+/// child does not have), so the supervisor terminates the daemon outright at
+/// either retirement stage. The endpoint descriptor and authority fence it
+/// leaves behind are exactly what a crashed daemon leaves, and both are
+/// reclaimed by the liveness probes in `resolve_bootstrap_action` and the
+/// fence recovery (Issue #3526). Issue #4038 (AC-6): Windows counterpart for
+/// a stale-version daemon this GUI did not spawn (no `Child` handle).
 #[cfg(windows)]
-fn terminate_pid_gracefully(pid: u32) {
+fn terminate_pid_with_signal(pid: u32, _signal: DaemonRetireSignal) {
     if pid == 0 {
         return;
     }
@@ -1164,7 +1278,7 @@ mod tests {
                 gwt_home: home.path().into(),
                 is_process_alive: &observed,
                 expected_daemon_version: env!("CARGO_PKG_VERSION"),
-                retire_stale_daemon: &|_| panic!("Quit must not retire an owner"),
+                retire_stale_daemon: &|_, _| panic!("Quit must not retire an owner"),
             },
         );
         assert_eq!(
@@ -1432,7 +1546,7 @@ mod tests {
                     gwt_home: gwt_home.path().to_path_buf(),
                     is_process_alive: &|pid| pid == std::process::id(),
                     expected_daemon_version: env!("CARGO_PKG_VERSION"),
-                    retire_stale_daemon: &|pid| retired.lock().unwrap().push(pid),
+                    retire_stale_daemon: &|pid, signal| retired.lock().unwrap().push((pid, signal)),
                 },
             )
             .expect("ensure succeeds");
@@ -1444,11 +1558,453 @@ mod tests {
                 pid: std::process::id()
             }
         );
-        assert_eq!(retired.lock().unwrap().as_slice(), &[std::process::id()]);
+        assert_eq!(
+            retired.lock().unwrap().as_slice(),
+            &[(std::process::id(), DaemonRetireSignal::Term)],
+            "Issue #7541: retirement always opens with the cooperative signal"
+        );
         assert!(
             scope.endpoint_path(gwt_home.path()).exists(),
             "the live daemon unlinks its own descriptor on SIGTERM; the supervisor does not"
         );
+    }
+
+    /// Issue #7541 fixture: a live stale-version daemon. The current test
+    /// process poses as the daemon (the supervisor never signals it for
+    /// real; every effect goes through the injected inputs), a loopback
+    /// listener answers the retirement authentication handshake
+    /// `connections` times, and the persisted descriptor names version
+    /// "0.0.1-stale".
+    #[cfg(unix)]
+    struct StaleDaemonFixture {
+        home: tempfile::TempDir,
+        project: tempfile::TempDir,
+        endpoint_path: PathBuf,
+        server: std::thread::JoinHandle<()>,
+    }
+
+    #[cfg(unix)]
+    fn stale_daemon_fixture(connections: usize) -> StaleDaemonFixture {
+        use gwt_core::daemon::{persist_endpoint, DaemonEndpoint, RuntimeScope, RuntimeTarget};
+
+        let home = gwt_core::test_support::socket_tempdir().expect("gwt home");
+        let project = tempfile::TempDir::new().expect("project");
+        let scope =
+            RuntimeScope::from_project_root(project.path(), RuntimeTarget::Host).expect("scope");
+        let socket_path = home.path().join("retire.sock");
+        let listener = std::os::unix::net::UnixListener::bind(
+            gwt_core::test_support::checked_socket_path(&socket_path),
+        )
+        .unwrap();
+        let endpoint = DaemonEndpoint::new(
+            scope.clone(),
+            std::process::id(),
+            socket_path.display().to_string(),
+            "secret-token".into(),
+            "0.0.1-stale".into(),
+        );
+        let endpoint_path = scope.endpoint_path(home.path());
+        persist_endpoint(&endpoint_path, &endpoint).expect("persist");
+        let server_scope = scope.clone();
+        let server = std::thread::spawn(move || {
+            use std::io::{BufRead, Write};
+            for _ in 0..connections {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .unwrap();
+                let mut line = String::new();
+                std::io::BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut line)
+                    .unwrap();
+                let request: gwt_core::daemon::IpcHandshakeRequest =
+                    serde_json::from_str(&line).unwrap();
+                assert_eq!(request.scope, server_scope);
+                assert_eq!(request.auth_token, "secret-token");
+                writeln!(
+                    stream,
+                    "{}",
+                    serde_json::to_string(&gwt_core::daemon::IpcHandshakeResponse {
+                        protocol_version: request.protocol_version,
+                        daemon_version: "0.0.1-stale".into(),
+                        accepted: true,
+                        rejection_reason: None,
+                    })
+                    .unwrap()
+                )
+                .unwrap();
+                let mut tail = Vec::new();
+                std::io::Read::read_to_end(&mut stream, &mut tail).unwrap();
+            }
+        });
+        StaleDaemonFixture {
+            home,
+            project,
+            endpoint_path,
+            server,
+        }
+    }
+
+    /// Move the pending retirement's deadline into the past so the next
+    /// ensure tick observes the elapsed grace instead of waiting for it.
+    #[cfg(unix)]
+    fn backdate_retirement_deadline(supervisor: &DaemonSupervisor) {
+        let mut children = supervisor
+            .children
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let slot = children
+            .values_mut()
+            .find(|slot| slot.replacement.is_some())
+            .expect("a retirement is pending");
+        slot.replacement.as_mut().expect("replacement").deadline =
+            // test-hygiene: allow-wall-clock-deadline the deadline is supervisor state, not a wait: backdating it makes the next ensure tick observe the elapsed grace deterministically
+            Instant::now() - Duration::from_secs(1);
+    }
+
+    #[cfg(unix)]
+    fn spawn_sleep_child(_context: &DaemonSpawnContext<'_>) -> std::io::Result<Child> {
+        gwt_core::process::resolved_command(gwt_core::process::ProcessPlanRequest::new("sleep"))
+            .map_err(std::io::Error::other)?
+            .arg("30")
+            .spawn()
+    }
+
+    /// Issue #7541 (D1): a stale daemon that honours the cooperative signal
+    /// is replaced on the next ensure tick; no forced signal is sent.
+    #[cfg(unix)]
+    #[test]
+    fn retire_term_success_then_replacement_spawns() {
+        let fixture = stale_daemon_fixture(1);
+        let live = Arc::new(AtomicBool::new(true));
+        let signals = Arc::new(Mutex::new(Vec::new()));
+        let supervisor = DaemonSupervisor::with_spawner(spawn_sleep_child);
+        let endpoint_path = fixture.endpoint_path.clone();
+        let retire_live = Arc::clone(&live);
+        let retire_signals = Arc::clone(&signals);
+        let retire = move |pid: u32, signal: DaemonRetireSignal| {
+            retire_signals.lock().unwrap().push((pid, signal));
+            if signal == DaemonRetireSignal::Term {
+                // A cooperative daemon unlinks its own descriptor and exits.
+                let _ = std::fs::remove_file(&endpoint_path);
+                retire_live.store(false, Ordering::SeqCst);
+            }
+        };
+        let observe_live = Arc::clone(&live);
+        let observe =
+            move |pid: u32| pid == std::process::id() && observe_live.load(Ordering::SeqCst);
+        let first = supervisor
+            .ensure_running_with(
+                fixture.project.path(),
+                DaemonEnsureInputs {
+                    gwt_home: fixture.home.path().to_path_buf(),
+                    is_process_alive: &observe,
+                    expected_daemon_version: env!("CARGO_PKG_VERSION"),
+                    retire_stale_daemon: &retire,
+                },
+            )
+            .expect("first ensure succeeds");
+        assert_eq!(
+            first,
+            DaemonEnsureOutcome::RetiringStale {
+                pid: std::process::id()
+            }
+        );
+        let second = supervisor
+            .ensure_running_with(
+                fixture.project.path(),
+                DaemonEnsureInputs {
+                    gwt_home: fixture.home.path().to_path_buf(),
+                    is_process_alive: &observe,
+                    expected_daemon_version: env!("CARGO_PKG_VERSION"),
+                    retire_stale_daemon: &retire,
+                },
+            )
+            .expect("second ensure succeeds");
+        fixture.server.join().unwrap();
+        assert!(
+            matches!(second, DaemonEnsureOutcome::Spawned { .. }),
+            "the replacement spawns once the cooperative exit is observed, got: {second:?}"
+        );
+        assert_eq!(
+            signals.lock().unwrap().as_slice(),
+            &[(std::process::id(), DaemonRetireSignal::Term)],
+            "a cooperative exit never escalates to the forced signal"
+        );
+        supervisor.cleanup_test_children();
+    }
+
+    /// Issue #7541 (D2 + D5 + D7): a stale daemon that ignores the
+    /// cooperative signal is escalated to the forced signal once the grace
+    /// elapses — repeated ensures advance the stage instead of re-sending
+    /// the cooperative signal forever — and once its death is confirmed the
+    /// replacement spawns and later ensures report the new child, not the
+    /// retirement.
+    #[cfg(unix)]
+    #[test]
+    fn retire_escalates_to_kill_after_term_grace_then_spawns() {
+        let fixture = stale_daemon_fixture(3);
+        let live = Arc::new(AtomicBool::new(true));
+        let signals = Arc::new(Mutex::new(Vec::new()));
+        let supervisor = DaemonSupervisor::with_spawner(spawn_sleep_child);
+        let retire_signals = Arc::clone(&signals);
+        let retire = move |pid: u32, signal: DaemonRetireSignal| {
+            // The daemon ignores every signal; only the test's explicit
+            // death simulation below ends it.
+            retire_signals.lock().unwrap().push((pid, signal));
+        };
+        let observe_live = Arc::clone(&live);
+        let observe =
+            move |pid: u32| pid == std::process::id() && observe_live.load(Ordering::SeqCst);
+        let ensure = || {
+            supervisor.ensure_running_with(
+                fixture.project.path(),
+                DaemonEnsureInputs {
+                    gwt_home: fixture.home.path().to_path_buf(),
+                    is_process_alive: &observe,
+                    expected_daemon_version: env!("CARGO_PKG_VERSION"),
+                    retire_stale_daemon: &retire,
+                },
+            )
+        };
+        assert!(matches!(
+            ensure().expect("first ensure succeeds"),
+            DaemonEnsureOutcome::RetiringStale { .. }
+        ));
+        assert!(matches!(
+            ensure().expect("second ensure succeeds"),
+            DaemonEnsureOutcome::RetiringStale { .. }
+        ));
+        assert_eq!(
+            signals.lock().unwrap().as_slice(),
+            &[(std::process::id(), DaemonRetireSignal::Term)],
+            "within the grace the stage is kept, not restarted (D5)"
+        );
+        backdate_retirement_deadline(&supervisor);
+        assert!(matches!(
+            ensure().expect("third ensure succeeds"),
+            DaemonEnsureOutcome::RetiringStale { .. }
+        ));
+        assert_eq!(
+            signals.lock().unwrap().as_slice(),
+            &[
+                (std::process::id(), DaemonRetireSignal::Term),
+                (std::process::id(), DaemonRetireSignal::Kill)
+            ],
+            "an ignored cooperative signal escalates to the forced signal (D2)"
+        );
+        // The daemon finally dies and unlinks its descriptor.
+        live.store(false, Ordering::SeqCst);
+        std::fs::remove_file(&fixture.endpoint_path).unwrap();
+        assert!(
+            matches!(
+                ensure().expect("fourth ensure succeeds"),
+                DaemonEnsureOutcome::Spawned { .. }
+            ),
+            "the replacement spawns only after the death is confirmed (D2)"
+        );
+        assert!(
+            matches!(
+                ensure().expect("fifth ensure succeeds"),
+                DaemonEnsureOutcome::Starting { .. }
+            ),
+            "after the generation change, ensure reports the new child (D7)"
+        );
+        fixture.server.join().unwrap();
+        supervisor.cleanup_test_children();
+    }
+
+    /// Issue #7541 (D3): a daemon that survives even the forced signal is
+    /// reported as an explicit error — the supervisor never spawns into its
+    /// still-held authority lease and never pretends to be Ready — and the
+    /// pending retirement stays retryable, so a later ensure recovers once
+    /// the process is actually gone.
+    #[cfg(unix)]
+    #[test]
+    fn retire_reports_error_when_daemon_survives_forced_termination() {
+        let fixture = stale_daemon_fixture(3);
+        let live = Arc::new(AtomicBool::new(true));
+        let signals = Arc::new(Mutex::new(Vec::new()));
+        let spawns = Arc::new(AtomicUsize::new(0));
+        let counted_spawns = Arc::clone(&spawns);
+        let supervisor = DaemonSupervisor::with_spawner(move |context| {
+            counted_spawns.fetch_add(1, Ordering::SeqCst);
+            spawn_sleep_child(context)
+        });
+        let retire_signals = Arc::clone(&signals);
+        let retire = move |pid: u32, signal: DaemonRetireSignal| {
+            retire_signals.lock().unwrap().push((pid, signal));
+        };
+        let observe_live = Arc::clone(&live);
+        let observe =
+            move |pid: u32| pid == std::process::id() && observe_live.load(Ordering::SeqCst);
+        let ensure = || {
+            supervisor.ensure_running_with(
+                fixture.project.path(),
+                DaemonEnsureInputs {
+                    gwt_home: fixture.home.path().to_path_buf(),
+                    is_process_alive: &observe,
+                    expected_daemon_version: env!("CARGO_PKG_VERSION"),
+                    retire_stale_daemon: &retire,
+                },
+            )
+        };
+        assert!(matches!(
+            ensure().expect("first ensure succeeds"),
+            DaemonEnsureOutcome::RetiringStale { .. }
+        ));
+        backdate_retirement_deadline(&supervisor);
+        assert!(matches!(
+            ensure().expect("second ensure succeeds"),
+            DaemonEnsureOutcome::RetiringStale { .. }
+        ));
+        backdate_retirement_deadline(&supervisor);
+        let error = ensure().expect_err("an unkillable daemon is an explicit error");
+        assert!(
+            error.contains("did not exit after forced termination"),
+            "got: {error}"
+        );
+        assert_eq!(
+            spawns.load(Ordering::SeqCst),
+            0,
+            "no replacement is spawned while the old daemon survives"
+        );
+        // Once the process is actually gone, the same pending retirement
+        // lets a later ensure recover.
+        live.store(false, Ordering::SeqCst);
+        std::fs::remove_file(&fixture.endpoint_path).unwrap();
+        assert!(matches!(
+            ensure().expect("fourth ensure succeeds"),
+            DaemonEnsureOutcome::Spawned { .. }
+        ));
+        fixture.server.join().unwrap();
+        supervisor.cleanup_test_children();
+    }
+
+    /// Issue #7541 (D4): a pending retirement whose captured start time no
+    /// longer matches the live process means the PID was reused by an
+    /// unrelated process. That process is never signalled, and the
+    /// replacement spawns.
+    #[cfg(unix)]
+    #[test]
+    fn reused_pid_is_never_signalled_and_replacement_spawns() {
+        use gwt_core::daemon::{DaemonStartIntent, RuntimeScope, RuntimeTarget};
+
+        let home = gwt_core::test_support::socket_tempdir().expect("gwt home");
+        let project = tempfile::tempdir().expect("project");
+        let scope =
+            RuntimeScope::from_project_root(project.path(), RuntimeTarget::Host).expect("scope");
+        let endpoint_path = scope.endpoint_path(home.path());
+        let supervisor = DaemonSupervisor::with_spawner(spawn_sleep_child);
+        let real_started = crate::process::host_process_start_time(std::process::id())
+            .expect("test process start time");
+        {
+            let mut children = supervisor
+                .children
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            children.insert(
+                endpoint_path,
+                SupervisedChild {
+                    project_root: project.path().to_path_buf(),
+                    child: None,
+                    replacement: Some(PendingReplacement {
+                        startup_intent: DaemonStartIntent::GuiManaged,
+                        pid: std::process::id(),
+                        started_at: real_started + 1,
+                        stage: RetireStage::KillSent,
+                        // test-hygiene: allow-wall-clock-deadline the deadline is supervisor state, not a wait: an already-elapsed deadline makes the next ensure tick observe the forced stage deterministically
+                        deadline: Instant::now() - Duration::from_secs(1),
+                    }),
+                },
+            );
+        }
+        let signals = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&signals);
+        let outcome = supervisor
+            .ensure_running_with(
+                project.path(),
+                DaemonEnsureInputs {
+                    gwt_home: home.path().to_path_buf(),
+                    is_process_alive: &|_| true,
+                    expected_daemon_version: env!("CARGO_PKG_VERSION"),
+                    retire_stale_daemon: &move |pid, signal| {
+                        recorded.lock().unwrap().push((pid, signal))
+                    },
+                },
+            )
+            .expect("ensure succeeds");
+        assert!(
+            matches!(outcome, DaemonEnsureOutcome::Spawned { .. }),
+            "a reused PID ends the retirement and the replacement spawns, got: {outcome:?}"
+        );
+        assert!(
+            signals.lock().unwrap().is_empty(),
+            "a reused PID is never signalled"
+        );
+        supervisor.cleanup_test_children();
+    }
+
+    /// Issue #7541 (D6): shutting the supervisor down — the normal GUI Quit
+    /// path — never signals a daemon, including one whose retirement is
+    /// pending and overdue; residency stays governed by the daemon's own
+    /// authenticated GUI leases.
+    #[cfg(unix)]
+    #[test]
+    fn shutdown_never_signals_a_pending_retirement() {
+        use gwt_core::daemon::{DaemonStartIntent, RuntimeScope, RuntimeTarget};
+
+        let home = gwt_core::test_support::socket_tempdir().expect("gwt home");
+        let project = tempfile::tempdir().expect("project");
+        let scope =
+            RuntimeScope::from_project_root(project.path(), RuntimeTarget::Host).expect("scope");
+        let endpoint_path = scope.endpoint_path(home.path());
+        let supervisor = DaemonSupervisor::with_spawner(spawn_sleep_child);
+        let real_started = crate::process::host_process_start_time(std::process::id())
+            .expect("test process start time");
+        {
+            let mut children = supervisor
+                .children
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            children.insert(
+                endpoint_path,
+                SupervisedChild {
+                    project_root: project.path().to_path_buf(),
+                    child: None,
+                    replacement: Some(PendingReplacement {
+                        startup_intent: DaemonStartIntent::GuiManaged,
+                        pid: std::process::id(),
+                        started_at: real_started,
+                        stage: RetireStage::KillSent,
+                        // test-hygiene: allow-wall-clock-deadline the deadline is supervisor state, not a wait: an already-elapsed deadline makes the next ensure tick observe the forced stage deterministically
+                        deadline: Instant::now() - Duration::from_secs(1),
+                    }),
+                },
+            );
+        }
+        supervisor.shutdown();
+        let signals = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&signals);
+        let error = supervisor
+            .ensure_running_with(
+                project.path(),
+                DaemonEnsureInputs {
+                    gwt_home: home.path().to_path_buf(),
+                    is_process_alive: &|_| true,
+                    expected_daemon_version: env!("CARGO_PKG_VERSION"),
+                    retire_stale_daemon: &move |pid, signal| {
+                        recorded.lock().unwrap().push((pid, signal))
+                    },
+                },
+            )
+            .expect_err("a shut-down supervisor refuses ensure work");
+        assert!(error.contains("shut down"), "got: {error}");
+        assert!(
+            signals.lock().unwrap().is_empty(),
+            "Quit never signals the shared daemon"
+        );
+        supervisor.cleanup_test_children();
     }
 
     #[cfg(unix)]
@@ -1512,7 +2068,7 @@ mod tests {
         });
         let live = AtomicBool::new(true);
         let observe = |_: u32| live.load(Ordering::SeqCst);
-        let retire = |_: u32| {
+        let retire = |_: u32, _: DaemonRetireSignal| {
             live.store(false, Ordering::SeqCst);
         };
         let first = supervisor
@@ -1601,7 +2157,7 @@ mod tests {
                     gwt_home: gwt_home.path().to_path_buf(),
                     is_process_alive: &|pid| pid == std::process::id(),
                     expected_daemon_version: env!("CARGO_PKG_VERSION"),
-                    retire_stale_daemon: &|pid| retired.lock().unwrap().push(pid),
+                    retire_stale_daemon: &|pid, _| retired.lock().unwrap().push(pid),
                 },
             )
             .expect_err("the fake spawner reports that the replacement was started");
@@ -1678,7 +2234,7 @@ mod tests {
                     gwt_home: gwt_home.path().to_path_buf(),
                     is_process_alive: &|pid| pid == std::process::id(),
                     expected_daemon_version: env!("CARGO_PKG_VERSION"),
-                    retire_stale_daemon: &|_| panic!("a rejected candidate is never signalled"),
+                    retire_stale_daemon: &|_, _| panic!("a rejected candidate is never signalled"),
                 },
             )
             .expect_err("a live candidate that refuses authentication blocks the launch");
