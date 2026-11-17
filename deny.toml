@@ -43,13 +43,10 @@ ignore = [
     # gtk3-macros. Same upstream-migration exit path as the gtk3-rs
     # crates above.
     { id = "RUSTSEC-2024-0370", reason = "proc-macro-error unmaintained via gtk3-macros; same exit path as gtk3-rs crates" },
-    # chrono is flagged unmaintained by a newly published advisory
-    # (Issue #7551). The advisory is unmaintained, not a vulnerability:
-    # chrono 0.4 is feature-complete, and gwt uses it for timestamps and
-    # duration arithmetic only. Exit path: evaluate replacing chrono with
-    # a maintained alternative (time / jiff) in a dedicated change, then
-    # remove this entry.
-    { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained (not a vulnerability); timestamps/durations only; exit is a dedicated replacement change (Issue #7551)" },
+    # chrono is flagged unmaintained. Remove this entry after Issue #7565
+    # migrates the remaining direct dependencies and removes the
+    # tracing-subscriber/chrono feature used by gwt-core's local log timer.
+    { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained; retire after timestamp and local log timer migration (Issue #7565)" },
     # glib::VariantStrIter unsoundness. We don't construct or iterate
     # GVariant string iters directly — glib reaches us only through
     # the gtk3-rs stack pulled by tao and tray-icon on Linux. Same exit path.
