@@ -143,10 +143,10 @@ pub struct DaemonEnsureInputs<'a> {
 /// rather than by a per-child waiter thread. That keeps the supervisor free of
 /// background threads. Residency belongs to the daemon, not the GUI parent.
 /// An external incompatible candidate must authenticate before it is signalled.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct PendingReplacement {
-    startup_intent: gwt_core::daemon::DaemonStartIntent,
-    pid: u32,
+    endpoint: gwt_core::daemon::DaemonEndpoint,
+    authority_fence: crate::IssueMonitorAuthorityFenceState,
     started_at: u64,
     stage: RetireStage,
     deadline: Instant,
@@ -390,6 +390,57 @@ impl DaemonSupervisor {
         let child_endpoint = child_endpoint_for_project(&children, &endpoint_path);
         let started_child_pid = reap_finished_child(&mut children, &child_endpoint);
 
+        // Retirement outlives the old daemon's transports and descriptor.
+        // Once authenticated, progress only the captured process identity;
+        // resolving or authenticating again can fail during its shutdown.
+        if let Some(previous) = children
+            .get(&child_endpoint)
+            .and_then(|slot| slot.replacement.clone())
+        {
+            let still_alive = is_process_alive(previous.endpoint.pid);
+            let current_birth = crate::process::host_process_start_time(previous.endpoint.pid);
+            if still_alive && current_birth.is_none() {
+                return Err("pending daemon process identity could not be verified".into());
+            }
+            if still_alive && current_birth == Some(previous.started_at) {
+                verify_pending_retirement_authority(&gwt_home, &previous)?;
+                let now = Instant::now();
+                if now >= previous.deadline {
+                    match previous.stage {
+                        RetireStage::TermSent => {
+                            // Filesystem checks above can race process exit/PID reuse.
+                            if !is_process_alive(previous.endpoint.pid)
+                                || crate::process::host_process_start_time(previous.endpoint.pid)
+                                    != Some(previous.started_at)
+                            {
+                                return Ok(DaemonEnsureOutcome::RetiringStale {
+                                    pid: previous.endpoint.pid,
+                                });
+                            }
+                            let pending = children
+                                .get_mut(&child_endpoint)
+                                .expect("pending retirement")
+                                .replacement
+                                .as_mut()
+                                .expect("captured identity");
+                            pending.stage = RetireStage::KillSent;
+                            pending.deadline = now + RETIRE_KILL_GRACE;
+                            retire_stale_daemon(previous.endpoint.pid, DaemonRetireSignal::Kill);
+                        }
+                        RetireStage::KillSent => {
+                            return Err(format!(
+                                "daemon (pid {}) did not exit after forced termination; replacement is paused until it exits",
+                                previous.endpoint.pid
+                            ));
+                        }
+                    }
+                }
+                return Ok(DaemonEnsureOutcome::RetiringStale {
+                    pid: previous.endpoint.pid,
+                });
+            }
+        }
+
         let action = crate::daemon_publisher::resolve_project_daemon_bootstrap(
             &gwt_home,
             &scope,
@@ -410,6 +461,7 @@ impl DaemonSupervisor {
             _ => None,
         };
         if let Some(endpoint) = retirement_candidate(&action) {
+            let authority_fence = retirement_authority_fence(&gwt_home, &endpoint.scope)?;
             let started_at = crate::process::host_process_start_time(endpoint.pid);
             drop(children);
             let Some(_authenticated) = authenticate_retirement_candidate(&endpoint)? else {
@@ -438,8 +490,6 @@ impl DaemonSupervisor {
                     &mut children,
                     action,
                     started_child_pid,
-                    is_process_alive,
-                    retire_stale_daemon,
                 );
             };
             let started_at = started_at
@@ -458,57 +508,33 @@ impl DaemonSupervisor {
                 is_process_alive,
             )?;
             if !matches!(current, DaemonBootstrapAction::RetireStaleVersion { endpoint: current } | DaemonBootstrapAction::Reuse(current) if current == endpoint)
+                || retirement_authority_fence(&gwt_home, &endpoint.scope)? != authority_fence
             {
                 return Err("daemon authority changed during retirement verification".into());
+            }
+            if !is_process_alive(endpoint.pid)
+                || crate::process::host_process_start_time(endpoint.pid) != Some(started_at)
+            {
+                return Err("daemon retirement PID birth changed before signaling".into());
             }
             let slot = children.entry(child_endpoint).or_insert(SupervisedChild {
                 project_root: project_root.to_path_buf(),
                 child: None,
                 replacement: None,
             });
-            // Issue #7541: retirement is a bounded state machine, not a
-            // one-shot signal. The stage is kept across ensure ticks for the
-            // same captured identity (PID + start time); a different
-            // identity restarts the machine from the cooperative signal.
-            let now = Instant::now();
-            let mut signal = None;
-            match slot.replacement {
-                Some(previous)
-                    if previous.pid == endpoint.pid && previous.started_at == started_at =>
-                {
-                    if now >= previous.deadline {
-                        match previous.stage {
-                            RetireStage::TermSent => {
-                                slot.replacement = Some(PendingReplacement {
-                                    stage: RetireStage::KillSent,
-                                    deadline: now + RETIRE_KILL_GRACE,
-                                    ..previous
-                                });
-                                signal = Some(DaemonRetireSignal::Kill);
-                            }
-                            RetireStage::KillSent => {
-                                return Err(format!(
-                                    "daemon (pid {}) did not exit after forced termination; replacement is paused until it exits",
-                                    endpoint.pid
-                                ));
-                            }
-                        }
-                    }
-                }
-                _ => {
-                    slot.replacement = Some(PendingReplacement {
-                        startup_intent: endpoint.startup_intent,
-                        pid: endpoint.pid,
-                        started_at,
-                        stage: RetireStage::TermSent,
-                        deadline: now + RETIRE_TERM_GRACE,
-                    });
-                    signal = Some(DaemonRetireSignal::Term);
-                }
-            }
-            if let Some(signal) = signal {
-                tracing::warn!(pid = endpoint.pid, ?signal, project_root = %project_root.display(), "retiring authenticated incompatible project daemon before replacement");
-                retire_stale_daemon(endpoint.pid, signal);
+            // A concurrent ensure may have authenticated this same owner.
+            if !slot.replacement.as_ref().is_some_and(|previous| {
+                previous.endpoint == endpoint && previous.started_at == started_at
+            }) {
+                slot.replacement = Some(PendingReplacement {
+                    endpoint: endpoint.clone(),
+                    authority_fence,
+                    started_at,
+                    stage: RetireStage::TermSent,
+                    deadline: Instant::now() + RETIRE_TERM_GRACE,
+                });
+                tracing::warn!(pid = endpoint.pid, project_root = %project_root.display(), "retiring authenticated incompatible project daemon before replacement");
+                retire_stale_daemon(endpoint.pid, DaemonRetireSignal::Term);
             }
             return Ok(DaemonEnsureOutcome::RetiringStale { pid: endpoint.pid });
         }
@@ -519,14 +545,11 @@ impl DaemonSupervisor {
             &mut children,
             action,
             started_child_pid,
-            is_process_alive,
-            retire_stale_daemon,
         )
     }
 
     /// Reuse the resolved daemon or start a new child once no retirement is
     /// pending for this project.
-    #[allow(clippy::too_many_arguments)]
     fn start_or_reuse(
         &self,
         project_root: &Path,
@@ -535,8 +558,6 @@ impl DaemonSupervisor {
         children: &mut HashMap<PathBuf, SupervisedChild>,
         action: gwt_core::daemon::DaemonBootstrapAction,
         started_child_pid: Option<u32>,
-        is_process_alive: &dyn Fn(u32) -> bool,
-        retire_stale_daemon: &dyn Fn(u32, DaemonRetireSignal),
     ) -> Result<DaemonEnsureOutcome, String> {
         use gwt_core::daemon::DaemonBootstrapAction;
 
@@ -556,51 +577,10 @@ impl DaemonSupervisor {
                 if let Some(pid) = started_child_pid {
                     return Ok(DaemonEnsureOutcome::Starting { pid });
                 }
-                let replacement = children
+                let startup_intent = children
                     .get(child_endpoint)
-                    .and_then(|slot| slot.replacement);
-                if let Some(previous) = replacement {
-                    // Issue #7541: the captured identity (PID + start time)
-                    // is the only process that may ever be signalled. A
-                    // start-time mismatch means the PID was reused by an
-                    // unrelated process; that process is not the daemon,
-                    // retirement is over, and the spawn below proceeds
-                    // without signalling it.
-                    if is_process_alive(previous.pid)
-                        && crate::process::host_process_start_time(previous.pid)
-                            == Some(previous.started_at)
-                    {
-                        // The descriptor is already gone (the daemon
-                        // unlinked it, or it was never published) but the
-                        // process itself lingers and still holds the
-                        // authority lease. Advance the same bounded
-                        // retirement the authenticated path started.
-                        let now = Instant::now();
-                        if now >= previous.deadline {
-                            match previous.stage {
-                                RetireStage::TermSent => {
-                                    if let Some(slot) = children.get_mut(child_endpoint) {
-                                        slot.replacement = Some(PendingReplacement {
-                                            stage: RetireStage::KillSent,
-                                            deadline: now + RETIRE_KILL_GRACE,
-                                            ..previous
-                                        });
-                                    }
-                                    retire_stale_daemon(previous.pid, DaemonRetireSignal::Kill);
-                                }
-                                RetireStage::KillSent => {
-                                    return Err(format!(
-                                        "daemon (pid {}) did not exit after forced termination; replacement is paused until it exits",
-                                        previous.pid
-                                    ));
-                                }
-                            }
-                        }
-                        return Ok(DaemonEnsureOutcome::RetiringStale { pid: previous.pid });
-                    }
-                }
-                let startup_intent = replacement
-                    .map(|previous| previous.startup_intent)
+                    .and_then(|slot| slot.replacement.as_ref())
+                    .map(|previous| previous.endpoint.startup_intent)
                     .unwrap_or(gwt_core::daemon::DaemonStartIntent::GuiManaged);
                 let child = (self.spawn)(&DaemonSpawnContext {
                     project_root,
@@ -963,6 +943,49 @@ fn report_orphan_fault(project_root: &Path, detail: &str) {
             ..Default::default()
         },
     );
+}
+
+fn retirement_authority_fence(
+    gwt_home: &Path,
+    scope: &gwt_core::daemon::RuntimeScope,
+) -> Result<crate::IssueMonitorAuthorityFenceState, String> {
+    let prefs_path = gwt_home
+        .join("projects")
+        .join(&scope.repo_hash)
+        .join("project-state/issue-monitor.json");
+    crate::load_issue_monitor_authority_fence(&prefs_path)
+        .map_err(|error| format!("daemon retirement authority could not be verified: {error}"))
+}
+
+fn verify_pending_retirement_authority(
+    gwt_home: &Path,
+    pending: &PendingReplacement,
+) -> Result<(), String> {
+    let current = retirement_authority_fence(gwt_home, &pending.endpoint.scope)?;
+    if matches!(current, crate::IssueMonitorAuthorityFenceState::Active(_))
+        && current != pending.authority_fence
+    {
+        return Err("daemon authority changed during retirement".into());
+    }
+    let descriptor = match std::fs::read(pending.endpoint.scope.endpoint_path(gwt_home)) {
+        Ok(payload) => serde_json::from_slice::<gwt_core::daemon::DaemonEndpoint>(&payload)
+            .map_err(|error| {
+                format!("daemon retirement descriptor could not be verified: {error}")
+            })?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(format!(
+                "daemon retirement descriptor could not be read: {error}"
+            ))
+        }
+    };
+    if !same_orphan_endpoint(&descriptor, &pending.endpoint)
+        || descriptor.protocol_version != pending.endpoint.protocol_version
+        || descriptor.daemon_version != pending.endpoint.daemon_version
+    {
+        return Err("daemon endpoint changed during retirement".into());
+    }
+    Ok(())
 }
 
 /// `Ok(None)` means nothing serves the candidate's bind (Issue #7463): the
@@ -1743,7 +1766,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn retire_escalates_to_kill_after_term_grace_then_spawns() {
-        let fixture = stale_daemon_fixture(3);
+        let fixture = stale_daemon_fixture(1);
         let live = Arc::new(AtomicBool::new(true));
         let signals = Arc::new(Mutex::new(Vec::new()));
         let supervisor = DaemonSupervisor::with_spawner(spawn_sleep_child);
@@ -1771,6 +1794,30 @@ mod tests {
             ensure().expect("first ensure succeeds"),
             DaemonEnsureOutcome::RetiringStale { .. }
         ));
+        // A newly published authority cannot inherit a capture made with no fence.
+        let scope = gwt_core::daemon::RuntimeScope::from_project_root(
+            fixture.project.path(),
+            gwt_core::daemon::RuntimeTarget::Host,
+        )
+        .unwrap();
+        let prefs_path = fixture
+            .home
+            .path()
+            .join("projects")
+            .join(&scope.repo_hash)
+            .join("project-state/issue-monitor.json");
+        crate::save_issue_monitor_prefs(&prefs_path, &crate::IssueMonitorPrefs::default()).unwrap();
+        crate::persist_issue_monitor_authority_fence(
+            &prefs_path,
+            &crate::IssueMonitorAuthorityFence::current_process(),
+        )
+        .unwrap();
+        assert!(ensure().unwrap_err().contains("authority changed"));
+        assert_eq!(
+            *signals.lock().unwrap(),
+            vec![(std::process::id(), DaemonRetireSignal::Term)]
+        );
+        std::fs::remove_file(crate::issue_monitor_authority_fence_path(&prefs_path)).unwrap();
         assert!(matches!(
             ensure().expect("second ensure succeeds"),
             DaemonEnsureOutcome::RetiringStale { .. }
@@ -1814,6 +1861,84 @@ mod tests {
         supervisor.cleanup_test_children();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn pending_retirement_survives_lost_ipc_and_descriptor_with_held_authority() {
+        let fixture = stale_daemon_fixture(1);
+        let mut replacement: gwt_core::daemon::DaemonEndpoint =
+            serde_json::from_slice(&std::fs::read(&fixture.endpoint_path).unwrap()).unwrap();
+        let prefs_path = fixture
+            .home
+            .path()
+            .join("projects")
+            .join(&replacement.scope.repo_hash)
+            .join("project-state/issue-monitor.json");
+        crate::save_issue_monitor_prefs(&prefs_path, &crate::IssueMonitorPrefs::default()).unwrap();
+        let fence = crate::IssueMonitorAuthorityFence::current_process();
+        let (_, lease) =
+            crate::establish_issue_monitor_authority_fence(&prefs_path, &fence, |_| true).unwrap();
+        let supervisor =
+            DaemonSupervisor::with_spawner(|_| panic!("a live retiring owner forbids replacement"));
+        let signals = Mutex::new(Vec::new());
+        let retire = |pid, signal| {
+            signals.lock().unwrap().push((pid, signal));
+            if signal == DaemonRetireSignal::Term {
+                std::fs::remove_file(&fixture.endpoint_path).unwrap();
+            }
+        };
+        let ensure = || {
+            supervisor.ensure_running_with(
+                fixture.project.path(),
+                DaemonEnsureInputs {
+                    gwt_home: fixture.home.path().to_path_buf(),
+                    is_process_alive: &|_| true,
+                    expected_daemon_version: env!("CARGO_PKG_VERSION"),
+                    retire_stale_daemon: &retire,
+                },
+            )
+        };
+        assert!(matches!(
+            ensure().unwrap(),
+            DaemonEnsureOutcome::RetiringStale { .. }
+        ));
+        fixture.server.join().unwrap();
+        backdate_retirement_deadline(&supervisor);
+        // A new generation must not inherit the old retirement authority.
+        crate::persist_issue_monitor_authority_fence(
+            &prefs_path,
+            &crate::IssueMonitorAuthorityFence::current_process(),
+        )
+        .unwrap();
+        assert!(ensure().unwrap_err().contains("authority changed"));
+        crate::persist_issue_monitor_authority_fence(&prefs_path, &fence).unwrap();
+        replacement.auth_token = "a-new-owner".into();
+        gwt_core::daemon::persist_endpoint(&fixture.endpoint_path, &replacement).unwrap();
+        assert!(ensure().unwrap_err().contains("endpoint changed"));
+        assert_eq!(
+            *signals.lock().unwrap(),
+            vec![(std::process::id(), DaemonRetireSignal::Term)]
+        );
+        std::fs::remove_file(&fixture.endpoint_path).unwrap();
+        assert!(matches!(
+            ensure().expect("captured retirement must outlive IPC and descriptor loss"),
+            DaemonEnsureOutcome::RetiringStale { .. }
+        ));
+        assert_eq!(
+            *signals.lock().unwrap(),
+            vec![
+                (std::process::id(), DaemonRetireSignal::Term),
+                (std::process::id(), DaemonRetireSignal::Kill),
+            ]
+        );
+        // A normal shutdown may revoke its fence before the process exits.
+        std::fs::remove_file(crate::issue_monitor_authority_fence_path(&prefs_path)).unwrap();
+        assert!(matches!(
+            ensure().unwrap(),
+            DaemonEnsureOutcome::RetiringStale { .. }
+        ));
+        drop(lease);
+    }
+
     /// Issue #7541 (D3): a daemon that survives even the forced signal is
     /// reported as an explicit error — the supervisor never spawns into its
     /// still-held authority lease and never pretends to be Ready — and the
@@ -1822,7 +1947,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn retire_reports_error_when_daemon_survives_forced_termination() {
-        let fixture = stale_daemon_fixture(3);
+        let fixture = stale_daemon_fixture(1);
         let live = Arc::new(AtomicBool::new(true));
         let signals = Arc::new(Mutex::new(Vec::new()));
         let spawns = Arc::new(AtomicUsize::new(0));
@@ -1909,8 +2034,17 @@ mod tests {
                     project_root: project.path().to_path_buf(),
                     child: None,
                     replacement: Some(PendingReplacement {
-                        startup_intent: DaemonStartIntent::GuiManaged,
-                        pid: std::process::id(),
+                        endpoint: gwt_core::daemon::DaemonEndpoint {
+                            startup_intent: DaemonStartIntent::GuiManaged,
+                            ..gwt_core::daemon::DaemonEndpoint::new(
+                                scope,
+                                std::process::id(),
+                                String::new(),
+                                String::new(),
+                                env!("CARGO_PKG_VERSION").into(),
+                            )
+                        },
+                        authority_fence: crate::IssueMonitorAuthorityFenceState::Missing,
                         started_at: real_started + 1,
                         stage: RetireStage::KillSent,
                         // test-hygiene: allow-wall-clock-deadline the deadline is supervisor state, not a wait: an already-elapsed deadline makes the next ensure tick observe the forced stage deterministically
@@ -1973,8 +2107,17 @@ mod tests {
                     project_root: project.path().to_path_buf(),
                     child: None,
                     replacement: Some(PendingReplacement {
-                        startup_intent: DaemonStartIntent::GuiManaged,
-                        pid: std::process::id(),
+                        endpoint: gwt_core::daemon::DaemonEndpoint {
+                            startup_intent: DaemonStartIntent::GuiManaged,
+                            ..gwt_core::daemon::DaemonEndpoint::new(
+                                scope,
+                                std::process::id(),
+                                String::new(),
+                                String::new(),
+                                env!("CARGO_PKG_VERSION").into(),
+                            )
+                        },
+                        authority_fence: crate::IssueMonitorAuthorityFenceState::Missing,
                         started_at: real_started,
                         stage: RetireStage::KillSent,
                         // test-hygiene: allow-wall-clock-deadline the deadline is supervisor state, not a wait: an already-elapsed deadline makes the next ensure tick observe the forced stage deterministically
