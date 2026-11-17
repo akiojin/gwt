@@ -3,7 +3,10 @@
 mod project_catalog;
 pub(crate) use project_catalog::owner_host_project_catalog;
 
-use super::workspace::{save_resumed_workspace_projection, save_start_work_workspace_projection};
+use super::workspace::{
+    save_resumed_workspace_projection, save_start_work_workspace_projection,
+    save_workspace_launch_projection, WorkspaceLaunchProjectionKind,
+};
 use super::{launch_finalization::*, launch_payload::*, ActiveLaunchHandshakeCleanup};
 use crate::launch_runtime::same_worktree_path;
 use crate::session_launch::{
@@ -1315,6 +1318,19 @@ pub fn install_agent_launch(
                 linked_issue_number,
                 canonical_owner,
                 context,
+                None,
+            )
+            .map(|()| true)
+        } else if let Some(genesis) = genesis.as_ref() {
+            // An Issue-linked NEW session can start on an existing branch.
+            save_workspace_launch_projection(
+                &input.project_root,
+                &active,
+                None,
+                linked_issue_number,
+                Some(genesis.owner),
+                None,
+                WorkspaceLaunchProjectionKind::StartWork,
                 None,
             )
             .map(|()| true)
