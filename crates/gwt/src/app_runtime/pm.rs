@@ -728,10 +728,7 @@ impl AppRuntime {
         let Some(project_root) = self.pm_project_root(context) else {
             return Vec::new();
         };
-        let prefs_path = pm_registry::pm_prefs_path_for_repo_path(&project_root);
-        if let Err(error) = pm_registry::mutate_pm_prefs(&prefs_path, |prefs| {
-            prefs.settings.auto_start = enabled;
-        }) {
+        if let Err(error) = pm_registry::set_pm_auto_start(&project_root, enabled) {
             tracing::warn!(%error, "failed to persist the PM auto-start setting");
             return Vec::new();
         }

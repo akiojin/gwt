@@ -32,7 +32,9 @@ use crate::app_runtime::ClientScope;
 #[cfg(test)]
 use crate::DispatchTarget;
 use axum::{
-    extract::{ws::WebSocketUpgrade, Query, Request, State},
+    extract::{
+        rejection::JsonRejection, ws::WebSocketUpgrade, DefaultBodyLimit, Query, Request, State,
+    },
     http::{
         header::{AUTHORIZATION, HOST, ORIGIN},
         HeaderMap, StatusCode,
@@ -354,6 +356,12 @@ impl EmbeddedServer {
             .route(
                 gwt::project_open_control::PROJECT_OPEN_CONTROL_PATH,
                 post(project_open_control_handler),
+            )
+            .route(
+                gwt::project_open_control::PANE_LAYOUT_PLACE_CONTROL_PATH,
+                post(pane_layout_place_control_handler).layer(DefaultBodyLimit::max(
+                    gwt::project_open_control::PROJECT_OPEN_CONTROL_MAX_BODY_BYTES,
+                )),
             )
             .route(
                 gwt::update_control::UPDATE_APPLY_CONTROL_PATH,
@@ -780,6 +788,56 @@ async fn project_open_control_handler(
             }),
         )
             .into_response(),
+    }
+}
+
+async fn pane_layout_place_control_handler(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    body: Result<Json<gwt::project_open_control::PaneLayoutPlaceRequest>, JsonRejection>,
+) -> Response {
+    let refuse = |status, message: &str| {
+        (status, Json(serde_json::json!({ "error": message }))).into_response()
+    };
+    if gwt::project_open_control::authorize_control_request(
+        headers
+            .get(AUTHORIZATION)
+            .and_then(|value| value.to_str().ok()),
+        state.control_token.as_deref(),
+    )
+    .is_err()
+    {
+        return refuse(StatusCode::UNAUTHORIZED, "missing or invalid control token");
+    }
+    let Json(request) = match body {
+        Ok(body) => body,
+        Err(error) => return refuse(error.status(), "invalid pane placement request"),
+    };
+    let (reply, mut result) = tokio::sync::mpsc::channel(1);
+    if state
+        .proxy
+        .send_event(UserEvent::ControlPaneLayoutPlace { request, reply })
+        .is_err()
+    {
+        return refuse(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "gwt is not accepting project requests",
+        );
+    }
+    match tokio::time::timeout(Duration::from_secs(10), result.recv()).await {
+        Ok(Some(true)) => Json(serde_json::json!({"placed": true})).into_response(),
+        Ok(Some(false)) => refuse(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "expected an agent pane and a Kanban board in the current project",
+        ),
+        Ok(None) => refuse(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "gwt is not accepting project requests",
+        ),
+        Err(_) => refuse(
+            StatusCode::GATEWAY_TIMEOUT,
+            "pane placement acknowledgement timed out",
+        ),
     }
 }
 

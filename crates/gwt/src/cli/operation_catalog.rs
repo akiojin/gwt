@@ -587,6 +587,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "pane.layout.place",
+        aliases: &[],
+    },
+    Operation {
         name: "pane.list",
         aliases: &[],
     },
@@ -644,6 +648,10 @@ pub const OPERATIONS: &[Operation] = &[
     },
     Operation {
         name: "pm.approval.status",
+        aliases: &[],
+    },
+    Operation {
+        name: "pm.auto_start.set",
         aliases: &[],
     },
     Operation {
@@ -788,6 +796,10 @@ pub const OPERATIONS: &[Operation] = &[
     },
     Operation {
         name: "project.execution.status",
+        aliases: &[],
+    },
+    Operation {
+        name: "project.open",
         aliases: &[],
     },
     Operation {
@@ -1197,6 +1209,66 @@ mod tests {
         assert!(
             phantom.is_empty(),
             "the catalog lists operations json_envelope.rs does not dispatch: {phantom:?}"
+        );
+    }
+
+    #[test]
+    fn gui_envelope_parity_ledger_tracks_frontend_events_and_catalog() {
+        use std::collections::BTreeSet;
+
+        let protocol = include_str!("../protocol.rs");
+        let (_, declaration) = protocol
+            .split_once("pub enum FrontendEvent {")
+            .expect("FrontendEvent declaration");
+        let (variants, _) = declaration.split_once("\n}").expect("FrontendEvent end");
+        // Direct variants start at the rustfmt enum indentation and use
+        // UpperCamelCase. Fields and nested attribute arguments do not.
+        let expected: BTreeSet<_> = variants
+            .lines()
+            .filter_map(|line| line.strip_prefix("    "))
+            .filter(|line| line.starts_with(|ch: char| ch.is_ascii_uppercase()))
+            .map(|line| {
+                line.split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
+                    .next()
+                    .expect("variant name")
+            })
+            .collect();
+        assert!(
+            !expected.is_empty(),
+            "FrontendEvent declaration no longer matches the scan"
+        );
+
+        let ledger = include_str!("../../../../docs/gui-envelope-parity.md");
+        let mut recorded = BTreeSet::new();
+        for row in ledger.lines().filter(|line| line.starts_with("| `")) {
+            let columns: Vec<_> = row.trim_matches('|').split('|').map(str::trim).collect();
+            let [event, classification, operations, reason] = columns.as_slice() else {
+                panic!("expected four cells: {row}");
+            };
+            let event = event.trim_matches('`');
+            assert!(recorded.insert(event), "duplicate FrontendEvent: {event}");
+            assert!(!reason.is_empty(), "missing rationale for {event}");
+            match *classification {
+                "対応" | "一部対応" => {
+                    for operation in operations.split(',').map(str::trim) {
+                        let operation = operation.trim_matches('`');
+                        assert!(
+                            canonical_names().any(|name| name == operation),
+                            "{event} references a noncanonical or missing operation: {operation}"
+                        );
+                    }
+                }
+                "GUI 内部" | "対象外" | "読み取り" => {
+                    assert_eq!(*operations, "—", "unexpected operation for {event}");
+                }
+                _ => panic!("unknown classification for {event}: {classification}"),
+            }
+        }
+        let missing: Vec<_> = expected.difference(&recorded).copied().collect();
+        let stale: Vec<_> = recorded.difference(&expected).copied().collect();
+        assert!(
+            missing.is_empty() && stale.is_empty(),
+            "FrontendEvent parity ledger drift: missing {missing:?}, stale {stale:?}"
         );
     }
 

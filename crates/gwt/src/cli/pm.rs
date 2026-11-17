@@ -84,6 +84,11 @@ pub enum PmCommand {
     Status {
         project_root: Option<String>,
     },
+    /// Persist whether the resident PM should start on the next project open.
+    SetAutoStart {
+        project_root: Option<String>,
+        enabled: bool,
+    },
     /// Persistently pause or resume the autonomous resident loop.
     SetPaused {
         project_root: Option<String>,
@@ -789,6 +794,25 @@ pub(super) fn run<E: CliEnv>(
             out.push_str(
                 &serde_json::json!({"schema_version": 1, "ok": true, "status": status}).to_string(),
             );
+            out.push('\n');
+            Ok(0)
+        }
+        PmCommand::SetAutoStart {
+            project_root,
+            enabled,
+        } => {
+            let repo_path = resolve_repo_path(env, project_root);
+            if ambient_session_id().is_some() && !caller_is_registered_pm(&repo_path) {
+                return Err(refusal(
+                    "pm.auto_start.set requires the registered PM or a direct user CLI call".into(),
+                ));
+            }
+            let prefs = pm_registry::set_pm_auto_start(&repo_path, enabled).map_err(|error| {
+                SpecOpsError::from(ApiError::Unexpected(format!(
+                    "failed to persist PM auto-start setting: {error}"
+                )))
+            })?;
+            out.push_str(&serde_json::json!({"auto_start": prefs.settings.auto_start}).to_string());
             out.push('\n');
             Ok(0)
         }
