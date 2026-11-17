@@ -10401,6 +10401,18 @@ fn main() -> std::io::Result<()> {
     if let Err(error) = gwt::update_settings::migrate() {
         tracing::warn!(%error, "automatic-update preference migration failed; runtime auto-apply remains disabled");
     }
+    // Only the desktop app moves the shared Agent registry to split storage:
+    // a binary older than the split fails closed on it, so `gwtd` never does.
+    match gwt::agent_registry::migrate_to_split_storage() {
+        Ok(true) => tracing::info!(
+            backup = %gwt::agent_registry::schema3_backup_path().display(),
+            "shared Agent registry moved to split storage"
+        ),
+        Ok(false) => {}
+        Err(error) => {
+            tracing::warn!(%error, "shared Agent registry stays in schema 3 storage; migration failed");
+        }
+    }
 
     // SPEC #2920: `gwt serve` is removed, so `main()` only ever reaches
     // this point on the GUI route. Phase 3 will rework the kind taxonomy

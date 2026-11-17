@@ -7252,6 +7252,24 @@ fn sync_parent_directory(_path: &Path) -> io::Result<()> {
 }
 
 pub(crate) fn durable_atomic_write(path: &Path, content: &[u8]) -> io::Result<()> {
+    atomic_write(path, content, true)
+}
+
+/// Durably replace two files of one directory with the same content.
+///
+/// One directory sync after the second rename makes both renames durable, so
+/// the pair costs one directory sync instead of two.
+pub(crate) fn durable_atomic_write_siblings(
+    first: &Path,
+    second: &Path,
+    content: &[u8],
+) -> io::Result<()> {
+    debug_assert_eq!(first.parent(), second.parent());
+    atomic_write(first, content, false)?;
+    atomic_write(second, content, true)
+}
+
+fn atomic_write(path: &Path, content: &[u8], sync_parent: bool) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent)?;
@@ -7305,7 +7323,10 @@ pub(crate) fn durable_atomic_write(path: &Path, content: &[u8]) -> io::Result<()
                 ));
             }
         }
-        sync_parent_directory(path)
+        if sync_parent {
+            sync_parent_directory(path)?;
+        }
+        Ok(())
     })();
     let finished = std::time::Instant::now();
     let elapsed = finished.duration_since(started);
