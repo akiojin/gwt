@@ -968,6 +968,72 @@ pub fn names() -> impl Iterator<Item = &'static str> {
     })
 }
 
+/// The help family an operation belongs to: everything before the first `.`,
+/// or the whole name for a bare operation such as `search`.
+pub fn family_of(name: &str) -> &str {
+    name.split('.').next().unwrap_or(name)
+}
+
+/// Every help family the catalog implies, sorted and deduplicated.
+pub fn families() -> Vec<&'static str> {
+    canonical_names()
+        .map(family_of)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+/// The operation list of `gwtd --help <family>`, generated from the catalog
+/// (Issue #7522).
+///
+/// The family help texts are hand-written prose and drifted: 87 of the
+/// canonical operations were absent from them and twelve families had no help
+/// at all. Appending this section to every family help makes the listing
+/// complete by construction, so a newly dispatched operation is discoverable
+/// the moment `catalog_covers_every_dispatched_operation` forces it into the
+/// catalog. Aliases resolve but are never recommended, so only canonical
+/// names are printed. `None` for a family the catalog does not know.
+pub fn family_operations_section(family: &str) -> Option<String> {
+    let operations: Vec<&'static str> = canonical_names()
+        .filter(|name| family_of(name) == family)
+        .collect();
+    if operations.is_empty() {
+        return None;
+    }
+    let mut section = format!(
+        "All {family} operations ({}, generated from the operation catalog):\n",
+        operations.len()
+    );
+    for name in operations {
+        section.push_str(&format!("  {name}\n"));
+    }
+    Some(section)
+}
+
+/// The `Commands:` rows of the global `gwtd --help`.
+///
+/// `summaries` supplies the hand-written one-line description per family and
+/// the display order. A catalog family without a summary still gets a row, so
+/// no family can be reachable only by reading the dispatch source.
+pub fn family_index(summaries: &[(&str, &str)]) -> String {
+    let mut index = String::new();
+    for (family, summary) in summaries {
+        index.push_str(&format!("  {family:<11} {summary}\n"));
+    }
+    for family in families() {
+        if summaries.iter().any(|(described, _)| *described == family) {
+            continue;
+        }
+        let count = canonical_names()
+            .filter(|name| family_of(name) == family)
+            .count();
+        index.push_str(&format!(
+            "  {family:<11} {count} operation(s); see gwtd --help {family}\n"
+        ));
+    }
+    index
+}
+
 /// The `namespace.` an operation name sits in, or `None` for a bare name.
 fn namespace_of(name: &str) -> Option<&str> {
     name.find('.').map(|index| &name[..index + 1])
@@ -1123,6 +1189,49 @@ mod tests {
         assert!(
             phantom.is_empty(),
             "the catalog lists operations json_envelope.rs does not dispatch: {phantom:?}"
+        );
+    }
+
+    /// Issue #7522: the generated section is the whole family, canonical
+    /// spellings only, and a bare operation is its own family.
+    #[test]
+    fn family_operations_section_lists_exactly_the_family() {
+        for family in families() {
+            let section = family_operations_section(family).expect("catalog family");
+            let listed: Vec<&str> = section.lines().skip(1).map(str::trim).collect();
+            let expected: Vec<&str> = canonical_names()
+                .filter(|name| family_of(name) == family)
+                .collect();
+            assert_eq!(listed, expected, "{family}");
+        }
+        assert_eq!(family_of("search"), "search");
+        assert_eq!(family_of("issue.spec.read"), "issue");
+        let pr = family_operations_section("pr").unwrap();
+        assert!(pr.contains("  pr.update_branch\n"), "{pr}");
+        assert!(
+            !pr.contains("pr.update-branch"),
+            "aliases stay unlisted: {pr}"
+        );
+        assert_eq!(family_operations_section("nonexistent"), None);
+    }
+
+    /// Issue #7522: a family nobody wrote a summary for still gets a row.
+    #[test]
+    fn family_index_adds_a_row_for_every_undescribed_family() {
+        let index = family_index(&[("issue", "Manage GitHub Issues"), ("lessons", "Alias")]);
+        assert!(index.starts_with("  issue       Manage GitHub Issues\n  lessons     Alias\n"));
+        assert_eq!(index.matches("\n  issue ").count(), 0, "{index}");
+        for family in families() {
+            assert!(
+                index
+                    .lines()
+                    .any(|line| line.starts_with(&format!("  {family} "))),
+                "{family} has no row: {index}"
+            );
+        }
+        assert!(
+            index.contains("  worktree    1 operation(s); see gwtd --help worktree\n"),
+            "{index}"
         );
     }
 

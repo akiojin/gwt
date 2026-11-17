@@ -558,7 +558,9 @@ print(len(names), len({name.split('.')[0] for name in names}), alias_count)
 PY
 ```
 
-Use `gwtd --help` or `gwtd --help daemon` for help. Ordinary operation argv such
+Use `gwtd --help` or `gwtd --help daemon` for help. `gwtd --help` lists every
+family, and each `gwtd --help <family>` ends with that family's complete
+operation list, generated from the same catalog. Ordinary operation argv such
 as `gwtd daemon start` is rejected; send `daemon.start` as an envelope instead.
 Managed hooks retain the dedicated argv transports `gwtd hook event <Event>`
 and `gwtd hook provider-event <provider> <native-event>`.

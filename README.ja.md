@@ -525,6 +525,8 @@ PY
 ```
 
 ヘルプには `gwtd --help` / `gwtd --help daemon` を使います。
+`gwtd --help` は全系統を列挙し、各 `gwtd --help <family>` の末尾には
+同じカタログから生成したその系統の全 operation 一覧が付きます。
 通常の operation を argv で渡す `gwtd daemon start` 等は拒否されるため、
 `daemon.start` を envelope で送ります。managed hook は専用 argv transport の
 `gwtd hook event <Event>` / `gwtd hook provider-event <provider> <native-event>` を維持します。
