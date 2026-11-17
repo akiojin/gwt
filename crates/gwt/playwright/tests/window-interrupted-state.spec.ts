@@ -80,6 +80,28 @@ test.afterEach(({ page }) => {
   expect(browserErrors.get(page), "console and page errors").toEqual([]);
 });
 
+test("Issue #7523: recovery failure explains impact and next action without Debug state", async ({ page }, testInfo) => {
+  const proof = process.env.GWT_PLAYWRIGHT_ISSUE_7523_EVENTS;
+  test.skip(!proof, "requires the Rust recovery regression's actual backend events");
+  const events = JSON.parse(await readFile(proof!, "utf8"));
+  const operation = events.find((event: any) => event.kind === "window_command_error" && event.operation === "resize");
+  expect(operation).toBeTruthy();
+  expect(operation.message).toContain("not delivered to the window");
+  expect(operation.message).toContain("background process connection is interrupted");
+  expect(operation.message).toContain("Reopen the window and check its state");
+  expect(operation.message).not.toMatch(/Some\(|Degraded|None/);
+  await page.evaluate(detail => {
+    window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail }));
+  }, { ...operation, id: "agent-1" });
+  await expect(page.locator(".toast-alerts__item").filter({ hasText: "Resize failed" })).toContainText("Reopen the window");
+  await page.getByRole("button", { name: /Notifications/ }).click();
+  const details = page.locator(".notification-center__details").filter({ hasText: "background process connection is interrupted" });
+  await details.locator("summary").click();
+  await expect(details).toContainText(operation.message);
+  await expect(details).not.toContainText("Some(");
+  await testInfo.attach("recovery-failure", { body: await page.screenshot(), contentType: "image/png" });
+});
+
 test("operation failure preserves runtime state while a true PTY error still renders", async ({ page }, testInfo) => {
   const agentWindow = page.locator(".workspace-window[data-id='agent-1']");
   const inject = async (detail: object) => page.evaluate(detail => {

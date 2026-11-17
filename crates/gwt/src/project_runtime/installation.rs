@@ -1368,17 +1368,15 @@ pub fn install_agent_launch(
                 "genesis recovery receipt could not be settled",
                 &mut input.removed_genesis_session,
             );
-            return Err(format!(
-                "genesis launch readiness could not be committed: {error}; rollback: {rollback:?}"
-            ));
+            tracing::warn!(%error, ?rollback, "genesis launch readiness could not be committed");
+            return Err("The agent launch could not be confirmed. Cleanup was attempted. Open Logs and review the launch error before launching again.".into());
         }
     }
     let cached_session = if durable_launch_recovery_exists(&input.sessions_dir, &session_id)
         .map_err(|error| {
-            format!(
-                "launch recovery probe failed for Session {session_id} ({:?}): {error}",
-                error.kind()
-            )
+            tracing::warn!(session_id, error_kind = ?error.kind(), %error,
+                "launch recovery probe failed");
+            "The previous launch could not be checked. Launch is paused. Open Logs and review the launch error before launching again.".to_string()
         })? {
         None
     } else {
