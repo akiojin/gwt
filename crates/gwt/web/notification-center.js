@@ -9,6 +9,15 @@
 // is one more occurrence of that row — the row keeps an occurrence count and
 // the latest time, and moves to the top. Different content stays separate.
 //
+// Issue #7520 — one aggregation rule for every level. FR-016's "the history
+// does not dedup" means that no event is dropped: each one is counted and
+// re-arms unread. It does not mean one row per event. A row is one cause on
+// one Issue or surface, and its identity never includes the parts that vary
+// between occurrences of that cause (timestamps, durations, request counts):
+// errors and keyed surface notices name the cause with `key`; other notices
+// use their content, or the caller's `identity` when the text itself varies.
+// The row then shows the latest text.
+//
 // History is session-scoped and in-memory (FR-013). Its immutable model owns
 // aggregation, unread state and retention; the shared toast stack renders rows.
 // Only explicit dismiss, clear-all and the retained-count cap retire a row.
@@ -110,7 +119,7 @@ export function createNotificationHistory({ maxRetained = DEFAULT_MAX_RETAINED, 
     const key = surface && notice.key != null ? String(notice.key) : "";
     const identity = surface ? null : JSON.stringify([
       notice.kind == null ? "" : String(notice.kind), notice.id == null ? "" : String(notice.id),
-      level, title, notice.issueNumber || "", message,
+      level, title, notice.issueNumber || "", notice.identity == null ? message : ["identity", String(notice.identity)],
     ]);
     const previous = state.rows.find(row => surface ? key && row.surface && row.key === key : !row.surface && row.identity === identity);
     const id = previous?.id ?? ++nextId;
@@ -313,7 +322,7 @@ export function createNotificationCenter({
 
   /**
    * Record one notification into the history.
-   * `notice` = { kind, level, title?, message?, issueNumber?, onActivate? }.
+   * `notice` = { kind, level, title?, message?, issueNumber?, identity?, onActivate? }.
    * Callers' `id` / `timeoutMs` are deliberately NOT forwarded as toast ids and
    * the history never auto-expires; `id` only separates content identities.
    */
