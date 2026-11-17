@@ -460,8 +460,8 @@ test("Works telemetry sums measured project conversations once, preserves missin
   assert.equal(incompleteClaude.by_window.w1.cache_tokens, null);
   assert.equal(incompleteClaude.today.cache_tokens, null);
   assert.equal(result.today.output_tokens, 0);
-  assert.equal(result.today.cost_usd, null);
-  assert.equal(result.today.landed_pr_count, null);
+  assert.equal(Object.hasOwn(result.today, "cost_usd"), false);
+  assert.equal(Object.hasOwn(result.today, "landed_pr_count"), false);
   assert.ok(result.availability, "Works must explain the availability of Today and Fleet");
   assert.equal(result.availability.today.state, "measured");
   assert.equal(result.availability.fleet.state, "measured");

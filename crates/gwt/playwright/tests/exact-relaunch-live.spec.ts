@@ -1649,7 +1649,7 @@ fs.appendFileSync(rollout, JSON.stringify({type:'assistant',sessionId:native,cwd
         await expect(row.locator(".terminal-text-preview x")).toHaveCount(0);
         await expect(surface).toHaveCSS("--works-preview-lines", "10");
         await expect(surface.locator(".works-counts [data-count]")).toHaveCount(4);
-        await expect(surface.locator(".works-today [data-metric]")).toHaveCount(6);
+        await expect(surface.locator(".works-today [data-metric]")).toHaveCount(4);
         await expect(row.locator(".work-stats [data-stat]")).toHaveCount(8);
         await row.locator(".work-tail").click(); await expect(surface.locator(".works-full")).toBeHidden();
         await row.getByRole("button", { name: "Open terminal" }).click();
@@ -1955,12 +1955,10 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
         }
         return true;
       }, { timeout: 45_000, message: "Today and Fleet match all five measured wire conversations" }).toBe(true);
-      await expect(main.locator('[data-metric="today-cost"]')).toHaveText("—");
-      await expect(main.locator('[data-metric="today-landed"]')).toHaveText("—");
+      await expect(main.locator('[data-metric="today-cost"], [data-metric="today-landed"]')).toHaveCount(0);
       await expect(main.locator('[data-availability="today"]')).toHaveAttribute("data-state", "measured");
       await expect(main.locator('[data-availability="fleet"]')).toHaveAttribute("data-state", "partial");
-      await expect(main.locator(".works-source-note")).toContainText("per-session USD");
-      await expect(main.locator(".works-source-note")).toContainText("daily merge data");
+      await expect(main.locator(".works-source-note")).toHaveCount(0);
       await expect.poll(async () => Number(await main.locator(".works-fleet svg").getAttribute("data-known-count"))).toBeGreaterThan(0);
     };
     let failed = false;

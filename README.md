@@ -2474,9 +2474,12 @@ branch and verification facts. Unavailable measurements display **—**, includi
 unless the provider reports it directly. Today totals use this project's measured conversations;
 account-wide usage is not copied into them. Individual PR information is not shown here.
 Today and Fleet explain whether measurements are missing, partial, unavailable, or complete;
-unknown totals stay **—**, while measured zero stays **0**. Cost remains unavailable because
-per-session USD is not supported; Landed PRs remains unavailable until complete daily merge
-data is connected.
+unknown totals stay **—**, while measured zero stays **0**. Cost and Landed PRs are omitted
+because their data sources are not connected.
+
+Issues shows host-wide **Verification slots** as running, capacity, and available counts.
+`issue.monitor.status` exposes the same observation as `verification_capacity`.
+Unavailable observations display **Unavailable** rather than zero.
 
 Saved sessions restore into the current surfaces. The former terminal tabs, grid and Columns
 setting do not return after reload or restart; the roster's Team/Past tabs remain.
@@ -2677,6 +2680,10 @@ gwtd <<'JSON'
 {"schema_version":1,"operation":"diagnostics.cpu","params":{}}
 JSON
 ```
+
+Each process sample includes `rss_bytes`, its resident memory in bytes, or `null` when
+unavailable. RSS includes resident pages and does not measure live allocations.
+The process list uses `ps` on macOS and Linux.
 
 The `host_cpu` result includes the latest `fseventsd` process sample and the
 sampling count and interval. On macOS, it samples three times one second apart
