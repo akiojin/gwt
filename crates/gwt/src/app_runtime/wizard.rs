@@ -437,7 +437,8 @@ fn revalidate_issue_monitor_launch_prepared(
             profile_config_path,
             expected.codex_preflight.clone(),
         );
-        if current != *expected {
+        if current != *expected || !expected.base_branch_is_current(&prepared.request.project_root)
+        {
             prepared.delivery.result =
                 Err(super::launch::ISSUE_MONITOR_SPAWN_ADMISSION_STALE.to_string());
             prepared.delivery.admission = None;
@@ -850,6 +851,9 @@ type IssueMonitorLaunchSelection = (
 struct IssueMonitorLaunchSourceFacts {
     selection: Result<Option<IssueMonitorLaunchSelection>, String>,
     handoff: IssueMonitorResumeHandoff,
+    /// Successful launch facts validate their Git base separately from prefs.
+    /// Answers and rejected preparations do not need another Git lookup.
+    base_branch: Option<String>,
     /// Issue #6299: the host Codex preflight this delivery already ran. It is
     /// not a prefs-derived input, so it is reused, never compared.
     codex_preflight: IssueMonitorCodexPreflightMemo,
@@ -890,6 +894,13 @@ impl IssueMonitorCodexPreflightMemo {
 }
 
 impl IssueMonitorLaunchSourceFacts {
+    fn base_branch_is_current(&self, project_root: &Path) -> bool {
+        self.base_branch.as_ref().is_none_or(|expected| {
+            gwt::issue_monitor::issue_monitor_implementation_base_branch(project_root)
+                .is_ok_and(|current| current == *expected)
+        })
+    }
+
     fn read(
         cache: &LaunchWizardMemoryCache,
         provider_usage_accounts: &[gwt_core::usage::ProviderUsage],
@@ -933,6 +944,7 @@ impl IssueMonitorLaunchSourceFacts {
         Self {
             selection,
             handoff: issue_monitor_resume_handoff(&request.project_root, issue_number),
+            base_branch: None,
             codex_preflight,
             answer_profile_expectation: None,
         }
@@ -4561,8 +4573,14 @@ impl AppRuntime {
             let source_prefs_stamp = super::issue_monitor_prefs_stamp(&prefs_path);
             let answer_profile_expectation = prefs.as_ref().and_then(|prefs|
                 capture_monitor_answer_profile_expectation(&request, prefs, &result));
-            let source_facts = IssueMonitorLaunchSourceFacts { selection, handoff, codex_preflight, answer_profile_expectation };
-            if source_facts != IssueMonitorLaunchSourceFacts::read(&cache, &provider_usage, &request, &profile_config_path, source_facts.codex_preflight.clone()) {
+            let base_branch = match result.as_ref() {
+                Ok(IssueMonitorLaunchPreparation::Launch(facts)) => Some(facts.base_branch.clone()),
+                _ => None,
+            };
+            let source_facts = IssueMonitorLaunchSourceFacts { selection, handoff, base_branch, codex_preflight, answer_profile_expectation };
+            if source_facts != IssueMonitorLaunchSourceFacts::read(&cache, &provider_usage, &request, &profile_config_path, source_facts.codex_preflight.clone())
+                || !source_facts.base_branch_is_current(&request.project_root)
+            {
                 result = Err(super::launch::ISSUE_MONITOR_SPAWN_ADMISSION_STALE.to_string());
             }
             record_issue_monitor_worker_phase("monitor_source_revalidation", &mut phase_started);
@@ -8276,6 +8294,37 @@ mod launch_agent_branch_resolution_tests {
 
     const NO_BRANCHES_ERROR: &str =
         "No branches exist in this repository; create an initial commit first";
+
+    #[test]
+    fn issue_7536_prefetched_launch_base_must_still_match_integration_ref() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let repo = temp.path().join("repo");
+        init_committed_repo(&repo, "main");
+        let facts = super::IssueMonitorLaunchSourceFacts {
+            selection: Ok(None),
+            handoff: Ok(None),
+            base_branch: Some("main".into()),
+            codex_preflight: Default::default(),
+            answer_profile_expectation: None,
+        };
+        assert!(facts.base_branch_is_current(&repo));
+        run_git(
+            &repo,
+            &["update-ref", "refs/remotes/origin/develop", "HEAD"],
+        );
+        assert!(!facts.base_branch_is_current(&repo));
+        let develop = super::IssueMonitorLaunchSourceFacts {
+            base_branch: Some("develop".into()),
+            ..facts
+        };
+        assert!(develop.base_branch_is_current(&repo));
+        run_git(&repo, &["update-ref", "-d", "refs/remotes/origin/develop"]);
+        assert!(!develop.base_branch_is_current(&repo));
+    }
 
     fn run_git(cwd: &Path, args: &[&str]) {
         let output = gwt_core::process::hidden_command("git")

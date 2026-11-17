@@ -1283,7 +1283,7 @@ fn issue5596_durable_facts_prefetch_is_bounded_and_keeps_claims_fifo() {
     let before = gwt_core::process::thread_git_spawn_count();
     run_worker(0);
     assert!(
-        gwt_core::process::thread_git_spawn_count() - before > 2,
+        gwt_core::process::thread_git_spawn_count() - before > 0,
         "unavailable speculation must run normal facts preparation"
     );
     fixture

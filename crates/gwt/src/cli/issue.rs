@@ -4205,6 +4205,21 @@ fn run_monitor_verification_declare<E: CliEnv>(
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let project_root = issue_monitor_project_root(env, project_root)?;
+    // The client and cache belong to the caller. A target root must retain
+    // that repository identity before either fetching its Issue or writing prefs.
+    let caller_root = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
+    if !gwt_core::repo_hash::detect_repo_identity(&caller_root)
+        .zip(gwt_core::repo_hash::detect_repo_identity(&project_root))
+        .is_some_and(|(caller, target)| caller.hash == target.hash)
+    {
+        out.push_str(&serde_json::json!({
+            "number": number, "status": "refused", "refusal": "repository_mismatch",
+            "detail": "project_root must resolve to the caller's repository identity so the Issue client, cache and preference store share one scope",
+            "recovery": "invoke issue.monitor.verification.declare from the target repository; linked worktrees and symlinks of the same repository are supported"
+        }).to_string());
+        out.push('\n');
+        return Ok(1);
+    }
     let entry = refresh_issue_cache(env, IssueNumber(number))?;
     if entry.snapshot.state != IssueState::Open {
         return Err(SpecOpsError::Validation(
@@ -9311,12 +9326,59 @@ mod tests {
         let input = serde_json::json!({"schema_version": 1,
             "operation": "issue.monitor.verification.declare",
             "params": {"number": 7, "criteria": [{"id": "AC-2", "verifier": "PM on release host"}]}});
+        let foreign = TempDir::new().unwrap();
+        init_monitor_test_repository(foreign.path(), "https://github.com/example/foreign.git");
+        let foreign_prefs = crate::issue_monitor_prefs_path_for_repo_path(foreign.path());
+        crate::save_issue_monitor_prefs(&foreign_prefs, &before).unwrap();
+        let mut foreign_input = input.clone();
+        foreign_input["params"]["project_root"] = serde_json::json!(foreign.path());
+        let calls_before = env.client.call_log();
+        let caller_before = fs::read(&path).unwrap();
+        let foreign_before = fs::read(&foreign_prefs).unwrap();
+        assert_eq!(
+            crate::cli::dispatch_json_input(&mut env, "gwtd", &foreign_input.to_string()),
+            1
+        );
+        assert_eq!(
+            env.client.call_log(),
+            calls_before,
+            "foreign scope must refuse before fetching"
+        );
+        assert_eq!(fs::read(&path).unwrap(), caller_before);
+        assert_eq!(fs::read(&foreign_prefs).unwrap(), foreign_before);
         assert_eq!(
             crate::cli::dispatch_json_input(&mut env, "gwtd", &input.to_string()),
             0,
             "{}",
             String::from_utf8_lossy(&env.stderr)
         );
+        let worktree = tmp.path().join("linked-worktree");
+        let worktree_git = tmp.path().join(".git/worktrees/verification");
+        fs::create_dir_all(&worktree).unwrap();
+        fs::create_dir_all(&worktree_git).unwrap();
+        fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", worktree_git.display()),
+        )
+        .unwrap();
+        fs::write(worktree_git.join("commondir"), "../..\n").unwrap();
+        fs::write(worktree_git.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        let same_repo_targets = std::iter::once(worktree);
+        #[cfg(unix)]
+        let same_repo_targets = same_repo_targets.chain({
+            let alias = tmp.path().join("repository-alias");
+            std::os::unix::fs::symlink(tmp.path(), &alias).unwrap();
+            std::iter::once(alias)
+        });
+        for target in same_repo_targets {
+            let mut scoped_input = input.clone();
+            scoped_input["params"]["project_root"] = serde_json::json!(target);
+            assert_eq!(
+                crate::cli::dispatch_json_input(&mut env, "gwtd", &scoped_input.to_string()),
+                0,
+                "a worktree or symlink of the caller repository remains a valid scope"
+            );
+        }
         let prefs = crate::load_issue_monitor_prefs(&path).unwrap();
         let mut restored =
             crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
