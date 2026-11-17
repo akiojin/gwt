@@ -1506,9 +1506,12 @@ pub fn reject_continue_work_workspace_commit(
             gwt_core::workspace_projection::ExternalWorkspaceCommitResolution::Rejected
             | gwt_core::workspace_projection::ExternalWorkspaceCommitResolution::Missing,
         ) => Ok(()),
-        Ok(resolution) => Err(std::io::Error::other(format!(
-            "continuation Work rejection returned {resolution:?}"
-        ))),
+        Ok(resolution) => {
+            tracing::warn!(?resolution, "continuation Work rejection was not confirmed");
+            Err(std::io::Error::other(
+                "The continuation cleanup could not be confirmed. Further continuation is paused. Open Logs and review the continuation error before retrying.",
+            ))
+        }
         Err(error) => Err(std::io::Error::other(error.to_string())),
     }
 }
@@ -1682,10 +1685,10 @@ pub fn reconcile_unindexed_prepared_fresh_launches(
             || !crate::cli::execution_state::is_owner_launch_successor_attempt(attempt)
             || durable_launch_recovery_exists(sessions_dir, &attempt.request.initial_session_id)
                 .map_err(|error| {
+                    tracing::warn!(session_id = %attempt.request.initial_session_id,
+                        error_kind = ?error.kind(), %error, "launch recovery probe failed");
                     format!(
-                        "launch recovery probe failed for Session {} ({:?}): {error}",
-                        attempt.request.initial_session_id,
-                        error.kind()
+                        "The previous launch could not be checked: {error}. Launch recovery is paused. Open Logs and review the launch error before launching again."
                     )
                 })?
         {

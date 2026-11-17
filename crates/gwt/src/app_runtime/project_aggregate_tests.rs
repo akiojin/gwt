@@ -245,6 +245,7 @@ fn remote_command_recovers_after_owner_identity_switch_and_health_recovery() {
 
 #[test]
 fn remote_command_owner_recovery_expires_with_reason_and_attempts() {
+    use super::RemoteRuntimeCommandKind;
     let _env = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -267,6 +268,16 @@ fn remote_command_owner_recovery_expires_with_reason_and_attempts() {
     assert!(runtime
         .pane_send_input_to_window_events("origin".into(), &id, "expire\n", None)
         .is_empty());
+    assert!(runtime.queue_remote_runtime_command(
+        &id,
+        gwt::project_runtime::events::OwnerCommand::Resize {
+            id: String::new(),
+            incarnation: runtime.runtimes[&id].incarnation,
+            cols: 90,
+            rows: 30,
+        },
+        RemoteRuntimeCommandKind::Resize,
+    ).is_empty());
     let start = Instant::now();
     assert!(runtime.next_runtime_output_deadline().is_some());
     // Drive the existing event-loop clock directly; no wall-clock sleep.
@@ -280,9 +291,12 @@ fn remote_command_owner_recovery_expires_with_reason_and_attempts() {
             _ => None,
         })
         .expect("expired command outcome");
-    assert!(error.contains("Degraded"), "{error}");
-    assert!(error.contains("identity mismatch"), "{error}");
-    assert!(error.contains("owner pane unset"), "{error}");
+    assert!(error.contains("background process connection is interrupted"), "{error}");
+    assert!(error.contains("background process connection changed"), "{error}");
+    assert!(error.contains("target window is unavailable"), "{error}");
+    assert!(!error.contains("Some(") && !error.contains("Degraded"), "{error}");
+    assert!(error.contains("not delivered to the window"), "{error}");
+    assert!(error.contains("Reopen the window and check its state"), "{error}");
     assert!(error.contains("Automatic recovery"), "{error}");
     assert!(error.contains("ms") && error.contains("attempt"), "{error}");
     assert!(
@@ -293,6 +307,13 @@ fn remote_command_owner_recovery_expires_with_reason_and_attempts() {
         !runtime.pane_has_unsent_user_input(&id),
         "expired input must clear its speculative busy hint"
     );
+    let resize_error = events.iter().find_map(|event| match &event.event {
+        BackendEvent::WindowCommandError { operation, message, .. } if operation == "resize" => Some(message),
+        _ => None,
+    }).expect("expired resize outcome");
+    assert_eq!(resize_error, error, "both display boundaries use the same recovery explanation");
+    let wire = events.iter().map(|event| serde_json::to_value(&event.event).unwrap()).collect::<Vec<_>>();
+    println!("ISSUE7523_EVENTS={}", serde_json::to_string(&wire).unwrap());
 }
 
 #[test]

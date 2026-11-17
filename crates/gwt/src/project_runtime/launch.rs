@@ -1265,9 +1265,13 @@ pub fn issue_monitor_trust_candidate_from_feedback(
         session_mode,
         gwt_agent::SessionMode::Normal | gwt_agent::SessionMode::Resume
     ) {
-        return Err(format!(
-            "Issues managed Codex trust requires Normal or Resume session mode, got {session_mode:?}"
-        ));
+        tracing::warn!(
+            ?session_mode,
+            "Issues managed Codex trust rejected session mode"
+        );
+        return Err(
+            "Issues launch requires Normal or Resume session mode. The agent was not launched. Choose one of those modes and launch again.".into()
+        );
     }
     Ok(Some(IssueMonitorTrustCandidate {
         issue_number,
@@ -1646,9 +1650,11 @@ pub fn validate_issue_monitor_managed_codex_worktree(
         ));
     }
     if config.linked_issue_number != Some(candidate.issue_number) {
+        tracing::warn!(expected_issue = candidate.issue_number, actual_issue = ?config.linked_issue_number,
+            "Issues launch rejected mismatched linked Issue");
         return Err(format!(
-            "Issues linked Issue #{} does not match launch metadata {:?}",
-            candidate.issue_number, config.linked_issue_number
+            "Issues linked Issue #{} does not match the launch settings. The agent was not launched. Reopen the launch setup for this Issue.",
+            candidate.issue_number
         ));
     }
     if !matches!(
@@ -1656,17 +1662,18 @@ pub fn validate_issue_monitor_managed_codex_worktree(
         gwt_agent::SessionMode::Normal | gwt_agent::SessionMode::Resume
     ) || config.session_mode != candidate.session_mode
     {
-        return Err(format!(
-            "Issues session mode {:?} does not match launch session mode {:?}; managed trust requires matching Normal or Resume provenance",
-            candidate.session_mode, config.session_mode
-        ));
+        tracing::warn!(expected_mode = ?candidate.session_mode, actual_mode = ?config.session_mode,
+            "Issues launch rejected mismatched session mode");
+        return Err(
+            "Issues session mode does not match the launch settings; matching Normal or Resume modes are required. The agent was not launched. Reopen the launch setup for this Issue.".into()
+        );
     }
 
     let expected_branch = format!("work/issue-{}", candidate.issue_number);
     if !candidate.review_dispatch && config.branch.as_deref() != Some(expected_branch.as_str()) {
         return Err(format!(
-            "Issues branch must be {expected_branch}, got {:?}",
-            config.branch
+            "Issues branch must be {expected_branch}, got {}. The agent was not launched. Select the Issue work branch in the launch setup.",
+            config.branch.as_deref().unwrap_or("no branch")
         ));
     }
 

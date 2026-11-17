@@ -203,29 +203,28 @@ impl AppRuntime {
         let context = self.project_context(&self.window_lookup.get(id)?.tab_id)?;
         let state = self.project_state(&context)?;
         let mut reasons = Vec::new();
-        if state
-            .project_owner_health
-            .as_ref()
-            .is_some_and(|health| health.state != gwt::protocol::ProjectOwnerHealthState::Healthy)
-        {
-            reasons.push("owner is not Healthy");
+        if let Some(health) = state.project_owner_health.as_ref() {
+            use gwt::protocol::ProjectOwnerHealthState;
+            match health.state {
+                ProjectOwnerHealthState::Healthy => {}
+                ProjectOwnerHealthState::Connecting => {
+                    reasons.push("background process is connecting")
+                }
+                ProjectOwnerHealthState::Degraded => {
+                    reasons.push("background process connection is interrupted")
+                }
+                ProjectOwnerHealthState::Wedged => {
+                    reasons.push("background process is not responding")
+                }
+            }
         }
         if state.project_owner_identity.as_ref() != Some(&runtime.owner_identity) {
-            reasons.push("owner identity mismatch");
+            reasons.push("background process connection changed");
         }
         if runtime.owner_pane_id.is_empty() {
-            reasons.push("owner pane unset");
+            reasons.push("target window is unavailable");
         }
-        (!reasons.is_empty()).then(|| {
-            format!(
-                "owner health: {:?}; {}",
-                state
-                    .project_owner_health
-                    .as_ref()
-                    .map(|health| &health.state),
-                reasons.join("; ")
-            )
-        })
+        (!reasons.is_empty()).then(|| reasons.join("; "))
     }
 
     fn warn_remote_command_recovery(
@@ -347,7 +346,7 @@ impl AppRuntime {
             let reason = reason.as_deref().unwrap_or(&pending.reason);
             self.warn_remote_command_recovery(id, reason, pending.attempts, waited);
             events.extend(self.remote_command_refusal(id, &pending.kind, format!(
-                "The project command could not be delivered: {reason}. Automatic recovery stopped after {} attempts and {} ms.",
+                "The command was not delivered to the window: {reason}. Automatic recovery stopped after {} attempts and {} ms. Reopen the window and check its state before repeating the command.",
                 pending.attempts, waited.as_millis()
             )));
         }

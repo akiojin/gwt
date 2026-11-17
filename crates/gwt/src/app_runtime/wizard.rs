@@ -2008,7 +2008,10 @@ impl AppRuntime {
             );
             return launch_agent_open_error(
                 client_id,
-                format!("Window preset {:?} is not a Work surface", window.preset),
+                format!(
+                    "{} is not a Work surface. Open Works to use this action.",
+                    window.preset.title()
+                ),
             );
         }
         // SPEC-1934 US-7 / FR-034
@@ -2275,8 +2278,8 @@ impl AppRuntime {
             return start_work_open_error(
                 client_id,
                 format!(
-                    "Window preset {:?} is not an Agent Kanban surface",
-                    board_window.preset
+                    "{} is not an Agent Kanban surface. Open Agents to launch work.",
+                    board_window.preset.title()
                 ),
             );
         }
@@ -2328,8 +2331,8 @@ impl AppRuntime {
             return launch_agent_open_error(
                 client_id,
                 format!(
-                    "Window preset {:?} is not an Agent Kanban surface",
-                    board_window.preset
+                    "{} is not an Agent Kanban surface. Open Agents to launch work.",
+                    board_window.preset.title()
                 ),
             );
         }
@@ -2852,8 +2855,8 @@ impl AppRuntime {
                 "resume_branch_latest_agent rejected: wrong preset"
             );
             return branch_error(format!(
-                "Window preset {:?} is not a Work surface",
-                window.preset
+                "{} is not a Work surface. Open Works to use this action.",
+                window.preset.title()
             ));
         }
         if tab.kind != gwt::ProjectKind::Git {
