@@ -128,7 +128,7 @@ pub fn render_settlement_comment(
             body.push_str(&format!("PR #{pr_number}（merge commit `{sha}`）の実装を配信しました。Issue #{issue_number} の未達 AC は実測専用です。Autonomous が on なら実測待ち（awaiting_measurement）、off なら needs_human として判断を待ちます。測定後に AC を更新するか、明示的に requeue してください。\n\n未達 AC: {}\n", unmet.join(", ")));
         }
         MergedIssueSettlementAction::AwaitVerification { unmet } => {
-            body.push_str(&format!("PR #{pr_number}（merge commit `{sha}`）の実装を配信しました。Issue #{issue_number} はリリース・main・別ホストでの確認待ち（awaiting_verification）です。残条件と確認主体は Issue の各 AC に記録します。確認可能になったら明示的に requeue してください。\n\n未達 AC: {}\n", unmet.join(", ")));
+            body.push_str(&format!("PR #{pr_number}（merge commit `{sha}`）の実装を配信しました。Issue #{issue_number} の残条件はリリース・main・別ホストでの確認です。Autonomous が on なら確認待ち（awaiting_verification）、off なら needs_human として判断を待ちます。残条件と確認主体は Issue の各 AC に記録します。確認可能になったら明示的に requeue してください。\n\n未達 AC: {}\n", unmet.join(", ")));
         }
     }
     body.push_str("\nManaged by gwt Issues.\n");
