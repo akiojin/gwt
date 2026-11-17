@@ -3340,10 +3340,10 @@ fn publish(source: &Source, path: &Path) -> io::Result<()> {
 fn publish_verified(source: &Source, path: &Path) -> io::Result<()> {
     #[cfg(test)]
     record_io(|io| io.mirror_publishes += 1);
-    crate::issue_monitor::durable_atomic_write(path, source.after_json.as_bytes())?;
     // The schema1 recovery writer must not be able to restore an old schema1
     // floor after the canonical schema2 file is damaged.
-    crate::issue_monitor::durable_atomic_write(
+    crate::issue_monitor::durable_atomic_write_siblings(
+        path,
         &path.with_extension("committed.json"),
         source.after_json.as_bytes(),
     )
