@@ -180,3 +180,40 @@ test("capacity-ended turn renders Waiting with its reason and recovers", async (
   await expect(agentWindow.locator(".status-label")).toHaveText("Running");
   await expect(agentWindow.locator(".status-chip")).not.toHaveAttribute("title", /Selected model is at capacity/);
 });
+
+test("Issue #7542: a failed PM launch is shown as not running with a working Restart", async ({ page }, testInfo) => {
+  await page.addInitScript(() => { (window as any).__gwtPlaywrightTestBridge = true; });
+  await page.reload();
+  await expect.poll(() => page.evaluate(() => Boolean((window as any).__gwtPmSettingsTestApi))).toBe(true);
+  await page.evaluate(() => {
+    const mount = document.createElement("section");
+    mount.id = "pm-start-block-mount";
+    mount.className = "settings-panel";
+    document.body.appendChild(mount);
+    (window as any).__gwtPmSettingsTestApi.mount(mount);
+  });
+  await page.evaluate(detail => {
+    window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail }));
+  }, {
+    kind: "pm_status", project_key: new URL(page.url()).pathname.split("/").filter(Boolean).at(-1),
+    available: true, auto_start: true, paused: false, is_running: false,
+    loop_interval_secs: 60, loop_interval_secs_decimal: "60",
+    configured_agent_id: "claude", agent_options: [{ id: "claude", name: "Claude Code" }],
+    start_block: {
+      kind: "launch_failed", permanent: false, restart_clears_it: true,
+      reason: "Configured PM still holds its reservation",
+      required_operation: "Close any Project Manager window that is still open, then press Restart Project Manager in Settings.",
+      observed_at: "2026-11-17T10:00:00Z",
+    },
+  });
+  const panel = page.locator("#pm-start-block-mount");
+  const line = panel.locator('[data-role="pm-start-block"]');
+  await expect(line).toBeVisible();
+  await expect(line).toHaveText(
+    "The Project Manager is not running: Configured PM still holds its reservation. "
+      + "Close any Project Manager window that is still open, then press Restart Project Manager in Settings.",
+  );
+  await expect(panel.locator('[data-role="pm-restart"]')).toBeEnabled();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", testInfo.project.name.includes("light") ? "light" : "dark");
+  await testInfo.attach("pm-launch-failed", { body: await page.screenshot(), contentType: "image/png" });
+});
