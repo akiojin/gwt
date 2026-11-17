@@ -1,6 +1,56 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.168.0] - 2026-11-17
+
+### Bug Fixes
+
+- **runtime:** Keep debug state out of user-facing failures
+- **runtime:** Keep launch diagnostics in logs and remove timing flake
+- **agents:** 他 project の record 書き込みを待たずに prefs を保存できるようにする
+- **agents:** Confirm restored registry durability on retry
+- **issues:** Park delivered owners awaiting external verification
+- **issues:** Clarify manual verification settlement guidance
+- **pm:** Reconcile or quarantine wedged PM reservations on NEW launch
+- **ui:** Steering の再要求を Issue と reason ごとの 1 行に集約する
+- **pm:** Expect the identity guard error for a foreign PM registration
+- **daemon:** Bound stale-daemon retirement with staged termination
+- **update:** 再起動後の停止済み担当が占有する枠を回復する
+- **cli:** Preserve local error kinds in envelope failures
+- **pm:** 世代交代後に残った PM 予約を新規起動時に回収する
+- **pm:** PM の起動失敗を PM が起動していない状態として明示する
+
+### Features
+
+- **agents:** Restore current split registry to schema 3
+- **gwtd:** ヘルプの operation 一覧をカタログから生成する
+- **cli:** Expose structured envelope data and error categories
+
+### Miscellaneous Tasks
+
+- **work:** Resume verified runtime failure delivery
+- **work:** Issue 7486 の配信を PR 7515 と PR 7530 に関連付ける
+- **work:** Issue 7486 の後続 slice の Work event を記録する
+- **work:** Issue 7486 の受け入れ条件 4 の作業 Work event を記録する
+- **work:** Record registry restore delivery PR
+- **work:** Record structured response delivery PR
+- **work:** Record external verification delivery PR
+- **work:** Issue 7520 の配信を PR 7540 に関連付ける
+- **security:** Allowlist the chrono unmaintained advisory in deny.toml
+- **work:** Issue 7526 の再開検証と配信記録を保存
+- **work:** Issue 7526 の継続検証と配信状態を記録
+- **work:** Issue 7526 の配信を PR 7544 に関連付ける
+- **work:** Record local failure delivery PR
+
+### Performance
+
+- **agents:** Core を変えないと分かった時点で core lock を放す
+- **terminal:** Drain large terminal backlogs in a time-budgeted catch-up
+
+### Testing
+
+- **gwtd:** ヘルプの手書き文が catalog に無い operation を名指さないことを固定する
+
 ## [9.167.3] - 2026-11-17
 
 ### Bug Fixes
