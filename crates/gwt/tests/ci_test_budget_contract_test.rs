@@ -567,7 +567,8 @@ fn workspace_shards_preserve_the_complete_serial_test_selection() {
     assert!(workflow["env"]["CARGO_PROFILE_TEST_DEBUG"].is_null());
     assert!(job["env"]["CARGO_PROFILE_TEST_DEBUG"].is_null());
     let test_steps = [
-        "Build and inventory workspace tests",
+        "Build workspace test binaries",
+        "Inventory workspace tests",
         RUN_TESTS_STEP,
         "Run doctests",
         "Run real-binary front-door tests (Xvfb)",
@@ -579,12 +580,24 @@ fn workspace_shards_preserve_the_complete_serial_test_selection() {
             assert!(step["env"]["CARGO_PROFILE_TEST_DEBUG"].is_null());
         }
     }
-    assert!(step("Build and inventory workspace tests")["run"]
+    assert!(step("Build workspace test binaries")["run"]
         .as_str()
         .unwrap()
-        .contains("cargo nextest list --workspace --all-features --message-format json"));
+        .contains("cargo nextest list --workspace --all-features --list-type binaries-only --message-format json > target/workspace-test-evidence/binaries.json"));
+    let inventory = step("Inventory workspace tests");
+    assert_eq!(inventory["run"].as_str(), Some(
+        "cargo nextest list --profile ci --binaries-metadata target/workspace-test-evidence/binaries.json --message-format json > target/workspace-test-evidence/inventory.json"));
+    assert_eq!(inventory["timeout-minutes"].as_u64(), Some(3));
     assert_eq!(step(RUN_TESTS_STEP)["run"].as_str(), Some(
         "cargo nextest run --workspace --all-features --test-threads=1 --profile ci --partition slice:${{ matrix.shard }}/6"));
+    let config: toml::Value = toml::from_str(&read(".config/nextest.toml")).unwrap();
+    assert_eq!(
+        config["profile"]["ci"]["scripts"][0]["list-wrapper"].as_str(),
+        Some("ci-list-deadline")
+    );
+    let command = &config["scripts"]["wrapper"]["ci-list-deadline"]["command"]["command-line"];
+    assert_eq!(command[0].as_str(), Some("scripts/ci_nextest_list.py"));
+    assert_eq!(command[1].as_str(), Some("60"));
     let front_door = step("Run real-binary front-door tests (Xvfb)");
     assert_eq!(front_door["run"].as_str(), Some(
         "dbus-run-session -- xvfb-run -a cargo test --workspace --all-features --test stable_server_port --test project_restore_integration --test open_cli_integration -- --ignored --test-threads=1 --nocapture"));

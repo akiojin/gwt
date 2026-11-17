@@ -1,3 +1,5 @@
+experimental = ["wrapper-scripts"]
+
 # Issue #3845: a blocked test must fail without preventing later tests from running.
 [profile.default]
 fail-fast = false
@@ -20,6 +22,15 @@ path = "junit.xml"
 # Issue #5564: retain execution identities for the required shard-union check.
 [profile.ci.junit]
 path = "junit.xml"
+
+# Issue #7572: listing runs before nextest's per-test timeouts take effect.
+[scripts.wrapper.ci-list-deadline]
+command = { command-line = ["scripts/ci_nextest_list.py", "60"], relative-to = "workspace-root" }
+target-runner = "within-wrapper"
+
+[[profile.ci.scripts]]
+platform = 'cfg(target_os = "linux")'
+list-wrapper = "ci-list-deadline"
 
 # Issue #4822: local Windows canonical verification opts into this profile.
 # Bound process pressure while allowing pure units to overlap fixture work.
