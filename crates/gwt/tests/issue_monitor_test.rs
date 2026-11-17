@@ -4576,13 +4576,13 @@ fn issue_7181_unhealthy_installed_hermes_one_hour_soak() {
     let runner = which::which("hermes").expect("installed Hermes must resolve");
     let started = std::time::Instant::now();
     record(serde_json::json!({
-        "event":"start", "run_id":run_id, "at":chrono::Utc::now().to_rfc3339(),
+        "event":"start", "run_id":run_id, "at":gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
         "runner":runner, "duration_secs":3600,
         "mode":"isolated_scheduler_real_installed_runner"
     }));
     let mut samples = 0_u64;
     loop {
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
         let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Hermes)
             .working_dir(&root)
             .build();
@@ -4631,7 +4631,7 @@ fn issue_7181_unhealthy_installed_hermes_one_hour_soak() {
         assert_eq!(monitor.next_launch_request(&now).unwrap().issue_number, 41);
         samples += 1;
         record(serde_json::json!({
-            "event":"sample", "run_id":run_id, "at":chrono::Utc::now().to_rfc3339(),
+            "event":"sample", "run_id":run_id, "at":gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
             "elapsed_secs":started.elapsed().as_secs(), "sample":samples,
             "hermes_health":"failed", "new_member":"soak-codex",
             "retry_member":"soak-codex", "pinned_hermes":"excluded"
@@ -4646,7 +4646,7 @@ fn issue_7181_unhealthy_installed_hermes_one_hour_soak() {
         );
     }
     record(serde_json::json!({
-        "event":"end", "run_id":run_id, "at":chrono::Utc::now().to_rfc3339(),
+        "event":"end", "run_id":run_id, "at":gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
         "elapsed_secs":started.elapsed().as_secs(), "samples":samples,
         "result":"pass"
     }));

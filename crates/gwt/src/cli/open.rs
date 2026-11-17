@@ -324,7 +324,7 @@ fn spawn_default_browser_launcher(url: &str) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
+
     use std::sync::Mutex;
     use tempfile::TempDir;
 
@@ -341,7 +341,7 @@ mod tests {
         let payload = TrayLockFile {
             pid: std::process::id(),
             url: url.to_string(),
-            started_at: Utc::now(),
+            started_at: gwt_core::timestamp::UtcTimestamp::now(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             control_token: control_token.map(str::to_string),
         };

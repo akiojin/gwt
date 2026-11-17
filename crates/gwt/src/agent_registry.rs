@@ -3117,7 +3117,7 @@ pub(crate) fn ensure_current_pm_identity(root: &Path, sessions: &Path) -> io::Re
                             member_id: id.clone(),
                             session_identity_sha256: identity.clone(),
                             registration_identity_sha256: registration_identity,
-                            imported_at: chrono::Utc::now().to_rfc3339(),
+                            imported_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
                         },
                     );
                 id

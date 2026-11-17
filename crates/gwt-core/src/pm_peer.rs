@@ -7,7 +7,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use chrono::{DateTime, Utc};
+use time::Duration;
+
+use crate::timestamp::UtcTimestamp;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -50,8 +52,8 @@ pub struct PeerMessage {
     pub kind: PeerKind,
     pub text: String,
     pub reply_to: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub expires_at: DateTime<Utc>,
+    pub created_at: UtcTimestamp,
+    pub expires_at: UtcTimestamp,
     pub answered_by: Option<String>,
     pub unavailable: Option<String>,
 }
@@ -149,7 +151,7 @@ pub fn validate(
 
 /// Publish a message and settle its exact original in one locked replacement.
 /// An unavailable attempt is retained only for the sender, never as delivery.
-pub fn send(request: PeerSend, now: DateTime<Utc>) -> io::Result<PeerMessage> {
+pub fn send(request: PeerSend, now: UtcTimestamp) -> io::Result<PeerMessage> {
     validate(
         request.kind,
         &request.text,
@@ -192,7 +194,7 @@ pub fn send(request: PeerSend, now: DateTime<Utc>) -> io::Result<PeerMessage> {
         text: crate::error_ledger::sanitize_error_message(&request.text),
         reply_to: request.reply_to,
         created_at: now,
-        expires_at: now + chrono::Duration::seconds(request.timeout_seconds as i64),
+        expires_at: now + Duration::seconds(request.timeout_seconds as i64),
         answered_by: None,
         unavailable: request.unavailable,
     };
@@ -237,15 +239,15 @@ pub fn pending(project_dir: &Path) -> io::Result<Vec<PeerMessage>> {
 }
 
 /// Deterministic one-line Reports, without a second write or duplicate append.
-pub fn reports(project_dir: &Path, now: DateTime<Utc>) -> io::Result<Vec<PmReport>> {
+pub fn reports(project_dir: &Path, now: UtcTimestamp) -> io::Result<Vec<PmReport>> {
     reports_with_deadline(project_dir, now).map(|(reports, _)| reports)
 }
 
 /// The next clock-only change to a report; readers need not reload idle stores.
 pub fn reports_with_deadline(
     project_dir: &Path,
-    now: DateTime<Utc>,
-) -> io::Result<(Vec<PmReport>, Option<DateTime<Utc>>)> {
+    now: UtcTimestamp,
+) -> io::Result<(Vec<PmReport>, Option<UtcTimestamp>)> {
     let messages = load()?.messages;
     let deadline = messages
         .iter()

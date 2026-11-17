@@ -38,7 +38,7 @@ fn evaluate_bash_command_without_observation(
 /// Counted only, never refused here — refusing an agent's PR operation
 /// would break the Ready PR gate (PM ruling on SPEC #4093).
 fn record_agent_gh_spend(command: &str, ledger: &gwt_core::github_budget::BudgetLedger) {
-    let now = chrono::Utc::now();
+    let now = gwt_core::timestamp::UtcTimestamp::now();
     for segment in super::segments::split_command_segments(command) {
         let tokens = command_tokens(&segment);
         let Some(first) = tokens.first().copied() else {
@@ -1023,7 +1023,7 @@ mod agent_gh_ledger_tests {
             "gh api repos/o/r/commits/abc/status && gh pr checks 12",
             &ledger,
         );
-        let snapshot = ledger.snapshot(chrono::Utc::now());
+        let snapshot = ledger.snapshot(gwt_core::timestamp::UtcTimestamp::now());
         assert_eq!(snapshot.local["core"].calls_last_minute, 1);
         assert_eq!(
             snapshot.local["core"].sources_last_minute["agent gh api repos"],
@@ -1060,7 +1060,7 @@ mod agent_gh_ledger_tests {
                 "{command}"
             );
             record_agent_gh_spend(command, &ledger);
-            let snapshot = ledger.snapshot(chrono::Utc::now());
+            let snapshot = ledger.snapshot(gwt_core::timestamp::UtcTimestamp::now());
             assert_eq!(
                 snapshot.local[resource].sources_last_minute[source], 1,
                 "{command}"

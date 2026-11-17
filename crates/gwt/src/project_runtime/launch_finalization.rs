@@ -1116,7 +1116,7 @@ impl FinalizedAgentCapabilityLaunch<'_> {
                 session_binding_id: uuid::Uuid::new_v4().to_string(),
                 initial_session_id: session.id.clone(),
                 entrypoint: execution_entrypoint.to_string(),
-                requested_at: chrono::Utc::now(),
+                requested_at: gwt_core::timestamp::UtcTimestamp::now(),
             };
             persist_durable_launch_recovery(
                 sessions_dir,
@@ -2253,7 +2253,7 @@ pub fn compensate_genesis_workspace_projection(
                         == gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Assigned
                     && candidate.workspace_id.as_deref() == Some(item.id.as_str())
             });
-            let now = chrono::Utc::now();
+            let now = gwt_core::timestamp::UtcTimestamp::now();
             let event = if failed_genesis_work_is_new(item, session_id) && !another_assigned_agent {
                 let mut event = gwt_core::workspace_projection::WorkEvent::new(
                     gwt_core::workspace_projection::WorkEventKind::Discard,

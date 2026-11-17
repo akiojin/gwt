@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use chrono::{DateTime, Utc};
+use gwt_core::timestamp::UtcTimestamp;
 use serde::{Deserialize, Serialize};
 
 use super::record::PerfViolationDetails;
@@ -26,7 +26,7 @@ const MAX_TRACKED_TARGETS: usize = 512;
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 struct RunState {
     consecutive: u32,
-    first_over: DateTime<Utc>,
+    first_over: UtcTimestamp,
 }
 
 /// Per-target state machine turning raw over-budget samples into violations.
@@ -99,7 +99,7 @@ impl ViolationSmoother {
         target: &str,
         value: f64,
         budget: f64,
-        at: DateTime<Utc>,
+        at: UtcTimestamp,
     ) -> Option<PerfViolationDetails> {
         if !value.is_finite() || !budget.is_finite() || value <= budget {
             self.runs.remove(target);
@@ -124,8 +124,7 @@ impl ViolationSmoother {
             }
         };
 
-        let duration_seconds = (at - run.first_over)
-            .to_std()
+        let duration_seconds = std::time::Duration::try_from(at - run.first_over)
             .map(|elapsed| elapsed.as_secs_f64())
             .unwrap_or(0.0);
 
@@ -151,13 +150,12 @@ impl ViolationSmoother {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{Duration, TimeZone as _};
+    use time::Duration;
 
     use super::*;
 
-    fn base() -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(2026, 9, 8, 10, 0, 0)
-            .single()
+    fn base() -> UtcTimestamp {
+        gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 9, 8, 10, 0, 0)
             .expect("valid timestamp")
     }
 

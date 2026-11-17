@@ -5,7 +5,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use gwt_core::index_coordinator::{IndexCoordinator, TargetKey};
+use gwt_core::{
+    index_coordinator::{IndexCoordinator, TargetKey},
+    timestamp::UtcTimestamp,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -39,7 +42,7 @@ pub(super) struct AttemptRecord {
     external_termination: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     external_terminations: Option<u8>,
-    created_at: chrono::DateTime<chrono::Utc>,
+    created_at: UtcTimestamp,
     watchdog_token_hash: String,
     runner_pid: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -290,7 +293,7 @@ pub(super) fn begin_for_caller(
             record_id: None,
             external_termination: false,
             external_terminations: None,
-            created_at: chrono::Utc::now(),
+            created_at: UtcTimestamp::now(),
             watchdog_token_hash: digest(token.as_bytes()),
             runner_pid: std::process::id(),
             runner_started_at: crate::process::host_process_start_time(std::process::id()),

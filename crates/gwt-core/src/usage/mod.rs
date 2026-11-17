@@ -31,3 +31,11 @@ pub use types::{
     CodexCredits, ProviderUsage, SessionUsage, UsageProvider, UsageSnapshot, UsageState,
     UsageWindow, WindowKind,
 };
+
+// Resolve the offset at this instant so local calendar operations respect
+// historical and seasonal offset changes.
+fn local_time_at(seconds: i64) -> time::OffsetDateTime {
+    let utc = time::OffsetDateTime::from_unix_timestamp(seconds)
+        .expect("UTC timestamp in the supported range");
+    utc.to_offset(time::UtcOffset::local_offset_at(utc).unwrap_or(time::UtcOffset::UTC))
+}

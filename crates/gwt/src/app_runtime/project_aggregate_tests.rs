@@ -859,7 +859,7 @@ fn project_owner_health_is_project_scoped_and_rejects_stale_context() {
         .unwrap()
         .owner_health
         .is_none());
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
     assert!(runtime
         .issue_monitor_window_snapshot_for_tab("b", &now)
         .is_some());

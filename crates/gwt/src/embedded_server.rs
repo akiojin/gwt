@@ -557,7 +557,7 @@ async fn oauth_callback_handler(
             &oauth_state,
             &poster,
             &gwt::board_remote::token_store::default_dir(),
-            chrono::Utc::now(),
+            gwt_core::timestamp::UtcTimestamp::now(),
         )
     })
     .await;
@@ -914,7 +914,7 @@ async fn update_apply_control_handler(
         latest: manifest.version.clone(),
         release_url: manifest.asset_url.clone(),
         asset_url: Some(manifest.asset_url),
-        checked_at: chrono::Utc::now(),
+        checked_at: gwt_core::timestamp::UtcTimestamp::now(),
     };
     if state
         .proxy
@@ -2742,7 +2742,7 @@ mod tests {
             kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
             number: 2359,
         };
-        let completed_at = chrono::Utc::now();
+        let completed_at = gwt_core::timestamp::UtcTimestamp::now();
         gwt::cli::execution_state::save(
             &repo,
             &gwt::cli::execution_state::ExecutionControlRecord {
@@ -2779,7 +2779,7 @@ mod tests {
             session_binding_id: "binding-prepared-probe".to_string(),
             initial_session_id: continuation_session_id.to_string(),
             entrypoint: "resume".to_string(),
-            requested_at: chrono::Utc::now(),
+            requested_at: gwt_core::timestamp::UtcTimestamp::now(),
         };
         gwt::cli::execution_state::prepare_successor(&repo, owner, &request)
             .expect("prepare successor");
@@ -3325,7 +3325,7 @@ mod tests {
             .save(&gwt_core::paths::gwt_sessions_dir())
             .expect("persist initial execution binding");
         let work_id = "work-materialization-probe-route";
-        let now = chrono::Utc::now();
+        let now = gwt_core::timestamp::UtcTimestamp::now();
         let mut projection =
             gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
         projection.agents = vec![gwt_core::workspace_projection::WorkspaceAgentSummary {
@@ -3348,8 +3348,9 @@ mod tests {
         }];
         gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
             .expect("save materialization probe assignment");
-        let mut work_items =
-            gwt_core::workspace_projection::WorkItemsProjection::empty(chrono::Utc::now());
+        let mut work_items = gwt_core::workspace_projection::WorkItemsProjection::empty(
+            gwt_core::timestamp::UtcTimestamp::now(),
+        );
         let mut work_event = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Start,
             work_id,
@@ -3647,8 +3648,9 @@ mod tests {
             work_items_before,
             "materialization route must not mutate WorkItems"
         );
-        let missing_work_items =
-            gwt_core::workspace_projection::WorkItemsProjection::empty(chrono::Utc::now());
+        let missing_work_items = gwt_core::workspace_projection::WorkItemsProjection::empty(
+            gwt_core::timestamp::UtcTimestamp::now(),
+        );
         gwt_core::workspace_projection::save_workspace_work_items_projection_to_path(
             &work_items_path,
             &missing_work_items,
@@ -3953,7 +3955,7 @@ mod tests {
             .expect("save bound Session");
 
         let work_id = "work-blocked-build-abort-http";
-        let now = chrono::Utc::now();
+        let now = gwt_core::timestamp::UtcTimestamp::now();
         let mut current =
             gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
         current
@@ -5561,7 +5563,7 @@ mod tests {
                 version: "99.1.0".into(),
                 asset_url: "https://example.invalid/gwt.zip".into(),
                 payload: gwt_core::update::PreparedPayload::PortableBinary { path: payload },
-                downloaded_at: chrono::Utc::now().to_rfc3339(),
+                downloaded_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
                 origin: gwt_core::update::PendingUpdateOrigin::ManualLater,
                 auto_apply_deferred: false,
             },

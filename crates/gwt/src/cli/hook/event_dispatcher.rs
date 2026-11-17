@@ -492,7 +492,7 @@ fn handle_autonomous_answer_receipt(worktree_root: &Path, input: &str) -> Result
             .expect("validated repository identity"),
         project_state_root: current_project_state_root.to_string_lossy().into_owned(),
     };
-    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds();
     crate::issue_monitor::acknowledge_autonomous_handoff_user_prompt_submit_from_prefs(
         &prefs_path,
         &source.id,
@@ -1902,7 +1902,7 @@ mod tests {
             vec![],
             vec![],
         );
-        entry.created_at = chrono::Utc::now() - chrono::Duration::hours(1);
+        entry.created_at = gwt_core::timestamp::UtcTimestamp::now() - time::Duration::hours(1);
         entry.updated_at = entry.created_at;
         gwt_core::coordination::post_entry(&worktree, entry).expect("seed 4 MiB Board history");
 
@@ -2354,7 +2354,7 @@ mod tests {
                 timeout_seconds: 900,
                 unavailable: None,
             },
-            chrono::Utc::now(),
+            gwt_core::timestamp::UtcTimestamp::now(),
         )
         .unwrap();
         let event = IntentBoundaryEvent::UserPromptSubmit;
@@ -2612,7 +2612,7 @@ mod tests {
             from_session_id: session_id.clone(),
             to_session_id: "replacement-session".to_string(),
             reason: "test stale predecessor".to_string(),
-            requested_at: chrono::Utc::now(),
+            requested_at: gwt_core::timestamp::UtcTimestamp::now(),
         };
         crate::cli::execution_state::prepare_generation_takeover(worktree.path(), owner, &takeover)
             .unwrap();

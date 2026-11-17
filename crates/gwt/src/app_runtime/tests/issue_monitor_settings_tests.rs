@@ -380,7 +380,7 @@ fn issue_5646_explicit_wait_uses_the_existing_manual_drain_without_restarting() 
         version: "99.0.0".into(),
         asset_url: "https://example.invalid/update".into(),
         payload: gwt_core::update::PreparedPayload::PortableBinary { path: payload },
-        downloaded_at: chrono::Utc::now().to_rfc3339(),
+        downloaded_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
         origin: gwt_core::update::PendingUpdateOrigin::ManualLater,
         auto_apply_deferred: true,
     })
@@ -425,7 +425,7 @@ fn issue_5646_failed_wait_keeps_apply_deferred_and_reports_the_failure() {
         version: "99.0.0".into(),
         asset_url: "https://example.invalid/update".into(),
         payload: gwt_core::update::PreparedPayload::PortableBinary { path: payload },
-        downloaded_at: chrono::Utc::now().to_rfc3339(),
+        downloaded_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
         origin: gwt_core::update::PendingUpdateOrigin::ManualLater,
         auto_apply_deferred: false,
     })
@@ -2113,7 +2113,7 @@ fn app_runtime_issue_monitor_profile_save_switches_the_head_to_a_second_provider
     seeded.launch_auto = true;
     seeded.launch_tiers = vec![vec![pool_profile("openclaw")], vec![pool_profile("codex")]];
     let mut monitor = test_monitor_with_prefs(gwt::IssueMonitorConfig::default(), seeded);
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
     monitor.terminal_queue_push(&[3165], "operator", &now);
     monitor.record_candidate(gwt::IssueMonitorIssue {
         author_login: None,
@@ -2200,7 +2200,7 @@ fn app_runtime_issue_monitor_profile_save_compensates_unowned_unsupported_delive
     fs::create_dir_all(&repo).unwrap();
     init_repo_with_initial_commit(&repo);
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
     let mut monitor = test_monitor(gwt::IssueMonitorConfig::default());
     monitor.set_launch_profile_pool(vec![pool_profile("codex")]);
     monitor.terminal_queue_push(&[3165], "operator", &now);
@@ -3039,7 +3039,7 @@ fn app_runtime_agent_window_initial_title_falls_back_to_projection_owner() {
         pr_url: None,
         pr_created_at: None,
         created_by_start_work: true,
-        created_at: chrono::Utc::now(),
+        created_at: gwt_core::timestamp::UtcTimestamp::now(),
     });
     gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
         .expect("save projection");
@@ -3086,7 +3086,7 @@ fn app_runtime_agent_window_initial_title_ignores_projection_owner_for_other_bra
         pr_url: None,
         pr_created_at: None,
         created_by_start_work: true,
-        created_at: chrono::Utc::now(),
+        created_at: gwt_core::timestamp::UtcTimestamp::now(),
     });
     gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
         .expect("save projection");

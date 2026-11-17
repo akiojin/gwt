@@ -38,7 +38,7 @@ use std::{
     path::Path,
 };
 
-use chrono::{DateTime, Utc};
+use gwt_core::timestamp::UtcTimestamp;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -102,7 +102,7 @@ pub struct PermissionReadinessRecord {
     /// pane contents can carry secrets.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub evidence: String,
-    pub recorded_at: DateTime<Utc>,
+    pub recorded_at: UtcTimestamp,
     /// Integrity hash over this record with the field emptied.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub content_hash: String,
@@ -232,7 +232,7 @@ pub fn record_prompt_regression(
             "Answer or dismiss the prompt in the agent window, then relaunch this owner with a provider whose skip-permissions mapping is applied. `gwt-execute` on a relaunched window clears this record."
                 .to_string(),
         evidence: format!("provider approval prompt fingerprint {prompt_fingerprint:016x}"),
-        recorded_at: Utc::now(),
+        recorded_at: gwt_core::timestamp::UtcTimestamp::now(),
         content_hash: String::new(),
     };
     // Stamped here as well as inside `save` so the value handed back to the
@@ -300,7 +300,7 @@ pub fn pre_launch_block(
             decision.source.as_str(),
             decision.entrypoint,
         ),
-        recorded_at: Utc::now(),
+        recorded_at: gwt_core::timestamp::UtcTimestamp::now(),
         content_hash: String::new(),
     };
     record.content_hash = compute_content_hash(&record);

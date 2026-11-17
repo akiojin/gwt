@@ -512,7 +512,7 @@ fn assert_genesis_pty_failure_recovers_member(roster_read_fails: bool) {
             session_binding_id: "genesis-pty-retry-binding".into(),
             initial_session_id: "genesis-pty-retry-session".into(),
             entrypoint: "$gwt-execute #2359".into(),
-            requested_at: Utc::now(),
+            requested_at: gwt_core::timestamp::UtcTimestamp::now(),
         };
         gwt::cli::execution_state::prepare_fresh_linked_owner_launch_successor(
             &source.worktree_path,
@@ -879,7 +879,7 @@ fn terminalized_genesis_compensation_pauses_instead_of_discarding_resumed_work()
         &existing.board_refs,
         existing.execution_containers.first().cloned(),
         Some(&prior.session_id),
-        Utc::now(),
+        gwt_core::timestamp::UtcTimestamp::now(),
     )
     .expect("pause prior Session");
     gwt_core::workspace_projection::mark_workspace_agent_stopped(&repo, &prior.session_id, None)
@@ -914,7 +914,7 @@ fn terminalized_genesis_compensation_pauses_instead_of_discarding_resumed_work()
         session_binding_id: "genesis-late-cleanup-binding".to_string(),
         initial_session_id: "genesis-late-cleanup-session".to_string(),
         entrypoint: "$gwt-execute #2359".to_string(),
-        requested_at: Utc::now(),
+        requested_at: gwt_core::timestamp::UtcTimestamp::now(),
     };
     gwt::cli::execution_state::prepare_fresh_linked_owner_launch_successor(
         &repo, owner, &successor,

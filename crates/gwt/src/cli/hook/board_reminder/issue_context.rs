@@ -1,6 +1,7 @@
 //! Same-Issue history is startup context, independent of the recent Board feed.
 
-use chrono::{DateTime, Utc};
+use gwt_core::timestamp::UtcTimestamp;
+
 use gwt_agent::Session;
 use gwt_core::coordination::{
     entry_visible_for_workspace, BoardAudienceScope, BoardEntry, BoardEntryKind,
@@ -30,7 +31,7 @@ pub(super) fn append(output: &mut HookOutput, session: &Session, scope: &BoardAu
     // or the 500-entry hot snapshot. Preserve provider routing and audience.
     match crate::board_provider::load_entries_since_for_scope(
         &session.worktree_path,
-        DateTime::<Utc>::UNIX_EPOCH,
+        UtcTimestamp::UNIX_EPOCH,
         scope,
     ) {
         Ok(entries) => {

@@ -10,9 +10,10 @@
 //! A quotation anywhere in an agent transcript is not refusal evidence, even
 //! when it persists at the bottom of the screen (Issue #5037).
 
-use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, Offset, TimeZone, Utc};
+use time::{Date, Month, OffsetDateTime, PrimitiveDateTime};
 
-use super::UsageProvider;
+use super::{local_time_at, UsageProvider};
+use crate::timestamp::UtcTimestamp;
 
 /// How many trailing non-empty lines may carry the notice. The Codex notice
 /// soft-wraps over two lines and Claude's over one, so a small window is
@@ -29,7 +30,7 @@ pub struct ProviderLimitNotice {
     pub provider: Option<UsageProvider>,
     /// When the provider said access returns, `None` when it printed no usable
     /// instant. Callers must treat `None` as "unknown", never as "now".
-    pub resets_at: Option<DateTime<Utc>>,
+    pub resets_at: Option<UtcTimestamp>,
 }
 
 /// A native screen match and the structural evidence that authenticated it.
@@ -42,36 +43,28 @@ pub struct ProviderLimitScreenMatch {
 
 /// Classify the tail of `screen` as a provider usage-limit notice.
 ///
-/// `now` supplies both the reference instant and the offset that bare
+/// `observed_at` supplies the reference instant for the local offset that bare
 /// wall-clock times ("resets 3pm") are interpreted in — providers print local
 /// times without a zone, so the caller's zone is the only available anchor.
-pub fn detect_provider_limit_notice<Tz: TimeZone>(
+pub fn detect_provider_limit_notice(
     screen: &str,
-    now: &DateTime<Tz>,
+    observed_at: UtcTimestamp,
 ) -> Option<ProviderLimitNotice> {
-    detect_provider_limit_screen_match(screen, now).map(|matched| matched.notice)
-}
-
-/// Resolve the caller's clock only after recognizing a native quota notice.
-pub fn detect_provider_limit_notice_with_clock<Tz: TimeZone>(
-    screen: &str,
-    now: impl FnOnce() -> DateTime<Tz>,
-) -> Option<ProviderLimitNotice> {
-    detect_provider_limit_screen_match_with_clock(screen, now).map(|matched| matched.notice)
+    detect_provider_limit_screen_match(screen, observed_at).map(|matched| matched.notice)
 }
 
 /// Preserve the whole rendered screen when calling this: leading indentation
 /// and Markdown fences distinguish tool/code quotations from native responses.
-pub fn detect_provider_limit_screen_match<Tz: TimeZone>(
+pub fn detect_provider_limit_screen_match(
     screen: &str,
-    now: &DateTime<Tz>,
+    observed_at: UtcTimestamp,
 ) -> Option<ProviderLimitScreenMatch> {
-    detect_provider_limit_screen_match_with_clock(screen, || now.clone())
+    detect_provider_limit_screen_match_with_clock(screen, || local_time_at(observed_at.timestamp()))
 }
 
-fn detect_provider_limit_screen_match_with_clock<Tz: TimeZone>(
+fn detect_provider_limit_screen_match_with_clock(
     screen: &str,
-    now: impl FnOnce() -> DateTime<Tz>,
+    now: impl FnOnce() -> OffsetDateTime,
 ) -> Option<ProviderLimitScreenMatch> {
     let lines: Vec<&str> = screen.lines().collect();
     for response in native_screen_responses(&lines) {
@@ -117,7 +110,7 @@ fn detect_provider_limit_screen_match_with_clock<Tz: TimeZone>(
         return Some(ProviderLimitScreenMatch {
             notice: ProviderLimitNotice {
                 provider: Some(provider),
-                resets_at: parse_reset(&text, &haystack, &now()),
+                resets_at: parse_reset(&text, &haystack, now()),
             },
             region,
             pattern,
@@ -255,11 +248,7 @@ fn normalize_tail(screen: &str) -> String {
 }
 
 /// Pull the first reset instant the notice states, in the caller's zone.
-fn parse_reset<Tz: TimeZone>(
-    tail: &str,
-    haystack: &str,
-    now: &DateTime<Tz>,
-) -> Option<DateTime<Utc>> {
+fn parse_reset(tail: &str, haystack: &str, now: OffsetDateTime) -> Option<UtcTimestamp> {
     const ANCHORS: [&str; 5] = [
         "try again at ",
         "will reset at ",
@@ -267,18 +256,19 @@ fn parse_reset<Tz: TimeZone>(
         "reset at ",
         "resets ",
     ];
-    let offset = now.offset().fix();
-    let local_now = now.naive_local();
+    let local_now = PrimitiveDateTime::new(now.date(), now.time());
     for anchor in ANCHORS {
         let Some(index) = haystack.find(anchor) else {
             continue;
         };
         let rest = &tail[index + anchor.len()..];
         if let Some(naive) = parse_reset_clause(rest, local_now) {
-            return offset
-                .from_local_datetime(&naive)
-                .earliest()
-                .map(|resolved| resolved.with_timezone(&Utc));
+            // The provider printed a wall clock using the observed offset.
+            // Applying the zone's rules at the future reset could shift it.
+            return UtcTimestamp::from_timestamp(
+                naive.assume_offset(now.offset()).unix_timestamp(),
+                0,
+            );
         }
     }
     None
@@ -287,7 +277,7 @@ fn parse_reset<Tz: TimeZone>(
 /// The three shapes observed in the wild, most specific first:
 /// `Aug 22nd, 2026 12:46 PM` (Codex), `Aug 20 at 6am` (Claude weekly), and a
 /// bare `3pm` (Claude rolling window).
-fn parse_reset_clause(rest: &str, local_now: NaiveDateTime) -> Option<NaiveDateTime> {
+fn parse_reset_clause(rest: &str, local_now: PrimitiveDateTime) -> Option<PrimitiveDateTime> {
     parse_dated(rest, local_now).or_else(|| parse_time_of_day(rest, local_now))
 }
 
@@ -296,11 +286,11 @@ fn parse_reset_clause(rest: &str, local_now: NaiveDateTime) -> Option<NaiveDateT
 /// A year-less date resolves to its next occurrence: a December notice read in
 /// January must not schedule a hold eleven months in the past, which
 /// `retry_ready` would silently treat as "ready".
-fn parse_dated(rest: &str, local_now: NaiveDateTime) -> Option<NaiveDateTime> {
+fn parse_dated(rest: &str, local_now: PrimitiveDateTime) -> Option<PrimitiveDateTime> {
     let cleaned = strip_ordinal_suffixes(rest);
     let mut tokens = cleaned.split_whitespace().peekable();
     let month = month_from_name(tokens.next()?)?;
-    let day: u32 = tokens.next()?.trim_end_matches(',').parse().ok()?;
+    let day: u8 = tokens.next()?.trim_end_matches(',').parse().ok()?;
     let printed_year: Option<i32> = tokens
         .peek()
         .and_then(|token| token.trim_end_matches(',').parse().ok())
@@ -319,11 +309,14 @@ fn parse_dated(rest: &str, local_now: NaiveDateTime) -> Option<NaiveDateTime> {
     let meridiem = tokens.next().unwrap_or("");
     let (hour, minute) = parse_clock(clock, meridiem)?;
     if let Some(year) = printed_year {
-        return NaiveDate::from_ymd_opt(year, month, day)?.and_hms_opt(hour, minute, 0);
+        return Date::from_calendar_date(year, month, day)
+            .ok()?
+            .with_hms(hour, minute, 0)
+            .ok();
     }
     for year in [local_now.year(), local_now.year() + 1] {
-        let Some(candidate) = NaiveDate::from_ymd_opt(year, month, day)
-            .and_then(|date| date.and_hms_opt(hour, minute, 0))
+        let Ok(candidate) = Date::from_calendar_date(year, month, day)
+            .and_then(|date| date.with_hms(hour, minute, 0))
         else {
             continue;
         };
@@ -336,21 +329,21 @@ fn parse_dated(rest: &str, local_now: NaiveDateTime) -> Option<NaiveDateTime> {
 
 /// `3pm`, `3:30 pm`, `15:00` — Claude prints only a wall-clock time, so the
 /// instant is its next occurrence at or after `local_now`.
-fn parse_time_of_day(rest: &str, local_now: NaiveDateTime) -> Option<NaiveDateTime> {
+fn parse_time_of_day(rest: &str, local_now: PrimitiveDateTime) -> Option<PrimitiveDateTime> {
     let cleaned = rest.trim_start();
     let mut tokens = cleaned.split_whitespace();
     let clock = tokens.next()?;
     let meridiem = tokens.next().unwrap_or("");
     let (hour, minute) = parse_clock(clock, meridiem)?;
-    let today = local_now.date().and_hms_opt(hour, minute, 0)?;
+    let today = local_now.date().with_hms(hour, minute, 0).ok()?;
     if today > local_now {
         return Some(today);
     }
-    local_now.date().succ_opt()?.and_hms_opt(hour, minute, 0)
+    local_now.date().next_day()?.with_hms(hour, minute, 0).ok()
 }
 
 /// Split `3pm` / `3:30` / `15:00` / `12:46` (+ a detached `PM`) into 24h parts.
-fn parse_clock(clock: &str, detached_meridiem: &str) -> Option<(u32, u32)> {
+fn parse_clock(clock: &str, detached_meridiem: &str) -> Option<(u8, u8)> {
     let lowered = clock.trim_end_matches(['.', ',']).to_ascii_lowercase();
     let (digits, attached_meridiem) = match lowered.strip_suffix("am") {
         Some(head) => (head, "am"),
@@ -375,8 +368,8 @@ fn parse_clock(clock: &str, detached_meridiem: &str) -> Option<(u32, u32)> {
         Some((hour, minute)) => (hour, minute),
         None => (digits, "0"),
     };
-    let mut hour: u32 = hour_text.parse().ok()?;
-    let minute: u32 = minute_text.parse().ok()?;
+    let mut hour: u8 = hour_text.parse().ok()?;
+    let minute: u8 = minute_text.parse().ok()?;
     if minute > 59 {
         return None;
     }
@@ -419,7 +412,7 @@ fn strip_ordinal_suffixes(text: &str) -> String {
     out
 }
 
-fn month_from_name(token: &str) -> Option<u32> {
+fn month_from_name(token: &str) -> Option<Month> {
     let lowered = token.trim_end_matches(['.', ',']).to_ascii_lowercase();
     const MONTHS: [&str; 12] = [
         "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
@@ -427,7 +420,7 @@ fn month_from_name(token: &str) -> Option<u32> {
     MONTHS
         .iter()
         .position(|month| lowered.starts_with(month))
-        .map(|index| index as u32 + 1)
+        .and_then(|index| Month::try_from(index as u8 + 1).ok())
 }
 
 /// The provider notice rendered for a window detail / Monitor diagnostic.
@@ -445,7 +438,7 @@ pub fn describe_provider_limit_notice(
     match notice.resets_at {
         Some(resets_at) => format!(
             "{subject} — resumes after {}",
-            resets_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+            resets_at.to_rfc3339_seconds()
         ),
         None => format!("{subject} — reset time unknown"),
     }
@@ -453,11 +446,12 @@ pub fn describe_provider_limit_notice(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use chrono::FixedOffset;
+    use time::macros::datetime;
 
-    fn jst(text: &str) -> DateTime<FixedOffset> {
-        DateTime::parse_from_rfc3339(text).expect("fixture instant")
+    use super::*;
+
+    fn notice_at(screen: &str, now: OffsetDateTime) -> Option<ProviderLimitNotice> {
+        detect_provider_limit_screen_match_with_clock(screen, || now).map(|matched| matched.notice)
     }
 
     #[test]
@@ -465,10 +459,10 @@ mod tests {
         let calls = std::cell::Cell::new(0);
         let clock = || {
             calls.set(calls.get() + 1);
-            jst("2026-08-16T11:26:00+09:00")
+            datetime!(2026-08-16 11:26:00 +09:00)
         };
         assert_eq!(
-            detect_provider_limit_notice_with_clock("ordinary output", clock),
+            detect_provider_limit_screen_match_with_clock("ordinary output", clock),
             None
         );
         assert_eq!(
@@ -477,21 +471,22 @@ mod tests {
             "ordinary output must not resolve the local clock"
         );
 
-        let notice = detect_provider_limit_notice_with_clock(
+        let notice = detect_provider_limit_screen_match_with_clock(
             "Claude usage limit reached. Your limit will reset at 3pm.",
             clock,
         )
-        .expect("native notice");
+        .expect("native notice")
+        .notice;
         assert_eq!(calls.get(), 1);
         assert_eq!(
             notice.resets_at,
-            Some(jst("2026-08-16T06:00:00+00:00").with_timezone(&Utc))
+            Some("2026-08-16T06:00:00Z".parse().unwrap())
         );
     }
 
     #[test]
     fn quota_auth_and_model_fallback_notices_have_distinct_classifications() {
-        let now = jst("2026-10-22T11:26:00+09:00");
+        let now = datetime!(2026-10-22 11:26:00 +09:00);
         for (screen, quota, auth) in [
             (
                 "Claude usage limit reached. Your limit will reset at 3pm.",
@@ -507,7 +502,7 @@ mod tests {
             ("Opus limit reached, falling back to Sonnet", None, None),
         ] {
             assert_eq!(
-                detect_provider_limit_notice(screen, &now).and_then(|notice| notice.provider),
+                notice_at(screen, now).and_then(|notice| notice.provider),
                 quota,
                 "quota classification for {screen}"
             );
@@ -563,14 +558,12 @@ Running cargo test -p gwt
 ■ You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage
   to purchase more credits or try again at Aug 22nd, 2026 12:46 PM.
 ";
-        let notice = detect_provider_limit_notice(screen, &jst("2026-08-16T11:26:00+09:00"))
-            .expect("codex notice");
+        let notice =
+            notice_at(screen, datetime!(2026-08-16 11:26:00 +09:00)).expect("codex notice");
 
         assert_eq!(notice.provider, Some(UsageProvider::Codex));
         assert_eq!(
-            notice
-                .resets_at
-                .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+            notice.resets_at.map(UtcTimestamp::to_rfc3339_seconds),
             Some("2026-08-22T03:46:00Z".to_string()),
             "12:46 PM in the caller's +09:00 zone is 03:46Z"
         );
@@ -580,14 +573,12 @@ Running cargo test -p gwt
     fn claude_notice_resolves_a_bare_time_to_its_next_occurrence() {
         let screen = "Claude usage limit reached. Your limit will reset at 3pm (Asia/Tokyo).";
 
-        let notice = detect_provider_limit_notice(screen, &jst("2026-08-16T11:26:00+09:00"))
-            .expect("claude notice");
+        let notice =
+            notice_at(screen, datetime!(2026-08-16 11:26:00 +09:00)).expect("claude notice");
 
         assert_eq!(notice.provider, Some(UsageProvider::ClaudeCode));
         assert_eq!(
-            notice
-                .resets_at
-                .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+            notice.resets_at.map(UtcTimestamp::to_rfc3339_seconds),
             Some("2026-08-16T06:00:00Z".to_string()),
         );
     }
@@ -596,13 +587,11 @@ Running cargo test -p gwt
     fn a_bare_time_already_past_today_rolls_to_tomorrow() {
         let screen = "Claude usage limit reached. Your limit will reset at 3pm.";
 
-        let notice = detect_provider_limit_notice(screen, &jst("2026-08-16T16:00:00+09:00"))
-            .expect("claude notice");
+        let notice =
+            notice_at(screen, datetime!(2026-08-16 16:00:00 +09:00)).expect("claude notice");
 
         assert_eq!(
-            notice
-                .resets_at
-                .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+            notice.resets_at.map(UtcTimestamp::to_rfc3339_seconds),
             Some("2026-08-17T06:00:00Z".to_string()),
         );
     }
@@ -620,7 +609,7 @@ Running cargo test -p gwt
         );
 
         assert_eq!(
-            detect_provider_limit_notice(&quoted, &jst("2026-08-16T11:26:00+09:00")),
+            notice_at(&quoted, datetime!(2026-08-16 11:26:00 +09:00)),
             None,
             "a mention scrolled above the tail is transcript content, not a live block"
         );
@@ -632,20 +621,31 @@ Running cargo test -p gwt
     /// against: it says "hit your weekly limit", not "usage limit", and its
     /// reset is a month/day with no year and a bare hour.
     #[test]
+    fn dated_reset_uses_the_observed_offset_across_a_dst_change() {
+        let screen = "Claude usage limit reached. Your limit will reset at Mar 9 at 12pm.";
+        let notice = notice_at(screen, datetime!(2026-03-07 15:00 -05:00)).unwrap();
+        assert_eq!(
+            notice
+                .resets_at
+                .map(UtcTimestamp::to_rfc3339_seconds)
+                .as_deref(),
+            Some("2026-03-09T17:00:00Z")
+        );
+    }
+
+    #[test]
     fn claude_weekly_limit_notice_is_detected_with_its_dated_reset() {
         let screen = "\
 > read the file
 You've hit your weekly limit · resets Aug 20 at 6am (Asia/Tokyo)
 /usage-credits to finish what you're working on.";
 
-        let notice = detect_provider_limit_notice(screen, &jst("2026-08-17T09:20:00+09:00"))
-            .expect("claude weekly notice");
+        let notice =
+            notice_at(screen, datetime!(2026-08-17 09:20:00 +09:00)).expect("claude weekly notice");
 
         assert_eq!(notice.provider, Some(UsageProvider::ClaudeCode));
         assert_eq!(
-            notice
-                .resets_at
-                .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+            notice.resets_at.map(UtcTimestamp::to_rfc3339_seconds),
             Some("2026-08-19T21:00:00Z".to_string()),
             "6am on Aug 20 in the caller's +09:00 zone is 21:00Z the day before"
         );
@@ -658,13 +658,11 @@ You've hit your weekly limit · resets Aug 20 at 6am (Asia/Tokyo)
         let screen =
             "You've hit your weekly limit · resets Jan 2 at 6am\n/usage-credits to continue.";
 
-        let notice = detect_provider_limit_notice(screen, &jst("2026-12-30T09:00:00+09:00"))
-            .expect("claude weekly notice");
+        let notice =
+            notice_at(screen, datetime!(2026-12-30 09:00:00 +09:00)).expect("claude weekly notice");
 
         assert_eq!(
-            notice
-                .resets_at
-                .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+            notice.resets_at.map(UtcTimestamp::to_rfc3339_seconds),
             Some("2027-01-01T21:00:00Z".to_string()),
         );
     }
@@ -678,7 +676,7 @@ You've hit your weekly limit · resets Aug 20 at 6am (Asia/Tokyo)
             "Opus limit reached · now using Sonnet for the rest of this session",
         ] {
             assert_eq!(
-                detect_provider_limit_notice(screen, &jst("2026-08-17T09:20:00+09:00")),
+                notice_at(screen, datetime!(2026-08-17 09:20:00 +09:00)),
                 None,
                 "false positive for: {screen}"
             );
@@ -693,7 +691,7 @@ You've hit your weekly limit · resets Aug 20 at 6am (Asia/Tokyo)
             "Agent exited without completing the work",
         ] {
             assert_eq!(
-                detect_provider_limit_notice(screen, &jst("2026-08-16T11:26:00+09:00")),
+                notice_at(screen, datetime!(2026-08-16 11:26:00 +09:00)),
                 None,
                 "false positive for: {screen}"
             );
@@ -713,7 +711,7 @@ You've hit your weekly limit · resets Aug 20 at 6am (Asia/Tokyo)
             "You've hit your weekly limit · resets Oct 8, 6am\n~~~text\n/usage-credits to finish what you're working on.\n~~~",
         ] {
             assert_eq!(
-                detect_provider_limit_notice(screen, &jst("2026-10-05T14:31:32+09:00")),
+                notice_at(screen, datetime!(2026-10-05 14:31:32 +09:00)),
                 None,
                 "quoted output is not a native refusal: {screen}"
             );
@@ -725,7 +723,7 @@ You've hit your weekly limit · resets Aug 20 at 6am (Asia/Tokyo)
         // Wording read from the installed Claude Code 2.1.291 menu.
         let screen =
             "What do you want to do?\n❯ 1. Wait for limit to reset\n  2. Upgrade to Max 20x";
-        let notice = detect_provider_limit_notice(screen, &jst("2026-10-05T14:31:32+09:00"))
+        let notice = notice_at(screen, datetime!(2026-10-05 14:31:32 +09:00))
             .expect("the CLI's rate-limit-options menu is a structural refusal");
         assert_eq!(notice.provider, Some(UsageProvider::ClaudeCode));
         assert_eq!(notice.resets_at, None);
@@ -737,7 +735,7 @@ You've hit your weekly limit · resets Aug 20 at 6am (Asia/Tokyo)
             ("■ You've hit your\nusage limit. Visit https://chatgpt.com/codex/settings/usage\nto purchase more credits or try again at Oct 8, 2026 6am.", UsageProvider::Codex),
             ("You've hit your weekly limit · resets Aug 20 at\n6am (Asia/Tokyo)\n/usage-credits to finish what you're working on.", UsageProvider::ClaudeCode),
         ] {
-            let notice = detect_provider_limit_notice(screen, &jst("2026-10-05T14:31:32+09:00"))
+            let notice = notice_at(screen, datetime!(2026-10-05 14:31:32 +09:00))
                 .expect("wrapping preserves the native refusal region");
             assert_eq!(notice.provider, Some(provider));
         }
@@ -748,7 +746,7 @@ You've hit your weekly limit · resets Aug 20 at 6am (Asia/Tokyo)
         let screen = "■ You've hit your usage limit. Visit \
                       https://chatgpt.com/codex/settings/usage to purchase more credits.";
 
-        let notice = detect_provider_limit_notice(screen, &jst("2026-08-16T11:26:00+09:00"))
+        let notice = notice_at(screen, datetime!(2026-08-16 11:26:00 +09:00))
             .expect("codex notice without a reset instant");
 
         assert_eq!(notice.resets_at, None);
@@ -760,7 +758,7 @@ You've hit your weekly limit · resets Aug 20 at 6am (Asia/Tokyo)
             describe_provider_limit_notice(
                 &ProviderLimitNotice {
                     provider: Some(UsageProvider::Codex),
-                    resets_at: Some(Utc.with_ymd_and_hms(2026, 8, 22, 3, 46, 0).unwrap()),
+                    resets_at: Some("2026-08-22T03:46:00Z".parse().unwrap()),
                 },
                 Some("Codex")
             ),

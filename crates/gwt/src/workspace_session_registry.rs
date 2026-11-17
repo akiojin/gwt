@@ -88,7 +88,6 @@ pub fn registry_sessions_for_branch<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{TimeZone, Utc};
 
     fn session(
         id: &str,
@@ -103,10 +102,15 @@ mod tests {
         );
         session.id = id.to_string();
         session.repo_hash = repo_hash.map(str::to_string);
-        session.last_activity_at = Utc
-            .with_ymd_and_hms(2026, 6, 10, 12, last_activity_minute, 0)
-            .unwrap()
-            .into();
+        session.last_activity_at = gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(
+            2026,
+            6,
+            10,
+            12,
+            last_activity_minute,
+            0,
+        )
+        .unwrap();
         session
     }
 

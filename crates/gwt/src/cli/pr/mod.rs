@@ -1268,7 +1268,7 @@ fn record_mutated_workspace_pr_metadata<E: CliEnv>(
                 gwt_core::workspace_projection::emit_workspace_done_event_if_absent(
                     &worktree,
                     &event.work_item_id,
-                    chrono::Utc::now(),
+                    gwt_core::timestamp::UtcTimestamp::now(),
                 )
                 .map_err(|error| std::io::Error::other(error.to_string()))?;
             }
@@ -1441,7 +1441,7 @@ fn sync_workspace_pr_metadata_for_target<E: CliEnv>(
             container.pr_number = Some(pr.number);
             container.pr_state = Some(pr.state.to_string());
             container.pr_url = (!pr.url.trim().is_empty()).then_some(pr.url.clone());
-            let now = chrono::Utc::now();
+            let now = gwt_core::timestamp::UtcTimestamp::now();
             if update_current {
                 let details = projection
                     .git_details
@@ -1450,7 +1450,7 @@ fn sync_workspace_pr_metadata_for_target<E: CliEnv>(
                 details.pr_number = container.pr_number;
                 details.pr_state = container.pr_state.clone();
                 details.pr_url = container.pr_url.clone();
-                details.pr_created_at = pr.created_at.map(Into::into);
+                details.pr_created_at = pr.created_at;
                 projection.updated_at = now;
             }
             let already_recorded = target.is_some_and(|(_, existing)| existing == &container);
@@ -1476,7 +1476,7 @@ fn sync_workspace_pr_metadata_for_target<E: CliEnv>(
             let _ = gwt_core::workspace_projection::emit_workspace_done_event_if_absent(
                 env.repo_path(),
                 work_item_id,
-                chrono::Utc::now(),
+                gwt_core::timestamp::UtcTimestamp::now(),
             );
         }
     }
@@ -2081,7 +2081,7 @@ mod tests {
         let pr = gwt_git::pr_status::parse_pr_status_json(&value.to_string()).unwrap();
         let mut inventory = gwt_git::pr_status::parse_pr_inventory_json(
             &format!("[{value}]"),
-            chrono::Utc::now().into(),
+            gwt_core::timestamp::UtcTimestamp::now(),
         )
         .unwrap()
         .remove(0);
@@ -2153,7 +2153,7 @@ mod tests {
                     generated_outputs: Vec::new(),
                     quarantines: Vec::new(),
                     worktree_fingerprint: String::new(),
-                    created_at: chrono::Utc::now(),
+                    created_at: gwt_core::timestamp::UtcTimestamp::now(),
                     content_hash: String::new(),
                 },
             ),
@@ -2306,7 +2306,7 @@ mod tests {
             WorkItemsProjection, WorkspaceExecutionContainerRef,
         };
         let branch = current_branch_name(worktree).expect("PR fixture branch");
-        let now = chrono::Utc::now();
+        let now = gwt_core::timestamp::UtcTimestamp::now();
         let mut event = WorkEvent::new(WorkEventKind::Start, "generation-delivery-work", now);
         event.owner = Some("Issue #42".to_string());
         event.agent_session_id = Some(session_id.to_string());
@@ -3140,7 +3140,7 @@ mod tests {
                     generated_outputs: Vec::new(),
                     quarantines: Vec::new(),
                     worktree_fingerprint: String::new(),
-                    created_at: chrono::Utc::now(),
+                    created_at: gwt_core::timestamp::UtcTimestamp::now(),
                     content_hash: String::new(),
                 },
             ),
@@ -3385,7 +3385,7 @@ mod tests {
                     surfaces: Vec::new(),
                     generated_outputs: Vec::new(),
                     quarantines: Vec::new(),
-                    created_at: chrono::Utc::now(),
+                    created_at: gwt_core::timestamp::UtcTimestamp::now(),
                     content_hash: String::new(),
                 },
             ),
@@ -3475,7 +3475,7 @@ mod tests {
                     surfaces: Vec::new(),
                     generated_outputs: Vec::new(),
                     quarantines: Vec::new(),
-                    created_at: chrono::Utc::now(),
+                    created_at: gwt_core::timestamp::UtcTimestamp::now(),
                     content_hash: String::new(),
                 },
             ),
@@ -3546,7 +3546,7 @@ mod tests {
                     surfaces: Vec::new(),
                     generated_outputs: Vec::new(),
                     quarantines: Vec::new(),
-                    created_at: chrono::Utc::now(),
+                    created_at: gwt_core::timestamp::UtcTimestamp::now(),
                     content_hash: String::new(),
                 },
             ),
@@ -3597,7 +3597,7 @@ mod tests {
         let mut replacement_plan = crate::cli::verification_record::load_plan(worktree.path())
             .unwrap()
             .unwrap();
-        replacement_plan.created_at += chrono::Duration::seconds(1);
+        replacement_plan.created_at += time::Duration::seconds(1);
         crate::cli::verification_record::save_plan(worktree.path(), &replacement_plan).unwrap();
         dispatch_pr_mutation(None, Some((worktree.path(), &guard)), || {
             dispatched.set(true);
@@ -3667,7 +3667,7 @@ mod tests {
         let mut done = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Done,
             &work_id,
-            chrono::Utc::now(),
+            gwt_core::timestamp::UtcTimestamp::now(),
         );
         done.owner = Some(s("Issue #42"));
         done.title = Some(s("PR shard delivery"));
@@ -3833,7 +3833,7 @@ mod tests {
         let mut resume = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Resume,
             &work_id,
-            chrono::Utc::now(),
+            gwt_core::timestamp::UtcTimestamp::now(),
         );
         resume.agent_session_id = Some(s("independent-review-session"));
         gwt_core::workspace_projection::record_workspace_work_event(&fixture.repo, resume.clone())
@@ -4441,7 +4441,7 @@ mod tests {
                     surfaces: Vec::new(),
                     generated_outputs: Vec::new(),
                     quarantines: Vec::new(),
-                    created_at: chrono::Utc::now(),
+                    created_at: gwt_core::timestamp::UtcTimestamp::now(),
                     content_hash: String::new(),
                 },
             ),
@@ -4583,7 +4583,7 @@ mod tests {
                     surfaces: Vec::new(),
                     generated_outputs: Vec::new(),
                     quarantines: Vec::new(),
-                    created_at: chrono::Utc::now(),
+                    created_at: gwt_core::timestamp::UtcTimestamp::now(),
                     content_hash: String::new(),
                 },
             ),
@@ -4876,7 +4876,7 @@ fn main() -> ExitCode {
             let cache_path = gwt_core::paths::gwt_project_dir_for_repo_path(repo)
                 .join(gwt_git::PR_INVENTORY_CACHE_FILE);
             let cache = gwt_git::pr_status::PrInventoryCache {
-                fetched_at: Some(chrono::Utc::now().into()),
+                fetched_at: Some(gwt_core::timestamp::UtcTimestamp::now()),
                 ..Default::default()
             };
             cache.save(&cache_path).unwrap();
@@ -5621,7 +5621,7 @@ fn main() -> ExitCode {
                 surfaces: Vec::new(),
                 generated_outputs: Vec::new(),
                 quarantines: Vec::new(),
-                created_at: chrono::Utc::now(),
+                created_at: gwt_core::timestamp::UtcTimestamp::now(),
                 content_hash: String::new(),
             }),
         )
@@ -5752,7 +5752,7 @@ fn main() -> ExitCode {
                 surfaces: Vec::new(),
                 generated_outputs: Vec::new(),
                 quarantines: Vec::new(),
-                created_at: chrono::Utc::now(),
+                created_at: gwt_core::timestamp::UtcTimestamp::now(),
                 content_hash: String::new(),
             }),
         )
@@ -5914,7 +5914,7 @@ fn main() -> ExitCode {
                 surfaces: derived.surfaces.clone(),
                 generated_outputs: Vec::new(),
                 quarantines: Vec::new(),
-                created_at: chrono::Utc::now(),
+                created_at: gwt_core::timestamp::UtcTimestamp::now(),
                 content_hash: String::new(),
             }),
         )
@@ -6016,7 +6016,7 @@ fn main() -> ExitCode {
                 surfaces: derived.surfaces.clone(),
                 generated_outputs: Vec::new(),
                 quarantines: Vec::new(),
-                created_at: chrono::Utc::now(),
+                created_at: gwt_core::timestamp::UtcTimestamp::now(),
                 content_hash: String::new(),
             }),
         )
@@ -6095,7 +6095,7 @@ fn main() -> ExitCode {
                 surfaces: Vec::new(),
                 generated_outputs: Vec::new(),
                 quarantines: Vec::new(),
-                created_at: chrono::Utc::now(),
+                created_at: gwt_core::timestamp::UtcTimestamp::now(),
                 content_hash: String::new(),
             }),
         )
@@ -6260,7 +6260,7 @@ fn main() -> ExitCode {
                 surfaces: Vec::new(),
                 generated_outputs: Vec::new(),
                 quarantines: Vec::new(),
-                created_at: chrono::Utc::now(),
+                created_at: gwt_core::timestamp::UtcTimestamp::now(),
                 content_hash: String::new(),
             }),
         )
@@ -6473,7 +6473,7 @@ fn main() -> ExitCode {
             pr_url: None,
             pr_created_at: None,
             created_by_start_work: true,
-            created_at: chrono::Utc::now(),
+            created_at: gwt_core::timestamp::UtcTimestamp::now(),
         });
         gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
             .expect("save projection");
@@ -6595,7 +6595,7 @@ fn main() -> ExitCode {
             pr_url: None,
             pr_created_at: None,
             created_by_start_work: true,
-            created_at: chrono::Utc::now(),
+            created_at: gwt_core::timestamp::UtcTimestamp::now(),
         });
         projection
             .agents
@@ -6615,7 +6615,7 @@ fn main() -> ExitCode {
                 affiliation_status:
                     gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Assigned,
                 workspace_id: Some("work-work-issue-3640".to_string()),
-                updated_at: chrono::Utc::now(),
+                updated_at: gwt_core::timestamp::UtcTimestamp::now(),
             });
         if foreign_current {
             projection.id = "foreign-work".to_string();
@@ -6948,7 +6948,7 @@ fn main() -> ExitCode {
             pr_url: None,
             pr_created_at: None,
             created_by_start_work: true,
-            created_at: chrono::Utc::now(),
+            created_at: gwt_core::timestamp::UtcTimestamp::now(),
         });
         gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
             .expect("save projection");
@@ -7377,7 +7377,6 @@ fn main() -> ExitCode {
         test: impl FnOnce(&mut crate::cli::TestEnv, &std::path::Path, PrStatus),
     ) {
         use crate::cli::test_support::ScopedEnvVar;
-        use chrono::TimeZone;
 
         let _env_lock = crate::env_test_lock()
             .lock()
@@ -7419,7 +7418,7 @@ fn main() -> ExitCode {
             pr_url: None,
             pr_created_at: None,
             created_by_start_work: true,
-            created_at: chrono::Utc::now(),
+            created_at: gwt_core::timestamp::UtcTimestamp::now(),
         });
         gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
             .expect("save projection");
@@ -7427,7 +7426,7 @@ fn main() -> ExitCode {
         let mut start = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Start,
             "wi-pr-merge-auto-done",
-            chrono::Utc.with_ymd_and_hms(2026, 5, 13, 1, 0, 0).unwrap(),
+            gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 5, 13, 1, 0, 0).unwrap(),
         );
         start.title = Some("Auto-done PR work".to_string());
         start.status_category =
@@ -7638,7 +7637,7 @@ fn main() -> ExitCode {
             pr_state: Some("OPEN".to_string()),
             pr_created_at: None,
             created_by_start_work: true,
-            created_at: chrono::Utc::now(),
+            created_at: gwt_core::timestamp::UtcTimestamp::now(),
         });
         save_workspace_projection(&repo, &current).expect("save foreign current");
         let work_ids: &[&str] = if ambiguous {
@@ -7647,7 +7646,11 @@ fn main() -> ExitCode {
             &["same-branch-foreign-worktree"]
         };
         for id in work_ids {
-            let mut start = WorkEvent::new(WorkEventKind::Start, *id, chrono::Utc::now());
+            let mut start = WorkEvent::new(
+                WorkEventKind::Start,
+                *id,
+                gwt_core::timestamp::UtcTimestamp::now(),
+            );
             start.status_category = Some(WorkspaceStatusCategory::Active);
             start.execution_container = Some(WorkspaceExecutionContainerRef {
                 branch: Some("work/issue-3697".to_string()),

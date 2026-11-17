@@ -1670,11 +1670,12 @@ async fn hook_live_handler(
         None => "none",
         _ => "other",
     };
-    let occurred_at = if chrono::DateTime::parse_from_rfc3339(&event.occurred_at).is_ok() {
-        event.occurred_at.as_str()
-    } else {
-        "invalid"
-    };
+    let occurred_at =
+        if gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(&event.occurred_at).is_ok() {
+            event.occurred_at.as_str()
+        } else {
+            "invalid"
+        };
     tracing::info!(
         target: "gwt.hook.delivery",
         stage = "receipt",

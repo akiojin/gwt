@@ -206,7 +206,7 @@ fn append_index_audit_event(log_dir: &Path, fields: Value) -> io::Result<()> {
     let path = gwt_core::logging::current_log_file(log_dir);
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
     let event = json!({
-        "timestamp": chrono::Local::now().to_rfc3339(),
+        "timestamp": gwt_core::timestamp::UtcTimestamp::now_local_rfc3339(),
         "level": "INFO",
         "target": "gwt::index",
         "fields": fields,

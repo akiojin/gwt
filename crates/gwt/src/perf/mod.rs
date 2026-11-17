@@ -11,8 +11,8 @@ pub mod summary;
 
 use std::io;
 
-use chrono::{DateTime, Utc};
 use gwt_config::PerfConfig;
+use gwt_core::timestamp::UtcTimestamp;
 
 #[doc(hidden)]
 pub use record::{sanitize_ui_action_field, sanitize_ui_trace_entry};
@@ -97,7 +97,7 @@ impl PerfSink {
     /// Build and persist one sample record.
     pub fn record_sample(
         &mut self,
-        timestamp: DateTime<Utc>,
+        timestamp: UtcTimestamp,
         stream: PerfStream,
         target: impl AsRef<str>,
         value: f64,
@@ -109,7 +109,7 @@ impl PerfSink {
     /// Build and persist one sustained budget violation.
     pub fn record_violation(
         &mut self,
-        timestamp: DateTime<Utc>,
+        timestamp: UtcTimestamp,
         stream: PerfStream,
         target: impl AsRef<str>,
         value: f64,
@@ -124,7 +124,7 @@ impl PerfSink {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{TimeZone as _, Utc};
+
     use gwt_config::PerfConfig;
     use gwt_core::{paths::gwt_logs_dir, test_support::ScopedGwtHome};
 
@@ -141,8 +141,7 @@ mod tests {
         let mut sink = PerfSink::from_config(&config).expect("create disabled sink");
 
         sink.record_sample(
-            Utc.with_ymd_and_hms(2026, 8, 20, 12, 34, 56)
-                .single()
+            gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 8, 20, 12, 34, 56)
                 .expect("valid timestamp"),
             PerfStream::Op,
             "gwtd:issue.view",

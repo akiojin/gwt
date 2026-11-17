@@ -1,6 +1,6 @@
 //! Explicit, non-destructive maintenance of abandoned machine-local stores.
 
-use chrono::{DateTime, Utc};
+use gwt_core::timestamp::UtcTimestamp;
 use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -60,7 +60,7 @@ pub struct Report {
 pub fn inspect(
     projects: &Path,
     protected: &BTreeSet<String>,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
 ) -> io::Result<Report> {
     let mut report = Report {
         scanned: 0,
@@ -112,7 +112,7 @@ pub fn inspect(
 fn quarantine(
     projects: &Path,
     protected: &BTreeSet<String>,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
     manifest: &str,
     guard: Option<&StateGuard>,
 ) -> io::Result<Report> {
@@ -231,21 +231,25 @@ pub fn run(project_root: &Path, dry_run: bool, manifest: Option<&str>) -> io::Re
         .collect();
     let projects = gwt_core::paths::gwt_projects_dir();
     if dry_run {
-        let mut plan = inspect(&projects, &protected, Utc::now())?;
+        let mut plan = inspect(
+            &projects,
+            &protected,
+            gwt_core::timestamp::UtcTimestamp::now(),
+        )?;
         plan.protection_changed = guard.check().is_err();
         Ok(plan)
     } else {
         quarantine(
             &projects,
             &protected,
-            Utc::now(),
+            gwt_core::timestamp::UtcTimestamp::now(),
             manifest.unwrap_or_default(),
             Some(&guard),
         )
     }
 }
 
-fn store_fingerprint(store: &Path, now: DateTime<Utc>) -> Result<Vec<u8>, &'static str> {
+fn store_fingerprint(store: &Path, now: UtcTimestamp) -> Result<Vec<u8>, &'static str> {
     if store.join("pm").exists() || store.join("project-state/pm.json").exists() {
         return Err("pm_store");
     }
@@ -257,7 +261,7 @@ fn store_fingerprint(store: &Path, now: DateTime<Utc>) -> Result<Vec<u8>, &'stat
 fn fingerprint_tree(
     store: &Path,
     path: &Path,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
     digest: &mut Sha256,
     depth: usize,
 ) -> Result<(), &'static str> {
@@ -269,8 +273,8 @@ fn fingerprint_tree(
     if kind.is_symlink() {
         return Err("linked_state");
     }
-    if DateTime::<Utc>::from(metadata.modified().map_err(|_| "unreadable_state")?)
-        > now - chrono::Duration::days(1)
+    if UtcTimestamp::from(metadata.modified().map_err(|_| "unreadable_state")?)
+        > now - time::Duration::days(1)
     {
         return Err("recent_state");
     }
@@ -421,8 +425,8 @@ fn references_existing_root(value: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{Duration, Utc};
     use std::{collections::BTreeSet, fs};
+    use time::Duration;
 
     fn fixture() -> (tempfile::TempDir, PathBuf) {
         let temp = tempfile::tempdir().unwrap();
@@ -448,7 +452,7 @@ mod tests {
         let id = "0123456789abcdef";
         let store = workspace(&projects, id);
         let bytes = fs::read(store.join("workspace.json")).unwrap();
-        let now = Utc::now() + Duration::days(2);
+        let now = gwt_core::timestamp::UtcTimestamp::now() + Duration::days(2);
         let plan = inspect(&projects, &BTreeSet::new(), now).unwrap();
         assert_eq!(plan.candidates.len(), 1);
         assert!(store.exists());
@@ -482,9 +486,19 @@ mod tests {
         fs::write(corrupt.join("workspace.json"), b"broken").unwrap();
         workspace(&projects, "0000000000000005");
         let protected = BTreeSet::from(["0000000000000005".to_owned()]);
-        let plan = inspect(&projects, &protected, Utc::now() + Duration::days(2)).unwrap();
+        let plan = inspect(
+            &projects,
+            &protected,
+            gwt_core::timestamp::UtcTimestamp::now() + Duration::days(2),
+        )
+        .unwrap();
         assert!(plan.candidates.is_empty(), "{plan:?}");
-        let recent = inspect(&projects, &BTreeSet::new(), Utc::now()).unwrap();
+        let recent = inspect(
+            &projects,
+            &BTreeSet::new(),
+            gwt_core::timestamp::UtcTimestamp::now(),
+        )
+        .unwrap();
         assert!(recent.candidates.is_empty());
     }
 
@@ -492,7 +506,7 @@ mod tests {
     fn project_prune_refuses_changed_plan_and_keeps_live_daemon_owner() {
         let (_temp, projects) = fixture();
         let store = workspace(&projects, "0123456789abcdef");
-        let now = Utc::now() + Duration::days(2);
+        let now = gwt_core::timestamp::UtcTimestamp::now() + Duration::days(2);
         let plan = inspect(&projects, &BTreeSet::new(), now).unwrap();
         fs::write(
             store.join("workspace.json"),
@@ -531,7 +545,7 @@ mod tests {
     fn project_prune_retains_nested_unknown_state_and_refuses_changed_global_protection() {
         let (_temp, projects) = fixture();
         let store = workspace(&projects, "0123456789abcdef");
-        let now = Utc::now() + Duration::days(2);
+        let now = gwt_core::timestamp::UtcTimestamp::now() + Duration::days(2);
         let plan = inspect(&projects, &BTreeSet::new(), now).unwrap();
         let state = projects.parent().unwrap().join("session.json");
         fs::write(&state, b"before").unwrap();

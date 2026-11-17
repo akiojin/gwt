@@ -124,7 +124,12 @@ fn disk_pressure_reclaims_idle_merged_and_unmerged_caches_from_project_container
         "fixture config must load"
     );
     let disk = probe_disk(&project_root, &config);
-    let AutoGcDecision::Run { trigger } = decide(&config, &disk, None, Utc::now()) else {
+    let AutoGcDecision::Run { trigger } = decide(
+        &config,
+        &disk,
+        None,
+        gwt_core::timestamp::UtcTimestamp::now(),
+    ) else {
         panic!("configured disk pressure must trigger automatic GC: {disk:?}");
     };
     let history = record_path(&project_root);

@@ -234,7 +234,7 @@ pub(super) fn admit<E: CliEnv>(
 mod tests {
     use super::super::{execution_state as execution, verification_record as verification};
     use crate::cli::{CliEnv, SkillStateAction, TestEnv};
-    use chrono::Utc;
+
     use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
     use gwt_git::pr_status::PrState;
     use std::path::Path;
@@ -270,7 +270,7 @@ mod tests {
                 status: execution::ExecutionControlStatus::Active,
                 blocked_reason: None,
                 missing_verification: None,
-                launched_at: Utc::now(),
+                launched_at: gwt_core::timestamp::UtcTimestamp::now(),
                 settled_at: None,
                 completion_evidence: None,
                 transfers: Vec::new(),
@@ -293,7 +293,7 @@ mod tests {
                 surfaces: Vec::new(),
                 generated_outputs: Vec::new(),
                 quarantines: Vec::new(),
-                created_at: Utc::now(),
+                created_at: gwt_core::timestamp::UtcTimestamp::now(),
                 content_hash: String::new(),
             }),
         )
@@ -315,10 +315,12 @@ mod tests {
             "body": "User Verification Result: n/a (autonomous)\nAgent Visual Check: n/a (no UI surface)\n"
         });
         let pr = gwt_git::pr_status::parse_pr_status_json(&value.to_string()).unwrap();
-        let mut inventory =
-            gwt_git::pr_status::parse_pr_inventory_json(&format!("[{value}]"), Utc::now().into())
-                .unwrap()
-                .remove(0);
+        let mut inventory = gwt_git::pr_status::parse_pr_inventory_json(
+            &format!("[{value}]"),
+            gwt_core::timestamp::UtcTimestamp::now(),
+        )
+        .unwrap()
+        .remove(0);
         inventory.unresolved_review_threads = Some(0);
         inventory.coderabbit_review_complete = Some(true);
         env.pr_quarantine_contexts.insert(
@@ -388,7 +390,7 @@ mod tests {
         let event = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Pr,
             "work-completion-receipt",
-            Utc::now(),
+            gwt_core::timestamp::UtcTimestamp::now(),
         );
         gwt_core::workspace_projection::record_workspace_work_event(repo.path(), event).unwrap();
         commit_and_reverify(repo.path(), session_id, ".gwt/work/events");
@@ -412,7 +414,7 @@ mod tests {
         let event = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Pr,
             "work-completion-receipt",
-            Utc::now(),
+            gwt_core::timestamp::UtcTimestamp::now(),
         );
         gwt_core::workspace_projection::record_workspace_work_event(repo.path(), event).unwrap();
         commit_fixture_change(repo.path(), ".gwt/work/events");
@@ -472,7 +474,7 @@ mod tests {
         let event = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Pr,
             "work-completion-receipt",
-            Utc::now(),
+            gwt_core::timestamp::UtcTimestamp::now(),
         );
         gwt_core::workspace_projection::record_workspace_work_event(repo.path(), event).unwrap();
         commit_and_reverify(repo.path(), session_id, ".gwt/work/events");
@@ -902,7 +904,7 @@ mod tests {
                 start_evidence: None,
                 active: true,
                 owner_spec: Some(5034),
-                started_at: Utc::now(),
+                started_at: gwt_core::timestamp::UtcTimestamp::now(),
                 phase: None,
                 session_id: "completion-pr-legacy-build".into(),
             },
@@ -1014,7 +1016,7 @@ mod tests {
             start_evidence: None,
             active: true,
             owner_spec: Some(5034),
-            started_at: Utc::now(),
+            started_at: gwt_core::timestamp::UtcTimestamp::now(),
             phase: None,
             session_id: "completion-pr-build".into(),
         };

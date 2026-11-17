@@ -12,7 +12,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -25,6 +24,7 @@ use crate::{
     },
     paths::{gwt_project_dir, gwt_project_dir_for_repo_path, project_scope_hash},
     repo_hash::RepoHash,
+    timestamp::UtcTimestamp,
 };
 
 const RECOVERY_SCHEMA_VERSION: u32 = 1;
@@ -225,8 +225,8 @@ struct PersistedBoardPayloadV1 {
     parent_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     resolves_entry_ids: Vec<String>,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
+    created_at: UtcTimestamp,
+    updated_at: UtcTimestamp,
     related_topics: Vec<String>,
     related_owners: Vec<String>,
     origin_branch: Option<String>,
@@ -422,8 +422,8 @@ pub struct RecoveryRecord {
     pub acknowledgement: Option<RecoveryAcknowledgement>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conflict: Option<RecoveryConflictKind>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: UtcTimestamp,
+    pub updated_at: UtcTimestamp,
 }
 
 impl fmt::Debug for RecoveryRecord {
@@ -578,7 +578,7 @@ impl RecoveryStore {
             return Err(RecoveryError::AlreadyExists);
         }
 
-        let now = Utc::now();
+        let now = UtcTimestamp::now();
         let record = RecoveryRecord {
             recovery_id: intent.recovery_id.clone(),
             revision: 1,
@@ -633,7 +633,7 @@ impl RecoveryStore {
         record.revision += 1;
         record.state = RecoveryState::Acknowledged;
         record.acknowledgement = Some(acknowledgement);
-        record.updated_at = Utc::now();
+        record.updated_at = UtcTimestamp::now();
         let envelope = RevisionEnvelope::new(
             operation_id,
             operation_digest,
@@ -680,7 +680,7 @@ impl RecoveryStore {
         record.revision += 1;
         record.state = RecoveryState::Conflicted;
         record.conflict = Some(conflict);
-        record.updated_at = Utc::now();
+        record.updated_at = UtcTimestamp::now();
         let envelope = RevisionEnvelope::new(
             operation_id,
             operation_digest,
@@ -876,7 +876,7 @@ struct RevisionEnvelope {
     operation_id: String,
     operation_digest: String,
     previous_revision_digest: Option<String>,
-    committed_at: DateTime<Utc>,
+    committed_at: UtcTimestamp,
     record: RecoveryRecord,
     revision_digest: String,
 }
@@ -1648,7 +1648,7 @@ fn calculate_revision_digest(envelope: &RevisionEnvelope) -> RecoveryResult<Stri
         operation_id: &'a str,
         operation_digest: &'a str,
         previous_revision_digest: &'a Option<String>,
-        committed_at: &'a DateTime<Utc>,
+        committed_at: &'a UtcTimestamp,
         record: &'a RecoveryRecord,
     }
     digest_serializable(&RevisionDigest {
@@ -1799,6 +1799,66 @@ fn sync_directory(_path: &Path) -> RecoveryResult<()> {
 #[cfg(test)]
 mod retention_tests {
     use super::*;
+
+    #[test]
+    fn reads_the_legacy_revision_and_recomputes_its_digest() {
+        let legacy = r#"{
+            "schema_version": 1,
+            "recovery_id": "recovery-id",
+            "revision": 1,
+            "operation_id": "prepare-id",
+            "operation_digest": "v1:sha256:fixture",
+            "previous_revision_digest": null,
+            "committed_at": "2026-11-18T06:07:00.000120Z",
+            "record": {
+                "recovery_id": "recovery-id",
+                "revision": 1,
+                "state": "pending",
+                "authority": {
+                    "project_id": "project-id",
+                    "session_id": "session-id"
+                },
+                "intent": {
+                    "recovery_id": "recovery-id",
+                    "provider": "slack",
+                    "worktree_form": "branch-backed",
+                    "entry": {
+                        "schema_version": 1,
+                        "id": "board-entry",
+                        "author_kind": "agent",
+                        "author": "Codex",
+                        "kind": "status",
+                        "body": "body",
+                        "title": null,
+                        "title_summary": null,
+                        "state": null,
+                        "parent_id": null,
+                        "created_at": "2026-11-18T06:00:00.007980Z",
+                        "updated_at": "2026-11-18T06:02:00.010Z",
+                        "related_topics": [],
+                        "related_owners": [],
+                        "origin_branch": null,
+                        "origin_session_id": null,
+                        "origin_agent_id": null,
+                        "origin_worktree_form": "branch-backed",
+                        "origin_recovery_id": "recovery-id",
+                        "target_owners": [],
+                        "mentions": [],
+                        "audience": []
+                    },
+                    "payload_digest": "v1:sha256:fixture"
+                },
+                "created_at": "2026-11-18T06:05:00.000000125Z",
+                "updated_at": "2026-11-18T06:07:00.000120Z"
+            },
+            "revision_digest": "v1:sha256:19a427890650ea29001be91ac88de2f3f4dcf2b2e1dbb329034e77e9ed52f36f"
+        }"#;
+        let revision: RevisionEnvelope = serde_json::from_str(legacy).unwrap();
+        assert_eq!(
+            calculate_revision_digest(&revision).unwrap(),
+            revision.revision_digest,
+        );
+    }
 
     #[test]
     fn persisted_board_payload_preserves_the_agent_name_snapshot() {

@@ -28,8 +28,8 @@ pub fn status(project_root: &Path) -> io::Result<Status> {
         let wait = gwt_core::update::load_update_wait_observation(project_root).filter(|wait| {
             wait.version == drain.version
                 && matches!((
-                    chrono::DateTime::parse_from_rfc3339(&wait.observed_at),
-                    chrono::DateTime::parse_from_rfc3339(&drain.since),
+                    gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(&wait.observed_at),
+                    gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(&drain.since),
                 ), (Ok(observed), Ok(since)) if observed >= since)
         });
         if let Some(blockers) = wait.as_ref().and_then(|wait| {

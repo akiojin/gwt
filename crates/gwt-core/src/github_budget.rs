@@ -35,7 +35,9 @@ use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, Duration, SecondsFormat, TimeZone, Utc};
+use time::Duration;
+
+use crate::timestamp::UtcTimestamp;
 use serde::{Deserialize, Serialize};
 
 use crate::github_quota::{self, GitHubQuota, QuotaGate, RateLimitBlock, RATE_LIMITED_ERROR_CODE};
@@ -86,18 +88,18 @@ const REPORTED_RESOURCES: &[&str] = &["graphql", "core"];
 pub struct ResourceWindow {
     pub limit: u64,
     pub remaining: u64,
-    pub reset_at: DateTime<Utc>,
+    pub reset_at: UtcTimestamp,
 }
 
 /// Budget observations, reduced to the reported resources.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProbeSnapshot {
-    pub probed_at: DateTime<Utc>,
+    pub probed_at: UtcTimestamp,
     pub resources: BTreeMap<String, ResourceWindow>,
 }
 
 /// Parse a `gh api rate_limit` payload into every reported resource.
-pub fn parse_rate_limit_probe_all(payload: &str, now: DateTime<Utc>) -> Option<ProbeSnapshot> {
+pub fn parse_rate_limit_probe_all(payload: &str, now: UtcTimestamp) -> Option<ProbeSnapshot> {
     let value: serde_json::Value = serde_json::from_str(payload).ok()?;
     let entries = value.get("resources")?.as_object()?;
     let mut resources = BTreeMap::new();
@@ -108,7 +110,7 @@ pub fn parse_rate_limit_probe_all(payload: &str, now: DateTime<Utc>) -> Option<P
         let Some(reset) = entry.get("reset").and_then(serde_json::Value::as_i64) else {
             continue;
         };
-        let Some(reset_at) = Utc.timestamp_opt(reset, 0).single() else {
+        let Some(reset_at) = UtcTimestamp::from_unix_seconds(reset) else {
             continue;
         };
         resources.insert(
@@ -163,7 +165,7 @@ pub struct LocalConsumption {
 pub struct GraphQlRateLimit {
     pub cost: u64,
     pub remaining: u64,
-    pub reset_at: DateTime<Utc>,
+    pub reset_at: UtcTimestamp,
     pub node_count: u64,
 }
 
@@ -177,8 +179,7 @@ pub fn parse_graphql_rate_limit(response: &serde_json::Value) -> Option<GraphQlR
     let reset_at = block
         .get("resetAt")
         .and_then(serde_json::Value::as_str)
-        .and_then(|text| DateTime::parse_from_rfc3339(text).ok())
-        .map(|stamp| stamp.with_timezone(&Utc))?;
+        .and_then(UtcTimestamp::parse_rfc3339)?;
     Some(GraphQlRateLimit {
         cost: block.get("cost").and_then(serde_json::Value::as_u64)?,
         remaining: block.get("remaining").and_then(serde_json::Value::as_u64)?,
@@ -196,8 +197,8 @@ pub struct ObservedBlock {
     pub resource: String,
     pub limit: u64,
     pub remaining: u64,
-    pub reset_at: DateTime<Utc>,
-    pub observed_at: DateTime<Utc>,
+    pub reset_at: UtcTimestamp,
+    pub observed_at: UtcTimestamp,
     /// Issue #3928 AC-1: how many refusals in a row this window closes, which
     /// is what sets its length.
     #[serde(default)]
@@ -218,7 +219,7 @@ impl ObservedBlock {
 /// Everything a caller can know about the budget right now.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BudgetSnapshot {
-    pub taken_at: DateTime<Utc>,
+    pub taken_at: UtcTimestamp,
     /// Primary budgets from the newest probe, if any was ever taken.
     pub probe: Option<ProbeSnapshot>,
     /// Seconds since that probe.
@@ -241,7 +242,7 @@ pub struct BudgetSnapshot {
 /// reported beyond the one already charged at spawn.
 #[derive(Debug, Serialize, Deserialize)]
 struct SpawnRecord {
-    at: DateTime<Utc>,
+    at: UtcTimestamp,
     resource: String,
     #[serde(default)]
     source: String,
@@ -353,13 +354,13 @@ impl BudgetLedger {
 
     /// Record one budget-spending spawn. Free calls are not recorded. Failure
     /// to write is swallowed: bookkeeping must never fail the call it counts.
-    pub fn record_spawn(&self, quota: GitHubQuota, now: DateTime<Utc>) {
+    pub fn record_spawn(&self, quota: GitHubQuota, now: UtcTimestamp) {
         self.record_spawn_from(quota, UNKNOWN_SPAWN_SOURCE, now);
     }
 
     /// [`Self::record_spawn`] with the caller class the count is attributed to
     /// (Issue #3928 AC-4); see [`spawn_source`].
-    pub fn record_spawn_from(&self, quota: GitHubQuota, source: &str, now: DateTime<Utc>) {
+    pub fn record_spawn_from(&self, quota: GitHubQuota, source: &str, now: UtcTimestamp) {
         let Some(resource) = quota.resource_name() else {
             return;
         };
@@ -381,7 +382,7 @@ impl BudgetLedger {
         &self,
         source: &str,
         rate_limit: &GraphQlRateLimit,
-        now: DateTime<Utc>,
+        now: UtcTimestamp,
     ) {
         let Some(resource) = GitHubQuota::GraphQl.resource_name() else {
             return;
@@ -477,7 +478,7 @@ impl BudgetLedger {
     /// exponential schedule ([`backoff_secs`]) keyed by how many refusals in a
     /// row this one is. A measured primary exhaustion keeps GitHub's own reset.
     /// Either way an active window is never shortened.
-    pub fn record_block(&self, block: &RateLimitBlock, now: DateTime<Utc>) -> RateLimitBlock {
+    pub fn record_block(&self, block: &RateLimitBlock, now: UtcTimestamp) -> RateLimitBlock {
         let mut blocks = self.read_blocks();
         let previous = blocks.get(&block.resource).cloned();
         let consecutive_refusals = match &previous {
@@ -531,7 +532,7 @@ impl BudgetLedger {
 
     /// The persisted window still open for `quota`, or `None` when the budget
     /// is usable as far as this machine knows.
-    pub fn active_block(&self, quota: GitHubQuota, now: DateTime<Utc>) -> Option<RateLimitBlock> {
+    pub fn active_block(&self, quota: GitHubQuota, now: UtcTimestamp) -> Option<RateLimitBlock> {
         let resource = quota.resource_name()?;
         self.read_blocks()
             .get(resource)
@@ -547,7 +548,7 @@ impl BudgetLedger {
         &self,
         quota: GitHubQuota,
         policy: &ThrottlePolicy,
-        now: DateTime<Utc>,
+        now: UtcTimestamp,
     ) -> Option<std::time::Duration> {
         let resource = quota.resource_name()?;
         let limit = usize::try_from(policy.burst_calls_per_minute).ok()?;
@@ -555,7 +556,7 @@ impl BudgetLedger {
             return None;
         }
         let minute_start = now - Duration::seconds(60);
-        let mut recent: Vec<DateTime<Utc>> = self
+        let mut recent: Vec<UtcTimestamp> = self
             .read_spawns()
             .into_iter()
             .filter(|record| {
@@ -571,7 +572,7 @@ impl BudgetLedger {
         recent.sort_unstable();
         let frees_at =
             recent[recent.len() + 1 - limit] + Duration::seconds(60 + BURST_WAIT_SLACK_SECS);
-        (frees_at - now).to_std().ok()
+        std::time::Duration::try_from(frees_at - now).ok()
     }
 
     /// Every persisted refusal window, keyed by GitHub resource.
@@ -590,11 +591,11 @@ impl BudgetLedger {
     }
 
     /// Read everything back. A missing or corrupt ledger is an empty one.
-    pub fn snapshot(&self, now: DateTime<Utc>) -> BudgetSnapshot {
+    pub fn snapshot(&self, now: UtcTimestamp) -> BudgetSnapshot {
         let probe: Option<ProbeSnapshot> = read_json(&self.dir.join(PROBE_FILE));
         let probe_age_secs = probe
             .as_ref()
-            .map(|probe| (now - probe.probed_at).num_seconds().max(0));
+            .map(|probe| (now - probe.probed_at).whole_seconds().max(0));
         let mut local: BTreeMap<String, LocalConsumption> = REPORTED_RESOURCES
             .iter()
             .map(|name| ((*name).to_string(), LocalConsumption::default()))
@@ -652,7 +653,7 @@ impl BudgetLedger {
             .unwrap_or_default()
     }
 
-    fn compact_if_needed(&self, path: &Path, now: DateTime<Utc>) {
+    fn compact_if_needed(&self, path: &Path, now: UtcTimestamp) {
         let Ok(raw) = std::fs::read_to_string(path) else {
             return;
         };
@@ -780,7 +781,7 @@ fn fresh_resource_window<'a>(
     snapshot: &'a BudgetSnapshot,
     resource: &str,
     policy: &ThrottlePolicy,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
 ) -> Option<&'a ResourceWindow> {
     snapshot
         .probe
@@ -805,7 +806,7 @@ pub fn throttle_reason(
     snapshot: &BudgetSnapshot,
     quota: GitHubQuota,
     policy: &ThrottlePolicy,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
 ) -> Option<String> {
     let resource = quota.resource_name()?;
     if let Some(block) = snapshot
@@ -815,8 +816,8 @@ pub fn throttle_reason(
     {
         return Some(format!(
             "{RATE_LIMITED_ERROR_CODE}: resource={resource} reset_at={} retry_after_secs={}",
-            block.reset_at.to_rfc3339_opts(SecondsFormat::Secs, true),
-            (block.reset_at - now).num_seconds().max(0)
+            block.reset_at.to_rfc3339_seconds(),
+            (block.reset_at - now).whole_seconds().max(0)
         ));
     }
     if let Some(window) = fresh_resource_window(snapshot, resource, policy, now) {
@@ -826,7 +827,7 @@ pub fn throttle_reason(
                     "budget_reserve: resource={resource} remaining={} reserve={reserve} limit={} reset_at={}",
                     window.remaining,
                     window.limit,
-                    window.reset_at.to_rfc3339_opts(SecondsFormat::Secs, true)
+                    window.reset_at.to_rfc3339_seconds()
                 ));
         }
     }
@@ -848,7 +849,7 @@ pub fn suppressed_spawn_detail<S: AsRef<str>>(
     gate: &QuotaGate,
     ledger: &BudgetLedger,
     args: &[S],
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
 ) -> Option<String> {
     github_quota::suppressed_spawn_detail(gate, args, now).or_else(|| {
         ledger
@@ -870,7 +871,7 @@ pub fn observe_refusal<S, F>(
     ledger: &BudgetLedger,
     args: &[S],
     stderr: &str,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
     probe: F,
 ) -> Option<String>
 where
@@ -899,7 +900,7 @@ pub struct ResourceBudgetStatus {
     pub reason: Option<String>,
     /// End of the active refusal or reserve window, when one is open.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub backoff_until: Option<DateTime<Utc>>,
+    pub backoff_until: Option<UtcTimestamp>,
     /// Seconds until that window ends.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_after_secs: Option<i64>,
@@ -927,7 +928,7 @@ pub struct ResourceBudgetStatus {
 pub fn status_by_resource(
     snapshot: &BudgetSnapshot,
     policy: &ThrottlePolicy,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
 ) -> BTreeMap<String, ResourceBudgetStatus> {
     [GitHubQuota::GraphQl, GitHubQuota::Rest]
         .into_iter()
@@ -950,7 +951,8 @@ pub fn status_by_resource(
                     throttled: reason.is_some(),
                     reason,
                     backoff_until,
-                    retry_after_secs: backoff_until.map(|until| (until - now).num_seconds().max(0)),
+                    retry_after_secs: backoff_until
+                        .map(|until| (until - now).whole_seconds().max(0)),
                     consecutive_refusals: window
                         .map(|block| block.consecutive_refusals)
                         .unwrap_or(0),
@@ -977,7 +979,7 @@ mod settings_tests {
     fn a_graphql_response_settles_its_points_and_drives_the_reserve() {
         let temp = tempfile::tempdir().unwrap();
         let ledger = BudgetLedger::at(temp.path());
-        let now = Utc::now();
+        let now = UtcTimestamp::now();
         let mut resources = BTreeMap::new();
         resources.insert(
             "graphql".to_string(),
@@ -1030,6 +1032,26 @@ mod settings_tests {
     }
 
     #[test]
+    fn spawn_ledger_preserves_legacy_timestamp_bytes() {
+        const LEGACY_SPAWN: &str = concat!(
+            r#"{"at":"2026-09-07T10:00:00.123456789Z","resource":"graphql","source":"gwtd gh pr list","calls":1,"cost":1}"#,
+            "\n",
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let ledger = BudgetLedger::at(temp.path());
+        let path = temp.path().join(SPAWNS_FILE);
+        std::fs::write(&path, LEGACY_SPAWN).unwrap();
+
+        let at: UtcTimestamp = "2026-09-07T10:00:00.123456789Z".parse().unwrap();
+        assert_eq!(ledger.snapshot(at).local["graphql"].calls_last_minute, 1);
+        ledger.record_spawn_from(GitHubQuota::GraphQl, "gwtd gh pr list", at);
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            LEGACY_SPAWN.repeat(2)
+        );
+    }
+
+    #[test]
     fn graphql_rate_limit_block_is_read_from_the_response() {
         let response: serde_json::Value = serde_json::from_str(
             r#"{"data":{"repository":{},"rateLimit":{"cost":12,"remaining":4988,"resetAt":"2026-09-07T10:00:00Z","nodeCount":300}}}"#,
@@ -1039,10 +1061,7 @@ mod settings_tests {
         assert_eq!(block.cost, 12);
         assert_eq!(block.remaining, 4988);
         assert_eq!(block.node_count, 300);
-        assert_eq!(
-            block.reset_at.to_rfc3339_opts(SecondsFormat::Secs, true),
-            "2026-09-07T10:00:00Z"
-        );
+        assert_eq!(block.reset_at.to_rfc3339_seconds(), "2026-09-07T10:00:00Z");
         assert!(parse_graphql_rate_limit(&serde_json::json!({"data": {}})).is_none());
     }
 

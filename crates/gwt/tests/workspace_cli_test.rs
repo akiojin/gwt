@@ -9,6 +9,8 @@
 //! assignment, active Work/container, and tracked Work event. All ops run the
 //! real `gwtd` binary through the stdin JSON envelope with an isolated HOME.
 
+use gwt_core::timestamp::UtcTimestamp;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
@@ -31,7 +33,6 @@ use axum::{
     routing::post,
     Json, Router,
 };
-use chrono::Utc;
 use gwt_agent::{
     AgentId, Session, GWT_HOOK_FORWARD_TOKEN_ENV, GWT_HOOK_FORWARD_URL_ENV, GWT_SESSION_ID_ENV,
     GWT_SESSION_RUNTIME_PATH_ENV,
@@ -1034,7 +1035,7 @@ fn assert_reconcile_git(repo: &Path, args: &[&str]) {
 fn legacy_supersession(host: &str) -> WorkEvent {
     let parent = "reconcile-parent";
     let successor = gwt_core::workspace_projection::successor_work_id(parent);
-    let mut event = WorkEvent::new(WorkEventKind::Discard, &successor, Utc::now());
+    let mut event = WorkEvent::new(WorkEventKind::Discard, &successor, UtcTimestamp::now());
     event.id = format!("superseded-{successor}");
     event.related_work_item_id = Some(parent.to_string());
     event.execution_container = Some(WorkspaceExecutionContainerRef {
@@ -1494,7 +1495,7 @@ fn switch_current_projection_away_from_exact_work(
         "switching current must preserve the exact durable Session assignment"
     );
 
-    let now = Utc::now();
+    let now = UtcTimestamp::now();
     let mut works = load_workspace_work_items_from_path(&works_path)
         .expect("load exact WorkItems before current switch")
         .expect("exact WorkItems exist before current switch");
@@ -1675,7 +1676,7 @@ fn register_agent_at_home(home: &Path, project: &Path) {
         .join(".gwt/projects")
         .join(project_scope_hash(&project_root).as_str())
         .join("project-state");
-    let now = Utc::now();
+    let now = UtcTimestamp::now();
     let mut projection = WorkspaceProjection::default_for_project(&project_root);
     projection.agents.push(WorkspaceAgentSummary {
         session_id: SESSION.to_string(),
@@ -3737,7 +3738,11 @@ fn store_consolidate_dry_runs_then_folds_the_split_store_into_the_canonical_one(
     let orphan_hash = gwt_core::repo_hash::compute_path_hash(&fixture.layout_root);
     let orphan_state = projects.join(orphan_hash.as_str()).join("project-state");
     fs::create_dir_all(&orphan_state).expect("orphan store");
-    let mut split_event = WorkEvent::new(WorkEventKind::Start, "work-split-store", Utc::now());
+    let mut split_event = WorkEvent::new(
+        WorkEventKind::Start,
+        "work-split-store",
+        UtcTimestamp::now(),
+    );
     split_event.id = "event-split-store".to_string();
     split_event.title = Some("Work stranded in the split store".to_string());
     let mut split_projection = WorkItemsProjection::empty(split_event.updated_at);
@@ -4019,7 +4024,8 @@ fn store_consolidate_refuses_an_apply_that_no_dry_run_issued() {
     let orphan_hash = gwt_core::repo_hash::compute_path_hash(&fixture.layout_root);
     let orphan_state = projects.join(orphan_hash.as_str()).join("project-state");
     fs::create_dir_all(&orphan_state).expect("orphan store");
-    let mut split_event = WorkEvent::new(WorkEventKind::Start, "work-unreviewed", Utc::now());
+    let mut split_event =
+        WorkEvent::new(WorkEventKind::Start, "work-unreviewed", UtcTimestamp::now());
     split_event.id = "event-unreviewed".to_string();
     let mut split_projection = WorkItemsProjection::empty(split_event.updated_at);
     split_projection.apply_event(split_event.clone());

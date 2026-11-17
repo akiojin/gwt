@@ -16,7 +16,6 @@ use std::{
     process::Stdio,
 };
 
-use chrono::Utc;
 use gwt_agent::{
     AgentId, Session, GWT_HOOK_FORWARD_TOKEN_ENV, GWT_HOOK_FORWARD_URL_ENV, GWT_SESSION_ID_ENV,
     GWT_SESSION_RUNTIME_PATH_ENV,
@@ -160,7 +159,7 @@ fn write_pm_registration(fixture: &PmFixture, session_id: &str) {
 /// project has no Work for it yet (`save_start_work_workspace_projection`
 /// takes the ownerless path).
 fn seed_unassigned_pm_agent(fixture: &PmFixture) {
-    let now = Utc::now();
+    let now = gwt_core::timestamp::UtcTimestamp::now();
     let mut projection = WorkspaceProjection::default_for_project(fixture.project.path());
     projection.agents = vec![WorkspaceAgentSummary {
         session_id: fixture.session_id.clone(),

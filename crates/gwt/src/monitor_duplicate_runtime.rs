@@ -465,7 +465,7 @@ fn publish_counts(
     let host_pid = std::process::id();
     let host_started_at = crate::process::host_process_start_time(host_pid)
         .ok_or_else(|| io::Error::other("Monitor host process identity unavailable"))?;
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
     let (prefs, ()) = crate::try_mutate_issue_monitor_prefs(
         &crate::issue_monitor_prefs_path_for_repo_path(project_root),
         |prefs| {

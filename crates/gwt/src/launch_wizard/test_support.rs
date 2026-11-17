@@ -3,8 +3,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use chrono::Utc;
-
 use super::{AgentOption, LaunchWizardContext, LinkedIssueKind, QuickStartEntry};
 use crate::BranchListEntry;
 
@@ -99,7 +97,7 @@ pub(super) fn sample_session(
     branch: &str,
     worktree_path: &Path,
     agent_id: gwt_agent::AgentId,
-    updated_at: chrono::DateTime<Utc>,
+    updated_at: gwt_core::timestamp::UtcTimestamp,
     resume_id: &str,
 ) {
     sample_session_with_resume(
@@ -117,7 +115,7 @@ pub(super) fn sample_session_with_resume(
     branch: &str,
     worktree_path: &Path,
     agent_id: gwt_agent::AgentId,
-    updated_at: chrono::DateTime<Utc>,
+    updated_at: gwt_core::timestamp::UtcTimestamp,
     resume_id: Option<&str>,
 ) {
     let mut session = gwt_agent::Session::new(worktree_path, branch, agent_id);
@@ -131,7 +129,7 @@ pub(super) fn sample_session_with_resume(
     session.runtime_target = gwt_agent::LaunchRuntimeTarget::Docker;
     session.docker_service = Some("gwt".to_string());
     session.docker_lifecycle_intent = gwt_agent::DockerLifecycleIntent::Restart;
-    let updated_at = updated_at.into();
+
     session.created_at = updated_at;
     session.updated_at = updated_at;
     session.last_activity_at = updated_at;
@@ -142,7 +140,7 @@ pub(super) fn sample_session_record(
     branch: &str,
     worktree_path: &Path,
     agent_id: gwt_agent::AgentId,
-    updated_at: chrono::DateTime<Utc>,
+    updated_at: gwt_core::timestamp::UtcTimestamp,
     resume_id: Option<&str>,
 ) -> gwt_agent::Session {
     let mut session = gwt_agent::Session::new(worktree_path, branch, agent_id);
@@ -156,7 +154,7 @@ pub(super) fn sample_session_record(
     session.runtime_target = gwt_agent::LaunchRuntimeTarget::Docker;
     session.docker_service = Some("gwt".to_string());
     session.docker_lifecycle_intent = gwt_agent::DockerLifecycleIntent::Restart;
-    let updated_at = updated_at.into();
+
     session.created_at = updated_at;
     session.updated_at = updated_at;
     session.last_activity_at = updated_at;

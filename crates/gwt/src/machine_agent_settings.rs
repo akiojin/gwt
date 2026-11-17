@@ -358,9 +358,10 @@ fn legacy_policy() -> io::Result<Policy> {
             .max_active_last_change
             .as_ref()
             .and_then(|change| change.get("changed_at")?.as_str())
-            .and_then(|changed_at| chrono::DateTime::parse_from_rfc3339(changed_at).ok())
-            .map(|time| time.with_timezone(&chrono::Utc))
-            .unwrap_or_else(|| chrono::DateTime::<chrono::Utc>::from(modified));
+            .and_then(|changed_at| {
+                gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(changed_at).ok()
+            })
+            .unwrap_or_else(|| gwt_core::timestamp::UtcTimestamp::from(modified));
         let rank = (mode == IssueMonitorMaxActiveMode::Auto, changed_at, path);
         if selected.as_ref().is_none_or(|(current, _)| rank > *current) {
             selected = Some((
@@ -493,9 +494,10 @@ mod tests {
                     "max_active_last_change": change
                 }),
             );
-            let start = chrono::DateTime::parse_from_rfc3339("2025-01-01T00:00:00Z")
-                .unwrap()
-                .timestamp() as u64;
+            let start =
+                gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339("2025-01-01T00:00:00Z")
+                    .unwrap()
+                    .timestamp() as u64;
             fs::File::options()
                 .write(true)
                 .open(path)

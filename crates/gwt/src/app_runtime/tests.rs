@@ -22,7 +22,7 @@ use tokio_tungstenite::{
 };
 
 use base64::Engine;
-use chrono::{TimeZone, Utc};
+
 use gwt::{
     empty_workspace_state, load_workspace_state, refresh_managed_gwt_assets_for_worktree,
     save_workspace_state, workspace_state_path, BackendEvent, BranchCleanupInfo, BranchListEntry,
@@ -250,8 +250,12 @@ fn issue_5596_gui_phase_logging_waits_for_worker_dispatch() {
         assert_eq!(event.fields["thread"], "gui");
         assert_eq!(event.fields["emitter"], "worker");
         assert!(event.fields["elapsed_ms"].parse::<f64>().unwrap() >= 0.0);
-        let observed = chrono::DateTime::parse_from_rfc3339(&event.fields["captured_at"]).unwrap();
-        assert_eq!(observed.offset().local_minus_utc(), 0);
+        let observed = time::OffsetDateTime::parse(
+            &event.fields["captured_at"],
+            &time::format_description::well_known::Rfc3339,
+        )
+        .unwrap();
+        assert_eq!(observed.offset(), time::UtcOffset::UTC);
     }
     assert_eq!(emitted[0].fields["phase"], "monitor_gui_context");
     assert_eq!(emitted[1].fields["phase"], "monitor_gui_freshness");
@@ -1156,7 +1160,7 @@ fn workspace_agent_summary_for_test(
         affiliation_status:
             gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Assigned,
         workspace_id: workspace_id.map(str::to_string),
-        updated_at: chrono::Utc::now(),
+        updated_at: gwt_core::timestamp::UtcTimestamp::now(),
     }
 }
 
@@ -1684,7 +1688,7 @@ pub(super) fn owner_runtime_status_event(
     );
     hook.branch = Some(session.branch.clone());
     hook.agent_session_id.clone_from(&session.agent_session_id);
-    hook.occurred_at = chrono::Utc::now().to_rfc3339();
+    hook.occurred_at = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
     let expected =
         gwt::window_state::runtime_hook_window_state(&hook).expect("fixture hook status");
     let mut source = owner.subscribe();
@@ -2161,7 +2165,7 @@ impl AppRuntime {
             assert!(self.project_context_is_current(&context));
             let receipt = gwt::project_execution_policy::ActualViewReceipt {
                 receipt_id: uuid::Uuid::new_v4().to_string(),
-                accepted_at: chrono::Utc::now(),
+                accepted_at: gwt_core::timestamp::UtcTimestamp::now(),
                 admitted_policy_revision: gwt_core::project_execution_policy::load(
                     &context.project_root,
                 )
@@ -2188,7 +2192,7 @@ impl AppRuntime {
                     )]),
                     last_open_receipt: Some(receipt),
                     close_intents: Default::default(),
-                    observed_at: chrono::Utc::now(),
+                    observed_at: gwt_core::timestamp::UtcTimestamp::now(),
                 },
             )
             .expect("accepted visible Project fixture receipt");
@@ -2245,15 +2249,18 @@ fn seed_window_scoped_state(runtime: &mut AppRuntime, window_id: &str) {
     runtime
         .recoverable_agent_error_windows
         .insert(window_id.to_string());
-    runtime
-        .last_agent_activity
-        .insert(window_id.to_string(), chrono::Utc::now());
-    runtime
-        .last_issue_monitor_heartbeat
-        .insert(window_id.to_string(), chrono::Utc::now());
-    runtime
-        .window_last_output_at
-        .insert(window_id.to_string(), chrono::Utc::now());
+    runtime.last_agent_activity.insert(
+        window_id.to_string(),
+        gwt_core::timestamp::UtcTimestamp::now(),
+    );
+    runtime.last_issue_monitor_heartbeat.insert(
+        window_id.to_string(),
+        gwt_core::timestamp::UtcTimestamp::now(),
+    );
+    runtime.window_last_output_at.insert(
+        window_id.to_string(),
+        gwt_core::timestamp::UtcTimestamp::now(),
+    );
 }
 
 async fn next_test_agent_websocket_event<S>(
@@ -2866,7 +2873,7 @@ fn append_workspace_resume_journal(
         agent_session_id: None,
         agent_current_focus: None,
         agent_title_summary: Some("Suspended review".to_string()),
-        updated_at: chrono::Utc::now(),
+        updated_at: gwt_core::timestamp::UtcTimestamp::now(),
     };
     gwt_core::workspace_projection::append_workspace_journal_entry_to_path(&path, &entry)
         .expect("append journal");
@@ -3489,7 +3496,8 @@ fn issue_monitor_final_spawn_reads_fresh_shared_auto_capacity() {
     let artifact = target.join("fixture-artifact");
     fs::write(&artifact, b"measured target fixture").expect("target artifact");
     let target_bytes = fs::metadata(&artifact).expect("measured artifact").len();
-    let now = u64::try_from(Utc::now().timestamp()).expect("positive epoch");
+    let now = u64::try_from(gwt_core::timestamp::UtcTimestamp::now().timestamp())
+        .expect("positive epoch");
     let snapshot = serde_json::json!({
         "observed_at": now, "expires_at": now + 30,
         "performance_cores": 2, "gui_cpu_millicores": 0,
@@ -3655,9 +3663,9 @@ fn issue_monitor_final_spawn_preserves_live_wait_and_exempts_review() {
             readiness: gwt::IssueMonitorReadiness::Ready,
             updated_at: None,
         });
-        let now = Utc::now();
+        let now = gwt_core::timestamp::UtcTimestamp::now();
         let since = if case == "expired" {
-            now - chrono::Duration::hours(4)
+            now - time::Duration::hours(4)
         } else {
             now
         };
@@ -3916,7 +3924,10 @@ fn issue_monitor_final_spawn_rejects_a_saturated_cap_without_delivery() {
     .unwrap();
     relay(&mut runtime, &mut source);
     let snapshot = runtime
-        .issue_monitor_window_snapshot_for_tab_cached("tab-1", &Utc::now().to_rfc3339())
+        .issue_monitor_window_snapshot_for_tab_cached(
+            "tab-1",
+            &gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
+        )
         .unwrap();
     assert_eq!(
         snapshot.windows.len(),
@@ -4364,7 +4375,7 @@ fn continue_work_launch_failure_fixture(temp_root: &Path) -> ContinueWorkLaunchF
 
     let selected_work_id = "work-selected";
     let candidate_session_id = "candidate-session";
-    let now = chrono::Utc::now();
+    let now = gwt_core::timestamp::UtcTimestamp::now();
     let mut start = gwt_core::workspace_projection::WorkEvent::new(
         gwt_core::workspace_projection::WorkEventKind::Start,
         selected_work_id,
@@ -4389,7 +4400,7 @@ fn continue_work_launch_failure_fixture(temp_root: &Path) -> ContinueWorkLaunchF
         gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Done,
             selected_work_id,
-            now + chrono::Duration::seconds(1),
+            now + time::Duration::seconds(1),
         ),
     )
     .expect("complete selected Work");
@@ -4662,7 +4673,7 @@ fn projection_only_continue_runtime(
     }
 
     let work_id = format!("work-{case_name}");
-    let now = chrono::Utc::now();
+    let now = gwt_core::timestamp::UtcTimestamp::now();
     let mut start = gwt_core::workspace_projection::WorkEvent::new(
         gwt_core::workspace_projection::WorkEventKind::Start,
         &work_id,
@@ -4688,7 +4699,7 @@ fn projection_only_continue_runtime(
         let mut update = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Update,
             &work_id,
-            now + chrono::Duration::microseconds(1),
+            now + time::Duration::microseconds(1),
         );
         update.owner = Some("SPEC #3248".to_string());
         gwt_core::workspace_projection::record_workspace_work_event(&project_root, update)
@@ -4713,7 +4724,7 @@ fn projection_only_continue_runtime(
         let mut update = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Update,
             &work_id,
-            now + chrono::Duration::milliseconds(1),
+            now + time::Duration::milliseconds(1),
         );
         update.execution_container = Some(
             gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
@@ -4734,7 +4745,7 @@ fn projection_only_continue_runtime(
         let mut update = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Update,
             &work_id,
-            now + chrono::Duration::milliseconds(1),
+            now + time::Duration::milliseconds(1),
         );
         update.execution_container = Some(
             gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
@@ -4753,7 +4764,7 @@ fn projection_only_continue_runtime(
         gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Done,
             &work_id,
-            now + chrono::Duration::milliseconds(2),
+            now + time::Duration::milliseconds(2),
         ),
     )
     .expect("settle projection-only Work");
@@ -5118,7 +5129,7 @@ fn continue_work_activated_successor_recovery_case(
     let predecessor_binding = gwt::cli::execution_state::current_execution_binding(&repo, owner)
         .expect("read predecessor binding")
         .expect("predecessor binding");
-    let now = chrono::Utc::now();
+    let now = gwt_core::timestamp::UtcTimestamp::now();
     let (execution, planned) = if same_generation_takeover {
         let request = gwt::cli::execution_state::GenerationTakeoverRequest {
             operation_id: operation_id.to_string(),
@@ -5188,7 +5199,7 @@ fn continue_work_activated_successor_recovery_case(
             gwt_core::workspace_projection::WorkEvent::new(
                 gwt_core::workspace_projection::WorkEventKind::Done,
                 work_id,
-                now + chrono::Duration::seconds(1),
+                now + time::Duration::seconds(1),
             ),
         )
         .expect("settle Work");
@@ -5265,7 +5276,7 @@ fn continue_work_activated_successor_recovery_case(
                         created_by_start_work: true,
                     },
                     live_session_ids: &live_session_ids,
-                    now: now + chrono::Duration::seconds(2),
+                    now: now + time::Duration::seconds(2),
                 },
             );
             Ok(((), vec![event]))
@@ -5621,7 +5632,7 @@ fn continue_work_heal_session_start_events(
         let mut changed = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Update,
             &work_id,
-            chrono::Utc::now() + chrono::Duration::seconds(1),
+            gwt_core::timestamp::UtcTimestamp::now() + time::Duration::seconds(1),
         );
         changed.owner = Some(work_owner_text.into());
         gwt_core::workspace_projection::record_workspace_work_event(&repo, changed)
@@ -5994,7 +6005,7 @@ fn pending_fresh_execution_fixture_in_worktree(
         session_binding_id: format!("binding-{operation_id}"),
         initial_session_id: candidate_session_id.clone(),
         entrypoint,
-        requested_at: Utc::now(),
+        requested_at: gwt_core::timestamp::UtcTimestamp::now(),
     };
     if completed {
         gwt::cli::execution_state::prepare_successor(&repo, owner, &request)
@@ -6157,7 +6168,7 @@ fn leave_fresh_execution_activated_before_projection_commit(
                     resume_context: pending.resume_context.as_ref(),
                     kind: WorkspaceLaunchProjectionKind::StartWork,
                     live_session_ids: &live_session_ids,
-                    now: Utc::now(),
+                    now: gwt_core::timestamp::UtcTimestamp::now(),
                 },
                 true,
             )?;
@@ -6256,7 +6267,7 @@ impl AppRuntime {
 
     pub(crate) fn update_drain_tick_events_and_drain_at(
         &mut self,
-        now: chrono::DateTime<chrono::Utc>,
+        now: gwt_core::timestamp::UtcTimestamp,
     ) -> Vec<OutboundEvent> {
         let (spawner, tasks) = BlockingTaskSpawner::queued();
         let previous = std::mem::replace(&mut self.blocking_tasks, spawner);
@@ -7639,7 +7650,7 @@ fn git_details_for_active_work_test(
         pr_url: None,
         pr_created_at: None,
         created_by_start_work: true,
-        created_at: chrono::Utc::now(),
+        created_at: gwt_core::timestamp::UtcTimestamp::now(),
     }
 }
 
@@ -7746,7 +7757,7 @@ fn owner_monitor_fixture_with_prefs(
     let root = temp.join("monitor-project");
     fs::create_dir_all(&root).unwrap();
     init_repo_with_initial_commit(&root);
-    let now = Utc::now().to_rfc3339();
+    let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
     let mut prefs = gwt::IssueMonitorPrefs {
         enabled: true,
         max_active_agents: 8,
@@ -8230,7 +8241,7 @@ pub(super) fn seed_owner_fixture_roster(project: &Path, capacity: usize) {
             agent_id: None,
             name: name.into(),
             enabled: true,
-            created_at: Utc::now().to_rfc3339(),
+            created_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
             origin_session_id: None,
             last_issue_number: None,
             last_spec_number: None,
@@ -8319,10 +8330,8 @@ fn quota_live_runtime(temp: &Path, agent_id: &str) -> (AppRuntime, String) {
     (runtime, window_id)
 }
 
-fn instant(text: &str) -> chrono::DateTime<chrono::Utc> {
-    chrono::DateTime::parse_from_rfc3339(text)
-        .expect("fixture instant")
-        .with_timezone(&chrono::Utc)
+fn instant(text: &str) -> gwt_core::timestamp::UtcTimestamp {
+    gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(text).expect("fixture instant")
 }
 
 // SPEC-2359 US-42 — Workspace Resume Picker tests.
@@ -8531,7 +8540,7 @@ fn approval_owner_screen(
     owner_fixture_block_on(owner.observe_runtime_policy(
         &pane.id,
         pane.incarnation,
-        Utc::now(),
+        gwt_core::timestamp::UtcTimestamp::now(),
         now,
     ))
     .unwrap();
@@ -8726,7 +8735,7 @@ fn assert_ack_preserves_failed_window_replacement(test_root: &Path, restart_exis
                 .launching_issues
                 .push(gwt::IssueMonitorLaunchingIssue {
                     issue_number: 3165,
-                    claimed_at: Some(Utc::now().to_rfc3339()),
+                    claimed_at: Some(gwt_core::timestamp::UtcTimestamp::now().to_rfc3339()),
                 });
             Ok(())
         },
@@ -9088,7 +9097,7 @@ fn start_monitor_relaunch_owner_with_monitor(
     gwt::machine_agent_settings::set(
         Some(8),
         gwt::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
-        &Utc::now().to_rfc3339(),
+        &gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
     )
     .unwrap();
     gwt::issue_monitor::mutate_project_agent_schedule(
@@ -9456,7 +9465,7 @@ fn monitor_relaunch_fixture_with_settlement(
     fs::create_dir_all(&sessions_dir).expect("create sessions dir");
     let native_conversation_id = format!("native-monitor-{case_name}");
     let source_session_id = format!("session-monitor-{case_name}");
-    let now = Utc::now();
+    let now = gwt_core::timestamp::UtcTimestamp::now();
     let mut source = gwt_agent::Session::new(&worktree, target_branch, gwt_agent::AgentId::Codex);
     source.id = source_session_id.clone();
     source.agent_session_id = Some(native_conversation_id.clone());
@@ -9467,9 +9476,9 @@ fn monitor_relaunch_fixture_with_settlement(
     source.tool_version = Some("latest".to_string());
     source.skip_permissions = true;
     source.status = gwt_agent::AgentStatus::Stopped;
-    source.created_at = now.into();
-    source.updated_at = now.into();
-    source.last_activity_at = now.into();
+    source.created_at = now;
+    source.updated_at = now;
+    source.last_activity_at = now;
     if matches!(conversation, MonitorProviderConversationFixture::Unknown) {
         source.runtime_target = gwt_agent::LaunchRuntimeTarget::Docker;
         source.docker_service = Some("app".to_string());
@@ -9538,7 +9547,7 @@ fn monitor_relaunch_fixture_with_settlement(
             }
             MonitorNativeHolderFixture::None => unreachable!("holder window implies holder"),
         };
-        let holder_at = now - chrono::Duration::hours(1);
+        let holder_at = now - time::Duration::hours(1);
         let mut holder_session =
             gwt_agent::Session::new(&worktree, target_branch, gwt_agent::AgentId::Codex);
         holder_session.id = holder_session_id.clone();
@@ -9554,9 +9563,9 @@ fn monitor_relaunch_fixture_with_settlement(
         } else {
             gwt_agent::AgentStatus::Running
         };
-        holder_session.created_at = holder_at.into();
-        holder_session.updated_at = holder_at.into();
-        holder_session.last_activity_at = holder_at.into();
+        holder_session.created_at = holder_at;
+        holder_session.updated_at = holder_at;
+        holder_session.last_activity_at = holder_at;
         holder_session
             .save(&sessions_dir)
             .expect("save native conversation holder Session");
@@ -10331,7 +10340,7 @@ fn apply_title_sync_sample_projection(
             affiliation_status:
                 gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Assigned,
             workspace_id: None,
-            updated_at: chrono::Utc::now(),
+            updated_at: gwt_core::timestamp::UtcTimestamp::now(),
         });
     projection
 }
@@ -10402,7 +10411,7 @@ fn active_work_off_loop_setup(
             // recorded summary and the tip-subject fallback — the AC-3 path —
             // is the only thing that can fill it.
             "work-offloop-a1b2c3",
-            chrono::Utc::now(),
+            gwt_core::timestamp::UtcTimestamp::now(),
         );
         event.execution_container = Some(
             gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
@@ -11472,11 +11481,11 @@ fn issue_6722_periodic_wake_delivers_after_automatic_turn_and_interval() {
         serde_json::from_value(snapshot).unwrap(),
         pm.session.clone(),
     );
-    let now = Utc::now();
+    let now = gwt_core::timestamp::UtcTimestamp::now();
     assert!(runtime
         .pm_periodic_wake_decision_at(&repo, &now.to_rfc3339())
         .is_none());
-    runtime.pm_periodic_wake_events_at(&repo, &(now + chrono::Duration::seconds(61)).to_rfc3339());
+    runtime.pm_periodic_wake_events_at(&repo, &(now + time::Duration::seconds(61)).to_rfc3339());
     drain_pm_wake_delivery_tasks(&mut runtime);
     assert_native_pm_received_periodic_wake(&repo, &result, &pm);
 }
@@ -12626,7 +12635,7 @@ fn update_resume_fixture(temp: &Path, branch: &str) -> (PathBuf, AppRuntime) {
     session.record_completed_stop();
     // Older than the 24h startup auto-resume window: skipped on a normal
     // launch, resumed when the launch is the tail of an update apply.
-    session.last_activity_at = (chrono::Utc::now() - chrono::Duration::hours(30)).into();
+    session.last_activity_at = gwt_core::timestamp::UtcTimestamp::now() - time::Duration::hours(30);
     session
         .save(&runtime.sessions_dir)
         .expect("save stale resumable session");
@@ -12774,10 +12783,10 @@ fn restore_admission_summary(events: &[CapturedTracingEvent]) -> &CapturedTracin
 
 /// Issue #4441: backdate a restore fixture Session so it reads as history
 /// rather than as a window that was open at the last exit.
-fn age_restore_fixture_session(sessions_dir: &Path, session_id: &str, age: chrono::Duration) {
+fn age_restore_fixture_session(sessions_dir: &Path, session_id: &str, age: time::Duration) {
     let path = sessions_dir.join(format!("{session_id}.toml"));
     let mut session = gwt_agent::Session::load(&path).expect("load restore fixture session");
-    session.last_activity_at = (chrono::Utc::now() - age).into();
+    session.last_activity_at = gwt_core::timestamp::UtcTimestamp::now() - age;
     session
         .save(sessions_dir)
         .expect("save aged fixture session");
@@ -12817,7 +12826,7 @@ fn assert_pm_delivery_refused(
         let receipt = gwt::pm_registry::PmDeliveryReceipt {
             grok_prompt: None,
             operation_id: operation_id.clone(),
-            recorded_at: Utc::now().to_rfc3339(),
+            recorded_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
             status: gwt::pm_registry::PmDeliveryReceiptStatus::Prepared,
             principal_session_id: fixture.pm.session.as_ref().unwrap().id.clone(),
             target_window_id: target_id.clone(),

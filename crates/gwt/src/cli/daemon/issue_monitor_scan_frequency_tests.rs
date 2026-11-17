@@ -182,7 +182,7 @@ fn measure_scan_frequency(duration: Duration) -> serde_json::Value {
                             crate::scan_issue_monitor_candidates(
                                 &mut monitor,
                                 &[],
-                                &chrono::Utc::now().to_rfc3339(),
+                                &gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
                             );
                             Ok(monitor)
                         })
@@ -204,7 +204,7 @@ fn measure_scan_frequency(duration: Duration) -> serde_json::Value {
             paths.push(prefs_path);
             workers.push((hub, shutdown, worker));
         }
-        let started_at = chrono::Utc::now();
+        let started_at = gwt_core::timestamp::UtcTimestamp::now();
         let started = Instant::now();
         for (hub, _, _) in workers.iter().take(2) {
             hub.publish_issue_monitor_control(DaemonFrame::Event {
@@ -218,7 +218,7 @@ fn measure_scan_frequency(duration: Duration) -> serde_json::Value {
         }
         // test-hygiene: allow-wall-clock-deadline The requested measurement is a real elapsed observation window, not a scheduling-order assertion.
         tokio::time::sleep_until(tokio::time::Instant::from_std(started + duration)).await;
-        let finished_at = chrono::Utc::now();
+        let finished_at = gwt_core::timestamp::UtcTimestamp::now();
         let elapsed = started.elapsed();
         let counts = std::array::from_fn::<_, 3, _>(|index| scans[index].load(Ordering::SeqCst));
         let rejected = std::array::from_fn::<_, 3, _>(|index| rejections[index].load(Ordering::SeqCst));
@@ -234,7 +234,7 @@ fn measure_scan_frequency(duration: Duration) -> serde_json::Value {
         let events = fs::read_to_string(&log_path).unwrap().lines()
             .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
             .filter(|event| event["timestamp"].as_str()
-                .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+                .and_then(|at| gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(at).ok())
                 .is_some_and(|at| at >= started_at && at <= finished_at))
             .collect::<Vec<_>>();
         serde_json::json!({

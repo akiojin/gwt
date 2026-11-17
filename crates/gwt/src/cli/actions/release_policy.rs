@@ -417,7 +417,7 @@ pub(crate) fn execute<E: CliEnv>(
                     scope: scope.clone(),
                     authorization: normalized.clone(),
                     actor: current_context,
-                    at: chrono::Utc::now().to_rfc3339(),
+                    at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
                     reason: gwt_core::error_ledger::redact_credentials(&input.reason),
                     before,
                     after,
@@ -965,7 +965,7 @@ mod tests {
             scope: intent.scope().unwrap(),
             authorization: authorization.clone(),
             actor: proof(),
-            at: chrono::Utc::now().to_rfc3339(),
+            at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
             reason: "Fixture".into(),
             before: snapshot("owner/repo", &raw),
             after: Snapshot {
