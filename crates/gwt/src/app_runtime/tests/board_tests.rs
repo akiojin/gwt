@@ -1431,9 +1431,9 @@ fn app_runtime_load_knowledge_bridge_marks_session_only_stopped_related_session_
     session.agent_session_id = Some("conv-issue-3133-stopped".to_string());
     session.status = gwt_agent::AgentStatus::Stopped;
     session.linked_issue_number = Some(3133);
-    session.created_at = stopped_at;
-    session.updated_at = stopped_at;
-    session.last_activity_at = stopped_at;
+    session.created_at = stopped_at.into();
+    session.updated_at = stopped_at.into();
+    session.last_activity_at = stopped_at.into();
     session.save(&runtime.sessions_dir).expect("save session");
 
     let immediate = runtime.load_knowledge_bridge_events(
@@ -1509,9 +1509,9 @@ fn app_runtime_load_knowledge_bridge_dedupes_related_issue_sessions_by_conversat
     stale_session.agent_session_id = Some(conversation_id.to_string());
     stale_session.status = gwt_agent::AgentStatus::Stopped;
     stale_session.linked_issue_number = Some(3133);
-    stale_session.created_at = old_at;
-    stale_session.updated_at = old_at;
-    stale_session.last_activity_at = old_at;
+    stale_session.created_at = old_at.into();
+    stale_session.updated_at = old_at.into();
+    stale_session.last_activity_at = old_at.into();
     stale_session
         .save(&runtime.sessions_dir)
         .expect("save stale session");
@@ -1522,9 +1522,9 @@ fn app_runtime_load_knowledge_bridge_dedupes_related_issue_sessions_by_conversat
     current_session.agent_session_id = Some(conversation_id.to_string());
     current_session.status = gwt_agent::AgentStatus::Running;
     current_session.linked_issue_number = Some(3133);
-    current_session.created_at = new_at;
-    current_session.updated_at = new_at;
-    current_session.last_activity_at = new_at;
+    current_session.created_at = new_at.into();
+    current_session.updated_at = new_at.into();
+    current_session.last_activity_at = new_at.into();
     current_session
         .save(&runtime.sessions_dir)
         .expect("save current session");
@@ -1661,9 +1661,9 @@ fn app_runtime_load_knowledge_bridge_collapses_related_issue_session_actions_to_
         session.agent_session_id = Some(conversation_id.to_string());
         session.status = status;
         session.linked_issue_number = Some(3133);
-        session.created_at = timestamp;
-        session.updated_at = timestamp;
-        session.last_activity_at = timestamp;
+        session.created_at = timestamp.into();
+        session.updated_at = timestamp.into();
+        session.last_activity_at = timestamp.into();
         session.save(&runtime.sessions_dir).expect("save session");
     }
 
@@ -1811,9 +1811,9 @@ fn app_runtime_load_knowledge_bridge_ignores_ambiguous_branch_only_related_work(
     session.agent_session_id = Some("conv-issue-3133-current".to_string());
     session.status = gwt_agent::AgentStatus::Running;
     session.linked_issue_number = Some(3133);
-    session.created_at = live_at;
-    session.updated_at = live_at;
-    session.last_activity_at = live_at;
+    session.created_at = live_at.into();
+    session.updated_at = live_at.into();
+    session.last_activity_at = live_at.into();
     session.save(&runtime.sessions_dir).expect("save session");
 
     let issue_work_id = gwt_core::workspace_projection::canonical_work_id(

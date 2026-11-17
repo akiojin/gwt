@@ -125,6 +125,7 @@ fn expired_stopped_session(session: &Session, now: DateTime<Utc>) -> bool {
     .into_iter()
     .flatten()
     .max()
+    .map(DateTime::from)
     .unwrap_or(now);
     session.status == AgentStatus::Stopped
         && !session.restore_window_on_startup
@@ -327,7 +328,7 @@ mod tests {
         session.id = id.to_string();
         session.status = AgentStatus::Stopped;
         session.restore_window_on_startup = false;
-        session.created_at = now - Duration::days(31);
+        session.created_at = (now - Duration::days(31)).into();
         session.updated_at = session.created_at;
         session.last_activity_at = session.created_at;
         session.save(sessions).unwrap();
@@ -354,7 +355,7 @@ mod tests {
             session.save(&sessions).unwrap();
         }
         let mut recent = old_session(&sessions, &worktree, "recent", now);
-        recent.updated_at = now;
+        recent.updated_at = now.into();
         recent.save(&sessions).unwrap();
         for (id, path) in [
             (

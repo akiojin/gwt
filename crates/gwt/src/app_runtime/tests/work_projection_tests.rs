@@ -380,11 +380,11 @@ fn workspace_work_agent_view_attaches_session_history() {
     session.session_history = vec![
         gwt_agent::AgentSessionHistoryEntry {
             agent_session_id: "conv-1".to_string(),
-            started_at: chrono::Utc::now(),
+            started_at: gwt_core::timestamp::UtcTimestamp::now(),
         },
         gwt_agent::AgentSessionHistoryEntry {
             agent_session_id: "conv-2".to_string(),
-            started_at: chrono::Utc::now(),
+            started_at: gwt_core::timestamp::UtcTimestamp::now(),
         },
     ];
     let sessions = vec![session];

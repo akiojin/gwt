@@ -2029,9 +2029,7 @@ pub(super) fn workspace_work_agent_view_from_ref(
                     .map(|conversation| {
                         vec![gwt::WorkspaceHistorySessionView {
                             agent_session_id: conversation.to_string(),
-                            started_at: session
-                                .updated_at
-                                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                            started_at: session.updated_at.to_rfc3339_seconds(),
                             is_active: true,
                             resumable: exact_resume_available
                                 && session.is_resumable_conversation(conversation),
@@ -2043,9 +2041,7 @@ pub(super) fn workspace_work_agent_view_from_ref(
                 .into_iter()
                 .map(|entry| gwt::WorkspaceHistorySessionView {
                     agent_session_id: entry.agent_session_id.clone(),
-                    started_at: entry
-                        .started_at
-                        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                    started_at: entry.started_at.to_rfc3339_seconds(),
                     is_active: latest == Some(entry.agent_session_id.as_str()),
                     // A Session whose conversation handle is structurally
                     // unusable (empty / Codex placeholder) is history-only; the
@@ -2760,7 +2756,7 @@ pub(super) fn attach_registry_sessions_to_active_works<'a>(
                 session_id: session.id.clone(),
                 agent_id: Some(session.agent_id.command().to_string()),
                 display_name: Some(session.display_name.clone()),
-                updated_at: session.last_activity_at,
+                updated_at: session.last_activity_at.into(),
                 attached_by: None,
             };
             let history_view =
@@ -7090,9 +7086,9 @@ mod bounded_cache_merge_tests {
         };
         let mut recorded = sessions[0].as_ref().clone();
         recorded.status = gwt_agent::AgentStatus::Stopped;
-        let exited_at = recorded.created_at + chrono::Duration::seconds(60);
-        recorded.last_exited_at = Some(exited_at);
-        recorded.updated_at = exited_at + chrono::Duration::seconds(60);
+        let exited_at = chrono::DateTime::from(recorded.created_at) + chrono::Duration::seconds(60);
+        recorded.last_exited_at = Some(exited_at.into());
+        recorded.updated_at = (exited_at + chrono::Duration::seconds(60)).into();
         let stopped = projected_history(recorded.clone());
         assert_eq!(stopped["role"], "implementation");
         assert_eq!(stopped["started_at"], recorded.created_at.to_rfc3339());
@@ -7106,7 +7102,7 @@ mod bounded_cache_merge_tests {
         recorded.last_exited_at = None;
         assert!(projected_history(recorded.clone())["ended_at"].is_null());
         recorded.status = gwt_agent::AgentStatus::Running;
-        recorded.last_exited_at = Some(exited_at);
+        recorded.last_exited_at = Some(exited_at.into());
         assert!(projected_history(recorded.clone())["ended_at"].is_null());
         recorded.review_dispatch = true;
         assert_eq!(projected_history(recorded.clone())["role"], "review");

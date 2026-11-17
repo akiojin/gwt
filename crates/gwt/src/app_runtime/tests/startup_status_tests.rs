@@ -2092,7 +2092,7 @@ fn app_runtime_latest_branch_resume_picks_newest_resumable_session() {
     let mut older = gwt_agent::Session::new(&repo, "work/manual-resume", gwt_agent::AgentId::Codex);
     older.id = "session-older".to_string();
     older.agent_session_id = Some("native-older".to_string());
-    older.last_activity_at = Utc.with_ymd_and_hms(2026, 5, 21, 9, 0, 0).unwrap();
+    older.last_activity_at = Utc.with_ymd_and_hms(2026, 5, 21, 9, 0, 0).unwrap().into();
     older.updated_at = older.last_activity_at;
     older.created_at = older.last_activity_at;
     older.save(&sessions_dir).expect("save older session");
@@ -2100,7 +2100,7 @@ fn app_runtime_latest_branch_resume_picks_newest_resumable_session() {
     let mut newer = gwt_agent::Session::new(&repo, "work/manual-resume", gwt_agent::AgentId::Codex);
     newer.id = "session-newer".to_string();
     newer.agent_session_id = Some("native-newer".to_string());
-    newer.last_activity_at = Utc.with_ymd_and_hms(2026, 5, 21, 10, 0, 0).unwrap();
+    newer.last_activity_at = Utc.with_ymd_and_hms(2026, 5, 21, 10, 0, 0).unwrap().into();
     newer.updated_at = newer.last_activity_at;
     newer.created_at = newer.last_activity_at;
     newer.save(&sessions_dir).expect("save newer session");
@@ -2109,7 +2109,7 @@ fn app_runtime_latest_branch_resume_picks_newest_resumable_session() {
         gwt_agent::Session::new(&repo, "work/manual-resume", gwt_agent::AgentId::Codex);
     metadata_only.id = "session-metadata-only".to_string();
     metadata_only.agent_session_id = None;
-    metadata_only.last_activity_at = Utc.with_ymd_and_hms(2026, 5, 21, 11, 0, 0).unwrap();
+    metadata_only.last_activity_at = Utc.with_ymd_and_hms(2026, 5, 21, 11, 0, 0).unwrap().into();
     metadata_only.updated_at = metadata_only.last_activity_at;
     metadata_only.created_at = metadata_only.last_activity_at;
     metadata_only
@@ -2191,7 +2191,10 @@ fn app_runtime_open_launch_wizard_shows_only_latest_resume_and_focus_methods() {
             gwt_agent::Session::new(&repo, "work/manual-resume", gwt_agent::AgentId::Codex);
         session.id = session_id.to_string();
         session.agent_session_id = Some(native_session_id.to_string());
-        session.last_activity_at = Utc.with_ymd_and_hms(2026, 5, 21, hour, 0, 0).unwrap();
+        session.last_activity_at = Utc
+            .with_ymd_and_hms(2026, 5, 21, hour, 0, 0)
+            .unwrap()
+            .into();
         session.updated_at = session.last_activity_at;
         session.created_at = session.last_activity_at;
         session.save(&sessions_dir).expect("save session");
@@ -2201,7 +2204,10 @@ fn app_runtime_open_launch_wizard_shows_only_latest_resume_and_focus_methods() {
             gwt_agent::Session::new(&repo, "work/manual-resume", gwt_agent::AgentId::Codex);
         session.id = session_id.to_string();
         session.agent_session_id = None;
-        session.last_activity_at = Utc.with_ymd_and_hms(2026, 5, 21, hour, 0, 0).unwrap();
+        session.last_activity_at = Utc
+            .with_ymd_and_hms(2026, 5, 21, hour, 0, 0)
+            .unwrap()
+            .into();
         session.updated_at = session.last_activity_at;
         session.created_at = session.last_activity_at;
         session
@@ -2540,7 +2546,7 @@ fn app_runtime_bootstrap_resumes_unclosed_window_despite_stopped_status() {
     // Status drifted to Stopped (would fail the candidate gate on the orphan
     // path) but the window is recent.
     session.update_status(gwt_agent::AgentStatus::Stopped);
-    session.last_activity_at = chrono::Utc::now() - chrono::Duration::hours(2);
+    session.last_activity_at = (chrono::Utc::now() - chrono::Duration::hours(2)).into();
     session
         .save(&runtime.sessions_dir)
         .expect("save stopped session");
@@ -2626,7 +2632,7 @@ fn app_runtime_bootstrap_does_not_resume_an_unclosed_window_past_the_freshness_b
     session.record_completed_stop();
     session.restore_window_on_startup = true;
     session.update_status(gwt_agent::AgentStatus::Stopped);
-    session.last_activity_at = chrono::Utc::now() - chrono::Duration::hours(30);
+    session.last_activity_at = (chrono::Utc::now() - chrono::Duration::hours(30)).into();
     session
         .save(&runtime.sessions_dir)
         .expect("save stale stopped session");
