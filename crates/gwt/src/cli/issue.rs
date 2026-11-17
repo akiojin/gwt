@@ -12596,6 +12596,9 @@ mod tests {
 
     #[test]
     fn issue_7508_autonomous_pm_orders_instead_of_mutating_queue_membership() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = TempDir::new().unwrap();
         let _home = ScopedGwtHome::set(tmp.path().join("home"));
         let repo = tmp.path().join("repo");
