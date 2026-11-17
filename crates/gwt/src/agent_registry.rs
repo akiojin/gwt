@@ -983,6 +983,84 @@ pub fn migrate_to_split_storage() -> io::Result<bool> {
     Ok(true)
 }
 
+/// Restore the current split registry for binaries that only support schema 3.
+/// Stop the desktop app and all Agents first; the next modern app start would
+/// migrate it back to split storage. Records and the migration backup stay intact.
+pub fn restore_schema3() -> io::Result<RegistryStatus> {
+    let snapshot = load()?.ok_or_else(|| invalid("Agent registry is inactive"))?;
+    let keys = snapshot.sources.keys().cloned().collect();
+    let _sources = source_locks(&keys)?;
+    let _registry = lock()?;
+    let mut registry = load()?.ok_or_else(|| invalid("Agent registry disappeared"))?;
+    if registry.sources.keys().any(|key| !keys.contains(key)) {
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "Agent registry enrollment changed; retry agent.registry.restore_schema3",
+        ));
+    }
+    if !registry.store.split {
+        if unconfirmed_path().try_exists()? {
+            confirm_durable()?;
+        }
+        return status(None);
+    }
+    if registry.phase != RegistryPhase::Active {
+        return Err(invalid(
+            "Agent registry is prepared; finish agent.registry.reconcile before restoring schema 3",
+        ));
+    }
+    if registry
+        .project_assignments
+        .values()
+        .any(|assignments| !assignments.is_empty())
+    {
+        return Err(invalid("Agent assignments remain; stop all Agents and release their reservations before restoring schema 3 (inspect agent.registry.status)"));
+    }
+    let inventory =
+        crate::session_inventory::observe_machine_sessions(&gwt_core::paths::gwt_sessions_dir());
+    if !inventory.sessions.is_empty() || !inventory.uncertainties.is_empty() {
+        let live = inventory
+            .sessions
+            .iter()
+            .map(|entry| entry.session.session_id.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let uncertain = inventory
+            .uncertainties
+            .iter()
+            .map(|entry| entry.reason.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(invalid(format!("Agent Sessions are live or their absence is unproven: live=[{live}], uncertain=[{uncertain}]; stop all Agents before restoring schema 3")));
+    }
+    for (key, source) in &mut registry.sources {
+        let path = prefs_path(key)?;
+        let mirror = raw(&path)?;
+        let floor = raw(&path.with_extension("committed.json"))?;
+        let mirror_hash = raw_hash(mirror.as_deref());
+        if mirror_hash != source.before_sha256 && mirror_hash != source.after_sha256 {
+            return Err(invalid(format!("Agent mirror conflict for {key}; inspect agent.registry.status and reconcile before restoring schema 3")));
+        }
+        assert_known_floor_hash(source, &path, &raw_hash(floor.as_deref()))?;
+        // Split records retain only superseded hashes. Use the known on-disk
+        // mirrors as schema 3's recovery baselines, including pending publishes.
+        source.before_sha256 = mirror_hash;
+        source.before_json = mirror;
+        source.floor_before_sha256 = raw_hash(floor.as_deref());
+        source.floor_before_json = floor;
+    }
+    registry.store = Store::default();
+    validate_proving(&registry, Mirrors::All)?;
+    let content = serde_json::to_vec_pretty(&registry).map_err(io::Error::other)?;
+    confirm_durable()?;
+    fs::write(unconfirmed_path(), b"")?;
+    // One commit point: before rename schema 4 remains authoritative; after
+    // rename both old and new readers see the complete schema 3 generation.
+    crate::issue_monitor::durable_atomic_write(&path(), &content)?;
+    clear_unconfirmed()?;
+    status(None)
+}
+
 /// Present while the latest registry write is not known to be durable.
 fn unconfirmed_path() -> PathBuf {
     path().with_extension("unconfirmed")
@@ -7479,6 +7557,208 @@ mod tests {
         })
         .unwrap();
         assert_eq!(storage_schema(), 3);
+    }
+
+    #[test]
+    fn restore_schema3_preserves_current_prefs_and_pending_mirrors() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let (a_path, _, b_path, b_key) = two_split_sources();
+        let backup = fs::read(schema3_backup_path()).unwrap();
+        rename_first_member(&a_path, "Current Cedar");
+        let pending_mirror = fs::read(&a_path).unwrap();
+        crate::try_mutate_issue_monitor_prefs(&a_path, |prefs| {
+            prefs.merged_issues.push(7531);
+            Ok(())
+        })
+        .unwrap();
+        crate::try_mutate_issue_monitor_prefs(&b_path, |prefs| {
+            prefs.merged_issues.push(7486);
+            Ok(())
+        })
+        .unwrap();
+        // A committed record whose publish was interrupted must also round trip.
+        fs::write(&a_path, &pending_mirror).unwrap();
+        fs::write(a_path.with_extension("committed.json"), &pending_mirror).unwrap();
+        let mut expected = (
+            crate::load_issue_monitor_prefs(&a_path).unwrap(),
+            crate::load_issue_monitor_prefs(&b_path).unwrap(),
+            status(None).unwrap(),
+        );
+        for row in &mut expected.2.projects {
+            row.before_sha256.clone_from(&row.observed_sha256);
+            row.floor_before_sha256
+                .clone_from(&row.floor_observed_sha256);
+        }
+        let snapshots = load().unwrap().unwrap().sources[&b_key]
+            .rosterless_snapshots
+            .clone();
+        assert!(!snapshots.is_empty());
+        restore_schema3().unwrap();
+        assert_eq!(storage_schema(), 3);
+        // This is the schema 3 decoder used before split storage existed.
+        let legacy: Registry = serde_json::from_slice(&fs::read(super::path()).unwrap()).unwrap();
+        validate_proving(&legacy, Mirrors::All).unwrap();
+        assert!(!legacy.store.split);
+        assert_eq!(legacy.sources[&b_key].rosterless_snapshots, snapshots);
+        assert_eq!(fs::read(&a_path).unwrap(), pending_mirror);
+        assert_eq!(fs::read(schema3_backup_path()).unwrap(), backup);
+        fs::remove_dir_all(records_dir()).unwrap();
+        assert_eq!(
+            crate::load_issue_monitor_prefs(&a_path).unwrap(),
+            expected.0
+        );
+        assert_eq!(
+            crate::load_issue_monitor_prefs(&b_path).unwrap(),
+            expected.1
+        );
+        assert_eq!(status(None).unwrap(), expected.2);
+        let restored = fs::read(super::path()).unwrap();
+        restore_schema3().unwrap();
+        assert_eq!(
+            fs::read(super::path()).unwrap(),
+            restored,
+            "retry is a no-op"
+        );
+        crate::try_mutate_issue_monitor_prefs(&a_path, |prefs| {
+            prefs.merged_issues.push(1);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            crate::load_issue_monitor_prefs(&a_path)
+                .unwrap()
+                .merged_issues,
+            [7531, 1]
+        );
+        assert_eq!(storage_schema(), 3);
+    }
+
+    #[test]
+    fn restore_schema3_interrupted_before_commit_keeps_split_storage_authoritative() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let (a_path, a_key, _, _) = two_split_sources();
+        let core = fs::read(super::path()).unwrap();
+        let record = fs::read(record_path(&a_key)).unwrap();
+        let prefs = crate::load_issue_monitor_prefs(&a_path).unwrap();
+        let failure = ScopedEnvVar::set(
+            "GWT_TEST_FAIL_ISSUE_MONITOR_PREFS_PARENT_SYNC_ONCE",
+            super::path(),
+        );
+        fs::write(super::path().with_extension("parent-sync-fail-once"), b"").unwrap();
+        assert!(restore_schema3().is_err());
+        assert_eq!(fs::read(super::path()).unwrap(), core);
+        assert_eq!(fs::read(record_path(&a_key)).unwrap(), record);
+        assert_eq!(storage_schema(), SPLIT_SCHEMA_VERSION);
+        assert!(
+            serde_json::from_slice::<Registry>(&core).is_err(),
+            "old readers fail closed"
+        );
+        assert_eq!(crate::load_issue_monitor_prefs(&a_path).unwrap(), prefs);
+        drop(failure);
+        restore_schema3().unwrap();
+        assert_eq!(storage_schema(), 3);
+        // A crash after the atomic rename can leave schema 3 visible without
+        // a successful directory sync. Retrying must confirm it before ACK.
+        fs::write(unconfirmed_path(), b"").unwrap();
+        let failure = ScopedEnvVar::set(
+            "GWT_TEST_FAIL_ISSUE_MONITOR_PREFS_PARENT_SYNC_ONCE",
+            super::path(),
+        );
+        fs::write(super::path().with_extension("parent-sync-fail-once"), b"").unwrap();
+        assert!(restore_schema3().is_err());
+        assert!(unconfirmed_path().exists());
+        drop(failure);
+        restore_schema3().unwrap();
+        assert!(!unconfirmed_path().exists());
+        assert_eq!(crate::load_issue_monitor_prefs(&a_path).unwrap(), prefs);
+    }
+
+    #[test]
+    fn restore_schema3_refuses_missing_or_damaged_records_without_writes() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let (_, _, _, b_key) = two_split_sources();
+        let core = fs::read(super::path()).unwrap();
+        let record = fs::read(record_path(&b_key)).unwrap();
+        fs::remove_file(record_path(&b_key)).unwrap();
+        assert!(restore_schema3().is_err());
+        assert_eq!(fs::read(super::path()).unwrap(), core);
+        fs::write(record_path(&b_key), b"{ torn").unwrap();
+        assert!(restore_schema3().is_err());
+        assert_eq!(fs::read(super::path()).unwrap(), core);
+        fs::write(record_path(&b_key), record).unwrap();
+        restore_schema3().unwrap();
+    }
+
+    #[test]
+    fn restore_schema3_refuses_assignments_and_live_or_uncertain_sessions() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let (a_path, _, _, _) = two_split_sources();
+        let root = gwt_core::paths::gwt_home().join("repo");
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let member = crate::agent_names::reserve_project_member(
+            &root,
+            &sessions,
+            "downgrade-slot",
+            Some(7531),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let core = fs::read(super::path()).unwrap();
+        assert!(restore_schema3()
+            .unwrap_err()
+            .to_string()
+            .contains("assignment"));
+        assert_eq!(fs::read(super::path()).unwrap(), core);
+        crate::agent_names::release_project_member(
+            &root,
+            &sessions,
+            &member.agent_member_id,
+            "downgrade-slot",
+        )
+        .unwrap();
+        let core = fs::read(super::path()).unwrap();
+        let session = gwt_agent::Session::new(&root, "unnamed", gwt_agent::AgentId::Codex);
+        session.save(&sessions).unwrap();
+        let runtime_path =
+            gwt_agent::runtime_state_path_for_pid(&sessions, 2_000_000_000, &session.id);
+        let mut runtime = gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running);
+        runtime.child_pid = Some(std::process::id());
+        runtime.child_started_at = crate::process::host_process_start_time(std::process::id());
+        assert!(runtime.child_started_at.is_some());
+        runtime.save(&runtime_path).unwrap();
+        assert!(restore_schema3()
+            .unwrap_err()
+            .to_string()
+            .contains("Session"));
+        assert_eq!(fs::read(super::path()).unwrap(), core);
+        runtime.child_started_at = None;
+        runtime.save(&runtime_path).unwrap();
+        assert!(restore_schema3()
+            .unwrap_err()
+            .to_string()
+            .contains("child_identity_missing"));
+        assert_eq!(fs::read(super::path()).unwrap(), core);
+        fs::remove_file(runtime_path).unwrap();
+        restore_schema3().unwrap();
+        assert!(crate::load_issue_monitor_prefs(&a_path).is_ok());
     }
 
     #[test]

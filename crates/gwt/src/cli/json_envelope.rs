@@ -521,6 +521,10 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
     let params = params_object(&envelope.params)?;
     let recording = param_audit::Recording::start();
     let command = match envelope.operation.as_str() {
+        "agent.registry.restore_schema3" => {
+            reject_unknown_params(params, &[], &envelope.operation)?;
+            CliCommand::AgentRegistry(super::AgentRegistryCommand::RestoreSchema3)
+        }
         "agent.registry.status" => {
             reject_unknown_params(params, &["source_key"], &envelope.operation)?;
             let source_key: Option<String> = serde_json::from_value(
@@ -4256,6 +4260,8 @@ mod tests {
 
     #[test]
     fn agent_registry_operations_parse_strict_recovery_identity() {
+        assert!(parse_operation("agent.registry.restore_schema3", &json!({})).is_ok());
+        assert!(parse_operation("agent.registry.restore_schema3", &json!({"force":true})).is_err());
         assert!(parse_operation("agent.registry.status", &json!({})).is_ok());
         assert!(parse_operation(
             "agent.registry.status",
