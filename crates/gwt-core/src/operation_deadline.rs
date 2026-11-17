@@ -171,6 +171,8 @@ pub struct NamedFileLock {
     file: File,
     holder_path: PathBuf,
     locked: bool,
+    /// A shared holder never wrote the single holder file and must not clear it.
+    shared: bool,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -206,6 +208,32 @@ impl NamedFileLock {
         on_first_contention: impl FnMut(),
     ) -> io::Result<Self> {
         Self::acquire_with_observer(path, operation, true, on_first_contention)
+    }
+
+    /// Wait for shared ownership using the ambient operation deadline.
+    ///
+    /// Shared holders run together and exclude every exclusive holder. They
+    /// record no holder metadata: the one holder file cannot name several.
+    pub fn acquire_shared(path: &Path, operation: &str) -> io::Result<Self> {
+        let file = open_named_lock(path)?;
+        let holder_path = named_lock_holder_path(path);
+        let mut contention_observed = false;
+        lock_with_observer(&file, true, || contention_observed = true).map_err(|error| {
+            if contention_observed {
+                named_lock_error(&holder_path, operation, error)
+            } else {
+                io::Error::new(
+                    error.kind(),
+                    format!("{error}; operation={operation}; lock_contention=not_observed"),
+                )
+            }
+        })?;
+        Ok(Self {
+            file,
+            holder_path,
+            locked: true,
+            shared: true,
+        })
     }
 
     fn acquire_with_observer(
@@ -294,6 +322,7 @@ impl NamedFileLock {
             file,
             holder_path,
             locked: true,
+            shared: false,
         };
         let holder = ObservedLockHolder {
             pid: std::process::id(),
@@ -329,9 +358,11 @@ impl NamedFileLock {
         if !self.locked {
             return Ok(());
         }
-        if let Err(error) = std::fs::remove_file(&self.holder_path) {
-            if error.kind() != io::ErrorKind::NotFound {
-                tracing::warn!(%error, "could not clear observational lock holder metadata");
+        if !self.shared {
+            if let Err(error) = std::fs::remove_file(&self.holder_path) {
+                if error.kind() != io::ErrorKind::NotFound {
+                    tracing::warn!(%error, "could not clear observational lock holder metadata");
+                }
             }
         }
         let unlocked = FileExt::unlock(&self.file);
@@ -487,14 +518,33 @@ pub fn lock_exclusive(file: &File) -> io::Result<()> {
 /// timing and deadline behavior remain identical to [`lock_exclusive`].
 pub fn lock_exclusive_with_observer(
     file: &File,
+    on_first_contention: impl FnMut(),
+) -> io::Result<()> {
+    lock_with_observer(file, false, on_first_contention)
+}
+
+fn lock_with_observer(
+    file: &File,
+    shared: bool,
     mut on_first_contention: impl FnMut(),
 ) -> io::Result<()> {
+    let try_lock = || {
+        if shared {
+            FileExt::try_lock_shared(file)
+        } else {
+            FileExt::try_lock_exclusive(file)
+        }
+    };
     let Some(deadline) = current() else {
-        return match file.try_lock_exclusive() {
+        return match try_lock() {
             Ok(()) => Ok(()),
             Err(error) if is_lock_contended(&error) => {
                 on_first_contention();
-                FileExt::lock_exclusive(file)
+                if shared {
+                    FileExt::lock_shared(file)
+                } else {
+                    FileExt::lock_exclusive(file)
+                }
             }
             Err(error) => Err(error),
         };
@@ -504,7 +554,7 @@ pub fn lock_exclusive_with_observer(
         if now() >= deadline {
             return Err(deadline_error("file lock"));
         }
-        match file.try_lock_exclusive() {
+        match try_lock() {
             Ok(()) => {
                 if now() >= deadline {
                     FileExt::unlock(file)?;
@@ -546,6 +596,27 @@ fn deadline_error(operation: &str) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_holders_run_together_and_exclude_exclusive_holders_both_ways() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("registry.lock");
+        let first = NamedFileLock::acquire_shared(&path, "reader").unwrap();
+        let second = NamedFileLock::acquire_shared(&path, "reader").unwrap();
+        assert!(NamedFileLock::try_acquire(&path, "writer").is_err());
+        first.unlock().unwrap();
+        assert!(NamedFileLock::try_acquire(&path, "writer").is_err());
+        second.unlock().unwrap();
+        let writer = NamedFileLock::try_acquire(&path, "writer").unwrap();
+        let _deadline = ScopedOperationDeadline::enter(now() + Duration::from_millis(100));
+        let error = NamedFileLock::acquire_shared(&path, "reader").unwrap_err();
+        assert!(is_deadline_expired(&error));
+        let message = error.to_string();
+        assert!(message.contains("operation=writer"), "{message}");
+        // The shared attempt left the exclusive holder's metadata in place.
+        assert!(named_lock_holder_path(&path).exists());
+        drop(writer);
+    }
 
     #[test]
     fn issue_6678_uncontended_pm_lock_does_not_emit_info_events() {
