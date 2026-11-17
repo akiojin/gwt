@@ -17031,7 +17031,16 @@ fn exact_close_confirmation_survives_compacted_done_and_prior_pauses() {
         let closes = temp.path().join("work-events-closed.jsonl");
         let start = Utc::now();
         let mut projection = WorkItemsProjection::empty(start);
-        let mut accepted_closes = Vec::new();
+        // The local lifecycle log also stores Board references. Their exact
+        // accepted identity must survive compaction just like Pause and Done.
+        let mut board_ref = WorkEvent::new(
+            WorkEventKind::Update,
+            "exact-close-work",
+            start - chrono::Duration::seconds(1),
+        );
+        board_ref.board_entry_id = Some("accepted-local-board-ref".into());
+        projection.apply_event(board_ref.clone());
+        let mut accepted_closes = vec![board_ref];
         for index in 0..pause_count {
             let event = WorkEvent::new(
                 WorkEventKind::Pause,
@@ -17118,6 +17127,13 @@ impl CloseProofRepairFixture {
         done.status_category = Some(WorkspaceStatusCategory::Done);
         let mut projection = WorkItemsProjection::empty(at);
         projection.apply_event(start.clone());
+        let mut local = Vec::new();
+        if compacted {
+            let mut board_ref = WorkEvent::new(WorkEventKind::Update, &start.work_item_id, at);
+            board_ref.board_entry_id = Some("compacted-local-board-ref".into());
+            projection.apply_event(board_ref.clone());
+            local.push(board_ref);
+        }
         projection.apply_event(done.clone());
         let mut shared = vec![start];
         if compacted {
@@ -17148,7 +17164,8 @@ impl CloseProofRepairFixture {
             fs::write(&works, bytes).unwrap();
             fs::write(&proof_path, serde_json::to_vec(&proofs).unwrap()).unwrap();
         }
-        append_workspace_work_events_to_path(&closes, std::slice::from_ref(&done)).unwrap();
+        local.push(done.clone());
+        append_workspace_work_events_to_path(&closes, &local).unwrap();
         let content = shared
             .iter()
             .map(|event| format!("{}\n", serde_json::to_string(event).unwrap()))
@@ -17179,7 +17196,7 @@ impl CloseProofRepairFixture {
 #[test]
 fn close_proof_repair_replays_accepted_compacted_history() {
     let _guard = lock_test_env();
-    for proof_gap in ["missing", "stale", "omitted"] {
+    for proof_gap in ["missing", "stale", "omitted", "omitted-update"] {
         let temp = tempfile::tempdir().unwrap();
         let fixture = CloseProofRepairFixture::new(temp.path(), true);
         let proof_path = workspace_close_projection_proofs_path(&fixture.works);
@@ -17192,7 +17209,11 @@ fn close_proof_repair_replays_accepted_compacted_history() {
                 if proof_gap == "stale" {
                     snapshot.projection_hash = "stale".into();
                 } else if let Some(events) = snapshot.events.get_mut(&fixture.done.work_item_id) {
-                    events.remove(&fixture.done.id);
+                    if proof_gap == "omitted-update" {
+                        events.retain(|id, _| id == &fixture.done.id);
+                    } else {
+                        events.remove(&fixture.done.id);
+                    }
                 }
             }
             fs::write(&proof_path, serde_json::to_vec(&proofs).unwrap()).unwrap();
@@ -17206,7 +17227,7 @@ fn close_proof_repair_replays_accepted_compacted_history() {
             &fixture.closes,
         )
         .is_err());
-        if proof_gap == "omitted" {
+        if proof_gap.starts_with("omitted") {
             assert!(
                 !workspace_close_projection_needs_rebuild(&fixture.works, &fixture.closes).unwrap(),
                 "explicit repair must preserve the automatic intake guard"

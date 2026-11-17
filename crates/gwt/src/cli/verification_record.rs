@@ -14479,6 +14479,90 @@ fn default_integration_test_builds_a_guarded_binary() {
         );
     }
 
+    #[test]
+    fn delivered_successor_can_record_no_action_without_inheriting_predecessor_receipt() {
+        use crate::cli::delivered_owner::{self, NoActionOutcome, NoActionRefusal};
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let fixture = WorkEventGitFixture::tracked();
+        let owner = generation_scoped_owner();
+        let predecessor_session = "delivered-predecessor";
+        initialize_generation_scoped_execution(&fixture.repo, predecessor_session);
+        let receipt =
+            save_work_event_settlement_record(&fixture.repo, predecessor_session, true).unwrap();
+        execution_state::settle(
+            &fixture.repo,
+            predecessor_session,
+            execution_state::ExecutionSettlement::Completed,
+        )
+        .unwrap();
+        let request = generation_scoped_successor_request(
+            "delivered-successor",
+            "delivered-successor-session",
+        );
+        execution_state::prepare_successor(&fixture.repo, owner, &request).unwrap();
+        execution_state::activate_successor(&fixture.repo, owner, &request).unwrap();
+        persist_generation_scoped_session(
+            &fixture.repo,
+            &request.initial_session_id,
+            execution_state::current_execution_binding(&fixture.repo, owner)
+                .unwrap()
+                .unwrap(),
+            1,
+        );
+        assert!(work_event_settlement_refusal(&fixture.repo)
+            .unwrap()
+            .contains("predecessor execution generation"));
+        assert!(
+            !work_event_receipt_authorizes_current_generation(&fixture.repo, &receipt).unwrap()
+        );
+
+        // Issue #7501: source still awaiting delivery must keep refusing No Action.
+        let source = fixture.repo.join("undelivered.rs");
+        fs::write(&source, "undelivered source").unwrap();
+        let before = execution_state::record_contents(&fixture.repo).unwrap();
+        assert!(matches!(
+            delivered_owner::record_no_action(
+                &fixture.repo,
+                &request.initial_session_id,
+                "delivered"
+            )
+            .unwrap(),
+            NoActionOutcome::Refused(NoActionRefusal::SourceChanges { .. })
+        ));
+        assert_eq!(
+            execution_state::record_contents(&fixture.repo).unwrap(),
+            before
+        );
+        fs::remove_file(source).unwrap();
+
+        // Once the base contains the source, one operation settles this generation
+        // without promoting the predecessor's receipt or claiming fresh verification.
+        assert!(matches!(
+            delivered_owner::record_no_action(
+                &fixture.repo,
+                &request.initial_session_id,
+                "delivered"
+            )
+            .unwrap(),
+            NoActionOutcome::Recorded(_)
+        ));
+        let settled = execution_state::load(&fixture.repo).unwrap().unwrap();
+        assert_eq!(
+            settled.status,
+            execution_state::ExecutionControlStatus::Completed
+        );
+        assert!(settled.completion_evidence.is_none());
+        assert!(
+            !work_event_receipt_authorizes_current_generation(&fixture.repo, &receipt).unwrap()
+        );
+    }
+
     // #4011: the receipt is generation-bound, but once the canonical Work is
     // terminal no later generation can mint its own — `workspace.update`
     // refuses terminal targets. A predecessor receipt therefore has to behave

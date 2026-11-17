@@ -1022,6 +1022,25 @@ test("Issue #6141 closed issues follow live sessions and explain cleanup, counts
   await expect(popup).toBeVisible();
   await expect(popup).not.toContainText(cause);
   await expect(popup).toContainText(/no.*(?:cause|detail|reason)|not.*reported/i);
+
+  // Issue #7507: a delivered slice can release its execution while the parent
+  // SPEC remains open. The operator stop must not ask for a human decision.
+  await page.keyboard.press("Escape");
+  await page.evaluate(() => {
+    const fixture = window as any;
+    fixture.__queueAgentState("stopped");
+    fixture.__queueSetEntries([{ number: 5, title: "Open SPEC with a delivered slice", state: "open", labels: [] }]);
+    fixture.__queueInbox([{ issue: { number: 5, state: "open" }, state: "released" }]);
+  });
+  await expect(column(page, "done").locator('[data-issue-number="5"]')).toBeVisible();
+  await expect(column(page, "active").locator(".knowledge-row")).toHaveCount(0);
+  await expect(activeMetric).toHaveText("Active 0 · 0 issues · PM 0");
+  await expect(row(page, 5).locator(".knowledge-row-badge")).toHaveText("Released");
+  await expect(row(page, 5).locator('[data-key="closed"]')).toHaveCount(0);
+  await expect(row(page, 5)).not.toContainText(/Needs human|Session cleanup pending/);
+  await row(page, 5).locator(".knowledge-row-badge").hover();
+  await expect(popup).toContainText("confirmed delivery");
+  await expect(popup).toContainText("GitHub issue may remain open");
 });
 
 test("Issue #4862 failed launches with no window show their reason outside Active", async ({ page }) => {

@@ -1039,7 +1039,7 @@ export function createKnowledgeKanbanSurface({
           "monitor:launching": "The monitor is starting an agent for this issue.",
           "monitor:launched": "The monitor launched an agent for this issue.",
           "monitor:merged": "The current execution is complete; the GitHub issue may remain open until release.",
-          "monitor:released": "The monitor observed this issue closed on GitHub.",
+          "monitor:released": "This execution was released after completion or confirmed delivery. The GitHub issue may remain open.",
           "monitor:launch_failed": "The monitor could not start an agent for this issue.",
           "monitor:agent_failed": "The launched agent did not complete this issue successfully.",
           "monitor:blocked_by_claim": "Another agent holds the execution claim, so the monitor will not launch duplicate work.",
