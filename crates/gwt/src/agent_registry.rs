@@ -448,6 +448,31 @@ pub struct RegistryStatus {
     pub unknown_assignments: usize,
 }
 
+/// Test-only observation of the I/O one registry transaction performs.
+#[cfg(test)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct RegistryIo {
+    pub(crate) durability_confirmations: usize,
+    pub(crate) registry_writes: usize,
+    pub(crate) mirror_publishes: usize,
+    pub(crate) validated_payloads: Vec<String>,
+}
+
+#[cfg(test)]
+thread_local! {
+    static REGISTRY_IO: std::cell::RefCell<RegistryIo> = std::cell::RefCell::new(RegistryIo::default());
+}
+
+#[cfg(test)]
+pub(crate) fn take_registry_io_for_test() -> RegistryIo {
+    REGISTRY_IO.with(|io| std::mem::take(&mut *io.borrow_mut()))
+}
+
+#[cfg(test)]
+fn record_io(observe: impl FnOnce(&mut RegistryIo)) {
+    REGISTRY_IO.with(|io| observe(&mut io.borrow_mut()));
+}
+
 fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message.into())
 }
@@ -502,37 +527,94 @@ fn lock() -> io::Result<NamedFileLock> {
     NamedFileLock::acquire(&path.with_extension("lock"), "shared Agent registry")
 }
 
+/// The committed mirrors one registry read or write proves byte-for-byte.
+///
+/// Every project shares the roster, profiles and assignments, so those are
+/// always validated. A project's own transaction proves only the committed
+/// mirror it serves: another project's mirror, and the superseded snapshots
+/// kept beside each mirror, are carried unchanged and stay closed to that
+/// project and to every complete read.
+#[derive(Clone, Copy)]
+enum Mirrors<'a> {
+    All,
+    Only(&'a str),
+    None,
+}
+
+impl Mirrors<'_> {
+    fn covers(self, key: &str) -> bool {
+        match self {
+            Self::All => true,
+            Self::Only(only) => only == key,
+            Self::None => false,
+        }
+    }
+
+    fn covers_superseded(self) -> bool {
+        matches!(self, Self::All)
+    }
+}
+
 fn load() -> io::Result<Option<Registry>> {
-    let Some(raw) = raw(&path())? else {
-        return Ok(None);
-    };
-    let mut registry: Registry = serde_json::from_str(&raw).map_err(io::Error::other)?;
-    validate(&registry)?;
+    load_proving(Mirrors::All)
+}
+
+fn load_proving(mirrors: Mirrors<'_>) -> io::Result<Option<Registry>> {
+    raw(&path())?
+        .map(|raw| decode_registry(&raw, mirrors))
+        .transpose()
+}
+
+fn decode_registry(raw: &str, mirrors: Mirrors<'_>) -> io::Result<Registry> {
+    let mut registry: Registry = serde_json::from_str(raw).map_err(io::Error::other)?;
+    validate_proving(&registry, mirrors)?;
     if registry.schema_version < 3 {
         extract_legacy_runtime(&mut registry)?;
         registry.schema_version = 3;
         if let Some(roster) = &mut registry.roster {
             roster.schema_version = 3;
         }
-        validate(&registry)?;
+        validate_proving(&registry, mirrors)?;
     }
-    Ok(Some(registry))
+    Ok(registry)
 }
 
 fn save(registry: &Registry) -> io::Result<()> {
+    save_proving(registry, Mirrors::All)
+}
+
+fn save_proving(registry: &Registry, mirrors: Mirrors<'_>) -> io::Result<()> {
     let mut registry = registry.clone();
     registry.schema_version = 3;
     if let Some(roster) = &mut registry.roster {
         roster.schema_version = 3;
     }
-    validate(&registry)?;
-    crate::issue_monitor::durable_atomic_write(
-        &path(),
-        &serde_json::to_vec_pretty(&registry).map_err(io::Error::other)?,
-    )
+    validate_proving(&registry, mirrors)?;
+    let content = serde_json::to_vec_pretty(&registry).map_err(io::Error::other)?;
+    #[cfg(test)]
+    record_io(|io| io.registry_writes += 1);
+    // Raised before the write and lowered only after it is durable, so a
+    // later transaction confirms durability exactly when this one could not.
+    fs::write(unconfirmed_path(), b"")?;
+    crate::issue_monitor::durable_atomic_write(&path(), &content)?;
+    clear_unconfirmed()
+}
+
+/// Present while the latest registry write is not known to be durable.
+fn unconfirmed_path() -> PathBuf {
+    path().with_extension("unconfirmed")
+}
+
+fn clear_unconfirmed() -> io::Result<()> {
+    match fs::remove_file(unconfirmed_path()) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
+    }
 }
 
 fn confirm_durable() -> io::Result<()> {
+    #[cfg(test)]
+    record_io(|io| io.durability_confirmations += 1);
     let registry_path = path();
     fs::OpenOptions::new()
         .read(true)
@@ -553,7 +635,7 @@ fn confirm_durable() -> io::Result<()> {
     }
     #[cfg(unix)]
     fs::File::open(registry_path.parent().expect("machine state parent"))?.sync_all()?;
-    Ok(())
+    clear_unconfirmed()
 }
 
 fn ensure_cores(registry: &mut Registry) {
@@ -585,7 +667,7 @@ fn settings_revision(registry: &Registry) -> u64 {
     registry.roster.as_ref().map_or(0, |roster| roster.revision)
 }
 
-fn validate(registry: &Registry) -> io::Result<()> {
+fn validate_proving(registry: &Registry, mirrors: Mirrors<'_>) -> io::Result<()> {
     if !matches!(registry.schema_version, 1..=3)
         || !matches!(
             registry.phase,
@@ -614,23 +696,35 @@ fn validate(registry: &Registry) -> io::Result<()> {
     }
     for (key, source) in &registry.sources {
         ProjectKey::parse(key).map_err(|error| invalid(error.to_string()))?;
-        if fingerprint(&source.after_json) != source.after_sha256
-            || raw_hash(source.before_json.as_deref()) != source.before_sha256
-            || raw_hash(source.floor_before_json.as_deref()) != source.floor_before_sha256
-            || source.transaction_id.is_empty()
-        {
+        if source.transaction_id.is_empty() {
             return Err(invalid(format!("Agent registry commit mismatch for {key}")));
         }
-        for observation in &source.rosterless_snapshots {
-            if raw_hash(observation.raw.as_deref()) != observation.sha256 {
-                return Err(invalid(format!(
-                    "Agent legacy observation fingerprint mismatch for {key}"
-                )));
+        if mirrors.covers(key) {
+            #[cfg(test)]
+            record_io(|io| io.validated_payloads.push(key.clone()));
+            if fingerprint(&source.after_json) != source.after_sha256
+                || mirrors.covers_superseded()
+                    && (raw_hash(source.before_json.as_deref()) != source.before_sha256
+                        || raw_hash(source.floor_before_json.as_deref())
+                            != source.floor_before_sha256)
+            {
+                return Err(invalid(format!("Agent registry commit mismatch for {key}")));
             }
-        }
-        let prefs = decode(Some(&source.after_json))?;
-        if prefs.schema_version != 2 || prefs.agent_roster.is_some() {
-            return Err(invalid(format!("Invalid Agent execution mirror for {key}")));
+            for observation in source
+                .rosterless_snapshots
+                .iter()
+                .filter(|_| mirrors.covers_superseded())
+            {
+                if raw_hash(observation.raw.as_deref()) != observation.sha256 {
+                    return Err(invalid(format!(
+                        "Agent legacy observation fingerprint mismatch for {key}"
+                    )));
+                }
+            }
+            let prefs = decode(Some(&source.after_json))?;
+            if prefs.schema_version != 2 || prefs.agent_roster.is_some() {
+                return Err(invalid(format!("Invalid Agent execution mirror for {key}")));
+            }
         }
         if registry.phase == RegistryPhase::Active && !source.was_active {
             return Err(invalid("Active Agent registry has an unfenced enrollment"));
@@ -806,7 +900,8 @@ pub fn resolve_member_id(root: &Path, observed_id: &str) -> io::Result<String> {
 }
 
 pub fn is_active() -> io::Result<bool> {
-    load().map(|registry| registry.is_some_and(|registry| registry.phase == RegistryPhase::Active))
+    load_proving(Mirrors::None)
+        .map(|registry| registry.is_some_and(|registry| registry.phase == RegistryPhase::Active))
 }
 
 /// Shared registration and PM selection do not mutate project execution mirrors.
@@ -2227,7 +2322,7 @@ pub(crate) fn active_settings_revision(prefs_path: &Path) -> io::Result<Option<u
     if source_key(prefs_path).is_none() {
         return Ok(None);
     }
-    let Some(registry) = load()? else {
+    let Some(registry) = load_proving(Mirrors::None)? else {
         return Ok(None);
     };
     if registry.phase != RegistryPhase::Active {
@@ -2840,6 +2935,10 @@ fn assert_known(registry: &Registry, key: &str, observed: Option<&str>) -> io::R
 
 fn assert_known_floor(source: &Source, path: &Path) -> io::Result<()> {
     let observed = raw_hash(raw(&path.with_extension("committed.json"))?.as_deref());
+    assert_known_floor_hash(source, path, &observed)
+}
+
+fn assert_known_floor_hash(source: &Source, path: &Path, observed: &str) -> io::Result<()> {
     if observed != source.floor_before_sha256 && observed != source.after_sha256 {
         return Err(invalid(format!(
             "Agent recovery floor conflict: project={}, transaction={}, before={}, after={}, observed={observed}; read agent.registry.status and explicitly reconcile with expected_floor_sha256",
@@ -2856,6 +2955,8 @@ fn publish(source: &Source, path: &Path) -> io::Result<()> {
 }
 
 fn publish_verified(source: &Source, path: &Path) -> io::Result<()> {
+    #[cfg(test)]
+    record_io(|io| io.mirror_publishes += 1);
     crate::issue_monitor::durable_atomic_write(path, source.after_json.as_bytes())?;
     // The schema1 recovery writer must not be able to restore an old schema1
     // floor after the canonical schema2 file is damaged.
@@ -2894,30 +2995,39 @@ pub(crate) fn read_project(path: &Path) -> io::Result<Option<IssueMonitorPrefs>>
                 "Agent registry changed during read; retry the same operation",
             ));
         }
-        let Some(before) = load()? else {
+        let Some(before) = raw(&self::path())? else {
             return Ok(None);
         };
-        if before.phase != RegistryPhase::Active {
-            return Err(invalid(
-                "Agent registry is prepared; inspect agent.registry.status and reconcile",
-            ));
-        }
         let observed = raw(path)?;
         let floor = raw(&path.with_extension("committed.json"))?;
         #[cfg(test)]
         if let Some(observer) = READ_PROJECT_AFTER_SOURCE.with(|slot| slot.borrow_mut().take()) {
             observer();
         }
-        let Some(after) = load()? else { continue };
+        let Some(after) = raw(&self::path())? else {
+            continue;
+        };
+        // Identical bytes are one generation: decode and prove it once.
         if before != after {
             std::thread::yield_now();
             continue;
         }
+        let after = decode_registry(&after, Mirrors::Only(&key))?;
+        if after.phase != RegistryPhase::Active {
+            return Err(invalid(
+                "Agent registry is prepared; inspect agent.registry.status and reconcile",
+            ));
+        }
         if let Some(source) = after.sources.get(&key) {
-            assert_known(&after, &key, observed.as_deref())?;
-            let floor_hash = raw_hash(floor.as_deref());
-            if floor_hash != source.floor_before_sha256 && floor_hash != source.after_sha256 {
-                return Err(invalid(format!("Agent recovery floor conflict for {key}: observed={floor_hash}; read agent.registry.status and explicitly reconcile with expected_floor_sha256")));
+            let committed = Some(source.after_json.as_str());
+            if observed.as_deref() != committed {
+                assert_known(&after, &key, observed.as_deref())?;
+            }
+            if floor.as_deref() != committed {
+                let floor_hash = raw_hash(floor.as_deref());
+                if floor_hash != source.floor_before_sha256 && floor_hash != source.after_sha256 {
+                    return Err(invalid(format!("Agent recovery floor conflict for {key}: observed={floor_hash}; read agent.registry.status and explicitly reconcile with expected_floor_sha256")));
+                }
             }
             return project(&after, &key, Some(&source.after_json)).map(Some);
         }
@@ -2977,6 +3087,8 @@ pub(crate) struct RegistryWrite {
     registry: Option<Registry>,
     key: Option<String>,
     before: Option<IssueMonitorPrefs>,
+    /// Both mirror files hold the committed generation, proven under these locks.
+    mirrors_current: bool,
 }
 
 impl RegistryWrite {
@@ -2987,17 +3099,21 @@ impl RegistryWrite {
                 registry: None,
                 key: None,
                 before: None,
+                mirrors_current: false,
             });
         };
         let guard = lock()?;
-        let mut registry = load()?;
+        let mut registry = load_proving(Mirrors::Only(&key))?;
         if let Some(current) = &mut registry {
             if current.phase != RegistryPhase::Active {
                 return Err(invalid(
                     "Agent registry is prepared; inspect agent.registry.status and reconcile",
                 ));
             }
-            confirm_durable()?;
+            // Every registry write lowers this marker once it is durable.
+            if unconfirmed_path().try_exists()? {
+                confirm_durable()?;
+            }
             if !current.sources.contains_key(&key) {
                 if path.try_exists()?
                     || crate::agent_names::observed_project_member_seeds(
@@ -3008,22 +3124,31 @@ impl RegistryWrite {
                 {
                     return Err(io::Error::new(io::ErrorKind::WouldBlock, "Legacy Agent source needs enrollment before its prefs lock; retry the same command after preflight"));
                 }
+                // Enrollment rewrites shared identity: prove every mirror first.
+                *current = load()?.ok_or_else(|| invalid("Agent registry disappeared"))?;
                 enroll(current, &key, None, &[])?;
                 save(current)?;
             }
-            let observed = raw(path)?;
-            assert_known(current, &key, observed.as_deref())?;
             let source = &current.sources[&key];
-            assert_known_floor(source, path)?;
-            if raw_hash(observed.as_deref()) != source.after_sha256
-                || raw(&path.with_extension("committed.json"))?.as_deref()
-                    != Some(source.after_json.as_str())
-            {
-                publish(source, path)?;
+            let committed = Some(source.after_json.as_str());
+            let observed = raw(path)?;
+            let floor = raw(&path.with_extension("committed.json"))?;
+            // Equal bytes are the committed generation; only a difference is hashed.
+            let mirror_current = observed.as_deref() == committed;
+            let floor_current = floor.as_deref() == committed;
+            if !mirror_current {
+                assert_known(current, &key, observed.as_deref())?;
+            }
+            if !floor_current {
+                assert_known_floor_hash(source, path, &raw_hash(floor.as_deref()))?;
+            }
+            if !mirror_current || !floor_current {
+                publish_verified(source, path)?;
             }
         }
         Ok(Self {
             _lock: Some(guard),
+            mirrors_current: registry.is_some(),
             registry,
             key: Some(key),
             before: None,
@@ -3050,7 +3175,11 @@ impl RegistryWrite {
             return Ok(None);
         };
         let mut next = registry.clone();
-        let latest = project(registry, key, Some(&registry.sources[key].after_json))?;
+        // `before` is this same committed generation whenever it was loaded.
+        let latest = match &self.before {
+            Some(before) => before.clone(),
+            None => project(registry, key, Some(&registry.sources[key].after_json))?,
+        };
         let mut candidate = prefs.clone();
         if mutation {
             if prefs.agent_registry_revision != Some(settings_revision(registry))
@@ -3126,18 +3255,42 @@ impl RegistryWrite {
                     .ok_or_else(|| invalid("Agent settings revision exhausted"))?;
             }
         }
-        let committed = source_from(
-            &next,
-            key,
-            &candidate,
-            Some(&source.after_json),
-            source.aliases.clone(),
-        )?;
+        let committed = if self.mirrors_current {
+            // Both files hold `source.after_json`: it is the superseded
+            // canonical and floor snapshot without reading or hashing it again.
+            Source {
+                transaction_id: uuid::Uuid::new_v4().to_string(),
+                before_sha256: source.after_sha256.clone(),
+                before_json: Some(source.after_json.clone()),
+                floor_before_sha256: source.after_sha256.clone(),
+                floor_before_json: Some(source.after_json.clone()),
+                after_sha256: fingerprint(&after_json),
+                after_json,
+                was_active: source.was_active,
+                aliases: source.aliases.clone(),
+                session_aliases: source.session_aliases.clone(),
+                rosterless_snapshots: source.rosterless_snapshots.clone(),
+            }
+        } else {
+            source_from(
+                &next,
+                key,
+                &candidate,
+                Some(&source.after_json),
+                source.aliases.clone(),
+            )?
+        };
         next.sources.insert(key.clone(), committed);
-        save(&next)?; // The sole logical commit point for an Active transaction.
-        self.registry = Some(next.clone());
-        publish(&next.sources[key], path)?;
+        // Decode the new mirror before it becomes the committed generation.
         let saved = project(&next, key, Some(&next.sources[key].after_json))?;
+        // The sole logical commit point for an Active transaction. Its mirror
+        // was serialized, fingerprinted and decoded just above.
+        save_proving(&next, Mirrors::None)?;
+        self.registry = Some(next.clone());
+        // `acquire` proved both mirrors under the locks this transaction still holds.
+        self.mirrors_current = false;
+        publish_verified(&next.sources[key], path)?;
+        self.mirrors_current = true;
         self.before = Some(saved.clone());
         Ok(Some(saved))
     }
@@ -3524,7 +3677,8 @@ pub(crate) fn preflight_write(path: &Path) -> io::Result<()> {
     let Some(key) = source_key(path) else {
         return Ok(());
     };
-    let Some(registry) = load()? else {
+    // Enrollment is shared state; this project's mirror is proven under its lock.
+    let Some(registry) = load_proving(Mirrors::None)? else {
         return Ok(());
     };
     if registry.phase == RegistryPhase::Active && registry.sources.contains_key(&key) {
@@ -6550,6 +6704,212 @@ mod tests {
                 .to_string()
                 .contains("retains a live or unknown reservation"),
             "{error}"
+        );
+    }
+
+    /// Two enrolled projects: `a` carries the roster, `b` is a plain mirror.
+    fn two_active_sources() -> (PathBuf, String, PathBuf, String) {
+        let (root, a_path, _) = source();
+        let b_root = gwt_core::paths::gwt_home().join("project-b");
+        fs::create_dir_all(&b_root).unwrap();
+        let b_path = crate::issue_monitor_prefs_path_for_repo_path(&b_root);
+        fs::create_dir_all(b_path.parent().unwrap()).unwrap();
+        fs::write(
+            &b_path,
+            serde_json::to_vec(&IssueMonitorPrefs::default()).unwrap(),
+        )
+        .unwrap();
+        ensure_active_for_project(&root).unwrap();
+        let a_key = source_key(&a_path).unwrap();
+        let b_key = source_key(&b_path).unwrap();
+        assert!(load().unwrap().unwrap().sources.contains_key(&b_key));
+        (a_path, a_key, b_path, b_key)
+    }
+
+    fn tamper_committed_mirror(key: &str) {
+        let mut registry: serde_json::Value =
+            serde_json::from_slice(&fs::read(super::path()).unwrap()).unwrap();
+        registry["sources"][key]["after_json"] = serde_json::json!("{\"tampered\":true}");
+        fs::write(super::path(), serde_json::to_vec(&registry).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn unchanged_prefs_transaction_syncs_nothing_and_checks_only_its_own_mirror() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let (a_path, a_key, _, b_key) = two_active_sources();
+        let registry = fs::read(super::path()).unwrap();
+        take_registry_io_for_test();
+        crate::try_mutate_issue_monitor_prefs(&a_path, |_| Ok(())).unwrap();
+        let io = take_registry_io_for_test();
+        assert_eq!(
+            (
+                io.durability_confirmations,
+                io.registry_writes,
+                io.mirror_publishes
+            ),
+            (0, 0, 0),
+            "a transaction that changes nothing confirms and writes nothing: {io:?}"
+        );
+        assert!(io.validated_payloads.contains(&a_key), "{io:?}");
+        assert!(
+            !io.validated_payloads.contains(&b_key),
+            "another project's mirror is not decoded for this project: {io:?}"
+        );
+        assert_eq!(fs::read(super::path()).unwrap(), registry);
+    }
+
+    #[test]
+    fn prefs_commit_writes_the_registry_and_its_mirror_once_without_other_mirrors() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let (a_path, _, b_path, b_key) = two_active_sources();
+        let b_mirror = fs::read(&b_path).unwrap();
+        take_registry_io_for_test();
+        crate::try_mutate_issue_monitor_prefs(&a_path, |prefs| {
+            prefs.merged_issues.push(7486);
+            Ok(())
+        })
+        .unwrap();
+        let io = take_registry_io_for_test();
+        assert_eq!(
+            (
+                io.durability_confirmations,
+                io.registry_writes,
+                io.mirror_publishes
+            ),
+            (0, 1, 1),
+            "one commit is one registry write and one mirror publish: {io:?}"
+        );
+        assert!(!io.validated_payloads.contains(&b_key), "{io:?}");
+        assert_eq!(fs::read(&b_path).unwrap(), b_mirror);
+        assert_eq!(
+            crate::load_issue_monitor_prefs(&a_path)
+                .unwrap()
+                .merged_issues,
+            [7486]
+        );
+        // The untouched project still passes the complete validation.
+        assert!(load().unwrap().unwrap().sources.contains_key(&b_key));
+    }
+
+    #[test]
+    fn interrupted_publish_replays_the_committed_generation_for_readers_and_writers() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let (a_path, _, _, _) = two_active_sources();
+        let floor_path = a_path.with_extension("committed.json");
+        let (mirror_before, floor_before) =
+            (fs::read(&a_path).unwrap(), fs::read(&floor_path).unwrap());
+        crate::try_mutate_issue_monitor_prefs(&a_path, |prefs| {
+            prefs.merged_issues.push(7486);
+            Ok(())
+        })
+        .unwrap();
+        let committed = fs::read(&a_path).unwrap();
+        assert_ne!(committed, mirror_before);
+        // A crash after the registry commit leaves both mirrors one generation behind.
+        fs::write(&a_path, &mirror_before).unwrap();
+        fs::write(&floor_path, &floor_before).unwrap();
+        assert_eq!(
+            crate::load_issue_monitor_prefs(&a_path)
+                .unwrap()
+                .merged_issues,
+            [7486],
+            "a reader observes the committed generation, not the stale mirror"
+        );
+        take_registry_io_for_test();
+        let (replayed, ()) = crate::try_mutate_issue_monitor_prefs(&a_path, |_| Ok(())).unwrap();
+        let io = take_registry_io_for_test();
+        assert_eq!(replayed.merged_issues, [7486]);
+        assert_eq!((io.registry_writes, io.mirror_publishes), (0, 1), "{io:?}");
+        assert_eq!(fs::read(&a_path).unwrap(), committed);
+        assert_eq!(fs::read(&floor_path).unwrap(), committed);
+        // A half-published mirror (canonical current, floor stale) is completed too.
+        fs::write(&floor_path, &floor_before).unwrap();
+        crate::try_mutate_issue_monitor_prefs(&a_path, |_| Ok(())).unwrap();
+        assert_eq!(fs::read(&floor_path).unwrap(), committed);
+    }
+
+    #[test]
+    fn damaged_committed_mirror_fails_closed_for_its_own_project_only() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let (a_path, _, b_path, b_key) = two_active_sources();
+        tamper_committed_mirror(&b_key);
+        let b_mirror = fs::read(&b_path).unwrap();
+        assert!(crate::load_issue_monitor_prefs(&b_path).is_err());
+        assert!(crate::try_mutate_issue_monitor_prefs(&b_path, |prefs| {
+            prefs.merged_issues.push(1);
+            Ok(())
+        })
+        .is_err());
+        assert_eq!(fs::read(&b_path).unwrap(), b_mirror);
+        assert!(load().is_err(), "the complete registry read stays closed");
+        // The damage is carried byte-for-byte, never repaired, by another project's commit.
+        crate::try_mutate_issue_monitor_prefs(&a_path, |prefs| {
+            prefs.merged_issues.push(7486);
+            Ok(())
+        })
+        .unwrap();
+        assert!(crate::load_issue_monitor_prefs(&b_path).is_err());
+        assert!(load().is_err());
+        assert_eq!(fs::read(&b_path).unwrap(), b_mirror);
+    }
+
+    /// Prints the same `held_ms` the "Issues prefs lock released" record reports.
+    /// `cargo test -p gwt --lib --release measure_prefs_lock_held_ms -- --ignored --nocapture`
+    #[test]
+    #[ignore = "measurement, not an assertion"]
+    fn measure_prefs_lock_held_ms() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let (a_path, _, b_path, _) = two_active_sources();
+        let padding: Vec<u64> = (0..46_000).map(|index| 1_000_000 + index).collect();
+        for path in [&a_path, &b_path] {
+            crate::try_mutate_issue_monitor_prefs(path, |prefs| {
+                prefs.merged_issues.clone_from(&padding);
+                Ok(())
+            })
+            .unwrap();
+        }
+        let median = |mut samples: Vec<f64>| {
+            samples.sort_by(f64::total_cmp);
+            (samples[samples.len() / 2], samples[samples.len() * 9 / 10])
+        };
+        let mut unchanged = Vec::new();
+        let mut committed = Vec::new();
+        for index in 0..40 {
+            crate::try_mutate_issue_monitor_prefs(&a_path, |_| Ok(())).unwrap();
+            unchanged.push(crate::issue_monitor::prefs_lock_held_ms_for_test());
+            crate::try_mutate_issue_monitor_prefs(&a_path, |prefs| {
+                prefs.merged_issues.push(index);
+                Ok(())
+            })
+            .unwrap();
+            committed.push(crate::issue_monitor::prefs_lock_held_ms_for_test());
+        }
+        println!(
+            "registry={}B mirror={}B unchanged(median,p90)={:?}ms commit(median,p90)={:?}ms",
+            fs::metadata(super::path()).unwrap().len(),
+            fs::metadata(&a_path).unwrap().len(),
+            median(unchanged),
+            median(committed),
         );
     }
 }
