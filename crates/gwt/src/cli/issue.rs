@@ -14316,7 +14316,10 @@ mod tests {
 
         assert!(published.queue.is_empty());
         assert!(published.needs_human.is_empty());
-        assert_eq!(published.needs_human_count, Some(0));
+        assert_eq!(
+            published.needs_human_count, None,
+            "the merged count is unavailable when the Board index cannot be read"
+        );
         assert_eq!(published.last_error, None);
     }
 
@@ -14626,11 +14629,15 @@ mod tests {
             .remove("monitor_runtime_stop_requests");
         // Assert presence and null before the legacy projection comparison;
         // adding keys to its large json! fixture exceeds the macro recursion budget.
-        for field in ["priority_reason_note", "priority_reason_matches_order"] {
+        for field in [
+            "priority_reason_note",
+            "priority_reason_matches_order",
+            "needs_human_count",
+        ] {
             assert_eq!(
                 status.as_object_mut().unwrap().remove(field),
                 Some(serde_json::Value::Null),
-                "legacy preferences must explicitly report {field} as null"
+                "the degraded cache must explicitly report {field} as null"
             );
         }
         assert_eq!(

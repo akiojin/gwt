@@ -148,6 +148,7 @@ impl PmReportsReader {
         match crate::daemon_publisher::read_issue_monitor_status(repo) {
             Ok(status) => inputs.push(SourceStamp::Monitor(status.map(|status| serde_json::json!({
                 "queue": status["queue"], "needs_human": status["needs_human"],
+                "needs_human_count": status["needs_human_count"],
                 "activity": status["inbox"].as_array().map(|rows| rows.iter().map(|row| (&row["issue_number"], &row["last_activity_at"])).collect::<Vec<_>>()),
             })).unwrap_or(Value::Null))),
             Err(_) => readable = false,
