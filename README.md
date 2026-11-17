@@ -194,6 +194,12 @@ be verified. `gh copilot` also requires manual updates because the detected
 distribution may differ from the extension updater's target. The row explains
 these limitations. Metadata failures disable updates and show the reason.
 
+After installation, the completion message shows how to add the detected CLI
+directory to your shell's PATH. gwt's Installed status does not confirm your
+terminal's PATH. If `claude` or another command is not found, follow the displayed
+bash/zsh, fish, or Windows instructions, open a new terminal, and run the command
+with `--version`. gwt does not edit your shell startup files.
+
 Automatic agent updates are off by default. When enabled, gwt checks installed
 agents with a verified update route at the next app startup and updates only known newer versions, with
 no live agent panes (including the Project Manager) or pending launches. Manual

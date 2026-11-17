@@ -45,6 +45,67 @@ test.describe("Supported Agents version layout (isolated live backend)", () => {
   test.use({ viewport: { width: 1440, height: 1000 } });
   test.setTimeout(120_000);
 
+  test("shows shell PATH setup after a successful catalog installation", async ({ page }, info) => {
+    test.skip(!process.env.GWT_7496_PATH_FIXTURE, "requires the isolated npm install fixture");
+    await withLiveGwtBackendLock(BASE, info, async () => {
+      const errors: string[] = [];
+      page.on("pageerror", error => errors.push(error.message));
+      page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+      const theme = info.project.name.endsWith("light") ? "light" : "dark";
+      await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+      // Only the catalog is deterministic; the install action and completion
+      // message pass through the checkout's actual maintenance backend.
+      await page.routeWebSocket(/\/ws(?:\?|$)/, socket => {
+        const server = socket.connectToServer();
+        let installed = false;
+        const catalog = () => JSON.stringify({ ...snapshot, agents: [{
+          ...snapshot.agents[1], installed, installed_version: installed ? "codex-cli 1.2.3" : null,
+          available_version: "1.2.3", update_available: false, up_to_date: installed,
+        }] });
+        socket.onMessage(message => {
+          const payload = typeof message === "string" ? JSON.parse(message) : null;
+          if (payload?.kind === "list_supported_agents") socket.send(catalog());
+          else server.send(message);
+        });
+        server.onMessage(message => {
+          const payload = typeof message === "string" ? JSON.parse(message) : null;
+          if (payload?.kind === "supported_agent_maintenance" && payload.success) installed = true;
+          socket.send(payload?.kind === "supported_agent_list" ? catalog() : message);
+        });
+      });
+      await gotoLiveGwt(page, BASE, { enableTestBridge: true });
+      await openLiveGwtProject(page, PROJECT);
+      await page.evaluate(() => document.dispatchEvent(
+        new CustomEvent("settings:open", { detail: { target: "supported-agents" } }),
+      ));
+      const settings = page.locator('.workspace-window[data-preset="settings"]');
+      const row = settings.locator('[data-agent-id="codex"]');
+      await row.getByRole("button", { name: "Install Codex", exact: true }).click();
+      const status = settings.locator('[data-agent-maintenance-id="codex"]');
+      await expect(status).toContainText("Installed Codex", { timeout: 30_000 });
+      await expect(status).toContainText("terminal's PATH");
+      await expect(status).toContainText("command not found");
+      await expect(status).toContainText('export PATH="$HOME"/\'.local/bin\':"$PATH"');
+      await expect(status).toContainText("~/.zshrc");
+      await expect(status).toContainText("~/.bashrc");
+      await expect(status).toContainText("fish_add_path");
+      await expect(status).toContainText("codex --version");
+      await expect(status).not.toContainText("redacted");
+      await expect(row.locator("td").nth(1)).toHaveText("Installed");
+      expect(await status.evaluate(element => ({
+        wraps: getComputedStyle(element).whiteSpace !== "nowrap",
+        fits: element.scrollWidth <= element.clientWidth,
+      }))).toEqual({ wraps: true, fits: true });
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      const screenshotPath = info.outputPath(`install-shell-path-${theme}.png`);
+      await settings.screenshot({ path: screenshotPath });
+      await info.attach(`install-shell-path-${theme}`, {
+        path: screenshotPath, contentType: "image/png",
+      });
+      expect(errors, "zero console and page errors").toEqual([]);
+    });
+  });
+
   test("keeps banners in tooltips and aligns short versions and actions", async ({ page }, info) => {
     await withLiveGwtBackendLock(BASE, info, async () => {
       const errors: string[] = [];
