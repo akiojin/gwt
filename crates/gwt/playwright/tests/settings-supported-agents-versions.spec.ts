@@ -47,6 +47,7 @@ test.describe("Supported Agents version layout (isolated live backend)", () => {
 
   test("shows shell PATH setup after a successful catalog installation", async ({ page }, info) => {
     test.skip(!process.env.GWT_7496_PATH_FIXTURE, "requires the isolated npm install fixture");
+    expect(process.env.GWT_PLAYWRIGHT_CHECK_HOME, "the fixture must identify its isolated installation home").toBeTruthy();
     await withLiveGwtBackendLock(BASE, info, async () => {
       const errors: string[] = [];
       page.on("pageerror", error => errors.push(error.message));
@@ -85,7 +86,8 @@ test.describe("Supported Agents version layout (isolated live backend)", () => {
       await expect(status).toContainText("Installed Codex", { timeout: 30_000 });
       await expect(status).toContainText("terminal's PATH");
       await expect(status).toContainText("command not found");
-      await expect(status).toContainText('export PATH="$HOME"/\'.local/bin\':"$PATH"');
+      await expect(status).toContainText(`export PATH='${process.env.GWT_PLAYWRIGHT_CHECK_HOME}/.local/bin':"$PATH"`);
+      await expect(status).not.toContainText('"$HOME"');
       await expect(status).toContainText("~/.zshrc");
       await expect(status).toContainText("~/.bashrc");
       await expect(status).toContainText("fish_add_path");
