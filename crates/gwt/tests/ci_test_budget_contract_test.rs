@@ -1113,6 +1113,9 @@ fn windows_regression_slices_build_each_harness_once_and_gate_all_filters() {
         "gwt lib gwt cli::issue::tests::immediate_scan_delivery_never_claims_an_unacknowledged_schedule -- --exact --test-threads=1",
         "gwt lib gwt cli::pane::tests::pane_websocket_request_carries_the_agent_capability_in_authorization -- --exact --test-threads=1",
         "gwt lib gwt cli::pane::tests::issue_monitor_scan_client_ -- --test-threads=1",
+        // Issue #7451: shared machine admission under unknown and stale observations.
+        "gwt lib gwt machine_agent_admission::tests::uncertain_manual_observation_refuses_but_auto_preserves_existing_admission -- --exact --test-threads=1",
+        "gwt lib gwt session_inventory::tests::issue_5644_expired_inventory_is_uncertain_instead_of_empty -- --exact --test-threads=1",
         "gwt bin gwt embedded_server::tests::authenticated_monitor_scan_routes_scope_guard_and_result_only_to_origin_socket -- --exact --test-threads=1",
         "gwt bin gwt authenticated_pm_scan_now_ -- --test-threads=1",
         "gwt bin gwt authenticated_scan_now_ -- --test-threads=1",
@@ -1152,7 +1155,7 @@ fn windows_regression_slices_build_each_harness_once_and_gate_all_filters() {
         "gwt test cli_contracts memory_cli_test::memory_add_writes_to_machine_local_work_notes -- --exact --test-threads=1 --nocapture",
         "gwt test cli_contracts gwtd_cli_test::auto_feedback_real_worker_has_no_consent_auth_process_or_raw_sinks -- --exact --test-threads=1 --nocapture",
     ];
-    assert_eq!(expected_filters.len(), 70);
+    assert_eq!(expected_filters.len(), 72);
     expected_filters.sort_unstable();
     actual_filters.sort_unstable();
     assert_eq!(actual_filters, expected_filters);
