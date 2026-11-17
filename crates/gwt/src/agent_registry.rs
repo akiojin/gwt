@@ -9483,6 +9483,118 @@ mod tests {
         assert_eq!(saved.merged_issues, vec![7550]);
     }
 
+    /// The mirror encoder as it was before Issue #7550, kept as the oracle for
+    /// the bytes a project commits.
+    fn mirror_json_before_7550(
+        prefs: &IssueMonitorPrefs,
+        original: Option<&str>,
+    ) -> io::Result<String> {
+        let mut mirror = prefs.clone();
+        mirror.schema_version = 2;
+        mirror.agent_roster = None;
+        let mut profiles = mirror.launch_profile_pool();
+        for profile in &mut profiles {
+            if profile.agent_member_id.is_none() {
+                continue;
+            }
+            profile.model = None;
+            profile.reasoning = None;
+            profile.version = None;
+            profile.fast_mode = false;
+            profile.codex_speed = gwt_agent::CodexSpeed::Off;
+        }
+        mirror.set_launch_profile_pool(profiles);
+        let mut value = original
+            .map(serde_json::from_str::<serde_json::Value>)
+            .transpose()
+            .map_err(io::Error::other)?
+            .unwrap_or_else(|| serde_json::json!({}));
+        let object = value
+            .as_object_mut()
+            .ok_or_else(|| invalid("Project preferences must be an object"))?;
+        let mut known =
+            serde_json::to_value(IssueMonitorPrefs::default()).map_err(io::Error::other)?;
+        if let Some(original) = original {
+            let before = serde_json::to_value(decode(Some(original))?).map_err(io::Error::other)?;
+            known
+                .as_object_mut()
+                .expect("prefs object")
+                .extend(before.as_object().expect("prefs object").clone());
+        }
+        for key in known.as_object().expect("prefs object").keys() {
+            object.remove(key);
+        }
+        object.remove("agent_roster");
+        object.extend(
+            serde_json::to_value(mirror)
+                .map_err(io::Error::other)?
+                .as_object()
+                .expect("prefs object")
+                .clone(),
+        );
+        serde_json::to_string_pretty(&value).map_err(io::Error::other)
+    }
+
+    /// Issue #7550: reusing the committed decode changes how the mirror is
+    /// encoded, never one byte of what is committed.
+    #[test]
+    fn the_mirror_a_project_commits_is_byte_identical_to_the_previous_encoder() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let (a_path, ..) = two_split_sources();
+        let (projected, ()) = crate::try_mutate_issue_monitor_prefs(&a_path, |prefs| {
+            fill_heavy_prefs_for_test(prefs);
+            Ok(())
+        })
+        .unwrap();
+        let committed = fs::read_to_string(&a_path).unwrap();
+        // What an older or newer version wrote: fields this version does not
+        // know, a known field written empty, a roster, and a legacy field.
+        let mut foreign: serde_json::Value = serde_json::from_str(&committed).unwrap();
+        foreign["future_field"] = serde_json::json!({"nested": [3, 1, {"z": null, "a": "é\n"}]});
+        foreign["another_future_field"] = serde_json::json!("text");
+        foreign["requeue_audit"] = serde_json::json!([]);
+        foreign["launch_usage_threshold_percent"] = serde_json::json!(80);
+        foreign["agent_roster"] =
+            serde_json::json!({"schema_version": 1, "revision": 1, "members": []});
+        let foreign = serde_json::to_string(&foreign).unwrap();
+        let mut changed = projected.clone();
+        changed.merged_issues.push(7550);
+        changed.closure_records.truncate(3);
+        changed.claim_diagnostics.clear();
+
+        let mut compared = 0;
+        for original in [None, Some(committed.as_str()), Some(foreign.as_str())] {
+            let decoded = original.map(|original| decode(Some(original)).unwrap());
+            for prefs in [&projected, &changed, &IssueMonitorPrefs::default()] {
+                let expected = mirror_json_before_7550(prefs, original).unwrap();
+                assert_eq!(mirror_json(prefs, original, None).unwrap(), expected);
+                assert_eq!(
+                    mirror_json(prefs, original, decoded.as_ref()).unwrap(),
+                    expected
+                );
+                compared += 1;
+            }
+        }
+        assert_eq!(compared, 9);
+        assert!(mirror_json_before_7550(&changed, Some(&foreign))
+            .unwrap()
+            .contains("\"future_field\""));
+        for malformed in ["[1]", "{"] {
+            assert_eq!(
+                mirror_json(&projected, Some(malformed), Some(&projected))
+                    .unwrap_err()
+                    .to_string(),
+                mirror_json_before_7550(&projected, Some(malformed))
+                    .unwrap_err()
+                    .to_string()
+            );
+        }
+    }
+
     /// One project's transactions on the 1.3 MB record Issue #7550 reported:
     /// the read before the lock, an unchanged transaction and a saving one.
     /// `cargo test -p gwt --lib --release measure_heavy_record_prefs_transaction_ms -- --ignored --nocapture`
