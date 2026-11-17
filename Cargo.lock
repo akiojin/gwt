@@ -1521,7 +1521,6 @@ dependencies = [
 name = "gwt-git"
 version = "9.168.0"
 dependencies = [
- "chrono",
  "dirs 7.0.0",
  "gwt-core",
  "libc",
@@ -1530,6 +1529,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "time",
  "tracing",
 ]
 

@@ -1450,7 +1450,7 @@ fn sync_workspace_pr_metadata_for_target<E: CliEnv>(
                 details.pr_number = container.pr_number;
                 details.pr_state = container.pr_state.clone();
                 details.pr_url = container.pr_url.clone();
-                details.pr_created_at = pr.created_at;
+                details.pr_created_at = pr.created_at.map(Into::into);
                 projection.updated_at = now;
             }
             let already_recorded = target.is_some_and(|(_, existing)| existing == &container);
@@ -2079,10 +2079,12 @@ mod tests {
             "body": "User Verification Result: n/a (autonomous)\nAgent Visual Check: n/a (no UI surface)\n"
         });
         let pr = gwt_git::pr_status::parse_pr_status_json(&value.to_string()).unwrap();
-        let mut inventory =
-            gwt_git::pr_status::parse_pr_inventory_json(&format!("[{value}]"), chrono::Utc::now())
-                .unwrap()
-                .remove(0);
+        let mut inventory = gwt_git::pr_status::parse_pr_inventory_json(
+            &format!("[{value}]"),
+            chrono::Utc::now().into(),
+        )
+        .unwrap()
+        .remove(0);
         inventory.unresolved_review_threads = Some(0);
         inventory.coderabbit_review_complete = Some(true);
         env.seed_current_pr(Some(pr.clone()));
@@ -4874,7 +4876,7 @@ fn main() -> ExitCode {
             let cache_path = gwt_core::paths::gwt_project_dir_for_repo_path(repo)
                 .join(gwt_git::PR_INVENTORY_CACHE_FILE);
             let cache = gwt_git::pr_status::PrInventoryCache {
-                fetched_at: Some(chrono::Utc::now()),
+                fetched_at: Some(chrono::Utc::now().into()),
                 ..Default::default()
             };
             cache.save(&cache_path).unwrap();

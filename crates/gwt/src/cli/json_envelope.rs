@@ -4250,7 +4250,7 @@ mod tests {
     fn every_named_pr_default_action_operation_is_callable() {
         use gwt_git::pr_status::{classify_pr_lifecycle, PrInventoryFields};
 
-        let now = chrono::Utc::now();
+        let now = gwt_core::timestamp::UtcTimestamp::now();
         let mut seen_update_branch = false;
         for (mergeable, merge_state_status, ci_status, is_draft) in [
             ("MERGEABLE", "BEHIND", "SUCCESS", true),

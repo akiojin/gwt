@@ -793,7 +793,7 @@ mod tests {
                 "body":"Agent Visual Check: n/a (no UI surface)",
             }])
             .to_string(),
-            chrono::Utc::now(),
+            chrono::Utc::now().into(),
         )
         .unwrap()
         .remove(0);
@@ -857,7 +857,7 @@ mod tests {
                 "statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"}],
             }])
             .to_string(),
-            chrono::Utc::now(),
+            chrono::Utc::now().into(),
         )
         .unwrap()
         .remove(0);

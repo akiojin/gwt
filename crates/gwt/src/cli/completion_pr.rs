@@ -316,7 +316,7 @@ mod tests {
         });
         let pr = gwt_git::pr_status::parse_pr_status_json(&value.to_string()).unwrap();
         let mut inventory =
-            gwt_git::pr_status::parse_pr_inventory_json(&format!("[{value}]"), Utc::now())
+            gwt_git::pr_status::parse_pr_inventory_json(&format!("[{value}]"), Utc::now().into())
                 .unwrap()
                 .remove(0);
         inventory.unresolved_review_threads = Some(0);

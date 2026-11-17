@@ -401,7 +401,7 @@ fn load(repo: &Path, update: Option<&gwt_core::update::UpdateState>) -> PmReport
     let cache = gwt_git::pr_status::PrInventoryCache::load(
         &project_dir(repo).join(gwt_git::PR_INVENTORY_CACHE_FILE),
     );
-    let refresh = cache.fetched_at.unwrap_or(now)
+    let refresh = cache.fetched_at.map(DateTime::from).unwrap_or(now)
         + chrono::Duration::seconds(
             settings.pr_inventory.cache_ttl_secs.min(i64::MAX as u64) as i64
         );

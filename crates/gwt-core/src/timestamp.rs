@@ -1,9 +1,11 @@
 //! UTC timestamps for persisted and wire data.
 
-use std::{fmt, str::FromStr, time::SystemTime};
+use std::{borrow::Cow, fmt, str::FromStr, time::SystemTime};
 
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
-use time::{Date, Duration, Month, OffsetDateTime, UtcOffset};
+use time::{
+    format_description::well_known::Rfc3339, Date, Duration, Month, OffsetDateTime, UtcOffset,
+};
 
 const NANOS_PER_SECOND: u32 = 1_000_000_000;
 const SECONDS_PER_DAY: i64 = 86_400;
@@ -53,6 +55,29 @@ impl UtcTimestamp {
         })
     }
 
+    /// Parse a wire timestamp with the same separator and leap-second rules
+    /// as the previous parser.
+    pub fn parse_rfc3339(input: &str) -> Option<Self> {
+        if !matches!(input.as_bytes().get(10), Some(b'T' | b't' | b' ')) {
+            return None;
+        }
+        let leap_second = input.get(17..19) == Some("60");
+        let input = if leap_second || input.contains('−') {
+            let mut normalized = input.replace('−', "-");
+            if leap_second {
+                normalized.replace_range(17..19, "59");
+            }
+            Cow::Owned(normalized)
+        } else {
+            Cow::Borrowed(input)
+        };
+        let parsed = OffsetDateTime::parse(&input, &Rfc3339).ok()?;
+        Some(Self {
+            seconds: parsed.unix_timestamp(),
+            nanoseconds: parsed.nanosecond() + u32::from(leap_second) * NANOS_PER_SECOND,
+        })
+    }
+
     /// Whole seconds since the Unix epoch, using the preceding second for a
     /// leap second.
     pub fn timestamp(self) -> i64 {
@@ -60,6 +85,10 @@ impl UtcTimestamp {
     }
 
     pub fn whole_seconds_since(self, earlier: Self) -> i64 {
+        self.signed_duration_since(earlier).whole_seconds()
+    }
+
+    pub fn signed_duration_since(self, earlier: Self) -> Duration {
         let mut seconds = self.seconds - earlier.seconds;
         // Legacy arithmetic counts the stored leap second when it comes
         // between the two times-of-day.
@@ -71,7 +100,7 @@ impl UtcTimestamp {
             seconds -= 1;
         }
         let nanos = self.nanoseconds as i32 - earlier.nanoseconds as i32;
-        Duration::new(seconds, nanos).whole_seconds()
+        Duration::new(seconds, nanos)
     }
 
     /// Format UTC with the numeric offset used by existing user-facing output.
@@ -394,6 +423,28 @@ mod tests {
             assert_eq!(
                 UtcTimestamp::from(left).whole_seconds_since(UtcTimestamp::from(right)),
                 (left - right).num_seconds()
+            );
+        }
+    }
+    #[test]
+    fn strict_rfc3339_matches_previous_wire_parser() {
+        for input in [
+            "1970-01-01t00:00:00.000001200−00:30",
+            "2017-01-01 00:59:60.1250000005+01:00",
+            "0000-01-01T00:00:00+23:59",
+            "9999-12-31T23:59:59-23:59",
+            "2026-11-18Q00:00:00Z",
+            "2026-11-18T00:00:00+0000",
+            "2026-11-18T00:00:00+24:00",
+            "+10000-01-01T00:00:00Z",
+        ] {
+            let expected = chrono::DateTime::parse_from_rfc3339(input)
+                .map(|at| at.to_utc())
+                .ok();
+            assert_eq!(
+                UtcTimestamp::parse_rfc3339(input).map(chrono::DateTime::from),
+                expected,
+                "{input}"
             );
         }
     }

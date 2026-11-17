@@ -34,6 +34,7 @@ use std::{
 };
 
 use fs2::FileExt;
+use gwt_core::timestamp::UtcTimestamp;
 use serde::{Deserialize, Serialize};
 use time::{macros::format_description, OffsetDateTime};
 use uuid::Uuid;
@@ -42,7 +43,6 @@ use crate::{
     body::{ParseError, SpecBody, SpecMeta},
     client::{CommentId, CommentSnapshot, IssueNumber, IssueSnapshot, IssueState, UpdatedAt},
     sections::SectionName,
-    timestamp::Rfc3339Timestamp,
 };
 
 pub const ISSUE_VALIDATION_RECEIPT_FILE: &str = "issue-validation.json";
@@ -474,10 +474,10 @@ impl Cache {
             {
                 return Ok(ValidatedCacheEntry::Unvalidated(versioned));
             }
-            let Some(validated_at) = Rfc3339Timestamp::parse(&receipt.validated_at) else {
+            let Some(validated_at) = UtcTimestamp::parse_rfc3339(&receipt.validated_at) else {
                 return Ok(ValidatedCacheEntry::Unvalidated(versioned));
             };
-            let age = validated_at.age_at(OffsetDateTime::now_utc());
+            let age = UtcTimestamp::now().signed_duration_since(validated_at);
             // The old signed duration could represent up to i64::MAX milliseconds.
             if ttl > std::time::Duration::from_millis(i64::MAX as u64)
                 || age.is_negative()

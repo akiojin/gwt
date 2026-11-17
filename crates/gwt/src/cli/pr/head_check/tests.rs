@@ -218,7 +218,7 @@ impl RemoteFixture {
         if let Some(base) = base {
             let mut inventory = gwt_git::pr_status::parse_pr_inventory_json(
                 &format!("[{value}]"),
-                chrono::Utc::now(),
+                chrono::Utc::now().into(),
             )
             .unwrap()
             .remove(0);

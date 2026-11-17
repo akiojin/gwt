@@ -23,6 +23,7 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
+use gwt_core::timestamp::UtcTimestamp;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
@@ -35,7 +36,6 @@ use crate::client::{
     RepositoryIssue, RepositoryIssueKind, RepositoryRelease, ResolutionDeadline, SpecListFilter,
     SpecSummary, UpdatedAt,
 };
-pub use crate::timestamp::Rfc3339Timestamp;
 
 /// HTTP method.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -516,7 +516,7 @@ pub struct DiscussionComment {
     pub id: String,
     pub body: String,
     pub author: String,
-    pub created_at: Rfc3339Timestamp,
+    pub created_at: UtcTimestamp,
 }
 
 /// One page of top-level comments from a GitHub Discussion.
@@ -1446,7 +1446,7 @@ impl<T: HttpTransport> HttpIssueClient<T> {
                     return Err(invalid("comment.id is empty"));
                 }
                 let created_at = required_string(node, "createdAt", operation)?;
-                let created_at = Rfc3339Timestamp::parse(&created_at)
+                let created_at = UtcTimestamp::parse_rfc3339(&created_at)
                     .ok_or_else(|| invalid("comment.createdAt invalid"))?;
                 Ok(DiscussionComment {
                     id,
@@ -3099,7 +3099,7 @@ fn parse_owner_comment(value: &Value, operation: &str) -> Result<RepositoryComme
         .and_then(Value::as_str)
         .ok_or_else(|| parse("comment updated_at missing"))?
         .to_string();
-    if Rfc3339Timestamp::parse(&updated_at).is_none() {
+    if UtcTimestamp::parse_rfc3339(&updated_at).is_none() {
         return Err(parse("comment updated_at is not RFC3339"));
     }
     let author = value
@@ -3525,7 +3525,7 @@ impl<T: HttpTransport> IssueClient for HttpIssueClient<T> {
                     .get("created_at")
                     .and_then(Value::as_str)
                     .ok_or_else(malformed)?;
-                let at = Rfc3339Timestamp::parse(created_at).ok_or_else(malformed)?;
+                let at = UtcTimestamp::parse_rfc3339(created_at).ok_or_else(malformed)?;
                 let key = (at, id);
                 if latest
                     .as_ref()
@@ -4343,7 +4343,7 @@ mod check_status_tests {
 
     use super::{
         check_status, classify_graphql_errors, HttpError, HttpIssueClient, HttpRequest,
-        HttpResponse, HttpTransport, ResolutionDeadline, Rfc3339Timestamp,
+        HttpResponse, HttpTransport, ResolutionDeadline, UtcTimestamp,
     };
     use crate::client::{ApiError, IssueClient, SpecListFilter};
 
@@ -4636,7 +4636,7 @@ mod check_status_tests {
                 id: "C_1".into(),
                 body: "message".into(),
                 author: "owner".into(),
-                created_at: Rfc3339Timestamp::parse("2026-10-16T00:00:00Z").unwrap(),
+                created_at: UtcTimestamp::parse_rfc3339("2026-10-16T00:00:00Z").unwrap(),
             }]
         );
         assert_eq!(page.cursor.as_deref(), Some("cursor"));
