@@ -1384,9 +1384,12 @@ fs.appendFileSync(rollout, JSON.stringify({type:'assistant',sessionId:native,cwd
       expect((await fixture.launches()).length).toBe(launchesBeforePm);
       afterPm = await cursor(page);
       await page.locator("#op-pm-entry").click();
+      const runningPm = await pmStatus(page, firstProjectKey, afterPm, { is_running: true,
+        running_member_id: pmMemberId, running_model: "gpt-6.1-sol", running_reasoning: "low" });
       await expect.poll(async () => (await fixture.launches()).length).toBe(launchesBeforePm + 1);
       const pmLaunch = (await fixture.launches())[launchesBeforePm];
       expect(pmLaunch.gwt_session_id).toBeTruthy();
+      expect(pmLaunch.gwt_session_id).toBe(runningPm.running_session_id);
       expect(pmLaunch.gwt_session_id).not.toBe(launch.gwt_session_id);
       expect(pmLaunch.provider_session_id).toMatch(/^[0-9a-f-]{36}$/i);
       expect(pmLaunch.provider_session_id).not.toBe(launch.provider_session_id);

@@ -1013,7 +1013,12 @@ test("Supported Agents sends maintenance requests and exposes failures and autom
   assert.equal(panel.querySelector('[aria-label="Automatically update agents"]').checked, true);
   handlers.applySupportedAgentMaintenance({ agent_id: "opencode", pending: false, success: false, message: "Registry unavailable. Check your connection and retry." });
   assert.match(panel.querySelector('[role="alert"]').textContent, /Check your connection and retry/);
-  assert.equal(panel.querySelector('[role="alert"]').title, "Registry unavailable. Check your connection and retry.");
+  const result = panel.querySelector('[data-agent-maintenance-id="opencode"]');
+  assert.ok(result, "maintenance guidance needs an agent-labelled result");
+  assert.equal(result.parentNode, panel, "long recovery instructions must stay outside clipped table cells");
+  assert.match(result.textContent, /^OpenCode: Registry unavailable/);
+  assert.equal(result.title, result.textContent);
+  assert.match(componentsCss, /\.settings-agent-maintenance-result\s*\{[^}]*overflow-wrap:\s*anywhere/s);
   assert.equal(panel.querySelector('[aria-label="Install OpenCode"]').disabled, false);
   agents[1].installed_version = "grok 2.0.0";
   agents[1].update_available = false;

@@ -178,6 +178,11 @@ Agents に案内を表示し、**Retry model catalog** で保存値や入力途�
 
 **Settings > Supported Agents** では、全対応エージェントの導入状態と
 インストール済みバージョンを確認し、未導入の CLI をインストールできます。
+導入完了時には、検出した CLI の配置先をシェルの PATH に追加する手順を表示します。
+gwt の Installed 表示は、端末側の PATH 設定を確認したことを意味しません。
+`claude` などが見つからない場合は、表示された bash/zsh・fish・Windows 向けの手順で
+設定し、新しい端末でコマンドに `--version` を付けて確認してください。
+gwt がシェルの起動設定ファイルを書き換えることはありません。
 公式配布元の情報で新しいバージョンを確認できた場合は更新操作が表示されます。
 Codex・Grok・OpenCode・OpenClaw は npm、Antigravity は platform manifest を照会します。
 Claude native と Hermes は実効更新チャネルを検証できないため、理由を表示し、
@@ -1543,6 +1548,10 @@ GitHub の auto-merge を有効にします。監査記録には PR 番号・SHA
 head が変わった場合は再レビューと新しい許可が必要です。この経路が利用できない、または
 委任が無い場合は人によるマージが必要です。`pr.list` はマージ提案を繰り返す代わりに、
 外部 fork のため自動化の対象外になり得る理由と代替経路を示します。
+
+auto-merge workflow が起動に失敗した場合、同じ operation で同一リポジトリの Ready PR も
+回復できます。PM には対象 PR 番号と head SHA に限定した許可、成功した CI、既存の review・
+visual check が引き続き必要です。GitHub の branch protection と必須チェックは維持します。
 
 明示的に許可した PR の close、ビルドキャッシュ削除、provider 承認への応答には、PM が
 `pm.operation.execute` を使います。対象は既存の `pr.close` / `worktree.gc_build_artifacts` /

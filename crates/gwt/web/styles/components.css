@@ -4872,6 +4872,11 @@ button.workspace-board-ref:focus-visible {
   color: var(--color-text-muted);
 }
 
+:root[data-theme] .settings-agent-maintenance-result {
+  margin-bottom: var(--space-3);
+  overflow-wrap: anywhere;
+}
+
 :root[data-theme] .settings-status[data-kind="success"] {
   color: color-mix(in oklab, var(--color-state-positive) 80%, var(--color-text));
 }
