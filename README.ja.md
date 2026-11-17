@@ -500,6 +500,31 @@ gwtd <<'JSON'
 JSON
 ```
 
+応答は `ok`、`operation`、`exit_code` と従来の人間向け `output` 文字列を維持します。
+JSON object/array のレポートは `data` にも直接入ります。対象には `execution.status`、
+`board.show`、`pr.list`、PM の status operation などが含まれます。`issue.view` は Issue の
+各フィールド、`pr.view` / `pr.current` は PR snapshot を `data` に返します。
+PR が無い `pr.current` は `data:null` です。`pr.checks` と verify 系の既存 data 契約も
+維持します。テキストのみの operation は `data` を省略する場合があります。
+新規の呼び出し側では `output` の解析より `data` を優先してください。
+
+失敗応答には `error_category` と安定した `error_code` を付与します。カテゴリは
+`not_found`（例: `NOT_FOUND_ISSUE`）、`conflict`（`CONFLICT_CONCURRENT_WRITE`）、
+`permission`（`PERMISSION_DENIED`）、`input`（`INPUT_VALIDATION_FAILED`）、
+`internal`（`INTERNAL_INDEX_INTEGRITY`）、`external`（`EXTERNAL_NETWORK`）、
+`operation`（分類情報の無い非ゼロ結果: `OPERATION_FAILED`）です。
+`ISSUE_CACHE_CONFLICT` など既存の固有コードは維持します。型情報で分類し、型情報が
+失われた従来の失敗はメッセージの文言から推測せず fallback を使います。
+`refusal` と復旧フィールドの意味は変わりません。不正 envelope も終了コード 2 の
+JSON 応答を返し、`error_category:"input"`、`INPUT_*` コード、`operation:null` を
+含みます。入力を伏せる intake 診断では、呼び出し側の秘密情報を出力しません。
+
+入れ子の operation も `data` 内では JSON object です。応答を一度デコードすれば、
+`pm.operation.execute` の監査結果は `data`、内側の envelope は `data.after`、
+内側の JSON レポートは `data.after.data` で直接読めます。互換性のため従来の入れ子の
+`output` 文字列も維持します。error code は失敗の分類であり、再試行の許可や
+リモート更新が確定したことの証明ではありません。
+
 [operation catalog](crates/gwt/src/cli/operation_catalog.rs) の `OPERATIONS` は、
 v9.167.1 時点で **36 系統・230 件の canonical operation** と **40 件の alias**
 （受理する表記は合計 270 件）を定義します。系統は最初のドットより前の名前で数え、

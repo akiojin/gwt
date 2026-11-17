@@ -87,6 +87,15 @@ pub(super) fn run<E: CliEnv>(
     cmd: IssueCommand,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
+    run_with_data(env, cmd, out, &mut None)
+}
+
+pub(super) fn run_with_data<E: CliEnv>(
+    env: &mut E,
+    cmd: IssueCommand,
+    out: &mut String,
+    data: &mut Option<serde_json::Value>,
+) -> Result<i32, SpecOpsError> {
     if matches!(
         cmd,
         IssueCommand::SpecReadAll { .. }
@@ -115,6 +124,16 @@ pub(super) fn run<E: CliEnv>(
         IssueCommand::View { number, refresh } => {
             let entry = load_or_refresh_issue(env, IssueNumber(number), refresh)?;
             render_issue(out, &entry.snapshot);
+            let snapshot = &entry.snapshot;
+            *data = Some(serde_json::json!({
+                "number": snapshot.number.0,
+                "author_login": snapshot.author_login,
+                "title": snapshot.title,
+                "body": snapshot.body,
+                "labels": snapshot.labels,
+                "state": match snapshot.state { IssueState::Open => "open", IssueState::Closed => "closed" },
+                "updated_at": snapshot.updated_at.0,
+            }));
             0
         }
         IssueCommand::Comments { number, refresh } => {
