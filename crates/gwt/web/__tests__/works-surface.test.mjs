@@ -804,18 +804,35 @@ test("Works ordinary surface departure keeps unavailable native ownership readon
   assert.equal(f.runtime.readOnly, false);
   assert.ok(f.previous.get("one") === record, "fresh return keeps the surviving entry association");
   f.api.enter(); f.surface.showList(); f.api.leave();
+  const bindingCount = f.events.length;
   f.activity.clearAgentActivity();
-  assert.ok(f.runtime.terminalContainer === root, "proof loss also reclaims a normally returned list native");
+  // Issue #7558: a transport replacement clears activity while the window shows this terminal.
+  assert.ok(f.runtime.terminalContainer === f.original, "proof loss leaves a returned native in its still-listed window");
+  assert.equal(f.runtime.readOnly, false);
+  assert.equal(f.events.length, bindingCount, "proof loss has no binding effects on the window host");
+  f.dispose();
+});
+
+// Issue #7558 narrows proof-loss reclaim only for a still-listed same Session.
+test("Works reclaims a returned native readonly once its window leaves the catalog", async () => {
+  const f = await nativeLifetimeFixture();
+  const root = f.runtime.terminalContainer;
+  f.api.leave(); f.activity.clearAgentActivity();
+  assert.ok(f.runtime.terminalContainer === f.original && f.runtime.readOnly === false);
+  f.api.workspace(projectCatalog([]).appState);
+  assert.ok(f.runtime.terminalContainer === root, "catalog loss reclaims the returned native");
   assert.equal(f.runtime.readOnly, true);
-  const bindingCount = f.events.filter(event => event === "readonly").length;
-  f.activity.clearAgentActivity();
-  assert.equal(f.events.filter(event => event === "readonly").length, bindingCount, "repeated loss has no binding effects");
-  f.activity.applyAgentActivitySnapshot(activitySnapshot([live[0]], 2));
-  f.api.enter(); f.api.leave();
-  assert.ok(f.runtime.terminalContainer === f.original);
-  f.activity.clearAgentActivity();
-  assert.ok(f.runtime.terminalContainer === root, "an earlier revoked flag cannot suppress reclaim after another fresh list return");
-  assert.equal(f.runtime.readOnly, true);
+  assert.equal(f.runtime.terminal.disposed, false);
+  f.dispose();
+});
+
+test("Works fences a returned native when its window is rebound to another Session", async () => {
+  const f = await nativeLifetimeFixture();
+  f.api.leave(); f.activity.clearAgentActivity();
+  assert.ok(f.runtime.terminalContainer === f.original && f.runtime.readOnly === false);
+  f.api.workspace(projectCatalog([{ ...windows[0], session_id: "new-session" }]).appState);
+  assert.equal(f.runtime.terminal.disposed, true, "the old Session's native cannot keep input");
+  assert.ok(f.terminalMap.get("one") !== f.runtime);
   f.dispose();
 });
 
