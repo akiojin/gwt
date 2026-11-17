@@ -6948,6 +6948,17 @@ thread_local! {
 }
 
 #[cfg(test)]
+thread_local! {
+    static PREFS_LOCK_HELD_MS: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
+}
+
+/// The `held_ms` of this thread's latest "Issues prefs lock released" record.
+#[cfg(test)]
+pub(crate) fn prefs_lock_held_ms_for_test() -> f64 {
+    PREFS_LOCK_HELD_MS.get()
+}
+
+#[cfg(test)]
 pub(crate) fn prefs_io_counts_for_test() -> (usize, usize) {
     PREFS_IO_COUNTS.get()
 }
@@ -7918,13 +7929,16 @@ fn with_issue_monitor_prefs_lock_observed<T>(
     let result = crate::agent_registry::RegistryWrite::acquire(path)
         .and_then(|mut registry| operation(&mut registry));
     let unlock_result = lock.unlock();
+    let held_ms = held.elapsed().as_secs_f64() * 1000.0;
+    #[cfg(test)]
+    PREFS_LOCK_HELD_MS.set(held_ms);
     tracing::info!(
         target: "gwt.issue_monitor.prefs",
         caller = %caller,
         path = %path.display(),
         pid = std::process::id(),
         wait_ms,
-        held_ms = held.elapsed().as_secs_f64() * 1000.0,
+        held_ms,
         success = result.is_ok() && unlock_result.is_ok(),
         "Issues prefs lock released"
     );
