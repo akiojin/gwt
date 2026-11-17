@@ -3046,15 +3046,22 @@ request.catch(() => {});
       // capacity sample is still warming attempts the launch and the shared registry
       // refuses it; a Host with a settled sample counts the other project and waits.
       await sendLiveGwtEvent(secondPage, { kind: "issue_monitor_queue_push", issue_numbers: [45] });
+      const withheld = async () => {
+        const second = await status(fixture.second.project);
+        const refusals = await capacityRefusals(45);
+        const counted = second.agent_capacity.other_live_agents === 1 && second.launch_capacity.admission_saturated === true;
+        return { second, refusals, protectedBy: refusals.length > 0 ? "refused" : counted ? "counted" : null };
+      };
+      await expect.poll(async () => (await withheld()).protectedBy, { timeout: 180_000,
+        message: "the shared limit refuses the second project's launch or makes it count the original owner" }).not.toBeNull();
+      // The decision must hold across further scans, not only at one instant.
       await scans(secondPreferences, "second project while the slot is occupied");
-      const held = await status(fixture.second.project);
-      const refusedSecond = await capacityRefusals(45);
+      const { second: held, refusals: refusedSecond, protectedBy } = await withheld();
       await info.attach("issue-7451-second-project-held", { body: JSON.stringify({
-        refusals: refusedSecond, agent_capacity: held.agent_capacity, launch_capacity: held.launch_capacity, inbox: held.inbox,
+        protected_by: protectedBy, refusals: refusedSecond, agent_capacity: held.agent_capacity,
+        launch_capacity: held.launch_capacity, inbox: held.inbox,
       }, null, 2), contentType: "application/json" });
-      expect(held.agent_capacity.other_live_agents, "the second project sees the original owner's live worker").toBe(1);
-      expect(refusedSecond.length > 0 || held.launch_capacity.admission_saturated,
-        "the shared limit either refused the launch or withheld it").toBe(true);
+      expect(protectedBy).not.toBeNull();
       expect(held.inbox.find((row: any) => row.issue_number === 45)?.state).not.toBe("launched");
       expect(await fixture.launchIssues()).toEqual([43]);
       expect(exited(source.pid)).toBe(false);
@@ -3100,6 +3107,10 @@ request.catch(() => {});
         number: 43, reason: "Issue #7451 resume the original owner" })).output);
       expect(requeued.status).toBe("requeued");
       await expect.poll(hold, { timeout: 30_000 }).toBeUndefined();
+      await expect.poll(async () => {
+        const first = await status();
+        return first.agent_capacity.other_live_agents === 1 && first.launch_capacity.admission_saturated === true;
+      }, { timeout: 180_000, message: "the original project counts the second project's live worker" }).toBe(true);
       await scans(preferences, "original project while the slot is occupied");
       const waiting = await status();
       expect(waiting.agent_capacity.other_live_agents, "the original project counts the other project's live worker").toBe(1);
@@ -3125,7 +3136,8 @@ request.catch(() => {});
       await info.attach("issue-7451-shared-pool", { body: JSON.stringify({
         platform: process.platform, theme, first_project: firstKey, second_project: fixture.second.key,
         machine_policy: await machine("agent-settings.json"), source, stopped, other, requeued, resumed,
-        refused_second_project: refusedSecond, second_project_waiting: held.launch_capacity,
+        second_project_protected_by: protectedBy, refused_second_project: refusedSecond,
+        second_project_waiting: held.launch_capacity,
         original_owner_waiting: waiting.launch_capacity,
         launches: await fixture.launches(),
       }, null, 2), contentType: "application/json" });
