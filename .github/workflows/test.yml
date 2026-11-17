@@ -1073,10 +1073,9 @@ jobs:
         if: ${{ needs.source-sync.outputs.quit_subscriber_changed != 'false' }}
         shell: bash
         run: |
-          filter=daemon_subscriber::project_owner_tests::explicit_quit_retries_an_endpoint_published_during_delivery
           for (( run = 1; run <= 50; run++ )); do
             echo "Pending-endpoint Quit run $run/50"
-            node scripts/ci-windows-tests.mjs run-lib gwt lib gwt "$filter" -- --exact --test-threads=1 |
+            node scripts/ci-windows-tests.mjs run-lib gwt lib gwt daemon_subscriber::project_owner_tests::explicit_quit_retries_an_endpoint_published_during_delivery -- --exact --test-threads=1 |
               tee "$RUNNER_TEMP/pending-endpoint-quit.log"
             grep -Fq 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/pending-endpoint-quit.log"
           done
