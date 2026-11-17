@@ -16209,7 +16209,7 @@ mod drop_tests {
         .unwrap();
         // Source-level writer reconciliation: this parser-fed report is not
         // evidence of a native startup-query ordering or counterexample.
-        let report = pane.process_owner_output(b"\x1b[6n").cursor_reports[0];
+        let report = pane.process_owner_output(b"\x1b[6n").replies[0];
         let pty = pane.shared_pty();
         let _cleanup = TestPtyGuard(pty.clone());
         let owner = OwnerState::start(
@@ -16243,7 +16243,7 @@ mod drop_tests {
         let result = completion.await.unwrap();
         // Exercise the physical generation fence independently of the expired
         // operation's logical current flag; no runtime authority is restored.
-        let response = pty.write_cursor_position_report(report, &AtomicBool::new(true));
+        let response = pty.write_terminal_reply(report, &AtomicBool::new(true));
         owner.shutdown().await;
         assert!(result.is_err_and(|error| error.contains("cancelled before installation")));
         assert!(pty.tree_exit_confirmed());

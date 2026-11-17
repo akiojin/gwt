@@ -55,6 +55,105 @@ test("Issue #7492 PM execution log starts when its delayed layout becomes availa
   expect(errors, "console and page errors").toEqual([]);
 });
 
+// Returning to the page replaces the transport, which clears agent activity.
+// A PM terminal that Works showed earlier must stay in the PM window.
+test("Issue #7558 PM execution log stays in its window when the transport is replaced after a Works visit", async ({ page }, info) => {
+  const errors: string[] = [];
+  const theme = info.project.name.includes("light") ? "light" : "dark";
+  page.on("pageerror", error => errors.push(error.message));
+  page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+  await page.addInitScript(value => localStorage.setItem("gwt:ui:theme", value), theme);
+  if (!liveBase) await installEmbeddedRoutes(page);
+  await installPmBackend(page);
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await page.goto(appUrl);
+  const activity = () => page.evaluate(() => (window as any).__pmTerminalFixture.emit({ kind: "active_work_projection", projection: {
+    id: "pm-live", active_works: [], local_agent_activity: {
+      project_key: location.pathname.split("/").at(-1), host_id: "pm-fixture", observed_at: new Date().toISOString(),
+      agents: [{ window_id: "pm-terminal", session_id: "pm-terminal-session", runtime_incarnation: 1, is_pm: true, issue_number: null }],
+    } } }));
+  await page.locator("#op-pm-entry").click();
+  const pm = page.locator(`.workspace-window[data-id="${PM}"]`);
+  const log = pm.locator(".pm-conversation-log .xterm-rows");
+  await pm.getByRole("button", { name: "Execution log", exact: true }).click();
+  await emit(page, "terminal_snapshot", "\x1b[H\x1b[2JPM initial snapshot");
+  await activity();
+  await expect(log).toContainText("PM initial snapshot");
+  await page.locator('[data-surface="works"]').click();
+  await expect(page.locator(`.work-row[data-window-id="${PM}"]`)).toBeVisible();
+  await page.locator("#op-pm-entry").click();
+  await expect(log).toContainText("PM initial snapshot");
+
+  for (const flowing of [false, true]) {
+    await page.evaluate(tail => {
+      const fixture = (window as any).__pmTerminalFixture;
+      fixture.recoveryTail = tail; fixture.reconnect();
+    }, flowing ? "\r\nPM output during return" : "");
+    await expect(log, "the log is shown without another view change").toContainText(
+      flowing ? "Reconnected statusPM output during return" : "Reconnected status");
+    await activity();
+    await emit(page, "terminal_output", `\r\nPM after return ${flowing}`);
+    await expect(log).toContainText(`PM after return ${flowing}`);
+    expect(await metrics(page)).toMatchObject({ isReady: true, readOnly: false, snapshotPending: false });
+  }
+  await expect(pm.getByRole("button", { name: "Execution log", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  await info.attach(`transport-replaced-${theme}`, { body: await pm.screenshot(), contentType: "image/png" });
+  expect(errors, "console and page errors").toEqual([]);
+});
+
+// The reported trigger itself: a real hidden page returning to the foreground
+// replaces the transport through the trusted visibilitychange.
+test("Issue #7558 PM execution log survives a native page hide and return after a Works visit", async ({ page, playwright }, info) => {
+  test.setTimeout(60_000);
+  test.skip(!liveBase, "Requires the isolated browser-check checkout server");
+  await page.goto("about:blank");
+  const theme = info.project.name.includes("light") ? "light" : "dark";
+  const state = () => ({ ...(window as any).__gwtTerminalTestApi.metrics("pm-terminal"),
+    connections: (window as any).__pmTerminalFixture.connections(), theme: document.documentElement.dataset.theme,
+    log: document.querySelector('.workspace-window[data-id="pm-terminal"] .pm-conversation-log .xterm-rows')?.textContent ?? null });
+  const activity = () => (window as any).__pmTerminalFixture.emit({ kind: "active_work_projection", projection: {
+    id: "pm-live", active_works: [], local_agent_activity: {
+      project_key: location.pathname.split("/").at(-1), host_id: "pm-fixture", observed_at: new Date().toISOString(),
+      agents: [{ window_id: "pm-terminal", session_id: "pm-terminal-session", runtime_incarnation: 1, is_pm: true, issue_number: null }],
+    } } });
+  const output = (bytes: string) => (window as any).__pmTerminalFixture.emit({ kind: "terminal_output", id: "pm-terminal", data_base64: btoa(bytes) });
+  const click = (selector: string) => (document.querySelector(selector) as HTMLElement).click();
+  let connectionsBefore = 0;
+  const hidden = await withNativeHiddenPage(playwright.chromium, info, async nativePage => {
+    await nativePage.addInitScript(value => localStorage.setItem("gwt:ui:theme", value), theme);
+    await installPmBackend(nativePage);
+    await nativePage.goto(appUrl);
+    await expect.poll(() => nativePage.evaluate(() => !!(window as any).__pmTerminalFixture && !!document.querySelector("#op-pm-entry"))).toBe(true);
+    await nativePage.evaluate(click, "#op-pm-entry");
+    const openLog = () => {
+      const button = [...document.querySelectorAll('.workspace-window[data-id="pm-terminal"] button')].find(button => button.textContent === "Execution log") as HTMLElement | undefined;
+      button?.click();
+      return !!button;
+    };
+    await expect.poll(() => nativePage.evaluate(openLog)).toBe(true);
+    await nativePage.evaluate(() => (window as any).__pmTerminalFixture.emit({ kind: "terminal_snapshot", id: "pm-terminal", data_base64: btoa("\x1b[H\x1b[2JPM initial snapshot") }));
+    await nativePage.evaluate(activity);
+    await expect.poll(async () => (await nativePage.evaluate(state)).log).toContain("PM initial snapshot");
+    await nativePage.evaluate(click, '[data-surface="works"]');
+    await expect.poll(() => nativePage.evaluate(() => !!document.querySelector('.work-row[data-window-id="pm-terminal"]'))).toBe(true);
+    await nativePage.evaluate(click, "#op-pm-entry");
+    await expect.poll(async () => (await nativePage.evaluate(state)).log).toContain("PM initial snapshot");
+    // Output is still flowing when the page returns.
+    await nativePage.evaluate(() => { (window as any).__pmTerminalFixture.recoveryTail = "\r\nPM output during return"; });
+    connectionsBefore = (await nativePage.evaluate(state)).connections;
+  }, () => ({ hidden: document.hidden, connections: (window as any).__pmTerminalFixture.connections() }), undefined, async nativePage => {
+    await expect.poll(async () => (await nativePage.evaluate(state)).log, { message: "the log is shown without another view change" })
+      .toContain("Reconnected statusPM output during return");
+    await nativePage.evaluate(activity);
+    await nativePage.evaluate(output, "\r\nPM after return");
+    await expect.poll(() => nativePage.evaluate(state)).toMatchObject({ isReady: true, readOnly: false, snapshotPending: false, theme,
+      log: expect.stringContaining("PM after return") });
+    expect((await nativePage.evaluate(state)).connections, "the return replaced the transport").toBeGreaterThan(connectionsBefore);
+  });
+  expect(hidden).toEqual({ hidden: true, connections: connectionsBefore });
+});
+
 // Issue #7030 AC-5: Codex can downgrade an unadvertised tier without exiting.
 // Preserve its actual explanation through the same terminal protocol as PTY output.
 test("Issue #7030 Ultrafast downgrade warning remains visible", async ({ page }, info) => {

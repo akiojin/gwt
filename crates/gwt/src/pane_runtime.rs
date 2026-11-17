@@ -13,7 +13,7 @@ use std::{
     time::Instant,
 };
 
-use gwt_terminal::{Pane, PaneStatus};
+use gwt_terminal::{pane::OWNER_QUERY_PREFIX_MAX_BYTES, pty::TerminalReply, Pane, PaneStatus};
 
 use crate::WindowProcessStatus;
 
@@ -72,9 +72,9 @@ pub fn spawn_output_thread(
         };
 
         let mut reader = reader;
-        // A read can release the three withheld bytes of a split CSI 6n
-        // candidate. Keep the resulting public chunk within the existing bound.
-        let mut buffer = [0u8; OUTPUT_BATCH_MAX_BYTES - 3];
+        // A read can release a withheld query prefix. Leave room for it in
+        // the public chunk.
+        let mut buffer = [0u8; OUTPUT_BATCH_MAX_BYTES - OWNER_QUERY_PREFIX_MAX_BYTES];
         loop {
             match reader.read(&mut buffer) {
                 Ok(0) => {
@@ -113,7 +113,7 @@ pub fn spawn_output_thread(
                         let parse_started = Instant::now();
                         let output = pane.process_owner_output(&chunk);
                         chunk = output.data;
-                        responses = Some((pane.shared_pty(), output.cursor_reports));
+                        responses = Some((pane.shared_pty(), output.replies));
                         seq = pane.output_seq();
                         screen = Some(pane.screen().contents());
                         screen_ansi = Some(pane.screen().contents_formatted());
@@ -134,22 +134,26 @@ pub fn spawn_output_thread(
                             );
                         }
                     }
-                    // The parser captured each cursor at the query's stream
-                    // position. Never hold Pane while waiting for its writer.
-                    if let Some((pty, reports)) = responses {
-                        if !reports.is_empty() {
+                    // Keep replies in stream order and never hold the pane
+                    // lock while waiting for its writer.
+                    if let Some((pty, replies)) = responses {
+                        let report_count = replies
+                            .iter()
+                            .filter(|reply| matches!(reply, TerminalReply::CursorPosition(_)))
+                            .count();
+                        if report_count != 0 {
                             tracing::debug!(
                                 target: "gwt_terminal_protocol",
                                 stage = "owner_cursor_response",
                                 window_id = id.as_str(),
                                 incarnation,
                                 seq,
-                                report_count = reports.len(),
+                                report_count,
                                 "answering terminal cursor query"
                             );
                         }
-                        for report in reports {
-                            if let Err(error) = pty.write_cursor_position_report(report, &current) {
+                        for reply in replies {
+                            if let Err(error) = pty.write_terminal_reply(reply, &current) {
                                 if current.load(Ordering::Acquire) {
                                     sink(PaneRuntimeEvent::Status {
                                         id,
