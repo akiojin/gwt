@@ -475,6 +475,10 @@ Cancel は画面を開いたままにします。他のプロジェクトには�
 gwt は PTY をドレインしてから graceful shutdown を実行します。tray 常駐プロセスは
 1 OS-login ユーザーにつき 1 つだけで、二重起動した `gwt` は既存 URL を出して終了します。
 
+### gwtd operations and daemon
+
+この節と[英語版](README.md#gwtd-operations-and-daemon)を operation、daemon の使い方、
+互換性に関する利用者向け説明の正本とします。
 `gwtd` operation は stdin JSON envelope で処理され、gwt のメインウィンドウは起動しません。
 承認が必要な operation では OS のネイティブダイアログが表示されることがあります。
 
@@ -495,6 +499,70 @@ gwtd <<'JSON'
 {"schema_version":1,"operation":"daemon.status","params":{}}
 JSON
 ```
+
+[operation catalog](crates/gwt/src/cli/operation_catalog.rs) の `OPERATIONS` は、
+v9.167.1 時点で **36 系統・230 件の canonical operation** と **40 件の alias**
+（受理する表記は合計 270 件）を定義します。系統は最初のドットより前の名前で数え、
+単独の `search` も 1 系統です。canonical 名は小文字で、階層をドット、同一階層の複数語を
+アンダースコアで区切ります（例: `workspace.project_scan`）。alias は明示登録された別名
+だけを受理します。例は `actions.job_logs` の `actions.job-logs`、`pane.close` の
+`pane.stop` です。ハイフンとアンダースコアの任意置換はできません。
+新規スクリプトや案内には canonical 名を使います。catalog 内の
+`catalog_covers_every_dispatched_operation` テストが
+[JSON dispatcher](crates/gwt/src/cli/json_envelope.rs) と受理する表記の一致を検証します。
+件数を更新するときは source checkout で次を実行して再集計します。
+
+```bash
+python3 - <<'PY'
+from pathlib import Path
+import re
+catalog = Path('crates/gwt/src/cli/operation_catalog.rs').read_text()
+names = re.findall(r'name: "([^"]+)"', catalog)
+aliases = re.findall(r'aliases: &\[([^\]]*)\]', catalog)
+alias_count = sum(len(re.findall(r'"[^"]+"', group)) for group in aliases)
+print(len(names), len({name.split('.')[0] for name in names}), alias_count)
+PY
+```
+
+ヘルプには `gwtd --help` / `gwtd --help daemon` を使います。
+通常の operation を argv で渡す `gwtd daemon start` 等は拒否されるため、
+`daemon.start` を envelope で送ります。managed hook は専用 argv transport の
+`gwtd hook event <Event>` / `gwtd hook provider-event <provider> <native-event>` を維持します。
+
+runtime daemon は macOS/Linux の Unix domain socket と Windows の named pipe に対応します。
+GUI はプロジェクト daemon を監督し、必要に応じて起動・置換するため、通常の GUI 利用で
+手動の `daemon.start` は不要です。standalone daemon を起動する場合、次の操作は呼び出した
+プロセスでサーバーを動かし、終了まで接続したままになります（利用可能な daemon が既に
+あればその旨を返して終了します）。
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"daemon.start","params":{}}
+JSON
+```
+
+endpoint metadata は [`RuntimeScope::endpoint_path`](crates/gwt-core/src/daemon.rs) が定義する
+`~/.gwt/projects/<repo-hash>/runtime/daemon/<worktree-hash>.json` に保存します。
+endpoint の `bind` は Unix socket または Windows pipe を指します。長い Unix socket path は
+短縮される場合があるため、JSON ファイルと同じ場所とは限りません。live endpoint metadata を
+編集・削除しないでください。起動時には停止済み owner の stale descriptor を掃除できますが、
+互換性のない client が live owner の descriptor を削除することはありません。
+
+`gwt` と `gwtd` は同じ配布版を使ってください。互換性は次の境界ごとに判定し、
+全体を通じた version negotiation は行いません。
+
+| 境界 | 受理する版数と挙動 |
+| --- | --- |
+| stdin JSON envelope | `schema_version:1` のみ（省略時も 1）。別 schema 版数と未知の operation は拒否します。 |
+| Daemon IPC | 現在の `DAEMON_PROTOCOL_VERSION` は 4。endpoint と handshake の protocol version、および scope と認証 token の一致が必要です。 |
+| Project `OwnerCommand` transport | client は製品版数 `daemon_version` が一致する endpoint だけを再利用します（前後の空白・先頭の `v` は正規化）。`OwnerRequest` 自体に独立した版数交渉フィールドはありません。 |
+
+GUI supervisor は起動・復旧時に別の製品版数の daemon を認証した上で置き換えます。
+`daemon.status` / `daemon.subscribe` は IPC 契約に従って観測・接続する操作であり、
+その製品版数に基づく置換は行いません。判定の実装は
+[daemon contract](crates/gwt-core/src/daemon.rs)、
+[supervisor](crates/gwt/src/daemon_supervisor.rs)、
+[project runtime client](crates/gwt/src/project_runtime/client.rs) にあります。
 
 `workspace.project_scan` は host endpoint の探索について、cache の利用、列挙した
 件数、経過ミリ秒を返します。消失した root と停止済み host は repository identity の
