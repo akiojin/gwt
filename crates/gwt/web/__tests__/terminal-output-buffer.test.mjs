@@ -4,6 +4,8 @@ import { readFileSync } from "node:fs";
 import * as terminalOutput from "../terminal-output-buffer.js";
 
 import {
+  DEFAULT_CATCH_UP_BUDGET_MS,
+  DEFAULT_CATCH_UP_THRESHOLD_BYTES,
   DEFAULT_MAX_CHARS_PER_FLUSH,
   DEFAULT_MAX_TOTAL_CHARS_PER_FLUSH,
   DEFAULT_MAX_WINDOWS_PER_FLUSH,
@@ -1022,4 +1024,154 @@ test("defaults expose bounded per-frame budgets", () => {
   assert.equal(DEFAULT_MAX_CHARS_PER_FLUSH, 65536);
   assert.equal(DEFAULT_MAX_WINDOWS_PER_FLUSH, 8);
   assert.equal(DEFAULT_MAX_TOTAL_CHARS_PER_FLUSH, DEFAULT_MAX_CHARS_PER_FLUSH);
+});
+
+test("catch-up defaults stay below the retention cap so catch-up can engage", () => {
+  assert.equal(DEFAULT_CATCH_UP_THRESHOLD_BYTES, 256 * 1024);
+  assert.equal(DEFAULT_CATCH_UP_BUDGET_MS, 8);
+  assert.ok(
+    DEFAULT_CATCH_UP_THRESHOLD_BYTES < 512 * 1024,
+    "catch-up must trigger before the per-window retention limit fails the window",
+  );
+});
+
+// Issue #7553 fixture: a 320KB backlog in 8KB chunks — what a busy agent
+// window accumulates while hidden, short of the 512KB retention cap.
+function enqueueBacklogFixture(batcher, windowId, chunks = 40) {
+  const chunk = "x".repeat(8192);
+  for (let i = 0; i < chunks; i += 1) {
+    assert.equal(batcher.enqueue(windowId, chunk), true);
+  }
+  return chunk.repeat(chunks);
+}
+
+test("large backlogs drain one capped slice per frame when catch-up is disabled", () => {
+  const scheduler = manualScheduler();
+  const writes = [];
+  let clock = 0;
+  const batcher = createTerminalOutputBatcher({
+    schedule: scheduler.schedule,
+    catchUpThresholdBytes: Number.MAX_SAFE_INTEGER,
+    now: () => clock,
+    write: (windowId, text, done) => {
+      writes.push(text);
+      clock += 1;
+      done();
+    },
+  });
+  const expected = enqueueBacklogFixture(batcher, "agent-1");
+
+  let frames = 0;
+  while (scheduler.pendingCount() > 0 && frames < 100) {
+    scheduler.runOnce();
+    frames += 1;
+  }
+
+  assert.equal(frames, 5, "320KB at 64KB per frame needs five scheduled frames");
+  assert.equal(writes.length, 5);
+  assert.equal(writes.join(""), expected);
+  assert.equal(batcher.pendingCount("agent-1"), 0);
+});
+
+test("catch-up drain empties a large backlog inside one scheduled flush", () => {
+  const scheduler = manualScheduler();
+  const writes = [];
+  let clock = 0;
+  const batcher = createTerminalOutputBatcher({
+    schedule: scheduler.schedule,
+    now: () => clock,
+    write: (windowId, text, done) => {
+      writes.push(text);
+      clock += 1;
+      done();
+    },
+  });
+  const expected = enqueueBacklogFixture(batcher, "agent-1");
+
+  scheduler.runOnce();
+
+  assert.equal(writes.length, 5, "the same five capped slices are written");
+  assert.ok(writes.every((text) => text.length <= DEFAULT_MAX_CHARS_PER_FLUSH));
+  assert.equal(writes.join(""), expected, "catch-up preserves chunk order");
+  assert.equal(batcher.pendingCount("agent-1"), 0);
+  assert.equal(scheduler.pendingCount(), 0, "no follow-up frame is needed");
+});
+
+test("catch-up drain stops at the time budget and reschedules the remainder", () => {
+  const scheduler = manualScheduler();
+  const writes = [];
+  let clock = 0;
+  const batcher = createTerminalOutputBatcher({
+    schedule: scheduler.schedule,
+    now: () => clock,
+    write: (windowId, text, done) => {
+      writes.push(text);
+      clock += 4;
+      done();
+    },
+  });
+  const expected = enqueueBacklogFixture(batcher, "agent-1");
+
+  scheduler.runOnce();
+
+  assert.equal(writes.length, 2, "two 4ms passes fit the 8ms catch-up budget");
+  assert.equal(batcher.pendingCount("agent-1"), 24, "the tail stays queued");
+  assert.equal(scheduler.pendingCount(), 1, "the remainder schedules a follow-up flush");
+
+  scheduler.runAll();
+
+  assert.equal(writes.join(""), expected);
+  assert.equal(batcher.pendingCount("agent-1"), 0);
+});
+
+test("small live bursts never enter catch-up even with budget to spare", () => {
+  const scheduler = manualScheduler();
+  const writes = [];
+  const batcher = createTerminalOutputBatcher({
+    schedule: scheduler.schedule,
+    maxCharsPerFlush: 100,
+    now: () => 0,
+    write: (windowId, text, done) => {
+      writes.push(text);
+      done();
+    },
+  });
+
+  batcher.enqueue("agent-1", "a".repeat(100));
+  batcher.enqueue("agent-1", "b".repeat(100));
+  batcher.enqueue("agent-1", "c".repeat(100));
+
+  scheduler.runOnce();
+
+  assert.deepEqual(writes, ["a".repeat(100)], "one capped slice per frame below the threshold");
+  assert.equal(batcher.pendingCount("agent-1"), 2);
+  assert.equal(scheduler.pendingCount(), 1, "remaining chunks use a follow-up frame");
+});
+
+test("catch-up does not starve a small window queued ahead of the backlog", () => {
+  const scheduler = manualScheduler();
+  const writes = [];
+  let clock = 0;
+  const batcher = createTerminalOutputBatcher({
+    schedule: scheduler.schedule,
+    now: () => clock,
+    write: (windowId, text, done) => {
+      writes.push({ windowId, text });
+      clock += 1;
+      done();
+    },
+  });
+
+  batcher.enqueue("agent-small", "hello");
+  const expected = enqueueBacklogFixture(batcher, "agent-big");
+
+  scheduler.runOnce();
+
+  assert.equal(writes[0].windowId, "agent-small", "the small window keeps its first-pass slot");
+  assert.equal(writes[0].text, "hello");
+  const bigWrites = writes.filter((entry) => entry.windowId === "agent-big");
+  assert.equal(bigWrites.map((entry) => entry.text).join(""), expected);
+  assert.ok(bigWrites.every((entry) => entry.text.length <= DEFAULT_MAX_CHARS_PER_FLUSH));
+  assert.equal(batcher.pendingCount(), 0);
+  assert.equal(scheduler.pendingCount(), 0);
 });
