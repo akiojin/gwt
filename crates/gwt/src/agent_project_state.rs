@@ -7631,6 +7631,20 @@ mod tests {
                 .unwrap()
                 .unwrap();
             let done_at = items.work_items[0].completed_at.unwrap();
+            let producer_done: WorkEvent =
+                serde_json::from_slice(&std::fs::read(&closes_path).unwrap()).unwrap();
+            let mut board_ref = WorkEvent::new(
+                gwt_core::workspace_projection::WorkEventKind::Update,
+                "work-primary-proof-repair",
+                done_at - chrono::Duration::seconds(1),
+            );
+            board_ref.board_entry_id = Some("compacted-producer-board-ref".into());
+            items.apply_event(board_ref.clone());
+            gwt_core::workspace_projection::append_workspace_work_event_to_path(
+                &closes_path,
+                &board_ref,
+            )
+            .unwrap();
             let mut shared = items.work_items[0]
                 .events
                 .iter()
@@ -7714,7 +7728,7 @@ mod tests {
             )
             .expect("current Active primary can discover proof repair"));
             for foreign_generation in [false, true] {
-                let mut close: WorkEvent = serde_json::from_slice(&close_before).unwrap();
+                let mut close = producer_done.clone();
                 if foreign_generation {
                     close.execution_generation = Some("stale-producer-generation".into());
                 } else {
@@ -7828,7 +7842,7 @@ mod tests {
             assert_eq!(std::fs::read(&proof_path).unwrap(), discarded_proof);
             assert_eq!(std::fs::read(&closes_path).unwrap(), close_before);
             save_mutation_work_items(repo, &repaired);
-            let close: WorkEvent = serde_json::from_slice(&close_before).unwrap();
+            let close = producer_done;
             apply_authenticated_workspace_reopen(
                 repo,
                 &session.id,

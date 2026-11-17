@@ -9713,7 +9713,10 @@ fn has_compacted_machine_local_closes(
             .map_err(|error| GwtError::Other(format!("machine-local close event json: {error}")))?;
         if matches!(
             event.kind,
-            WorkEventKind::Pause | WorkEventKind::Done | WorkEventKind::Discard
+            WorkEventKind::Pause
+                | WorkEventKind::Done
+                | WorkEventKind::Discard
+                | WorkEventKind::Update
         ) && inline_ids
             .get(event.work_item_id.as_str())
             .is_some_and(|ids| !ids.contains(event.id.as_str()))
@@ -9809,9 +9812,14 @@ fn collect_projected_close_events(
             }
         }
         for event in &item.events {
+            // Board-reference Updates share the local lifecycle log. Preserve
+            // their accepted identities before inline compaction drops them.
             if matches!(
                 event.kind,
-                WorkEventKind::Pause | WorkEventKind::Done | WorkEventKind::Discard
+                WorkEventKind::Pause
+                    | WorkEventKind::Done
+                    | WorkEventKind::Discard
+                    | WorkEventKind::Update
             ) {
                 accepted
                     .entry(item.id.clone())
