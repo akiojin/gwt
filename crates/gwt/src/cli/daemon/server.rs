@@ -1343,6 +1343,7 @@ async fn run_bound_server(
         mut listener,
         authority_lease,
     } = bound;
+    let native_owner = project_transport.owner.clone();
     let project_transport = project_transport
         .serve()
         .map_err(|error| config_error(format!("project transport startup failed: {error}")))?;
@@ -1354,7 +1355,7 @@ async fn run_bound_server(
     // Keep one handle through listener and worker shutdown: a failed worker
     // must not admit a second daemon while this server still answers IPC.
     let authority_lease = Arc::new(authority_lease);
-    let mut issue_monitor_worker = spawn_issue_monitor_worker_with_lease(
+    let mut issue_monitor_worker = spawn_issue_monitor_worker(
         endpoint.scope.clone(),
         hub.clone(),
         Arc::clone(&shutdown),
@@ -1362,6 +1363,7 @@ async fn run_bound_server(
         operation_timeout,
         test_hooks,
         Some(Arc::clone(&authority_lease)),
+        Some(native_owner),
     );
 
     let endpoint = Arc::new(endpoint);
@@ -1850,6 +1852,7 @@ async fn run_issue_monitor_authority_retry(
     }
 }
 
+#[cfg(test)]
 fn spawn_issue_monitor_worker_with_lease(
     scope: RuntimeScope,
     hub: BroadcastHub,
@@ -1858,6 +1861,29 @@ fn spawn_issue_monitor_worker_with_lease(
     operation_timeout: Duration,
     test_hooks: IssueMonitorWorkerTestHooks,
     authority_lease: Option<Arc<crate::IssueMonitorAuthorityLease>>,
+) -> tokio::task::JoinHandle<()> {
+    spawn_issue_monitor_worker(
+        scope,
+        hub,
+        shutdown,
+        config,
+        operation_timeout,
+        test_hooks,
+        authority_lease,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_issue_monitor_worker(
+    scope: RuntimeScope,
+    hub: BroadcastHub,
+    shutdown: Arc<DaemonShutdown>,
+    config: crate::IssueMonitorConfig,
+    operation_timeout: Duration,
+    test_hooks: IssueMonitorWorkerTestHooks,
+    authority_lease: Option<Arc<crate::IssueMonitorAuthorityLease>>,
+    native_owner: Option<crate::project_runtime::owner::OwnerHandle>,
 ) -> tokio::task::JoinHandle<()> {
     // Establish the control-lane state from the durable snapshot before the
     // server can accept a publisher connection. Starting publishers wait on
@@ -2936,6 +2962,7 @@ fn spawn_issue_monitor_worker_with_lease(
                         deadline,
                         read_max_age,
                         test_hooks.clone(),
+                        native_owner.clone(),
                     ),
                     deadline,
                     watchdog_fired: false,
@@ -7600,6 +7627,7 @@ fn spawn_issue_monitor_scan(
         deadline,
         None,
         IssueMonitorWorkerTestHooks::default(),
+        None,
     )
 }
 
@@ -7616,6 +7644,7 @@ fn spawn_issue_monitor_scan_with_deadline(
     deadline: Instant,
     read_max_age: Option<Duration>,
     test_hooks: IssueMonitorWorkerTestHooks,
+    native_owner: Option<crate::project_runtime::owner::OwnerHandle>,
 ) -> tokio::task::JoinHandle<
     Result<crate::IssueMonitorState, crate::issue_monitor_worker::IssueMonitorScanFailure>,
 > {
@@ -7641,7 +7670,12 @@ fn spawn_issue_monitor_scan_with_deadline(
         // must not start a host-wide sweep on a CI runner that is low on disk.
         #[cfg(not(test))]
         crate::worktree::gc::maybe_spawn(&scope.project_root);
-        scan_issue_monitor_once_blocking(scope, monitor, gui_connected)
+        scan_issue_monitor_with_runtime_reconciliation(
+            scope,
+            monitor,
+            gui_connected,
+            native_owner.as_ref(),
+        )
     })
 }
 
@@ -9254,10 +9288,20 @@ fn daemon_run_secret() -> &'static [u8] {
         .as_slice()
 }
 
+#[cfg(all(test, unix))]
 fn scan_issue_monitor_once_blocking(
+    scope: RuntimeScope,
+    monitor: crate::IssueMonitorState,
+    gui_connected: bool,
+) -> Result<crate::IssueMonitorState, crate::issue_monitor_worker::IssueMonitorScanFailure> {
+    scan_issue_monitor_with_runtime_reconciliation(scope, monitor, gui_connected, None)
+}
+
+fn scan_issue_monitor_with_runtime_reconciliation(
     scope: RuntimeScope,
     mut monitor: crate::IssueMonitorState,
     gui_connected: bool,
+    native_owner: Option<&crate::project_runtime::owner::OwnerHandle>,
 ) -> Result<crate::IssueMonitorState, crate::issue_monitor_worker::IssueMonitorScanFailure> {
     use crate::issue_monitor::IssueMonitorDependencyObservation;
     use crate::issue_monitor_worker::{
@@ -9275,9 +9319,26 @@ fn scan_issue_monitor_once_blocking(
     // the prefs file — so without this the daemon keeps its stale startup view
     // (`has_launch_profile()==false` ⇒ active cap 0) and can never act as the
     // launch driver, leaving refills to the GUI's racy re-entrant scans.
-    if let Ok(disk) = crate::issue_monitor::load_issue_monitor_prefs_for_running_version(
-        &crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root),
-    ) {
+    let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root);
+    if let Ok(mut disk) =
+        crate::issue_monitor::load_issue_monitor_prefs_for_running_version(&prefs_path)
+    {
+        if let Some(runtime_scan) = native_owner.and_then(|owner| owner.monitor_runtime_scan.get())
+        {
+            match runtime_scan.reconcile_closed_slots(&disk) {
+                Ok(true) => {
+                    // The native worker published its physical census before
+                    // acknowledging the pass. Use it in this scan's admission.
+                    if let Ok(reconciled) = crate::load_issue_monitor_prefs(&prefs_path) {
+                        disk = reconciled;
+                    }
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::warn!(%error, "Issues retained the last known physical census")
+                }
+            }
+        }
         monitor.rebase_daemon_driver_prefs(&disk);
     }
     timing.next("capacity-refresh");

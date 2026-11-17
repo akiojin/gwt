@@ -712,6 +712,8 @@ pub struct OwnerHandle {
     pub(crate) sender: mpsc::Sender<OwnerMessage>,
     events: broadcast::Sender<OwnerEvent>,
     residency: tokio::sync::watch::Receiver<ResidencySnapshot>,
+    pub(crate) monitor_runtime_scan:
+        Arc<std::sync::OnceLock<crate::monitor_duplicate_runtime::MonitorRuntimeScan>>,
 }
 impl OwnerHandle {
     #[cfg(any(test, feature = "test-gh-guard"))]
@@ -1229,7 +1231,9 @@ impl OwnerState {
             sender: sender.clone(),
             events: events.clone(),
             residency: residency_projection,
+            monitor_runtime_scan: Default::default(),
         };
+        let monitor_runtime_scan = handle.monitor_runtime_scan.clone();
         let agent_registry = super::agent_dispatch::load_owner_registry(&root);
         let registry_projection = agent_registry
             .as_ref()
@@ -1325,6 +1329,9 @@ impl OwnerState {
                     })).collect())
                 },
             ).map_err(|error| tracing::error!(target: "gwt.monitor.runtime", %error, "failed to start owner Monitor runtime reconciliation")).ok();
+            if let Some(reconciler) = &_monitor_reconciler {
+                let _ = monitor_runtime_scan.set(reconciler.scan_trigger());
+            }
             #[cfg(any(test, feature = "test-gh-guard"))]
             {
                 state.test_reconciler = _monitor_reconciler
@@ -12811,6 +12818,7 @@ fn owner_fixture(
         sender: sender.clone(),
         events: events.clone(),
         residency: tokio::sync::watch::channel(ResidencySnapshot::default()).1,
+        monitor_runtime_scan: Default::default(),
     };
     let state = OwnerState {
         test_continue_before_receive: None,
@@ -14912,6 +14920,7 @@ mod tests {
             sender: sender.clone(),
             events: events.clone(),
             residency: tokio::sync::watch::channel(ResidencySnapshot::default()).1,
+            monitor_runtime_scan: Default::default(),
         };
         let pane = super::super::spawn_unbound_pane(
             "pane",
