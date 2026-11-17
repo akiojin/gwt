@@ -1,6 +1,38 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.169.0] - 2026-11-17
+
+### Bug Fixes
+
+- **gui:** ページ復帰後も PM の Execution log をウィンドウに残す
+- **daemon:** Continue authenticated retirement after IPC loss
+- **pm:** 未登録候補の優先順指定に応答の説明を合わせる
+- **terminal:** Answer Codex startup queries in the PTY owner
+
+### Features
+
+- **pm:** 自律モードのキュー投入を Monitor に一本化する
+
+### Miscellaneous Tasks
+
+- **work:** Issue 7542 の配信を PR 7555 に関連付ける
+- **work:** Issue 7542 の配信監査と継続履歴を保存する
+- **work:** Issue 7542 の履歴配信を PR 7559 に関連付ける
+- **work:** Issue 7558 の Work event を記録する
+- **work:** Issue 7558 の進捗イベントを記録する
+- **work:** Record Issue #7541 retirement investigation
+- **work:** Record verified daemon retirement slice
+- **work:** Track PR #7561 delivery
+- **work:** Finalize Issue #7541 retirement slice
+- **work:** Issue 7558 の精算イベントを記録する
+- **work:** Issue 7558 の後続スライスの Work event を記録する
+
+### Testing
+
+- **gui:** 回収の境界とネイティブ非表示からの復帰を固定する
+- **pm:** キュー制御回帰の環境変数変更を直列化する
+
 ## [9.168.0] - 2026-11-17
 
 ### Bug Fixes
