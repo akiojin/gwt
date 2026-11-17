@@ -232,6 +232,24 @@ struct PmProjectIdentity {
     member_id: Option<String>,
     #[serde(default)]
     legacy_sessions: BTreeMap<String, PmLegacyMemberProof>,
+    /// Issue #7542: PM assignments set aside by the NEW-launch quarantine
+    /// fallback, keyed by member id. The record is the only place the
+    /// displaced assignment survives; restoring it is an explicit operation
+    /// (`restore_quarantined_pm_assignment`), never an automatic merge.
+    #[serde(default)]
+    quarantined_assignments: BTreeMap<String, PmQuarantinedAssignment>,
+}
+
+/// Issue #7542: a PM assignment parked by the quarantine fallback. The
+/// assignment is preserved verbatim — reservation token, bound Session id,
+/// reserving host — so the displaced conversation can later be restored
+/// exactly; the bound Session's file is never touched by quarantining.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PmQuarantinedAssignment {
+    assignment: crate::agent_names::AgentMemberAssignment,
+    reason: String,
+    quarantined_at_unix: u64,
 }
 
 fn project_roster(registry: &Registry, key: &str) -> Option<AgentRoster> {
@@ -1699,8 +1717,13 @@ fn pm_host_matches(assignment: &crate::agent_names::AgentMemberAssignment) -> bo
 ///
 /// Issue #7475 extends the same reconciliation to one Session-bound class:
 /// a legacy reservation imported by the registry migration (see
-/// `pm_legacy_assignment_is_dead`). Every other Session-bound assignment
-/// keeps blocking so a resumable conversation is never displaced.
+/// `pm_legacy_assignment_is_dead`). Issue #7542 adds the second
+/// Session-bound class: a modern reservation whose bound Session is
+/// provably finished under the full multi-signal proof (see
+/// `pm_bound_assignment_is_dead`), and the hostless re-import of a finished
+/// current-format Session, which records no incarnation for that proof to
+/// read (see `pm_hostless_import_is_dead`). Every other Session-bound
+/// assignment keeps blocking so a resumable conversation is never displaced.
 fn pm_leftover_assignment_is_dead(
     root: &Path,
     sessions: &Path,
@@ -1720,26 +1743,12 @@ fn pm_leftover_assignment_is_dead(
         Some(session_id) => {
             (pm_legacy_assignment_is_dead(
                 registry, sessions, key, member_id, session_id, assignment,
-            ) || pm_hostless_import_is_dead(sessions, key, member_id, session_id, assignment)
-                || pm_reserving_host_is_gone(assignment))
-                && !crate::agent_names::assignment_is_busy(root, assignment, sessions)
+            ) && !crate::agent_names::assignment_is_busy(root, assignment, sessions))
+                || pm_bound_assignment_is_dead(root, sessions, assignment)
+                || (pm_hostless_import_is_dead(sessions, key, member_id, session_id, assignment)
+                    && !crate::agent_names::assignment_is_busy(root, assignment, sessions))
         }
     }
-}
-
-/// Issue #7542: whether the gwtd incarnation that wrote this reservation is
-/// provably gone. Only a recorded incarnation on this host qualifies: its pid
-/// is dead, or the pid now belongs to a process with another start time. An
-/// unreadable start time, a hostless record, and another host stay unproven.
-fn pm_reserving_host_is_gone(assignment: &crate::agent_names::AgentMemberAssignment) -> bool {
-    assignment.host_id == crate::process::current_hostname()
-        && assignment.host_pid > 0
-        && assignment.host_started_at.is_some_and(|started| {
-            started > 0
-                && (!crate::process::is_host_process_alive(assignment.host_pid)
-                    || crate::process::host_process_start_time(assignment.host_pid)
-                        .is_some_and(|current| current != started))
-        })
 }
 
 /// Issue #7542: whether a Session-bound assignment is exactly the hostless
@@ -1776,6 +1785,129 @@ fn pm_hostless_import_is_dead(
         && pm_session_identity(&project, &session).is_ok_and(|identity| {
             assignment.reservation_id == legacy_pm_reservation(key, session_id, &identity)
         })
+}
+
+/// Issue #7542: whether the host incarnation that reserved `assignment` is
+/// provably gone. The recorded (pid, start time) pair *is* the incarnation:
+/// it is gone when the pid is dead, and when a different process now owns
+/// the pid (its start time differs, so the recorded incarnation cannot
+/// still exist). A live process whose start time cannot be read is not
+/// proof of anything, so the check fails closed and PID-reuse ambiguity
+/// never releases a reservation. Another host's incarnation can never be
+/// proven gone from here.
+fn pm_reserving_incarnation_is_gone(
+    assignment: &crate::agent_names::AgentMemberAssignment,
+) -> bool {
+    if assignment.host_id != crate::process::current_hostname() {
+        return false;
+    }
+    let Some(started) = assignment.host_started_at.filter(|started| *started > 0) else {
+        return false;
+    };
+    if assignment.host_pid == std::process::id() {
+        // This process is alive. A record naming it belongs to the current
+        // incarnation only with this process's exact start time, which
+        // `pm_host_matches` has already fenced; anything else is not a
+        // provable death, so fail closed.
+        return false;
+    }
+    match crate::process::host_process_start_time(assignment.host_pid) {
+        Some(current) => current != started,
+        None => !crate::process::is_host_process_alive(assignment.host_pid),
+    }
+}
+
+/// Issue #7542: whether a Session-bound PM assignment under a modern
+/// (non-legacy) reservation token is provably dead. Every signal must
+/// agree: the bound Session loads with an exact identity, no launch
+/// handshake is in flight for it, the reserving host incarnation is
+/// provably gone, and the roster liveness discipline
+/// (`assignment_is_busy`) reports it not busy — which itself requires the
+/// Session inventory to show neither a live process nor an uncertainty,
+/// and, for a Session still marked Running, the exact runtime proof
+/// (execution identity, runtime incarnation, exited child tree). Anything
+/// unprovable keeps blocking.
+fn pm_bound_assignment_is_dead(
+    root: &Path,
+    sessions: &Path,
+    assignment: &crate::agent_names::AgentMemberAssignment,
+) -> bool {
+    let Some(session_id) = assignment.session_id.as_deref() else {
+        return false;
+    };
+    let Ok(session) = gwt_agent::Session::load(&sessions.join(format!("{session_id}.toml"))) else {
+        return false;
+    };
+    if session.id != session_id {
+        return false;
+    }
+    if !matches!(
+        std::fs::symlink_metadata(gwt_agent::active_launch_handshake_path(
+            sessions, session_id
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound
+    ) {
+        return false;
+    }
+    pm_reserving_incarnation_is_gone(assignment)
+        && !crate::agent_names::assignment_is_busy(root, assignment, sessions)
+}
+
+/// Issue #7542: whether a Session-bound PM assignment may be quarantined
+/// so a NEW launch can proceed even though the assignment is not provably
+/// dead. The bar is deliberately narrower than "unknown": the reserving
+/// host incarnation must be provably gone and the bound Session must load
+/// with an exact identity, so the displaced conversation stays restorable
+/// from the quarantine record. A missing or corrupt Session file, another
+/// host's reservation, and any doubt about the incarnation keep blocking
+/// (fail-closed); the unbound case never reaches here because the
+/// reconciliation above already owns it.
+fn pm_assignment_is_quarantinable(
+    sessions: &Path,
+    assignment: &crate::agent_names::AgentMemberAssignment,
+) -> bool {
+    if assignment.role != AgentAssignmentRole::Pm || pm_host_matches(assignment) {
+        return false;
+    }
+    let Some(session_id) = assignment.session_id.as_deref() else {
+        return false;
+    };
+    let Ok(session) = gwt_agent::Session::load(&sessions.join(format!("{session_id}.toml"))) else {
+        return false;
+    };
+    session.id == session_id && pm_reserving_incarnation_is_gone(assignment)
+}
+
+/// Issue #7542: a stored PM registration fences NEW launches so a live
+/// conversation is resumed, not displaced. The fence lifts only when the
+/// registration names the very Session the configured PM's assignment is
+/// bound to and that assignment is itself reconcilable — provably dead or
+/// quarantinable — so both durable records describe the same wedged
+/// launch. A registration naming any other Session keeps fencing.
+fn pm_registration_is_reconcilable(
+    root: &Path,
+    sessions: &Path,
+    registration: &crate::pm_registry::PmRegistration,
+) -> bool {
+    let key = gwt_core::paths::project_scope_hash(root);
+    let Ok(Some(registry)) = load() else {
+        return false;
+    };
+    let Some(member) = selected_pm_member(&registry, key.as_str()) else {
+        return false;
+    };
+    let Some(assignment) = member.assignment.as_ref() else {
+        return false;
+    };
+    assignment.session_id.as_deref() == Some(registration.session_id.as_str())
+        && (pm_leftover_assignment_is_dead(
+            root,
+            sessions,
+            key.as_str(),
+            &registry,
+            &member.agent_member_id,
+            assignment,
+        ) || pm_assignment_is_quarantinable(sessions, assignment))
 }
 
 /// Issue #7475: whether a Session-bound assignment is exactly the legacy
@@ -1923,6 +2055,32 @@ fn reserve_new_pm_member_inner(
             invalid("PM reserving host identity is unknown; retry from its project owner")
         })?;
     let pm_path = crate::pm_registry::pm_prefs_path_for_repo_path(root);
+    // Issue #7542: a stored registration normally fences NEW launches so a
+    // live conversation is resumed, not displaced. When the registration
+    // names the very Session the configured PM's wedged assignment is bound
+    // to and that assignment is reconcilable (provably dead or
+    // quarantinable), both records describe the same dead launch: clear the
+    // registration first, then let the assignment handling below reconcile
+    // or quarantine the assignment in the same launch. Clearing first keeps
+    // a later failure retryable — the wedged assignment still fences, the
+    // registration no longer double-fences.
+    if let Some(registration) = crate::pm_registry::load_pm_prefs(&pm_path)?.registration {
+        if !pm_registration_is_reconcilable(root, sessions, &registration) {
+            return Err(invalid(
+                "Resume the registered PM conversation before starting a new PM",
+            ));
+        }
+        let wedged_session = registration.session_id.clone();
+        crate::pm_registry::mutate_pm_prefs(&pm_path, |prefs| {
+            if prefs
+                .registration
+                .as_ref()
+                .is_some_and(|current| current.session_id == wedged_session)
+            {
+                prefs.registration = None;
+            }
+        })?;
+    }
     crate::pm_registry::with_pm_prefs_snapshot(&pm_path, |prefs| {
         if prefs.registration.is_some() {
             return Err(invalid(
@@ -2024,7 +2182,35 @@ fn reserve_new_pm_member_inner(
                 &member.agent_member_id,
                 assignment,
             ) {
-                return Err(invalid(format!("Configured PM {} still holds its reservation because its session or reserving gwt process is alive or cannot be verified; close the running PM window, then use Restart Project Manager in Settings", member.name)));
+                if !pm_assignment_is_quarantinable(sessions, assignment) {
+                    return Err(invalid(format!("Configured PM {} retains a live or unknown reservation; resume its conversation or choose another PM", member.name)));
+                }
+                // Issue #7542 quarantine fallback: the reserving host
+                // incarnation is provably gone and the bound Session loads
+                // exactly, but the Session is not provably finished, so the
+                // assignment must not be deleted. Park it verbatim in the
+                // project's quarantine record — the Session file stays
+                // untouched and `restore_quarantined_pm_assignment` can
+                // bring the assignment back exactly — and fall through to
+                // the fresh reservation below, so no durable state can
+                // wedge every future PM launch behind a dead generation.
+                let record = PmQuarantinedAssignment {
+                    assignment: assignment.clone(),
+                    reason: format!(
+                        "reserving host incarnation is gone; bound Session {} was not provably finished, so the assignment was quarantined instead of deleted",
+                        assignment.session_id.as_deref().unwrap_or_default()
+                    ),
+                    quarantined_at_unix: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|elapsed| elapsed.as_secs())
+                        .unwrap_or_default(),
+                };
+                registry
+                    .pm_projects
+                    .entry(key.to_string())
+                    .or_default()
+                    .quarantined_assignments
+                    .insert(member.agent_member_id.clone(), record);
             }
             // Issue #7472: the reserving gwtd incarnation is gone and no
             // Session was ever bound, so no owner remains that could cancel
@@ -2037,11 +2223,11 @@ fn reserve_new_pm_member_inner(
             // finished — it records no reserving host, so no cancel, reap,
             // or adoption path can ever release it.
             //
-            // Issue #7542: and for a Session-bound reservation left by a
-            // previous gwtd generation — the hostless re-import of a finished
-            // current-format Session, or one whose reserving incarnation is
-            // provably gone. This launch requires the PM to be deregistered,
-            // so there is no conversation left to resume through it.
+            // Issue #7542: the same holds for a modern Session-bound
+            // reservation whose bound Session is provably finished under
+            // the multi-signal proof in `pm_bound_assignment_is_dead`, and
+            // for a quarantinable assignment, which is parked above rather
+            // than deleted.
         }
         member.assignment = Some(expected_assignment);
         set_project_assignment(
@@ -2058,6 +2244,65 @@ fn reserve_new_pm_member_inner(
             prior_assignment: None,
         })
     })
+}
+
+/// Issue #7542: restore a PM assignment previously parked by the
+/// quarantine fallback in `reserve_new_pm_member_inner`. The parked
+/// assignment returns verbatim — same reservation token, same bound
+/// Session — and the quarantine record is removed in the same commit, so
+/// the member's conversation becomes resumable exactly as it was.
+///
+/// Restoration is allowed only while the member's current assignment
+/// cannot belong to a live conversation: no assignment at all, or this
+/// host incarnation's own unspawned reservation (the fresh NEW reservation
+/// the quarantine made room for, before any Session was bound to it).
+/// Anything else is an explicit error, never a silent overwrite.
+// The operator surface that calls this lands with the GUI affordance in
+// the follow-up slice (Issue #7543); the registry path itself is complete
+// and covered by tests here.
+#[allow(dead_code)]
+pub(crate) fn restore_quarantined_pm_assignment(
+    root: &Path,
+    member_id: &str,
+) -> io::Result<crate::agent_names::AgentMemberAssignment> {
+    let key = gwt_core::paths::project_scope_hash(root);
+    let _guard = lock()?;
+    let mut registry = load()?.ok_or_else(|| invalid("PM registry activation is unavailable"))?;
+    if registry.phase != RegistryPhase::Active {
+        return Err(invalid(
+            "Agent registry is prepared; inspect agent.registry.status and reconcile",
+        ));
+    }
+    confirm_durable()?;
+    let record = registry
+        .pm_projects
+        .get(key.as_str())
+        .and_then(|project| project.quarantined_assignments.get(member_id))
+        .cloned()
+        .ok_or_else(|| invalid("No quarantined PM assignment is recorded for this member"))?;
+    let replaceable = match project_assignment(&registry, key.as_str(), member_id) {
+        None => true,
+        Some(current) => current.session_id.is_none() && pm_host_matches(current),
+    };
+    if !replaceable {
+        return Err(invalid(
+            "The current PM assignment belongs to a live or unknown conversation; stop it before restoring the quarantined assignment",
+        ));
+    }
+    registry
+        .pm_projects
+        .get_mut(key.as_str())
+        .expect("quarantine record exists")
+        .quarantined_assignments
+        .remove(member_id);
+    set_project_assignment(
+        &mut registry,
+        key.as_str(),
+        member_id,
+        Some(record.assignment.clone()),
+    );
+    commit_pm_identity(&mut registry)?;
+    Ok(record.assignment)
 }
 
 pub(crate) fn cancel_unspawned_pm_member(
@@ -7192,7 +7437,9 @@ mod tests {
             .err()
             .expect("a live PM reservation must block a new launch");
         assert!(
-            error.to_string().contains("still holds its reservation"),
+            error
+                .to_string()
+                .contains("retains a live or unknown reservation"),
             "{error}"
         );
 
@@ -7206,7 +7453,9 @@ mod tests {
             .err()
             .expect("a Session-bound assignment must block a new launch");
         assert!(
-            error.to_string().contains("still holds its reservation"),
+            error
+                .to_string()
+                .contains("retains a live or unknown reservation"),
             "{error}"
         );
 
@@ -7219,7 +7468,9 @@ mod tests {
             .err()
             .expect("another host's reservation must block a new launch");
         assert!(
-            error.to_string().contains("still holds its reservation"),
+            error
+                .to_string()
+                .contains("retains a live or unknown reservation"),
             "{error}"
         );
     }
@@ -7293,7 +7544,9 @@ mod tests {
             .err()
             .expect("a legacy reservation bound to a running Session must block a new launch");
         assert!(
-            error.to_string().contains("still holds its reservation"),
+            error
+                .to_string()
+                .contains("retains a live or unknown reservation"),
             "{error}"
         );
     }
@@ -7317,9 +7570,432 @@ mod tests {
             .err()
             .expect("a non-legacy Session-bound assignment must block a new launch");
         assert!(
-            error.to_string().contains("still holds its reservation"),
+            error
+                .to_string()
+                .contains("retains a live or unknown reservation"),
             "{error}"
         );
+    }
+
+    /// Issue #7542 fixture: reserve a fresh PM assignment, then rewrite it
+    /// into the wedged modern shape — bound to the fixture's Session (saved
+    /// with `session_status`) and reserved by a host incarnation that no
+    /// longer exists (a pid that cannot exist on any supported host). The
+    /// prefs registration is cleared, matching the state after the PM pane
+    /// of the dead generation was closed.
+    fn wedged_modern_pm_fixture(
+        session_status: gwt_agent::AgentStatus,
+    ) -> (PathBuf, gwt_agent::Session, String, PathBuf) {
+        let (root, mut session, _) = pm_only_fixture();
+        session.update_status(session_status);
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        session.save(&sessions).unwrap();
+        let prefs_path = crate::pm_registry::pm_prefs_path_for_repo_path(&root);
+        crate::pm_registry::mutate_pm_prefs(&prefs_path, |prefs| prefs.registration = None)
+            .unwrap();
+        let worktree = session.worktree_path.clone();
+        let first = reserve_new_pm_member(&root, &sessions, &worktree, "wedged-attempt").unwrap();
+        let member_id = first.member.agent_member_id.clone();
+        let session_id = session.id.clone();
+        rewrite_pm_assignment(&root, &member_id, |assignment| {
+            assignment.host_pid = 4_000_000_000;
+            assignment.host_started_at = Some(1);
+            assignment.session_id = Some(session_id);
+        });
+        (root, session, member_id, worktree)
+    }
+
+    fn quarantined_assignment(root: &Path, member_id: &str) -> Option<PmQuarantinedAssignment> {
+        let key = gwt_core::paths::project_scope_hash(root);
+        let registry = load().unwrap().unwrap();
+        registry
+            .pm_projects
+            .get(key.as_str())
+            .and_then(|project| project.quarantined_assignments.get(member_id))
+            .cloned()
+    }
+
+    /// Issue #7542 (R1): a modern Session-bound reservation whose bound
+    /// Session is provably finished and whose reserving incarnation is gone
+    /// is reconciled by a fresh NEW launch — the class that wedged PM
+    /// startup after the 2026-11-17 daemon generation change. The Session
+    /// file is never rewritten and nothing is quarantined: the assignment
+    /// was provably dead, not merely unknown.
+    #[test]
+    fn reserve_new_pm_member_reconciles_modern_bound_assignment_for_a_stopped_session() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let (root, session, member_id, worktree) =
+            wedged_modern_pm_fixture(gwt_agent::AgentStatus::Stopped);
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let session_path = sessions.join(format!("{}.toml", session.id));
+        let session_bytes = fs::read(&session_path).unwrap();
+
+        let prepared =
+            reserve_new_pm_member(&root, &sessions, &worktree, "recovery-attempt").unwrap();
+        assert_eq!(prepared.member.agent_member_id, member_id);
+        let assignment = prepared.member.assignment.expect("new PM assignment");
+        assert_eq!(assignment.reservation_id, "recovery-attempt");
+        assert_eq!(assignment.session_id, None);
+        assert!(quarantined_assignment(&root, &member_id).is_none());
+        assert_eq!(fs::read(&session_path).unwrap(), session_bytes);
+    }
+
+    /// Issue #7542 (R2): a Session still marked Running is reconciled when
+    /// its runtime sidecar carries the exact proof — execution identity,
+    /// runtime incarnation, the reserving host's start time, and a child
+    /// tree that has exited — and the reserving incarnation is gone.
+    #[test]
+    fn reserve_new_pm_member_reconciles_running_session_with_exact_runtime_proof() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let (root, session, member_id, worktree) =
+            wedged_modern_pm_fixture(gwt_agent::AgentStatus::Running);
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        // The fixture Session carries no execution binding, so its exact
+        // identity is the absent one; the runtime sidecar proves the rest:
+        // the reserving host's start time, a runtime incarnation, and a
+        // child tree that has exited.
+        let mut stored =
+            gwt_agent::Session::load(&sessions.join(format!("{}.toml", session.id))).unwrap();
+        stored.execution_binding = None;
+        stored.save(&sessions).unwrap();
+        let mut runtime = gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running);
+        runtime.host_started_at = Some(1);
+        runtime.runtime_incarnation = Some(1);
+        runtime.child_pid = Some(4_000_000_001);
+        runtime.child_started_at = Some(1);
+        runtime
+            .save(&gwt_agent::runtime_state_path_for_pid(
+                &sessions,
+                4_000_000_000,
+                &session.id,
+            ))
+            .unwrap();
+
+        let prepared =
+            reserve_new_pm_member(&root, &sessions, &worktree, "recovery-attempt").unwrap();
+        let assignment = prepared.member.assignment.expect("new PM assignment");
+        assert_eq!(assignment.reservation_id, "recovery-attempt");
+        assert_eq!(assignment.session_id, None);
+        assert!(quarantined_assignment(&root, &member_id).is_none());
+    }
+
+    /// Issue #7542 (R3): when the Session inventory reports uncertainty and
+    /// the reserving incarnation is this live process, nothing is
+    /// reconciled or quarantined — the launch keeps blocking.
+    #[test]
+    fn reserve_new_pm_member_retains_assignment_when_inventory_is_uncertain_and_host_is_live() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let (root, session, member_id, worktree) =
+            wedged_modern_pm_fixture(gwt_agent::AgentStatus::Stopped);
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        // An unreadable runtime sidecar makes the inventory uncertain.
+        let runtime_path =
+            gwt_agent::runtime_state_path_for_pid(&sessions, std::process::id(), &session.id);
+        fs::create_dir_all(runtime_path.parent().unwrap()).unwrap();
+        fs::write(&runtime_path, b"not a runtime state").unwrap();
+        let started = crate::process::host_process_start_time(std::process::id()).unwrap();
+        rewrite_pm_assignment(&root, &member_id, |assignment| {
+            assignment.host_pid = std::process::id();
+            assignment.host_started_at = Some(started);
+        });
+        let error = reserve_new_pm_member(&root, &sessions, &worktree, "blocked-attempt")
+            .err()
+            .expect("an uncertain inventory with a live incarnation must block");
+        assert!(
+            error
+                .to_string()
+                .contains("retains a live or unknown reservation"),
+            "{error}"
+        );
+        assert!(quarantined_assignment(&root, &member_id).is_none());
+    }
+
+    /// Issue #7542 (R4): another host's Session-bound reservation can never
+    /// be proven dead or quarantined from this host, even with a finished
+    /// Session.
+    #[test]
+    fn reserve_new_pm_member_retains_bound_assignment_from_another_host() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let (root, _session, member_id, worktree) =
+            wedged_modern_pm_fixture(gwt_agent::AgentStatus::Stopped);
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        rewrite_pm_assignment(&root, &member_id, |assignment| {
+            assignment.host_id = "another-host".into();
+        });
+        let error = reserve_new_pm_member(&root, &sessions, &worktree, "blocked-attempt")
+            .err()
+            .expect("another host's reservation must block a new launch");
+        assert!(
+            error
+                .to_string()
+                .contains("retains a live or unknown reservation"),
+            "{error}"
+        );
+        assert!(quarantined_assignment(&root, &member_id).is_none());
+    }
+
+    /// Issue #7542 (R5 + R6): a bound Session whose file is missing or
+    /// corrupt is unprovable in both directions — it is neither reconciled
+    /// nor quarantined, so the launch keeps blocking (fail-closed).
+    #[test]
+    fn reserve_new_pm_member_retains_bound_assignment_when_session_file_is_unprovable() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let (root, session, member_id, worktree) =
+            wedged_modern_pm_fixture(gwt_agent::AgentStatus::Stopped);
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+
+        rewrite_pm_assignment(&root, &member_id, |assignment| {
+            assignment.session_id = Some("missing-session".into());
+        });
+        let error = reserve_new_pm_member(&root, &sessions, &worktree, "blocked-attempt")
+            .err()
+            .expect("a missing Session file must block a new launch");
+        assert!(
+            error
+                .to_string()
+                .contains("retains a live or unknown reservation"),
+            "{error}"
+        );
+        assert!(quarantined_assignment(&root, &member_id).is_none());
+
+        let wedged_session = session.id.clone();
+        rewrite_pm_assignment(&root, &member_id, |assignment| {
+            assignment.session_id = Some(wedged_session);
+        });
+        fs::write(
+            sessions.join(format!("{}.toml", session.id)),
+            "not a session",
+        )
+        .unwrap();
+        let error = reserve_new_pm_member(&root, &sessions, &worktree, "blocked-attempt")
+            .err()
+            .expect("a corrupt Session file must block a new launch");
+        assert!(
+            error
+                .to_string()
+                .contains("retains a live or unknown reservation"),
+            "{error}"
+        );
+        assert!(quarantined_assignment(&root, &member_id).is_none());
+    }
+
+    /// Issue #7542 (R7): when the recorded pid now belongs to a different
+    /// live process (its start time differs), the recorded incarnation is
+    /// provably gone and the finished Session's assignment is reconciled.
+    #[test]
+    fn reserve_new_pm_member_reconciles_when_the_recorded_pid_was_reused() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let (root, _session, member_id, worktree) =
+            wedged_modern_pm_fixture(gwt_agent::AgentStatus::Stopped);
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let mut sleeper = gwt_core::process::resolved_command(
+            gwt_core::process::ProcessPlanRequest::new("sleep"),
+        )
+        .expect("sleep resolves")
+        .arg("30")
+        .spawn()
+        .unwrap();
+        let sleeper_started = crate::process::host_process_start_time(sleeper.id()).unwrap();
+        rewrite_pm_assignment(&root, &member_id, |assignment| {
+            assignment.host_pid = sleeper.id();
+            assignment.host_started_at = Some(sleeper_started + 999);
+        });
+        let prepared =
+            reserve_new_pm_member(&root, &sessions, &worktree, "recovery-attempt").unwrap();
+        let assignment = prepared.member.assignment.expect("new PM assignment");
+        assert_eq!(assignment.reservation_id, "recovery-attempt");
+        assert!(quarantined_assignment(&root, &member_id).is_none());
+        let _ = sleeper.kill();
+        let _ = sleeper.wait();
+    }
+
+    /// Issue #7542 (R8): a Session that is not provably finished (still
+    /// Running, and its unreadable runtime sidecar makes the inventory
+    /// uncertain) is not deleted — it is quarantined. The NEW launch
+    /// proceeds, the quarantine record preserves the displaced assignment
+    /// verbatim, and the Session file stays untouched.
+    #[test]
+    fn reserve_new_pm_member_quarantines_unprovable_assignment_from_a_dead_incarnation() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let (root, session, member_id, worktree) =
+            wedged_modern_pm_fixture(gwt_agent::AgentStatus::Running);
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let runtime_path =
+            gwt_agent::runtime_state_path_for_pid(&sessions, 4_000_000_000, &session.id);
+        fs::create_dir_all(runtime_path.parent().unwrap()).unwrap();
+        fs::write(&runtime_path, b"not a runtime state").unwrap();
+        let session_path = sessions.join(format!("{}.toml", session.id));
+        let session_bytes = fs::read(&session_path).unwrap();
+
+        let prepared =
+            reserve_new_pm_member(&root, &sessions, &worktree, "recovery-attempt").unwrap();
+        let assignment = prepared.member.assignment.expect("new PM assignment");
+        assert_eq!(assignment.reservation_id, "recovery-attempt");
+        assert_eq!(assignment.session_id, None);
+
+        let record = quarantined_assignment(&root, &member_id)
+            .expect("the displaced assignment is quarantined, not deleted");
+        assert_eq!(record.assignment.reservation_id, "wedged-attempt");
+        assert_eq!(
+            record.assignment.session_id.as_deref(),
+            Some(session.id.as_str())
+        );
+        assert!(!record.reason.is_empty());
+        assert_eq!(fs::read(&session_path).unwrap(), session_bytes);
+    }
+
+    /// Issue #7542 (R9): when the prefs registration names the same wedged
+    /// Session, the NEW launch clears exactly that registration as part of
+    /// reconciling; a registration naming any other Session keeps fencing.
+    #[test]
+    fn reserve_new_pm_member_clears_registration_for_the_same_wedged_session() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let (root, session, _member_id, worktree) =
+            wedged_modern_pm_fixture(gwt_agent::AgentStatus::Stopped);
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let prefs_path = crate::pm_registry::pm_prefs_path_for_repo_path(&root);
+        let registration = crate::pm_registry::PmRegistration {
+            session_id: session.id.clone(),
+            agent_id: "claude".into(),
+            worktree_path: worktree.to_string_lossy().into_owned(),
+            created_at: None,
+            consecutive_crashes: 0,
+            next_not_before: None,
+        };
+        crate::pm_registry::mutate_pm_prefs(&prefs_path, |prefs| {
+            prefs.registration = Some(registration.clone())
+        })
+        .unwrap();
+        let prepared =
+            reserve_new_pm_member(&root, &sessions, &worktree, "recovery-attempt").unwrap();
+        assert_eq!(
+            prepared
+                .member
+                .assignment
+                .expect("new PM assignment")
+                .reservation_id,
+            "recovery-attempt"
+        );
+        assert!(
+            crate::pm_registry::load_pm_prefs(&prefs_path)
+                .unwrap()
+                .registration
+                .is_none(),
+            "the registration naming the wedged Session is cleared"
+        );
+
+        // A registration naming a different Session still fences NEW: it is
+        // never cleared by the recovery path, and the current assignment is
+        // left exactly as the successful launch prepared it. (The guard
+        // that fires is the identity import's, because that Session does
+        // not exist on disk.)
+        crate::pm_registry::mutate_pm_prefs(&prefs_path, |prefs| {
+            prefs.registration = Some(crate::pm_registry::PmRegistration {
+                session_id: "another-session".into(),
+                ..registration.clone()
+            })
+        })
+        .unwrap();
+        let error = reserve_new_pm_member(&root, &sessions, &worktree, "blocked-attempt")
+            .err()
+            .expect("a registration for another Session must fence a new launch");
+        assert!(
+            error
+                .to_string()
+                .contains("Registered PM Session is unavailable"),
+            "{error}"
+        );
+        assert_eq!(
+            crate::pm_registry::load_pm_prefs(&prefs_path)
+                .unwrap()
+                .registration
+                .map(|registration| registration.session_id),
+            Some("another-session".to_string()),
+            "another Session's registration is never cleared"
+        );
+        let key = gwt_core::paths::project_scope_hash(&root);
+        let registry = load().unwrap().unwrap();
+        let member = selected_pm_member(&registry, key.as_str()).expect("configured PM member");
+        assert_eq!(
+            member
+                .assignment
+                .as_ref()
+                .map(|assignment| assignment.reservation_id.as_str()),
+            Some("recovery-attempt"),
+            "the fenced launch leaves the current assignment untouched"
+        );
+    }
+
+    /// Issue #7542 (R10): a quarantined assignment can be restored verbatim
+    /// while the current assignment is still this incarnation's unspawned
+    /// reservation; once the current assignment is bound to a conversation,
+    /// restoration is an explicit error instead of a silent overwrite.
+    #[test]
+    fn restore_quarantined_pm_assignment_round_trips_and_fences_live_assignments() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let (root, session, member_id, worktree) =
+            wedged_modern_pm_fixture(gwt_agent::AgentStatus::Running);
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let runtime_path =
+            gwt_agent::runtime_state_path_for_pid(&sessions, 4_000_000_000, &session.id);
+        fs::create_dir_all(runtime_path.parent().unwrap()).unwrap();
+        fs::write(&runtime_path, b"not a runtime state").unwrap();
+        reserve_new_pm_member(&root, &sessions, &worktree, "recovery-attempt").unwrap();
+        assert!(quarantined_assignment(&root, &member_id).is_some());
+
+        let restored = restore_quarantined_pm_assignment(&root, &member_id).unwrap();
+        assert_eq!(restored.reservation_id, "wedged-attempt");
+        assert_eq!(restored.session_id.as_deref(), Some(session.id.as_str()));
+        assert!(quarantined_assignment(&root, &member_id).is_none());
+        let key = gwt_core::paths::project_scope_hash(&root);
+        let registry = load().unwrap().unwrap();
+        assert_eq!(
+            project_assignment(&registry, key.as_str(), &member_id),
+            Some(&restored)
+        );
+        // Nothing left to restore.
+        assert!(restore_quarantined_pm_assignment(&root, &member_id).is_err());
+
+        // Quarantine again, then bind the current assignment to a Session:
+        // restoration must now refuse rather than displace it.
+        rewrite_pm_assignment(&root, &member_id, |assignment| {
+            assignment.host_pid = 4_000_000_000;
+            assignment.host_started_at = Some(1);
+            assignment.reservation_id = "wedged-again".into();
+        });
+        reserve_new_pm_member(&root, &sessions, &worktree, "second-recovery").unwrap();
+        assert!(quarantined_assignment(&root, &member_id).is_some());
+        rewrite_pm_assignment(&root, &member_id, |assignment| {
+            assignment.session_id = Some("live-session".into());
+        });
+        let error = restore_quarantined_pm_assignment(&root, &member_id)
+            .expect_err("restoration must not displace a bound assignment");
+        assert!(
+            error.to_string().contains("belongs to a live or unknown"),
+            "{error}"
+        );
+        assert!(quarantined_assignment(&root, &member_id).is_some());
+    }
+
+    /// Issue #7542 (R11): registry files written before the quarantine
+    /// record existed still decode — the field is an additive default in
+    /// both the schema 3 registry and the schema 4 split core, which share
+    /// this type.
+    #[test]
+    fn pm_project_identity_without_quarantine_field_still_decodes() {
+        let legacy: PmProjectIdentity =
+            serde_json::from_str(r#"{"member_id":"m1","legacy_sessions":{}}"#).unwrap();
+        assert_eq!(legacy.member_id.as_deref(), Some("m1"));
+        assert!(legacy.quarantined_assignments.is_empty());
     }
 
     /// Issue #7542 fixture: a current-format PM Session (it names its member)
@@ -7414,71 +8090,11 @@ mod tests {
             .err()
             .expect("a hostless import bound to a running Session must block a new launch");
         assert!(
-            error.to_string().contains("still holds its reservation"),
+            error
+                .to_string()
+                .contains("retains a live or unknown reservation"),
             "{error}"
         );
-    }
-
-    /// Issue #7542: a Session-bound reservation whose reserving gwtd
-    /// incarnation is provably gone has no owner left to release it. With the
-    /// PM deregistered there is nothing to resume either, so a NEW launch
-    /// reconciles it instead of wedging on the dead generation.
-    #[test]
-    fn reserve_new_pm_member_reconciles_bound_reservation_from_a_dead_host_incarnation() {
-        let home = tempfile::tempdir().unwrap();
-        let _home = ScopedGwtHome::set(home.path());
-        let (root, session, member_id) = orphaned_current_pm_fixture();
-        let sessions = gwt_core::paths::gwt_sessions_dir();
-        let worktree = session.worktree_path.clone();
-        let key = gwt_core::paths::project_scope_hash(&root);
-        let prefs_path = crate::pm_registry::pm_prefs_path_for_repo_path(&root);
-        crate::pm_registry::deregister_pm(&prefs_path, &session.id).unwrap();
-
-        let bound = |host_pid: u32, host_started_at: Option<u64>| {
-            let mut registry = load().unwrap().unwrap();
-            set_project_assignment(
-                &mut registry,
-                key.as_str(),
-                &member_id,
-                Some(crate::agent_names::AgentMemberAssignment {
-                    role: AgentAssignmentRole::Pm,
-                    pm_profile_revision: None,
-                    project_key: Some(key.to_string()),
-                    reservation_id: "previous-generation".into(),
-                    session_id: Some(session.id.clone()),
-                    issue_number: None,
-                    spec_number: None,
-                    delivery_id: None,
-                    host_id: crate::process::current_hostname(),
-                    host_pid,
-                    host_started_at,
-                }),
-            );
-            save(&registry).unwrap();
-        };
-
-        // A live foreign gwtd on this host keeps its bound reservation even
-        // though the bound Session is stopped.
-        #[cfg(unix)]
-        {
-            let parent = std::os::unix::process::parent_id();
-            bound(parent, crate::process::host_process_start_time(parent));
-            let error = reserve_new_pm_member(&root, &sessions, &worktree, "blocked-attempt")
-                .err()
-                .expect("a live reserving host must block a new launch");
-            assert!(
-                error.to_string().contains("still holds its reservation"),
-                "{error}"
-            );
-        }
-
-        bound(4_000_000_000, Some(1));
-        let prepared =
-            reserve_new_pm_member(&root, &sessions, &worktree, "recovery-attempt").unwrap();
-        let assignment = prepared.member.assignment.expect("new PM assignment");
-        assert_eq!(assignment.reservation_id, "recovery-attempt");
-        assert_eq!(assignment.session_id, None);
-        assert_eq!(assignment.host_pid, std::process::id());
     }
 
     /// Two enrolled projects: `a` carries the roster, `b` is a plain mirror.
