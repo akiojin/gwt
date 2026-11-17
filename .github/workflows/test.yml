@@ -55,6 +55,7 @@ jobs:
       # runs of a changed `gwt` alone would blow any step budget. The SPEC's own
       # cost model is per target ("#4550 は 54 テスト 0.53 秒で、20 回でも 11 秒").
       flake_targets: ${{ steps.classify.outputs.flake_targets }}
+      quit_subscriber_changed: ${{ steps.classify.outputs.quit_subscriber_changed }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -164,6 +165,11 @@ jobs:
           echo "flake_targets=$flake_targets"
           echo "docs_only=$docs_only" >>"$GITHUB_OUTPUT"
           echo "flake_targets=$flake_targets" >>"$GITHUB_OUTPUT"
+          if grep -Fxq 'crates/gwt/src/daemon_subscriber.rs' <<<"$files"; then
+            echo "quit_subscriber_changed=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "quit_subscriber_changed=false" >>"$GITHUB_OUTPUT"
+          fi
 
   test:
     name: Test (Rust workspace ${{ matrix.shard }}/6)
@@ -1063,6 +1069,18 @@ jobs:
           node scripts/ci-windows-tests.mjs run-lib gwt lib gwt process::tests -- --test-threads=1
           node scripts/ci-windows-tests.mjs run-lib gwt-core lib gwt_core daemon_pipe_name -- --test-threads=1
         timeout-minutes: 20
+      - name: Repeat pending-endpoint Quit regression on Windows
+        if: ${{ needs.source-sync.outputs.quit_subscriber_changed != 'false' }}
+        shell: bash
+        run: |
+          filter=daemon_subscriber::project_owner_tests::explicit_quit_retries_an_endpoint_published_during_delivery
+          for (( run = 1; run <= 50; run++ )); do
+            echo "Pending-endpoint Quit run $run/50"
+            node scripts/ci-windows-tests.mjs run-lib gwt lib gwt "$filter" -- --exact --test-threads=1 |
+              tee "$RUNNER_TEMP/pending-endpoint-quit.log"
+            grep -Fq 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/pending-endpoint-quit.log"
+          done
+        timeout-minutes: 5
       # Issue #4746: Windows uses the in-process verification runner, and
       # reclaiming an exited workload's stalled driver needs native taskkill.
       - name: Run Windows verification completion and reclaim regressions
