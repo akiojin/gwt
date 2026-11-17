@@ -1066,7 +1066,7 @@ pub fn install_agent_launch(
         std::time::Duration::from_secs(2),
         |session| {
             session.restore_window_on_startup = true;
-            session.updated_at = chrono::Utc::now();
+            session.updated_at = gwt_core::timestamp::UtcTimestamp::now();
             session.launch_origin = input.origin;
             session.restore_source_session_id = input.auto_resume_source_session_id.clone();
             Ok(())

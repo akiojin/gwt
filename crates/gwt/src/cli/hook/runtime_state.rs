@@ -2104,7 +2104,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("runtime.json");
         let mut state = SessionRuntimeState::new(AgentStatus::Running);
-        state.last_completed_hook_event_at = Some(Utc::now());
+        state.last_completed_hook_event_at = Some(gwt_core::timestamp::UtcTimestamp::now());
         state.last_completed_hook_outcome =
             Some(gwt_agent::session::HookCompletionOutcome::Blocked);
         state.save(&path).unwrap();

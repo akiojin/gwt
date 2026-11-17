@@ -2450,9 +2450,7 @@ mod tests {
         runtime.host_started_at = Some(started);
         runtime.child_pid = Some(pid);
         runtime.child_started_at = Some(started);
-        runtime.last_activity_at = chrono::DateTime::parse_from_rfc3339("2000-01-01T00:00:00Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc);
+        runtime.last_activity_at = "2000-01-01T00:00:00Z".parse().unwrap();
         runtime.save(&runtime_path).unwrap();
         let mut workspace = crate::persistence::empty_workspace_state();
         let mut pane = window("agent-health", WindowPreset::Codex, Some("codex"));

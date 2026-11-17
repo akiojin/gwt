@@ -646,7 +646,8 @@ fn app_runtime_startup_auto_resume_restores_each_eligible_session() {
         session.restore_window_on_startup = true;
         session.record_hook_event("Stop");
         session.record_completed_stop();
-        session.last_activity_at = chrono::Utc::now() - chrono::Duration::seconds(index as i64);
+        session.last_activity_at =
+            (chrono::Utc::now() - chrono::Duration::seconds(index as i64)).into();
         session.updated_at = session.last_activity_at;
         session
             .save(&runtime.sessions_dir)
@@ -1108,7 +1109,7 @@ fn startup_restore_defers_1500_old_sessions_without_git_spawns() {
     for index in 0..1500 {
         let mut session = gwt_agent::Session::new(&repo, "work/history", gwt_agent::AgentId::Codex);
         session.id = format!("history-{index}");
-        session.last_activity_at = chrono::Utc::now() - chrono::Duration::days(3);
+        session.last_activity_at = (chrono::Utc::now() - chrono::Duration::days(3)).into();
         let path = runtime.sessions_dir.join(format!("{}.toml", session.id));
         fs::write(&path, toml::to_string(&session).unwrap()).unwrap();
         fs::File::options()
@@ -1168,7 +1169,7 @@ fn startup_restore_update_marker_1500_sessions_bounds_git_spawns() {
             gwt_agent::AgentId::Codex,
         );
         session.id = format!("update-history-{index}");
-        session.last_activity_at = chrono::Utc::now() - chrono::Duration::days(3);
+        session.last_activity_at = (chrono::Utc::now() - chrono::Duration::days(3)).into();
         fs::write(
             runtime.sessions_dir.join(format!("{}.toml", session.id)),
             toml::to_string(&session).unwrap(),
@@ -1597,7 +1598,7 @@ fn app_runtime_bootstrap_auto_resume_dedupes_and_skips_stale_without_count_cap()
         session.restore_window_on_startup = true;
         session.record_hook_event("Stop");
         session.record_completed_stop();
-        session.last_activity_at = now - chrono::Duration::seconds(age_secs);
+        session.last_activity_at = (now - chrono::Duration::seconds(age_secs)).into();
         session.updated_at = session.last_activity_at;
         session
             .save(&runtime.sessions_dir)

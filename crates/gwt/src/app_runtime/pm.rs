@@ -3204,10 +3204,10 @@ mod delivery_tests {
         );
         let mut state = physical.clone();
         state.status = gwt_agent::AgentStatus::Running;
-        state.updated_at = chrono::Utc::now();
+        state.updated_at = gwt_core::timestamp::UtcTimestamp::now();
         state.active_tool_calls = Some(Default::default());
         state.source_event = Some("Stop".into());
-        state.last_activity_at = chrono::Utc::now() - chrono::Duration::hours(1);
+        state.last_activity_at = (chrono::Utc::now() - chrono::Duration::hours(1)).into();
         state.save(&path).unwrap();
         let lock_count = || {
             std::fs::read_to_string(&trace_path)

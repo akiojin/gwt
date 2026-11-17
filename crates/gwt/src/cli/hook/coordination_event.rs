@@ -106,7 +106,7 @@ fn sync_coordination_for_session_with_paths(
         // Provider compaction can replay SessionStart within the same gwt
         // Session. Recognize pre-upgrade random-id starts in archived history
         // as well as new deterministic starts, without another sidecar.
-        if load_entries_since(&session.worktree_path, session.created_at)
+        if load_entries_since(&session.worktree_path, session.created_at.into())
             .map_err(coordination_as_hook_error)?
             .iter()
             .any(|prior| {

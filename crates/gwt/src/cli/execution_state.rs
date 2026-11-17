@@ -19788,7 +19788,8 @@ mod tests {
 
     fn with_new_hook_observations(session: &gwt_agent::Session) -> gwt_agent::Session {
         let mut current = session.clone();
-        let observed_at = session.updated_at + chrono::Duration::seconds(1);
+        let observed_at =
+            (DateTime::from(session.updated_at) + chrono::Duration::seconds(1)).into();
         current.updated_at = observed_at;
         current.last_activity_at = observed_at;
         current.last_hook_event = Some("PreToolUse".to_string());
@@ -23268,8 +23269,8 @@ mod tests {
             &identity,
             16,
         );
-        stale.updated_at = written_at;
-        stale.last_activity_at = written_at;
+        stale.updated_at = written_at.into();
+        stale.last_activity_at = written_at.into();
         stale
             .save(&gwt_agent::runtime_state_path(&sessions_dir, session_id))
             .unwrap();
@@ -23292,7 +23293,7 @@ mod tests {
             &identity,
             17,
         );
-        fresh.updated_at = Utc::now();
+        fresh.updated_at = gwt_core::timestamp::UtcTimestamp::now();
         fresh.last_activity_at = fresh.updated_at;
         fresh
             .save(&gwt_agent::runtime_state_path(&sessions_dir, session_id))

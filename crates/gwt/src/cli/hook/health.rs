@@ -519,7 +519,7 @@ fn read_managed_browser_preflight_with(
             result.reasons.push(PreflightReason::CompletionBlocked);
         }
         (Some(HookCompletionOutcome::Normal), Some(at))
-            if at >= runtime.updated_at && at <= chrono::Utc::now() =>
+            if at >= runtime.updated_at && at <= chrono::Utc::now().into() =>
         {
             result.normal_completion = PreflightCompletion::Normal;
         }
@@ -544,7 +544,7 @@ fn read_managed_browser_preflight_with(
                     Some(id) if id == before.identity.session_id => {
                         if runtime.last_completed_hook_outcome
                             == Some(HookCompletionOutcome::Normal)
-                            && completed_at.is_some_and(|at| at > row.recorded_at)
+                            && completed_at.is_some_and(|at| at > row.recorded_at.into())
                         {
                             RetainedHookClassification::Recovered
                         } else {
@@ -1992,10 +1992,10 @@ pub(super) mod browser_preflight_tests {
             pid,
             started,
         );
-        runtime.updated_at = chrono::Utc::now() - chrono::Duration::seconds(5);
+        runtime.updated_at = (chrono::Utc::now() - chrono::Duration::seconds(5)).into();
         runtime.source_event = Some("PostToolUse".into());
         runtime.last_completed_hook_event_at =
-            Some(chrono::Utc::now() - chrono::Duration::seconds(1));
+            Some((chrono::Utc::now() - chrono::Duration::seconds(1)).into());
         runtime.last_completed_hook_outcome = Some(Normal);
         let path = gwt_agent::runtime_state_path(&sessions, &session.id);
         runtime.save(&path).unwrap();
@@ -2111,7 +2111,7 @@ pub(super) mod browser_preflight_tests {
     #[test]
     fn normal_recovery_proceeds_while_legacy_health_and_failure_bytes_are_retained() {
         with_source(|input, session, _, runtime| {
-            let row = failure(input, Some(&session.id), runtime.updated_at);
+            let row = failure(input, Some(&session.id), runtime.updated_at.into());
             gwt_core::error_ledger::record(row.clone()).unwrap();
             let before = gwt_core::error_ledger::list_since(None).unwrap();
             let health = read_managed_hook_health(input);
@@ -2185,7 +2185,7 @@ pub(super) mod browser_preflight_tests {
     #[test]
     fn blocked_missing_old_equal_and_backward_completion_cannot_proceed() {
         with_source(|input, session, path, runtime| {
-            let at = runtime.last_completed_hook_event_at.unwrap();
+            let at = chrono::DateTime::from(runtime.last_completed_hook_event_at.unwrap());
             gwt_core::error_ledger::record(failure(input, Some(&session.id), at)).unwrap();
             for (outcome, completed) in [
                 (Some(Blocked), Some(at + chrono::Duration::seconds(1))),
@@ -2195,12 +2195,12 @@ pub(super) mod browser_preflight_tests {
                 (Some(Normal), Some(at - chrono::Duration::seconds(1))),
                 (
                     Some(Normal),
-                    Some(runtime.updated_at - chrono::Duration::seconds(1)),
+                    Some(chrono::DateTime::from(runtime.updated_at) - chrono::Duration::seconds(1)),
                 ),
             ] {
                 let mut state = runtime.clone();
                 state.last_completed_hook_outcome = outcome;
-                state.last_completed_hook_event_at = completed;
+                state.last_completed_hook_event_at = completed.map(Into::into);
                 state.save(path).unwrap();
                 assert_ne!(
                     read_managed_browser_preflight(input).result,
@@ -2213,7 +2213,7 @@ pub(super) mod browser_preflight_tests {
     #[test]
     fn foreign_rows_never_hide_related_failure_and_unattributed_rows_remain_unknown() {
         with_source(|input, session, _, runtime| {
-            let at = runtime.last_completed_hook_event_at.unwrap();
+            let at = chrono::DateTime::from(runtime.last_completed_hook_event_at.unwrap());
             let related = failure(input, Some(&session.id), at);
             let foreign = failure(
                 input,
@@ -2230,7 +2230,8 @@ pub(super) mod browser_preflight_tests {
                 .any(|d| d.classification == RetainedHookClassification::Foreign));
         });
         with_source(|input, _, _, runtime| {
-            gwt_core::error_ledger::record(failure(input, None, runtime.updated_at)).unwrap();
+            gwt_core::error_ledger::record(failure(input, None, runtime.updated_at.into()))
+                .unwrap();
             let result = read_managed_browser_preflight(input);
             assert_eq!(result.result, PreflightResult::Unknown);
             assert!(result

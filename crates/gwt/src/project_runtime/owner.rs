@@ -12069,7 +12069,7 @@ fn finish_agent_session(
                 }
                 runtime = latest;
                 runtime.status = gwt_agent::AgentStatus::Stopped;
-                runtime.updated_at = chrono::Utc::now();
+                runtime.updated_at = gwt_core::timestamp::UtcTimestamp::now();
                 writer.save(&runtime)?;
                 session.update_status(gwt_agent::AgentStatus::Stopped);
                 if let Some(receipt) = exit_receipt {

@@ -858,12 +858,13 @@ mod tests {
                 .session_history
                 .push(gwt_agent::session::AgentSessionHistoryEntry {
                     agent_session_id: sid.to_owned(),
-                    started_at: now(),
+                    started_at: now().into(),
                 });
         }
         current.save(&sessions_dir).unwrap();
         let mut predecessor = make_session("current", "member-a", AgentStatus::Stopped);
-        predecessor.created_at = current.created_at - chrono::Duration::seconds(1);
+        predecessor.created_at =
+            (DateTime::from(current.created_at) - chrono::Duration::seconds(1)).into();
         predecessor.save(&sessions_dir).unwrap();
         for session in [
             make_session("ambiguous", "member-b", AgentStatus::Stopped),
@@ -962,7 +963,7 @@ mod tests {
             session.project_state_root = Some(project.clone());
             session.agent_session_id = Some(sid.to_owned());
             session.status = status;
-            session.created_at = now() + chrono::Duration::seconds(age);
+            session.created_at = (now() + chrono::Duration::seconds(age)).into();
             session.updated_at = session.created_at;
             session
         };

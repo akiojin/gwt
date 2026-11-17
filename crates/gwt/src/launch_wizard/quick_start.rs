@@ -164,6 +164,7 @@ mod tests {
         session.runtime_target = gwt_agent::LaunchRuntimeTarget::Docker;
         session.docker_service = Some("gwt".to_string());
         session.docker_lifecycle_intent = gwt_agent::DockerLifecycleIntent::Restart;
+        let updated_at = updated_at.into();
         session.created_at = updated_at;
         session.updated_at = updated_at;
         session.last_activity_at = updated_at;
@@ -188,6 +189,7 @@ mod tests {
         session.runtime_target = gwt_agent::LaunchRuntimeTarget::Docker;
         session.docker_service = Some("gwt".to_string());
         session.docker_lifecycle_intent = gwt_agent::DockerLifecycleIntent::Restart;
+        let updated_at = updated_at.into();
         session.created_at = updated_at;
         session.updated_at = updated_at;
         session.last_activity_at = updated_at;

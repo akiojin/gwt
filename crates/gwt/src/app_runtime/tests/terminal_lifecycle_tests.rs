@@ -437,7 +437,7 @@ fn app_runtime_active_work_projection_attaches_registry_sessions() {
     session.agent_session_id = Some("conv-1".to_string());
     session.session_history = vec![gwt_agent::AgentSessionHistoryEntry {
         agent_session_id: "conv-1".to_string(),
-        started_at: chrono::Utc::now(),
+        started_at: gwt_core::timestamp::UtcTimestamp::now(),
     }];
     assert!(
         session.repo_hash.is_some(),

@@ -9,8 +9,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chrono::{DateTime, Utc};
 use fs2::FileExt;
+use gwt_core::timestamp::UtcTimestamp;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -101,7 +101,7 @@ pub const GWT_PANE_WS_URL_ENV: &str = "GWT_PANE_WS_URL";
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentSessionHistoryEntry {
     pub agent_session_id: String,
-    pub started_at: DateTime<Utc>,
+    pub started_at: UtcTimestamp,
 }
 
 /// Durable launch-time binding for a Docker-backed Session.
@@ -187,7 +187,7 @@ pub struct SessionActiveLaunchHandshake {
     pub host_started_at: u64,
     #[serde(default)]
     pub phase: SessionActiveLaunchPhase,
-    pub created_at: DateTime<Utc>,
+    pub created_at: UtcTimestamp,
 }
 
 impl SessionActiveLaunchHandshake {
@@ -223,7 +223,7 @@ pub struct SessionManualHandoffFence {
     pub execution_identity: SessionExecutionIdentity,
     pub host_pid: u32,
     pub host_started_at: u64,
-    pub created_at: DateTime<Utc>,
+    pub created_at: UtcTimestamp,
 }
 
 impl SessionManualHandoffFence {
@@ -418,7 +418,7 @@ pub struct Session {
     /// When the bypass was armed. Consumers treat a bypass without a fresh
     /// timestamp as expired so a forgotten disarm cannot outlive its release.
     #[serde(default)]
-    pub workflow_bypass_armed_at: Option<DateTime<Utc>>,
+    pub workflow_bypass_armed_at: Option<UtcTimestamp>,
     #[serde(default)]
     pub launch_command: String,
     #[serde(default)]
@@ -446,15 +446,15 @@ pub struct Session {
     /// idempotent. Legacy TOML files without this field deserialize as `0`.
     #[serde(default)]
     pub schema_version: u32,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-    pub last_activity_at: DateTime<Utc>,
+    pub created_at: UtcTimestamp,
+    pub updated_at: UtcTimestamp,
+    pub last_activity_at: UtcTimestamp,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_hook_event: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_hook_event_at: Option<DateTime<Utc>>,
+    pub last_hook_event_at: Option<UtcTimestamp>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_completed_stop_at: Option<DateTime<Utc>>,
+    pub last_completed_stop_at: Option<UtcTimestamp>,
     /// Exit code reported by the agent's PTY child the last time it was reaped
     /// (Issue #3341). `1` alongside [`Self::last_exit_signal`] means signal
     /// death; `0` with no signal means the agent shut itself down cleanly,
@@ -467,7 +467,7 @@ pub struct Session {
     /// When the exit was observed, not when it was persisted — the gap between
     /// the two has already been misread as a much later death.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_exited_at: Option<DateTime<Utc>>,
+    pub last_exited_at: Option<UtcTimestamp>,
     pub display_name: String,
 }
 
@@ -477,7 +477,7 @@ pub struct Session {
 pub struct SessionExitReceipt {
     pub exit_code: u32,
     pub signal: Option<String>,
-    pub exited_at: DateTime<Utc>,
+    pub exited_at: UtcTimestamp,
 }
 
 /// Lightweight runtime state updated by hook events while the PTY is alive.
@@ -531,8 +531,8 @@ impl CurrentHookEventObservation {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionRuntimeState {
     pub status: AgentStatus,
-    pub updated_at: DateTime<Utc>,
-    pub last_activity_at: DateTime<Utc>,
+    pub updated_at: UtcTimestamp,
+    pub last_activity_at: UtcTimestamp,
     /// Exact durable producing Session represented by this runtime sidecar.
     /// Legacy and hook-only sidecars omit it and therefore cannot authorize a
     /// destructive terminal handoff.
@@ -564,7 +564,7 @@ pub struct SessionRuntimeState {
     /// protocol output included (Issue #3541). `hook.health` compares it with
     /// the newest hook failure to tell "recovered" from "unresolved".
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_completed_hook_event_at: Option<DateTime<Utc>>,
+    pub last_completed_hook_event_at: Option<UtcTimestamp>,
     /// Missing in old sidecars; absence is never evidence of a normal outcome.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_completed_hook_outcome: Option<HookCompletionOutcome>,
@@ -588,7 +588,7 @@ impl Session {
         agent_id: AgentId,
     ) -> Self {
         let worktree_path = worktree_path.into();
-        let now = Utc::now();
+        let now = UtcTimestamp::now();
         let display_name = agent_id.display_name().to_string();
         let repo_hash = gwt_core::repo_hash::detect_repo_hash(&worktree_path)
             .map(|hash| hash.as_str().to_string());
@@ -730,14 +730,14 @@ impl Session {
             }
         }
         self.execution_binding = binding;
-        self.updated_at = Utc::now();
+        self.updated_at = UtcTimestamp::now();
         Ok(())
     }
 
     /// Update the session status and touch timestamps.
     pub fn update_status(&mut self, status: AgentStatus) {
         self.status = status;
-        let now = Utc::now();
+        let now = UtcTimestamp::now();
         self.updated_at = now;
         if matches!(
             status,
@@ -757,7 +757,7 @@ impl Session {
         self.last_exit_code = Some(receipt.exit_code);
         self.last_exit_signal = receipt.signal.clone();
         self.last_exited_at = Some(receipt.exited_at);
-        self.updated_at = Utc::now();
+        self.updated_at = UtcTimestamp::now();
     }
 
     /// Apply hook status without reviving an explicitly stopped or closed Session.
@@ -771,7 +771,7 @@ impl Session {
 
     /// Persist that a managed runtime hook was observed for this session.
     pub fn record_hook_event(&mut self, event: &str) {
-        let now = Utc::now();
+        let now = UtcTimestamp::now();
         self.last_hook_event = Some(event.to_string());
         self.last_hook_event_at = Some(now);
         self.updated_at = now;
@@ -783,7 +783,7 @@ impl Session {
     /// Persist that the latest Stop hook was allowed to complete.
     pub fn record_completed_stop(&mut self) {
         self.consecutive_interruptions = 0;
-        let now = Utc::now();
+        let now = UtcTimestamp::now();
         self.last_completed_stop_at = Some(now);
         self.updated_at = now;
         if self.last_hook_event.as_deref() != Some("Stop") {
@@ -915,9 +915,7 @@ impl Session {
         if self.status == AgentStatus::Stopped {
             return false;
         }
-        let elapsed = Utc::now()
-            .signed_duration_since(self.last_activity_at)
-            .num_seconds();
+        let elapsed = UtcTimestamp::now().whole_seconds_since(self.last_activity_at);
         elapsed >= IDLE_TIMEOUT_SECS
     }
 
@@ -1656,7 +1654,7 @@ pub fn persist_observed_session_runtime_stopped_under_lease(
     current.update_status(AgentStatus::Stopped);
     current.restore_window_on_startup = false;
     runtime.status = AgentStatus::Stopped;
-    runtime.updated_at = Utc::now();
+    runtime.updated_at = UtcTimestamp::now();
     write_session_toml_atomic(&path, &serialize_session_toml(&current)?)?;
     writer.save(&runtime)?;
     Ok(true)
@@ -2125,7 +2123,7 @@ fn normalize_config_override(value: &str) -> String {
 impl SessionRuntimeState {
     /// Create a new runtime state snapshot for the given status.
     pub fn new(status: AgentStatus) -> Self {
-        let now = Utc::now();
+        let now = UtcTimestamp::now();
         Self {
             status,
             updated_at: now,
@@ -2525,7 +2523,7 @@ pub fn begin_session_active_launch_handshake_under_lease(
         host_pid: std::process::id(),
         host_started_at,
         phase: SessionActiveLaunchPhase::PreSpawn,
-        created_at: Utc::now(),
+        created_at: UtcTimestamp::now(),
     };
     save_active_launch_handshake(sessions_dir, &handshake)?;
     Ok(Some(handshake))
@@ -2644,7 +2642,7 @@ pub fn begin_session_manual_handoff_under_lease(
         execution_identity: expected.clone(),
         host_pid: std::process::id(),
         host_started_at,
-        created_at: Utc::now(),
+        created_at: UtcTimestamp::now(),
     };
     save_manual_handoff(sessions_dir, &handoff)?;
     Ok(Some(handoff))
@@ -2743,7 +2741,7 @@ pub fn persist_session_status(
         let mut runtime = SessionRuntimeState::load(&runtime_path)
             .unwrap_or_else(|_| SessionRuntimeState::new(status));
         runtime.status = status;
-        runtime.updated_at = Utc::now();
+        runtime.updated_at = UtcTimestamp::now();
         runtime.last_activity_at = runtime.updated_at;
         writer.save(&runtime)
     })
@@ -2930,7 +2928,7 @@ pub fn persist_session_terminal_status_if_execution_identity_matches_under_lease
         {
             runtime = previous;
             runtime.status = status;
-            runtime.updated_at = Utc::now();
+            runtime.updated_at = UtcTimestamp::now();
         } else {
             runtime.last_completed_hook_event_at = previous.last_completed_hook_event_at;
             runtime.last_completed_hook_outcome = previous.last_completed_hook_outcome;
@@ -2960,7 +2958,7 @@ pub fn persist_session_restore_window_on_startup_if_execution_identity_matches_u
         return Ok(true);
     }
     session.restore_window_on_startup = restore;
-    session.updated_at = Utc::now();
+    session.updated_at = UtcTimestamp::now();
     let content = serialize_session_toml(&session)?;
     write_session_toml_atomic(
         &session_file_path(sessions_dir, &expected.session_id),
@@ -3026,7 +3024,7 @@ pub fn persist_session_terminal_status_for_exact_runtime_under_lease(
 
     session.update_status(status);
     exact_runtime.status = status;
-    exact_runtime.updated_at = Utc::now();
+    exact_runtime.updated_at = UtcTimestamp::now();
     let session_content = serialize_session_toml(&session)?;
     write_session_toml_atomic(
         &session_file_path(sessions_dir, &expected.session_id),
@@ -3158,7 +3156,7 @@ fn apply_agent_session_id(session: &mut Session, agent_session_id: &str) {
     {
         session.session_history.push(AgentSessionHistoryEntry {
             agent_session_id: agent_session_id.to_string(),
-            started_at: Utc::now(),
+            started_at: UtcTimestamp::now(),
         });
     }
     session.agent_session_id = Some(agent_session_id.to_string());
@@ -3296,7 +3294,7 @@ pub fn persist_session_restore_window_on_startup(
             return Ok(());
         }
         session.restore_window_on_startup = restore;
-        session.updated_at = Utc::now();
+        session.updated_at = UtcTimestamp::now();
         Ok(())
     })
     .map(|_| ())
@@ -3550,7 +3548,7 @@ display_name = "Codex"
     #[test]
     fn record_process_exit_keeps_a_clean_exit_receipt() {
         let mut session = Session::new("/tmp/wt", "main", AgentId::Codex);
-        let exited_at = Utc::now();
+        let exited_at = UtcTimestamp::now();
 
         session.record_process_exit(&SessionExitReceipt {
             exit_code: 0,
@@ -3570,7 +3568,7 @@ display_name = "Codex"
         session.record_process_exit(&SessionExitReceipt {
             exit_code: 1,
             signal: Some("Killed: 9".to_string()),
-            exited_at: Utc::now(),
+            exited_at: UtcTimestamp::now(),
         });
 
         assert_eq!(session.last_exit_signal.as_deref(), Some("Killed: 9"));
@@ -3592,7 +3590,7 @@ display_name = "Codex"
         let dir = tempfile::tempdir().expect("tempdir");
         let session = session_with_execution_owner();
         session.save(dir.path()).expect("save Session");
-        let exited_at = Utc::now();
+        let exited_at = "2017-01-01T00:59:60.125000001+0100".parse().unwrap();
 
         persist_session_exit(
             dir.path(),
@@ -3605,14 +3603,15 @@ display_name = "Codex"
         )
         .expect("persist exit receipt");
 
-        let reloaded = Session::load(&session_file_path(dir.path(), &session.id))
-            .expect("reload persisted Session");
+        let path = session_file_path(dir.path(), &session.id);
+        let persisted = fs::read_to_string(&path).expect("read Session TOML");
+        assert!(persisted
+            .lines()
+            .any(|line| line == r#"last_exited_at = "2016-12-31T23:59:60.125000001Z""#));
+        let reloaded = Session::load(&path).expect("reload persisted Session");
         assert_eq!(reloaded.last_exit_code, Some(0));
         assert_eq!(reloaded.last_exit_signal, None);
-        assert_eq!(
-            reloaded.last_exited_at.map(|at| at.timestamp_millis()),
-            Some(exited_at.timestamp_millis())
-        );
+        assert_eq!(reloaded.last_exited_at, Some(exited_at));
     }
 
     /// Issue #3341: the exit receipt and the Stopped status are written by two
@@ -3630,7 +3629,7 @@ display_name = "Codex"
             &SessionExitReceipt {
                 exit_code: 7,
                 signal: None,
-                exited_at: Utc::now(),
+                exited_at: UtcTimestamp::now(),
             },
         )
         .expect("persist exit receipt");
@@ -4313,7 +4312,7 @@ display_name = "Codex"
         session.agent_session_id = Some("conversation-current".to_string());
         session.session_history.push(AgentSessionHistoryEntry {
             agent_session_id: "conversation-current".to_string(),
-            started_at: Utc::now(),
+            started_at: UtcTimestamp::now(),
         });
         session.record_hook_event("UserPromptSubmit");
         let expected_history = session.session_history.clone();
@@ -4924,7 +4923,7 @@ display_name = "Claude Code"
     #[test]
     fn should_mark_stopped_old_activity() {
         let mut session = Session::new("/tmp/wt", "main", AgentId::ClaudeCode);
-        session.last_activity_at = Utc::now() - chrono::Duration::seconds(120);
+        session.last_activity_at = (std::time::SystemTime::now() - Duration::from_secs(120)).into();
         session.status = AgentStatus::Running;
         assert!(session.should_mark_stopped());
     }
@@ -5912,13 +5911,16 @@ display_name = "Claude Code"
     fn runtime_state_legacy_json_defaults_execution_proof_to_none() {
         let legacy = r#"{
   "status": "Running",
-  "updated_at": "2026-08-13T00:00:00Z",
-  "last_activity_at": "2026-08-13T00:00:00Z",
+  "updated_at": "2026-08-13T00:00:00.010Z",
+  "last_activity_at": "2026-08-13T00:00:00.000120Z",
   "source_event": "SessionStart"
 }"#;
 
         let runtime: SessionRuntimeState =
             serde_json::from_str(legacy).expect("deserialize legacy runtime sidecar");
+        let serialized = serde_json::to_string(&runtime).unwrap();
+        assert!(serialized.contains(r#""updated_at":"2026-08-13T00:00:00.010Z""#));
+        assert!(serialized.contains(r#""last_activity_at":"2026-08-13T00:00:00.000120Z""#));
 
         assert!(runtime.execution_identity.is_none());
         assert!(runtime.runtime_incarnation.is_none());

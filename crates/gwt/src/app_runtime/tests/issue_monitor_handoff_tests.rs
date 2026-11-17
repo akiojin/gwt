@@ -3690,8 +3690,10 @@ fn app_runtime_answered_handoff_ignores_a_newer_branch_session() {
     let mut newer = source.clone();
     newer.id = "session-newer-same-branch".to_string();
     newer.agent_session_id = Some("native-newer-same-branch".to_string());
-    newer.updated_at += chrono::Duration::hours(1);
-    newer.last_activity_at += chrono::Duration::hours(1);
+    newer.updated_at =
+        (chrono::DateTime::from(newer.updated_at) + chrono::Duration::hours(1)).into();
+    newer.last_activity_at =
+        (chrono::DateTime::from(newer.last_activity_at) + chrono::Duration::hours(1)).into();
     newer
         .save(&fixture.sessions_dir)
         .expect("save newer Session");
@@ -4815,7 +4817,7 @@ fn app_runtime_monitor_launch_preflight_refuses_unauthenticated_provider() {
     let mut start = gwt_core::workspace_projection::WorkEvent::new(
         gwt_core::workspace_projection::WorkEventKind::Start,
         &predecessor_work_id,
-        predecessor.created_at,
+        predecessor.created_at.into(),
     );
     start.owner = Some("SPEC-3165".into());
     start.agent_session_id = Some(predecessor.id.clone());
@@ -4837,7 +4839,7 @@ fn app_runtime_monitor_launch_preflight_refuses_unauthenticated_provider() {
         gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Done,
             &predecessor_work_id,
-            predecessor.updated_at,
+            predecessor.updated_at.into(),
         ),
     )
     .unwrap();
@@ -4985,7 +4987,7 @@ fn app_runtime_monitor_launch_preflight_refuses_unauthenticated_provider() {
     let mut unrelated_start = gwt_core::workspace_projection::WorkEvent::new(
         gwt_core::workspace_projection::WorkEventKind::Start,
         &unrelated_work_id,
-        unrelated_session.created_at,
+        unrelated_session.created_at.into(),
     );
     unrelated_start.owner = Some("Issue #3166".into());
     unrelated_start.agent_session_id = Some(unrelated_session.id.clone());

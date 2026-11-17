@@ -140,9 +140,9 @@ impl Fixture {
             let mut session = Session::new(root, "fixture", AgentId::Codex);
             session.status = AgentStatus::Stopped;
             session.restore_window_on_startup = false;
-            session.created_at = old;
-            session.updated_at = old;
-            session.last_activity_at = old;
+            session.created_at = old.into();
+            session.updated_at = old.into();
+            session.last_activity_at = old.into();
             session.save(&template).expect("seed stopped Session");
         }
         Self {

@@ -823,7 +823,9 @@ mod tests {
                     capability_generation: 1,
                 });
             } else {
-                successor.created_at += chrono::Duration::seconds(1);
+                successor.created_at = (chrono::DateTime::from(successor.created_at)
+                    + chrono::Duration::seconds(1))
+                .into();
             }
             successor.save(temp.path()).unwrap();
             let bytes = std::fs::read(&path).unwrap();
