@@ -635,7 +635,7 @@ test.describe("Works and Agents approved baseline", () => {
         await expect(surface.locator('.work-row[data-window-id="agent-one"] .terminal-text-preview x')).toHaveCount(0);
         await expect(surface.locator(".work-row")).toHaveCount(3);
         await expect(surface.locator(".works-counts [data-count]")).toHaveCount(4);
-        await expect(surface.locator(".works-today [data-metric]")).toHaveCount(6);
+        await expect(surface.locator(".works-today [data-metric]")).toHaveCount(4);
         await expect(surface.locator(".works-fleet svg")).toHaveAttribute("data-known-count", "0");
         await expect(surface.locator('.work-row[data-window-id="agent-one"] .work-stats [data-stat]')).toHaveCount(8);
       }

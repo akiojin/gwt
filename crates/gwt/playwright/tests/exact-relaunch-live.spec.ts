@@ -1649,7 +1649,7 @@ fs.appendFileSync(rollout, JSON.stringify({type:'assistant',sessionId:native,cwd
         await expect(row.locator(".terminal-text-preview x")).toHaveCount(0);
         await expect(surface).toHaveCSS("--works-preview-lines", "10");
         await expect(surface.locator(".works-counts [data-count]")).toHaveCount(4);
-        await expect(surface.locator(".works-today [data-metric]")).toHaveCount(6);
+        await expect(surface.locator(".works-today [data-metric]")).toHaveCount(4);
         await expect(row.locator(".work-stats [data-stat]")).toHaveCount(8);
         await row.locator(".work-tail").click(); await expect(surface.locator(".works-full")).toBeHidden();
         await row.getByRole("button", { name: "Open terminal" }).click();

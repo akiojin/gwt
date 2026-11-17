@@ -1243,6 +1243,12 @@ test("T-7a: current labels explain themselves with keyboard focus and hover", as
   const queueMetric = page.locator('[data-metric="queue"]');
   await queueMetric.focus();
   await page.keyboard.press("Tab");
+  const verification = page.locator('[data-metric="verification"]');
+  await expect(verification).toBeFocused();
+  await expect(popup).toBeVisible();
+  await expect(popup).toHaveText("Host verification capacity is unavailable.");
+  await expect(verification).toHaveAttribute("aria-describedby", await popup.getAttribute("id") as string);
+  await page.keyboard.press("Tab");
   const refill = page.getByRole("switch", { name: "Auto-refill", exact: true });
   await expect(refill).toBeFocused();
   await expect(popup).toBeVisible();
