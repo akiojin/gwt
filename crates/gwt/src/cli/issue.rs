@@ -17,7 +17,7 @@ use crate::cli::{
 };
 
 fn io_as_api_error(err: io::Error) -> SpecOpsError {
-    SpecOpsError::from(ApiError::Network(err.to_string()))
+    SpecOpsError::LocalIo(err)
 }
 
 fn guard_pm_owner_check(
@@ -7505,7 +7505,9 @@ pub(super) fn load_or_refresh_linked_prs<E: CliEnv>(
             }
         }
     }
-    let linked_prs = env.fetch_linked_prs(number).map_err(io_as_api_error)?;
+    let linked_prs = env
+        .fetch_linked_prs(number)
+        .map_err(super::io_as_api_error)?;
     write_linked_prs_cache(&cache_root, number, &linked_prs)?;
     Ok(linked_prs)
 }
