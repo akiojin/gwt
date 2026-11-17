@@ -9434,6 +9434,11 @@ fn monitor_relaunch_fixture_with_settlement(
             "2026-08-13T00:00:00Z",
         ))
         .expect("seed monitored owner authority");
+    gwt::issue_cache::set_issue_launch_readback_fixture(
+        &repo,
+        3165,
+        r#"{"state":"OPEN","updatedAt":"2026-08-13T00:00:00Z"}"#,
+    );
     let worktree = case_root.join("issue-worktree");
     let target_branch = "work/issue-3165";
     let status = gwt_core::process::hidden_command("git")
