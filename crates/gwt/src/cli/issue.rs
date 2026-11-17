@@ -87,6 +87,15 @@ pub(super) fn run<E: CliEnv>(
     cmd: IssueCommand,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
+    run_with_data(env, cmd, out, &mut None)
+}
+
+pub(super) fn run_with_data<E: CliEnv>(
+    env: &mut E,
+    cmd: IssueCommand,
+    out: &mut String,
+    data: &mut Option<serde_json::Value>,
+) -> Result<i32, SpecOpsError> {
     if matches!(
         cmd,
         IssueCommand::SpecReadAll { .. }
@@ -115,6 +124,16 @@ pub(super) fn run<E: CliEnv>(
         IssueCommand::View { number, refresh } => {
             let entry = load_or_refresh_issue(env, IssueNumber(number), refresh)?;
             render_issue(out, &entry.snapshot);
+            let snapshot = &entry.snapshot;
+            *data = Some(serde_json::json!({
+                "number": snapshot.number.0,
+                "author_login": snapshot.author_login,
+                "title": snapshot.title,
+                "body": snapshot.body,
+                "labels": snapshot.labels,
+                "state": match snapshot.state { IssueState::Open => "open", IssueState::Closed => "closed" },
+                "updated_at": snapshot.updated_at.0,
+            }));
             0
         }
         IssueCommand::Comments { number, refresh } => {
@@ -638,6 +657,14 @@ pub(crate) fn attach_github_budget(status: &mut crate::IssueMonitorAgentStatus) 
     status.github_budget = Some(budget);
 }
 
+pub(crate) fn attach_verification_capacity(status: &mut crate::IssueMonitorAgentStatus) {
+    let capacity = super::verification_lease::capacity_snapshot();
+    status.verification_capacity = capacity;
+    if let Some(gui_status) = status.gui_status.as_mut() {
+        gui_status.verification_capacity = capacity;
+    }
+}
+
 /// Issue #4009 AC-4: free space where the worktrees live and where the
 /// verification coordinator writes its lease, so a filling host warns here
 /// before `verify.run` fails with `No space left on device`.
@@ -933,6 +960,7 @@ fn run_monitor_status<E: CliEnv>(
     let (mut status, capacity) =
         load_monitor_agent_status(&project_root, inventory.sessions.len())?;
     attach_github_budget(&mut status);
+    attach_verification_capacity(&mut status);
     attach_disk_space(&project_root, &mut status);
     attach_build_artifact_gc(&project_root, &mut status);
     attach_memory_pressure(&mut status);
@@ -13270,6 +13298,62 @@ mod tests {
         );
     }
 
+    #[test]
+    fn issue_7524_monitor_status_reports_verification_capacity_without_claiming_slots() {
+        use gwt_core::index_coordinator::{JobAdmission, JobPriority, TargetKey};
+
+        let tmp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let mut settings = gwt_config::Settings::default();
+        settings.verification.slots = std::num::NonZeroU16::new(3);
+        settings.save_global().unwrap();
+        let env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+        let observe = || {
+            let mut out = String::new();
+            run_monitor_status(&env, None, &mut out).unwrap();
+            serde_json::from_str::<serde_json::Value>(&out).unwrap()
+        };
+        let coordinator = super::super::verification_lease::open_coordinator().unwrap();
+        let key = TargetKey::verification("issue-7524", "fixture");
+        let JobAdmission::Owner(guard) = coordinator
+            .request_job(&key, JobPriority::ManualRebuild, Duration::from_secs(1))
+            .unwrap()
+        else {
+            panic!("private fixture must own its job");
+        };
+        for running in [false, true] {
+            let _lease = running.then(|| {
+                guard
+                    .acquire_heavy_with_disk_budgets(
+                        Duration::from_secs(1),
+                        Duration::from_secs(60),
+                        &[],
+                    )
+                    .unwrap()
+            });
+            let status = observe();
+            let expected = serde_json::json!({
+                "capacity": 3, "running": usize::from(running),
+                "available": 3 - usize::from(running),
+            });
+            assert_eq!(status["verification_capacity"], expected);
+            assert_eq!(status["gui_status"]["verification_capacity"], expected);
+            let pool = coordinator.heavy_pool_status().unwrap();
+            assert_eq!(pool.used, usize::from(running));
+            assert!(pool.queue.is_empty(), "observing must not join admission");
+        }
+        std::fs::write(
+            gwt_config::Settings::global_config_path().unwrap(),
+            "invalid [",
+        )
+        .unwrap();
+        let unavailable = observe();
+        assert!(unavailable.get("verification_capacity").is_none());
+        assert!(unavailable["gui_status"]
+            .get("verification_capacity")
+            .is_none());
+    }
+
     /// Issue #4908 AC-5 / AC-6: the usage poller's reading is in the status
     /// with when it was taken, and a host where nothing was read says so
     /// instead of returning an empty or zero-filled account.
@@ -13461,6 +13545,7 @@ mod tests {
             .expect("write closed cache entry");
 
         let mut published = crate::IssueMonitorAgentStatus {
+            verification_capacity: None,
             event_history: Vec::new(),
             max_active_agents_scope: "machine".to_string(),
             agent_capacity: Default::default(),
@@ -13526,6 +13611,7 @@ mod tests {
         assert_eq!(published.last_error, None);
 
         let mut live_open = crate::IssueMonitorAgentStatus {
+            verification_capacity: None,
             event_history: Vec::new(),
             max_active_agents_scope: "machine".to_string(),
             agent_capacity: Default::default(),
@@ -13681,6 +13767,7 @@ mod tests {
 
         for issue_updated_at in [None, Some("not-a-timestamp".to_string())] {
             let mut status = crate::IssueMonitorAgentStatus {
+                verification_capacity: None,
                 event_history: Vec::new(),
                 max_active_agents_scope: "machine".to_string(),
                 agent_capacity: Default::default(),
@@ -13810,6 +13897,7 @@ mod tests {
         let escalation_path = gwt_core::coordination::coordination_escalations_path(&repo);
         std::fs::create_dir_all(&escalation_path).expect("make escalation index unreadable");
         let mut published = crate::IssueMonitorAgentStatus {
+            verification_capacity: None,
             event_history: Vec::new(),
             max_active_agents_scope: "machine".to_string(),
             agent_capacity: Default::default(),
@@ -13962,6 +14050,11 @@ mod tests {
     fn issue_monitor_status_reports_ordered_queue_and_active_launches() {
         let tmp = TempDir::new().expect("tempdir");
         let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let mut settings = gwt_config::Settings::default();
+        settings.verification.slots = std::num::NonZeroU16::new(2);
+        settings
+            .save_global()
+            .expect("verification capacity fixture");
         crate::machine_agent_settings::set(
             Some(3),
             crate::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
@@ -14085,6 +14178,16 @@ mod tests {
             .expect("status object")
             .remove("gui_status")
             .expect("GUI projection");
+        let verification_capacity = status
+            .as_object_mut()
+            .unwrap()
+            .remove("verification_capacity")
+            .expect("live host verification capacity");
+        assert_eq!(
+            verification_capacity,
+            serde_json::json!({"capacity": 2, "running": 0, "available": 2})
+        );
+        assert_eq!(gui_status["verification_capacity"], verification_capacity);
         assert_eq!(gui_status["state"], "launching");
         assert_eq!(gui_status["last_error"], serde_json::Value::Null);
         assert_eq!(
@@ -18567,6 +18670,7 @@ command = "my-agent-cli"
     #[test]
     fn a_live_foreign_claim_is_reported_instead_of_a_queue_position() {
         let status = crate::IssueMonitorAgentStatus {
+            verification_capacity: None,
             event_history: Vec::new(),
             max_active_agents_scope: "machine".to_string(),
             agent_capacity: Default::default(),

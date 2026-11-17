@@ -119,41 +119,139 @@ fn main() -> ExitCode {
 }
 
 fn print_help() {
-    println!("gwtd {}", env!("CARGO_PKG_VERSION"));
-    println!("Headless CLI for gwt agent, hook, and workflow automation.");
-    println!();
-    println!("Usage: gwtd < stdin-json-envelope");
-    println!("       gwtd hook event <Event>   Managed hook transport exception");
-    println!("       gwtd --help <command>   Show subcommands for a family");
-    println!();
-    println!("Commands:");
-    println!("  issue       Manage GitHub Issues and SPEC sections");
-    println!("  pr          Manage pull requests, reviews, checks, threads");
-    println!("  actions     Read logs, re-run failures, and cancel GitHub Actions runs");
-    println!("  board       Read/write the coordination Board (SPEC-1974)");
-    println!("  hook        Dispatch Claude Code / Codex hook events");
-    println!("  index       Manage the local search index");
-    println!("  search      Semantic search over SPECs, Issues, files, memory");
-    println!("  memory      Append reusable project memory");
-    println!("  lessons     Legacy alias for memory add");
-    println!("  discuss     gwt-discussion exit CLI (SPEC-1935)");
-    println!("  discussion  Persist/update Git-managed discussion notes");
-    println!("  plan        gwt-plan-spec exit CLI (SPEC-1935)");
-    println!("  build       gwt-build-spec exit CLI (SPEC-1935)");
-    println!("  register    gwt-register-spec exit CLI (SPEC-2784)");
-    println!("  pane        Inspect and control live agent panes");
-    println!("  pm          PM agent diagnostics (SPEC-3431)");
-    println!("  provider    Free quota reset proposals and native user consent");
-    println!("  workspace   Update Work current projection and summary journal");
-    println!("  update      Check / apply gwt updates");
-    println!("  daemon      Long-running runtime daemon (SPEC-2077)");
-    println!("  errors      List host-wide persistent error ledger rows");
-    println!("  perf        Summarize the always-on performance log (SPEC-3700)");
+    print!("{}", format_global_help());
 }
+
+fn format_global_help() -> String {
+    let mut help = String::new();
+    help.push_str(&format!("gwtd {}\n", env!("CARGO_PKG_VERSION")));
+    help.push_str("Headless CLI for gwt agent, hook, and workflow automation.\n\n");
+    help.push_str("Usage: gwtd < stdin-json-envelope\n");
+    help.push_str("       gwtd hook event <Event>   Managed hook transport exception\n");
+    help.push_str("       gwtd --help <command>   Show subcommands for a family\n\n");
+    help.push_str("Commands:\n");
+    help.push_str(&gwt::cli::operation_catalog::family_index(FAMILY_SUMMARIES));
+    help.push('\n');
+    help.push_str("Every family help ends with its complete operation list, generated from\n");
+    help.push_str("the operation catalog. `pm.capabilities` returns the whole catalog as JSON:\n");
+    help.push_str("  gwtd <<'JSON'\n");
+    help.push_str("  {\"schema_version\":1,\"operation\":\"pm.capabilities\",\"params\":{}}\n");
+    help.push_str("  JSON\n");
+    help
+}
+
+/// One-line description per help family, in display order. The rows are
+/// rendered by `operation_catalog::family_index`, which also lists a catalog
+/// family this table has not described yet (Issue #7522).
+const FAMILY_SUMMARIES: &[(&str, &str)] = &[
+    ("issue", "Manage GitHub Issues and SPEC sections"),
+    ("pr", "Manage pull requests, reviews, checks, threads"),
+    (
+        "actions",
+        "Read logs, re-run failures, and cancel GitHub Actions runs",
+    ),
+    ("board", "Read/write the coordination Board (SPEC-1974)"),
+    ("hook", "Dispatch Claude Code / Codex hook events"),
+    ("index", "Manage the local search index"),
+    (
+        "search",
+        "Semantic search over SPECs, Issues, files, memory",
+    ),
+    ("memory", "Append reusable project memory"),
+    ("lessons", "Legacy alias for memory add"),
+    ("discuss", "gwt-discussion exit CLI (SPEC-1935)"),
+    ("discussion", "Persist/update Git-managed discussion notes"),
+    ("plan", "gwt-plan-spec exit CLI (SPEC-1935)"),
+    ("build", "gwt-build-spec exit CLI (SPEC-1935)"),
+    ("register", "gwt-register-spec exit CLI (SPEC-2784)"),
+    ("pane", "Inspect and control live agent panes"),
+    ("pm", "PM agent diagnostics (SPEC-3431)"),
+    (
+        "provider",
+        "Free quota reset proposals and native user consent",
+    ),
+    (
+        "workspace",
+        "Update Work current projection and summary journal",
+    ),
+    ("update", "Check / apply gwt updates"),
+    ("daemon", "Long-running runtime daemon (SPEC-2077)"),
+    ("errors", "List host-wide persistent error ledger rows"),
+    (
+        "perf",
+        "Summarize the always-on performance log (SPEC-3700)",
+    ),
+    ("agent", "Inspect and reconcile the agent registry"),
+    ("branch", "Prune merged work branches"),
+    (
+        "concern",
+        "Track, measure, and resolve user concerns (SPEC #4320)",
+    ),
+    ("diagnostics", "Host CPU diagnostics"),
+    (
+        "execution",
+        "Settle and recover the Execution Control Record",
+    ),
+    ("feedback", "Report gwt friction and track its intake"),
+    ("fleet", "Inventory agent processes and dispose of orphans"),
+    ("github", "Read the GitHub API budget"),
+    ("intake", "Record an intake session outcome (SPEC-3248)"),
+    (
+        "project",
+        "Read or choose the project execution environment",
+    ),
+    ("release", "Release status, metadata, and update deferral"),
+    ("repository", "Repository settings and required checks"),
+    ("verify", "Plan and run recorded verification"),
+    ("workflow", "Workflow policy bypass mode"),
+    ("worktree", "Reclaim worktree build artifacts"),
+];
 
 /// SPEC-1942 T-204: render family-scoped help text. Returns `None` for
 /// unknown families so the caller can fall back to the global help.
+///
+/// Issue #7522: the hand-written text describes a family; the operation list
+/// that closes every family help is generated from the operation catalog, so
+/// no dispatched operation can be missing from it. A catalog family without
+/// hand-written text gets a generated page instead of the global fallback.
 fn family_help(family: &str) -> Option<String> {
+    // `lessons` is the legacy spelling of the `memory` family.
+    let catalog_family = if family == "lessons" {
+        "memory"
+    } else {
+        family
+    };
+    let operations = gwt::cli::operation_catalog::family_operations_section(catalog_family);
+    match (described_family_help(family), operations) {
+        (Some(described), Some(operations)) => Some(format!("{described}\n{operations}")),
+        (Some(described), None) => Some(described),
+        (None, Some(operations)) => Some(format!(
+            "{}\n{operations}",
+            format_undescribed_family_help(family)
+        )),
+        (None, None) => None,
+    }
+}
+
+/// Header of a family that has no hand-written help text.
+fn format_undescribed_family_help(family: &str) -> String {
+    let summary = FAMILY_SUMMARIES
+        .iter()
+        .find(|(described, _)| *described == family)
+        .map_or("JSON envelope operations", |(_, summary)| summary);
+    [
+        format!("{family}.* — {summary} via JSON envelope.").as_str(),
+        "",
+        "Usage:",
+        "  gwtd <<'JSON'",
+        "  {\"schema_version\":1,\"operation\":\"<operation>\",\"params\":{}}",
+        "  JSON",
+        "",
+    ]
+    .join("\n")
+}
+
+fn described_family_help(family: &str) -> Option<String> {
     match family {
         "issue" => Some(format_issue_help()),
         "pr" => Some(format_pr_help()),
@@ -1295,31 +1393,102 @@ mod tests {
         }
     }
 
-    /// Issue #4465 AC-6'': every workspace operation that exists must be
-    /// discoverable from `gwtd --help workspace`. `workspace.work_prune` and
-    /// the projection operations were absent, so a refusal telling an agent to
-    /// prune had no discoverable route at all — the help, the refusal text and
-    /// four guessed names all missed on 2026-09-16.
+    /// Whether `help` names `operation` as a whole token, so `pr.review` is
+    /// not satisfied by `pr.review_threads`.
+    fn help_names_operation(help: &str, operation: &str) -> bool {
+        help.split(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')))
+            .any(|token| token.trim_matches('.') == operation)
+    }
+
+    /// Issue #7522, generalizing Issue #4465 AC-6'': every canonical operation
+    /// that exists must be discoverable from `gwtd --help <family>`, in every
+    /// family. The #4465 guard covered only `workspace` and pinned ten
+    /// hand-picked names while the family had grown to seventeen; 87 canonical
+    /// operations and twelve whole families were unreachable from help. The
+    /// expected set is the catalog itself, which
+    /// `catalog_covers_every_dispatched_operation` ties to the dispatch
+    /// source, so an operation added without a help entry fails here.
     #[test]
-    fn workspace_family_help_lists_every_workspace_operation() {
-        let help = family_help("workspace").expect("workspace family help");
-        for expected in [
-            "workspace.update",
-            "workspace.create",
-            "workspace.ensure",
-            "workspace.join",
-            "workspace.candidates",
-            "workspace.work_prune",
-            "workspace.work_repair",
-            "workspace.projection_list",
-            "workspace.projection_prune",
-            "workspace.store_consolidate",
-        ] {
+    fn every_family_help_lists_every_canonical_operation() {
+        let mut unlisted = Vec::new();
+        for operation in gwt::cli::operation_catalog::canonical_names() {
+            let family = gwt::cli::operation_catalog::family_of(operation);
+            let listed =
+                family_help(family).is_some_and(|help| help_names_operation(&help, operation));
+            if !listed {
+                unlisted.push(operation);
+            }
+        }
+        assert!(
+            unlisted.is_empty(),
+            "{} canonical operation(s) are missing from their family help: {unlisted:?}",
+            unlisted.len()
+        );
+    }
+
+    /// Issue #7522: the reverse direction. The hand-written family text is
+    /// kept, so a renamed or removed operation could survive in it and send a
+    /// caller to a name that no longer dispatches. Every operation-shaped
+    /// token in a family help must be a catalog spelling, or the prefix of
+    /// one (`issue.spec.*`).
+    #[test]
+    fn family_help_names_only_catalogued_operations() {
+        use gwt::cli::operation_catalog::{families, names};
+        let families = families();
+        let mut stale = Vec::new();
+        for family in families.iter().copied().chain(["lessons"]) {
+            let help = family_help(family).expect("catalog family help");
+            for token in help
+                .split(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')))
+                .map(|token| token.trim_matches('.'))
+            {
+                let Some((head, _)) = token.split_once('.') else {
+                    continue;
+                };
+                let known = names().any(|name| {
+                    name == token
+                        || name
+                            .strip_prefix(token)
+                            .is_some_and(|rest| rest.starts_with('.'))
+                });
+                if families.contains(&head) && !known {
+                    stale.push(format!("{family}: {token}"));
+                }
+            }
+        }
+        assert!(
+            stale.is_empty(),
+            "family help names operations the catalog does not dispatch: {stale:?}"
+        );
+    }
+
+    /// Issue #7522: the global help names every family and the one operation
+    /// that enumerates the whole catalog machine-readably.
+    #[test]
+    fn global_help_lists_every_family_and_the_full_enumeration_route() {
+        let help = format_global_help();
+        for family in gwt::cli::operation_catalog::families() {
             assert!(
-                help.contains(expected),
-                "workspace help must mention {expected}, got:\n{help}"
+                help.lines()
+                    .any(|line| line.starts_with(&format!("  {family} "))),
+                "global help must list the {family} family, got:\n{help}"
+            );
+            assert!(
+                FAMILY_SUMMARIES
+                    .iter()
+                    .any(|(described, _)| *described == family),
+                "add a FAMILY_SUMMARIES description for the {family} family"
             );
         }
+        assert!(help_names_operation(&help, "pm.capabilities"), "{help}");
+    }
+
+    /// Issue #7522: generating the operation list must not turn an unknown
+    /// family into a help page; the caller falls back to the global help.
+    #[test]
+    fn family_help_stays_none_for_an_unknown_family() {
+        assert!(family_help("nonexistent").is_none());
+        assert!(family_help("lessons").is_some());
     }
 
     #[test]

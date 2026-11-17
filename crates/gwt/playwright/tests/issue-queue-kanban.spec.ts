@@ -207,6 +207,35 @@ test("Issue #6994 merged work awaits measurement in Backlog with an explicit req
   ]);
 });
 
+test("Issue #7536 merged work awaits external verification without taking attention or an active slot", async ({ page }) => {
+  const reason = "Only release, main or another host verification remains: AC-4";
+  await page.evaluate(reason => {
+    const fixture = window as any;
+    fixture.__queueActivity([]);
+    fixture.__queueSetEntries([{ number: 7536, title: "Merged work awaiting release verification",
+      state: "open", labels: [], related_work_refs: [] }]);
+    fixture.__queueConfirm([7536], { state: "idle", active_count: 0, max_active_agents: 2,
+      autonomous_issues: [{ issue_number: 7536, phase: "implementing", needs_human: false,
+        review_dispatch_hold: { reason: "Old dispatch hold" }, steering: { reason: "Old steering request" } }] });
+    fixture.__queueInbox([{ issue: { number: 7536 }, state: "awaiting_verification", exclusion_reason: reason }]);
+  }, reason);
+  const waiting = column(page, "backlog").locator('[data-issue-number="7536"]');
+  await expect(waiting).toBeVisible();
+  const badge = waiting.locator(".knowledge-row-badge");
+  await expect(badge).toHaveText("Awaiting verification");
+  await expect(badge).toHaveAttribute("data-issue-explanation", /Only release, main or another host verification remains/);
+  await expect(waiting).toContainText(reason);
+  await expect(waiting).not.toContainText(/Needs human|Agent failed|Old dispatch hold|Old steering request/);
+  await expect(page.locator(".knowledge-monitor-pill")).toHaveAttribute("title", /Awaiting attention 0/);
+  await expect(column(page, "active").locator("h3")).toHaveText("Active · 0 issues");
+  await expect(column(page, "queued").locator('[data-issue-number="7536"]')).toHaveCount(0);
+  await waiting.locator('[data-action="requeue-issue"]').click();
+  await expect.poll(() => page.evaluate(() => (window as any).__queueMessages
+    .filter((message: any) => message.kind === "issue_monitor_requeue"))).toEqual([
+    { kind: "issue_monitor_requeue", issue_number: 7536 },
+  ]);
+});
+
 test("Issue #6880 artifact diagnostics recover to queued without a requeue request", async ({ page }, info) => {
   const projectionPath = process.env.GWT_PLAYWRIGHT_ISSUE_6880_PROJECTION;
   test.skip(!projectionPath, "Requires the projections emitted by the Issue #6880 Rust regression test");
@@ -1138,7 +1167,7 @@ test("AC-M1/M2: approved status, action, filter rows and card anatomy", async ({
   await expect(status.locator('[data-metric="capacity"]')).toHaveText("1 of 3");
   await expect(status.locator('[data-metric="backlog"]')).toHaveText("7");
   await expect(status.locator('[data-metric="last-scan"]')).toHaveText("00:00:00 UTC");
-  await expect(status.locator('[data-metric="verification"]')).toHaveText("Not reported");
+  await expect(status.locator('[data-metric="verification"]')).toHaveText("Unavailable");
   const boxes=await Promise.all([status,controls,filter].map(node=>node.boundingBox()));
   expect(boxes[0]!.y+boxes[0]!.height).toBeLessThanOrEqual(boxes[1]!.y);
   expect(boxes[1]!.y+boxes[1]!.height).toBeLessThanOrEqual(boxes[2]!.y);
@@ -1242,6 +1271,12 @@ test("T-7a: current labels explain themselves with keyboard focus and hover", as
   const before = await controlMessages();
   const queueMetric = page.locator('[data-metric="queue"]');
   await queueMetric.focus();
+  await page.keyboard.press("Tab");
+  const verification = page.locator('[data-metric="verification"]');
+  await expect(verification).toBeFocused();
+  await expect(popup).toBeVisible();
+  await expect(popup).toHaveText("Host verification capacity is unavailable.");
+  await expect(verification).toHaveAttribute("aria-describedby", await popup.getAttribute("id") as string);
   await page.keyboard.press("Tab");
   const refill = page.getByRole("switch", { name: "Auto-refill", exact: true });
   await expect(refill).toBeFocused();

@@ -421,10 +421,12 @@ impl AppRuntime {
             Self::record_pm_start_block(
                 &tab.project_root,
                 pm_registry::PmStartBlockKind::MigrationPending,
-                format!(
-                    "the tab is not a migration-clear Git project (kind={:?}, migration_pending={})",
-                    tab.kind, tab.migration_pending
-                ),
+                if tab.kind != gwt::ProjectKind::Git {
+                    "The PM cannot start in this project. Open a Git project to use the PM."
+                        .to_string()
+                } else {
+                    "The PM cannot start until project migration finishes. Complete the migration before starting the PM.".to_string()
+                },
             );
             return Vec::new();
         }

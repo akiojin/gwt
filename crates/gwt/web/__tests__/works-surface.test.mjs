@@ -152,12 +152,13 @@ test("Works joins exact local-live sessions, places PM first and keeps unknown t
   summaryModel.update(() => ({ running: 5, block: 2, idle: 1, error: 0 })); flush();
   assert.deepEqual(["running", "block", "idle", "error"].map(key => surface.element.querySelector(`[data-count="${key}"]`).textContent), ["5", "2", "1", "0"]);
   assert.match(surface.element.querySelector(".works-counts").textContent, /RUNNING 5\s*BLOCK 2\s*IDLE 1\s*ERROR 0/);
-  assert.match(surface.element.textContent, /Today.*Input.*Cache.*Output.*Landed PRs/s);
-  assert.equal(surface.element.querySelector('[data-metric="today-cost"]').textContent, "—");
+  assert.match(surface.element.textContent, /Today.*Input.*Cache.*Output/s);
+  assert.equal(surface.element.querySelector('[data-metric="today-cost"], [data-metric="today-landed"]'), null);
+  assert.doesNotMatch(surface.element.querySelector(".works-today").textContent, /Cost|Landed PRs/);
   assert.equal(surface.element.querySelector('[data-metric="today-total"]')?.textContent, "—");
   assert.match(surface.element.querySelector('[data-availability="today"]')?.textContent || "", /No data/);
   assert.match(surface.element.querySelector('[data-availability="fleet"]')?.textContent || "", /No data/);
-  assert.match(surface.element.querySelector(".works-source-note")?.textContent || "", /Cost.*per-session USD.*Landed PRs.*daily merge data/s);
+  assert.equal(surface.element.querySelector(".works-source-note"), null);
   assert.match(rows[1].textContent, /Context remaining.*Branch.*Verification.*Last action/s);
   assert.equal(rows[0].querySelector(".work-member"), null, "PM is a role, not a fictional member link");
   assert.equal(rows[0].querySelector(".work-name").textContent, "Manager");
@@ -328,15 +329,14 @@ test("Works batches bursts, resolves synchronous navigation and rejects ended or
 
 test("Works distinguishes measured zero from unavailable tokens and thirty-minute graph gaps", async () => {
   const values = [...Array(29).fill(null), 0];
-  const telemetry = { today: { input_tokens: 0, cache_tokens: 0, output_tokens: 0, cost_usd: 0, landed_pr_count: 0 }, fleet_tokens_per_minute: values, by_window: { one: { input_tokens: 0, cache_tokens: 0, output_tokens: 0, context_remaining_percent: 0, ahead_of_develop: 0, tokens_per_minute: values } } };
+  const telemetry = { today: { input_tokens: 0, cache_tokens: 0, output_tokens: 0 }, fleet_tokens_per_minute: values, by_window: { one: { input_tokens: 0, cache_tokens: 0, output_tokens: 0, context_remaining_percent: 0, ahead_of_develop: 0, tokens_per_minute: values } } };
   telemetry.availability = { today: { state: "measured", detail: "Measured: all project session tokens are available." },
     fleet: { state: "partial", detail: "Partial: some live agent minutes are missing." } };
   const f = await fixture(telemetry);
   assert.equal(f.surface.element.querySelector('[data-metric="today-total"]')?.textContent, "0");
-  assert.equal(f.surface.element.querySelector('[data-metric="today-cost"]').textContent, "$0.00");
   assert.equal(f.surface.element.querySelector('[data-availability="today"]')?.dataset.state, "measured");
   assert.equal(f.surface.element.querySelector('[data-availability="fleet"]').textContent, telemetry.availability.fleet.detail);
-  assert.equal(f.surface.element.querySelector(".works-source-note").hidden, true);
+  assert.equal(f.surface.element.querySelector(".works-source-note"), null);
   assert.equal(f.surface.element.querySelector('[data-metric="fleet-now"]').textContent, "0");
   const graph = f.surface.element.querySelector('[data-window-id="one"] svg');
   assert.equal(graph.dataset.knownCount, "1");
@@ -600,7 +600,7 @@ test("Works output line settings update both lists without replacing the native 
     assert.ok(f.surface.element.querySelector('.work-row[data-window-id="one"]') === row, "row remains identical");
     assert.equal(f.runtimes.get("one"), native);
     assert.equal(f.surface.element.querySelectorAll(".work-row").length, 2);
-    assert.match(f.surface.element.textContent, /Today.*Input.*Cache.*Output.*Landed PRs/s);
+    assert.match(f.surface.element.textContent, /Today.*Input.*Cache.*Output/s);
   }
   f.surface.openWork("one");
   f.systemSettingsModel.update(state => ({ ...state, worksPreviewLines: 3 })); f.flush();
