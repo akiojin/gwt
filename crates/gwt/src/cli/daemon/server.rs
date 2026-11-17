@@ -14258,6 +14258,14 @@ exit 0
                 .and_then(|gui| gui.github_budget.take()),
             Some(budget),
         );
+        let capacity = projected.verification_capacity.take();
+        assert_eq!(
+            projected
+                .gui_status
+                .as_mut()
+                .and_then(|gui| gui.verification_capacity.take()),
+            capacity,
+        );
         assert_eq!(projected, monitor.agent_status());
         assert_eq!(projected.max_active, 3);
     }
@@ -14582,6 +14590,14 @@ exit 0
                 .as_mut()
                 .and_then(|gui| gui.github_budget.take()),
             Some(budget),
+        );
+        let capacity = projected.verification_capacity.take();
+        assert_eq!(
+            projected
+                .gui_status
+                .as_mut()
+                .and_then(|gui| gui.verification_capacity.take()),
+            capacity,
         );
         // Issue #3633 AC-5: the published projection also carries the
         // scan-cadence check, which `agent_status` deliberately leaves out

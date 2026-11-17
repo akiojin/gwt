@@ -14031,6 +14031,11 @@ mod tests {
     fn issue_monitor_status_reports_ordered_queue_and_active_launches() {
         let tmp = TempDir::new().expect("tempdir");
         let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let mut settings = gwt_config::Settings::default();
+        settings.verification.slots = std::num::NonZeroU16::new(2);
+        settings
+            .save_global()
+            .expect("verification capacity fixture");
         crate::machine_agent_settings::set(
             Some(3),
             crate::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
@@ -14154,6 +14159,16 @@ mod tests {
             .expect("status object")
             .remove("gui_status")
             .expect("GUI projection");
+        let verification_capacity = status
+            .as_object_mut()
+            .unwrap()
+            .remove("verification_capacity")
+            .expect("live host verification capacity");
+        assert_eq!(
+            verification_capacity,
+            serde_json::json!({"capacity": 2, "running": 0, "available": 2})
+        );
+        assert_eq!(gui_status["verification_capacity"], verification_capacity);
         assert_eq!(gui_status["state"], "launching");
         assert_eq!(gui_status["last_error"], serde_json::Value::Null);
         assert_eq!(

@@ -3158,6 +3158,11 @@ fn finish_list_read(
 fn list_issue_monitor_uses_the_daemon_gui_projection_without_local_scan() {
     let temp = tempdir().expect("tempdir");
     let _home = ScopedGwtHome::set(temp.path());
+    let mut settings = gwt_config::Settings::default();
+    settings.verification.slots = std::num::NonZeroU16::new(2);
+    settings
+        .save_global()
+        .expect("verification capacity fixture");
     // No Git remote: even the old local scan cannot access the network.
     let root = temp.path().join("project");
     fs::create_dir_all(&root).expect("project");
@@ -3167,7 +3172,9 @@ fn list_issue_monitor_uses_the_daemon_gui_projection_without_local_scan() {
     monitor.set_max_active_agents(5);
     monitor.record_scan_error("2026-09-12T00:00:00Z", "daemon scan failed");
     let agent = serde_json::to_value(monitor.agent_status()).expect("agent status");
-    let expected = agent["gui_status"].clone();
+    let mut expected = agent["gui_status"].clone();
+    expected["verification_capacity"] =
+        serde_json::json!({"capacity": 2, "running": 0, "available": 2});
     reset_local_issue_monitor_remote_scan_count();
 
     let events = runtime.completed_issue_monitor_list_for_test("client-1", move |project_root| {
