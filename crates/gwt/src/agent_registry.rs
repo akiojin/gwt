@@ -645,11 +645,40 @@ pub(crate) fn source_key(path: &Path) -> Option<String> {
     ProjectKey::parse(key).ok().map(|key| key.to_string())
 }
 
-fn lock() -> io::Result<NamedFileLock> {
+/// Exclusive ownership of the shared core and of every project's record.
+///
+/// Lock order, the same on every path: project prefs lock(s), then the core
+/// lock, then the registry lock. Only [`lock`] and [`RegistryWrite::acquire`]
+/// take the last two. The core lock orders everything that reads the shared
+/// core to write from it. The registry lock is the one an
+/// older binary takes for a whole transaction: a project transaction holds
+/// it shared, so several projects write their own record at once while this
+/// guard, and any older binary, still excludes all of them (Issue #7486).
+pub(crate) struct RegistryLock {
+    _registry: NamedFileLock,
+    _core: NamedFileLock,
+}
+
+fn lock_path() -> io::Result<PathBuf> {
     let path = path();
     gwt_config::home::assert_test_path(&path);
     fs::create_dir_all(path.parent().expect("machine state parent"))?;
-    NamedFileLock::acquire(&path.with_extension("lock"), "shared Agent registry")
+    Ok(path.with_extension("lock"))
+}
+
+fn core_lock() -> io::Result<NamedFileLock> {
+    NamedFileLock::acquire(
+        &lock_path()?.with_extension("core.lock"),
+        "shared Agent registry core",
+    )
+}
+
+fn lock() -> io::Result<RegistryLock> {
+    let core = core_lock()?;
+    Ok(RegistryLock {
+        _registry: NamedFileLock::acquire(&lock_path()?, "shared Agent registry")?,
+        _core: core,
+    })
 }
 
 /// The committed mirrors one registry read or write proves byte-for-byte.
@@ -827,9 +856,19 @@ fn record_content(
     .map_err(io::Error::other)
 }
 
+#[cfg(test)]
+thread_local! {
+    static BEFORE_RECORD_WRITE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 fn write_record(key: &str, content: &[u8]) -> io::Result<()> {
     #[cfg(test)]
     record_io(|io| io.record_writes.push(key.into()));
+    #[cfg(test)]
+    if let Some(observer) = BEFORE_RECORD_WRITE.with(|slot| slot.borrow_mut().take()) {
+        observer();
+    }
     crate::issue_monitor::durable_atomic_write(&record_path(key), content)
 }
 
@@ -950,10 +989,30 @@ fn unconfirmed_path() -> PathBuf {
 }
 
 fn clear_unconfirmed() -> io::Result<()> {
-    match fs::remove_file(unconfirmed_path()) {
+    clear_marker(&unconfirmed_path())
+}
+
+fn clear_marker(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
         Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
         _ => Ok(()),
     }
+}
+
+/// The same marker for a record its project writes without the core lock,
+/// where the shared marker would be lowered by another project's write.
+fn record_unconfirmed_path(key: &str) -> PathBuf {
+    records_dir().join(format!("{key}.unconfirmed"))
+}
+
+/// Commit one project's record when the shared core is unchanged.
+fn save_record(registry: &Registry, key: &str) -> io::Result<()> {
+    validate_proving(registry, Mirrors::None)?;
+    let marker = record_unconfirmed_path(key);
+    fs::write(&marker, b"")?;
+    let record = SourceRecord::of(&registry.sources[key]);
+    write_record(key, &record_content(key, Some(record), None)?)?;
+    clear_marker(&marker)
 }
 
 fn confirm_durable() -> io::Result<()> {
@@ -982,11 +1041,16 @@ fn confirm_durable() -> io::Result<()> {
     match fs::read_dir(records_dir()) {
         Ok(records) => {
             for record in records {
-                fs::OpenOptions::new()
+                // Another project may rename its temporary file away meanwhile.
+                match fs::OpenOptions::new()
                     .read(true)
                     .write(true)
-                    .open(record?.path())?
-                    .sync_all()?;
+                    .open(record?.path())
+                {
+                    Ok(record) => record.sync_all()?,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
+                }
             }
             #[cfg(unix)]
             fs::File::open(records_dir())?.sync_all()?;
@@ -3472,8 +3536,12 @@ pub fn member_profile(
 }
 
 /// Held strictly after a project prefs lock. No method takes another source lock.
+///
+/// The core lock is held until the transaction is known to leave the shared
+/// core unchanged; the registry lock is shared unless enrollment needs it whole.
 pub(crate) struct RegistryWrite {
     _lock: Option<NamedFileLock>,
+    core_lock: Option<NamedFileLock>,
     registry: Option<Registry>,
     key: Option<String>,
     before: Option<IssueMonitorPrefs>,
@@ -3486,13 +3554,15 @@ impl RegistryWrite {
         let Some(key) = source_key(path) else {
             return Ok(Self {
                 _lock: None,
+                core_lock: None,
                 registry: None,
                 key: None,
                 before: None,
                 mirrors_current: false,
             });
         };
-        let guard = lock()?;
+        let core = core_lock()?;
+        let mut guard = NamedFileLock::acquire_shared(&lock_path()?, "shared Agent registry")?;
         let mut registry = load_proving(Mirrors::Only(&key))?;
         if let Some(current) = &mut registry {
             if current.phase != RegistryPhase::Active {
@@ -3501,8 +3571,10 @@ impl RegistryWrite {
                 ));
             }
             // Every registry write lowers this marker once it is durable.
-            if unconfirmed_path().try_exists()? {
+            let record_marker = record_unconfirmed_path(&key);
+            if unconfirmed_path().try_exists()? || record_marker.try_exists()? {
                 confirm_durable()?;
+                clear_marker(&record_marker)?;
             }
             if !current.sources.contains_key(&key) {
                 if path.try_exists()?
@@ -3514,7 +3586,11 @@ impl RegistryWrite {
                 {
                     return Err(io::Error::new(io::ErrorKind::WouldBlock, "Legacy Agent source needs enrollment before its prefs lock; retry the same command after preflight"));
                 }
-                // Enrollment rewrites shared identity: prove every mirror first.
+                // Enrollment rewrites shared identity: prove every mirror first,
+                // with no other project's record write open. The core lock
+                // held throughout keeps the shared core as it was just read.
+                drop(guard);
+                guard = NamedFileLock::acquire(&lock_path()?, "shared Agent registry")?;
                 *current = load()?.ok_or_else(|| invalid("Agent registry disappeared"))?;
                 enroll(current, &key, None, &[])?;
                 save(current)?;
@@ -3538,6 +3614,7 @@ impl RegistryWrite {
         }
         Ok(Self {
             _lock: Some(guard),
+            core_lock: Some(core),
             mirrors_current: registry.is_some(),
             registry,
             key: Some(key),
@@ -3679,7 +3756,19 @@ impl RegistryWrite {
         let saved = project(&next, key, Some(&next.sources[key].after_json))?;
         // The sole logical commit point for an Active transaction. Its mirror
         // was serialized, fingerprinted and decoded just above.
-        save_proving(&next, Mirrors::None)?;
+        if registry.store.split && !global_changed {
+            // Only this project's record changes, and the prefs lock already
+            // orders its writers: let the other projects in before the write.
+            self.core_lock = None;
+            save_record(&next, key)?;
+        } else if self.core_lock.is_some() {
+            save_proving(&next, Mirrors::None)?;
+        } else {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "Agent registry changed; reload the exact project before retrying",
+            ));
+        }
         self.registry = Some(next.clone());
         // `acquire` proved both mirrors under the locks this transaction still holds.
         self.mirrors_current = false;
@@ -4249,7 +4338,7 @@ fn ensure_active(source: Option<&ProjectKey>) -> io::Result<()> {
     activate_prepared(&mut registry)
 }
 
-pub(crate) fn inactive_import_guard() -> io::Result<NamedFileLock> {
+pub(crate) fn inactive_import_guard() -> io::Result<RegistryLock> {
     let guard = lock()?;
     if load()?.is_some() {
         return Err(invalid("Agent registry is prepared or active; use agent.registry.status/reconcile instead of inactive imports"));
@@ -7797,6 +7886,300 @@ mod tests {
     #[ignore = "measurement, not an assertion"]
     fn measure_split_prefs_lock_held_ms() {
         measure_prefs_lock_held(true);
+    }
+
+    /// Issue #7486 AC-4: the daemons one GUI start launches together must not
+    /// queue behind each other's durable writes.
+    #[test]
+    fn a_record_write_excludes_shared_writers_but_not_another_projects_transaction() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let (a_path, _, b_path, _) = two_split_sources();
+        let home = home.path().to_path_buf();
+        let other = b_path.clone();
+        BEFORE_RECORD_WRITE.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                let within = |budget: u64| {
+                    gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+                        gwt_core::operation_deadline::now()
+                            + std::time::Duration::from_millis(budget),
+                    )
+                };
+                std::thread::scope(|scope| {
+                    let transaction = scope.spawn(|| {
+                        let _home = ScopedGwtHome::set(&home);
+                        // Ample: a transaction that still queued would spend all of it.
+                        let _deadline = within(5_000);
+                        crate::try_mutate_issue_monitor_prefs(&other, |prefs| {
+                            prefs.merged_issues.push(7);
+                            Ok(())
+                        })
+                    });
+                    transaction
+                        .join()
+                        .unwrap()
+                        .expect("another project commits during this durable write");
+                    // A roster change through another project's transaction
+                    // commits its pending record and the core meanwhile.
+                    scope
+                        .spawn(|| {
+                            let _home = ScopedGwtHome::set(&home);
+                            let _deadline = within(5_000);
+                            rename_first_member(&other, "Interleaved Cedar");
+                        })
+                        .join()
+                        .unwrap();
+                    let shared_writer = scope.spawn(|| {
+                        let _home = ScopedGwtHome::set(&home);
+                        let _deadline = within(100);
+                        lock().map(drop)
+                    });
+                    assert!(
+                        shared_writer.join().unwrap().is_err(),
+                        "a writer of shared state waits for the open record write"
+                    );
+                    let older_binary = scope.spawn(|| {
+                        let _home = ScopedGwtHome::set(&home);
+                        let _deadline = within(100);
+                        NamedFileLock::acquire(&lock_path().unwrap(), "shared Agent registry")
+                            .map(drop)
+                    });
+                    assert!(
+                        older_binary.join().unwrap().is_err(),
+                        "a binary that knows only the registry lock waits as well"
+                    );
+                });
+            }));
+        });
+        crate::try_mutate_issue_monitor_prefs(&a_path, |prefs| {
+            prefs.merged_issues.push(1);
+            Ok(())
+        })
+        .unwrap();
+        assert!(BEFORE_RECORD_WRITE.with(|slot| slot.borrow().is_none()));
+        for path in [&a_path, &b_path] {
+            assert_eq!(first_member_name(path), "Interleaved Cedar");
+        }
+        for (path, issue) in [(&a_path, 1), (&b_path, 7)] {
+            assert!(crate::load_issue_monitor_prefs(path)
+                .unwrap()
+                .merged_issues
+                .contains(&issue));
+            assert_eq!(
+                fs::read(path).unwrap(),
+                fs::read(path.with_extension("committed.json")).unwrap()
+            );
+        }
+        let status = status(None).unwrap();
+        assert!(status
+            .projects
+            .iter()
+            .all(|row| !row.conflict && !row.pending && !row.floor_conflict));
+    }
+
+    /// Every path takes the core lock before the registry lock, and a binary
+    /// that knows only the registry lock still excludes a project transaction.
+    #[test]
+    fn registry_locks_are_taken_core_first_and_exclude_an_older_binary() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let (a_path, ..) = two_split_sources();
+        let home = home.path();
+        let blocked = |attempt: &(dyn Fn() -> io::Result<()> + Sync)| {
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(|| {
+                        let _home = ScopedGwtHome::set(home);
+                        let _deadline =
+                            gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+                                gwt_core::operation_deadline::now()
+                                    + std::time::Duration::from_millis(100),
+                            );
+                        attempt().unwrap_err().to_string()
+                    })
+                    .join()
+                    .unwrap()
+            })
+        };
+        let transaction = || crate::try_mutate_issue_monitor_prefs(&a_path, |_| Ok(())).map(drop);
+        let shared_writer = || lock().map(drop);
+        {
+            let _both = lock().unwrap();
+            for error in [blocked(&transaction), blocked(&shared_writer)] {
+                assert!(
+                    error.contains("operation=shared Agent registry core;"),
+                    "{error}"
+                );
+            }
+        }
+        {
+            let _older_binary =
+                NamedFileLock::acquire(&lock_path().unwrap(), "shared Agent registry").unwrap();
+            for error in [blocked(&transaction), blocked(&shared_writer)] {
+                assert!(
+                    error.contains("operation=shared Agent registry;"),
+                    "{error}"
+                );
+            }
+        }
+        transaction().unwrap();
+    }
+
+    /// The record write after the core lock is released is interrupted once
+    /// the new record is visible but before its durability is confirmed.
+    #[test]
+    fn interrupted_record_write_stays_committed_and_leaves_other_projects_open() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let (a_path, _, b_path, _) = two_split_sources();
+        let record = record_path(&source_key(&a_path).unwrap());
+        let marker = record_unconfirmed_path(&source_key(&a_path).unwrap());
+        let mirror_before = fs::read(&a_path).unwrap();
+        fs::write(record.with_extension("parent-sync-fail-once"), b"").unwrap();
+        {
+            let _fail = ScopedEnvVar::set(
+                "GWT_TEST_FAIL_ISSUE_MONITOR_PREFS_PARENT_SYNC_ONCE",
+                &record,
+            );
+            assert!(crate::try_mutate_issue_monitor_prefs(&a_path, |prefs| {
+                prefs.merged_issues.push(7486);
+                Ok(())
+            })
+            .is_err());
+        }
+        assert!(marker.exists());
+        assert_eq!(fs::read(&a_path).unwrap(), mirror_before);
+        crate::try_mutate_issue_monitor_prefs(&b_path, |prefs| {
+            prefs.merged_issues.push(7);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            crate::load_issue_monitor_prefs(&a_path)
+                .unwrap()
+                .merged_issues,
+            [7486],
+            "the visible record is the committed generation"
+        );
+        take_registry_io_for_test();
+        let (replayed, ()) = crate::try_mutate_issue_monitor_prefs(&a_path, |_| Ok(())).unwrap();
+        let io = take_registry_io_for_test();
+        assert_eq!(replayed.merged_issues, [7486]);
+        assert_eq!(
+            (io.durability_confirmations, io.mirror_publishes),
+            (1, 1),
+            "{io:?}"
+        );
+        assert!(!marker.exists());
+        assert_eq!(
+            fs::read(&a_path).unwrap(),
+            fs::read(a_path.with_extension("committed.json")).unwrap()
+        );
+        let status = status(None).unwrap();
+        assert!(status
+            .projects
+            .iter()
+            .all(|row| !row.conflict && !row.pending && !row.floor_conflict));
+    }
+
+    /// A record write that could not confirm its durability left its marker.
+    #[test]
+    fn an_unconfirmed_record_write_is_confirmed_by_the_next_transaction() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let (a_path, ..) = two_split_sources();
+        let marker = record_unconfirmed_path(&source_key(&a_path).unwrap());
+        fs::write(&marker, b"").unwrap();
+        take_registry_io_for_test();
+        crate::try_mutate_issue_monitor_prefs(&a_path, |_| Ok(())).unwrap();
+        assert_eq!(take_registry_io_for_test().durability_confirmations, 1);
+        assert!(!marker.exists());
+        crate::try_mutate_issue_monitor_prefs(&a_path, |prefs| {
+            prefs.merged_issues.push(1);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(take_registry_io_for_test().durability_confirmations, 0);
+        assert!(!marker.exists());
+    }
+
+    /// One saving writer per project, all started together, as the daemons of
+    /// one GUI start. Prints each transaction's whole elapsed time, which is
+    /// what `ISSUE_MONITOR_PREFS_BUDGET` (250 ms) bounds.
+    /// `cargo test -p gwt --lib --release measure_concurrent_projects_prefs_transaction_ms -- --ignored --nocapture`
+    #[test]
+    #[ignore = "measurement, not an assertion"]
+    fn measure_concurrent_projects_prefs_transaction_ms() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let (a_path, _, b_path, _) = two_split_sources();
+        let mut paths = vec![a_path, b_path];
+        for index in 0..6 {
+            let root = gwt_core::paths::gwt_home().join(format!("project-{index}"));
+            fs::create_dir_all(&root).unwrap();
+            paths.push(crate::issue_monitor_prefs_path_for_repo_path(&root));
+        }
+        let padding: Vec<u64> = (0..46_000).map(|index| 1_000_000 + index).collect();
+        for path in &paths {
+            crate::try_mutate_issue_monitor_prefs(path, |prefs| {
+                prefs.merged_issues.clone_from(&padding);
+                Ok(())
+            })
+            .unwrap();
+        }
+        let home = home.path();
+        let start = std::sync::Barrier::new(paths.len());
+        let mut samples: Vec<f64> = std::thread::scope(|scope| {
+            let writers: Vec<_> = paths
+                .iter()
+                .map(|path| {
+                    let start = &start;
+                    scope.spawn(move || {
+                        let _home = ScopedGwtHome::set(home);
+                        start.wait();
+                        (0..20)
+                            .map(|issue| {
+                                let began = std::time::Instant::now();
+                                crate::try_mutate_issue_monitor_prefs(path, |prefs| {
+                                    prefs.merged_issues.push(issue);
+                                    Ok(())
+                                })
+                                .unwrap();
+                                began.elapsed().as_secs_f64() * 1000.0
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            writers
+                .into_iter()
+                .flat_map(|writer| writer.join().unwrap())
+                .collect()
+        });
+        samples.sort_by(f64::total_cmp);
+        println!(
+            "projects={} mirror={}B transaction(median,p90,max)=({:.1},{:.1},{:.1})ms",
+            paths.len(),
+            fs::metadata(&paths[0]).unwrap().len(),
+            samples[samples.len() / 2],
+            samples[samples.len() * 9 / 10],
+            samples[samples.len() - 1],
+        );
     }
 
     fn measure_prefs_lock_held(split: bool) {
