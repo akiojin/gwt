@@ -187,17 +187,39 @@ fn issue6842_persisted_pane_without_runtime_does_not_swallow_launch() {
     );
     assert!(after.failed_issues.is_empty());
     assert!(launched.pty.try_wait().unwrap().is_none());
-    authenticate_monitor_owner_readiness(&owner, &launched);
+    // Capture a pre-readiness ACK, leaving its GUI completion queued so
+    // readiness deterministically overtakes observation of that false receipt.
     fixture
         .runtime
-        .auto_launch_issue_monitor_delivery_events_for_project(
+        .issue_monitor_launch_completed_delivery_events(
             &fixture.project_root,
             3165,
-            LinkedIssueKind::Spec,
-            fixture.delivery_id.clone(),
-            gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+            &window_id,
+            fixture.delivery_id.as_deref(),
         );
-    fixture.runtime.finish_queued_delivery_acks(&queued);
+    drain_queued_blocking_tasks(&queued);
+    authenticate_monitor_owner_readiness(&owner, &launched);
+    // Readiness can overtake one in-flight ready=false commit. Its ACK is
+    // intermediate: the owner then starts the ready=true commit, so a second
+    // replay waits for that exact successful ACK without a scheduling delay.
+    for _ in 0..2 {
+        fixture
+            .runtime
+            .auto_launch_issue_monitor_delivery_events_for_project(
+                &fixture.project_root,
+                3165,
+                LinkedIssueKind::Spec,
+                fixture.delivery_id.clone(),
+                gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+            );
+        fixture.runtime.finish_queued_delivery_acks(&queued);
+        if matches!(fixture.runtime.issue_monitor_launch_deliveries.get(&expected_delivery),
+            Some(super::super::IssueMonitorLaunchDeliveryState::Launched { window_id: id })
+                if id == &window_id)
+        {
+            break;
+        }
+    }
     assert!(
         matches!(fixture.runtime.issue_monitor_launch_deliveries.get(&expected_delivery),
             Some(super::super::IssueMonitorLaunchDeliveryState::Launched { window_id: id })
