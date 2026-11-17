@@ -100,7 +100,7 @@ async function liveCodexWindow(page: Page, sessionId: string): Promise<AgentWind
   return (await codexWindows(page)).find((entry) => entry.session_id === sessionId)!;
 }
 
-async function launchCodex(page: Page, branch: string, issueNumber?: number) {
+async function launchCodex(page: Page, branch: string, issueNumber?: number, branchMode: "new" | "existing" = "new") {
   const after = await cursor(page);
   await sendLiveGwtEvent(page, { kind: "open_active_work_launch_wizard", branch_name: branch });
   await latestWizard(page, after, true);
@@ -108,8 +108,10 @@ async function launchCodex(page: Page, branch: string, issueNumber?: number) {
   // The installed (fixture) Codex is the only route: the wizard has no version choice.
   let state = await wizardAction(page, { kind: "set_agent", agent_id: "codex" });
   if (issueNumber !== undefined) {
-    await wizardAction(page, { kind: "set_branch_mode", create_new: true });
-    await wizardAction(page, { kind: "set_branch_name", value: `issue-${issueNumber}` });
+    if (branchMode === "new") {
+      await wizardAction(page, { kind: "set_branch_mode", create_new: true });
+      await wizardAction(page, { kind: "set_branch_name", value: `issue-${issueNumber}` });
+    }
     state = await wizardAction(page, { kind: "set_linked_issue", issue_number: issueNumber });
     expect(state.wizard?.linked_issue_number).toBe(issueNumber);
   }
@@ -148,6 +150,45 @@ async function attachScreenshot(page: Page, testInfo: TestInfo, name: string) {
   await page.screenshot({ path });
   await testInfo.attach(name, { path, contentType: "image/png" });
 }
+
+test("Issue #7440 publishes Work and launches Codex on an existing branch linked to an Issue", async ({ page }, info) => {
+  test.skip(process.env.GWT_PLAYWRIGHT_EXACT_RELAUNCH !== "1", "requires checkout binaries");
+  test.setTimeout(120_000);
+  const fixture = await startExactRelaunchFixture(info, {
+    async prepare({ home, project, env }) {
+      const origin = join(home, "origin.git");
+      execFileSync("git", ["clone", "--bare", "--quiet", project, origin], { cwd: project, env });
+      execFileSync("git", ["remote", "add", "origin", origin], { cwd: project, env });
+    },
+  });
+  const errors = capture(page);
+  const theme = info.project.name.includes("light") ? "light" : "dark";
+  await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+  try {
+    await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+    await launchCodex(page, fixture.branch, 43, "existing");
+    await expect.poll(async () => (await fixture.launches()).length, { timeout: 20_000 }).toBe(1);
+    const [launch] = await fixture.launches();
+    const pane = await liveCodexWindow(page, launch.gwt_session_id!);
+    const works = JSON.parse(await readFile(join(fixture.preferences, "works.json"), "utf8")).work_items;
+    expect(works).toEqual(expect.arrayContaining([expect.objectContaining({
+      owner: "Issue #43",
+      status_category: "active",
+      execution_containers: expect.arrayContaining([expect.objectContaining({
+        branch: fixture.branch,
+        worktree_path: fixture.project,
+      })]),
+      agents: expect.arrayContaining([expect.objectContaining({ session_id: pane.session_id, attached_by: "start" })]),
+    })]));
+    await page.locator('.op-rail__surface[data-surface="works"]').click();
+    await expect(page.locator(`.work-row[data-window-id="${pane.id}"]`)).toBeVisible();
+    await attachScreenshot(page, info, `existing-issue-work-${theme}`);
+    expect(errors, "console and page errors during linked launch").toEqual([]);
+  } finally {
+    await fixture.stop();
+  }
+});
 
 test.describe("Issue #6767 final quota output (isolated checkout)", () => {
   test.skip(process.env.GWT_PLAYWRIGHT_EXACT_RELAUNCH !== "1", "requires checkout binaries");
