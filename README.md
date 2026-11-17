@@ -533,6 +533,34 @@ gwtd <<'JSON'
 JSON
 ```
 
+Responses retain `ok`, `operation`, `exit_code` and the legacy human-readable
+`output` string. JSON object/array reports also appear directly in `data`,
+including `execution.status`, `board.show`, `pr.list` and PM status operations.
+`issue.view` exposes issue fields in `data`; `pr.view` and `pr.current` expose
+the PR snapshot (`pr.current` uses `data:null` when no PR exists). Existing
+`pr.checks` and verification data contracts are preserved. Text-only operations
+may omit `data`. Prefer `data` to parsing `output` in new callers.
+
+Failures include `error_category` and a stable `error_code`. Categories are
+`not_found` (for example `NOT_FOUND_ISSUE`), `conflict`
+(`CONFLICT_CONCURRENT_WRITE`), `permission` (`PERMISSION_DENIED`), `input`
+(`INPUT_VALIDATION_FAILED`), `internal` (`INTERNAL_INDEX_INTEGRITY`), `external`
+(`EXTERNAL_NETWORK`) and `operation` (`OPERATION_FAILED`, an unclassified
+nonzero result). Existing operation-specific codes such as
+`ISSUE_CACHE_CONFLICT` are retained. Categories use typed failure information;
+legacy failures that have lost that information use a fallback rather than
+guessing from message wording. `refusal` and recovery fields retain their
+existing meaning. Invalid envelopes answer JSON with exit code 2,
+`error_category:"input"`, an `INPUT_*` code and `operation:null`; redacted
+intake diagnostics never echo caller-controlled secrets.
+
+Nested operations use JSON objects in `data`: after decoding the response once,
+`pm.operation.execute` exposes its audit result at `data` and the inner envelope
+at `data.after`. A JSON inner report is available at `data.after.data`, with no
+additional JSON decoding. The nested legacy `output` strings remain for
+compatibility. Error codes classify failures; they do not authorize retries or
+prove whether a remote mutation committed.
+
 The [operation catalog](crates/gwt/src/cli/operation_catalog.rs) (`OPERATIONS`)
 defines **230 canonical operations across 36 families**, plus **40 aliases**
 (270 accepted spellings) in v9.167.1. A family is the first dot-separated
