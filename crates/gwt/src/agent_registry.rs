@@ -3685,6 +3685,16 @@ impl RegistryWrite {
             }
         }
         ensure_cores(&mut next);
+        let global_changed = next.roster != registry.roster
+            || next.profiles != registry.profiles
+            || next.project_assignments != registry.project_assignments
+            || next.pm_projects != registry.pm_projects;
+        if registry.store.split && !global_changed {
+            // Only this project's record can change from here on, and the
+            // prefs lock already orders its writers: let the other projects
+            // read the shared core before the mirror is encoded and written.
+            self.core_lock = None;
+        }
         candidate.agent_roster = project_roster(&next, key);
         if let Some(roster) = &candidate.agent_roster {
             candidate.max_active_agents = roster.enabled_count();
@@ -3706,10 +3716,6 @@ impl RegistryWrite {
         {
             return Ok(Some(latest));
         }
-        let global_changed = next.roster != registry.roster
-            || next.profiles != registry.profiles
-            || next.project_assignments != registry.project_assignments
-            || next.pm_projects != registry.pm_projects;
         // In split storage the revision belongs to the shared core, which a
         // transaction that changes only this project's mirror never writes.
         if global_changed || !registry.store.split {
@@ -3757,9 +3763,6 @@ impl RegistryWrite {
         // The sole logical commit point for an Active transaction. Its mirror
         // was serialized, fingerprinted and decoded just above.
         if registry.store.split && !global_changed {
-            // Only this project's record changes, and the prefs lock already
-            // orders its writers: let the other projects in before the write.
-            self.core_lock = None;
             save_record(&next, key)?;
         } else if self.core_lock.is_some() {
             save_proving(&next, Mirrors::None)?;
