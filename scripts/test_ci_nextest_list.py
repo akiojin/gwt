@@ -55,6 +55,28 @@ class NextestListTests(unittest.TestCase):
         with self.assertRaises(ProcessLookupError):
             os.kill(int(pid[1]), 0)
 
+    def test_listing_fails_if_nextest_stops_reading_output(self):
+        with subprocess.Popen(
+            [
+                sys.executable,
+                str(WRAPPER),
+                "2",
+                sys.executable,
+                "-c",
+                "import sys; sys.stdout.buffer.write(b'x' * (2 ** 21))",
+                "--list",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        ) as wrapper:
+            try:
+                # Leave stdout unread to simulate a blocked listing consumer.
+                self.assertEqual(wrapper.wait(timeout=6), 124)
+            finally:
+                if wrapper.poll() is None:
+                    wrapper.kill()
+            self.assertIn(b"timed out forwarding test enumeration output", wrapper.stderr.read())
+
 
 if __name__ == "__main__":
     unittest.main()
