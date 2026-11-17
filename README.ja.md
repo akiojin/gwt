@@ -529,6 +529,25 @@ PY
 `daemon.start` を envelope で送ります。managed hook は専用 argv transport の
 `gwtd hook event <Event>` / `gwtd hook provider-event <provider> <native-event>` を維持します。
 
+Agent registry の schema 3 だけを読める旧 binary へ戻す場合は、すべての Agent、
+デスクトップ app、daemon を終了してから、**新しい** `gwtd` で次を実行します。
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"agent.registry.restore_schema3","params":{}}
+JSON
+```
+
+移行時の backup へ戻すのではなく、現在の共有 registry と全 project の確定済み prefs を
+schema 3 に書き戻します。Agent の割当が残る場合、Session が稼働中または不在を確認できない場合、
+record の欠落・破損、未知の mirror 内容がある場合は拒否します。Agent の終了と予約解除は
+通常の操作で行い、mirror の競合は `agent.registry.status` / `agent.registry.reconcile` で
+確認・解消してから再実行してください。拒否を回避するために record を削除しないでください。
+registry の置換は原子的で、中断しても完全な schema 4 または完全な schema 3 が残ります。
+record と移行時の `agent-registry.schema3-backup.json` は保持します。成功後は旧 binary を直接
+起動してください。新しいデスクトップ app を起動すると schema 4 に再移行します。
+schema 3 で再実行しても変更はありません。
+
 runtime daemon は macOS/Linux の Unix domain socket と Windows の named pipe に対応します。
 GUI はプロジェクト daemon を監督し、必要に応じて起動・置換するため、通常の GUI 利用で
 手動の `daemon.start` は不要です。standalone daemon を起動する場合、次の操作は呼び出した

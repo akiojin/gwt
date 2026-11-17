@@ -563,6 +563,27 @@ as `gwtd daemon start` is rejected; send `daemon.start` as an envelope instead.
 Managed hooks retain the dedicated argv transports `gwtd hook event <Event>`
 and `gwtd hook provider-event <provider> <native-event>`.
 
+To return to a binary that only supports Agent registry schema 3, stop all
+Agents, the desktop app, and daemons first. Using the **new** `gwtd`, run:
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"agent.registry.restore_schema3","params":{}}
+JSON
+```
+
+This writes the current shared registry and every project's committed preferences
+to schema 3 without reverting to the migration backup. It refuses outstanding
+Agent assignments, live or unproven Sessions, missing/damaged records, and unknown
+mirror contents. Stop Agents and release reservations normally; use
+`agent.registry.status` / `agent.registry.reconcile` to inspect and resolve mirror
+conflicts before retrying. Do not delete records to bypass a refusal.
+The registry replacement is atomic; an interruption leaves either the complete
+schema 4 or the complete schema 3 registry. Records and the original
+`agent-registry.schema3-backup.json` are retained. After success, start the old
+binary directly: starting the new desktop app would migrate back to schema 4.
+Running the operation again on schema 3 makes no changes.
+
 The runtime daemon supports macOS/Linux Unix domain sockets and Windows named
 pipes. The GUI supervises the project daemon, starting or replacing it as needed;
 normal GUI use does not require a manual `daemon.start`. To run a standalone

@@ -94,6 +94,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "agent.registry.restore_schema3",
+        aliases: &[],
+    },
+    Operation {
         name: "agent.registry.status",
         aliases: &[],
     },
