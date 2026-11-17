@@ -207,6 +207,35 @@ test("Issue #6994 merged work awaits measurement in Backlog with an explicit req
   ]);
 });
 
+test("Issue #7536 merged work awaits external verification without taking attention or an active slot", async ({ page }) => {
+  const reason = "Only release, main or another host verification remains: AC-4";
+  await page.evaluate(reason => {
+    const fixture = window as any;
+    fixture.__queueActivity([]);
+    fixture.__queueSetEntries([{ number: 7536, title: "Merged work awaiting release verification",
+      state: "open", labels: [], related_work_refs: [] }]);
+    fixture.__queueConfirm([7536], { state: "idle", active_count: 0, max_active_agents: 2,
+      autonomous_issues: [{ issue_number: 7536, phase: "implementing", needs_human: false,
+        review_dispatch_hold: { reason: "Old dispatch hold" }, steering: { reason: "Old steering request" } }] });
+    fixture.__queueInbox([{ issue: { number: 7536 }, state: "awaiting_verification", exclusion_reason: reason }]);
+  }, reason);
+  const waiting = column(page, "backlog").locator('[data-issue-number="7536"]');
+  await expect(waiting).toBeVisible();
+  const badge = waiting.locator(".knowledge-row-badge");
+  await expect(badge).toHaveText("Awaiting verification");
+  await expect(badge).toHaveAttribute("data-issue-explanation", /Only release, main or another host verification remains/);
+  await expect(waiting).toContainText(reason);
+  await expect(waiting).not.toContainText(/Needs human|Agent failed|Old dispatch hold|Old steering request/);
+  await expect(page.locator(".knowledge-monitor-pill")).toHaveAttribute("title", /Awaiting attention 0/);
+  await expect(column(page, "active").locator("h3")).toHaveText("Active · 0 issues");
+  await expect(column(page, "queued").locator('[data-issue-number="7536"]')).toHaveCount(0);
+  await waiting.locator('[data-action="requeue-issue"]').click();
+  await expect.poll(() => page.evaluate(() => (window as any).__queueMessages
+    .filter((message: any) => message.kind === "issue_monitor_requeue"))).toEqual([
+    { kind: "issue_monitor_requeue", issue_number: 7536 },
+  ]);
+});
+
 test("Issue #6880 artifact diagnostics recover to queued without a requeue request", async ({ page }, info) => {
   const projectionPath = process.env.GWT_PLAYWRIGHT_ISSUE_6880_PROJECTION;
   test.skip(!projectionPath, "Requires the projections emitted by the Issue #6880 Rust regression test");

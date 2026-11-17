@@ -1202,6 +1202,13 @@ queue に戻す旨をコメントします。未達の基準がすべて `(measu
 **Awaiting measurement** として実測を待ち、コメントにも `awaiting_measurement` を示します。
 測定後に受け入れ基準をチェックすると
 close を再評価でき、**Return to queue** で作業を再開することもできます。
+リリース、main、別ホストでの確認を待つ場合は、残条件に
+`(release-verification)`、`(main-verification)`、`(host-verification)` を
+明示します（角括弧も使用可）。Autonomous が on で残条件がこれらと任意の実測条件だけなら、
+配信済み Issue は **Awaiting verification** (`awaiting_verification`) となり、
+active slot と NeedsHuman に含めず確認を待ちます。確認主体も各条件に記録してください。
+リリース公開後や対象ホストが利用可能になったら **Return to queue**、または理由を付けた
+`issue.monitor.requeue` で確認を起動できます。タグのない実装条件があれば通常の queue を継続します。
 Autonomous が off の場合は `merge 済み・未達 AC あり` とコメントして
 従来どおり `NeedsHuman` にします。`gwt-spec` Issue は
 全 Phase の tasks が完了したときだけ close します。残りの基準を別 Issue に
