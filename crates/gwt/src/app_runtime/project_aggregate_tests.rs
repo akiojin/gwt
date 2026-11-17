@@ -279,6 +279,8 @@ fn remote_command_owner_recovery_expires_with_reason_and_attempts() {
         RemoteRuntimeCommandKind::Resize,
     ).is_empty());
     let start = Instant::now();
+    // Commands are queued independently and need not have equal wait times.
+    runtime.runtimes.get_mut(&id).unwrap().pending_owner_commands.front_mut().unwrap().queued_at -= Duration::from_secs(1);
     assert!(runtime.next_runtime_output_deadline().is_some());
     // Drive the existing event-loop clock directly; no wall-clock sleep.
     let events = runtime.flush_runtime_output_batches(start + Duration::from_secs(11));
@@ -291,27 +293,25 @@ fn remote_command_owner_recovery_expires_with_reason_and_attempts() {
             _ => None,
         })
         .expect("expired command outcome");
-    assert!(error.contains("background process connection is interrupted"), "{error}");
-    assert!(error.contains("background process connection changed"), "{error}");
-    assert!(error.contains("target window is unavailable"), "{error}");
-    assert!(!error.contains("Some(") && !error.contains("Degraded"), "{error}");
-    assert!(error.contains("not delivered to the window"), "{error}");
-    assert!(error.contains("Reopen the window and check its state"), "{error}");
-    assert!(error.contains("Automatic recovery"), "{error}");
-    assert!(error.contains("ms") && error.contains("attempt"), "{error}");
-    assert!(
-        !error.contains("Refresh") && !error.contains("try again"),
-        "{error}"
-    );
-    assert!(
-        !runtime.pane_has_unsent_user_input(&id),
-        "expired input must clear its speculative busy hint"
-    );
     let resize_error = events.iter().find_map(|event| match &event.event {
         BackendEvent::WindowCommandError { operation, message, .. } if operation == "resize" => Some(message),
         _ => None,
     }).expect("expired resize outcome");
-    assert_eq!(resize_error, error, "both display boundaries use the same recovery explanation");
+    for error in [error, resize_error] {
+        assert!(error.contains("background process connection is interrupted"), "{error}");
+        assert!(error.contains("background process connection changed"), "{error}");
+        assert!(error.contains("target window is unavailable"), "{error}");
+        assert!(!error.contains("Some(") && !error.contains("Degraded"), "{error}");
+        assert!(error.contains("not delivered to the window"), "{error}");
+        assert!(error.contains("Reopen the window and check its state"), "{error}");
+        assert!(error.contains("Automatic recovery"), "{error}");
+        assert!(error.contains("ms") && error.contains("attempt"), "{error}");
+        assert!(!error.contains("Refresh") && !error.contains("try again"), "{error}");
+    }
+    assert!(
+        !runtime.pane_has_unsent_user_input(&id),
+        "expired input must clear its speculative busy hint"
+    );
     let wire = events.iter().map(|event| serde_json::to_value(&event.event).unwrap()).collect::<Vec<_>>();
     println!("ISSUE7523_EVENTS={}", serde_json::to_string(&wire).unwrap());
 }

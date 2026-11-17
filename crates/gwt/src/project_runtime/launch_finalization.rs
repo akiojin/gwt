@@ -1687,9 +1687,7 @@ pub fn reconcile_unindexed_prepared_fresh_launches(
                 .map_err(|error| {
                     tracing::warn!(session_id = %attempt.request.initial_session_id,
                         error_kind = ?error.kind(), %error, "launch recovery probe failed");
-                    format!(
-                        "The previous launch could not be checked: {error}. Launch recovery is paused. Open Logs and review the launch error before launching again."
-                    )
+                    "The previous launch could not be checked. Launch recovery is paused. Open Logs and review the launch error before launching again.".to_string()
                 })?
         {
             continue;

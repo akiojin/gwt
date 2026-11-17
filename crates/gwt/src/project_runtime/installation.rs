@@ -1369,18 +1369,14 @@ pub fn install_agent_launch(
                 &mut input.removed_genesis_session,
             );
             tracing::warn!(%error, ?rollback, "genesis launch readiness could not be committed");
-            return Err(format!(
-                "The agent launch could not be confirmed: {error}. Cleanup was attempted. Open Logs and review the launch error before launching again."
-            ));
+            return Err("The agent launch could not be confirmed. Cleanup was attempted. Open Logs and review the launch error before launching again.".into());
         }
     }
     let cached_session = if durable_launch_recovery_exists(&input.sessions_dir, &session_id)
         .map_err(|error| {
             tracing::warn!(session_id, error_kind = ?error.kind(), %error,
                 "launch recovery probe failed");
-            format!(
-                "The previous launch could not be checked: {error}. Launch is paused. Open Logs and review the launch error before launching again."
-            )
+            "The previous launch could not be checked. Launch is paused. Open Logs and review the launch error before launching again.".to_string()
         })? {
         None
     } else {
