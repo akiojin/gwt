@@ -2376,7 +2376,7 @@ fn issue5596_unrelated_prefs_and_window_change_reuses_fresh_launch_facts() {
     let before = gwt_core::process::thread_git_spawn_count();
     drain_queued_blocking_tasks(&queued);
     let repeated_git = gwt_core::process::thread_git_spawn_count() - before;
-    assert_eq!(repeated_git, 0, "read-only revalidation must reuse Git/base/prompt facts; materializer claim belongs to the physical owner");
+    assert_eq!(repeated_git, 1, "revalidation must only probe the current base ref and reuse delivery/prompt facts; materializer claim belongs to the physical owner");
     fixture
         .runtime
         .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
