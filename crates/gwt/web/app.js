@@ -65,6 +65,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         createAgentAttentionToaster,
         notificationForTransition,
         monitorDiagnostic,
+        monitorNoticeIdentity,
       } from "/agent-completion-notifications.js";
       import { createReleaseNotesWindow } from "/release-notes-window.js";
 
@@ -5182,6 +5183,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
           title: monitorNotice?.title || "Issues",
           message: event?.message,
           issueNumber: event?.issue_number,
+          identity: monitorNoticeIdentity(event?.message),
         });
       });
 
