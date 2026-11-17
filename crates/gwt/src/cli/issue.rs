@@ -1691,9 +1691,9 @@ fn reorder_local_terminal_queue_by_priority(prefs: &mut crate::IssueMonitorPrefs
     });
 }
 
-/// Issue #4231 AC-5: `priority_order` orders Issues the Monitor already
-/// tracks; it never adds one to the queue. Answering only `ok: true` and the
-/// new order read as "queued" to the PM, so the reply says so and names the
+/// Issue #4231 AC-5: `priority_order` stores the order for Monitor candidates,
+/// including those not yet tracked; it never adds one to the queue. Answering
+/// only `ok: true` and the new order read as "queued" to the PM, so the reply says so and names the
 /// placed numbers that have no inbox row. `not_in_inbox` is omitted when the
 /// status cannot be read: the order is already persisted, and failing the
 /// call now would report a write that happened as one that did not.
@@ -1704,7 +1704,7 @@ fn monitor_priority_reply(
 ) -> serde_json::Value {
     let mut reply = serde_json::json!({
         "priority_order": prefs.priority_order,
-        "note": "priority_order only orders Issues already in Issues inbox; it does not enqueue. Numbers in not_in_inbox are ignored by the scan until they gain an inbox row.",
+        "note": "priority_order stores the preferred order for Monitor candidates, including before an inbox row exists; it does not enqueue or change eligibility. not_in_inbox lists Issues with no current inbox row.",
     });
     attach_priority_reason_note(&mut reply, prefs);
     if let Ok((status, _)) = load_monitor_agent_status(project_root, 0) {
