@@ -804,18 +804,16 @@ test("Works ordinary surface departure keeps unavailable native ownership readon
   assert.equal(f.runtime.readOnly, false);
   assert.ok(f.previous.get("one") === record, "fresh return keeps the surviving entry association");
   f.api.enter(); f.surface.showList(); f.api.leave();
+  const bindingCount = f.events.length;
   f.activity.clearAgentActivity();
-  assert.ok(f.runtime.terminalContainer === root, "proof loss also reclaims a normally returned list native");
+  // Issue #7558: a transport replacement clears activity while the window shows this terminal.
+  assert.ok(f.runtime.terminalContainer === f.original, "proof loss leaves a returned native in its still-listed window");
+  assert.equal(f.runtime.readOnly, false);
+  assert.equal(f.events.length, bindingCount, "proof loss has no binding effects on the window host");
+  f.api.workspace(projectCatalog([]).appState);
+  assert.ok(f.runtime.terminalContainer === root, "a returned native whose window left the catalog is reclaimed");
   assert.equal(f.runtime.readOnly, true);
-  const bindingCount = f.events.filter(event => event === "readonly").length;
-  f.activity.clearAgentActivity();
-  assert.equal(f.events.filter(event => event === "readonly").length, bindingCount, "repeated loss has no binding effects");
-  f.activity.applyAgentActivitySnapshot(activitySnapshot([live[0]], 2));
-  f.api.enter(); f.api.leave();
-  assert.ok(f.runtime.terminalContainer === f.original);
-  f.activity.clearAgentActivity();
-  assert.ok(f.runtime.terminalContainer === root, "an earlier revoked flag cannot suppress reclaim after another fresh list return");
-  assert.equal(f.runtime.readOnly, true);
+  assert.equal(f.runtime.terminal.disposed, false);
   f.dispose();
 });
 

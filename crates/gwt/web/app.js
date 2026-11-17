@@ -3265,7 +3265,13 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
 
       function revokeWorksTerminal(windowId, root, identity) {
         const owner = capturedWorksOwner(windowId, root, identity);
-        if (owner) reparentTerminalRuntime(windowId, owner.runtime, root, { readOnly: true });
+        if (!owner) return;
+        // A terminal that returned to its window stays there while the catalog
+        // still lists that session: a transport replacement clears activity,
+        // and nothing moves the terminal back while Works is closed.
+        if (owner.currentRoot !== root && currentNativeWindow(windowId)
+            && sameNativeSession(identity, nativeSessionIdentity(windowId))) return;
+        reparentTerminalRuntime(windowId, owner.runtime, root, { readOnly: true });
       }
 
       function settleWorksTerminal(windowId, root, identity, cause) {
