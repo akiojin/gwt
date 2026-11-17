@@ -378,8 +378,7 @@ fn received_comment(comment: &DiscussionComment, topic: &Topic) -> Option<BoardE
     if comment.body.trim().is_empty() || comment.body.len() > MAX_COMMENT_BYTES {
         return None;
     }
-    let (seconds, nanoseconds) = comment.created_at.unix_parts();
-    let created_at = DateTime::from_timestamp(seconds, nanoseconds)?;
+    let created_at = DateTime::from(comment.created_at);
     let mut entry = BoardEntry::new(
         coordination::AuthorKind::User,
         &comment.author,
@@ -726,7 +725,8 @@ pub(crate) fn schedule(_root: &Path) {}
 mod tests {
     use super::*;
     use gwt_core::coordination::{AuthorKind, BoardEntryKind};
-    use gwt_github::client::http::{BoardDiscussion, Rfc3339Timestamp};
+    use gwt_core::timestamp::UtcTimestamp;
+    use gwt_github::client::http::BoardDiscussion;
     use std::cell::{Cell, RefCell};
 
     struct RemoteTopic {
@@ -816,7 +816,7 @@ mod tests {
                 id: format!("{id}_C{}", topic.comments.len()),
                 body: body.into(),
                 author: "collaborator".into(),
-                created_at: Rfc3339Timestamp::parse("1970-01-01T00:00:00Z").unwrap(),
+                created_at: UtcTimestamp::parse_rfc3339("1970-01-01T00:00:00Z").unwrap(),
             });
             if self.fail_post_after_commit.replace(false) {
                 return Err(ApiError::Network("response lost".into()));
@@ -1064,7 +1064,7 @@ mod tests {
         synchronize(root.path(), &mut state, &remote).unwrap();
         remote.post("D_1", "human response").unwrap();
         remote.topics.borrow_mut()[0].comments[0].created_at =
-            Rfc3339Timestamp::parse("2017-01-01T00:59:60.125+01:00").unwrap();
+            UtcTimestamp::parse_rfc3339("2017-01-01T00:59:60.125+01:00").unwrap();
         synchronize(root.path(), &mut state, &remote).unwrap();
         let comments = coordination::load_snapshot(root.path())
             .unwrap()

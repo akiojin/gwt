@@ -3,9 +3,9 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use chrono::{DateTime, Utc};
 use gwt_core::github_budget::{self, BudgetLedger, ThrottlePolicy};
 use gwt_core::github_quota::{GitHubQuota, RATE_LIMITED_ERROR_CODE};
+use gwt_core::timestamp::UtcTimestamp;
 use gwt_core::{GwtError, Result};
 use serde::{Deserialize, Serialize};
 
@@ -38,7 +38,7 @@ pub struct PrStatus {
     pub title: String,
     pub state: PrState,
     pub url: String,
-    pub created_at: Option<DateTime<Utc>>,
+    pub created_at: Option<UtcTimestamp>,
     /// Overall CI status: "SUCCESS", "FAILURE", "PENDING", or "UNKNOWN".
     pub ci_status: String,
     /// Raw `mergeable` field from GitHub: "MERGEABLE", "CONFLICTING", "UNKNOWN".
@@ -361,11 +361,11 @@ pub struct PrInventoryFields {
     /// PR base branch (`baseRefName`). The ref a conflict or a behind-count is
     /// measured against (SPEC #3835 AC-4).
     pub base_ref_name: String,
-    pub updated_at: Option<DateTime<Utc>>,
+    pub updated_at: Option<UtcTimestamp>,
     /// When the PR was opened. Unlike `updated_at`, no bookkeeping action moves
     /// it, so it is the only sound basis for "how long has this been waiting"
     /// (Issue #4836).
-    pub created_at: Option<DateTime<Utc>>,
+    pub created_at: Option<UtcTimestamp>,
     pub mergeable: String,
     pub merge_state_status: String,
     pub ci_status: String,
@@ -452,9 +452,9 @@ pub struct PrInventoryItem {
     pub is_cross_repository: Option<bool>,
     #[serde(default)]
     pub base_ref_name: String,
-    pub updated_at: Option<DateTime<Utc>>,
+    pub updated_at: Option<UtcTimestamp>,
     #[serde(default)]
-    pub created_at: Option<DateTime<Utc>>,
+    pub created_at: Option<UtcTimestamp>,
     pub mergeable: String,
     pub merge_state_status: String,
     pub ci_status: String,
@@ -570,11 +570,11 @@ pub struct PrInventoryHistory {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrInventoryHistoryEntry {
-    pub updated_at: Option<DateTime<Utc>>,
+    pub updated_at: Option<UtcTimestamp>,
     pub lifecycle: String,
     pub default_action: String,
     pub unchanged_cycles: u32,
-    pub last_seen_at: DateTime<Utc>,
+    pub last_seen_at: UtcTimestamp,
 }
 
 impl PrInventoryHistory {
@@ -603,7 +603,7 @@ impl PrInventoryHistory {
     pub fn observe(
         &mut self,
         items: &mut [PrInventoryItem],
-        now: DateTime<Utc>,
+        now: UtcTimestamp,
         options: &PrInventoryOptions,
     ) {
         let mut next: BTreeMap<u64, PrInventoryHistoryEntry> = BTreeMap::new();
@@ -771,8 +771,8 @@ fn owner_issue_is_closed(issues: &[PrClosingIssue]) -> bool {
 
 /// Whole hours between `since` and `now`, floored at zero. Used for both
 /// `dwell_hours` (from `updated_at`) and `age_hours` (from `created_at`).
-fn pr_dwell_hours(since: Option<DateTime<Utc>>, now: DateTime<Utc>) -> Option<i64> {
-    since.map(|instant| (now - instant).num_hours().max(0))
+fn pr_dwell_hours(since: Option<UtcTimestamp>, now: UtcTimestamp) -> Option<i64> {
+    since.map(|instant| now.signed_duration_since(instant).whole_hours().max(0))
 }
 
 fn mergeability_unknown(fields: &PrInventoryFields) -> bool {
@@ -848,17 +848,14 @@ pub fn ready_to_promote_blocker(fields: &PrInventoryFields) -> Option<&'static s
 }
 
 /// Classify one open PR into the PM inventory taxonomy with default thresholds.
-pub fn classify_pr_lifecycle(
-    fields: &PrInventoryFields,
-    now: DateTime<Utc>,
-) -> PrLifecycleDecision {
+pub fn classify_pr_lifecycle(fields: &PrInventoryFields, now: UtcTimestamp) -> PrLifecycleDecision {
     classify_pr_lifecycle_with(fields, now, &PrInventoryOptions::default())
 }
 
 /// Classify one open PR into the PM inventory taxonomy.
 pub fn classify_pr_lifecycle_with(
     fields: &PrInventoryFields,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
     options: &PrInventoryOptions,
 ) -> PrLifecycleDecision {
     let owner_issue_closed = owner_issue_is_closed(&fields.closing_issues)
@@ -1030,7 +1027,7 @@ fn default_action_operation(class: PrLifecycleClass, is_draft: bool) -> Option<&
 
 fn inventory_item_from_fields(
     fields: PrInventoryFields,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
     options: &PrInventoryOptions,
 ) -> PrInventoryItem {
     let decision = classify_pr_lifecycle_with(&fields, now, options);
@@ -1120,7 +1117,7 @@ fn parse_closing_issues(value: &serde_json::Value) -> Vec<PrClosingIssue> {
 
 fn inventory_item_from_value(
     value: &serde_json::Value,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
     options: &PrInventoryOptions,
 ) -> Result<PrInventoryItem> {
     let single_json = serde_json::to_string(value).map_err(|e| GwtError::Other(e.to_string()))?;
@@ -1198,14 +1195,14 @@ fn inventory_item_from_value(
 }
 
 /// Parse `gh pr list --json` output into classified inventory rows.
-pub fn parse_pr_inventory_json(json: &str, now: DateTime<Utc>) -> Result<Vec<PrInventoryItem>> {
+pub fn parse_pr_inventory_json(json: &str, now: UtcTimestamp) -> Result<Vec<PrInventoryItem>> {
     parse_pr_inventory_json_with(json, now, &PrInventoryOptions::default())
 }
 
 /// Parse `gh pr list --json` output with explicit thresholds.
 pub fn parse_pr_inventory_json_with(
     json: &str,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
     options: &PrInventoryOptions,
 ) -> Result<Vec<PrInventoryItem>> {
     let arr: Vec<serde_json::Value> =
@@ -1276,12 +1273,12 @@ const GWT_STRICT_STATUS_CHECKS_KEY: &str = "gwtRequiresStrictStatusChecks";
 /// Heavy fields of one PR, keyed by the `updated_at` they were fetched for.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrInventoryHeavy {
-    pub updated_at: Option<DateTime<Utc>>,
+    pub updated_at: Option<UtcTimestamp>,
     #[serde(default)]
     pub head_ref_oid: Option<String>,
     pub status_check_rollup: Option<serde_json::Value>,
     pub body: Option<String>,
-    pub hydrated_at: DateTime<Utc>,
+    pub hydrated_at: UtcTimestamp,
     /// SPEC #3835 AC-6: review state, probed only for a promotion candidate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_state: Option<PrReviewState>,
@@ -1297,7 +1294,7 @@ pub struct PrReviewState {
 /// The persisted `pr.list` snapshot.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PrInventoryCache {
-    pub fetched_at: Option<DateTime<Utc>>,
+    pub fetched_at: Option<UtcTimestamp>,
     #[serde(default)]
     pub include: PrInventoryInclude,
     #[serde(default)]
@@ -1322,16 +1319,16 @@ impl PrInventoryCache {
         gwt_core::atomic_file::write_atomic(path, rendered.as_bytes())
     }
 
-    fn age_secs(&self, now: DateTime<Utc>) -> Option<i64> {
+    fn age_secs(&self, now: UtcTimestamp) -> Option<i64> {
         self.fetched_at
-            .map(|fetched_at| (now - fetched_at).num_seconds())
+            .map(|fetched_at| now.whole_seconds_since(fetched_at))
     }
 
     /// Classified rows from the snapshot, exposing only the heavy fields the
     /// caller asked for.
     fn items(
         &self,
-        now: DateTime<Utc>,
+        now: UtcTimestamp,
         options: &PrInventoryOptions,
     ) -> Result<Vec<PrInventoryItem>> {
         self.rows
@@ -1375,7 +1372,7 @@ pub struct PrInventoryRead {
     /// `github` (fetched now), `cache` (inside the TTL), or `stale-cache`
     /// (served because the budget throttled the fetch).
     pub source: &'static str,
-    pub fetched_at: Option<DateTime<Utc>>,
+    pub fetched_at: Option<UtcTimestamp>,
     pub cache_age_secs: Option<i64>,
     /// Why the live fetch was skipped, when it was.
     pub throttled: Option<String>,
@@ -1408,7 +1405,7 @@ const UNLANDED_BATCH_SIZE: usize = 15;
 pub struct UnlandedBranchProbe {
     pub branch: String,
     pub ahead: usize,
-    pub last_commit_at: Option<DateTime<Utc>>,
+    pub last_commit_at: Option<UtcTimestamp>,
     /// Whether a projected merge changes files outside `.gwt`. `None` means
     /// the local probe could not reach a safe conclusion.
     pub has_non_gwt_changes: Option<bool>,
@@ -1426,7 +1423,7 @@ pub struct UnlandedBranch {
     /// Issue named by the launch ref, when the branch is one.
     pub owner_issue: Option<u64>,
     pub ahead: usize,
-    pub last_commit_at: Option<DateTime<Utc>>,
+    pub last_commit_at: Option<UtcTimestamp>,
     pub has_open_pr: bool,
     /// `false` identifies residue confined to gwt's bookkeeping. Unknown
     /// results stay visible to avoid hiding potentially unlanded source.
@@ -1556,20 +1553,14 @@ pub fn branch_has_non_gwt_changes(
 
 /// Parse `git for-each-ref --format=%(refname:short)%09%(committerdate:iso-strict)`
 /// output into branch names stripped of their `origin/` prefix.
-pub fn parse_unlanded_branch_refs(stdout: &str) -> Vec<(String, Option<DateTime<Utc>>)> {
+pub fn parse_unlanded_branch_refs(stdout: &str) -> Vec<(String, Option<UtcTimestamp>)> {
     stdout
         .lines()
         .filter_map(|line| {
             let (reference, date) = line.split_once('\t')?;
             let branch = reference.trim().strip_prefix("origin/")?;
-            (!branch.is_empty()).then(|| {
-                (
-                    branch.to_string(),
-                    DateTime::parse_from_rfc3339(date.trim())
-                        .ok()
-                        .map(|value| value.with_timezone(&Utc)),
-                )
-            })
+            (!branch.is_empty())
+                .then(|| (branch.to_string(), UtcTimestamp::parse_rfc3339(date.trim())))
         })
         .collect()
 }
@@ -1642,9 +1633,7 @@ pub fn collect_unlanded_work_branches(
             has_non_gwt_changes: None,
             branch: branch.to_string(),
             ahead: 0,
-            last_commit_at: DateTime::parse_from_rfc3339(fields[1])
-                .ok()
-                .map(|date| date.with_timezone(&Utc)),
+            last_commit_at: UtcTimestamp::parse_rfc3339(fields[1]),
         });
     }
     // At most 1950 bytes of stdin even with SHA256 OID pairs. The existing
@@ -1881,7 +1870,7 @@ pub fn fetch_pr_inventory_cached(
         repo_path,
         cache_path,
         &BudgetLedger::global(),
-        Utc::now(),
+        UtcTimestamp::now(),
         options,
         run_gh_command,
     )
@@ -1897,7 +1886,7 @@ pub fn fetch_pr_inventory_tracked(
     cache_path: &Path,
     options: &PrInventoryOptions,
 ) -> Result<PrInventoryRead> {
-    let now = Utc::now();
+    let now = UtcTimestamp::now();
     let mut read = fetch_pr_inventory_cached_with(
         repo_path,
         cache_path,
@@ -1951,7 +1940,7 @@ fn track_pr_inventory(
     read: &mut PrInventoryRead,
     repo_path: &Path,
     history_path: &Path,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
     options: &PrInventoryOptions,
 ) -> Result<()> {
     // Issue #5735: neither lifecycle progress nor absence of an open PR can
@@ -2000,7 +1989,7 @@ fn fetch_pr_inventory_cached_with<F>(
     repo_path: &Path,
     cache_path: &Path,
     ledger: &BudgetLedger,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
     options: &PrInventoryOptions,
     mut run_gh: F,
 ) -> Result<PrInventoryRead>
@@ -2183,7 +2172,7 @@ fn probe_ready_candidates<F>(
     repo_path: &Path,
     rows: &[serde_json::Value],
     heavy: &mut BTreeMap<u64, PrInventoryHeavy>,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
     options: &PrInventoryOptions,
     run_gh: &F,
 ) -> u32
@@ -2291,7 +2280,7 @@ fn hydrate_fallback_owners<F>(
     repo_path: &Path,
     rows: &mut [serde_json::Value],
     ledger: &BudgetLedger,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
     run_gh: &mut F,
 ) -> Result<usize>
 where
@@ -2341,7 +2330,7 @@ where
         ledger.record_graphql_response(
             &github_budget::spawn_source(&["api", "graphql"]),
             &rate_limit,
-            now,
+            now.into(),
         );
     }
     // gh exits nonzero for partial GraphQL responses too. Only a NOT_FOUND
@@ -2408,7 +2397,7 @@ fn probe_merge_queue<F>(
     repo_path: &Path,
     rows: &mut [serde_json::Value],
     ledger: &BudgetLedger,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
     run_gh: &mut F,
 ) -> usize
 where
@@ -2482,7 +2471,7 @@ where
         ledger.record_graphql_response(
             &github_budget::spawn_source(&["api", "graphql"]),
             &rate_limit,
-            now,
+            now.into(),
         );
     }
     if !output.success {
@@ -2524,13 +2513,14 @@ where
 fn periodic_read_throttle<F>(
     repo_path: &Path,
     ledger: &BudgetLedger,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
     run_gh: &mut F,
 ) -> Option<String>
 where
     F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
 {
     let policy = ThrottlePolicy::current();
+    let now = now.into();
     let mut snapshot = ledger.snapshot(now);
     if github_budget::probe_is_stale(&snapshot, &policy) {
         if let Ok(output) = run_gh(repo_path, &["api", "rate_limit"]) {
@@ -2550,10 +2540,10 @@ where
 /// entry still answers: unchanged data, no running checks due, body already held.
 fn hydration_needed(
     previous: Option<&PrInventoryHeavy>,
-    updated_at: Option<DateTime<Utc>>,
+    updated_at: Option<UtcTimestamp>,
     head_ref_oid: Option<&str>,
     options: &PrInventoryOptions,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
 ) -> Option<PrInventoryInclude> {
     let wanted = options.include;
     if wanted.is_empty() {
@@ -2570,7 +2560,7 @@ fn hydration_needed(
             None => true,
             Some(rollup) => {
                 ci_status_from_rollup(Some(rollup)) == "PENDING"
-                    && (now - previous.hydrated_at).num_seconds().max(0) as u64
+                    && now.whole_seconds_since(previous.hydrated_at).max(0) as u64
                         >= options.checks_refresh_secs
             }
         };
@@ -2856,7 +2846,7 @@ fn parse_inventory_rows(json: &str) -> Result<Vec<serde_json::Value>> {
 #[cfg(test)]
 fn fetch_pr_inventory_with<F>(
     repo_path: &Path,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
     options: &PrInventoryOptions,
     mut run_gh: F,
 ) -> Result<Vec<PrInventoryItem>>
@@ -3069,10 +3059,8 @@ pub fn check_counts_from_rollup(rollup: Option<&serde_json::Value>) -> Option<Pr
     Some(counts)
 }
 
-fn parse_github_timestamp(value: Option<&str>) -> Option<DateTime<Utc>> {
-    value
-        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
-        .map(|value| value.with_timezone(&Utc))
+fn parse_github_timestamp(value: Option<&str>) -> Option<UtcTimestamp> {
+    value.and_then(UtcTimestamp::parse_rfc3339)
 }
 
 pub fn latest_pr_by_created_at(prs: impl IntoIterator<Item = PrStatus>) -> Option<PrStatus> {
@@ -3469,13 +3457,13 @@ pub(crate) fn run_cached_list_command(repo_path: &Path, args: &[&str]) -> Result
 pub(crate) fn run_cached_list_command_with_observed_at(
     repo_path: &Path,
     args: &[&str],
-) -> Result<(DateTime<Utc>, GhCliOutput)> {
+) -> Result<(UtcTimestamp, GhCliOutput)> {
     let cache_dir =
         gwt_core::paths::gwt_project_dir_for_repo_path(repo_path).join("rest-list-pages");
     let (observed_at, stdout) = crate::gh_rest::cached_list_response_at_with(
         &cache_dir,
         &args.join(" "),
-        chrono::Utc::now(),
+        UtcTimestamp::now(),
         crate::gh_rest::monitor_list_cache_ttl_secs(),
         || {
             let output = run_gh_command(repo_path, args).map_err(|error| error.to_string())?;
@@ -3963,7 +3951,7 @@ where
             "PR identity, Draft status or checks are unknown".into(),
         ));
     }
-    let now = Utc::now();
+    let now = UtcTimestamp::now();
     let options = PrInventoryOptions::default();
     let mut inventory = inventory_item_from_value(&value, now, &options)?;
     // A non-strict base makes failed CI actionable even while BEHIND. Other
@@ -4146,7 +4134,7 @@ where
         ));
     }
     let state = parse_pr_status_json(&output.stdout)?.state;
-    let now = Utc::now();
+    let now = UtcTimestamp::now();
     if state == PrState::Open {
         let url = value
             .get("url")
@@ -4868,6 +4856,9 @@ where
 
 #[cfg(test)]
 mod tests {
+    use crate::shift_test_timestamp;
+    use time::Duration;
+
     use super::*;
 
     #[test]
@@ -5249,9 +5240,11 @@ mod tests {
             }
             let json = serde_json::json!({"number":number,"isDraft":true,
                 "statusCheckRollup":checks});
-            let inventory =
-                parse_pr_inventory_json(&serde_json::json!([json]).to_string(), Utc::now())
-                    .unwrap();
+            let inventory = parse_pr_inventory_json(
+                &serde_json::json!([json]).to_string(),
+                UtcTimestamp::now(),
+            )
+            .unwrap();
             assert_eq!(inventory[0].ci_status, "SUCCESS", "PR #{number}");
             assert_eq!(
                 parse_pr_check_report_json(&json.to_string()).unwrap().ci,
@@ -6348,7 +6341,7 @@ mod tests {
             "reviewDecision":"APPROVED","autoMergeRequest":null,
         });
         let read = |row: &serde_json::Value| {
-            parse_pr_inventory_json(&serde_json::json!([row]).to_string(), Utc::now())
+            parse_pr_inventory_json(&serde_json::json!([row]).to_string(), UtcTimestamp::now())
                 .unwrap()
                 .remove(0)
         };
@@ -6615,8 +6608,9 @@ mod tests {
         let mut fields = promotable_fields();
         fields.merge_state_status = "BEHIND".into();
         assert_eq!(ready_to_promote_blocker(&fields), Some("behind_base"));
-        let row =
-            |fields| inventory_item_from_fields(fields, Utc::now(), &PrInventoryOptions::default());
+        let row = |fields| {
+            inventory_item_from_fields(fields, UtcTimestamp::now(), &PrInventoryOptions::default())
+        };
         assert_eq!(
             row(fields.clone()).completion_blocker(),
             Some("behind_base")
@@ -6631,7 +6625,7 @@ mod tests {
             head_sha: "observed-head".into(),
             inventory: inventory_item_from_fields(
                 fields,
-                Utc::now(),
+                UtcTimestamp::now(),
                 &PrInventoryOptions::default(),
             ),
         }
@@ -6968,7 +6962,7 @@ mod tests {
 
     // ---- Issue #3868: fallback detection, dwell time, no-progress counting ----
 
-    fn now_3868() -> DateTime<Utc> {
+    fn now_3868() -> UtcTimestamp {
         "2026-09-01T12:00:00Z".parse().expect("now")
     }
 
@@ -7361,7 +7355,7 @@ mod tests {
         );
         let cache_path = tmp.path().join(PR_INVENTORY_CACHE_FILE);
         PrInventoryCache {
-            fetched_at: Some(Utc::now()),
+            fetched_at: Some(UtcTimestamp::now()),
             ..Default::default()
         }
         .save(&cache_path)
@@ -8178,12 +8172,12 @@ mod tests {
 
     use gwt_core::github_budget::{BudgetLedger, ProbeSnapshot, ResourceWindow};
 
-    fn now_3891() -> DateTime<Utc> {
+    fn now_3891() -> UtcTimestamp {
         "2026-09-02T00:00:00Z".parse().expect("now")
     }
 
     fn healthy_probe_payload() -> String {
-        let reset = (now_3891() + chrono::Duration::hours(1)).timestamp();
+        let reset = shift_test_timestamp(now_3891(), Duration::hours(1)).timestamp();
         serde_json::json!({"resources": {
             "core": {"limit": 5000, "remaining": 4990, "reset": reset},
             "graphql": {"limit": 5000, "remaining": 4800, "reset": reset}
@@ -8280,7 +8274,7 @@ mod tests {
         tmp: &Path,
         ledger: &BudgetLedger,
         gh: &mut FakeGh,
-        now: DateTime<Utc>,
+        now: UtcTimestamp,
         options: &PrInventoryOptions,
     ) -> Result<PrInventoryRead> {
         let gh = std::sync::Mutex::new(gh);
@@ -8334,7 +8328,7 @@ mod tests {
             // mutability rather than a captured `&mut`.
             let owner_calls = std::sync::atomic::AtomicUsize::new(0);
             let calls_before = gh.calls.len();
-            let now = now_3891() + chrono::Duration::seconds(offset);
+            let now = shift_test_timestamp(now_3891(), Duration::seconds(offset));
             let read = {
                 let gh = std::sync::Mutex::new(&mut gh);
                 fetch_pr_inventory_cached_with(
@@ -8352,7 +8346,7 @@ mod tests {
                             ledger.record_spawn_from(
                                 GitHubQuota::GraphQl,
                                 &github_budget::spawn_source(args),
-                                now,
+                                now.into(),
                             );
                             Ok(GhCliOutput {
                                 success: true,
@@ -8373,7 +8367,7 @@ mod tests {
             };
             let owner_calls = owner_calls.into_inner();
             assert_eq!(owner_calls, 1);
-            let budget = ledger.snapshot(now);
+            let budget = ledger.snapshot(now.into());
             assert_eq!(
                 budget.local["graphql"].points_last_hour,
                 if offset == 0 { 3 } else { 6 }
@@ -8405,7 +8399,10 @@ mod tests {
             tmp.path(),
             &ledger,
             &mut gh,
-            now_3891() + chrono::Duration::seconds(PR_INVENTORY_CACHE_TTL_SECS + 2),
+            shift_test_timestamp(
+                now_3891(),
+                Duration::seconds(PR_INVENTORY_CACHE_TTL_SECS + 2),
+            ),
             &PrInventoryOptions::default(),
         )
         .unwrap();
@@ -8418,7 +8415,7 @@ mod tests {
     fn read_with_merge_queue_answer(
         tmp: &Path,
         gh: &mut FakeGh,
-        now: DateTime<Utc>,
+        now: UtcTimestamp,
         answer: GhCliOutput,
     ) -> (PrInventoryRead, Vec<String>) {
         let ledger = BudgetLedger::at(&tmp.join("budget"));
@@ -8513,7 +8510,7 @@ mod tests {
             tmp.path(),
             &ledger,
             &mut gh,
-            now_3891() + chrono::Duration::seconds(1),
+            shift_test_timestamp(now_3891(), Duration::seconds(1)),
             &PrInventoryOptions::default(),
         )
         .expect("cached read");
@@ -8717,7 +8714,7 @@ mod tests {
         let first = cached_read(tmp.path(), &ledger, &mut gh, now_3891(), &options).expect("first");
         gh.calls.clear();
 
-        let later = now_3891() + chrono::Duration::seconds(60);
+        let later = shift_test_timestamp(now_3891(), Duration::seconds(60));
         let second = cached_read(tmp.path(), &ledger, &mut gh, later, &options).expect("second");
 
         assert!(
@@ -8759,7 +8756,10 @@ mod tests {
         let options = PrInventoryOptions::default();
         cached_read(tmp.path(), &ledger, &mut gh, now_3891(), &options).expect("warm");
         gh.calls.clear();
-        let later = now_3891() + chrono::Duration::seconds(PR_INVENTORY_CACHE_TTL_SECS + 1);
+        let later = shift_test_timestamp(
+            now_3891(),
+            Duration::seconds(PR_INVENTORY_CACHE_TTL_SECS + 1),
+        );
         let read = cached_read(tmp.path(), &ledger, &mut gh, later, &options).expect("periodic");
         assert_eq!(gh.calls, vec![light_list_call()]);
         assert_eq!(read.github_calls, 1);
@@ -8774,7 +8774,7 @@ mod tests {
             tmp.path(),
             &ledger,
             &mut gh,
-            later + chrono::Duration::seconds(PR_INVENTORY_CACHE_TTL_SECS + 1),
+            shift_test_timestamp(later, Duration::seconds(PR_INVENTORY_CACHE_TTL_SECS + 1)),
             &options,
         )
         .expect("changed head");
@@ -8806,7 +8806,10 @@ mod tests {
         gh.calls.clear();
 
         // The snapshot TTL elapsed, but the independent checks interval has not.
-        let second_at = now_3891() + chrono::Duration::seconds(PR_INVENTORY_CACHE_TTL_SECS + 1);
+        let second_at = shift_test_timestamp(
+            now_3891(),
+            Duration::seconds(PR_INVENTORY_CACHE_TTL_SECS + 1),
+        );
         cached_read(tmp.path(), &ledger, &mut gh, second_at, &options).expect("second");
         assert_eq!(
             gh.calls,
@@ -8815,7 +8818,7 @@ mod tests {
         );
         gh.calls.clear();
 
-        let checks_at = now_3891() + chrono::Duration::seconds(602);
+        let checks_at = shift_test_timestamp(now_3891(), Duration::seconds(602));
         cached_read(tmp.path(), &ledger, &mut gh, checks_at, &options).expect("checks due");
         assert_eq!(
             gh.calls,
@@ -8828,7 +8831,10 @@ mod tests {
 
         // PR 3 got a new commit: its updatedAt moved, so it is hydrated again.
         gh.rows[0] = light_row(3, "2026-09-02T00:30:00Z", "CLEAN");
-        let third_at = checks_at + chrono::Duration::seconds(PR_INVENTORY_CACHE_TTL_SECS + 1);
+        let third_at = shift_test_timestamp(
+            checks_at,
+            Duration::seconds(PR_INVENTORY_CACHE_TTL_SECS + 1),
+        );
         let third = cached_read(tmp.path(), &ledger, &mut gh, third_at, &options).expect("third");
         assert!(
             gh.calls
@@ -8882,7 +8888,10 @@ mod tests {
             5,
             "cold reads must be bounded too"
         );
-        let later = now_3891() + chrono::Duration::seconds(PR_INVENTORY_CACHE_TTL_SECS + 1);
+        let later = shift_test_timestamp(
+            now_3891(),
+            Duration::seconds(PR_INVENTORY_CACHE_TTL_SECS + 1),
+        );
         read_at(later).expect("warm remaining 5");
         {
             let mut gh = gh.lock().unwrap();
@@ -8892,8 +8901,11 @@ mod tests {
             gh.calls.clear();
         }
         peak.store(0, Ordering::SeqCst);
-        let read = read_at(later + chrono::Duration::seconds(PR_INVENTORY_CACHE_TTL_SECS + 1))
-            .expect("changed cycle");
+        let read = read_at(shift_test_timestamp(
+            later,
+            Duration::seconds(PR_INVENTORY_CACHE_TTL_SECS + 1),
+        ))
+        .expect("changed cycle");
         assert_eq!(read.github_calls, 6);
         assert_eq!(read.hydrated, 5);
         assert_eq!(read.skipped_unchanged, 30);
@@ -8922,18 +8934,21 @@ mod tests {
 
         // The account's GraphQL budget is nearly gone in the warm probe's
         // same reset window (observed by any process).
-        let exhausted_at = now_3891() + chrono::Duration::seconds(PR_INVENTORY_CACHE_TTL_SECS + 1);
+        let exhausted_at = shift_test_timestamp(
+            now_3891(),
+            Duration::seconds(PR_INVENTORY_CACHE_TTL_SECS + 1),
+        );
         let mut resources = BTreeMap::new();
         resources.insert(
             "graphql".to_string(),
             ResourceWindow {
                 limit: 5000,
                 remaining: 120,
-                reset_at: now_3891() + chrono::Duration::hours(1),
+                reset_at: shift_test_timestamp(now_3891(), Duration::hours(1)).into(),
             },
         );
         ledger.record_probe(&ProbeSnapshot {
-            probed_at: exhausted_at,
+            probed_at: exhausted_at.into(),
             resources,
         });
 
@@ -8979,7 +8994,7 @@ mod tests {
             tmp.path(),
             &ledger,
             &mut gh,
-            exhausted_at + chrono::Duration::hours(1),
+            shift_test_timestamp(exhausted_at, Duration::hours(1)),
             &options,
         )
         .expect("recovered read");
@@ -9063,8 +9078,10 @@ mod tests {
         gh.probe_remaining = 50;
         // Past the probe's max age, so the refresh re-probes (free) and sees
         // the exhausted window before spending.
-        let later = now_3891()
-            + chrono::Duration::seconds(ThrottlePolicy::default().probe_max_age_secs + 1);
+        let later = shift_test_timestamp(
+            now_3891(),
+            Duration::seconds(ThrottlePolicy::default().probe_max_age_secs + 1),
+        );
         let refresh = PrInventoryOptions {
             refresh: true,
             ..PrInventoryOptions::default()
@@ -9100,9 +9117,9 @@ mod tests {
                 resource: "graphql".to_string(),
                 limit: 5000,
                 remaining: 0,
-                reset_at: later + chrono::Duration::seconds(300),
+                reset_at: shift_test_timestamp(later, Duration::seconds(300)).into(),
             },
-            later,
+            later.into(),
         );
         let read = cached_read(tmp.path(), &ledger, &mut gh, later, &forced).expect("read");
         assert_eq!(
@@ -9145,7 +9162,7 @@ mod tests {
     /// tell a declared owner from one guessed off a branch name.
     #[test]
     fn owner_issue_reports_whether_it_was_declared_or_derived() {
-        let now = Utc::now();
+        let now = UtcTimestamp::now();
 
         let declared = classify_pr_lifecycle(
             &inventory_fields(
@@ -9238,7 +9255,7 @@ mod tests {
     /// the one operation that performs it.
     #[test]
     fn an_all_green_draft_is_ready_to_promote() {
-        let now = Utc::now();
+        let now = UtcTimestamp::now();
         let fields = promotable_fields();
         assert_eq!(ready_to_promote_blocker(&fields), None);
 
@@ -9254,7 +9271,7 @@ mod tests {
     /// PR may never ship. A failed agent visual check is the real refusal.
     #[test]
     fn deferred_user_verification_alone_never_blocks_promotion() {
-        let now = Utc::now();
+        let now = UtcTimestamp::now();
         let deferred = promotable_fields();
         assert!(
             deferred.body.contains(DEFERRED_USER_VERIFICATION_RESULT),
@@ -9413,7 +9430,7 @@ mod tests {
     /// and the per-state counts through the inventory item.
     #[test]
     fn inventory_rows_carry_the_conflict_and_the_counts() {
-        let now = Utc::now();
+        let now = UtcTimestamp::now();
         let fields = PrInventoryFields {
             mergeable: "CONFLICTING".to_string(),
             conflict: Some(PrConflictReport {
@@ -9481,7 +9498,7 @@ mod tests {
     /// not only on the decision.
     #[test]
     fn inventory_rows_carry_the_owner_derivation_source() {
-        let now = Utc::now();
+        let now = UtcTimestamp::now();
         let item = inventory_item_from_fields(
             inventory_fields("work/issue-99", vec![]),
             now,

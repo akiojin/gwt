@@ -105,7 +105,7 @@ fn release_from_cache(
                 url: row["url"].as_str()?.to_owned(),
             })
         });
-    (release, cache.fetched_at)
+    (release, cache.fetched_at.map(Into::into))
 }
 
 /// SPEC #5016 HSV: reads only what `pr.list` already observed; it never
@@ -735,7 +735,7 @@ mod tests {
         ];
         let (release, at) = release_from_cache(&cache);
         assert_eq!(release.unwrap().number, 5352);
-        assert_eq!(at, Some(observed));
+        assert_eq!(at, Some(observed.into()));
     }
 
     // SPEC #5016 HSV: unresolved reviews come from the cached observation only.

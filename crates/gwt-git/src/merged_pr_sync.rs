@@ -22,9 +22,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use chrono::{DateTime, Utc};
+use gwt_core::timestamp::UtcTimestamp;
 use gwt_core::{GwtError, Result};
 use serde::{Deserialize, Serialize};
+use time::Duration;
 
 use crate::pr_status::{
     run_cached_list_command_with_observed_at, run_gh_command, GhCliOutput, MergedPrDeliveries,
@@ -61,7 +62,7 @@ pub struct MergedPrRecord {
 /// prove an interval complete; only this frozen source observation can.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MergedPrObservation {
-    pub observed_at: DateTime<Utc>,
+    pub observed_at: UtcTimestamp,
     pub newest_updated_at: Option<String>,
     pub oldest_updated_at: Option<String>,
     pub exhausted: bool,
@@ -75,16 +76,16 @@ impl MergedPrObservation {
     pub fn landed_count(
         &self,
         base_ref: &str,
-        start: DateTime<Utc>,
-        end: DateTime<Utc>,
-        now: DateTime<Utc>,
-        max_age: chrono::Duration,
+        start: UtcTimestamp,
+        end: UtcTimestamp,
+        now: UtcTimestamp,
+        max_age: Duration,
     ) -> Option<usize> {
         if base_ref.trim().is_empty()
             || start > self.observed_at
             || self.observed_at > now
             || now >= end
-            || max_age <= chrono::Duration::zero()
+            || max_age <= Duration::ZERO
             || now.signed_duration_since(self.observed_at) >= max_age
             || self.merged.len() > SYNC_PAGE_SIZE
             || (self.exhausted && self.merged.len() == SYNC_PAGE_SIZE)
@@ -99,8 +100,8 @@ impl MergedPrObservation {
             (Some(oldest), Some(newest)) => (oldest, newest),
             _ => return None,
         };
-        let oldest = DateTime::parse_from_rfc3339(oldest).ok()?;
-        let newest = DateTime::parse_from_rfc3339(newest).ok()?;
+        let oldest = UtcTimestamp::parse_rfc3339(oldest)?;
+        let newest = UtcTimestamp::parse_rfc3339(newest)?;
         // Equality cannot prove completeness: a full page can hide another
         // PR with the same second-level updated_at as the inclusive start.
         if oldest > newest || newest > now || (!self.exhausted && oldest >= start) {
@@ -114,8 +115,8 @@ impl MergedPrObservation {
                 .base_ref
                 .as_deref()
                 .filter(|s| !s.trim().is_empty())?;
-            let updated_at = DateTime::parse_from_rfc3339(&record.updated_at).ok()?;
-            let merged_at = DateTime::parse_from_rfc3339(record.merged_at.as_deref()?).ok()?;
+            let updated_at = UtcTimestamp::parse_rfc3339(&record.updated_at)?;
+            let merged_at = UtcTimestamp::parse_rfc3339(record.merged_at.as_deref()?)?;
             if record.number == 0
                 || !numbers.insert(record.number)
                 || record.head_ref.trim().is_empty()
@@ -215,7 +216,7 @@ where
     sync_with_observed_at(store_path, repo_path, |repo_path, args| {
         // Acquisition starts before the live request; response reuse must
         // instead supply the cache's original acquisition time.
-        let observed_at = Utc::now();
+        let observed_at = UtcTimestamp::now();
         run_gh(repo_path, args).map(|output| (observed_at, output))
     })
 }
@@ -226,7 +227,7 @@ pub(crate) fn sync_with_observed_at<F>(
     mut run_gh: F,
 ) -> Result<MergedPrSyncOutcome>
 where
-    F: FnMut(&Path, &[&str]) -> Result<(DateTime<Utc>, GhCliOutput)>,
+    F: FnMut(&Path, &[&str]) -> Result<(UtcTimestamp, GhCliOutput)>,
 {
     let watermark = load_store(store_path).watermark;
     let mut fetched = Vec::new();
@@ -403,7 +404,7 @@ fn parse_closed_pull_rows(arr: &[serde_json::Value]) -> Vec<ClosedPullRow> {
 fn observation_from_page(
     raw: &[serde_json::Value],
     rows: &[ClosedPullRow],
-    observed_at: DateTime<Utc>,
+    observed_at: UtcTimestamp,
 ) -> Option<MergedPrObservation> {
     if raw.len() > SYNC_PAGE_SIZE || raw.len() != rows.len() {
         return None;
@@ -412,7 +413,7 @@ fn observation_from_page(
     let mut previous = None;
     let mut merged = Vec::new();
     for (value, row) in raw.iter().zip(rows) {
-        let updated_at = DateTime::parse_from_rfc3339(&row.updated_at).ok()?;
+        let updated_at = UtcTimestamp::parse_rfc3339(&row.updated_at)?;
         if row.number == 0
             || !numbers.insert(row.number)
             || row.base_ref.is_none()
@@ -425,7 +426,7 @@ fn observation_from_page(
             serde_json::Value::Null => {}
             serde_json::Value::String(_) => {
                 let merged_at = row.merged_at.as_deref()?;
-                if DateTime::parse_from_rfc3339(merged_at).ok()? > updated_at {
+                if UtcTimestamp::parse_rfc3339(merged_at)? > updated_at {
                     return None;
                 }
                 merged.push(MergedPrRecord {
@@ -451,18 +452,20 @@ fn observation_from_page(
 
 #[cfg(test)]
 mod tests {
+    use crate::shift_test_timestamp;
+
     use super::*;
 
-    fn instant(value: &str) -> DateTime<Utc> {
-        DateTime::parse_from_rfc3339(value)
-            .unwrap()
-            .with_timezone(&Utc)
+    fn instant(value: &str) -> UtcTimestamp {
+        UtcTimestamp::parse_rfc3339(value).unwrap()
     }
 
     fn stamp(minutes: i64) -> String {
-        chrono::DateTime::from_timestamp(1_760_000_000 + minutes * 60, 0)
-            .expect("timestamp")
-            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        shift_test_timestamp(
+            UtcTimestamp::UNIX_EPOCH,
+            Duration::seconds(1_760_000_000 + minutes * 60),
+        )
+        .to_rfc3339_seconds()
     }
 
     /// A PR merged into `base`; higher numbers are newer.
@@ -734,11 +737,11 @@ mod tests {
             // The first merge occurred during the live request, after acquisition.
             github
                 .serve(args)
-                .map(|output| (now - chrono::Duration::seconds(10), output))
+                .map(|output| (shift_test_timestamp(now, -Duration::seconds(10)), output))
         })
         .unwrap();
         let observation = load_store(&store).observation.unwrap();
-        let freshness = chrono::Duration::seconds(120);
+        let freshness = Duration::seconds(120);
         assert_eq!(
             observation.landed_count("develop", start, end, now, freshness),
             Some(2)
@@ -756,7 +759,9 @@ mod tests {
 
         let mut future_closed = merged_row(5, "develop");
         future_closed["merged_at"] = serde_json::Value::Null;
-        future_closed["updated_at"] = (now + chrono::Duration::seconds(1)).to_rfc3339().into();
+        future_closed["updated_at"] = shift_test_timestamp(now, Duration::seconds(1))
+            .to_rfc3339()
+            .into();
         github.rows.insert(0, future_closed);
         sync_with_observed_at(&store, Path::new("/repo"), |_, args| {
             github.serve(args).map(|output| (now, output))
@@ -775,9 +780,9 @@ mod tests {
     #[test]
     fn landed_count_requires_strict_coverage_and_valid_frozen_rows() {
         let start = instant("2026-10-27T15:00:00Z");
-        let end = start + chrono::Duration::days(1);
-        let now = start + chrono::Duration::hours(1);
-        let freshness = chrono::Duration::seconds(120);
+        let end = shift_test_timestamp(start, Duration::days(1));
+        let now = shift_test_timestamp(start, Duration::hours(1));
+        let freshness = Duration::seconds(120);
         let mut observation = MergedPrObservation {
             observed_at: now,
             newest_updated_at: Some(start.to_rfc3339()),
@@ -797,7 +802,8 @@ mod tests {
             Some(0)
         );
         observation.exhausted = false;
-        observation.oldest_updated_at = Some((start - chrono::Duration::seconds(1)).to_rfc3339());
+        observation.oldest_updated_at =
+            Some(shift_test_timestamp(start, -Duration::seconds(1)).to_rfc3339());
         assert_eq!(
             observation.landed_count("develop", start, end, now, freshness),
             Some(0)
@@ -856,11 +862,11 @@ mod tests {
         let store = store_in(&temp);
         let cache = temp.path().join("cache");
         let start = instant("2026-10-27T15:00:00Z");
-        let acquired = start + chrono::Duration::hours(1);
+        let acquired = shift_test_timestamp(start, Duration::hours(1));
         let ttl = crate::gh_rest::LIST_CACHE_TTL_SECS;
         let mut fetches = 0;
         for elapsed in [0, ttl / 2, ttl] {
-            let at = acquired + chrono::Duration::seconds(elapsed);
+            let at = shift_test_timestamp(acquired, Duration::seconds(elapsed));
             let before = std::fs::read(&store).ok();
             let result = sync_with_observed_at(&store, Path::new("/repo"), |_, args| {
                 let (observed_at, stdout) = crate::gh_rest::cached_list_response_at_with(
@@ -903,14 +909,20 @@ mod tests {
             "cache reuse must not issue another live request"
         );
         let observation = load_store(&store).observation.unwrap();
-        let end = start + chrono::Duration::days(1);
-        let freshness = chrono::Duration::seconds(ttl);
+        let end = shift_test_timestamp(start, Duration::days(1));
+        let freshness = Duration::seconds(ttl);
         assert_eq!(
             observation.landed_count("develop", start, end, acquired, freshness),
             Some(0)
         );
         assert_eq!(
-            observation.landed_count("develop", start, end, acquired + freshness, freshness),
+            observation.landed_count(
+                "develop",
+                start,
+                end,
+                shift_test_timestamp(acquired, freshness),
+                freshness
+            ),
             None
         );
     }

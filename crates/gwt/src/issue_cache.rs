@@ -992,11 +992,11 @@ fn fetch_issue_list_snapshots(
             let (fetched_at, stdout) = gwt_git::gh_rest::cached_list_response_at_with(
                 cache_dir,
                 path,
-                Utc::now(),
+                Utc::now().into(),
                 ISSUE_CACHE_TTL.as_secs() as i64,
                 fetch,
             )?;
-            oldest_page = oldest_page.min(fetched_at);
+            oldest_page = oldest_page.min(fetched_at.into());
             Ok(stdout)
         },
     )?;

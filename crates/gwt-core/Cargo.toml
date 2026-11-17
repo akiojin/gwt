@@ -21,7 +21,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
 chrono = { workspace = true }
-time = { workspace = true, features = ["large-dates", "local-offset"] }
+time = { workspace = true, features = ["large-dates", "local-offset", "parsing"] }
 tokio = { workspace = true }
 notify = { workspace = true }
 notify-debouncer-mini = { workspace = true }

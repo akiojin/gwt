@@ -5599,7 +5599,7 @@ pub(crate) mod tests {
         }
         let item = parse_pr_inventory_json(
             r#"[{"number":7,"state":"OPEN","isDraft":false,"headRefName":"work/issue-42","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[{"status":"IN_PROGRESS"}]}]"#,
-            chrono::Utc::now(),
+            chrono::Utc::now().into(),
         ).unwrap().remove(0);
         PR_LIFECYCLE_READS.insert(
             format!("{}#7", repo_path.display()),
