@@ -2892,6 +2892,48 @@ pub(crate) struct PreparedOwnerAgentAdmission {
     pub issue_monitor_launch: bool,
     pub purpose_title: Option<String>,
 }
+
+pub(super) fn confirm_open_monitor_issue(
+    project_root: &Path,
+    issue_number: u64,
+) -> Result<(), String> {
+    let (state, updated_at) =
+        crate::issue_cache::fetch_issue_state_for_launch(project_root, issue_number).map_err(
+            |error| {
+                format!(
+                    "Cannot confirm Issue #{issue_number} is open on GitHub: {error}; {}",
+                    gwt_agent::TRANSIENT_LAUNCH_RETRY_HINT
+                )
+            },
+        )?;
+    if state == gwt_github::IssueState::Open {
+        return Ok(());
+    }
+
+    let result = super::monitor::publish(
+        project_root,
+        serde_json::json!({
+            "issue_state": { "number": issue_number, "state": "closed", "updated_at": updated_at }
+        }),
+    );
+    let result = match result {
+        Err(error) if error.allows_local_fallback() => {
+            commit_local_issue_monitor_control_with_timeout(
+                project_root,
+                std::time::Duration::from_secs(5),
+                |monitor| monitor.record_closed(issue_number, Some(updated_at)),
+            )
+            .map(|_| ())
+        }
+        other => other,
+    };
+    let detail = format!("Issue #{issue_number} is closed on GitHub");
+    Err(match result {
+        Ok(()) => detail,
+        Err(error) => format!("{detail}; Monitor closure could not be recorded: {error}"),
+    })
+}
+
 pub(crate) fn prepare_owner_agent_admission(
     input: OwnerAgentAdmissionInput<'_>,
     config: &mut gwt_agent::LaunchConfig,

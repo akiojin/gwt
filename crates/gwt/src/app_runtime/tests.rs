@@ -7798,6 +7798,11 @@ fn owner_monitor_fixture_with_prefs(
             &now,
         ))
         .unwrap();
+    gwt::issue_cache::set_issue_launch_readback_fixture(
+        &root,
+        issue,
+        &serde_json::json!({"state": "OPEN", "updatedAt": now}).to_string(),
+    );
     gwt::issue_monitor::mutate_project_agent_schedule(
         &root,
         &gwt_core::paths::gwt_sessions_dir(),

@@ -431,6 +431,25 @@ pub fn prepare_agent_launch(
         let provider_permission_args = config.args.clone();
         apply_windows_host_shell_wrapper(&mut config)?;
 
+        // The scan and durable claim can predate a close. Make this read on
+        // the launch worker before creating Session or execution authority,
+        // with the exact delivery already available for transient retry.
+        if issue_monitor_launch
+            && config.launch_route == gwt_agent::LaunchRoute::Autonomous
+            && !config
+                .env_vars
+                .get("GWT_REVIEW_DISPATCH")
+                .is_some_and(|value| value == "1")
+        {
+            let issue_number = config
+                .linked_issue_number
+                .ok_or("Monitor launch has no linked Issue")?;
+            super::installation::confirm_open_monitor_issue(
+                Path::new(&project_root),
+                issue_number,
+            )?;
+        }
+
         let branch_name = config.branch.clone().unwrap_or_else(|| "work".to_string());
 
         let agent_id = config.agent_id.clone();
