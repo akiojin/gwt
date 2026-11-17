@@ -1351,6 +1351,15 @@ explicitly tagged `(measurement)` or `[measurement]`, the Issue stays in Backlog
 as **Awaiting measurement**, outside NeedsHuman, and the comment identifies
 `awaiting_measurement`. Update its acceptance checklist
 after measurement to allow close, or choose **Return to queue** to resume work.
+For checks that require a release, main, or another host, explicitly tag each
+remaining criterion `(release-verification)`, `(main-verification)`, or
+`(host-verification)` (square brackets also work). With Autonomous on, only
+those checks and optional measurement criteria remaining puts the delivered
+Issue in **Awaiting verification** (`awaiting_verification`), outside active
+slots and NeedsHuman. Record who will verify in each criterion. After the
+release or host becomes available, choose **Return to queue** (or
+`issue.monitor.requeue` with a reason) to request verification. Untagged
+implementation criteria continue through the normal queue.
 With Autonomous off, unchecked criteria retain the `NeedsHuman` state with a
 `merge 済み・未達 AC あり` comment. A `gwt-spec` Issue
 is closed only after every task phase is complete. Delegating remaining criteria

@@ -579,6 +579,20 @@ test("needs_human derives one immutable count and reason for shared Issue views"
   assert.equal(snapshot.byIssue[41].reason, "Choose credentials");
 });
 
+test("Issue #7536 external verification waits do not retain stale decision attention", async (t) => {
+  const { surface } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  surface.applyIssueMonitorStatus({ autonomous_issues: [{ issue_number: 7536, phase: "implementing",
+    needs_human: false, review_dispatch_hold: { reason: "Old dispatch hold" },
+    steering: { reason: "Old steering request" } }] });
+  surface.applyIssueMonitorInbox([{ issue: { number: 7536, state: "open" }, state: "awaiting_verification" }]);
+  const snapshot = surface.issueMonitorModel.read();
+  assert.equal(snapshot.humanAttention.count, 0);
+  assert.equal(snapshot.reviewAttention.count, 0);
+  assert.equal(snapshot.steeringAttention.count, 0);
+  assert.equal(snapshot.decisionAttention.count, 0);
+});
+
 test("review holds derive shared counts and reasons from current status and open inbox", async (t) => {
   const { body, surface, sent, mod } = await makeFixture();
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));
