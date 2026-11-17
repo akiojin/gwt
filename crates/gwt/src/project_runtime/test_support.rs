@@ -640,6 +640,15 @@ impl ProjectOwnerHarness {
         }
     }
 
+    /// Observe the same published projection served by the daemon's status RPC,
+    /// without coupling fixture ordering to the GUI client's latency budget.
+    pub fn monitor_status(&self) -> Result<Option<serde_json::Value>, String> {
+        match self.transport.as_ref() {
+            Some(OwnerHarnessTransport::Daemon(daemon)) => Ok(daemon.hub.issue_monitor_status()),
+            _ => Err("the canonical Monitor daemon fixture is required".into()),
+        }
+    }
+
     pub fn pause_next_monitor_scan(&self) -> Result<OwnerMonitorScanPauseGuard, String> {
         let Some(OwnerHarnessTransport::Daemon(daemon)) = self.transport.as_ref() else {
             return Err("fixture has no canonical Monitor driver".into());
