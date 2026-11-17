@@ -11,7 +11,10 @@ use std::{
 };
 
 use crate::{
-    pty::{CursorPositionReport, GrokPromptReadiness, PendingPty, PtyHandle, SpawnConfig},
+    pty::{
+        CursorPositionReport, GrokPromptReadiness, PendingPty, PtyHandle, SpawnConfig,
+        TerminalReply,
+    },
     TerminalError,
 };
 
@@ -39,6 +42,22 @@ const MAX_INCOMPLETE_OUTPUT_TAIL: usize = 1_024;
 static NEXT_OUTPUT_SEQ: AtomicU64 = AtomicU64::new(0);
 
 const CURSOR_POSITION_QUERY: &[u8] = b"\x1b[6n";
+const OWNER_QUERIES: &[&[u8]] = &[
+    CURSOR_POSITION_QUERY,
+    b"\x1b[c",
+    b"\x1b[0c",
+    b"\x1b]10;?\x07",
+    b"\x1b]10;?\x1b\\",
+    b"\x1b]11;?\x07",
+    b"\x1b]11;?\x1b\\",
+];
+
+/// Largest unresolved query prefix, used to bound the public output batch.
+pub const OWNER_QUERY_PREFIX_MAX_BYTES: usize = b"\x1b]11;?\x1b".len();
+
+fn is_owner_query_prefix(prefix: &[u8]) -> bool {
+    OWNER_QUERIES.iter().any(|query| query.starts_with(prefix))
+}
 
 /// Grok's normal root composer owns the visible cursor and advertises its
 /// mode shortcut. Blocking permission/question/edit surfaces replace that
@@ -120,7 +139,9 @@ fn grok_prompt_readiness(screen: &vt100::Screen) -> GrokPromptReadiness {
 
 #[derive(Default)]
 struct TerminalCallbacks {
-    cursor_report: Option<CursorPositionReport>,
+    reply: Option<TerminalReply>,
+    foreground_changed: bool,
+    background_changed: bool,
 }
 
 impl vt100::Callbacks for TerminalCallbacks {
@@ -132,9 +153,41 @@ impl vt100::Callbacks for TerminalCallbacks {
         params: &[&[u16]],
         c: char,
     ) {
-        if i1.is_none() && i2.is_none() && params == [&[6][..]] && c == 'n' {
-            let (row, col) = screen.cursor_position();
-            self.cursor_report = Some(CursorPositionReport::from_screen_position(row, col));
+        if i1.is_none() && i2.is_none() {
+            match c {
+                'n' if params == [&[6][..]] => {
+                    let (row, col) = screen.cursor_position();
+                    self.reply = Some(TerminalReply::CursorPosition(
+                        CursorPositionReport::from_screen_position(row, col),
+                    ));
+                }
+                'c' if params == [&[0][..]] => {
+                    self.reply = Some(TerminalReply::PrimaryDeviceAttributes);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn unhandled_osc(&mut self, _: &mut vt100::Screen, params: &[&[u8]]) {
+        let sets_color = |value: &[u8]| !value.is_empty() && value != b"?";
+        match params {
+            [b"10", b"?"] if !self.foreground_changed => {
+                self.reply = Some(TerminalReply::ForegroundColor)
+            }
+            [b"11", b"?"] if !self.background_changed => {
+                self.reply = Some(TerminalReply::BackgroundColor)
+            }
+            // An application can override the xterm theme via OSC. The
+            // renderer still owns these queries until the color is restored.
+            [b"10", foreground, rest @ ..] => {
+                self.foreground_changed |= sets_color(foreground);
+                self.background_changed |= rest.first().is_some_and(|value| sets_color(value));
+            }
+            [b"11", background, ..] => self.background_changed |= sets_color(background),
+            [b"110", ..] => self.foreground_changed = false,
+            [b"111", ..] => self.background_changed = false,
+            _ => {}
         }
     }
 }
@@ -142,7 +195,7 @@ impl vt100::Callbacks for TerminalCallbacks {
 /// Display bytes and protocol replies from one bounded PTY read.
 pub struct PaneOutput {
     pub data: Vec<u8>,
-    pub cursor_reports: Vec<CursorPositionReport>,
+    pub replies: Vec<TerminalReply>,
 }
 
 /// Trailing screen rows folded into the logged PTY exit record, and the
@@ -252,9 +305,8 @@ pub struct Pane {
     /// so a client that resets to the snapshot continues parsing with the
     /// next chunk exactly like the pane's own parser does (Issue #4095).
     incomplete_output_tail: Vec<u8>,
-    // At most the three-byte prefix of the one query answered by this pane.
-    // Keep it off the public stream until the parser confirms the final byte.
-    cursor_query_prefix: Vec<u8>,
+    // Keep possible owner queries off the public stream until complete.
+    query_prefix: Vec<u8>,
     /// Reconnects frequently request the same idle screen. Serialize it once
     /// until output or a successful resize changes the parser state.
     snapshot_cache: OnceLock<Vec<u8>>,
@@ -295,7 +347,7 @@ impl PendingPane {
             last_exit: None,
             output_seq: 0,
             incomplete_output_tail: Vec::new(),
-            cursor_query_prefix: Vec::new(),
+            query_prefix: Vec::new(),
             snapshot_cache: OnceLock::new(),
         })
     }
@@ -407,7 +459,7 @@ impl Pane {
             last_exit: None,
             output_seq: 0,
             incomplete_output_tail: Vec::new(),
-            cursor_query_prefix: Vec::new(),
+            query_prefix: Vec::new(),
             snapshot_cache: OnceLock::new(),
         })
     }
@@ -486,21 +538,22 @@ impl Pane {
     pub fn process_bytes(&mut self, data: &[u8]) {
         self.snapshot_cache.take();
         self.parser.process(data);
-        self.parser.callbacks_mut().cursor_report.take();
+        self.parser.callbacks_mut().reply.take();
         self.record_parsed_output(data);
     }
 
-    /// Parse physical output and consume only canonical DSRs this parser handled.
+    /// Parse physical output and consume only queries confirmed by the parser.
     /// Their public CAN placeholder also cancels an earlier incomplete escape,
     /// preserving parser state without replaying a query to another responder.
     /// The caller writes the typed replies after releasing the pane mutex.
     pub fn process_owner_output(&mut self, data: &[u8]) -> PaneOutput {
         self.snapshot_cache.take();
         let mut output = PaneOutput {
-            data: Vec::with_capacity(data.len() + self.cursor_query_prefix.len()),
-            cursor_reports: Vec::new(),
+            data: Vec::with_capacity(data.len() + self.query_prefix.len()),
+            replies: Vec::new(),
         };
-        let mut prefix = std::mem::take(&mut self.cursor_query_prefix);
+        let mut prefix = std::mem::take(&mut self.query_prefix);
+        let mut has_cursor_report = false;
         let mut offset = 0;
         while offset < data.len() {
             if prefix.is_empty() {
@@ -511,8 +564,8 @@ impl Pane {
                 if plain != 0 {
                     let bytes = &data[offset..offset + plain];
                     self.parser.process(bytes);
-                    self.parser.callbacks_mut().cursor_report.take();
-                    if output.cursor_reports.is_empty() {
+                    self.parser.callbacks_mut().reply.take();
+                    if !has_cursor_report {
                         self.pty.discard_startup_cursor_preanswer();
                     }
                     output.data.extend_from_slice(bytes);
@@ -523,34 +576,40 @@ impl Pane {
             let byte = data[offset];
             offset += 1;
             self.parser.process(std::slice::from_ref(&byte));
-            let report = self.parser.callbacks_mut().cursor_report.take();
             prefix.push(byte);
-            if prefix == CURSOR_POSITION_QUERY {
-                if let Some(report) = report {
-                    output.cursor_reports.push(report);
+            if OWNER_QUERIES.contains(&prefix.as_slice()) {
+                // vt100 dispatches an OSC at ESC, before the backslash of
+                // ST arrives. Keep the reply pending until the full match.
+                if let Some(reply) = self.parser.callbacks_mut().reply.take() {
+                    has_cursor_report |= matches!(reply, TerminalReply::CursorPosition(_));
+                    output.replies.push(reply);
                     output.data.push(0x18);
                 } else {
                     output.data.extend_from_slice(&prefix);
                 }
                 prefix.clear();
-            } else if !CURSOR_POSITION_QUERY.starts_with(&prefix) {
-                let trailing_escape = prefix.last() == Some(&0x1b);
-                let public_len = prefix.len() - usize::from(trailing_escape);
+            } else if !is_owner_query_prefix(&prefix) {
+                self.parser.callbacks_mut().reply.take();
+                // An ESC that looked like part of ST can start the next
+                // query instead. Preserve that suffix if it still matches.
+                let public_len = prefix[1..]
+                    .iter()
+                    .rposition(|byte| *byte == 0x1b)
+                    .map(|index| index + 1)
+                    .filter(|&start| is_owner_query_prefix(&prefix[start..]))
+                    .unwrap_or(prefix.len());
                 output.data.extend_from_slice(&prefix[..public_len]);
-                prefix.clear();
-                if trailing_escape {
-                    prefix.push(0x1b);
-                }
+                prefix.drain(..public_len);
             }
             // The native query precedes public child output. Once output
             // progressed, even a later query back at 1;1 needs its own reply.
             // Output after a query in this same read must not discard that
             // query's preanswer before the caller writes its captured reports.
-            if !output.data.is_empty() && output.cursor_reports.is_empty() {
+            if !output.data.is_empty() && !has_cursor_report {
                 self.pty.discard_startup_cursor_preanswer();
             }
         }
-        self.cursor_query_prefix = prefix;
+        self.query_prefix = prefix;
         self.record_parsed_output(data);
         output
     }
@@ -603,7 +662,7 @@ impl Pane {
             }
         }
         let grok_readiness =
-            if self.incomplete_output_tail.is_empty() && self.cursor_query_prefix.is_empty() {
+            if self.incomplete_output_tail.is_empty() && self.query_prefix.is_empty() {
                 grok_prompt_readiness(self.parser.screen())
             } else {
                 GrokPromptReadiness::Unknown
@@ -614,13 +673,14 @@ impl Pane {
     /// At physical EOF an unfinished candidate cannot become a handled query.
     /// Publish its original bytes once, with a fresh stream position.
     pub fn finish_owner_output(&mut self) -> Vec<u8> {
-        if self.cursor_query_prefix.is_empty() {
+        if self.query_prefix.is_empty() {
             return Vec::new();
         }
         self.pty.discard_startup_cursor_preanswer();
         self.snapshot_cache.take();
         self.output_seq = NEXT_OUTPUT_SEQ.fetch_add(1, Ordering::Relaxed) + 1;
-        std::mem::take(&mut self.cursor_query_prefix)
+        self.parser.callbacks_mut().reply.take();
+        std::mem::take(&mut self.query_prefix)
     }
 
     /// Get the current vt100 screen.
@@ -666,12 +726,9 @@ impl Pane {
                     .parser
                     .screen()
                     .snapshot_formatted(SNAPSHOT_SCROLLBACK_REPLAY_LIMIT);
-                // A withheld DSR prefix belongs to the physical terminal, not
-                // a reconnecting frontend. Other unfinished output retains
-                // its existing snapshot continuation contract.
-                if self.cursor_query_prefix.is_empty()
-                    || self.incomplete_output_tail != self.cursor_query_prefix
-                {
+                // A withheld query belongs to the owner. For a split OSC
+                // terminator, the parsed tail is just its trailing ESC.
+                if !self.query_prefix.ends_with(&self.incomplete_output_tail) {
                     snapshot.extend_from_slice(&self.incomplete_output_tail);
                 }
                 snapshot
@@ -2209,6 +2266,47 @@ mod tests {
     }
 
     #[test]
+    fn owner_output_consumes_startup_queries_across_pty_reads() {
+        let _pty_guard = lock_pty_test();
+        let mut pane = test_pane_with_rows("owner-startup-queries", 6, sleep_command("60"));
+        for (query, reply) in [
+            (b"\x1b[c".as_slice(), TerminalReply::PrimaryDeviceAttributes),
+            (b"\x1b[0c", TerminalReply::PrimaryDeviceAttributes),
+            (b"\x1b]10;?\x07", TerminalReply::ForegroundColor),
+            (b"\x1b]11;?\x1b\\", TerminalReply::BackgroundColor),
+        ] {
+            // Every byte arrives separately, including the two-byte OSC
+            // terminator. A snapshot between reads must not expose a prefix.
+            for byte in &query[..query.len() - 1] {
+                let output = pane.process_owner_output(&[*byte]);
+                assert!(output.data.is_empty());
+                assert!(output.replies.is_empty());
+            }
+            assert!(!pane.snapshot_bytes().ends_with(b"\x1b"));
+            let output = pane.process_owner_output(&query[query.len() - 1..]);
+            assert_eq!(output.data, b"\x18", "query {query:?}");
+            assert_eq!(output.replies, [reply], "query {query:?}");
+        }
+
+        // A lone ESC at the end of an OSC may start a new query instead
+        // of terminating that OSC with ST.
+        let interrupted = pane.process_owner_output(b"\x1b]11;?\x1b[cX");
+        assert_eq!(interrupted.data, b"\x1b]11;?\x18X");
+        assert_eq!(
+            interrupted.replies,
+            [TerminalReply::PrimaryDeviceAttributes]
+        );
+
+        let custom = b"\x1b]11;#ffaa00\x07\x1b]11;?\x07";
+        let output = pane.process_owner_output(custom);
+        assert_eq!(output.data, custom);
+        assert!(output.replies.is_empty());
+        let restored = pane.process_owner_output(b"\x1b]111\x07\x1b]11;?\x07");
+        assert_eq!(restored.data, b"\x1b]111\x07\x18");
+        assert_eq!(restored.replies, [TerminalReply::BackgroundColor]);
+    }
+
+    #[test]
     fn owner_output_consumes_each_split_cursor_query_at_its_actual_cursor() {
         let _pty_guard = lock_pty_test();
         let mut pane = test_pane_with_rows("owner-cursor-query", 6, sleep_command("60"));
@@ -2219,7 +2317,7 @@ mod tests {
                 assert!(first.data.is_empty());
             }
             if (1..CURSOR_POSITION_QUERY.len()).contains(&split) {
-                assert!(first.cursor_reports.is_empty());
+                assert!(first.replies.is_empty());
                 assert!(!pane
                     .snapshot_bytes()
                     .ends_with(&CURSOR_POSITION_QUERY[..split]));
@@ -2227,33 +2325,28 @@ mod tests {
             let second = pane.process_owner_output(&CURSOR_POSITION_QUERY[split..]);
             let displayed: Vec<_> = first.data.into_iter().chain(second.data).collect();
             assert_eq!(displayed, b"\x18");
-            let reports: Vec<_> = first
-                .cursor_reports
-                .into_iter()
-                .chain(second.cursor_reports)
-                .collect();
+            let reports: Vec<_> = first.replies.into_iter().chain(second.replies).collect();
             assert_eq!(
                 reports,
-                vec![CursorPositionReport::from_screen_position(3, 7)]
+                vec![TerminalReply::CursorPosition(
+                    CursorPositionReport::from_screen_position(3, 7)
+                )]
             );
             let following = pane.process_owner_output(b"x");
             assert_eq!(following.data, b"x");
-            assert!(
-                following.cursor_reports.is_empty(),
-                "a query is consumed once"
-            );
+            assert!(following.replies.is_empty(), "a query is consumed once");
         }
 
         let output = pane.process_owner_output(b"\x1b[2;3H\x1b[6nabc\x1b[6n");
         assert_eq!(output.data, b"\x1b[2;3H\x18abc\x18");
         assert_eq!(
-            output.cursor_reports,
+            output.replies,
             vec![
-                CursorPositionReport::from_screen_position(1, 2),
-                CursorPositionReport::from_screen_position(1, 5),
+                TerminalReply::CursorPosition(CursorPositionReport::from_screen_position(1, 2)),
+                TerminalReply::CursorPosition(CursorPositionReport::from_screen_position(1, 5)),
             ]
         );
-        assert!(pane.process_owner_output(b"").cursor_reports.is_empty());
+        assert!(pane.process_owner_output(b"").replies.is_empty());
 
         // A new ESC aborts a preceding incomplete escape. Consuming its DSR
         // must also leave the public parser ready for the following text.
@@ -2264,7 +2357,7 @@ mod tests {
             pane.process_bytes(b"\x1bc");
             let output = pane.process_owner_output(original);
             assert_eq!(
-                output.cursor_reports.len(),
+                output.replies.len(),
                 1,
                 "the interrupted query remains owned"
             );
@@ -2287,13 +2380,13 @@ mod tests {
         for byte in original {
             let output = pane.process_owner_output(std::slice::from_ref(byte));
             displayed.extend(output.data);
-            assert!(output.cursor_reports.is_empty());
-            assert!(pane.cursor_query_prefix.len() < CURSOR_POSITION_QUERY.len());
+            assert!(output.replies.is_empty());
+            assert!(pane.query_prefix.len() < CURSOR_POSITION_QUERY.len());
         }
         assert_eq!(displayed, original);
         let partial = pane.process_owner_output(b"\x1b[6");
         assert!(partial.data.is_empty());
-        assert!(partial.cursor_reports.is_empty());
+        assert!(partial.replies.is_empty());
         let before_eof = pane.output_seq();
         assert_eq!(pane.finish_owner_output(), b"\x1b[6");
         assert!(pane.output_seq() > before_eof);
