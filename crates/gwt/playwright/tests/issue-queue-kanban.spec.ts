@@ -1138,7 +1138,7 @@ test("AC-M1/M2: approved status, action, filter rows and card anatomy", async ({
   await expect(status.locator('[data-metric="capacity"]')).toHaveText("1 of 3");
   await expect(status.locator('[data-metric="backlog"]')).toHaveText("7");
   await expect(status.locator('[data-metric="last-scan"]')).toHaveText("00:00:00 UTC");
-  await expect(status.locator('[data-metric="verification"]')).toHaveText("Not reported");
+  await expect(status.locator('[data-metric="verification"]')).toHaveText("Unavailable");
   const boxes=await Promise.all([status,controls,filter].map(node=>node.boundingBox()));
   expect(boxes[0]!.y+boxes[0]!.height).toBeLessThanOrEqual(boxes[1]!.y);
   expect(boxes[1]!.y+boxes[1]!.height).toBeLessThanOrEqual(boxes[2]!.y);

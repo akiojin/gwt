@@ -1466,11 +1466,20 @@ test("AC-M1: approved header reads status, actions, then one filter row", async 
   assert.deepEqual([...status.querySelectorAll(".issue-monitor-stat-label")].map(node => node.textContent),
     ["Issues", "Agent slots", "Queued", "Backlog", "Verification slots", "Last scan"]);
   surface.applyIssueMonitorStatus({enabled:true,state:"idle",active_count:1,max_active_agents:3,
-    max_active_agents_override:3,queue_len:2,unqueued_open_count:8,last_scan_at:"2026-10-25T00:00:00Z"});
+    max_active_agents_override:3,queue_len:2,unqueued_open_count:8,last_scan_at:"2026-10-25T00:00:00Z",
+    verification_capacity:{capacity:4,running:1,available:3}});
   assert.equal(status.querySelector('[data-metric="capacity"]').textContent,"1 of 3");
   assert.equal(status.querySelector('[data-metric="backlog"]').textContent,"8");
   assert.equal(status.querySelector('[data-metric="last-scan"]').textContent,"00:00:00 UTC");
-  assert.equal(status.querySelector('[data-metric="verification"]').textContent,"Not reported");
+  const verification = status.querySelector('[data-metric="verification"]');
+  assert.equal(verification.textContent,"1 of 4 · 3 available");
+  assert.match(verification.getAttribute("aria-description"), /1 running, 3 available, capacity 4/);
+  assert.equal(verification.getAttribute("title"), null, "no stale native unavailable tooltip");
+  surface.applyIssueMonitorStatus({verification_capacity:{capacity:4,running:0,available:4}});
+  assert.equal(verification.textContent,"0 of 4 · 4 available");
+  surface.applyIssueMonitorStatus({});
+  assert.equal(verification.textContent,"Unavailable", "missing observations clear stale measured values");
+  surface.applyIssueMonitorStatus({enabled:true,state:"idle",active_count:1,max_active_agents:3,max_active_agents_override:3});
   const limit = controls.querySelector('[data-action="monitor-limit"]');
   assert.equal(limit.value,"3");
   limit.value="4";

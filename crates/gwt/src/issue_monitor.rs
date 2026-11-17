@@ -4103,8 +4103,18 @@ fn machine_max_active_scope() -> String {
     "machine".to_string()
 }
 
+/// Host verification occupancy sampled by the publishing surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerificationCapacity {
+    pub capacity: usize,
+    pub running: usize,
+    pub available: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueMonitorStatusView {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification_capacity: Option<VerificationCapacity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_roster_capacity: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4319,6 +4329,8 @@ pub enum IssueMonitorStatusSource {
 /// percentage, and float equality is not reflexive.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IssueMonitorAgentStatus {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification_capacity: Option<VerificationCapacity>,
     #[serde(default = "machine_max_active_scope")]
     pub max_active_agents_scope: String,
     #[serde(default)]
@@ -15625,6 +15637,7 @@ impl IssueMonitorState {
         };
         let auto_tier_count = self.launch_auto.then_some(launch_tiers.len());
         IssueMonitorStatusView {
+            verification_capacity: None,
             agent_roster_capacity: self
                 .agent_roster
                 .as_ref()
@@ -15959,6 +15972,7 @@ impl IssueMonitorState {
         let launch_failures = self.launch_failures_at(now);
         let stall_reason = self.stall_reason_at(now);
         IssueMonitorAgentStatus {
+            verification_capacity: None,
             max_active_agents_scope: machine_max_active_scope(),
             allowed_labels: self.allowed_labels.clone(),
             label_excluded_count: self.label_excluded_issues.len(),
@@ -28851,6 +28865,7 @@ mod tests {
         assert_eq!(
             monitor.agent_status_without_scan_at("2026-08-03T00:00:00Z"),
             IssueMonitorAgentStatus {
+                verification_capacity: None,
                 max_active_agents_scope: machine_max_active_scope(),
                 allowed_labels: Vec::new(),
                 label_excluded_count: 0,

@@ -387,12 +387,10 @@ test.describe("Works and Agents approved baseline", () => {
     await expect(works(page).locator('[data-metric="today-input"]')).toHaveText("—");
     await expect(works(page).locator('[data-metric="today-cache"]')).toHaveText("—");
     await expect(works(page).locator('[data-metric="today-output"]')).toHaveText("—");
-    await expect(works(page).locator('[data-metric="today-cost"]')).toHaveText("—");
-    await expect(works(page).locator('[data-metric="today-landed"]')).toHaveText("—");
+    await expect(works(page).locator('[data-metric="today-cost"], [data-metric="today-landed"]')).toHaveCount(0);
     await expect(works(page).locator('[data-availability="today"]')).toContainText("No data");
     await expect(works(page).locator('[data-availability="fleet"]')).toContainText("No data");
-    await expect(works(page).locator(".works-source-note")).toContainText("per-session USD");
-    await expect(works(page).locator(".works-source-note")).toContainText("daily merge data");
+    await expect(works(page).locator(".works-source-note")).toHaveCount(0);
     await expect(works(page).locator(".works-fleet svg")).toHaveAttribute("aria-label", /last 30 minutes/);
     await expect(works(page).locator(".works-fleet svg")).toHaveAttribute("data-known-count", "0");
     await expect(workRow(page, "agent-one").locator(".work-stats")).toContainText("Context remaining");
@@ -816,7 +814,7 @@ test.describe("Works and Agents approved baseline", () => {
     await page.screenshot({ path: info.outputPath("works-approved-400.png") });
     await expect(works(page).locator('[data-availability="today"]')).toBeVisible();
     await expect(works(page).locator('[data-availability="fleet"]')).toBeVisible();
-    await expect(works(page).locator(".works-source-note")).toBeVisible();
+    await expect(works(page).locator(".works-source-note")).toHaveCount(0);
     await openRail(page, "agents");
     await roster(page).getByRole("tab", { name: "Team", exact: true }).click();
     await resting.click();

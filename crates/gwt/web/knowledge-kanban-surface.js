@@ -1448,6 +1448,17 @@ export function createKnowledgeKanbanSurface({
           explainIssueControl(queue, `Issues waiting in the launch queue. ${queue.title}`.trim());
         }
         const status = issueMonitorModel.read().status;
+        const verification = bar.querySelector('[data-metric="verification"]');
+        if (verification) {
+          const slots = status.verification_capacity;
+          const measured = slots && [slots.capacity, slots.running, slots.available]
+            .every(value => Number.isInteger(value) && value >= 0);
+          verification.textContent = measured
+            ? `${slots.running} of ${slots.capacity} · ${slots.available} available` : "Unavailable";
+          explainIssueControl(verification, measured
+            ? `Host verification slots: ${slots.running} running, ${slots.available} available, capacity ${slots.capacity}. Shared across projects.`
+            : "Host verification capacity is unavailable.");
+        }
         const setupGuidance = element.querySelector('[data-role="monitor-setup-guidance"]');
         if (setupGuidance) {
           setupGuidance.hidden = !(status.enabled === false && status.active_count === 0
@@ -1622,6 +1633,7 @@ export function createKnowledgeKanbanSurface({
             max_active_agents_override: nextStatus?.max_active_agents_override ?? null,
             agent_roster_capacity: nextStatus?.agent_roster_capacity ?? null,
             agent_capacity: nextStatus?.agent_capacity ?? null,
+            verification_capacity: nextStatus?.verification_capacity ?? null,
             quota_hold: normalizedIssueMonitorQuotaHold(nextStatus),
             github_budget: nextStatus?.github_budget ?? null,
             // Issue #4366 AC-6b: omitted once the hold clears, so it must not
@@ -5594,7 +5606,7 @@ export function createKnowledgeKanbanSurface({
                     <div class="issue-monitor-stat"><span class="issue-monitor-stat-label">Agent slots</span><span class="issue-monitor-stat-value"><span class="knowledge-monitor-metric" data-metric="capacity">0 of 1</span><span class="knowledge-monitor-metric issue-monitor-census" data-metric="active">Active —</span></span></div>
                     <div class="issue-monitor-stat"><span class="issue-monitor-stat-label">Queued</span><span class="knowledge-monitor-metric" data-metric="queue">Queue 0</span></div>
                     <div class="issue-monitor-stat"><span class="issue-monitor-stat-label">Backlog</span><span class="knowledge-monitor-metric" data-metric="backlog">—</span></div>
-                    <div class="issue-monitor-stat"><span class="issue-monitor-stat-label">Verification slots</span><span class="knowledge-monitor-metric" data-metric="verification" title="The Issues does not report host verification capacity.">Not reported</span></div>
+                    <div class="issue-monitor-stat"><span class="issue-monitor-stat-label">Verification slots</span><span class="knowledge-monitor-metric" data-metric="verification">Unavailable</span></div>
                     <div class="issue-monitor-stat"><span class="issue-monitor-stat-label">Last scan</span><span class="knowledge-monitor-metric" data-metric="last-scan">Not yet</span></div>
                   </div>
                   <div class="knowledge-monitor-controls" role="group" aria-label="Issues controls">

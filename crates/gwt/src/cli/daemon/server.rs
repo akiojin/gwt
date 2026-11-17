@@ -9754,6 +9754,7 @@ fn refresh_issue_monitor_agent_status(hub: &BroadcastHub, monitor: &crate::Issue
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let mut status = monitor.agent_status_at(&now);
     crate::cli::issue::attach_github_budget(&mut status);
+    crate::cli::issue::attach_verification_capacity(&mut status);
     hub.set_issue_monitor_status(
         serde_json::to_value(status).expect("Issues agent status serializes"),
     );
@@ -9773,7 +9774,16 @@ fn publish_issue_monitor_daemon_payloads(
     payloads: Vec<crate::issue_monitor_worker::IssueMonitorDaemonPayload>,
     project_store: &crate::runtime_daemon_events::ProjectStoreIdentity,
 ) {
-    for payload in payloads {
+    // Agent and WebSocket readers share the publication's host observation.
+    let verification_capacity = hub
+        .issue_monitor_status()
+        .and_then(|status| status.get("verification_capacity").cloned());
+    for mut payload in payloads {
+        if payload.event == "status" {
+            if let Some(capacity) = &verification_capacity {
+                payload.payload["verification_capacity"] = capacity.clone();
+            }
+        }
         let payload = crate::runtime_daemon_events::issue_monitor_payload_with_project_store(
             &payload.event,
             payload.payload,
@@ -13578,6 +13588,7 @@ exit 0
     #[test]
     fn issue_monitor_publish_attaches_actual_project_store_and_matches_agent_status() {
         let project = TempDir::new().expect("project tempdir");
+        let _home = gwt_core::test_support::ScopedGwtHome::set(project.path().join("home"));
         let scope = RuntimeScope::from_project_root(project.path(), RuntimeTarget::Host)
             .expect("worker scope");
         let project_store =
@@ -13642,6 +13653,10 @@ exit 0
         assert_eq!(status.max_active_agents, fresh_status.max_active);
         assert_eq!(status.queue_len, fresh_status.queue.len());
         assert_eq!(status.active_count, fresh_status.active_launches.len());
+        let gui = serde_json::to_value(&status).unwrap();
+        let agent = serde_json::to_value(&fresh_status).unwrap();
+        assert!(gui["verification_capacity"].is_object());
+        assert_eq!(gui["verification_capacity"], agent["verification_capacity"]);
     }
 
     /// Issue #7087 AC-2: a live GUI window lease with no materializer lease

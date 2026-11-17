@@ -2180,8 +2180,12 @@ Works には Session に帰属する入力・キャッシュ・出力、直近30
 provider の直接報告がある場合だけ表示します。Today はこのプロジェクトの実測会話を集計し、
 アカウント全体の使用量を転用しません。個別 PR 情報は表示しません。
 Today と Fleet には未取得・部分取得・取得エラー・実測済みの説明を表示します。
-不明な合計は **—**、実測ゼロは **0** として区別します。Cost は Session ごとの USD が
-未対応、Landed PRs は完全な日次マージデータが未接続のため、引き続き取得不能として表示します。
+不明な合計は **—**、実測ゼロは **0** として区別します。Cost と Landed PRs は
+データソースが未接続のため表示しません。
+
+Issues の **Verification slots** はホスト全体の実行中・容量・空き枠を表示します。
+`issue.monitor.status` では同じ観測値を `verification_capacity` から取得できます。
+観測できない場合はゼロではなく **Unavailable** を表示します。
 
 保存した Session は現在の各面へ復元します。旧端末タブ・grid・Columns 指定は再読み込みや
 再起動後も復活せず、名簿の Team/Past タブは維持します。
@@ -2374,6 +2378,10 @@ gwtd <<'JSON'
 {"schema_version":1,"operation":"diagnostics.cpu","params":{}}
 JSON
 ```
+
+各プロセス標本の `rss_bytes` は常駐メモリのバイト数で、取得不能時は `null` です。
+RSS は常駐ページを含む値で、生存中の割り当て量ではありません。
+プロセス一覧は macOS と Linux の `ps` で取得します。
 
 `host_cpu` には最新の `fseventsd` プロセス標本と、標本数・採取間隔を表示します。
 macOS では1秒間隔で3回採取し、同じプロセスが全標本で CPU 100% を超えた場合に
