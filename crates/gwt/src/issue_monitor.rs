@@ -409,6 +409,22 @@ pub struct MergedIssueSettlement {
     pub merge_sha: Option<String>,
     pub action: MergedIssueSettlementAction,
     pub settled_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification_declaration: Option<IssueMonitorVerificationDeclaration>,
+}
+
+/// An explicit assignment of the delivered owner's remaining external checks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorVerificationDeclaration {
+    pub criteria: Vec<IssueMonitorVerificationCriterion>,
+    pub declared_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorVerificationCriterion {
+    pub id: String,
+    pub text: String,
+    pub verifier: String,
 }
 
 impl MergedIssueSettlement {
@@ -5242,6 +5258,8 @@ pub struct IssueMonitorInboxSummary {
     /// so a silent row can be told apart from a stalled one by its reader.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting: Option<IssueMonitorWaitSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification_declaration: Option<IssueMonitorVerificationDeclaration>,
     /// Issue #4084 AC-1: why the bound window is idle, when it is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_kind: Option<IssueMonitorIdleKind>,
@@ -6820,6 +6838,21 @@ pub enum OwnerBranchDelivery {
     Undelivered,
 }
 
+/// Issues produce integration work independently of the PM's checked-out
+/// branch. Projects without develop keep the normal Launch Agent selection.
+pub fn issue_monitor_implementation_base_branch(project_root: &Path) -> Result<String, String> {
+    let develop_ref = "refs/remotes/origin/develop";
+    let git_root = gwt_git::worktree::main_worktree_root(project_root)
+        .map_err(|error| format!("Issues integration branch is unavailable: {error}"))?;
+    let refs = gwt_git::list_existing_refs(&git_root, &[develop_ref])
+        .map_err(|error| format!("Issues integration branch is unavailable: {error}"))?;
+    if refs.contains(develop_ref) {
+        Ok("develop".to_string())
+    } else {
+        crate::start_work::resolve_launch_agent_base_branch(project_root)
+    }
+}
+
 /// Classify the owner branch from the refs already on disk. It does not
 /// fetch: a launch must not wait on the network, and a stale base only errs
 /// toward [`OwnerBranchDelivery::Undelivered`], whose prompt tells the agent
@@ -6854,7 +6887,7 @@ pub fn issue_monitor_launch_prompt_for_base(
     let provenance = ISSUE_MONITOR_LAUNCH_PROVENANCE;
     let base = base.strip_prefix("origin/").unwrap_or(base);
     let base_ref = format!("origin/{base}");
-    match (kind, delivery) {
+    let mut prompt = match (kind, delivery) {
         (LinkedIssueKind::Spec, _) => format!("$gwt-execute #{number}\n\n{provenance}"),
         (LinkedIssueKind::Issue, OwnerBranchDelivery::Delivered) => format!(
             "$gwt-execute #{number}\n\n{provenance}\n\nBefore changing code, evaluate every remaining acceptance criterion against {base_ref}, not against your work branch. A commit that exists only on the work branch is not delivered and does not satisfy a criterion. If {base_ref} already satisfies all criteria, close Issue #{number} and finish without creating another implementation PR. Otherwise, implement only the remaining criteria."
@@ -6862,7 +6895,11 @@ pub fn issue_monitor_launch_prompt_for_base(
         (LinkedIssueKind::Issue, OwnerBranchDelivery::Undelivered) => format!(
             "$gwt-execute #{number}\n\n{provenance}\n\nThe work branch for Issue #{number} is ahead of {base_ref} with source that has not been delivered. Undelivered commits do not satisfy any acceptance criterion, so do not close Issue #{number} on their account. Evaluate every remaining acceptance criterion against {base_ref}, implement only what the branch still misses, then deliver the existing source through verify.run, a pull request, and its merge into {base}. If, after fetching, the branch has nothing that {base_ref} lacks, evaluate the criteria against {base_ref} alone."
         ),
+    };
+    if base == "develop" {
+        prompt.push_str("\n\nImplementation finishes after merge into develop and execution settlement. Release owns promotion to main. Leave release, main, and other-host verification criteria unchecked until their evidence is available; they do not require another implementation PR.");
     }
+    prompt
 }
 
 /// Issue #4630 AC-6: the most characters of an operator's requeue reason a
@@ -16205,6 +16242,9 @@ impl IssueMonitorState {
                         waiting: self
                             .autonomous_record(item.issue.number)
                             .and_then(|record| self.wait_summary(record, now)),
+                        verification_declaration: self
+                            .verification_declaration(item.issue.number)
+                            .cloned(),
                         steering: self
                             .autonomous_record(item.issue.number)
                             .and_then(|record| record.steering.clone()),
@@ -16623,6 +16663,113 @@ impl IssueMonitorState {
         self.merged_issue_settlements.get(&issue_number)
     }
 
+    /// Metadata only: declaring a verifier cannot park undelivered or runnable work.
+    pub fn declare_verification(
+        &mut self,
+        number: u64,
+        source: &str,
+        assignments: &[(String, String)],
+        now: &str,
+    ) -> Result<IssueMonitorVerificationDeclaration, String> {
+        let settlement = self.merged_issue_settlements.get(&number).ok_or(
+            "no delivered, settled owner; await the merged PR's settlement before declaring verification",
+        )?;
+        let MergedIssueSettlementAction::AwaitVerification { unmet } = &settlement.action else {
+            return Err("the settled owner must be awaiting_verification; implementation or settlement remains".into());
+        };
+        if settlement.pr_number == 0
+            || settlement
+                .merge_sha
+                .as_deref()
+                .is_none_or(|sha| sha.trim().is_empty())
+        {
+            return Err("the settlement has no merged delivery evidence".into());
+        }
+        let acceptance = crate::issue_monitor_gate::classify_acceptance_criteria(source);
+        if !acceptance.only_external_verification_remaining() || acceptance.unchecked != *unmet {
+            return Err("remaining criteria must match the settled external verification criteria; refresh acceptance and settlement first".into());
+        }
+        let assignees: BTreeMap<_, _> = assignments
+            .iter()
+            .map(|(id, verifier)| (id.as_str(), verifier.trim()))
+            .collect();
+        if assignments.len() != acceptance.unchecked.len()
+            || assignees.len() != assignments.len()
+            || assignees.values().any(|verifier| verifier.is_empty())
+            || acceptance
+                .unchecked
+                .iter()
+                .any(|id| !assignees.contains_key(id.as_str()))
+        {
+            return Err(
+                "criteria must name every remaining AC exactly once with a non-empty verifier"
+                    .into(),
+            );
+        }
+        let criteria = acceptance
+            .unchecked
+            .iter()
+            .map(|id| {
+                let mut matches = acceptance
+                    .criterion_texts
+                    .iter()
+                    .filter(|(criterion, _)| criterion == id);
+                let (_, text) = matches
+                    .next()
+                    .ok_or("remaining criterion text is unavailable")?;
+                if matches.next().is_some() {
+                    return Err("remaining AC ids must be unique");
+                }
+                Ok(IssueMonitorVerificationCriterion {
+                    id: id.clone(),
+                    text: text.clone(),
+                    verifier: assignees[id.as_str()].to_string(),
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(str::to_string)?;
+        let declaration = IssueMonitorVerificationDeclaration {
+            criteria,
+            declared_at: now.into(),
+        };
+        let settlement = self
+            .merged_issue_settlements
+            .get_mut(&number)
+            .expect("settlement checked");
+        settlement.settled_at = parse_rfc3339_utc(&settlement.settled_at)
+            .zip(parse_rfc3339_utc(now))
+            .map(|(previous, now)| {
+                now.max(previous + chrono::Duration::nanoseconds(1))
+                    .to_rfc3339()
+            })
+            .ok_or("declaration or settlement timestamp is invalid")?;
+        settlement.verification_declaration = Some(declaration.clone());
+        Ok(declaration)
+    }
+
+    fn verification_declaration(
+        &self,
+        number: u64,
+    ) -> Option<&IssueMonitorVerificationDeclaration> {
+        let settlement = self.merged_issue_settlements.get(&number)?;
+        let MergedIssueSettlementAction::AwaitVerification { unmet } = &settlement.action else {
+            return None;
+        };
+        let declaration = settlement.verification_declaration.as_ref()?;
+        let item = self.inbox_item(number)?;
+        let acceptance = crate::issue_monitor_gate::classify_acceptance_criteria(
+            item.issue.body.as_deref().unwrap_or(""),
+        );
+        (acceptance.only_external_verification_remaining()
+            && acceptance.unchecked == *unmet
+            && declaration.criteria.iter().all(|criterion| {
+                acceptance
+                    .criterion_texts
+                    .contains(&(criterion.id.clone(), criterion.text.clone()))
+            }))
+        .then_some(declaration)
+    }
+
     /// Issue #3917: Open rows whose work branch has a merged delivery that is
     /// not settled yet. A pure join over the inbox; the caller decides the
     /// action with [`decide_merged_issue_settlement`].
@@ -16894,6 +17041,30 @@ impl IssueMonitorState {
             return;
         }
         let action = self.remaining_acceptance_action(issue_number, action);
+        let verification_declaration = self
+            .merged_issue_settlements
+            .get(&issue_number)
+            .filter(|previous| {
+                previous.pr_number == pr_number
+                    && previous.merge_sha == merge_sha
+                    && matches!(
+                        action,
+                        MergedIssueSettlementAction::AwaitVerification { .. }
+                    )
+            })
+            .and_then(|_| self.verification_declaration(issue_number))
+            .cloned();
+        let settled_at = if verification_declaration.is_some() {
+            self.merged_issue_settlements
+                .get(&issue_number)
+                .filter(|previous| {
+                    parse_rfc3339_utc(&previous.settled_at) > parse_rfc3339_utc(settled_at)
+                })
+                .map_or(settled_at, |previous| previous.settled_at.as_str())
+        } else {
+            settled_at
+        }
+        .to_string();
         self.merged_issue_settlements.insert(
             issue_number,
             MergedIssueSettlement {
@@ -16901,7 +17072,8 @@ impl IssueMonitorState {
                 pr_number,
                 merge_sha,
                 action: action.clone(),
-                settled_at: settled_at.to_string(),
+                settled_at: settled_at.clone(),
+                verification_declaration,
             },
         );
         match action {
@@ -16943,7 +17115,7 @@ impl IssueMonitorState {
                 self.fence_relaunch_preserving_attempts(
                     issue_number,
                     "merged slice; remaining acceptance",
-                    settled_at,
+                    &settled_at,
                     false,
                 );
                 self.enforce_measurement_waits();
@@ -29049,6 +29221,7 @@ mod tests {
                     claim_id: None,
                     delivery_id: None,
                     waiting: None,
+                    verification_declaration: None,
                     steering: None,
                     idle_kind: None,
                     idle_since: None,
@@ -29311,6 +29484,46 @@ mod tests {
     }
 
     #[test]
+    fn issue_7536_implementation_base_prefers_develop_over_main_checkout() {
+        let repo = relaunch_repo();
+        let path = repo.path();
+        git_in(path, &["branch", "-m", "main"]);
+        assert_eq!(
+            crate::start_work::resolve_launch_agent_base_branch(path).unwrap(),
+            "main"
+        );
+        assert_eq!(
+            issue_monitor_implementation_base_branch(path).unwrap(),
+            "develop"
+        );
+        git_in(path, &["update-ref", "-d", "refs/remotes/origin/develop"]);
+        assert_eq!(
+            issue_monitor_implementation_base_branch(path).unwrap(),
+            "main"
+        );
+    }
+
+    #[test]
+    fn issue_7536_launch_guidance_assigns_main_promotion_to_release() {
+        for kind in [LinkedIssueKind::Issue, LinkedIssueKind::Spec] {
+            for delivery in [
+                OwnerBranchDelivery::Delivered,
+                OwnerBranchDelivery::Undelivered,
+            ] {
+                let prompt = issue_monitor_launch_prompt_for_base(kind, 42, "develop", delivery);
+                assert!(
+                    prompt.contains("Implementation finishes after merge into develop and execution settlement."),
+                    "{prompt}"
+                );
+                assert!(
+                    prompt.contains("Release owns promotion to main."),
+                    "{prompt}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn launch_plan_uses_unified_execute_prompt_and_work_issue_branch() {
         let mut spec_issue = issue(3164);
         spec_issue.labels.push("gwt-spec".to_string());
@@ -29319,7 +29532,7 @@ mod tests {
         assert_eq!(spec_plan.branch_name, "work/issue-3164");
         assert_eq!(
             spec_plan.prompt,
-            "$gwt-execute #3164\n\nThis prompt was generated by Issues. It is not a statement, approval, or visual confirmation by a human user."
+            "$gwt-execute #3164\n\nThis prompt was generated by Issues. It is not a statement, approval, or visual confirmation by a human user.\n\nImplementation finishes after merge into develop and execution settlement. Release owns promotion to main. Leave release, main, and other-host verification criteria unchecked until their evidence is available; they do not require another implementation PR."
         );
         assert_eq!(spec_plan.linked_issue_kind, LinkedIssueKind::Spec);
 
@@ -29327,7 +29540,7 @@ mod tests {
         assert_eq!(plain_plan.branch_name, "work/issue-42");
         assert_eq!(
             plain_plan.prompt,
-            "$gwt-execute #42\n\nThis prompt was generated by Issues. It is not a statement, approval, or visual confirmation by a human user.\n\nBefore changing code, evaluate every remaining acceptance criterion against origin/develop, not against your work branch. A commit that exists only on the work branch is not delivered and does not satisfy a criterion. If origin/develop already satisfies all criteria, close Issue #42 and finish without creating another implementation PR. Otherwise, implement only the remaining criteria."
+            "$gwt-execute #42\n\nThis prompt was generated by Issues. It is not a statement, approval, or visual confirmation by a human user.\n\nBefore changing code, evaluate every remaining acceptance criterion against origin/develop, not against your work branch. A commit that exists only on the work branch is not delivered and does not satisfy a criterion. If origin/develop already satisfies all criteria, close Issue #42 and finish without creating another implementation PR. Otherwise, implement only the remaining criteria.\n\nImplementation finishes after merge into develop and execution settlement. Release owns promotion to main. Leave release, main, and other-host verification criteria unchecked until their evidence is available; they do not require another implementation PR."
         );
         assert_eq!(plain_plan.linked_issue_kind, LinkedIssueKind::Issue);
     }
@@ -53305,6 +53518,56 @@ mod tests {
         );
         assert!(!cold.agent_status().needs_human.contains(&42));
         assert_eq!(cold.attempt_count(42), 2);
+    }
+
+    #[test]
+    fn issue_7536_verification_declaration_refuses_unsettled_or_inexact_checks() {
+        let source = "## Acceptance Criteria\n- [ ] AC-1: verify main [main-verification]\n";
+        let assignments = vec![("AC-1".into(), "PM".into())];
+        let mut monitor = test_monitor(IssueMonitorConfig::default());
+        monitor.set_autonomous_mode(true);
+        let mut candidate = issue(42);
+        candidate.body = Some(source.into());
+        monitor.record_candidate(candidate);
+        assert!(monitor
+            .declare_verification(42, source, &assignments, "2026-11-17T01:00:00Z")
+            .is_err());
+        monitor.record_merged_issue_settlement(
+            42,
+            7,
+            Some("aaa".into()),
+            MergedIssueSettlementAction::AwaitVerification {
+                unmet: vec!["AC-1".into()],
+            },
+            "2026-11-17T00:00:00Z",
+        );
+        let before = serde_json::to_value(monitor.prefs()).unwrap();
+        for (body, requested) in [
+            (source.to_string(), vec![("AC-1".into(), " ".into())]),
+            (source.to_string(), vec![("AC-2".into(), "PM".into())]),
+            (source.to_string(), vec![]),
+            (
+                source.replace(" [main-verification]", ""),
+                assignments.clone(),
+            ),
+            (
+                format!("{source}- [ ] AC-2: implement another fix\n"),
+                assignments.clone(),
+            ),
+        ] {
+            assert!(monitor
+                .declare_verification(42, &body, &requested, "2026-11-17T01:00:00Z")
+                .is_err());
+            assert_eq!(serde_json::to_value(monitor.prefs()).unwrap(), before);
+        }
+        monitor
+            .merged_issue_settlements
+            .get_mut(&42)
+            .unwrap()
+            .merge_sha = None;
+        assert!(monitor
+            .declare_verification(42, source, &assignments, "2026-11-17T01:00:00Z")
+            .is_err());
     }
 
     #[test]

@@ -511,6 +511,10 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "issue.monitor.verification.declare",
+        aliases: &[],
+    },
+    Operation {
         name: "issue.monitor.wait",
         aliases: &[],
     },

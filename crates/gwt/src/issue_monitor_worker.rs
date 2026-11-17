@@ -5562,6 +5562,7 @@ pub(crate) mod tests {
                     unmet: vec!["AC-1".into()],
                 },
                 settled_at: "2026-11-13T00:00:00Z".into(),
+                verification_declaration: None,
             });
         prefs.open_pr_observations.insert(
             43,
