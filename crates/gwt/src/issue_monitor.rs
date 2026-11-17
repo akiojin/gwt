@@ -25640,19 +25640,27 @@ impl IssueMonitorState {
                     observation.holder_host_dead
                         // Inbox payloads are not persisted. At startup wait
                         // for the candidate read before deciding whether this
-                        // Completed generation finished its owner or one slice.
-                        && (observation.settlement != IssueMonitorExecutionSettlement::Completed
+                        // Completed generation finished its owner or one slice,
+                        // or whether an Interrupted owner may be requeued.
+                        && (!matches!(observation.settlement,
+                            IssueMonitorExecutionSettlement::Completed
+                                | IssueMonitorExecutionSettlement::Interrupted)
                             || self.inbox_item(**number).is_some())
                         && matches!(
                             observation.settlement,
                             IssueMonitorExecutionSettlement::Completed
                                 | IssueMonitorExecutionSettlement::Blocked
+                                | IssueMonitorExecutionSettlement::Interrupted
+                                | IssueMonitorExecutionSettlement::RecoveryExhausted
                         )
                 }) && !self.binding_recovery_pending(**number, now, settlements)
                     // A fresh ordered absence already has its own unfinished
                     // recovery policy. Only bypass missing/stale canvas proof
                     // or a retained obsolete pane identity (Issue #4446).
-                    && !self.fresh_window_snapshot(now).is_some_and(|snapshot| {
+                    // Exhausted recovery releases capacity without retrying,
+                    // even when the new canvas confirms the old pane absent.
+                    && !(settlements[number].settlement != IssueMonitorExecutionSettlement::RecoveryExhausted
+                        && self.fresh_window_snapshot(now).is_some_and(|snapshot| {
                         issue_monitor_qualified_window_id(window).is_some_and(|(tab, _)| {
                             self.window_snapshot_tabs.contains(tab)
                                 || self.window_snapshot_host.is_some()
@@ -25663,7 +25671,7 @@ impl IssueMonitorState {
                         ) && !snapshot.windows.iter().any(|observed| {
                             issue_monitor_window_ids_match(window, &observed.window_id)
                         })
-                    })
+                    }))
             })
             .map(|(number, window)| IssueMonitorIdleWindow {
                 window_id: window.clone(),
@@ -25675,7 +25683,11 @@ impl IssueMonitorState {
                 // can belong to a new pane, so never issue a GUI close.
                 pane_present: false,
                 rebind_to: None,
-                requeue_on_release: false,
+                requeue_on_release: settlements[number].settlement
+                    == IssueMonitorExecutionSettlement::Interrupted
+                    && !self.issue_is_closed(*number)
+                    && !self.merged_issues.contains(number)
+                    && !self.failed_issues.contains_key(number),
             })
             .collect::<Vec<_>>();
         let Some(snapshot) = self.fresh_window_snapshot(now) else {
@@ -26145,12 +26157,18 @@ impl IssueMonitorState {
                                 observation.settlement,
                                 IssueMonitorExecutionSettlement::Completed
                                     | IssueMonitorExecutionSettlement::Blocked
+                                    | IssueMonitorExecutionSettlement::Interrupted
+                                    | IssueMonitorExecutionSettlement::RecoveryExhausted
                             )
                     })
             }) else {
                 continue;
             };
-            if self.finish_terminal_launch_release(number, settlements[&number].settlement, now) {
+            // The interrupted launch was already requeued by apply_idle_release.
+            // Do not retire that fresh successor's queue entry as finished work.
+            if settlements[&number].settlement != IssueMonitorExecutionSettlement::Interrupted
+                && self.finish_terminal_launch_release(number, settlements[&number].settlement, now)
+            {
                 outcome.requeued.push(number);
             }
             if let Some(snapshot) = &mut self.window_snapshot {
@@ -42301,6 +42319,57 @@ mod tests {
     }
 
     #[test]
+    fn issue_7526_dead_restart_holder_releases_waiting_reservation_without_canvas() {
+        for settlement in [
+            IssueMonitorExecutionSettlement::Interrupted,
+            IssueMonitorExecutionSettlement::RecoveryExhausted,
+        ] {
+            let mut previous = launched_monitor(42, "previous-tab::stopped");
+            previous.declare_autonomous_wait(42, "CI / auto-merge", "PR merged", IDLE_NOW);
+            let mut monitor = test_monitor_with_prefs(previous.config.clone(), previous.prefs());
+            monitor.record_candidate(issue(42));
+            let mut observed = settlements(&[(42, settlement)]);
+            observed.get_mut(&42).unwrap().holder_host_dead = true;
+            let mut held = observed.clone();
+            held.get_mut(&42).unwrap().process_held = true;
+            assert!(monitor
+                .reconcile_dead_terminal_launches(&held, IDLE_NOW)
+                .released
+                .is_empty());
+            assert_eq!(
+                monitor.active_count(),
+                1,
+                "live or uncertain successor stays protected"
+            );
+
+            let outcome = monitor.reconcile_dead_terminal_launches(&observed, IDLE_NOW);
+
+            assert_eq!(outcome.released, vec![42], "{settlement:?}");
+            assert!(outcome.pane_closes.is_empty());
+            assert_eq!(monitor.occupied_slot_count(), 0);
+            assert_eq!(monitor.attempt_count(42), previous.attempt_count(42));
+            assert_eq!(
+                outcome.requeued,
+                if settlement == IssueMonitorExecutionSettlement::Interrupted {
+                    vec![42]
+                } else {
+                    vec![]
+                }
+            );
+            assert_eq!(monitor.queued_issue_numbers(), outcome.requeued);
+            monitor.rebase_daemon_driver_prefs(&previous.prefs());
+            // Prefs merge is a union; the commit path reapplies the exact
+            // execution observations before publishing its capacity.
+            monitor.reconcile_dead_terminal_launches(&observed, IDLE_NOW);
+            assert_eq!(
+                monitor.occupied_slot_count(),
+                0,
+                "reconciliation retires a stale merged reservation"
+            );
+        }
+    }
+
+    #[test]
     fn issue_4131_restored_sessions_rebind_two_windows_after_restart() {
         for old_tab in ["tab-1", "previous-tab"] {
             let old_windows = [format!("{old_tab}::old-42"), format!("{old_tab}::old-43")];
@@ -42334,6 +42403,15 @@ mod tests {
                 BTreeSet::new(),
             );
             restored.record_verified_live_launch_owners(&owners, IDLE_NOW);
+            // Issue #7526: the new GUI's exact process census must replace
+            // each old reservation rather than add a second slot for it.
+            restored.record_monitor_runtime_windows(
+                123,
+                1,
+                BTreeMap::from([(42, 1), (43, 1)]),
+                owners,
+                IDLE_NOW,
+            );
 
             let outcome = restored.reconcile_idle_windows(&observed, IDLE_NOW);
 
