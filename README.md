@@ -508,7 +508,11 @@ To stop the whole server, choose **Quit** in the tray menu or send `Ctrl-C` /
 is one per OS-login user; a second `gwt` invocation prints the existing URL and
 exits instead of starting a second server.
 
-gwtd operations run through stdin JSON envelopes without opening the main gwt window.
+### gwtd operations and daemon
+
+This section and its [Japanese counterpart](README.ja.md#gwtd-operations-and-daemon)
+are the canonical user reference for operations, daemon usage and compatibility.
+`gwtd` operations run through stdin JSON envelopes without opening the main gwt window.
 Operations requiring consent can show a native OS dialog:
 
 ```bash
@@ -528,6 +532,73 @@ gwtd <<'JSON'
 {"schema_version":1,"operation":"daemon.status","params":{}}
 JSON
 ```
+
+The [operation catalog](crates/gwt/src/cli/operation_catalog.rs) (`OPERATIONS`)
+defines **230 canonical operations across 36 families**, plus **40 aliases**
+(270 accepted spellings) in v9.167.1. A family is the first dot-separated
+segment; the standalone `search` operation counts as one family. Canonical names
+use lowercase, dots between segments and underscores within multiword segments
+(for example, `workspace.project_scan`). Aliases are explicitly listed alternate
+spellings, such as `actions.job-logs` for `actions.job_logs` and `pane.stop` for
+`pane.close`; hyphen/underscore substitution is not generally accepted.
+Use canonical names in new scripts and guidance. The catalog's
+`catalog_covers_every_dispatched_operation` test checks the accepted spellings
+against the [JSON dispatcher](crates/gwt/src/cli/json_envelope.rs).
+Recount the catalog from a source checkout when updating this inventory:
+
+```bash
+python3 - <<'PY'
+from pathlib import Path
+import re
+catalog = Path('crates/gwt/src/cli/operation_catalog.rs').read_text()
+names = re.findall(r'name: "([^"]+)"', catalog)
+aliases = re.findall(r'aliases: &\[([^\]]*)\]', catalog)
+alias_count = sum(len(re.findall(r'"[^"]+"', group)) for group in aliases)
+print(len(names), len({name.split('.')[0] for name in names}), alias_count)
+PY
+```
+
+Use `gwtd --help` or `gwtd --help daemon` for help. Ordinary operation argv such
+as `gwtd daemon start` is rejected; send `daemon.start` as an envelope instead.
+Managed hooks retain the dedicated argv transports `gwtd hook event <Event>`
+and `gwtd hook provider-event <provider> <native-event>`.
+
+The runtime daemon supports macOS/Linux Unix domain sockets and Windows named
+pipes. The GUI supervises the project daemon, starting or replacing it as needed;
+normal GUI use does not require a manual `daemon.start`. To run a standalone
+daemon, the following starts the server in the invoking process and stays attached
+until shutdown (or returns if a usable daemon already exists):
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"daemon.start","params":{}}
+JSON
+```
+
+Endpoint metadata is stored at
+`~/.gwt/projects/<repo-hash>/runtime/daemon/<worktree-hash>.json`, as defined by
+[`RuntimeScope::endpoint_path`](crates/gwt-core/src/daemon.rs). The endpoint's
+`bind` names a Unix socket or Windows pipe; it need not be beside the JSON file
+because long Unix socket paths can be shortened. Do not edit or delete live
+endpoint metadata. Startup can clean up dead owners' stale descriptors; an
+incompatible client does not remove a live owner's descriptor.
+
+Keep `gwt` and `gwtd` from the same distribution version. Compatibility is checked
+separately at each boundary; there is no general version negotiation:
+
+| Boundary | Accepted version and behavior |
+| --- | --- |
+| stdin JSON envelope | `schema_version:1` (also the default when omitted); other schema versions and unknown operations are rejected. |
+| Daemon IPC | `DAEMON_PROTOCOL_VERSION` is currently 4; endpoint and handshake protocol versions must match, along with scope and authentication token. |
+| Project `OwnerCommand` transport | The client reuses only an endpoint with a matching product `daemon_version` (after trimming whitespace and leading `v`); `OwnerRequest` has no separate version negotiation field. |
+
+The GUI supervisor replaces an authenticated daemon from another product version
+during startup/recovery. `daemon.status` and `daemon.subscribe` observe/connect
+using the IPC contract; they do not perform that product-version replacement.
+These checks are implemented in the
+[daemon contract](crates/gwt-core/src/daemon.rs),
+[supervisor](crates/gwt/src/daemon_supervisor.rs) and
+[project runtime client](crates/gwt/src/project_runtime/client.rs).
 
 `workspace.project_scan` reports host endpoint discovery costs, including cache
 hits, enumerated entries and elapsed milliseconds. Missing roots and stopped

@@ -1,6 +1,26 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.167.2] - 2026-11-17
+
+### Bug Fixes
+
+- **execution:** Preserve delivered Work settlement proofs
+- **agents:** Prefs の書き換えごとの registry 検証と fsync を減らす
+- **issue-monitor:** Stop rejected scans from scheduling themselves
+
+### Miscellaneous Tasks
+
+- **work:** Associate Issue 7507 with PR 7512
+- **work:** Link issue 7510 delivery to PR 7514
+- **work:** Issue 7513 を PR 7517 に関連付ける
+- **work:** Link scan cadence fix to PR 7516
+
+### Testing
+
+- **issue-monitor:** Observe daemon state without GUI status deadline
+- **issue-monitor:** 成功 ACK の観測で phantom-pane テストを同期する
+
 ## [9.167.1] - 2026-11-17
 
 ### Bug Fixes
