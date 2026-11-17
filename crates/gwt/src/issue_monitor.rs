@@ -4103,8 +4103,18 @@ fn machine_max_active_scope() -> String {
     "machine".to_string()
 }
 
+/// Host verification occupancy sampled by the publishing surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerificationCapacity {
+    pub capacity: usize,
+    pub running: usize,
+    pub available: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueMonitorStatusView {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification_capacity: Option<VerificationCapacity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_roster_capacity: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4319,6 +4329,8 @@ pub enum IssueMonitorStatusSource {
 /// percentage, and float equality is not reflexive.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IssueMonitorAgentStatus {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification_capacity: Option<VerificationCapacity>,
     #[serde(default = "machine_max_active_scope")]
     pub max_active_agents_scope: String,
     #[serde(default)]
@@ -7252,6 +7264,24 @@ fn sync_parent_directory(_path: &Path) -> io::Result<()> {
 }
 
 pub(crate) fn durable_atomic_write(path: &Path, content: &[u8]) -> io::Result<()> {
+    atomic_write(path, content, true)
+}
+
+/// Durably replace two files of one directory with the same content.
+///
+/// One directory sync after the second rename makes both renames durable, so
+/// the pair costs one directory sync instead of two.
+pub(crate) fn durable_atomic_write_siblings(
+    first: &Path,
+    second: &Path,
+    content: &[u8],
+) -> io::Result<()> {
+    debug_assert_eq!(first.parent(), second.parent());
+    atomic_write(first, content, false)?;
+    atomic_write(second, content, true)
+}
+
+fn atomic_write(path: &Path, content: &[u8], sync_parent: bool) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent)?;
@@ -7305,7 +7335,10 @@ pub(crate) fn durable_atomic_write(path: &Path, content: &[u8]) -> io::Result<()
                 ));
             }
         }
-        sync_parent_directory(path)
+        if sync_parent {
+            sync_parent_directory(path)?;
+        }
+        Ok(())
     })();
     let finished = std::time::Instant::now();
     let elapsed = finished.duration_since(started);
@@ -15639,6 +15672,7 @@ impl IssueMonitorState {
         };
         let auto_tier_count = self.launch_auto.then_some(launch_tiers.len());
         IssueMonitorStatusView {
+            verification_capacity: None,
             agent_roster_capacity: self
                 .agent_roster
                 .as_ref()
@@ -15973,6 +16007,7 @@ impl IssueMonitorState {
         let launch_failures = self.launch_failures_at(now);
         let stall_reason = self.stall_reason_at(now);
         IssueMonitorAgentStatus {
+            verification_capacity: None,
             max_active_agents_scope: machine_max_active_scope(),
             allowed_labels: self.allowed_labels.clone(),
             label_excluded_count: self.label_excluded_issues.len(),
@@ -28865,6 +28900,7 @@ mod tests {
         assert_eq!(
             monitor.agent_status_without_scan_at("2026-08-03T00:00:00Z"),
             IssueMonitorAgentStatus {
+                verification_capacity: None,
                 max_active_agents_scope: machine_max_active_scope(),
                 allowed_labels: Vec::new(),
                 label_excluded_count: 0,

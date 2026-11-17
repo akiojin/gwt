@@ -1,6 +1,28 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.167.3] - 2026-11-17
+
+### Bug Fixes
+
+- **agents:** Registry を共有 core と project ごとの record に分ける
+- **agents:** Mirror と floor の publish で directory sync を 1 回にまとめる
+- **observability:** RSS と検証容量をライブ表示する
+
+### Documentation
+
+- **gwtd:** Daemon と operation の説明を README に集約
+
+### Miscellaneous Tasks
+
+- **work:** Issue 7525 を PR 7527 に関連付ける
+- **work:** PR #7529 の配信参照を記録する
+
+### Testing
+
+- **observability:** ライブ容量を既存 projection テストへ反映する
+- **observability:** 既存 E2E の指標数と Tab 順を更新する
+
 ## [9.167.2] - 2026-11-17
 
 ### Bug Fixes

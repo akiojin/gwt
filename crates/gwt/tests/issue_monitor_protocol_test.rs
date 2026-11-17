@@ -289,6 +289,7 @@ fn agent_issue_monitor_scan_result_uses_a_truthful_wire_shape() {
 fn backend_issue_monitor_status_serializes_for_monitor_card() {
     let event = BackendEvent::IssueMonitorStatus {
         status: Box::new(IssueMonitorStatusView {
+            verification_capacity: None,
             event_history: Vec::new(),
             agent_roster_capacity: None,
             agent_roster_revision: None,

@@ -116,6 +116,113 @@ struct Registry {
         BTreeMap<String, BTreeMap<String, crate::agent_names::AgentMemberAssignment>>,
     #[serde(default)]
     pm_projects: BTreeMap<String, PmProjectIdentity>,
+    #[serde(skip)]
+    store: Store,
+}
+
+/// Where this in-memory registry lives on disk.
+///
+/// Schema 3 keeps every project's mirror inside `agent-registry.json`.
+/// Split storage (schema 4) keeps only the shared core there and one record
+/// file per project, so a project's transaction reads and writes its own
+/// record and never another project's mirror.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Store {
+    split: bool,
+    /// Superseded snapshots were not loaded and must not be written back.
+    partial: bool,
+    /// Enrolled projects whose record this read did not load.
+    unloaded: BTreeMap<String, CoreSource>,
+}
+
+/// The shared part of one enrolled project in split storage.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CoreSource {
+    was_active: bool,
+    aliases: BTreeMap<String, String>,
+    session_aliases: BTreeMap<String, String>,
+    /// The record transaction the latest core write committed together with
+    /// itself. A pending record is the committed generation only while this
+    /// names it; otherwise the core write never happened and it is ignored.
+    record_transaction_id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Core {
+    schema_version: u32,
+    phase: RegistryPhase,
+    revision: u64,
+    roster: Option<AgentRoster>,
+    profiles: BTreeMap<String, AgentProfileCore>,
+    sources: BTreeMap<String, CoreSource>,
+    project_assignments:
+        BTreeMap<String, BTreeMap<String, crate::agent_names::AgentMemberAssignment>>,
+    pm_projects: BTreeMap<String, PmProjectIdentity>,
+}
+
+/// One project's committed mirror generation in split storage.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SourceRecord {
+    transaction_id: String,
+    before_sha256: String,
+    floor_before_sha256: String,
+    after_sha256: String,
+    after_json: String,
+}
+
+impl SourceRecord {
+    fn of(source: &Source) -> Self {
+        Self {
+            transaction_id: source.transaction_id.clone(),
+            before_sha256: source.before_sha256.clone(),
+            floor_before_sha256: source.floor_before_sha256.clone(),
+            after_sha256: source.after_sha256.clone(),
+            after_json: source.after_json.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecordFile {
+    schema_version: u32,
+    source_key: String,
+    /// Committed by its own durable write (a transaction that left the core unchanged).
+    record: Option<SourceRecord>,
+    /// Written ahead of a core write; committed only by that core write.
+    pending: Option<SourceRecord>,
+}
+
+impl RecordFile {
+    fn decode(key: &str, raw: &str) -> io::Result<Self> {
+        let file: Self = serde_json::from_str(raw).map_err(io::Error::other)?;
+        if file.schema_version != 1 || file.source_key != key {
+            return Err(invalid(format!(
+                "Agent source record for {key} belongs to another project or schema"
+            )));
+        }
+        Ok(file)
+    }
+
+    fn committed(self, core_transaction_id: Option<&str>) -> Option<SourceRecord> {
+        match self.pending {
+            Some(pending) if Some(pending.transaction_id.as_str()) == core_transaction_id => {
+                Some(pending)
+            }
+            _ => self.record,
+        }
+    }
+}
+
+const SPLIT_SCHEMA_VERSION: u32 = 4;
+
+impl Registry {
+    fn enrolled(&self, key: &str) -> bool {
+        self.sources.contains_key(key) || self.store.unloaded.contains_key(key)
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -455,6 +562,7 @@ pub(crate) struct RegistryIo {
     pub(crate) durability_confirmations: usize,
     pub(crate) registry_writes: usize,
     pub(crate) mirror_publishes: usize,
+    pub(crate) record_writes: Vec<String>,
     pub(crate) validated_payloads: Vec<String>,
 }
 
@@ -479,6 +587,23 @@ fn invalid(message: impl Into<String>) -> io::Error {
 
 pub fn path() -> PathBuf {
     gwt_core::paths::gwt_home().join("machine-state/agent-registry.json")
+}
+
+fn records_dir() -> PathBuf {
+    gwt_core::paths::gwt_home().join("machine-state/agent-registry-sources")
+}
+
+fn record_path(key: &str) -> PathBuf {
+    records_dir().join(format!("{key}.json"))
+}
+
+fn snapshots_path(key: &str) -> PathBuf {
+    records_dir().join(format!("{key}.snapshots.json"))
+}
+
+/// The complete schema 3 registry as it was immediately before the split.
+pub fn schema3_backup_path() -> PathBuf {
+    gwt_core::paths::gwt_home().join("machine-state/agent-registry.schema3-backup.json")
 }
 
 pub fn history_path() -> PathBuf {
@@ -561,11 +686,24 @@ fn load() -> io::Result<Option<Registry>> {
 
 fn load_proving(mirrors: Mirrors<'_>) -> io::Result<Option<Registry>> {
     raw(&path())?
-        .map(|raw| decode_registry(&raw, mirrors))
+        .map(|core| decode_registry(&core, mirrors, &|key| raw(&record_path(key))))
         .transpose()
 }
 
-fn decode_registry(raw: &str, mirrors: Mirrors<'_>) -> io::Result<Registry> {
+#[derive(Deserialize)]
+struct StorageSchema {
+    schema_version: u32,
+}
+
+fn decode_registry(
+    raw: &str,
+    mirrors: Mirrors<'_>,
+    record: &dyn Fn(&str) -> io::Result<Option<String>>,
+) -> io::Result<Registry> {
+    let schema: StorageSchema = serde_json::from_str(raw).map_err(io::Error::other)?;
+    if schema.schema_version >= SPLIT_SCHEMA_VERSION {
+        return decode_split(raw, mirrors, record);
+    }
     let mut registry: Registry = serde_json::from_str(raw).map_err(io::Error::other)?;
     validate_proving(&registry, mirrors)?;
     if registry.schema_version < 3 {
@@ -576,6 +714,73 @@ fn decode_registry(raw: &str, mirrors: Mirrors<'_>) -> io::Result<Registry> {
         }
         validate_proving(&registry, mirrors)?;
     }
+    Ok(registry)
+}
+
+fn decode_split(
+    raw: &str,
+    mirrors: Mirrors<'_>,
+    record: &dyn Fn(&str) -> io::Result<Option<String>>,
+) -> io::Result<Registry> {
+    let core: Core = serde_json::from_str(raw).map_err(io::Error::other)?;
+    if core.schema_version != SPLIT_SCHEMA_VERSION {
+        return Err(invalid("Unsupported shared Agent registry schema or phase"));
+    }
+    let mut registry = Registry {
+        schema_version: 3,
+        phase: core.phase,
+        revision: core.revision,
+        roster: core.roster,
+        profiles: core.profiles,
+        sources: BTreeMap::new(),
+        project_assignments: core.project_assignments,
+        pm_projects: core.pm_projects,
+        store: Store {
+            split: true,
+            partial: !mirrors.covers_superseded(),
+            unloaded: BTreeMap::new(),
+        },
+    };
+    for (key, shared) in core.sources {
+        if !mirrors.covers(&key) {
+            registry.store.unloaded.insert(key, shared);
+            continue;
+        }
+        let committed = record(&key)?
+            .map(|raw| RecordFile::decode(&key, &raw))
+            .transpose()?
+            .and_then(|file| file.committed(Some(&shared.record_transaction_id)))
+            .ok_or_else(|| {
+                invalid(format!(
+                    "Agent source record for {key} has no committed generation; inspect agent.registry.status"
+                ))
+            })?;
+        let rosterless_snapshots = if mirrors.covers_superseded() {
+            self::raw(&snapshots_path(&key))?
+                .map(|raw| serde_json::from_str(&raw).map_err(io::Error::other))
+                .transpose()?
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        registry.sources.insert(
+            key,
+            Source {
+                was_active: shared.was_active,
+                aliases: shared.aliases,
+                session_aliases: shared.session_aliases,
+                transaction_id: committed.transaction_id,
+                before_sha256: committed.before_sha256,
+                before_json: None,
+                floor_before_sha256: committed.floor_before_sha256,
+                floor_before_json: None,
+                after_sha256: committed.after_sha256,
+                after_json: committed.after_json,
+                rosterless_snapshots,
+            },
+        );
+    }
+    validate_proving(&registry, mirrors)?;
     Ok(registry)
 }
 
@@ -590,14 +795,153 @@ fn save_proving(registry: &Registry, mirrors: Mirrors<'_>) -> io::Result<()> {
         roster.schema_version = 3;
     }
     validate_proving(&registry, mirrors)?;
-    let content = serde_json::to_vec_pretty(&registry).map_err(io::Error::other)?;
     #[cfg(test)]
-    record_io(|io| io.registry_writes += 1);
+    if std::env::var_os("GWT_TEST_AGENT_REGISTRY_SPLIT").is_some() {
+        registry.store.split = true;
+    }
     // Raised before the write and lowered only after it is durable, so a
     // later transaction confirms durability exactly when this one could not.
     fs::write(unconfirmed_path(), b"")?;
-    crate::issue_monitor::durable_atomic_write(&path(), &content)?;
+    if registry.store.split {
+        save_split(&registry)?;
+    } else {
+        let content = serde_json::to_vec_pretty(&registry).map_err(io::Error::other)?;
+        #[cfg(test)]
+        record_io(|io| io.registry_writes += 1);
+        crate::issue_monitor::durable_atomic_write(&path(), &content)?;
+    }
     clear_unconfirmed()
+}
+
+fn record_content(
+    key: &str,
+    record: Option<SourceRecord>,
+    pending: Option<SourceRecord>,
+) -> io::Result<Vec<u8>> {
+    serde_json::to_vec_pretty(&RecordFile {
+        schema_version: 1,
+        source_key: key.into(),
+        record,
+        pending,
+    })
+    .map_err(io::Error::other)
+}
+
+fn write_record(key: &str, content: &[u8]) -> io::Result<()> {
+    #[cfg(test)]
+    record_io(|io| io.record_writes.push(key.into()));
+    crate::issue_monitor::durable_atomic_write(&record_path(key), content)
+}
+
+/// Split storage has two commit points and exactly one applies per write.
+///
+/// When the shared core is unchanged, each changed record is committed by
+/// its own durable write. When the core changes, every changed record is
+/// first written as `pending` beside its previous generation, and the core
+/// write that names those transactions commits all of them at once: a crash
+/// before it leaves every project on its previous generation.
+fn save_split(registry: &Registry) -> io::Result<()> {
+    let disk = raw(&path())?;
+    let disk_core = disk
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<Core>(raw).ok())
+        .filter(|core| core.schema_version == SPLIT_SCHEMA_VERSION);
+    let committed_transaction = |key: &str| {
+        disk_core
+            .as_ref()
+            .and_then(|core| core.sources.get(key))
+            .map(|source| source.record_transaction_id.clone())
+    };
+    let mut core = Core {
+        schema_version: SPLIT_SCHEMA_VERSION,
+        phase: registry.phase,
+        revision: registry.revision,
+        roster: registry.roster.clone(),
+        profiles: registry.profiles.clone(),
+        sources: registry.store.unloaded.clone(),
+        project_assignments: registry.project_assignments.clone(),
+        pm_projects: registry.pm_projects.clone(),
+    };
+    for (key, source) in &registry.sources {
+        core.sources.insert(
+            key.clone(),
+            CoreSource {
+                was_active: source.was_active,
+                aliases: source.aliases.clone(),
+                session_aliases: source.session_aliases.clone(),
+                record_transaction_id: committed_transaction(key)
+                    .unwrap_or_else(|| source.transaction_id.clone()),
+            },
+        );
+    }
+    let encode = |core: &Core| serde_json::to_vec_pretty(core).map_err(io::Error::other);
+    let core_changed = disk.as_deref().map(str::as_bytes) != Some(encode(&core)?.as_slice());
+    fs::create_dir_all(records_dir())?;
+    for (key, source) in &registry.sources {
+        let next = SourceRecord::of(source);
+        if !core_changed {
+            let content = record_content(key, Some(next), None)?;
+            if fs::read(record_path(key)).ok().as_deref() != Some(content.as_slice()) {
+                write_record(key, &content)?;
+            }
+            continue;
+        }
+        let previous = raw(&record_path(key))?
+            .and_then(|raw| RecordFile::decode(key, &raw).ok())
+            .and_then(|file| file.committed(committed_transaction(key).as_deref()));
+        if previous.as_ref() == Some(&next) {
+            continue;
+        }
+        core.sources
+            .get_mut(key)
+            .expect("loaded source")
+            .record_transaction_id
+            .clone_from(&next.transaction_id);
+        write_record(key, &record_content(key, previous, Some(next))?)?;
+    }
+    if !registry.store.partial {
+        for (key, source) in &registry.sources {
+            let path = snapshots_path(key);
+            if source.rosterless_snapshots.is_empty() && !path.try_exists()? {
+                continue;
+            }
+            let content = serde_json::to_vec_pretty(&source.rosterless_snapshots)
+                .map_err(io::Error::other)?;
+            if fs::read(&path).ok().as_deref() != Some(content.as_slice()) {
+                crate::issue_monitor::durable_atomic_write(&path, &content)?;
+            }
+        }
+    }
+    if core_changed {
+        #[cfg(test)]
+        record_io(|io| io.registry_writes += 1);
+        crate::issue_monitor::durable_atomic_write(&path(), &encode(&core)?)?;
+    }
+    Ok(())
+}
+
+/// Move a schema 3 registry to split storage. Only the desktop app calls
+/// this, once at startup: a binary older than the split fails closed on the
+/// new files, so helper CLIs keep whichever storage they find.
+///
+/// The untouched schema 3 file is kept at [`schema3_backup_path`] first.
+pub fn migrate_to_split_storage() -> io::Result<bool> {
+    if !path().try_exists()? {
+        return Ok(false);
+    }
+    let _guard = lock()?;
+    let Some(original) = raw(&path())? else {
+        return Ok(false);
+    };
+    let mut registry = decode_registry(&original, Mirrors::All, &|key| raw(&record_path(key)))?;
+    if registry.store.split {
+        return Ok(false);
+    }
+    confirm_durable()?;
+    crate::issue_monitor::durable_atomic_write(&schema3_backup_path(), original.as_bytes())?;
+    registry.store.split = true;
+    save(&registry)?;
+    Ok(true)
 }
 
 /// Present while the latest registry write is not known to be durable.
@@ -635,6 +979,21 @@ fn confirm_durable() -> io::Result<()> {
     }
     #[cfg(unix)]
     fs::File::open(registry_path.parent().expect("machine state parent"))?.sync_all()?;
+    match fs::read_dir(records_dir()) {
+        Ok(records) => {
+            for record in records {
+                fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(record?.path())?
+                    .sync_all()?;
+            }
+            #[cfg(unix)]
+            fs::File::open(records_dir())?.sync_all()?;
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
     clear_unconfirmed()
 }
 
@@ -702,8 +1061,10 @@ fn validate_proving(registry: &Registry, mirrors: Mirrors<'_>) -> io::Result<()>
         if mirrors.covers(key) {
             #[cfg(test)]
             record_io(|io| io.validated_payloads.push(key.clone()));
+            // Split storage keeps the superseded fingerprints, not their bytes.
             if fingerprint(&source.after_json) != source.after_sha256
                 || mirrors.covers_superseded()
+                    && !registry.store.split
                     && (raw_hash(source.before_json.as_deref()) != source.before_sha256
                         || raw_hash(source.floor_before_json.as_deref())
                             != source.floor_before_sha256)
@@ -726,10 +1087,32 @@ fn validate_proving(registry: &Registry, mirrors: Mirrors<'_>) -> io::Result<()>
                 return Err(invalid(format!("Invalid Agent execution mirror for {key}")));
             }
         }
-        if registry.phase == RegistryPhase::Active && !source.was_active {
+    }
+    let shared = registry
+        .sources
+        .iter()
+        .map(|(key, source)| {
+            (
+                key,
+                source.was_active,
+                &source.aliases,
+                &source.session_aliases,
+            )
+        })
+        .chain(registry.store.unloaded.iter().map(|(key, source)| {
+            (
+                key,
+                source.was_active,
+                &source.aliases,
+                &source.session_aliases,
+            )
+        }));
+    for (key, was_active, aliases, session_aliases) in shared {
+        ProjectKey::parse(key).map_err(|error| invalid(error.to_string()))?;
+        if registry.phase == RegistryPhase::Active && !was_active {
             return Err(invalid("Active Agent registry has an unfenced enrollment"));
         }
-        for id in source.aliases.values() {
+        for id in aliases.values() {
             uuid::Uuid::parse_str(id).map_err(|error| invalid(error.to_string()))?;
             if !imported.insert(id.as_str()) {
                 return Err(invalid(
@@ -737,8 +1120,8 @@ fn validate_proving(registry: &Registry, mirrors: Mirrors<'_>) -> io::Result<()>
                 ));
             }
         }
-        for (session_id, id) in &source.session_aliases {
-            if !source.aliases.values().any(|alias| alias == id)
+        for (session_id, id) in session_aliases {
+            if !aliases.values().any(|alias| alias == id)
                 || registry
                     .roster
                     .as_ref()
@@ -785,7 +1168,7 @@ fn validate_proving(registry: &Registry, mirrors: Mirrors<'_>) -> io::Result<()>
                 let Some(key) = assignment.project_key.as_deref() else {
                     return Err(invalid("Shared Agent assignment has no source project"));
                 };
-                if !registry.sources.contains_key(key)
+                if !registry.enrolled(key)
                     && !(assignment.role == AgentAssignmentRole::Pm
                         && registry.pm_projects.contains_key(key))
                 {
@@ -803,7 +1186,7 @@ fn validate_proving(registry: &Registry, mirrors: Mirrors<'_>) -> io::Result<()>
                     .iter()
                     .any(|member| &member.agent_member_id == id)
                     || assignment.project_key.as_deref() != Some(key)
-                    || (!registry.sources.contains_key(key)
+                    || (!registry.enrolled(key)
                         && !(assignment.role == AgentAssignmentRole::Pm
                             && registry.pm_projects.contains_key(key)))
                 {
@@ -2957,10 +3340,10 @@ fn publish(source: &Source, path: &Path) -> io::Result<()> {
 fn publish_verified(source: &Source, path: &Path) -> io::Result<()> {
     #[cfg(test)]
     record_io(|io| io.mirror_publishes += 1);
-    crate::issue_monitor::durable_atomic_write(path, source.after_json.as_bytes())?;
     // The schema1 recovery writer must not be able to restore an old schema1
     // floor after the canonical schema2 file is damaged.
-    crate::issue_monitor::durable_atomic_write(
+    crate::issue_monitor::durable_atomic_write_siblings(
+        path,
         &path.with_extension("committed.json"),
         source.after_json.as_bytes(),
     )
@@ -2995,7 +3378,13 @@ pub(crate) fn read_project(path: &Path) -> io::Result<Option<IssueMonitorPrefs>>
                 "Agent registry changed during read; retry the same operation",
             ));
         }
-        let Some(before) = raw(&self::path())? else {
+        let generation = || -> io::Result<Option<(String, Option<String>)>> {
+            let Some(core) = raw(&self::path())? else {
+                return Ok(None);
+            };
+            Ok(Some((core, raw(&record_path(&key))?)))
+        };
+        let Some(before) = generation()? else {
             return Ok(None);
         };
         let observed = raw(path)?;
@@ -3004,7 +3393,7 @@ pub(crate) fn read_project(path: &Path) -> io::Result<Option<IssueMonitorPrefs>>
         if let Some(observer) = READ_PROJECT_AFTER_SOURCE.with(|slot| slot.borrow_mut().take()) {
             observer();
         }
-        let Some(after) = raw(&self::path())? else {
+        let Some(after) = generation()? else {
             continue;
         };
         // Identical bytes are one generation: decode and prove it once.
@@ -3012,7 +3401,8 @@ pub(crate) fn read_project(path: &Path) -> io::Result<Option<IssueMonitorPrefs>>
             std::thread::yield_now();
             continue;
         }
-        let after = decode_registry(&after, Mirrors::Only(&key))?;
+        let (core, record) = after;
+        let after = decode_registry(&core, Mirrors::Only(&key), &|_| Ok(record.clone()))?;
         if after.phase != RegistryPhase::Active {
             return Err(invalid(
                 "Agent registry is prepared; inspect agent.registry.status and reconcile",
@@ -3243,10 +3633,14 @@ impl RegistryWrite {
             || next.profiles != registry.profiles
             || next.project_assignments != registry.project_assignments
             || next.pm_projects != registry.pm_projects;
-        next.revision = next
-            .revision
-            .checked_add(1)
-            .ok_or_else(|| invalid("Agent registry revision exhausted"))?;
+        // In split storage the revision belongs to the shared core, which a
+        // transaction that changes only this project's mirror never writes.
+        if global_changed || !registry.store.split {
+            next.revision = next
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| invalid("Agent registry revision exhausted"))?;
+        }
         if let Some(roster) = &mut next.roster {
             roster.schema_version = 3;
             if global_changed {
@@ -3681,7 +4075,7 @@ pub(crate) fn preflight_write(path: &Path) -> io::Result<()> {
     let Some(registry) = load_proving(Mirrors::None)? else {
         return Ok(());
     };
-    if registry.phase == RegistryPhase::Active && registry.sources.contains_key(&key) {
+    if registry.phase == RegistryPhase::Active && registry.enrolled(&key) {
         return Ok(());
     }
     if registry.phase == RegistryPhase::Active
@@ -3817,6 +4211,7 @@ fn ensure_active(source: Option<&ProjectKey>) -> io::Result<()> {
         sources: BTreeMap::new(),
         pm_projects: BTreeMap::new(),
         project_assignments: BTreeMap::new(),
+        store: Store::default(),
     };
     for key in &keys {
         let observed = raw(&prefs_path(key)?)?;
@@ -6869,17 +7264,551 @@ mod tests {
         assert_eq!(fs::read(&b_path).unwrap(), b_mirror);
     }
 
-    /// Prints the same `held_ms` the "Issues prefs lock released" record reports.
-    /// `cargo test -p gwt --lib --release measure_prefs_lock_held_ms -- --ignored --nocapture`
+    /// Two enrolled projects after the desktop app moved them to split storage.
+    fn two_split_sources() -> (PathBuf, String, PathBuf, String) {
+        let sources = two_active_sources();
+        assert!(migrate_to_split_storage().unwrap());
+        sources
+    }
+
+    fn storage_schema() -> u32 {
+        serde_json::from_slice::<StorageSchema>(&fs::read(super::path()).unwrap())
+            .unwrap()
+            .schema_version
+    }
+
+    fn rename_first_member(path: &Path, name: &str) {
+        crate::try_mutate_issue_monitor_prefs(path, |prefs| {
+            prefs.agent_roster.as_mut().unwrap().members[0].name = name.into();
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    fn first_member_name(path: &Path) -> String {
+        crate::load_issue_monitor_prefs(path)
+            .unwrap()
+            .agent_roster
+            .unwrap()
+            .members[0]
+            .name
+            .clone()
+    }
+
     #[test]
-    #[ignore = "measurement, not an assertion"]
-    fn measure_prefs_lock_held_ms() {
+    fn split_migration_keeps_the_schema3_file_and_every_committed_generation() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let (a_path, a_key, b_path, b_key) = two_active_sources();
+        crate::try_mutate_issue_monitor_prefs(&a_path, |prefs| {
+            prefs.merged_issues.push(7486);
+            Ok(())
+        })
+        .unwrap();
+        let schema3 = fs::read(super::path()).unwrap();
+        let before = (
+            crate::load_issue_monitor_prefs(&a_path).unwrap(),
+            crate::load_issue_monitor_prefs(&b_path).unwrap(),
+            status(None).unwrap(),
+        );
+        let mirrors = (fs::read(&a_path).unwrap(), fs::read(&b_path).unwrap());
+        let legacy_snapshots = || {
+            load()
+                .unwrap()
+                .unwrap()
+                .sources
+                .into_iter()
+                .map(|(key, source)| (key, source.rosterless_snapshots))
+                .collect::<BTreeMap<_, _>>()
+        };
+        let snapshots = legacy_snapshots();
+        assert!(!snapshots[&b_key].is_empty());
+
+        assert!(migrate_to_split_storage().unwrap());
+        assert_eq!(storage_schema(), SPLIT_SCHEMA_VERSION);
+        assert_eq!(
+            legacy_snapshots(),
+            snapshots,
+            "every observed legacy snapshot survives the split"
+        );
+        assert_eq!(fs::read(schema3_backup_path()).unwrap(), schema3);
+        let core = fs::read_to_string(super::path()).unwrap();
+        assert!(
+            !core.contains("after_json") && !core.contains("merged_issues"),
+            "the shared core carries no project mirror"
+        );
+        for key in [&a_key, &b_key] {
+            assert!(record_path(key).exists());
+        }
+        let after = (
+            crate::load_issue_monitor_prefs(&a_path).unwrap(),
+            crate::load_issue_monitor_prefs(&b_path).unwrap(),
+            status(None).unwrap(),
+        );
+        assert_eq!(after.0, before.0);
+        assert_eq!(after.1, before.1);
+        assert_eq!(after.2.phase, RegistryPhase::Active);
+        assert_eq!(
+            after
+                .2
+                .projects
+                .iter()
+                .map(|row| (&row.transaction_id, &row.after_sha256, row.conflict))
+                .collect::<Vec<_>>(),
+            before
+                .2
+                .projects
+                .iter()
+                .map(|row| (&row.transaction_id, &row.after_sha256, row.conflict))
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(
+            (fs::read(&a_path).unwrap(), fs::read(&b_path).unwrap()),
+            mirrors,
+            "migration rewrites no project mirror"
+        );
+        assert!(
+            !migrate_to_split_storage().unwrap(),
+            "a second start has nothing to migrate"
+        );
+        assert_eq!(fs::read(schema3_backup_path()).unwrap(), schema3);
+
+        // The documented way back: restore the backup and drop the records.
+        fs::copy(schema3_backup_path(), super::path()).unwrap();
+        fs::remove_dir_all(records_dir()).unwrap();
+        assert_eq!(storage_schema(), 3);
+        assert_eq!(crate::load_issue_monitor_prefs(&a_path).unwrap(), before.0);
+        crate::try_mutate_issue_monitor_prefs(&a_path, |prefs| {
+            prefs.merged_issues.push(1);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(storage_schema(), 3);
+    }
+
+    #[test]
+    fn interrupted_split_migration_leaves_the_schema3_registry_authoritative() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let (a_path, a_key, _, _) = two_active_sources();
+        let schema3 = fs::read(super::path()).unwrap();
+        // Records and the backup were written; the core write never happened.
+        assert!(migrate_to_split_storage().unwrap());
+        fs::write(super::path(), &schema3).unwrap();
+        assert_eq!(storage_schema(), 3);
+        let stale_record = fs::read(record_path(&a_key)).unwrap();
+        crate::try_mutate_issue_monitor_prefs(&a_path, |prefs| {
+            prefs.merged_issues.push(7486);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(storage_schema(), 3, "the schema 3 writer keeps working");
+        assert_eq!(fs::read(record_path(&a_key)).unwrap(), stale_record);
+
+        assert!(
+            migrate_to_split_storage().unwrap(),
+            "the next start migrates again"
+        );
+        assert_eq!(
+            crate::load_issue_monitor_prefs(&a_path)
+                .unwrap()
+                .merged_issues,
+            [7486],
+            "a record left by the interrupted attempt never replaces a later commit"
+        );
+        assert!(load().is_ok());
+    }
+
+    #[test]
+    fn split_prefs_transaction_reads_and_writes_only_its_own_record() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let (a_path, a_key, b_path, b_key) = two_split_sources();
+        let core = fs::read(super::path()).unwrap();
+        let revision = status(None).unwrap().registry_revision;
+        // Nothing of another project is needed: not even its record file.
+        let b_record = fs::read(record_path(&b_key)).unwrap();
+        fs::remove_file(record_path(&b_key)).unwrap();
+
+        take_registry_io_for_test();
+        crate::try_mutate_issue_monitor_prefs(&a_path, |_| Ok(())).unwrap();
+        let io = take_registry_io_for_test();
+        assert_eq!(
+            (
+                io.durability_confirmations,
+                io.registry_writes,
+                io.record_writes.len(),
+                io.mirror_publishes
+            ),
+            (0, 0, 0, 0),
+            "{io:?}"
+        );
+
+        crate::try_mutate_issue_monitor_prefs(&a_path, |prefs| {
+            prefs.merged_issues.push(7486);
+            Ok(())
+        })
+        .unwrap();
+        let io = take_registry_io_for_test();
+        assert_eq!(
+            (
+                io.durability_confirmations,
+                io.registry_writes,
+                io.mirror_publishes
+            ),
+            (0, 0, 1),
+            "a mirror-only commit never writes the shared core: {io:?}"
+        );
+        assert_eq!(io.record_writes, std::slice::from_ref(&a_key));
+        assert!(!io.validated_payloads.contains(&b_key), "{io:?}");
+        assert_eq!(fs::read(super::path()).unwrap(), core);
+        assert_eq!(
+            crate::load_issue_monitor_prefs(&a_path)
+                .unwrap()
+                .merged_issues,
+            [7486]
+        );
+
+        // The project whose record is missing is closed; so is every complete read.
+        assert!(crate::load_issue_monitor_prefs(&b_path).is_err());
+        assert!(crate::try_mutate_issue_monitor_prefs(&b_path, |_| Ok(())).is_err());
+        assert!(load().is_err());
+        fs::write(record_path(&b_key), b_record).unwrap();
+        assert!(crate::load_issue_monitor_prefs(&b_path).is_ok());
+        assert_eq!(status(None).unwrap().registry_revision, revision);
+    }
+
+    #[test]
+    fn split_core_change_commits_its_record_with_the_core_or_not_at_all() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let (a_path, a_key, _, _) = two_split_sources();
+        let floor_path = a_path.with_extension("committed.json");
+        let before = (
+            fs::read(super::path()).unwrap(),
+            fs::read(&a_path).unwrap(),
+            fs::read(&floor_path).unwrap(),
+        );
+        let revision = status(None).unwrap().registry_revision;
+
+        take_registry_io_for_test();
+        crate::try_mutate_issue_monitor_prefs(&a_path, |prefs| {
+            prefs.agent_roster.as_mut().unwrap().members[0].name = "Committed Cedar".into();
+            prefs.merged_issues.push(7486);
+            Ok(())
+        })
+        .unwrap();
+        let io = take_registry_io_for_test();
+        assert_eq!(
+            (io.registry_writes, io.record_writes.clone()),
+            (1, vec![a_key.clone()]),
+            "{io:?}"
+        );
+        assert_eq!(status(None).unwrap().registry_revision, revision + 1);
+        let committed = (
+            fs::read(super::path()).unwrap(),
+            fs::read(&a_path).unwrap(),
+            fs::read(record_path(&a_key)).unwrap(),
+        );
+
+        // A crash before the core write: the pending record is on disk, the
+        // core and both mirrors are one generation behind.
+        fs::write(super::path(), &before.0).unwrap();
+        fs::write(&a_path, &before.1).unwrap();
+        fs::write(&floor_path, &before.2).unwrap();
+        assert_eq!(first_member_name(&a_path), "Cedar");
+        assert!(crate::load_issue_monitor_prefs(&a_path)
+            .unwrap()
+            .merged_issues
+            .is_empty());
+        take_registry_io_for_test();
+        let (prefs, ()) = crate::try_mutate_issue_monitor_prefs(&a_path, |_| Ok(())).unwrap();
+        assert!(prefs.merged_issues.is_empty());
+        assert_eq!(take_registry_io_for_test().mirror_publishes, 0);
+        assert_eq!(fs::read(&a_path).unwrap(), before.1);
+        // The abandoned pending record never surfaces through a later commit.
+        crate::try_mutate_issue_monitor_prefs(&a_path, |prefs| {
+            prefs.merged_issues.push(1);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(first_member_name(&a_path), "Cedar");
+        assert_eq!(
+            crate::load_issue_monitor_prefs(&a_path)
+                .unwrap()
+                .merged_issues,
+            [1]
+        );
+        assert!(load().is_ok());
+
+        // A crash after the core write: readers and writers roll forward.
+        fs::write(record_path(&a_key), &committed.2).unwrap();
+        fs::write(super::path(), &committed.0).unwrap();
+        fs::write(&a_path, &before.1).unwrap();
+        fs::write(&floor_path, &before.2).unwrap();
+        assert_eq!(first_member_name(&a_path), "Committed Cedar");
+        let (prefs, ()) = crate::try_mutate_issue_monitor_prefs(&a_path, |_| Ok(())).unwrap();
+        assert_eq!(prefs.merged_issues, [7486]);
+        assert_eq!(fs::read(&a_path).unwrap(), committed.1);
+        assert_eq!(fs::read(&floor_path).unwrap(), committed.1);
+    }
+
+    #[test]
+    fn split_core_write_of_unknown_durability_is_confirmed_before_any_ack() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let (a_path, _, _, _) = two_split_sources();
+        let registry_path = super::path();
+        let marker = registry_path.with_extension("parent-sync-fail-once");
+        let mut failure = None;
+        assert!(crate::try_mutate_issue_monitor_prefs(&a_path, |prefs| {
+            fs::write(&marker, b"fail once")?;
+            failure = Some(ScopedEnvVar::set(
+                "GWT_TEST_FAIL_ISSUE_MONITOR_PREFS_PARENT_SYNC_ONCE",
+                &registry_path,
+            ));
+            prefs.agent_roster.as_mut().unwrap().members[0].name = "Committed Cedar".into();
+            Ok(())
+        })
+        .is_err());
+        fs::write(&marker, b"fail confirmation once").unwrap();
+        assert!(crate::try_mutate_issue_monitor_prefs(&a_path, |_| Ok(())).is_err());
+        take_registry_io_for_test();
+        let (replayed, ()) = crate::try_mutate_issue_monitor_prefs(&a_path, |_| Ok(())).unwrap();
+        assert_eq!(take_registry_io_for_test().durability_confirmations, 1);
+        assert_eq!(
+            replayed.agent_roster.unwrap().members[0].name,
+            "Committed Cedar"
+        );
+        crate::try_mutate_issue_monitor_prefs(&a_path, |_| Ok(())).unwrap();
+        assert_eq!(take_registry_io_for_test().durability_confirmations, 0);
+        drop(failure);
+    }
+
+    #[test]
+    fn split_records_fail_closed_when_damaged_or_swapped_between_projects() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let (a_path, a_key, b_path, b_key) = two_split_sources();
+        let a_record = fs::read(record_path(&a_key)).unwrap();
+        let a_mirror = fs::read(&a_path).unwrap();
+        let closed = |reason: &str| {
+            assert!(
+                crate::load_issue_monitor_prefs(&a_path).is_err(),
+                "{reason}: read"
+            );
+            assert!(
+                crate::try_mutate_issue_monitor_prefs(&a_path, |prefs| {
+                    prefs.merged_issues.push(1);
+                    Ok(())
+                })
+                .is_err(),
+                "{reason}: write"
+            );
+            assert!(load().is_err(), "{reason}: complete read");
+            assert_eq!(fs::read(&a_path).unwrap(), a_mirror, "{reason}: mirror");
+            assert!(
+                crate::load_issue_monitor_prefs(&b_path).is_ok(),
+                "{reason}: the other project stays open"
+            );
+        };
+
+        fs::copy(record_path(&b_key), record_path(&a_key)).unwrap();
+        closed("another project's record");
+
+        let mut damaged: serde_json::Value = serde_json::from_slice(&a_record).unwrap();
+        let slot = if damaged["pending"].is_null() {
+            "record"
+        } else {
+            "pending"
+        };
+        damaged[slot]["after_json"] = serde_json::json!("{\"tampered\":true}");
+        fs::write(record_path(&a_key), serde_json::to_vec(&damaged).unwrap()).unwrap();
+        closed("mirror bytes that do not match their fingerprint");
+
+        fs::write(record_path(&a_key), b"{ torn").unwrap();
+        closed("torn record");
+
+        fs::write(record_path(&a_key), &a_record).unwrap();
+        crate::try_mutate_issue_monitor_prefs(&a_path, |prefs| {
+            prefs.merged_issues.push(7486);
+            Ok(())
+        })
+        .unwrap();
+        assert!(load().is_ok());
+    }
+
+    #[test]
+    fn only_the_desktop_app_start_changes_the_storage_an_older_binary_reads() {
         let _lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let home = tempfile::tempdir().unwrap();
         let _home = ScopedGwtHome::set(home.path());
         let (a_path, _, b_path, _) = two_active_sources();
+        // Exactly how a binary older than the split decodes the registry.
+        let older_binary_reads = || {
+            serde_json::from_slice::<serde_json::Value>(&fs::read(super::path()).unwrap())
+                .ok()
+                .filter(|registry| registry["schema_version"].as_u64() <= Some(3))
+                .is_some_and(|registry| {
+                    registry["sources"]
+                        .as_object()
+                        .unwrap()
+                        .values()
+                        .all(|source| source["after_json"].is_string())
+                })
+        };
+        // A helper CLI of this version works on the schema 3 file in place:
+        // commits, core changes and a late enrollment all leave it readable.
+        rename_first_member(&a_path, "Renamed Cedar");
+        crate::try_mutate_issue_monitor_prefs(&b_path, |prefs| {
+            prefs.merged_issues.push(7486);
+            Ok(())
+        })
+        .unwrap();
+        let late = gwt_core::paths::gwt_home().join("late-project");
+        fs::create_dir_all(&late).unwrap();
+        crate::try_mutate_issue_monitor_prefs(
+            &crate::issue_monitor_prefs_path_for_repo_path(&late),
+            |prefs| {
+                prefs.merged_issues.push(1);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(storage_schema(), 3);
+        assert!(!records_dir().exists());
+        assert!(!schema3_backup_path().exists());
+        assert!(older_binary_reads());
+
+        assert!(migrate_to_split_storage().unwrap());
+        assert!(
+            !older_binary_reads(),
+            "an older binary fails closed instead of reading a partial registry"
+        );
+        assert!(
+            serde_json::from_slice::<Registry>(&fs::read(super::path()).unwrap()).is_err(),
+            "the schema 3 decoder rejects the split core"
+        );
+        // The same helper CLI keeps working on the storage it now finds.
+        rename_first_member(&a_path, "Split Cedar");
+        assert_eq!(first_member_name(&a_path), "Split Cedar");
+        assert_eq!(storage_schema(), SPLIT_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn split_storage_enrolls_projects_and_serves_them_concurrently() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let (a_path, _, b_path, _) = two_split_sources();
+        let late = gwt_core::paths::gwt_home().join("late-project");
+        fs::create_dir_all(&late).unwrap();
+        let late_path = crate::issue_monitor_prefs_path_for_repo_path(&late);
+        crate::try_mutate_issue_monitor_prefs(&late_path, |prefs| {
+            prefs.merged_issues.push(0);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(storage_schema(), SPLIT_SCHEMA_VERSION);
+        assert!(record_path(&source_key(&late_path).unwrap()).exists());
+
+        // One writer per project, as one daemon per project, plus a shared-core writer.
+        let paths = [a_path.clone(), b_path, late_path];
+        let home = home.path();
+        std::thread::scope(|scope| {
+            for path in &paths {
+                scope.spawn(move || {
+                    let _home = ScopedGwtHome::set(home);
+                    for issue in 1..=20 {
+                        crate::try_mutate_issue_monitor_prefs(path, |prefs| {
+                            prefs.merged_issues.push(issue);
+                            Ok(())
+                        })
+                        .unwrap();
+                        crate::load_issue_monitor_prefs(path).unwrap();
+                    }
+                });
+            }
+            scope.spawn(|| {
+                let _home = ScopedGwtHome::set(home);
+                for index in 0..10 {
+                    rename_first_member(&a_path, &format!("Cedar {index}"));
+                }
+            });
+        });
+        for path in &paths {
+            let prefs = crate::load_issue_monitor_prefs(path).unwrap();
+            assert_eq!(
+                prefs
+                    .merged_issues
+                    .iter()
+                    .filter(|issue| **issue > 0)
+                    .count(),
+                20,
+                "{}",
+                path.display()
+            );
+            assert_eq!(
+                fs::read(path).unwrap(),
+                fs::read(path.with_extension("committed.json")).unwrap()
+            );
+        }
+        assert_eq!(first_member_name(&a_path), "Cedar 9");
+        let status = status(None).unwrap();
+        assert_eq!(status.phase, RegistryPhase::Active);
+        assert!(status
+            .projects
+            .iter()
+            .all(|row| !row.conflict && !row.pending && !row.floor_conflict));
+    }
+
+    /// Prints the same `held_ms` the "Issues prefs lock released" record reports.
+    /// `cargo test -p gwt --lib --release measure_prefs_lock_held_ms -- --ignored --nocapture`
+    #[test]
+    #[ignore = "measurement, not an assertion"]
+    fn measure_prefs_lock_held_ms() {
+        measure_prefs_lock_held(false);
+    }
+
+    /// The same measurement after the desktop app moved to split storage.
+    #[test]
+    #[ignore = "measurement, not an assertion"]
+    fn measure_split_prefs_lock_held_ms() {
+        measure_prefs_lock_held(true);
+    }
+
+    fn measure_prefs_lock_held(split: bool) {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let (a_path, _, b_path, _) = two_active_sources();
+        if split {
+            assert!(migrate_to_split_storage().unwrap());
+        }
         let padding: Vec<u64> = (0..46_000).map(|index| 1_000_000 + index).collect();
         for path in [&a_path, &b_path] {
             crate::try_mutate_issue_monitor_prefs(path, |prefs| {

@@ -573,8 +573,7 @@ export function selectWorksTelemetry({ sessions = [], projectRoot, agents = [], 
   });
   const todayTotals = { input_tokens: today("today_input_tokens"), output_tokens: today("today_output_tokens"),
     cache_tokens: sumKnown(projectSessions.map(session => cache(session.provider,
-      session.telemetry?.today_cache_read_tokens, session.telemetry?.today_cache_creation_tokens))),
-    cost_usd: null, landed_pr_count: null };
+      session.telemetry?.today_cache_read_tokens, session.telemetry?.today_cache_creation_tokens))) };
   return { today: todayTotals, fleet_tokens_per_minute: fleet, by_window, by_member,
     availability: {
       today: availability(projectSessions, [todayTotals.input_tokens, todayTotals.cache_tokens, todayTotals.output_tokens]

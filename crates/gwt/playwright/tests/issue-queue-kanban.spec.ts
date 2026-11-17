@@ -1138,7 +1138,7 @@ test("AC-M1/M2: approved status, action, filter rows and card anatomy", async ({
   await expect(status.locator('[data-metric="capacity"]')).toHaveText("1 of 3");
   await expect(status.locator('[data-metric="backlog"]')).toHaveText("7");
   await expect(status.locator('[data-metric="last-scan"]')).toHaveText("00:00:00 UTC");
-  await expect(status.locator('[data-metric="verification"]')).toHaveText("Not reported");
+  await expect(status.locator('[data-metric="verification"]')).toHaveText("Unavailable");
   const boxes=await Promise.all([status,controls,filter].map(node=>node.boundingBox()));
   expect(boxes[0]!.y+boxes[0]!.height).toBeLessThanOrEqual(boxes[1]!.y);
   expect(boxes[1]!.y+boxes[1]!.height).toBeLessThanOrEqual(boxes[2]!.y);
@@ -1242,6 +1242,12 @@ test("T-7a: current labels explain themselves with keyboard focus and hover", as
   const before = await controlMessages();
   const queueMetric = page.locator('[data-metric="queue"]');
   await queueMetric.focus();
+  await page.keyboard.press("Tab");
+  const verification = page.locator('[data-metric="verification"]');
+  await expect(verification).toBeFocused();
+  await expect(popup).toBeVisible();
+  await expect(popup).toHaveText("Host verification capacity is unavailable.");
+  await expect(verification).toHaveAttribute("aria-describedby", await popup.getAttribute("id") as string);
   await page.keyboard.press("Tab");
   const refill = page.getByRole("switch", { name: "Auto-refill", exact: true });
   await expect(refill).toBeFocused();

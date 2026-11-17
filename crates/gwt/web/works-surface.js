@@ -86,8 +86,8 @@ export function createWorksSurface({ projectKey, document, windowCatalogModel, a
   element.className = "works-surface"; element.setAttribute("aria-label", "Works");
   element.innerHTML = `<div class="works-overview"><header class="works-heading"><h2>Works</h2><div class="works-counts">
     ${summaryCells.map(([key, label]) => `<span>${label} <b data-count="${key}">—</b></span>`).join("")}</div><span class="works-active"></span></header>
-    <div class="works-today">Today · Tokens <b data-metric="today-total">—</b> · Input <b data-metric="today-input">—</b> · Cache <b data-metric="today-cache">—</b> · Output <b data-metric="today-output">—</b> · Cost <b data-metric="today-cost">—</b> · Landed PRs <b data-metric="today-landed">—</b>
-      <small class="works-availability" data-availability="today"></small><small class="works-availability works-source-note"></small></div>
+    <div class="works-today">Today · Tokens <b data-metric="today-total">—</b> · Input <b data-metric="today-input">—</b> · Cache <b data-metric="today-cache">—</b> · Output <b data-metric="today-output">—</b>
+      <small class="works-availability" data-availability="today"></small></div>
     <div class="works-fleet"><div>Fleet tokens/min <b data-metric="fleet-now">—</b><small>Last 30 minutes</small></div><svg></svg><small class="works-availability" data-availability="fleet"></small></div>
     <div class="works-list" role="list" aria-label="Current agent works"></div><p class="works-empty">No local agents are active.</p></div>
     <section class="works-full" aria-label="Work terminal" hidden><header class="works-full-header"><button type="button" data-action="back">← Back to Works</button>
@@ -355,17 +355,13 @@ export function createWorksSurface({ projectKey, document, windowCatalogModel, a
     });
     renderSummary();
     element.querySelector(".works-active").textContent = `Active ${number(activity.count)}`;
-    for (const [key, value] of Object.entries({ total: finite(today.input_tokens) && finite(today.output_tokens) ? number(today.input_tokens + today.output_tokens) : "—", input: number(today.input_tokens), cache: number(today.cache_tokens), output: number(today.output_tokens), cost: finite(today.cost_usd) ? `$${today.cost_usd.toFixed(2)}` : "—", landed: number(today.landed_pr_count) })) element.querySelector(`[data-metric="today-${key}"]`).textContent = value;
+    for (const [key, value] of Object.entries({ total: finite(today.input_tokens) && finite(today.output_tokens) ? number(today.input_tokens + today.output_tokens) : "—", input: number(today.input_tokens), cache: number(today.cache_tokens), output: number(today.output_tokens) })) element.querySelector(`[data-metric="today-${key}"]`).textContent = value;
     for (const key of ["today", "fleet"]) {
       const note = element.querySelector(`[data-availability="${key}"]`);
       const status = telemetry.availability?.[key];
       note.dataset.state = status?.state || "no_data";
       note.textContent = status?.detail || "No data: session measurements are not available yet.";
     }
-    const sourceNote = element.querySelector(".works-source-note");
-    sourceNote.textContent = [!finite(today.cost_usd) && "Cost unavailable: per-session USD is not supported.",
-      !finite(today.landed_pr_count) && "Landed PRs unavailable: daily merge data is not connected."].filter(Boolean).join(" ");
-    sourceNote.hidden = !sourceNote.textContent;
     element.querySelector('[data-metric="fleet-now"]').textContent = number(telemetry.fleet_tokens_per_minute?.at(-1));
     drawSpark(document, element.querySelector(".works-fleet svg"), telemetry.fleet_tokens_per_minute);
     element.querySelector(".works-empty").textContent = activity.count === null ? "Local agent activity is unavailable." : "No local agents are active.";
