@@ -12,6 +12,24 @@ const shellPath = value => process.platform === "win32"
 const nativePath = value => process.platform === "win32"
   ? value.replace(/^\/([A-Za-z])\//, (_, drive) => `${drive}:/`) : value;
 
+test("runner rejects Node 26 before preparing Playwright", () => {
+  const bin = fs.mkdtempSync(path.join(os.tmpdir(), "gwt-node-version-"));
+  try {
+    fs.writeFileSync(path.join(bin, "node"), '#!/usr/bin/env bash\nprintf "v26.13.0\\n"\n', { mode: 0o755 });
+    fs.writeFileSync(path.join(bin, "mktemp"), "#!/usr/bin/env bash\nexit 77\n", { mode: 0o755 });
+    const result = spawnSync(bash, [shellPath(path.join(__dirname, "run-visual-tests.sh")), "--list"], {
+      encoding: "utf8",
+      env: { ...process.env, PATH: [bin, process.env.PATH].join(path.delimiter) },
+    });
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stderr, /requires Node\.js 22\.x/);
+    assert.match(result.stderr, /v26\.13\.0/);
+    assert.match(result.stderr, /PATH/);
+  } finally {
+    fs.rmSync(bin, { recursive: true, force: true });
+  }
+});
+
 test("project isolation runner preserves the caller repository under inherited Git state", () => {
   const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "gwt-isolation-git-env-"));
   const cleanEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")));
