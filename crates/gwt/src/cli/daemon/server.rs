@@ -3804,11 +3804,10 @@ fn try_mutate_daemon_prefs_with_wait_subjects<T>(
     if let Some(subject) = extra_subject {
         subjects.push(subject.clone());
     }
-    match crate::load_issue_monitor_prefs(prefs_path) {
-        Ok(prefs) => subjects.extend(subjects_in(&prefs)),
-        Err(error) if recover && error.kind() == io::ErrorKind::InvalidData => {}
-        Err(error) => return Err(error),
-    }
+    // The committed prefs are read under the lock only. A subject they hold
+    // and the baseline lacks is found there and leased on the next pass, so a
+    // read before the lock would decode the whole record once more for every
+    // transaction to save a rare second pass (Issue #7550).
     let mut mutation = Some(mutation);
     loop {
         gwt_core::operation_deadline::ensure_remaining("wait subject discovery")?;
@@ -27040,6 +27039,71 @@ exit 1
         assert_eq!(fenced.state, crate::IssueMonitorEffectState::Attempting);
         let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
         assert_eq!(persisted.pending_effects, vec![fenced]);
+    }
+
+    /// Issue #7550: on a 1.3 MB project record the fence decodes the committed
+    /// mirror once, under the lock, then proves what it wrote. The elapsed
+    /// time follows that count, so the count is what is held; the budget
+    /// itself is asserted on by no one's filesystem.
+    #[test]
+    fn effect_executor_fence_on_a_heavy_project_record_decodes_it_twice() {
+        let _prefs_budget = pin_prefs_hang_guard();
+        let _env = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = TempDir::new().expect("tempdir");
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let root = gwt_core::paths::gwt_home().join("repo");
+        std::fs::create_dir_all(&root).expect("project root");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&root);
+        std::fs::create_dir_all(prefs_path.parent().expect("prefs parent")).expect("prefs dir");
+        let mut seed = serde_json::to_value(crate::IssueMonitorPrefs::default()).expect("seed");
+        seed["agent_roster"] = serde_json::json!({"schema_version":1,"revision":1,"members":[{
+            "agent_member_id":"a4263a32-14e9-4bb0-ab78-ec3d4816e811", "agent_id":"codex",
+            "name":"Cedar", "enabled":true, "created_at":"2026-10-01T00:00:00Z"
+        }]});
+        let seed = serde_json::to_string_pretty(&seed).expect("seed json");
+        std::fs::write(&prefs_path, &seed).expect("seed prefs");
+        std::fs::write(prefs_path.with_extension("committed.json"), &seed).expect("seed floor");
+        crate::agent_registry::ensure_active_for_project(&root).expect("enroll");
+        assert!(crate::agent_registry::migrate_to_split_storage().expect("split storage"));
+        let effect = crate::PendingIssueMonitorEffect {
+            effect_id: "arm:42:99:abc123:4".to_string(),
+            authority_epoch: 4,
+            attempt: 0,
+            state: crate::IssueMonitorEffectState::Prepared,
+            payload: crate::IssueMonitorEffectPayload::ArmAutoMerge {
+                issue_number: 42,
+                pr_number: 99,
+                reviewed_sha: "abc123".to_string(),
+            },
+        };
+        let (prefs, ()) = crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+            crate::agent_registry::fill_heavy_prefs_for_test(prefs);
+            prefs.autonomous_mode = true;
+            prefs.effect_authority_epoch = 4;
+            prefs.pending_effects = vec![effect.clone()];
+            Ok(())
+        })
+        .expect("heavy prefs");
+        assert!(
+            std::fs::metadata(&prefs_path).expect("mirror").len() > 1_250_000,
+            "the fixture is as heavy as the reported record"
+        );
+        let mut monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        crate::agent_registry::take_registry_io_for_test();
+
+        let fenced = super::fence_next_issue_monitor_effect(&prefs_path, &mut monitor)
+            .expect("Prepared effect receives a durable attempt fence");
+
+        assert_eq!(fenced.state, crate::IssueMonitorEffectState::Attempting);
+        assert_eq!(
+            crate::agent_registry::take_registry_io_for_test().mirror_decodes,
+            2
+        );
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
+        assert_eq!(persisted.pending_effects, vec![fenced]);
+        assert_eq!(persisted.closure_records.len(), 2_237);
     }
 
     #[test]
