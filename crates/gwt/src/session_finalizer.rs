@@ -182,6 +182,30 @@ pub(crate) fn finalize_exact_close_with_restore_policy(
     desired_restore_on_startup: Option<bool>,
     exit_receipt: Option<&gwt_agent::SessionExitReceipt>,
 ) -> std::io::Result<Option<()>> {
+    finalize_exact_close_if(
+        sessions_dir,
+        identity,
+        incarnation,
+        pty,
+        window_id,
+        desired_restore_on_startup,
+        exit_receipt,
+        |_| Ok(true),
+    )
+}
+
+/// Recheck an automatic-close decision inside the normal exact runtime fence.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn finalize_exact_close_if(
+    sessions_dir: &Path,
+    identity: &gwt_agent::SessionExecutionIdentity,
+    incarnation: u64,
+    pty: &PtyHandle,
+    window_id: &str,
+    desired_restore_on_startup: Option<bool>,
+    exit_receipt: Option<&gwt_agent::SessionExitReceipt>,
+    can_close: impl FnOnce(&gwt_agent::SessionRuntimeState) -> std::io::Result<bool>,
+) -> std::io::Result<Option<()>> {
     let proof = gwt_agent::ManualLaunchRuntimeProof {
         host_pid: std::process::id(),
         runtime_incarnation: incarnation,
@@ -197,6 +221,9 @@ pub(crate) fn finalize_exact_close_with_restore_policy(
                 &identity.session_id,
             );
             let current = gwt_agent::SessionRuntimeState::load(&sidecar)?;
+            if !can_close(&current)? {
+                return Ok(None);
+            }
             let child_pid = pty
                 .process_id()
                 .ok_or_else(|| std::io::Error::other("captured child PID unavailable"))?;
@@ -262,9 +289,10 @@ pub(crate) fn finalize_exact_close_with_restore_policy(
                     ));
                 }
             }
-            Ok(())
+            Ok(Some(()))
         },
     )
+    .map(Option::flatten)
 }
 
 /// Stop under the exact runtime lease without waiting on the caller's event loop.
