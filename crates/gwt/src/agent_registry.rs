@@ -3846,6 +3846,20 @@ fn publish_verified(source: &Source, path: &Path) -> io::Result<()> {
     )
 }
 
+/// Where the mirror is kept as it was before retention first dropped entries.
+pub(crate) fn pre_retention_mirror_path(path: &Path) -> PathBuf {
+    path.with_extension("pre-retention.json")
+}
+
+/// Keep one generation: the mirror the first retention pass is about to shrink.
+fn keep_pre_retention_mirror(path: &Path, committed: &str) -> io::Result<()> {
+    let kept = pre_retention_mirror_path(path);
+    if kept.try_exists()? {
+        return Ok(());
+    }
+    crate::issue_monitor::durable_atomic_write(&kept, committed.as_bytes())
+}
+
 fn quarantine(path: &Path, contents: &str) -> io::Result<()> {
     let destination = path.with_file_name(format!(
         "{}.registry-quarantine-{}.json",
@@ -4168,6 +4182,9 @@ impl RegistryWrite {
         )
         .map_err(invalid)?;
         validate_assignment_budget(registry, &next)?;
+        // Issue #7550: every writer saves through here, so none can keep or
+        // bring back what the retention rule drops.
+        candidate.enforce_retention();
         let source = &registry.sources[key];
         let after_json = mirror_json(
             &candidate,
@@ -4224,6 +4241,13 @@ impl RegistryWrite {
             )?
         };
         next.sources.insert(key.clone(), committed);
+        if self
+            .committed
+            .clone()
+            .is_some_and(|mut committed| committed.enforce_retention())
+        {
+            keep_pre_retention_mirror(path, &source.after_json)?;
+        }
         // Decode the new mirror before it becomes the committed generation.
         let proven = decode(Some(&next.sources[key].after_json))?;
         let saved = project_decoded(&next, key, proven.clone())?;
@@ -5132,12 +5156,12 @@ pub(crate) fn fill_heavy_prefs_for_test(prefs: &mut IssueMonitorPrefs) {
                 last_success_at: Some("2026-11-17T12:32:49.661938400+00:00".into()),
                 ..Default::default()
             };
-            (10_000 + issue, diagnostics)
+            (20_000 + issue, diagnostics)
         })
         .collect();
     prefs.claim_identities = (0..471u64)
         .map(|issue| crate::issue_monitor::IssueMonitorClaimIdentity {
-            issue_number: 10_000 + issue,
+            issue_number: 20_000 + issue,
             claim_id: format!("gwt-queue:{issue}:b47249f5-bb49-4252-a319-5eebc718ab61"),
             owner: "ccs-win-125:operator:50212".into(),
         })
@@ -9481,6 +9505,79 @@ mod tests {
         let saved = crate::load_issue_monitor_prefs(&a_path).unwrap();
         assert_eq!(take_registry_io_for_test().mirror_decodes, 1);
         assert_eq!(saved.merged_issues, vec![7550]);
+    }
+
+    /// Issue #7550: a writer that edits the prefs directly saves them under
+    /// the same retention rule, and the mirror it shrinks first is kept once.
+    #[test]
+    fn every_registry_writer_saves_under_the_retention_rule_and_keeps_the_first_mirror() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let (a_path, ..) = two_split_sources();
+        let kept = pre_retention_mirror_path(&a_path);
+        let closed = |issue_number| crate::issue_monitor::IssueClosureRecord {
+            issue_number,
+            generation: 1,
+            state: crate::issue_monitor::IssueClosureState::Closed,
+            evidence: Default::default(),
+            issue_updated_at: None,
+            reopened_after_close: false,
+        };
+        let identity = |issue_number| crate::issue_monitor::IssueMonitorClaimIdentity {
+            issue_number,
+            claim_id: format!("gwt-queue:{issue_number}:claim"),
+            owner: "host:user:1".into(),
+        };
+        // What a version without the rule committed.
+        let mut legacy = decode(Some(&fs::read_to_string(&a_path).unwrap())).unwrap();
+        legacy.closure_records = vec![closed(1)];
+        legacy.claim_identities = vec![identity(1), identity(2)];
+        let legacy_json = mirror_json(&legacy, None, None).unwrap();
+        let mut registry = load().unwrap().unwrap();
+        let key = source_key(&a_path).unwrap();
+        let source = registry.sources.get_mut(&key).unwrap();
+        source.before_sha256 = source.after_sha256.clone();
+        source.floor_before_sha256 = source.after_sha256.clone();
+        source.after_sha256 = fingerprint(&legacy_json);
+        source.after_json = legacy_json.clone();
+        save(&registry).unwrap();
+        publish_verified(&registry.sources[&key], &a_path).unwrap();
+        assert_eq!(
+            crate::load_issue_monitor_prefs(&a_path)
+                .unwrap()
+                .claim_identities,
+            vec![identity(1), identity(2)],
+            "reading never drops anything"
+        );
+        assert!(!kept.exists());
+
+        let (saved, ()) = crate::try_mutate_issue_monitor_prefs(&a_path, |prefs| {
+            prefs.merged_issues.push(7550);
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(saved.claim_identities, vec![identity(2)]);
+        assert_eq!(fs::read_to_string(&kept).unwrap(), legacy_json);
+
+        // A writer that puts a retired entry back saves without it, and the
+        // kept mirror stays the first generation.
+        let (saved, ()) = crate::try_mutate_issue_monitor_prefs(&a_path, |prefs| {
+            prefs.claim_identities.insert(0, identity(1));
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(saved.claim_identities, vec![identity(2)]);
+        assert_eq!(
+            crate::load_issue_monitor_prefs(&a_path)
+                .unwrap()
+                .claim_identities,
+            vec![identity(2)]
+        );
+        assert_eq!(fs::read_to_string(&kept).unwrap(), legacy_json);
     }
 
     /// The mirror encoder as it was before Issue #7550, kept as the oracle for
