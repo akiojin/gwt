@@ -5236,6 +5236,15 @@ pub fn mutate_pm_prefs<T>(
     })
 }
 
+/// Set the next project open's auto-start preference while preserving the
+/// current PM registration and loop settings.
+pub fn set_pm_auto_start(repo_path: &Path, enabled: bool) -> io::Result<PmPrefs> {
+    mutate_pm_prefs(&pm_prefs_path_for_repo_path(repo_path), |prefs| {
+        prefs.settings.auto_start = enabled;
+    })
+    .map(|(prefs, ())| prefs)
+}
+
 /// Pause only autonomous PM work. Resume re-arms the existing loop once;
 /// registration, auto-start and Issues state remain intact.
 pub fn set_pm_paused(repo_path: &Path, paused: bool) -> io::Result<PmPrefs> {

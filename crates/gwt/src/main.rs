@@ -2463,6 +2463,10 @@ enum UserEvent {
         path: PathBuf,
         reply: app_runtime::ProjectOpenReply,
     },
+    ControlPaneLayoutPlace {
+        request: gwt::project_open_control::PaneLayoutPlaceRequest,
+        reply: tokio::sync::mpsc::Sender<bool>,
+    },
     ProjectObservationInvalidationCompleted(
         Box<app_runtime::project_execution_policy::ProjectObservationInvalidationCompleted>,
     ),
@@ -11926,6 +11930,14 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::ControlProjectOpen { path, reply }) => {
                 let events = app.control_project_open_events(path, reply);
                 clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::ControlPaneLayoutPlace { request, reply }) => {
+                if !reply.is_closed() {
+                    let events = app.control_pane_layout_place_events(request);
+                    let placed = !events.is_empty();
+                    clients.dispatch(events);
+                    let _ = reply.try_send(placed);
+                }
             }
             Event::UserEvent(UserEvent::PmConversationLoaded { client_id, window_id, session_id, snapshot }) => {
                 clients.dispatch(app.pm_conversation_loaded_events(client_id, &window_id, &session_id, snapshot));

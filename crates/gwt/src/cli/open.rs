@@ -25,9 +25,10 @@ use gwt_github::SpecOpsError;
 
 use super::tray::lock::{current_user_id, lock_path, TrayLockFile};
 use super::{CliEnv, CliParseError};
+use crate::persistence::AgentKanbanLane;
 use crate::project_open_control::{
-    ProjectOpenControlErrorBody, ProjectOpenControlRequest, ProjectOpenControlResponse,
-    PROJECT_OPEN_CONTROL_PATH,
+    PaneLayoutPlaceRequest, ProjectOpenControlErrorBody, ProjectOpenControlRequest,
+    ProjectOpenControlResponse, PANE_LAYOUT_PLACE_CONTROL_PATH, PROJECT_OPEN_CONTROL_PATH,
 };
 
 /// `gwt open [path]`. Without a path the Hub (root URL) opens, exactly as
@@ -35,6 +36,75 @@ use crate::project_open_control::{
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct OpenArgs {
     pub path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectControlCommand {
+    Open {
+        path: PathBuf,
+    },
+    PlacePane {
+        id: String,
+        board_id: String,
+        lane_id: AgentKanbanLane,
+        order: Option<u32>,
+    },
+}
+
+pub(super) fn run_control<E: CliEnv>(
+    env: &E,
+    command: ProjectControlCommand,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let root = match &command {
+        ProjectControlCommand::Open { path } => path.as_path(),
+        ProjectControlCommand::PlacePane { .. } => env.repo_path(),
+    };
+    if super::pm::ambient_session_id().is_some() && !super::pm::caller_is_registered_pm(root) {
+        return Err(control_error(
+            "Project control requires the target project's registered PM or a direct user CLI call"
+                .into(),
+        ));
+    }
+    let lock = read_tray_lock(&gwt_core::paths::gwt_home()).map_err(control_error)?;
+    let data = match command {
+        ProjectControlCommand::Open { path } => {
+            let response = request_project_open(&lock, &path, &send_project_open_request)
+                .map_err(control_error)?;
+            serde_json::to_value(response).expect("serializable project open response")
+        }
+        ProjectControlCommand::PlacePane {
+            id,
+            board_id,
+            lane_id,
+            order,
+        } => {
+            let request = PaneLayoutPlaceRequest {
+                project_key: gwt_core::paths::resolve_project_scope(env.repo_path())
+                    .hash
+                    .to_string(),
+                id,
+                board_id,
+                lane_id,
+                order,
+            };
+            send_control_request(
+                &lock.url,
+                tray_control_token(&lock).map_err(control_error)?,
+                PANE_LAYOUT_PLACE_CONTROL_PATH,
+                &request,
+                Duration::from_secs(15),
+            )
+            .map_err(control_error)?
+        }
+    };
+    out.push_str(&data.to_string());
+    out.push('\n');
+    Ok(0)
+}
+
+fn control_error(message: String) -> SpecOpsError {
+    gwt_github::ApiError::Unexpected(message).into()
 }
 
 /// Parse `gwt open [...]` after the verb has already been stripped.
@@ -83,52 +153,13 @@ pub(crate) fn run_with_home(
     launcher: &dyn Fn(&str) -> std::io::Result<()>,
     requester: &ProjectOpenRequester<'_>,
 ) -> Result<i32, SpecOpsError> {
-    let user_id = current_user_id();
-    let path = lock_path(gwt_home, &user_id);
-    if !path.exists() {
-        out.push_str(&format!(
-            "gwt open: no running gwt instance found (expected lock at {})\n",
-            path.display()
-        ));
-        out.push_str(
-            "hint: launch `gwt` (with no arguments) to start the tray-resident process first.\n",
-        );
-        return Ok(1);
-    }
-    let payload = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(error) => {
-            out.push_str(&format!(
-                "gwt open: could not read tray lock at {}: {error}\n",
-                path.display()
-            ));
+    let lock = match read_tray_lock(gwt_home) {
+        Ok(lock) => lock,
+        Err(message) => {
+            out.push_str(&format!("gwt open: {message}\n"));
             return Ok(1);
         }
     };
-    if payload.trim().is_empty() {
-        out.push_str(&format!(
-            "gwt open: tray lock at {} is empty (server still starting?)\n",
-            path.display()
-        ));
-        return Ok(1);
-    }
-    let lock: TrayLockFile = match serde_json::from_str(&payload) {
-        Ok(value) => value,
-        Err(error) => {
-            out.push_str(&format!(
-                "gwt open: tray lock at {} is corrupt: {error}\n",
-                path.display()
-            ));
-            return Ok(1);
-        }
-    };
-    if lock.url.trim().is_empty() {
-        out.push_str(&format!(
-            "gwt open: tray lock at {} has no URL yet (server still binding?)\n",
-            path.display()
-        ));
-        return Ok(1);
-    }
     let url = match target {
         None => lock.url.clone(),
         Some(target) => match project_url(&lock, target, requester) {
@@ -150,30 +181,63 @@ pub(crate) fn run_with_home(
     }
 }
 
+fn read_tray_lock(gwt_home: &Path) -> Result<TrayLockFile, String> {
+    let path = lock_path(gwt_home, &current_user_id());
+    if !path.exists() {
+        return Err(format!(
+            "no running gwt instance found (expected lock at {})\nhint: launch `gwt` (with no arguments) to start the tray-resident process first.",
+            path.display()
+        ));
+    }
+    let payload = std::fs::read_to_string(&path)
+        .map_err(|error| format!("could not read tray lock at {}: {error}", path.display()))?;
+    if payload.trim().is_empty() {
+        return Err(format!(
+            "tray lock at {} is empty (server still starting?)",
+            path.display()
+        ));
+    }
+    let lock: TrayLockFile = serde_json::from_str(&payload)
+        .map_err(|error| format!("tray lock at {} is corrupt: {error}", path.display()))?;
+    if lock.url.trim().is_empty() {
+        return Err(format!(
+            "tray lock at {} has no URL yet (server still binding?)",
+            path.display()
+        ));
+    }
+    Ok(lock)
+}
+
 /// Ask the running process to open `target`, then build `/p/<key>` on its URL.
 fn project_url(
     lock: &TrayLockFile,
     target: &Path,
     requester: &ProjectOpenRequester<'_>,
 ) -> Result<String, String> {
-    let Some(token) = lock
-        .control_token
-        .as_deref()
-        .filter(|token| !token.is_empty())
-    else {
-        return Err(
-            "the running gwt does not accept `gwt open <path>`; restart gwt to update it"
-                .to_string(),
-        );
-    };
-    let absolute = std::path::absolute(target)
-        .map_err(|error| format!("could not resolve {}: {error}", target.display()))?;
-    let response = requester(&lock.url, token, &absolute)?;
+    let response = request_project_open(lock, target, requester)?;
     let base = reqwest::Url::parse(&lock.url)
         .map_err(|error| format!("tray lock URL {} is invalid: {error}", lock.url))?;
     base.join(&response.url_path)
         .map(|url| url.to_string())
         .map_err(|error| format!("invalid project URL {}: {error}", response.url_path))
+}
+
+fn tray_control_token(lock: &TrayLockFile) -> Result<&str, String> {
+    lock.control_token
+        .as_deref()
+        .filter(|token| !token.is_empty())
+        .ok_or_else(|| "the running gwt does not accept authenticated project control; restart gwt to update it".to_string())
+}
+
+fn request_project_open(
+    lock: &TrayLockFile,
+    target: &Path,
+    requester: &ProjectOpenRequester<'_>,
+) -> Result<ProjectOpenControlResponse, String> {
+    let token = tray_control_token(lock)?;
+    let absolute = std::path::absolute(target)
+        .map_err(|error| format!("could not resolve {}: {error}", target.display()))?;
+    requester(&lock.url, token, &absolute)
 }
 
 /// `POST /internal/projects/open` with the lock's bearer token. The server
@@ -183,25 +247,44 @@ fn send_project_open_request(
     token: &str,
     path: &Path,
 ) -> Result<ProjectOpenControlResponse, String> {
+    send_control_request(
+        server_url,
+        token,
+        PROJECT_OPEN_CONTROL_PATH,
+        &ProjectOpenControlRequest {
+            path: path.display().to_string(),
+        },
+        Duration::from_secs(150),
+    )
+    .map_err(|error| format!("could not open {}: {error}", path.display()))
+}
+
+fn send_control_request<T: serde::de::DeserializeOwned>(
+    server_url: &str,
+    token: &str,
+    route: &str,
+    body: &impl serde::Serialize,
+    timeout: Duration,
+) -> Result<T, String> {
     let endpoint = reqwest::Url::parse(server_url)
-        .and_then(|base| base.join(PROJECT_OPEN_CONTROL_PATH))
+        .and_then(|base| base.join(route))
         .map_err(|error| format!("tray lock URL {server_url} is invalid: {error}"))?;
     let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(150))
+        .timeout(timeout)
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|error| format!("could not build HTTP client: {error}"))?;
     let response = client
         .post(endpoint)
         .bearer_auth(token)
-        .json(&ProjectOpenControlRequest {
-            path: path.display().to_string(),
-        })
+        .json(body)
         .send()
         .map_err(|error| format!("could not reach the running gwt: {error}"))?;
     let status = response.status();
     if status.is_success() {
         return response
-            .json::<ProjectOpenControlResponse>()
+            .json::<T>()
             .map_err(|error| format!("invalid response from the running gwt: {error}"));
     }
     let detail = response
@@ -209,8 +292,7 @@ fn send_project_open_request(
         .map(|body| body.error)
         .unwrap_or_else(|_| "no detail".to_string());
     Err(format!(
-        "could not open {} ({}): {detail}",
-        path.display(),
+        "project control was refused ({}): {detail}",
         status.as_u16()
     ))
 }
