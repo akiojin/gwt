@@ -50,6 +50,7 @@ pub use urgent::{
     IssueMonitorUrgentGrant, IssueMonitorUrgentQueue, IssueMonitorUrgentQueueProjection,
 };
 
+mod retention;
 mod tiers;
 pub(crate) use tiers::record_work_done_tier_landing;
 pub use tiers::{
@@ -7424,6 +7425,7 @@ fn save_legacy_issue_monitor_prefs_unlocked(
     let mut normalized = prefs.clone();
     crate::agent_names::synchronize_roster_capacity(&mut normalized, path)
         .map_err(io::Error::other)?;
+    normalized.enforce_retention();
     let prefs = &normalized;
     let normalized_at = std::time::Instant::now();
     validate_issue_monitor_prefs_schema_version(prefs.schema_version)?;
@@ -9089,7 +9091,7 @@ impl IssueMonitorState {
     }
 
     pub fn prefs(&self) -> IssueMonitorPrefs {
-        IssueMonitorPrefs {
+        let mut prefs = IssueMonitorPrefs {
             agent_registry_revision: self.agent_registry_revision,
             agent_registry_project_key: self.agent_registry_project_key.clone(),
             agent_registry_profiles: self.agent_registry_profiles.clone(),
@@ -9240,7 +9242,10 @@ impl IssueMonitorState {
             last_scan_at: self.last_scan_at.clone(),
             last_scan_error: self.last_scan_error.clone(),
             agent_blackout_since: self.agent_blackout_since.clone(),
-        }
+        };
+        // Issue #7550: a holder of a retired entry must not publish it again.
+        prefs.enforce_retention();
+        prefs
     }
 
     /// Finalize a numerical cap change inside its existing prefs transaction.
