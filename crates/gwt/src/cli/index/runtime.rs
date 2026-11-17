@@ -273,22 +273,57 @@ pub(crate) fn parse_runner_json(stdout: &[u8]) -> Result<Value, SpecOpsError> {
     })
 }
 
+pub(crate) fn apply_search_readiness(
+    payload: &mut Value,
+    resources: &crate::index_resources::IndexResourceDiagnostics,
+) {
+    let Some(payload) = payload.as_object_mut() else {
+        return;
+    };
+    let Some(runtime) = payload
+        .entry("runtime")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+    else {
+        return;
+    };
+    // An available query worker cannot repair an unhealthy runtime asset or smoke test.
+    if runtime.get("healthy").and_then(Value::as_bool) == Some(false) {
+        return;
+    }
+    let reason = match resources.query_worker.model_state {
+        "warm" if !resources.heavy_status_available => "search_coordinator_unavailable",
+        "warm" if resources.heavy_held => "search_heavy_lease_unavailable",
+        "warm" => "ready",
+        "warming" => "query_worker_warming",
+        _ => "query_worker_cold",
+    };
+    runtime.insert("healthy".to_string(), Value::Bool(reason == "ready"));
+    runtime.insert("reason".to_string(), Value::String(reason.to_string()));
+}
+
 pub fn render_index_status(
     out: &mut String,
     report: &gwt_core::runtime::ProjectIndexRuntimeReport,
     payload: &Value,
 ) {
     let runtime = payload.get("runtime").unwrap_or(&Value::Null);
+    let healthy = runtime.get("healthy").and_then(Value::as_bool) != Some(false);
     let reason = runtime
         .get("reason")
         .and_then(Value::as_str)
-        .unwrap_or("ready");
+        .unwrap_or(if healthy { "ready" } else { "unknown" });
+    let state = if healthy {
+        reason.to_string()
+    } else {
+        format!("not_ready reason={reason}")
+    };
     let asset_hash = runtime
         .get("asset_hash")
         .and_then(Value::as_str)
         .unwrap_or(report.runner_hash.as_str());
     out.push_str(&format!(
-        "runtime: {reason} asset={asset_hash} smoke={}\n",
+        "runtime: {state} asset={asset_hash} smoke={}\n",
         runtime.get("smoke_test").and_then(Value::as_str).unwrap_or(
             if report.runner_smoke_tested {
                 "passed"

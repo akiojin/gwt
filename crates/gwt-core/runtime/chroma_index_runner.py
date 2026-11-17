@@ -1994,10 +1994,19 @@ def _get_embedding_model(revision: Optional[str] = None) -> Any:
             started = _model_load_clock()
             from sentence_transformers import SentenceTransformer  # type: ignore
 
-            if model_revision is None:
-                model = SentenceTransformer(FILE_INDEX_V2_MODEL_ID)
+            options = {} if model_revision is None else {"revision": model_revision}
+            if _SEARCH_WORKER_QOS == "background":
+                model = SentenceTransformer(FILE_INDEX_V2_MODEL_ID, **options)
             else:
-                model = SentenceTransformer(FILE_INDEX_V2_MODEL_ID, revision=model_revision)
+                # A ready local index already has its model cached. Hub metadata
+                # probes must not consume a cold search's bounded heavy lease.
+                try:
+                    model = SentenceTransformer(
+                        FILE_INDEX_V2_MODEL_ID, local_files_only=True, **options
+                    )
+                except OSError:
+                    # Preserve first-use provisioning for an incomplete cache.
+                    model = SentenceTransformer(FILE_INDEX_V2_MODEL_ID, **options)
             _MODEL_LOAD_MS += int(round((_model_load_clock() - started) * 1000))
         _MODEL_CACHE[revision] = model
         if revision is None and model_revision is not None:
@@ -8426,7 +8435,17 @@ def _layered_document_count(
     for store, hidden in _active_store_layers(db_path):
         client, collection = _open_chroma_collection(store, _scope_collection_name(scope))
         try:
-            total += int(collection.count())
+            count = int(collection.count())
+            if count:
+                # count() only reads metadata: a broken HNSW segment can still
+                # report the expected size. Exercise the query reader with a
+                # stored vector so health matches search without loading E5.
+                sample = collection.get(limit=1, include=["embeddings"])
+                vectors = E5EmbeddingFunction._native_finite_query_vectors(sample["embeddings"])
+                if len(vectors) != 1:
+                    raise ValueError("missing scope health probe vector")
+                collection.query(query_embeddings=vectors, n_results=1, include=[])
+            total += count
             if hidden:
                 total -= len(collection.get(ids=sorted(hidden), include=[])["ids"])
         finally:

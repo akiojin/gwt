@@ -1,6 +1,38 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.167.1] - 2026-11-17
+
+### Bug Fixes
+
+- **verify:** Match JavaScript runtime to CI Node major
+- **gui:** PM Execution Log の遅延レイアウト後に初期化を完了する
+- **pr:** Recover auto-merge when the workflow cannot start
+- **agents:** インストール完了時にシェルの PATH 設定手順を表示する
+- **search:** Align readiness with cold workers and ANN health
+- **search:** Distinguish unreadable coordinator status from idle
+- **agents:** 検出した絶対配置先を伏字処理後の導入案内に保持する
+
+### Miscellaneous Tasks
+
+- **work:** Record issue 3165 pull request reference
+- **work:** Record Issue 7494 pull request delivery
+- **work:** Issue 7492 の配信を PR 7497 に関連付ける
+- **work:** Link PM readiness verification to PR 7495
+- **work:** Link auto-merge recovery to PR 7503
+- **work:** Issue 7496 の配信を PR 7506 に関連付ける
+- **work:** Record issue 7493 pull request reference
+- **work:** PATH 案内の追補を PR 7509 に関連付ける
+
+### Testing
+
+- **runtime:** Cover stale completion and claimed switch successors
+- **runtime:** Keep claimed successors running during switch checks
+- **runtime:** Await native source natural close receipts
+- **agents:** Wait for PM readiness before launch assertions
+- **runtime:** Hold endpoint failure through notification completion
+- **agents:** シェル検証で共通プロセス起動経路を使用する
+
 ## [9.167.0] - 2026-11-16
 
 ### Bug Fixes

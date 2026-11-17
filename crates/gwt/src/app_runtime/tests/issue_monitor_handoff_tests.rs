@@ -3413,7 +3413,8 @@ fn app_runtime_failed_live_handoff_delivery_keeps_the_answer_pending() {
         canvas_ids(&canvas),
         "the daemon watch must contain the same real GUI IDs/Issue/provenance before the RPC"
     );
-    let source_status = gwt::daemon_publisher::read_issue_monitor_status(&fixture.project_root)
+    let source_status = owner
+        .monitor_status()
         .expect("read the actual daemon's source readiness after canvas ACK")
         .expect("the fixed owner has a live Monitor driver");
     let source_row = source_status["inbox"]
@@ -3507,7 +3508,7 @@ fn app_runtime_failed_live_handoff_delivery_keeps_the_answer_pending() {
         owner.monitor_snapshot().map(|snapshot| snapshot.map(|snapshot| (snapshot.project_tab_id,
             snapshot.windows.into_iter().map(|window|
                 (window.window_id, window.issue_number, window.status, window.monitor_owned)).collect::<Vec<_>>()))),
-        gwt::daemon_publisher::read_issue_monitor_status(&fixture.project_root).map(|status| status.map(|status|
+        owner.monitor_status().map(|status| status.map(|status|
             serde_json::json!({"source":status["source"],"last_scan_at":status["last_scan_at"],
                 "occupied":status["occupied_slot_count"],"inbox":status["inbox"].as_array().map(|items|
                     items.iter().filter(|item| item["issue_number"] == 3165).map(|item|
