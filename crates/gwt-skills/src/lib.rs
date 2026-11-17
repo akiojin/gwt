@@ -482,9 +482,11 @@ mod tests {
             managed_hooks: vec![make_hook("pre-commit", "old-lint", true)],
             user_hooks: vec![make_hook("post-merge", "notify", false)],
         };
-        std::fs::write(&hooks_file, serde_json::to_string(&initial).unwrap()).unwrap();
-        backup_hooks(&hooks_file).unwrap();
-        std::fs::remove_file(hooks_file.with_extension("json.bak")).unwrap();
+        std::fs::write(
+            dir.path().join("hooks.json.20261117T184312007Z.bak"),
+            serde_json::to_string(&initial).unwrap(),
+        )
+        .unwrap();
         std::fs::write(&hooks_file, "").unwrap();
 
         let managed = vec![make_hook("pre-commit", "new-lint", true)];

@@ -6,9 +6,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use chrono::Utc;
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
+use time::{macros::format_description, OffsetDateTime};
 
 /// Marker prefix that identifies gwt-managed hooks.
 const GWT_MANAGED_MARKER: &str = "# gwt-managed";
@@ -85,8 +85,13 @@ fn backup_path_for(path: &Path) -> PathBuf {
 }
 
 /// Derive the timestamped backup path for a hooks file.
-fn timestamped_backup_path_for(path: &Path) -> PathBuf {
-    let stamp = Utc::now().format("%Y%m%dT%H%M%S%3fZ").to_string();
+fn timestamped_backup_path_for(path: &Path, now: OffsetDateTime) -> PathBuf {
+    let stamp = now
+        .to_utc()
+        .format(format_description!(
+            "[year][month][day]T[hour][minute][second][subsecond digits:3]Z"
+        ))
+        .expect("UTC timestamp contains every component of the backup filename");
     path.with_extension(format!("json.{stamp}.bak"))
 }
 
@@ -171,7 +176,7 @@ fn acquire_lock(path: &Path) -> Result<std::fs::File, HooksError> {
 pub fn backup_hooks(path: &Path) -> Result<PathBuf, HooksError> {
     crate::asset_io::ensure_safe_mutation(path, crate::asset_io::AssetRoute::Backup)?;
     let target = path.to_path_buf();
-    let timestamped = timestamped_backup_path_for(&target);
+    let timestamped = timestamped_backup_path_for(&target, OffsetDateTime::now_utc());
     let stable = backup_path_for(&target);
 
     crate::asset_io::backup(&target, &timestamped)?;
@@ -249,7 +254,7 @@ pub fn merge_hooks_safe(path: &Path, managed: &[Hook]) -> Result<(), HooksError>
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("hooks.json"),
-        Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        i64::try_from(OffsetDateTime::now_utc().unix_timestamp_nanos()).unwrap_or_default()
     ));
     let json = serde_json::to_string_pretty(&new_config)?;
     {
@@ -268,4 +273,18 @@ pub fn merge_hooks_safe(path: &Path, managed: &[Hook]) -> Result<(), HooksError>
     crate::asset_io::rename(&tmp_path, &target)?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn timestamped_backup_path_preserves_the_legacy_name() {
+        let instant = time::macros::datetime!(2026-11-17 18:43:12.007987654 UTC);
+        assert_eq!(
+            timestamped_backup_path_for(Path::new("hooks.json"), instant),
+            Path::new("hooks.json.20261117T184312007Z.bak")
+        );
+    }
 }
