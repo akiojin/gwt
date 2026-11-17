@@ -771,7 +771,9 @@ fn launch_failure_status_preserves_worker_profile_and_uses_background_snapshot_o
     assert_eq!(stale_gui_session.agent_id, gwt_agent::AgentId::Codex);
     assert_eq!(stale_gui_session.model.as_deref(), Some("worker-profile"));
     stale_gui_session.model = Some("gui-profile".into());
-    stale_gui_session.updated_at += chrono::Duration::seconds(1);
+    stale_gui_session.updated_at = (chrono::DateTime::from(stale_gui_session.updated_at)
+        + chrono::Duration::seconds(1))
+    .into();
     let mut runtime = sample_runtime(
         temp.path(),
         vec![sample_project_tab(

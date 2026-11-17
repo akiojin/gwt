@@ -7,8 +7,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use chrono::{DateTime, Utc};
 use fs2::FileExt;
+use gwt_core::timestamp::UtcTimestamp;
 use serde::{Deserialize, Serialize};
 
 use crate::{SessionExecutionIdentity, SessionRuntimeState};
@@ -47,7 +47,7 @@ impl LaunchIdentity {
 
 #[derive(Serialize, Deserialize)]
 struct BridgeResult {
-    started_at: DateTime<Utc>,
+    started_at: UtcTimestamp,
     transport_failed: bool,
 }
 
@@ -75,7 +75,7 @@ fn load_receipt(path: &Path) -> io::Result<Option<Receipt>> {
 pub struct SessionBridgeObservation {
     runtime_path: PathBuf,
     launch: LaunchIdentity,
-    started_at: DateTime<Utc>,
+    started_at: UtcTimestamp,
 }
 
 impl SessionBridgeObservation {
@@ -86,7 +86,7 @@ impl SessionBridgeObservation {
             .map(|launch| Self {
                 runtime_path: runtime_path.to_owned(),
                 launch,
-                started_at: Utc::now(),
+                started_at: UtcTimestamp::now(),
             }))
     }
 

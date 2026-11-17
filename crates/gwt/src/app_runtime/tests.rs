@@ -7798,6 +7798,11 @@ fn owner_monitor_fixture_with_prefs(
             &now,
         ))
         .unwrap();
+    gwt::issue_cache::set_issue_launch_readback_fixture(
+        &root,
+        issue,
+        &serde_json::json!({"state": "OPEN", "updatedAt": now}).to_string(),
+    );
     gwt::issue_monitor::mutate_project_agent_schedule(
         &root,
         &gwt_core::paths::gwt_sessions_dir(),
@@ -9429,6 +9434,11 @@ fn monitor_relaunch_fixture_with_settlement(
             "2026-08-13T00:00:00Z",
         ))
         .expect("seed monitored owner authority");
+    gwt::issue_cache::set_issue_launch_readback_fixture(
+        &repo,
+        3165,
+        r#"{"state":"OPEN","updatedAt":"2026-08-13T00:00:00Z"}"#,
+    );
     let worktree = case_root.join("issue-worktree");
     let target_branch = "work/issue-3165";
     let status = gwt_core::process::hidden_command("git")
@@ -9457,9 +9467,9 @@ fn monitor_relaunch_fixture_with_settlement(
     source.tool_version = Some("latest".to_string());
     source.skip_permissions = true;
     source.status = gwt_agent::AgentStatus::Stopped;
-    source.created_at = now;
-    source.updated_at = now;
-    source.last_activity_at = now;
+    source.created_at = now.into();
+    source.updated_at = now.into();
+    source.last_activity_at = now.into();
     if matches!(conversation, MonitorProviderConversationFixture::Unknown) {
         source.runtime_target = gwt_agent::LaunchRuntimeTarget::Docker;
         source.docker_service = Some("app".to_string());
@@ -9544,9 +9554,9 @@ fn monitor_relaunch_fixture_with_settlement(
         } else {
             gwt_agent::AgentStatus::Running
         };
-        holder_session.created_at = holder_at;
-        holder_session.updated_at = holder_at;
-        holder_session.last_activity_at = holder_at;
+        holder_session.created_at = holder_at.into();
+        holder_session.updated_at = holder_at.into();
+        holder_session.last_activity_at = holder_at.into();
         holder_session
             .save(&sessions_dir)
             .expect("save native conversation holder Session");
@@ -12616,7 +12626,7 @@ fn update_resume_fixture(temp: &Path, branch: &str) -> (PathBuf, AppRuntime) {
     session.record_completed_stop();
     // Older than the 24h startup auto-resume window: skipped on a normal
     // launch, resumed when the launch is the tail of an update apply.
-    session.last_activity_at = chrono::Utc::now() - chrono::Duration::hours(30);
+    session.last_activity_at = (chrono::Utc::now() - chrono::Duration::hours(30)).into();
     session
         .save(&runtime.sessions_dir)
         .expect("save stale resumable session");
@@ -12767,7 +12777,7 @@ fn restore_admission_summary(events: &[CapturedTracingEvent]) -> &CapturedTracin
 fn age_restore_fixture_session(sessions_dir: &Path, session_id: &str, age: chrono::Duration) {
     let path = sessions_dir.join(format!("{session_id}.toml"));
     let mut session = gwt_agent::Session::load(&path).expect("load restore fixture session");
-    session.last_activity_at = chrono::Utc::now() - age;
+    session.last_activity_at = (chrono::Utc::now() - age).into();
     session
         .save(sessions_dir)
         .expect("save aged fixture session");

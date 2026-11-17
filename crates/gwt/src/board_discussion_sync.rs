@@ -378,6 +378,8 @@ fn received_comment(comment: &DiscussionComment, topic: &Topic) -> Option<BoardE
     if comment.body.trim().is_empty() || comment.body.len() > MAX_COMMENT_BYTES {
         return None;
     }
+    let (seconds, nanoseconds) = comment.created_at.unix_parts();
+    let created_at = DateTime::from_timestamp(seconds, nanoseconds)?;
     let mut entry = BoardEntry::new(
         coordination::AuthorKind::User,
         &comment.author,
@@ -389,8 +391,8 @@ fn received_comment(comment: &DiscussionComment, topic: &Topic) -> Option<BoardE
         topic.root.related_owners.clone(),
     );
     entry.id = format!("github-discussion-comment:{}", comment.id);
-    entry.created_at = comment.created_at;
-    entry.updated_at = comment.created_at;
+    entry.created_at = created_at;
+    entry.updated_at = created_at;
     entry.audience = topic.root.audience.clone();
     Some(entry)
 }
@@ -724,7 +726,7 @@ pub(crate) fn schedule(_root: &Path) {}
 mod tests {
     use super::*;
     use gwt_core::coordination::{AuthorKind, BoardEntryKind};
-    use gwt_github::client::http::BoardDiscussion;
+    use gwt_github::client::http::{BoardDiscussion, Rfc3339Timestamp};
     use std::cell::{Cell, RefCell};
 
     struct RemoteTopic {
@@ -814,7 +816,7 @@ mod tests {
                 id: format!("{id}_C{}", topic.comments.len()),
                 body: body.into(),
                 author: "collaborator".into(),
-                created_at: DateTime::UNIX_EPOCH,
+                created_at: Rfc3339Timestamp::parse("1970-01-01T00:00:00Z").unwrap(),
             });
             if self.fail_post_after_commit.replace(false) {
                 return Err(ApiError::Network("response lost".into()));
@@ -1061,6 +1063,8 @@ mod tests {
         let entry = post(root.path(), BoardEntryKind::Decision, "topic");
         synchronize(root.path(), &mut state, &remote).unwrap();
         remote.post("D_1", "human response").unwrap();
+        remote.topics.borrow_mut()[0].comments[0].created_at =
+            Rfc3339Timestamp::parse("2017-01-01T00:59:60.125+01:00").unwrap();
         synchronize(root.path(), &mut state, &remote).unwrap();
         let comments = coordination::load_snapshot(root.path())
             .unwrap()
@@ -1072,7 +1076,9 @@ mod tests {
             .unwrap();
         assert_eq!(received.parent_id.as_deref(), Some(entry.id.as_str()));
         assert_eq!(received.author, "collaborator");
-        assert_eq!(received.created_at, DateTime::UNIX_EPOCH);
+        let serialized = serde_json::to_value(received).unwrap();
+        assert_eq!(serialized["created_at"], "2016-12-31T23:59:60.125Z");
+        assert_eq!(serialized["updated_at"], "2016-12-31T23:59:60.125Z");
         let cursor = state.topics[&entry.id].cursor.clone();
         synchronize(root.path(), &mut state, &remote).unwrap();
         assert_eq!(state.topics[&entry.id].cursor, cursor);

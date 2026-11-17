@@ -1305,9 +1305,7 @@ fn knowledge_related_agent_from_workspace_history(
 fn knowledge_related_work_from_session(
     session: &gwt_agent::Session,
 ) -> gwt::KnowledgeRelatedWorkView {
-    let updated_at = session
-        .updated_at
-        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let updated_at = session.updated_at.to_rfc3339_seconds();
     let is_active = session_status_is_active(session.status);
     let sessions = session
         .agent_session_id

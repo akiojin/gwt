@@ -978,10 +978,24 @@ fn windows_regression_slices_build_each_harness_once_and_gate_all_filters() {
             );
             for capture in invocation.captures_iter(run) {
                 assert!(build < index, "{name} must build before running filters");
-                assert!(
-                    step["if"].is_null(),
-                    "all regression filters run unconditionally"
-                );
+                if step["name"] == "Repeat pending-endpoint Quit regression on Windows" {
+                    assert!(lib);
+                    assert_eq!(
+                        step["if"],
+                        "${{ needs.source-sync.outputs.quit_subscriber_changed != 'false' }}"
+                    );
+                    assert!(step["continue-on-error"].is_null());
+                    assert_eq!(step["shell"], "bash");
+                    assert!(run.contains("for (( run = 1; run <= 50; run++ )); do"));
+                    assert!(
+                        run.contains("grep -Fq 'test result: ok. 1 passed; 0 failed; 0 ignored;'")
+                    );
+                } else {
+                    assert!(
+                        step["if"].is_null(),
+                        "all default regression filters run unconditionally"
+                    );
+                }
                 assert_eq!(&capture[1], command);
                 let filter = &capture[2];
                 assert_eq!(filter.split_whitespace().nth(1) == Some("lib"), lib);
@@ -1126,6 +1140,7 @@ fn windows_regression_slices_build_each_harness_once_and_gate_all_filters() {
         "gwt lib gwt cli::daemon::client -- --test-threads=1",
         "gwt lib gwt cli::daemon::tests -- --test-threads=1",
         "gwt lib gwt daemon_subscriber -- --test-threads=1",
+        "gwt lib gwt daemon_subscriber::project_owner_tests::explicit_quit_retries_an_endpoint_published_during_delivery -- --exact --test-threads=1 |",
         "gwt lib gwt daemon_supervisor -- --test-threads=1",
         "gwt lib gwt process::tests -- --test-threads=1",
         "gwt-core lib gwt_core daemon_pipe_name -- --test-threads=1",
@@ -1155,7 +1170,7 @@ fn windows_regression_slices_build_each_harness_once_and_gate_all_filters() {
         "gwt test cli_contracts memory_cli_test::memory_add_writes_to_machine_local_work_notes -- --exact --test-threads=1 --nocapture",
         "gwt test cli_contracts gwtd_cli_test::auto_feedback_real_worker_has_no_consent_auth_process_or_raw_sinks -- --exact --test-threads=1 --nocapture",
     ];
-    assert_eq!(expected_filters.len(), 72);
+    assert_eq!(expected_filters.len(), 73);
     expected_filters.sort_unstable();
     actual_filters.sort_unstable();
     assert_eq!(actual_filters, expected_filters);

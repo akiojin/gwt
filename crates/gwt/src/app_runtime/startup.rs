@@ -554,7 +554,7 @@ fn startup_auto_resume_is_fresh(
     session: &gwt_agent::Session,
     now: chrono::DateTime<chrono::Utc>,
 ) -> bool {
-    now.signed_duration_since(session.last_activity_at)
+    now.signed_duration_since(chrono::DateTime::from(session.last_activity_at))
         <= chrono::Duration::seconds(STARTUP_AUTO_RESUME_STALE_AFTER_SECS)
 }
 

@@ -105,7 +105,8 @@ mod tests {
         session.repo_hash = repo_hash.map(str::to_string);
         session.last_activity_at = Utc
             .with_ymd_and_hms(2026, 6, 10, 12, last_activity_minute, 0)
-            .unwrap();
+            .unwrap()
+            .into();
         session
     }
 

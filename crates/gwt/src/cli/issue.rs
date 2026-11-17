@@ -3753,7 +3753,33 @@ fn run_monitor_stop<E: CliEnv>(
             // whose row is long gone. Every other mismatch means the caller is
             // talking about a different launch, and stays completely inert.
             let mut payload = issue_monitor_stop_refusal(number, *mismatch, &identity);
-            if matches!(mismatch, crate::IssueMonitorStopMismatch::NotRunning) {
+            // The raw daemon projection includes physical slot occupancy. A
+            // pane can remain observable after closure removes its durable
+            // launch identity. A projection is evidence for diagnosis only.
+            let observed = (!identity.active
+                && matches!(
+                    mismatch,
+                    crate::IssueMonitorStopMismatch::UnknownIssue
+                        | crate::IssueMonitorStopMismatch::NotRunning
+                ))
+            .then(|| monitor_status_projection(&project_root))
+            .flatten()
+            .filter(|status| status.active_launches.contains(&number));
+            if let Some(status) = observed {
+                let row = status.inbox.iter().find(|row| row.issue_number == number);
+                payload["mismatch"] = "launch_record_missing".into();
+                payload["observed_launch"] = serde_json::json!({
+                    "active": true,
+                    "inbox_state": row.map(|row| row.state),
+                    "window_id": row.and_then(|row| row.launched_window_id.as_deref()),
+                });
+                payload["detail"] = "The daemon counts an active slot for this Issue. The persisted launch record is missing. In this project, compare pane.list with active_sessions in issue.monitor.status, then use pane.close with the confirmed pane id.".into();
+                payload["recovery"] = serde_json::json!({
+                    "schema_version": 1,
+                    "operation": "pane.list",
+                    "params": {},
+                });
+            } else if matches!(mismatch, crate::IssueMonitorStopMismatch::NotRunning) {
                 merge_generation_release(
                     &mut payload,
                     release_revoked_launch_generation(&project_root, number, reason),
@@ -15217,6 +15243,10 @@ mod tests {
                                 "state": "launched",
                                 "github_state": "closed",
                                 "launched_window_id": "tab-1::closed"
+                            }, {
+                                "issue_number": 47,
+                                "state": "not_ready",
+                                "github_state": "open"
                             }],
                             "max_active": 1,
                             "max_active_last_change": {
@@ -15236,7 +15266,6 @@ mod tests {
                     })
                 )
                 .expect("write live status");
-                return;
             }
         });
 
@@ -15246,6 +15275,23 @@ mod tests {
             &mut env,
             IssueCommand::MonitorStatus { project_root: None },
             &mut out,
+        );
+        // Issue #7569: the daemon still counts a live pane after its launch
+        // binding disappears. A stale Open row is only an observation.
+        let prefs_before_stop = std::fs::read(&prefs_path).expect("prefs before stop");
+        let mut stop_out = String::new();
+        let stop_result = run(
+            &mut env,
+            IssueCommand::MonitorStop {
+                project_root: None,
+                number: 47,
+                reason: "release the observed slot".to_string(),
+                remove_from_queue: true,
+                claim_id: None,
+                delivery_id: None,
+                window_id: None,
+            },
+            &mut stop_out,
         );
         stop.store(true, Ordering::Release);
         server.join().expect("live daemon joins");
@@ -15306,6 +15352,22 @@ mod tests {
         assert_eq!(released["state"], "queued");
         assert!(released["claim_id"].is_null());
         assert!(released["launched_window_id"].is_null());
+
+        assert_eq!(stop_result.expect("stop runs"), 1);
+        let refusal: serde_json::Value =
+            serde_json::from_str(stop_out.trim()).expect("stop refusal JSON");
+        assert_eq!(refusal["mismatch"], "launch_record_missing", "{refusal}");
+        assert_eq!(refusal["live_launch"]["active"], false);
+        assert_eq!(refusal["observed_launch"]["inbox_state"], "not_ready");
+        assert_eq!(refusal["recovery"]["operation"], "pane.list");
+        assert!(refusal["detail"]
+            .as_str()
+            .expect("detail")
+            .contains("pane.close"));
+        assert_eq!(
+            std::fs::read(&prefs_path).expect("prefs after stop"),
+            prefs_before_stop
+        );
     }
 
     #[test]

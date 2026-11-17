@@ -1055,6 +1055,72 @@ fn fetch_issue_snapshot(repo_path: &Path, number: IssueNumber) -> Result<IssueSn
     parse_issue_snapshot(&stdout, number)
 }
 
+/// Read only the Issue fields needed for launch admission. Unlike cache
+/// ingestion, an absent or unrecognized state is insufficient to confirm Open.
+pub(crate) fn fetch_issue_state_for_launch(
+    repo_path: &Path,
+    number: u64,
+) -> Result<(IssueState, String), String> {
+    fn parse(response: &str) -> Result<(IssueState, String), String> {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct IssueRevision {
+            state: String,
+            updated_at: String,
+        }
+        let revision: IssueRevision = serde_json::from_str(response).map_err(|e| e.to_string())?;
+        chrono::DateTime::parse_from_rfc3339(&revision.updated_at).map_err(|e| e.to_string())?;
+        let state = match revision.state.as_str() {
+            "OPEN" => IssueState::Open,
+            "CLOSED" => IssueState::Closed,
+            _ => return Err("unexpected GitHub Issue state".into()),
+        };
+        Ok((state, revision.updated_at))
+    }
+
+    #[cfg(any(test, feature = "test-gh-guard"))]
+    if let Some(response) = gwt_core::test_support::gwt_home_override().and_then(|_| {
+        std::fs::read_to_string(issue_launch_readback_fixture_path(repo_path, number)).ok()
+    }) {
+        return parse(&response);
+    }
+
+    let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+        gwt_core::operation_deadline::now() + Duration::from_secs(5),
+    );
+    let (owner, repo) = crate::issue_monitor_worker::github_remote_owner_and_repo(repo_path)
+        .map_err(|error| error.to_string())?;
+    let response = run_gh_issue_command(
+        repo_path,
+        &[
+            "issue",
+            "view",
+            &number.to_string(),
+            "--repo",
+            &format!("{owner}/{repo}"),
+            "--json",
+            "state,updatedAt",
+        ],
+        "gh issue launch state",
+    )?;
+    parse(&response)
+}
+
+/// Give owner fixtures a live readback independent of their cached Issue.
+#[cfg(any(test, feature = "test-gh-guard"))]
+#[doc(hidden)]
+pub fn set_issue_launch_readback_fixture(root: &Path, number: u64, response: &str) {
+    let path = issue_launch_readback_fixture_path(root, number);
+    std::fs::create_dir_all(path.parent().expect("fixture parent")).unwrap();
+    std::fs::write(path, response).unwrap();
+}
+
+#[cfg(any(test, feature = "test-gh-guard"))]
+fn issue_launch_readback_fixture_path(root: &Path, number: u64) -> PathBuf {
+    crate::issue_monitor_prefs_path_for_repo_path(root)
+        .with_file_name(format!("fixture-issue-{number}-readback.json"))
+}
+
 fn parse_issue_state(value: Option<&str>) -> IssueState {
     match value {
         Some("CLOSED" | "closed") => IssueState::Closed,

@@ -3130,11 +3130,7 @@ impl AppRuntime {
                     display_name: session.display_name.clone(),
                     branch: (!session.branch.trim().is_empty()).then(|| session.branch.clone()),
                     worktree_path: Some(session.worktree_path.display().to_string()),
-                    last_activity_at: Some(
-                        session
-                            .last_activity_at
-                            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-                    ),
+                    last_activity_at: Some(session.last_activity_at.to_rfc3339_seconds()),
                     resume_kind: resume_kind_for_session(session),
                     lifecycle_status: lifecycle_status_for_session(session),
                 });
