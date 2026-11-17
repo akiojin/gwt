@@ -9288,7 +9288,7 @@ fn daemon_run_secret() -> &'static [u8] {
         .as_slice()
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn scan_issue_monitor_once_blocking(
     scope: RuntimeScope,
     monitor: crate::IssueMonitorState,
