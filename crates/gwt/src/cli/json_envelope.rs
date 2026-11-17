@@ -378,6 +378,15 @@ pub(super) fn dispatch_input<E: CliEnv>(
 fn attach_error_metadata(payload: &mut Value, error: Option<&gwt_github::SpecOpsError>) {
     use gwt_github::{ApiError, SpecOpsError};
     let (category, code) = match error {
+        Some(SpecOpsError::LocalIo(error)) => match error.kind() {
+            std::io::ErrorKind::NotFound => ("not_found", "NOT_FOUND_LOCAL_RESOURCE"),
+            std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::WouldBlock => {
+                ("conflict", "CONFLICT_LOCAL_STATE")
+            }
+            std::io::ErrorKind::PermissionDenied => ("permission", "PERMISSION_DENIED"),
+            std::io::ErrorKind::InvalidInput => ("input", "INPUT_INVALID_PARAMS"),
+            _ => ("internal", "INTERNAL_LOCAL_IO"),
+        },
         Some(SpecOpsError::Api(ApiError::NotFound(_))) => ("not_found", "NOT_FOUND_ISSUE"),
         Some(SpecOpsError::Api(ApiError::CommentNotFound(_))) => ("not_found", "NOT_FOUND_COMMENT"),
         Some(SpecOpsError::SectionNotFound(_)) => ("not_found", "NOT_FOUND_SECTION"),
@@ -3765,6 +3774,46 @@ mod tests {
             assert_eq!(reply["error_code"], "PERMISSION_AUTHORITY");
             assert_eq!(reply["refusal"], refusal);
         }
+    }
+
+    #[test]
+    fn issue_7521_stale_queue_order_is_a_conflict_through_the_handler() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let repo = temp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(&path, &Default::default()).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let mut env = TestEnv::new(repo);
+        env.stdin = envelope(
+            "issue.monitor.queue.move",
+            json!({
+                "number":42, "position":0, "expected_queue_order":[42]
+            }),
+        );
+        assert_eq!(super::dispatch(&mut env, "gwtd"), 1);
+        let reply: Value = serde_json::from_slice(&env.stdout).unwrap();
+        assert_eq!(reply["error_category"], "conflict");
+        assert_eq!(reply["error_code"], "CONFLICT_LOCAL_STATE");
+        assert!(reply["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("network error: queue_order changed"));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn issue_7521_linked_pr_transport_failure_remains_external() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let mut env = TestEnv::new(temp.path().join("repo"));
+        env.linked_pr_errors.insert(42, "connection reset".into());
+        env.stdin = envelope("issue.linked_prs", json!({"number":42,"refresh":true}));
+        assert_eq!(super::dispatch(&mut env, "gwtd"), 1);
+        let reply: Value = serde_json::from_slice(&env.stdout).unwrap();
+        assert_eq!(reply["error_category"], "external");
+        assert_eq!(reply["error_code"], "EXTERNAL_NETWORK");
     }
 
     #[test]

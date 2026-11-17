@@ -26,6 +26,10 @@ pub enum SpecOpsError {
     /// A local operation failure, without implying a network or API cause.
     #[error("{0}")]
     Operation(String),
+    /// Preserve the local I/O kind for structured callers. Retain the legacy
+    /// display prefix used before these failures were separated from Network.
+    #[error("network error: {0}")]
+    LocalIo(#[source] std::io::Error),
     #[error(transparent)]
     Api(#[from] ApiError),
     #[error(transparent)]
