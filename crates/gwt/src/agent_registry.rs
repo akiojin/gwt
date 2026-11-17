@@ -7852,7 +7852,11 @@ mod tests {
             "the registration naming the wedged Session is cleared"
         );
 
-        // A registration naming a different Session still fences NEW.
+        // A registration naming a different Session still fences NEW: it is
+        // never cleared by the recovery path, and the current assignment is
+        // left exactly as the successful launch prepared it. (The guard
+        // that fires is the identity import's, because that Session does
+        // not exist on disk.)
         crate::pm_registry::mutate_pm_prefs(&prefs_path, |prefs| {
             prefs.registration = Some(crate::pm_registry::PmRegistration {
                 session_id: "another-session".into(),
@@ -7866,8 +7870,27 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("Resume the registered PM conversation"),
+                .contains("Registered PM Session is unavailable"),
             "{error}"
+        );
+        assert_eq!(
+            crate::pm_registry::load_pm_prefs(&prefs_path)
+                .unwrap()
+                .registration
+                .map(|registration| registration.session_id),
+            Some("another-session".to_string()),
+            "another Session's registration is never cleared"
+        );
+        let key = gwt_core::paths::project_scope_hash(&root);
+        let registry = load().unwrap().unwrap();
+        let member = selected_pm_member(&registry, key.as_str()).expect("configured PM member");
+        assert_eq!(
+            member
+                .assignment
+                .as_ref()
+                .map(|assignment| assignment.reservation_id.as_str()),
+            Some("recovery-attempt"),
+            "the fenced launch leaves the current assignment untouched"
         );
     }
 
