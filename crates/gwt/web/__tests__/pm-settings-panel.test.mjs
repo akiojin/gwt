@@ -613,6 +613,23 @@ test("FR-026: Restart は confirm を通ったときだけ restart_pm_agent を�
   assert.deepEqual(accepted.sent.at(-1), { kind: "restart_pm_agent" });
 });
 
+test("Issue #7542: a failed PM launch is shown as not running and keeps Restart available", () => {
+  const { document, panel, sent } = fixture();
+  const block = { kind: "launch_failed", permanent: false, restart_clears_it: true, reason: "the launch was refused", required_operation: "Press Restart Project Manager in Settings.", observed_at: "2026-11-17T10:00:00Z" };
+  panel.applyStatus({ ...RUNNING_STATUS, is_running: false, running_agent_id: null, start_block: block });
+  const line = required(document, '[data-role="pm-start-block"]');
+  assert.equal(line.hidden, false);
+  assert.equal(line.textContent, "The Project Manager is not running: the launch was refused. Press Restart Project Manager in Settings.");
+  const restart = required(document, '[data-role="pm-restart"]');
+  assert.equal(restart.disabled, false);
+  restart.click();
+  assert.deepEqual(sent.at(-1), { kind: "restart_pm_agent" });
+
+  panel.applyStatus({ ...RUNNING_STATUS, is_running: false, start_block: { ...block, kind: "migration_pending", permanent: true, restart_clears_it: false } });
+  assert.match(line.textContent, /Restarting will not clear this/);
+  assert.equal(restart.disabled, true);
+});
+
 test("Issue #7030: inherited PM model and effort do not create a false Pending chip", () => {
   const { document, panel } = fixture();
   panel.applyStatus({ ...RUNNING_STATUS, running_model: "gpt-6-astra", running_reasoning: "high" });
