@@ -467,6 +467,7 @@ pub(crate) struct OwnerDaemonFixture {
     pub(crate) scan: Arc<OwnerMonitorScanGate>,
     pub(crate) monitor_snapshot:
         tokio::sync::watch::Receiver<Option<crate::IssueMonitorWindowSnapshot>>,
+    pub(crate) hub: BroadcastHub,
     endpoint_path: PathBuf,
     socket_path: PathBuf,
     shutdown: Arc<DaemonShutdown>,
@@ -562,7 +563,7 @@ impl OwnerDaemonFixture {
         let server = run_bound_server(
             endpoint.clone(),
             endpoint_path.into(),
-            hub,
+            hub.clone(),
             shutdown.clone(),
             crate::IssueMonitorConfig {
                 poll_interval_secs: 3600,
@@ -594,6 +595,7 @@ impl OwnerDaemonFixture {
             owner,
             scan,
             monitor_snapshot,
+            hub,
             endpoint_path: endpoint_path.into(),
             socket_path,
             shutdown,
