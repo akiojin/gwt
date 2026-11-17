@@ -1,7 +1,46 @@
 //! JSONL formatting layer used by `init` to persist events to disk.
 
+use time::{OffsetDateTime, UtcOffset};
 use tracing_appender::non_blocking::NonBlocking;
-use tracing_subscriber::fmt::{self, time::ChronoLocal};
+use tracing_subscriber::fmt;
+
+struct LocalRfc3339;
+
+impl fmt::time::FormatTime for LocalRfc3339 {
+    fn format_time(&self, writer: &mut fmt::format::Writer<'_>) -> std::fmt::Result {
+        let now = OffsetDateTime::now_utc();
+        let offset = UtcOffset::local_offset_at(now).unwrap_or(UtcOffset::UTC);
+        write_log_timestamp(writer, now.to_offset(offset))
+    }
+}
+
+/// Preserve the timestamp bytes written by the previous JSONL timer.
+fn write_log_timestamp(writer: &mut impl std::fmt::Write, at: OffsetDateTime) -> std::fmt::Result {
+    write!(
+        writer,
+        "{}T{:02}:{:02}:{:02}",
+        at.date(),
+        at.hour(),
+        at.minute(),
+        at.second()
+    )?;
+
+    let nanos = at.nanosecond();
+    if nanos != 0 {
+        if nanos.is_multiple_of(1_000_000) {
+            write!(writer, ".{:03}", nanos / 1_000_000)?;
+        } else if nanos.is_multiple_of(1_000) {
+            write!(writer, ".{:06}", nanos / 1_000)?;
+        } else {
+            write!(writer, ".{nanos:09}")?;
+        }
+    }
+
+    let offset_seconds = at.offset().whole_seconds();
+    let sign = if offset_seconds < 0 { '-' } else { '+' };
+    let minutes = (offset_seconds.unsigned_abs() + 30) / 60;
+    write!(writer, "{sign}{:02}:{:02}", minutes / 60, minutes % 60)
+}
 
 /// Build the JSONL fmt layer that writes structured events to the
 /// non-blocking appender.
@@ -22,7 +61,7 @@ where
         .with_line_number(false)
         .with_thread_ids(false)
         .with_thread_names(false)
-        .with_timer(ChronoLocal::rfc_3339())
+        .with_timer(LocalRfc3339)
         .with_writer(writer)
 }
 
@@ -56,7 +95,7 @@ where
             .json()
             .with_current_span(true)
             .with_span_list(false)
-            .with_timer(ChronoLocal::rfc_3339())
+            .with_timer(LocalRfc3339)
             .format_event(ctx, fmt::format::Writer::new(&mut line), event)?;
         let scope = self.router.resolve(event, ctx.event_scope());
         if let Some(token) = &scope {
@@ -70,5 +109,38 @@ where
         self.router
             .write(scope.as_deref(), line.as_bytes())
             .map_err(|_| std::fmt::Error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use time::macros::datetime;
+
+    use super::*;
+
+    #[test]
+    fn log_timestamp_preserves_legacy_offset_and_subsecond_precision() {
+        for (instant, expected) in [
+            (
+                datetime!(2026-11-17 18:43:12 UTC),
+                "2026-11-17T18:43:12+00:00",
+            ),
+            (
+                datetime!(2026-11-17 18:43:12.007 +09:00),
+                "2026-11-17T18:43:12.007+09:00",
+            ),
+            (
+                datetime!(2026-11-17 18:43:12.007980 -03:30),
+                "2026-11-17T18:43:12.007980-03:30",
+            ),
+            (
+                datetime!(2026-11-17 18:43:12.007987654 +05:45:31),
+                "2026-11-17T18:43:12.007987654+05:46",
+            ),
+        ] {
+            let mut output = String::new();
+            write_log_timestamp(&mut output, instant).unwrap();
+            assert_eq!(output, expected);
+        }
     }
 }
