@@ -1677,6 +1677,9 @@ impl BoardDaemonSubscriberRegistry {
         }
         self.subscribers
             .retain(|project_root, _| active_roots.contains(project_root));
+        if app.daemon_supervisor.update_in_progress() {
+            return;
+        }
         let owner_contexts: HashMap<_, _> = app
             .project_states
             .values()
@@ -2533,14 +2536,15 @@ enum UserEvent {
     },
     /// Payload resolution failed; release apply admission before reporting it.
     UpdateApplyResolutionFailed(OutboundEvent),
-    /// Issue #4038 (AC-1): commit a persisted update manifest gracefully on
-    /// the event-loop thread: write the resume marker, spawn the helper
-    /// once, clear the manifest, then quit through `QuitApp` with
-    /// `GuiShutdownReason::ApplyUpdate`. Replaces every worker-thread
-    /// `exit(0)`.
+    /// Admit a staged update, then prepare daemon retirement and commit on a worker.
     ApplyUpdateGraceful {
         manifest: gwt_core::update::PendingUpdateManifest,
         client_id: ClientId,
+    },
+    UpdateApplyFinished {
+        version: String,
+        client_id: ClientId,
+        result: Result<String, String>,
     },
     /// SPEC-2041 Phase 19 (FR-056): worker thread completed `prepare_update`
     /// and the prepared payload is ready on disk. Dispatcher broadcasts
@@ -2688,7 +2692,7 @@ mod tests {
             .unwrap()
             .1;
         let apply = startup
-            .find("if update_front_door::try_apply_pending_update_at_bootstrap()")
+            .find("if update_front_door::try_apply_pending_update_at_bootstrap(&startup_dir)")
             .unwrap();
         assert!(
             startup
@@ -10473,7 +10477,7 @@ fn main() -> std::io::Result<()> {
 
     // Only the singleton owner may bootstrap a staged update. A duplicate
     // launch must never install while another GUI still owns running panes.
-    if update_front_door::try_apply_pending_update_at_bootstrap() {
+    if update_front_door::try_apply_pending_update_at_bootstrap(&startup_dir) {
         return Ok(());
     }
 
@@ -10967,6 +10971,8 @@ fn main() -> std::io::Result<()> {
 
     let mut gui_shutdown = GuiShutdownCoordinator::default();
     let mut update_apply_admission = update_front_door::UpdateApplyAdmission::default();
+    let mut quit_after_update_attempt = None;
+    let cancel_update_for_quit = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut board_refresh_queue = BoardRefreshQueue::default();
     let mut active_work_refresh_queue = ActiveWorkRefreshQueue::default();
     // Reuse the context-aware queue; roster refreshes do not retain Board views.
@@ -11144,6 +11150,15 @@ fn main() -> std::io::Result<()> {
             }
         };
         let app = app.as_mut().expect("startup complete");
+        if let Event::UserEvent(UserEvent::QuitApp { reason }) = &event {
+            if app.agent_maintenance.app_update_committing
+                && !matches!(reason, GuiShutdownReason::ApplyUpdate { .. })
+            {
+                cancel_update_for_quit.store(true, std::sync::atomic::Ordering::Release);
+                quit_after_update_attempt = Some(reason.clone());
+                return;
+            }
+        }
         if matches!(&event, Event::UserEvent(UserEvent::QuitApp { .. })) {
             app.daemon_supervisor.shutdown();
             board_daemon_subscribers.request_quit();
@@ -12210,8 +12225,8 @@ fn main() -> std::io::Result<()> {
                 // SPEC-2041 Phase 19 (T-130/T-133) + Issue #4038 (AC-2):
                 // consume the persisted manifest if it exists so we don't
                 // re-download the same payload; otherwise download + persist
-                // on a worker thread. Either way the commit happens through
-                // `ApplyUpdateGraceful` on this thread, never via `exit(0)`.
+                // on a worker thread. Either way the GUI admits the same
+                // `ApplyUpdateGraceful` event and eventually quits via QuitApp.
                 spawn_update_apply_resolution(
                     proxy.clone(),
                     state,
@@ -12238,9 +12253,6 @@ fn main() -> std::io::Result<()> {
                     "pending_applying",
                     "graceful apply commit started",
                 );
-                let log_path = gwt_core::update::update_log_path()
-                    .to_string_lossy()
-                    .to_string();
                 let marker = gwt_core::update::UpdateResumeMarker {
                     from_version: env!("CARGO_PKG_VERSION").to_string(),
                     to_version: manifest.version.clone(),
@@ -12249,12 +12261,35 @@ fn main() -> std::io::Result<()> {
                     projects: app.update_resume_projects(),
                     attempt: 1,
                 };
-                match update_front_door::stage_graceful_update_apply(
-                    manifest,
-                    &marker,
-                    client_id == app_runtime::UPDATE_AUTO_APPLY_CLIENT_ID
-                        || client_id == app_runtime::UPDATE_MANUAL_DRAIN_CLIENT_ID,
-                ) {
+                let roots = app.tabs.iter()
+                    .filter(|tab| tab.kind == gwt::ProjectKind::Git)
+                    .map(|tab| tab.project_root.clone())
+                    .collect::<Vec<_>>();
+                let supervisor = app.daemon_supervisor.clone();
+                supervisor.set_update_in_progress(true);
+                let presence = std::mem::take(&mut board_daemon_subscribers.owner_subscribers);
+                let proxy = proxy.clone();
+                let cancelled = cancel_update_for_quit.clone();
+                app.blocking_tasks.spawn(move || {
+                    let scheduled = client_id == app_runtime::UPDATE_AUTO_APPLY_CLIENT_ID
+                        || client_id == app_runtime::UPDATE_MANUAL_DRAIN_CLIENT_ID;
+                    let result = gwt::daemon_supervisor::UpdateDaemonRetirement::capture(
+                        &roots, Some(&supervisor),
+                    ).and_then(|retirement| {
+                        update_front_door::stage_graceful_update_apply(manifest, &marker, scheduled, || {
+                            retirement.retire(|| drop(presence), || cancelled.load(std::sync::atomic::Ordering::Acquire))
+                        })
+                    });
+                    record_update_dispatch_result(
+                        proxy.send_event(UserEvent::UpdateApplyFinished {
+                            version: marker.to_version, client_id, result,
+                        }),
+                        "dispatch_update_apply_finished",
+                    );
+                });
+            }
+            Event::UserEvent(UserEvent::UpdateApplyFinished { version, client_id, result }) => {
+                match result {
                     Ok(version) => {
                         gwt_core::update::log_update_event(
                             "graceful_apply_committed",
@@ -12270,8 +12305,10 @@ fn main() -> std::io::Result<()> {
                     Err(message) => {
                         update_apply_admission.failed();
                         app.agent_maintenance.app_update_committing = false;
+                        app.daemon_supervisor.set_update_in_progress(false);
+                        board_daemon_subscribers.sync(app, proxy.clone());
                         app.record_update_apply_observation(
-                            &marker.to_version,
+                            &version,
                             "pending_failed",
                             &message,
                         );
@@ -12286,9 +12323,11 @@ fn main() -> std::io::Result<()> {
                             message: Some(message.clone()),
                             stage: Some("Restart now".to_string()),
                             reason: Some(message.clone()),
-                            log_path: Some(log_path),
+                            log_path: Some(gwt_core::update::update_log_path().to_string_lossy().into_owned()),
                         };
-                        let failure = if client_id == UPDATE_CONTROL_CLIENT_ID {
+                        let scheduled = client_id == app_runtime::UPDATE_AUTO_APPLY_CLIENT_ID
+                            || client_id == app_runtime::UPDATE_MANUAL_DRAIN_CLIENT_ID;
+                        let failure = if scheduled || client_id == UPDATE_CONTROL_CLIENT_ID {
                             OutboundEvent::broadcast(failure)
                         } else {
                             OutboundEvent::reply(client_id, failure)
@@ -12296,19 +12335,26 @@ fn main() -> std::io::Result<()> {
                         let mut events = Vec::new();
                         if gwt_core::update::load_update_apply_result().is_some_and(|result| {
                             result.outcome == gwt_core::update::UpdateApplyOutcome::Failure
-                                && result.to_version == marker.to_version
+                                && result.to_version == version
                                 && result.message.as_deref() == Some(message.as_str())
                         }) {
-                            events.extend(failed_update_reset_events(app, &marker.to_version));
+                            events.extend(failed_update_reset_events(app, &version));
+                        } else if scheduled {
+                            events.extend(app.release_update_auto_apply_events(
+                                &version, app_runtime::UpdateAutoApplyRelease::PreviousFailure,
+                            ));
                         }
                         events.extend([
                             OutboundEvent::global_update_notice(
                                 "error",
-                                format!("Update v{} could not be applied: {message}", marker.to_version),
+                                format!("Update v{version} could not be applied: {message}"),
                             ),
                             failure,
                         ]);
                         clients.dispatch(events);
+                        if let Some(reason) = quit_after_update_attempt.take() {
+                            let _ = proxy.send_event(UserEvent::QuitApp { reason });
+                        }
                     }
                 }
             }

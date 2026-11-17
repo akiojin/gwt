@@ -242,6 +242,7 @@ pub struct DaemonSupervisor {
     ensure_attempts: AtomicUsize,
     in_flight: Mutex<HashSet<String>>,
     stopped: AtomicBool,
+    update_in_progress: AtomicBool,
 }
 
 /// Keeps one project's queued or running ensure pass unique until its task drops.
@@ -270,6 +271,7 @@ impl DaemonSupervisor {
             ensure_attempts: AtomicUsize::new(0),
             in_flight: Mutex::new(HashSet::new()),
             stopped: AtomicBool::new(false),
+            update_in_progress: AtomicBool::new(false),
         }
     }
 
@@ -285,6 +287,7 @@ impl DaemonSupervisor {
             ensure_attempts: AtomicUsize::new(0),
             in_flight: Mutex::new(HashSet::new()),
             stopped: AtomicBool::new(false),
+            update_in_progress: AtomicBool::new(false),
         }
     }
 
@@ -303,7 +306,16 @@ impl DaemonSupervisor {
             ensure_attempts: AtomicUsize::new(0),
             in_flight: Mutex::new(HashSet::new()),
             stopped: AtomicBool::new(false),
+            update_in_progress: AtomicBool::new(false),
         }
+    }
+
+    pub fn set_update_in_progress(&self, in_progress: bool) {
+        self.update_in_progress.store(in_progress, Ordering::SeqCst);
+    }
+
+    pub fn update_in_progress(&self) -> bool {
+        self.update_in_progress.load(Ordering::SeqCst)
     }
 
     /// Reserve an off-thread ensure using the same project identity as discovery.
@@ -311,7 +323,7 @@ impl DaemonSupervisor {
         self: &Arc<Self>,
         project_root: &Path,
     ) -> Result<Option<DaemonEnsureReservation>, String> {
-        if self.stopped.load(Ordering::SeqCst) {
+        if self.stopped.load(Ordering::SeqCst) || self.update_in_progress() {
             return Ok(None);
         }
         let scope = gwt_core::daemon::RuntimeScope::from_project_root(
@@ -386,6 +398,9 @@ impl DaemonSupervisor {
         let mut children = self.children.lock().unwrap_or_else(PoisonError::into_inner);
         if self.stopped.load(Ordering::SeqCst) {
             return Err("daemon supervisor is shut down".to_string());
+        }
+        if self.update_in_progress() {
+            return Err("Project owner is preparing for a GWT update".into());
         }
         let child_endpoint = child_endpoint_for_project(&children, &endpoint_path);
         let started_child_pid = reap_finished_child(&mut children, &child_endpoint);
@@ -471,7 +486,7 @@ impl DaemonSupervisor {
                 remove_unreachable_endpoint(&gwt_home, &endpoint)?;
                 tracing::warn!(pid = endpoint.pid, bind = %endpoint.bind, project_root = %project_root.display(), "removed unreachable project daemon descriptor before replacement");
                 let mut children = self.children.lock().unwrap_or_else(PoisonError::into_inner);
-                if self.stopped.load(Ordering::SeqCst) {
+                if self.stopped.load(Ordering::SeqCst) || self.update_in_progress() {
                     return Err("daemon supervisor shut down during retirement verification".into());
                 }
                 let action = crate::daemon_publisher::resolve_project_daemon_bootstrap(
@@ -498,7 +513,7 @@ impl DaemonSupervisor {
                 })
                 .ok_or_else(|| "daemon retirement PID birth was not confirmed".to_string())?;
             let mut children = self.children.lock().unwrap_or_else(PoisonError::into_inner);
-            if self.stopped.load(Ordering::SeqCst) {
+            if self.stopped.load(Ordering::SeqCst) || self.update_in_progress() {
                 return Err("daemon supervisor shut down during retirement verification".into());
             }
             let current = crate::daemon_publisher::resolve_project_daemon_bootstrap(
@@ -571,7 +586,7 @@ impl DaemonSupervisor {
             DaemonBootstrapAction::Spawn { .. } => {
                 // Quit can stop admission while discovery is doing filesystem
                 // work. Do not create a new child after that decision.
-                if self.stopped.load(Ordering::SeqCst) {
+                if self.stopped.load(Ordering::SeqCst) || self.update_in_progress() {
                     return Err("daemon supervisor shut down during discovery".into());
                 }
                 if let Some(pid) = started_child_pid {
@@ -898,6 +913,220 @@ impl DaemonSupervisor {
     }
 }
 
+type UpdateGuiConnection = std::pin::Pin<
+    Box<
+        dyn futures_util::Sink<
+            tokio_tungstenite::tungstenite::Message,
+            Error = tokio_tungstenite::tungstenite::Error,
+        >,
+    >,
+>;
+
+struct UpdateDaemonTarget {
+    root: PathBuf,
+    prefs: PathBuf,
+    owner: Option<(
+        gwt_core::daemon::DaemonEndpoint,
+        u64,
+        crate::IssueMonitorAuthorityFenceState,
+    )>,
+}
+
+/// Capture authenticated owners without spawning a replacement. The explicit
+/// Quit is sent on these same connections, even if discovery changes later.
+pub struct UpdateDaemonRetirement<'a> {
+    home: PathBuf,
+    runtime: tokio::runtime::Runtime,
+    targets: Vec<UpdateDaemonTarget>,
+    connections: Vec<UpdateGuiConnection>,
+    supervisor: Option<&'a DaemonSupervisor>,
+}
+
+impl<'a> UpdateDaemonRetirement<'a> {
+    /// Call from an update worker, or before the native event loop starts.
+    /// Bootstrap has no GUI presence to detach and requires idle projects.
+    pub fn capture(
+        roots: &[PathBuf],
+        supervisor: Option<&'a DaemonSupervisor>,
+    ) -> Result<Self, String> {
+        let home = gwt_core::paths::gwt_home();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| error.to_string())?;
+        let mut targets = Vec::new();
+        let mut connections = Vec::<UpdateGuiConnection>::new();
+        let mut seen = HashSet::new();
+        for root in roots {
+            let prefs = crate::issue_monitor_prefs_path_for_repo_path(root);
+            if !seen.insert(prefs.clone()) {
+                continue;
+            }
+            let fail = |reason: &str| {
+                format!(
+                    "Could not retire project daemon for {}: {reason}",
+                    root.display()
+                )
+            };
+            let endpoint = crate::daemon_publisher::resolve_project_daemon_endpoint(root)
+                .map_err(|error| fail(&error))?;
+            let owner = if let Some(endpoint) = endpoint {
+                if supervisor.is_none() {
+                    return Err(fail("a live owner is still running"));
+                }
+                let fence = retirement_authority_fence(&home, &endpoint.scope)
+                    .map_err(|error| fail(&error))?;
+                let (health, connection) = runtime
+                    .block_on(async {
+                        let health = inspect_orphan_health(&endpoint).await?;
+                        if health.startup_intent != gwt_core::daemon::DaemonStartIntent::GuiManaged
+                        {
+                            return Err("a standalone owner is still running".to_string());
+                        }
+                        let client =
+                            crate::project_runtime::client::ProjectRuntimeClient::new(&endpoint)?;
+                        let connection =
+                            tokio::time::timeout(Duration::from_secs(2), client.gui_events())
+                                .await
+                                .map_err(|_| "authenticated GUI lease timed out".to_string())??;
+                        Ok::<_, String>((health, connection))
+                    })
+                    .map_err(|error| fail(&error))?;
+                verify_retirement_authority(&home, &endpoint, &fence)
+                    .map_err(|error| fail(&error))?;
+                connections.push(Box::pin(connection));
+                Some((endpoint, health.identity.host_started_at, fence))
+            } else {
+                let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+                    gwt_core::operation_deadline::now() + Duration::from_secs(1),
+                );
+                if crate::issue_monitor::issue_monitor_daemon_lease_is_held(&prefs).map_err(
+                    |error| fail(&format!("authority lease could not be verified: {error}")),
+                )? {
+                    return Err(fail(
+                        "the authority lease is held without an authenticated owner",
+                    ));
+                }
+                if supervisor.is_some_and(|supervisor| supervisor.has_live_child_for(root, &home)) {
+                    return Err(fail("a starting owner has not registered yet"));
+                }
+                None
+            };
+            targets.push(UpdateDaemonTarget {
+                root: root.clone(),
+                prefs,
+                owner,
+            });
+        }
+        Ok(Self {
+            home,
+            runtime,
+            targets,
+            connections,
+            supervisor,
+        })
+    }
+
+    /// Release this GUI's existing subscriptions, then close only the exact
+    /// authenticated leases. A standalone or shared owner retains its normal
+    /// lifetime. Hold the released authority locks through helper spawn.
+    pub fn retire(
+        self,
+        detach_gui: impl FnOnce(),
+        cancelled: impl Fn() -> bool,
+    ) -> Result<Vec<crate::IssueMonitorAuthorityLease>, String> {
+        let check_cancelled = || {
+            if cancelled() {
+                Err("GWT quit was requested before the update could apply".to_string())
+            } else {
+                Ok(())
+            }
+        };
+        check_cancelled()?;
+        detach_gui();
+        self.runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                for connection in self.connections {
+                    crate::daemon_subscriber::close_project_owner_for_quit(connection).await?;
+                }
+                Ok::<_, String>(())
+            })
+            .await
+            .map_err(|_| "Project daemon GUI detach timed out".to_string())?
+        })?;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            check_cancelled()?;
+            if let Some(supervisor) = self.supervisor {
+                supervisor.reap_finished_children();
+            }
+            let mut leases = Vec::with_capacity(self.targets.len());
+            let mut waiting = None;
+            for target in &self.targets {
+                match target.lease_after_exit(&self.home) {
+                    Ok(Some(lease)) => leases.push(lease),
+                    Ok(None) => {
+                        waiting = Some(&target.root);
+                        break;
+                    }
+                    Err(error) => {
+                        return Err(format!(
+                            "Could not retire project daemon for {}: {error}",
+                            target.root.display()
+                        ))
+                    }
+                }
+            }
+            let Some(root) = waiting else {
+                check_cancelled()?;
+                return Ok(leases);
+            };
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "Project daemon for {} did not exit and release its authority lease. Close other GWT instances using this project and retry the staged update.",
+                    root.display()
+                ));
+            }
+            drop(leases);
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+}
+
+impl UpdateDaemonTarget {
+    fn lease_after_exit(
+        &self,
+        home: &Path,
+    ) -> Result<Option<crate::IssueMonitorAuthorityLease>, String> {
+        if let Some((endpoint, started_at, fence)) = &self.owner {
+            verify_retirement_authority(home, endpoint, fence)?;
+            match crate::process::host_process_liveness(endpoint.pid) {
+                Some(false) => {}
+                Some(true) => match crate::process::host_process_start_time(endpoint.pid) {
+                    Some(current) if current != *started_at => {}
+                    Some(_) => return Ok(None),
+                    None => return Err("daemon process birth could not be verified".into()),
+                },
+                None => return Err("daemon process exit could not be verified".into()),
+            }
+        }
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            gwt_core::operation_deadline::now() + Duration::from_secs(1),
+        );
+        let lease = match crate::issue_monitor::acquire_issue_monitor_daemon_lease(&self.prefs) {
+            Ok(lease) => lease,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(None),
+            Err(error) => return Err(format!("authority lease could not be verified: {error}")),
+        };
+        if let Some((endpoint, _, fence)) = &self.owner {
+            verify_retirement_authority(home, endpoint, fence)?;
+        } else if crate::daemon_publisher::resolve_project_daemon_endpoint(&self.root)?.is_some() {
+            return Err("a new daemon appeared before the update could commit".into());
+        }
+        Ok(Some(lease))
+    }
+}
+
 fn read_orphan_endpoint(path: &Path) -> Result<gwt_core::daemon::DaemonEndpoint, String> {
     serde_json::from_slice(
         &std::fs::read(path)
@@ -961,13 +1190,19 @@ fn verify_pending_retirement_authority(
     gwt_home: &Path,
     pending: &PendingReplacement,
 ) -> Result<(), String> {
-    let current = retirement_authority_fence(gwt_home, &pending.endpoint.scope)?;
-    if matches!(current, crate::IssueMonitorAuthorityFenceState::Active(_))
-        && current != pending.authority_fence
-    {
+    verify_retirement_authority(gwt_home, &pending.endpoint, &pending.authority_fence)
+}
+
+fn verify_retirement_authority(
+    gwt_home: &Path,
+    endpoint: &gwt_core::daemon::DaemonEndpoint,
+    fence: &crate::IssueMonitorAuthorityFenceState,
+) -> Result<(), String> {
+    let current = retirement_authority_fence(gwt_home, &endpoint.scope)?;
+    if matches!(current, crate::IssueMonitorAuthorityFenceState::Active(_)) && &current != fence {
         return Err("daemon authority changed during retirement".into());
     }
-    let descriptor = match std::fs::read(pending.endpoint.scope.endpoint_path(gwt_home)) {
+    let descriptor = match std::fs::read(endpoint.scope.endpoint_path(gwt_home)) {
         Ok(payload) => serde_json::from_slice::<gwt_core::daemon::DaemonEndpoint>(&payload)
             .map_err(|error| {
                 format!("daemon retirement descriptor could not be verified: {error}")
@@ -979,9 +1214,9 @@ fn verify_pending_retirement_authority(
             ))
         }
     };
-    if !same_orphan_endpoint(&descriptor, &pending.endpoint)
-        || descriptor.protocol_version != pending.endpoint.protocol_version
-        || descriptor.daemon_version != pending.endpoint.daemon_version
+    if !same_orphan_endpoint(&descriptor, endpoint)
+        || descriptor.protocol_version != endpoint.protocol_version
+        || descriptor.daemon_version != endpoint.daemon_version
     {
         return Err("daemon endpoint changed during retirement".into());
     }
@@ -1275,6 +1510,45 @@ fn spawn_production_daemon(context: &DaemonSpawnContext<'_>) -> std::io::Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn update_retirement_requires_both_process_exit_and_authority_release() {
+        use gwt_core::daemon::{DaemonEndpoint, RuntimeScope, RuntimeTarget};
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let scope = RuntimeScope::from_project_root(project.path(), RuntimeTarget::Host).unwrap();
+        let pid = std::process::id();
+        let birth = crate::process::host_process_start_time(pid).unwrap();
+        let endpoint =
+            DaemonEndpoint::new(scope, pid, "unused".into(), "fixture".into(), "1".into());
+        let prefs = home
+            .path()
+            .join("projects/fixture/project-state/issue-monitor.json");
+        let mut target = UpdateDaemonTarget {
+            root: project.path().into(),
+            prefs: prefs.clone(),
+            owner: Some((
+                endpoint.clone(),
+                birth,
+                crate::IssueMonitorAuthorityFenceState::Missing,
+            )),
+        };
+
+        assert!(target.lease_after_exit(home.path()).unwrap().is_none());
+        let holder = crate::issue_monitor::acquire_issue_monitor_daemon_lease(&prefs).unwrap();
+        // Model the original process exiting and the OS reusing its PID.
+        target.owner = Some((
+            endpoint,
+            birth.wrapping_add(1),
+            crate::IssueMonitorAuthorityFenceState::Missing,
+        ));
+        assert!(target.lease_after_exit(home.path()).unwrap().is_none());
+        drop(holder);
+        let lease = target.lease_after_exit(home.path()).unwrap().unwrap();
+        assert!(crate::issue_monitor::issue_monitor_daemon_lease_is_held(&prefs).unwrap());
+        drop(lease);
+        assert!(!crate::issue_monitor::issue_monitor_daemon_lease_is_held(&prefs).unwrap());
+    }
 
     #[test]
     fn quit_during_discovery_prevents_a_pending_spawn() {

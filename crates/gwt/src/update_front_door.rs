@@ -655,7 +655,7 @@ fn commit_pending_manifest_with_ops(
 /// sends `UserEvent::QuitApp { reason: ApplyUpdate }`.
 // Keep the helper-copy and defer-guard choices explicit at this test seam.
 #[allow(clippy::too_many_arguments)]
-fn stage_graceful_update_apply_with_ops(
+fn stage_graceful_update_apply_with_ops<T>(
     ops: &mut impl UpdateApplyOps,
     manifest: gwt_core::update::PendingUpdateManifest,
     marker: &gwt_core::update::UpdateResumeMarker,
@@ -664,6 +664,7 @@ fn stage_graceful_update_apply_with_ops(
     old_pid: u32,
     use_helper_copy: bool,
     respect_defer: bool,
+    retire_daemons: impl FnOnce() -> Result<T, String>,
 ) -> Result<String, String> {
     {
         // Defer and apply-start publish under the same lock. Whichever wins
@@ -691,6 +692,19 @@ fn stage_graceful_update_apply_with_ops(
         gwt_core::update::persist_update_resume_marker(marker)
             .map_err(|err| format!("Failed to write update resume marker: {err}"))?;
     }
+    // This attempt is still staged until every old owner has exited. Keep
+    // any acquired authority locks alive across the helper spawn.
+    let _authority_leases = match retire_daemons() {
+        Ok(leases) => leases,
+        Err(error) => {
+            return match gwt_core::update::clear_update_resume_marker() {
+                Ok(()) => Err(error),
+                Err(cleanup) => Err(format!(
+                    "{error}; could not clear update resume marker: {cleanup}"
+                )),
+            };
+        }
+    };
     // Cleanup below acquires the manifest lock itself. The marker now rejects
     // a defer request, so the lock can be released before the helper starts.
     match commit_pending_manifest_with_ops(
@@ -734,15 +748,15 @@ fn stage_graceful_update_apply_with_ops(
 }
 
 /// Issue #4038 (AC-1 / AC-2): production entry for the graceful apply commit.
-/// Called on the event-loop thread by the `UserEvent::ApplyUpdateGraceful`
-/// handler; returns the committed version so the handler can quit with
+/// Runs on the apply worker and returns the committed version so the GUI can quit with
 /// `GuiShutdownReason::ApplyUpdate { version }`.
 /// Scheduled drains respect operator defer, including manually requested
 /// drains; only an explicit Restart now bypasses that guard.
-pub fn stage_graceful_update_apply(
+pub fn stage_graceful_update_apply<T>(
     mut manifest: gwt_core::update::PendingUpdateManifest,
     marker: &gwt_core::update::UpdateResumeMarker,
     respect_defer: bool,
+    retire_daemons: impl FnOnce() -> Result<T, String>,
 ) -> Result<String, String> {
     let current_exe = std::env::current_exe()
         .map_err(|err| format!("Failed to resolve current executable: {err}"))?;
@@ -767,6 +781,7 @@ pub fn stage_graceful_update_apply(
         std::process::id(),
         cfg!(windows),
         respect_defer,
+        retire_daemons,
     )
 }
 
@@ -781,7 +796,24 @@ pub fn current_restart_args() -> Vec<String> {
 /// after Issue #4038; the running GUI never calls it.
 fn apply_pending_manifest_and_exit(
     manifest: gwt_core::update::PendingUpdateManifest,
+    startup_dir: &Path,
 ) -> Result<(), String> {
+    let session = gwt::persistence::load_session_state(&gwt_core::paths::gwt_session_state_path())
+        .map_err(|error| format!("Could not read projects before applying update: {error}"))?;
+    let mut roots: Vec<_> = session
+        .tabs
+        .into_iter()
+        .filter(|tab| tab.kind == gwt::ProjectKind::Git)
+        .map(|tab| tab.project_root)
+        .collect();
+    match gwt_git::detect_repo_type(startup_dir) {
+        gwt_git::RepoType::Normal { path, .. } => roots.push(path),
+        gwt_git::RepoType::Bare {
+            develop_worktree: Some(path),
+        } => roots.push(path),
+        _ => {}
+    }
+    let retirement = gwt::daemon_supervisor::UpdateDaemonRetirement::capture(&roots, None)?;
     let marker = gwt_core::update::UpdateResumeMarker {
         from_version: env!("CARGO_PKG_VERSION").to_string(),
         to_version: manifest.version.clone(),
@@ -790,7 +822,9 @@ fn apply_pending_manifest_and_exit(
         projects: Vec::new(),
         attempt: 1,
     };
-    stage_graceful_update_apply(manifest, &marker, true)?;
+    stage_graceful_update_apply(manifest, &marker, true, || {
+        retirement.retire(|| {}, || false)
+    })?;
     std::process::exit(0);
 }
 
@@ -803,7 +837,7 @@ fn apply_pending_manifest_and_exit(
 /// any window setup. Stale manifests (older than the running binary, or
 /// pointing at a missing payload) are quietly cleared so they don't keep
 /// rewinding launches.
-pub fn try_apply_pending_update_at_bootstrap() -> bool {
+pub fn try_apply_pending_update_at_bootstrap(startup_dir: &Path) -> bool {
     let manifest = match gwt_core::update::load_pending_update_manifest() {
         Some(m) => m,
         None => return false,
@@ -831,7 +865,7 @@ pub fn try_apply_pending_update_at_bootstrap() -> bool {
     ) {
         return false;
     }
-    match apply_pending_manifest_and_exit(manifest) {
+    match apply_pending_manifest_and_exit(manifest, startup_dir) {
         Ok(()) => true, // unreachable: apply_pending_manifest_and_exit calls exit(0)
         Err(err) => {
             // The commit boundary may have rejected a newly deferred or
@@ -1259,7 +1293,7 @@ mod poll_state_tests {
         std::fs::create_dir_all(gwt_core::update::pending_update_dir()).unwrap();
         let bytes = serde_json::to_vec(&manifest).unwrap();
         std::fs::write(gwt_core::update::pending_update_manifest_path(), &bytes).unwrap();
-        assert!(!super::try_apply_pending_update_at_bootstrap());
+        assert!(!super::try_apply_pending_update_at_bootstrap(home.path()));
         assert_eq!(
             std::fs::read(gwt_core::update::pending_update_manifest_path()).unwrap(),
             bytes
@@ -1456,6 +1490,7 @@ mod poll_state_tests {
             42,
             false,
             true,
+            || Ok(()),
         )
         .unwrap();
         assert_eq!(ops.allow_elevation, Some(false));
@@ -1521,6 +1556,7 @@ mod poll_state_tests {
                 42,
                 false,
                 true,
+                || Ok(()),
             )
         };
         let before = std::fs::read(gwt_core::update::pending_update_manifest_path()).unwrap();
@@ -1554,6 +1590,7 @@ mod poll_state_tests {
             42,
             false,
             false,
+            || Ok(()),
         )
         .expect("explicit manual apply still uses the deferred payload");
         assert_eq!(ops.portable_spawn_count, 1);
@@ -1584,6 +1621,7 @@ mod poll_state_tests {
             42,
             false,
             true,
+            || Ok(()),
         )
         .expect("the original helper commits while the replacement is deferred");
         assert_eq!(version, "9.31.0");
@@ -1621,6 +1659,13 @@ mod poll_state_tests {
             42,
             false,
             true,
+            || {
+                assert_eq!(
+                    gwt_core::update::load_update_resume_marker(),
+                    Some(marker.clone())
+                );
+                Ok(())
+            },
         )
         .expect("graceful apply commits");
 
@@ -1636,6 +1681,76 @@ mod poll_state_tests {
             gwt_core::update::load_pending_update_manifest().is_none(),
             "the pending manifest is consumed after the helper is spawned"
         );
+    }
+
+    #[test]
+    fn graceful_apply_retirement_failure_keeps_staged_update_retryable() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(tempdir.path());
+        let manifest = staged_manifest_in(tempdir.path());
+        let marker = sample_resume_marker();
+        let mut ops = FakeUpdateApplyOps::portable(tempdir.path().join("prepared-binary"));
+
+        let error = super::stage_graceful_update_apply_with_ops(
+            &mut ops,
+            manifest.clone(),
+            &marker,
+            Path::new("/Applications/GWT.app/Contents/MacOS/gwt"),
+            Vec::new(),
+            42,
+            false,
+            true,
+            || {
+                assert_eq!(
+                    gwt_core::update::load_update_resume_marker(),
+                    Some(marker.clone())
+                );
+                Err::<(), _>("the old owner still holds the authority lease".into())
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.contains("authority lease"));
+        assert!(!ops.wrote_restart_args);
+        assert_eq!(ops.portable_spawn_count, 0);
+        assert_eq!(
+            gwt_core::update::load_pending_update_manifest(),
+            Some(manifest)
+        );
+        assert!(gwt_core::update::load_update_resume_marker().is_none());
+        assert!(gwt_core::update::load_update_apply_result().is_none());
+    }
+
+    #[test]
+    fn bootstrap_keeps_a_staged_update_when_an_open_project_holds_its_lease() {
+        let home = tempfile::tempdir().unwrap();
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let mut manifest = staged_manifest_in(home.path());
+        manifest.version = "999.0.1".into();
+        // A regression can reach helper preparation, but can never start it.
+        std::fs::create_dir(home.path().join("v9.31.0/restart-args.json")).unwrap();
+        gwt_core::update::persist_pending_update_manifest(&manifest).unwrap();
+        let project = home.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::write(
+            gwt_core::paths::gwt_session_state_path(),
+            serde_json::json!({
+                "tabs": [{"id":"one", "title":"Project", "project_root": project, "kind":"git"}]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let prefs = gwt::issue_monitor_prefs_path_for_repo_path(&project);
+        std::fs::create_dir_all(prefs.parent().unwrap()).unwrap();
+        let holder = std::fs::File::create_new(prefs.with_extension("authority.lock")).unwrap();
+        fs2::FileExt::try_lock_exclusive(&holder).unwrap();
+
+        assert!(!super::try_apply_pending_update_at_bootstrap(home.path()));
+        assert_eq!(
+            gwt_core::update::load_pending_update_manifest(),
+            Some(manifest)
+        );
+        assert!(gwt_core::update::load_update_resume_marker().is_none());
     }
 
     #[test]
@@ -1655,6 +1770,7 @@ mod poll_state_tests {
             42,
             false,
             false,
+            || Ok(()),
         )
         .expect_err("spawn failure surfaces");
 
