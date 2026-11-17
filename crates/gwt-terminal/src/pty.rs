@@ -634,6 +634,15 @@ impl CursorPositionReport {
     }
 }
 
+/// Replies to queries recognized by the owner-side terminal parser.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalReply {
+    CursorPosition(CursorPositionReport),
+    PrimaryDeviceAttributes,
+    ForegroundColor,
+    BackgroundColor,
+}
+
 #[derive(Debug, Clone, Copy)]
 #[repr(u8)]
 pub(crate) enum GrokPromptReadiness {
@@ -1086,9 +1095,9 @@ impl PtyHandle {
     /// Protocol replies share the physical writer, but must not wait behind a
     /// prompt reservation whose ACK may itself require this reply. They do not
     /// change ordinary input, composer, human quiet time, or transaction revisions.
-    pub fn write_cursor_position_report(
+    pub fn write_terminal_reply(
         &self,
-        report: CursorPositionReport,
+        reply: TerminalReply,
         current: &AtomicBool,
     ) -> Result<(), TerminalError> {
         let active =
@@ -1112,18 +1121,29 @@ impl PtyHandle {
         let writer = writer.as_mut().ok_or_else(|| TerminalError::PtyIoError {
             details: RELEASED_DESCRIPTORS.into(),
         })?;
-        // The existing gate preanswered only the initial 1;1 native query.
-        // Consume stale eligibility too, but never suppress a progressed query.
-        if self
-            .startup_cursor_report_sent
-            .swap(false, Ordering::AcqRel)
-            && report.row == 1
-            && report.col == 1
-        {
-            return Ok(());
-        }
-        let bytes = format!("\x1b[{};{}R", report.row, report.col);
-        Self::write_with_locked_writer(&mut **writer, bytes.as_bytes(), 0)
+        let cursor;
+        let bytes = match reply {
+            TerminalReply::CursorPosition(report) => {
+                // The Windows start gate preanswered only the initial native
+                // 1;1 query. Color and device replies cannot consume that slot.
+                if self
+                    .startup_cursor_report_sent
+                    .swap(false, Ordering::AcqRel)
+                    && report.row == 1
+                    && report.col == 1
+                {
+                    return Ok(());
+                }
+                cursor = format!("\x1b[{};{}R", report.row, report.col);
+                cursor.as_bytes()
+            }
+            // Match xterm.js and its fixed XTERM_THEME_DARK palette in app.js
+            // (SPEC-2356), which applies in both application themes.
+            TerminalReply::PrimaryDeviceAttributes => b"\x1b[?1;2c",
+            TerminalReply::ForegroundColor => b"\x1b]10;rgb:e8e8/eaea/eded\x1b\\",
+            TerminalReply::BackgroundColor => b"\x1b]11;rgb:0a0a/0d0d/1212\x1b\\",
+        };
+        Self::write_with_locked_writer(&mut **writer, bytes, 0)
     }
 
     fn write_ordinary_input(&self, data: &[u8], human: bool) -> Result<(), TerminalError> {
@@ -3677,6 +3697,18 @@ mod tests {
             .lock()
             .unwrap()
             .replace(Box::new(Capture(bytes.clone())));
+        let current = AtomicBool::new(true);
+        for reply in [
+            TerminalReply::PrimaryDeviceAttributes,
+            TerminalReply::ForegroundColor,
+            TerminalReply::BackgroundColor,
+        ] {
+            handle.write_terminal_reply(reply, &current).unwrap();
+        }
+        assert_eq!(
+            std::mem::take(&mut *bytes.lock().unwrap()),
+            b"\x1b[?1;2c\x1b]10;rgb:e8e8/eaea/eded\x1b\\\x1b]11;rgb:0a0a/0d0d/1212\x1b\\"
+        );
         handle.write_input(b"human").unwrap();
         let reservation = handle.reserve_input_transaction().unwrap();
         handle.write_input(b"queued").unwrap();
@@ -3690,11 +3722,9 @@ mod tests {
                 state.queued.clone(),
             )
         };
-        let current = AtomicBool::new(true);
-        let report = CursorPositionReport::from_screen_position(2, 6);
-        handle
-            .write_cursor_position_report(report, &current)
-            .unwrap();
+        let report =
+            TerminalReply::CursorPosition(CursorPositionReport::from_screen_position(2, 6));
+        handle.write_terminal_reply(report, &current).unwrap();
         assert_eq!(&*bytes.lock().unwrap(), b"human\x1b[3;7R");
         {
             let state = handle.input_state.lock().unwrap();
@@ -3719,14 +3749,12 @@ mod tests {
             .store(true, Ordering::Release);
         let initial = pane.process_owner_output(b"\x1b[6nchild output");
         assert_eq!(initial.data, b"\x18child output");
-        assert_eq!(initial.cursor_reports.len(), 1);
+        assert_eq!(initial.replies.len(), 1);
         handle
-            .write_cursor_position_report(initial.cursor_reports[0], &current)
+            .write_terminal_reply(initial.replies[0], &current)
             .unwrap();
         assert_eq!(&*bytes.lock().unwrap(), b"human\x1b[3;7R");
-        handle
-            .write_cursor_position_report(report, &current)
-            .unwrap();
+        handle.write_terminal_reply(report, &current).unwrap();
         assert_eq!(&*bytes.lock().unwrap(), b"human\x1b[3;7R\x1b[3;7R");
 
         // A progressed query must be written even if stale eligibility was
@@ -3735,9 +3763,7 @@ mod tests {
         handle
             .startup_cursor_report_sent
             .store(true, Ordering::Release);
-        handle
-            .write_cursor_position_report(report, &current)
-            .unwrap();
+        handle.write_terminal_reply(report, &current).unwrap();
         let progressed_written = &*bytes.lock().unwrap() == b"human\x1b[3;7R\x1b[3;7R\x1b[3;7R";
         handle
             .startup_cursor_report_sent
@@ -3745,11 +3771,13 @@ mod tests {
         let returned = pane.process_owner_output(b"\x1b[4;8H\x1b[H\x1b[6n");
         assert_eq!(returned.data, b"\x1b[4;8H\x1b[H\x18");
         assert_eq!(
-            returned.cursor_reports,
-            vec![CursorPositionReport::from_screen_position(0, 0)]
+            returned.replies,
+            vec![TerminalReply::CursorPosition(
+                CursorPositionReport::from_screen_position(0, 0)
+            )]
         );
         handle
-            .write_cursor_position_report(returned.cursor_reports[0], &current)
+            .write_terminal_reply(returned.replies[0], &current)
             .unwrap();
         let expected = b"human\x1b[3;7R\x1b[3;7R\x1b[3;7R\x1b[1;1R";
         let returned_written = *bytes.lock().unwrap() == expected;
@@ -3763,15 +3791,11 @@ mod tests {
             .startup_cursor_report_sent
             .store(true, Ordering::Release);
         current.store(false, Ordering::Release);
-        assert!(handle
-            .write_cursor_position_report(report, &current)
-            .is_err());
+        assert!(handle.write_terminal_reply(report, &current).is_err());
         assert!(handle.startup_cursor_report_sent.load(Ordering::Acquire));
         current.store(true, Ordering::Release);
         handle.revoke_input_generation();
-        assert!(handle
-            .write_cursor_position_report(report, &current)
-            .is_err());
+        assert!(handle.write_terminal_reply(report, &current).is_err());
         assert!(handle.startup_cursor_report_sent.load(Ordering::Acquire));
         drop(reservation);
         assert_eq!(&*bytes.lock().unwrap(), expected);
@@ -3848,9 +3872,10 @@ mod tests {
         let current = Arc::new(AtomicBool::new(true));
         let reporting_handle = handle.clone();
         let reporting_current = current.clone();
-        let report = CursorPositionReport::from_screen_position(2, 6);
+        let report =
+            TerminalReply::CursorPosition(CursorPositionReport::from_screen_position(2, 6));
         let reporter = std::thread::spawn(move || {
-            reporting_handle.write_cursor_position_report(report, &reporting_current)
+            reporting_handle.write_terminal_reply(report, &reporting_current)
         });
         assert_eq!(
             // test-hygiene: allow-wall-clock-deadline Bounds actual typed-write entry; the channel proves both generation checks and writer acquisition happened before logical close.
@@ -3884,9 +3909,7 @@ mod tests {
         invalidator.join().expect("invalidation thread");
 
         assert!(handle.write_input(b"late input").is_err());
-        assert!(handle
-            .write_cursor_position_report(report, &current)
-            .is_err());
+        assert!(handle.write_terminal_reply(report, &current).is_err());
     }
 
     #[test]
