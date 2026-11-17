@@ -645,14 +645,17 @@ mod tests {
             .split_once("` to ~/.zshrc")
             .unwrap()
             .0;
-        let output = std::process::Command::new("/bin/sh")
-            .arg("-c")
-            .arg(format!("{command}; printf '%s' \"$PATH\""))
-            .env_clear()
-            .env("HOME", home.path())
-            .env("PATH", "/usr/bin:/bin")
-            .output()
-            .unwrap();
+        let output = gwt_core::process::resolved_command(
+            gwt_core::process::ProcessPlanRequest::new("/bin/sh"),
+        )
+        .unwrap()
+        .arg("-c")
+        .arg(format!("{command}; printf '%s' \"$PATH\""))
+        .env_clear()
+        .env("HOME", home.path())
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
         assert!(output.status.success());
         assert_eq!(
             String::from_utf8(output.stdout).unwrap(),
