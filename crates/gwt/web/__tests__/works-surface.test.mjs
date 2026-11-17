@@ -810,10 +810,29 @@ test("Works ordinary surface departure keeps unavailable native ownership readon
   assert.ok(f.runtime.terminalContainer === f.original, "proof loss leaves a returned native in its still-listed window");
   assert.equal(f.runtime.readOnly, false);
   assert.equal(f.events.length, bindingCount, "proof loss has no binding effects on the window host");
+  f.dispose();
+});
+
+// Issue #7558 narrows proof-loss reclaim only for a still-listed same Session.
+test("Works reclaims a returned native readonly once its window leaves the catalog", async () => {
+  const f = await nativeLifetimeFixture();
+  const root = f.runtime.terminalContainer;
+  f.api.leave(); f.activity.clearAgentActivity();
+  assert.ok(f.runtime.terminalContainer === f.original && f.runtime.readOnly === false);
   f.api.workspace(projectCatalog([]).appState);
-  assert.ok(f.runtime.terminalContainer === root, "a returned native whose window left the catalog is reclaimed");
+  assert.ok(f.runtime.terminalContainer === root, "catalog loss reclaims the returned native");
   assert.equal(f.runtime.readOnly, true);
   assert.equal(f.runtime.terminal.disposed, false);
+  f.dispose();
+});
+
+test("Works fences a returned native when its window is rebound to another Session", async () => {
+  const f = await nativeLifetimeFixture();
+  f.api.leave(); f.activity.clearAgentActivity();
+  assert.ok(f.runtime.terminalContainer === f.original && f.runtime.readOnly === false);
+  f.api.workspace(projectCatalog([{ ...windows[0], session_id: "new-session" }]).appState);
+  assert.equal(f.runtime.terminal.disposed, true, "the old Session's native cannot keep input");
+  assert.ok(f.terminalMap.get("one") !== f.runtime);
   f.dispose();
 });
 
