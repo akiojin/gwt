@@ -194,6 +194,12 @@ be verified. `gh copilot` also requires manual updates because the detected
 distribution may differ from the extension updater's target. The row explains
 these limitations. Metadata failures disable updates and show the reason.
 
+After installation, the completion message shows how to add the detected CLI
+directory to your shell's PATH. gwt's Installed status does not confirm your
+terminal's PATH. If `claude` or another command is not found, follow the displayed
+bash/zsh, fish, or Windows instructions, open a new terminal, and run the command
+with `--version`. gwt does not edit your shell startup files.
+
 Automatic agent updates are off by default. When enabled, gwt checks installed
 agents with a verified update route at the next app startup and updates only known newer versions, with
 no live agent panes (including the Project Manager) or pending launches. Manual
@@ -1714,6 +1720,11 @@ current PR, CI and review state. The audit records the PR, SHA and permission
 source. A changed head requires a new review and authorization. If this route is
 unavailable or the owner has not delegated it, a human must merge the PR;
 `pr.list` explains the external-fork fallback instead of repeating a merge proposal.
+
+The same operation can recover a Ready PR in this repository when the auto-merge
+workflow fails to start. The PM still needs permission for the exact PR and head
+SHA, passing CI, and the existing review and visual checks. GitHub's branch
+protection and required checks remain enforced.
 
 For an explicitly authorized PR close, build-cache cleanup, or provider approval
 response, the PM uses `pm.operation.execute` with the existing `pr.close`,

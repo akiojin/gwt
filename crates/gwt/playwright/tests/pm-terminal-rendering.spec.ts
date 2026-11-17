@@ -9,6 +9,52 @@ const liveBase = process.env.GWT_PLAYWRIGHT_BASE_URL;
 const appUrl = liveBase ? new URL(new URL(APP_URL).pathname, liveBase).href : APP_URL;
 const PM = "pm-terminal";
 
+test("Issue #7492 PM execution log starts when its delayed layout becomes available", async ({ page }, info) => {
+  const errors: string[] = [];
+  const theme = info.project.name.includes("light") ? "light" : "dark";
+  page.on("pageerror", error => errors.push(error.message));
+  page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+  await page.addInitScript(value => localStorage.setItem("gwt:ui:theme", value), theme);
+  if (!liveBase) await installEmbeddedRoutes(page);
+  await installPmBackend(page);
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await page.goto(appUrl);
+  // Hold only layout, leaving the real reveal, ResizeObserver, initial-fit
+  // handshake and terminal receive path intact. No activation is called by the test.
+  const delayedLayout = await page.addStyleTag({ content:
+    '.pm-conversation-log .terminal-root { width: 0 !important; height: 0 !important; }' });
+  await page.locator("#op-pm-entry").click();
+  const pm = page.locator(`.workspace-window[data-id="${PM}"]`);
+  await pm.getByRole("button", { name: "Execution log", exact: true }).click();
+  await settle(page);
+  await emit(page, "terminal_snapshot", "\x1b[H\x1b[2JPM initial snapshot");
+  await emit(page, "terminal_output", "\r\nPM queued output");
+  await settle(page);
+  const before = await metrics(page);
+  expect(before).toMatchObject({ isReady: false, hostWidth: 0, hostHeight: 0, snapshotApplied: 0 });
+  expect(before.snapshotAccepted).toBeGreaterThan(0);
+  expect(await text(page)).not.toContain("PM initial snapshot");
+  await info.attach(`delayed-layout-before-${theme}`, { body: JSON.stringify(before), contentType: "application/json" });
+
+  await delayedLayout.evaluate(node => node.remove());
+  await expect.poll(() => text(page), { message: "layout availability releases the snapshot and queued output without switching views" })
+    .toContain("PM initial snapshot\nPM queued output");
+  await expectGridConverged(page);
+  expect(await metrics(page)).toMatchObject({ isReady: true, snapshotApplied: before.snapshotAccepted, outputPending: false });
+  await expect(pm.locator(".xterm-rows")).toContainText("PM initial snapshot");
+  await expect(pm.locator(".xterm-rows")).toContainText("PM queued output");
+
+  // Preserve the reported recovery route as well as uninterrupted live output.
+  await page.locator('[data-surface="works"]').click();
+  await page.locator("#op-pm-entry").click();
+  await emit(page, "terminal_output", "\r\nPM after Works return");
+  await expect.poll(() => text(page)).toContain("PM after Works return");
+  await expect(pm.locator(".xterm-rows")).toContainText("PM after Works return");
+  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  await info.attach(`delayed-layout-after-${theme}`, { body: await pm.screenshot(), contentType: "image/png" });
+  expect(errors, "console and page errors").toEqual([]);
+});
+
 // Issue #7030 AC-5: Codex can downgrade an unadvertised tier without exiting.
 // Preserve its actual explanation through the same terminal protocol as PTY output.
 test("Issue #7030 Ultrafast downgrade warning remains visible", async ({ page }, info) => {

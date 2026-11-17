@@ -60,6 +60,7 @@ pub(crate) mod interactive_process;
 pub mod interruption;
 pub mod measurement;
 pub mod nextest;
+mod node_runtime;
 pub mod wire;
 
 /// Additive fields are preserved and hash-covered independently of the
@@ -3361,9 +3362,10 @@ const LIVE_GITHUB_OPT_IN_ENV: &str = "GWT_ALLOW_REAL_GH";
 /// `verify.run` reads as a real RED and sends its owner after a bug that is
 /// not there.
 ///
-/// Inherit the caller's environment, including PATH; do not discover or append
-/// tool installation directories (#4255). Leading `KEY=value` assignments
-/// override this list. The spawn boundary gives each command private temporary
+/// Inherit the caller's environment, including PATH (#4255). gwt's JavaScript
+/// commands additionally select the CI Node major at the shared spawn boundary
+/// (#7494); other projects/commands keep the inherited PATH. Leading `KEY=value`
+/// assignments override this list. The spawn boundary gives each command private temporary
 /// directories; isolated baselines additionally scrub Git selection and
 /// CARGO_TARGET_DIR without changing PATH.
 fn child_environment_contract() -> Vec<(String, Option<String>)> {
@@ -3744,7 +3746,12 @@ fn execute_command_with_artifact_guard_cancellable(
     check: Option<&CancellationCheck<'_>>,
 ) -> Result<(i32, Option<i32>, String, Vec<VerificationOutputStream>), String> {
     check_cancellation(check)?;
-    let (assignments, args) = take_env_assignments(split_command_line(command)?)?;
+    let (mut assignments, mut args) = take_env_assignments(split_command_line(command)?)?;
+    if let Err(error) =
+        node_runtime::prepare(worktree, &mut args, &mut assignments, capture.is_some())
+    {
+        return spawn_failure_result((!isolated_baseline).then_some(worktree), command, &error);
+    }
     // Auxiliary baseline proofs and artifact restoration do not produce
     // canonical command rows, so do not leave unreferenced output artifacts.
     let output_worktree = (!isolated_baseline).then_some(worktree);

@@ -2163,6 +2163,13 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
             if (!runtime || !element) {
               return;
             }
+            // A reveal can precede its layout box. When ResizeObserver later
+            // requests a fit, finish readiness as well as sizing so buffered
+            // snapshots/output do not wait for another view activation.
+            if (runtime.isReady !== true) {
+              completeInitialFitHandshake(windowId);
+              return;
+            }
             return runTerminalFitRequest({
               persist,
               canFit: () => canRefreshTerminalViewport(windowId),
