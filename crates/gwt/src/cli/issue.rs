@@ -5936,6 +5936,14 @@ fn record_monitor_wait_in_prefs(
                         ));
                     }
                 }
+                if record.wait.as_ref().is_some_and(|wait| {
+                    !crate::issue_monitor::wait_cap_has_time(wait, &chrono::Utc::now().to_rfc3339())
+                }) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        crate::runtime_daemon_events::ISSUE_MONITOR_WAIT_CAP_EXPIRED_ERROR,
+                    ));
+                }
                 crate::declare_wait_on_record(record, reason, resume_condition, now);
             }
             Ok(())
@@ -6034,6 +6042,10 @@ fn run_monitor_wait<E: CliEnv>(
     clear: bool,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
+    use crate::runtime_daemon_events::{
+        IssueMonitorControlPublishError, ISSUE_MONITOR_WAIT_CAP_EXPIRED_ERROR,
+    };
+
     let launch_context = std::env::var(crate::autonomous_handoff::GWT_AUTONOMOUS_ISSUE_ENV).ok();
     let Some(number) = resolve_monitor_wait_issue_number(number, launch_context.as_deref()) else {
         out.push_str(
@@ -6092,6 +6104,9 @@ fn run_monitor_wait<E: CliEnv>(
                 clear,
                 &now,
             ) {
+                if commit_error == ISSUE_MONITOR_WAIT_CAP_EXPIRED_ERROR {
+                    return Ok(refuse_expired_monitor_wait(out, number));
+                }
                 out.push_str(
                     &serde_json::json!({
                         "number": number,
@@ -6106,6 +6121,11 @@ fn run_monitor_wait<E: CliEnv>(
                 return Ok(1);
             }
             "local"
+        }
+        Err(IssueMonitorControlPublishError::Rejected(message))
+            if message == ISSUE_MONITOR_WAIT_CAP_EXPIRED_ERROR =>
+        {
+            return Ok(refuse_expired_monitor_wait(out, number));
         }
         Err(error) => {
             // Ambiguous or rejected: a second writer here could contradict the
@@ -6136,12 +6156,28 @@ fn run_monitor_wait<E: CliEnv>(
             serde_json::Value::from(resume_condition.unwrap_or_default());
         response["max_wait_secs"] = serde_json::Value::from(crate::AUTONOMOUS_WAIT_MAX_SECS);
         response["detail"] = serde_json::Value::from(
-            "stuck detection is suspended for this launch until the wait is cleared or max_wait_secs elapses; clear it with params.clear:true when you resume",
+            "the wait cap is measured from the original declaration; read waiting.in_force and waiting.expires_at in issue.monitor.status, and clear the wait with params.clear:true when you resume",
         );
     }
     out.push_str(&response.to_string());
     out.push('\n');
     Ok(0)
+}
+
+fn refuse_expired_monitor_wait(out: &mut String, number: u64) -> i32 {
+    out.push_str(
+        &serde_json::json!({
+            "number": number,
+            "status": "refused",
+            "refusal": "wait_cap_expired",
+            "in_force": false,
+            "detail": "the original wait deadline has passed or cannot be read; stuck detection and Stop checks still apply",
+            "recovery": "inspect the original deadline with issue.monitor.status; when verification admission is available, retry verify.run with the identical full matrix",
+        })
+        .to_string(),
+    );
+    out.push('\n');
+    1
 }
 
 /// Issue #4286: whether `number` currently carries a wait declaration in the
@@ -19017,6 +19053,40 @@ command = "my-agent-cli"
             before,
             "a refused declaration must be zero-mutation"
         );
+    }
+
+    #[test]
+    fn monitor_wait_refuses_to_renew_an_expired_cap() {
+        let tmp = TempDir::new().expect("tempdir");
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        let declared_at = "2000-01-01T00:00:00Z";
+        monitor.complete_active_launch_at(42, "tab::agent", declared_at);
+        monitor.declare_autonomous_wait(42, "verification queue", "lease available", declared_at);
+        crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).unwrap();
+        let before = std::fs::read(&prefs_path).unwrap();
+
+        let mut out = String::new();
+        let code = run_monitor_wait(
+            &crate::cli::TestEnv::new(repo.clone()),
+            Some(&repo),
+            Some(42),
+            Some("verification deferred on disk"),
+            Some("capacity returns"),
+            false,
+            &mut out,
+        )
+        .unwrap();
+        let reply: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(code, 1, "{reply}");
+        assert_eq!(reply["status"], "refused");
+        assert_eq!(reply["refusal"], "wait_cap_expired");
+        assert_eq!(reply["in_force"], false);
+        assert!(reply["recovery"].as_str().unwrap().contains("verify.run"));
+        assert_eq!(std::fs::read(&prefs_path).unwrap(), before);
     }
 
     /// Issue #3844: the launch context names the owner Issue, so an agent may
