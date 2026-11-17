@@ -7599,6 +7599,79 @@ fn issue_4735_monitor_off_before_ack_preserves_the_materialized_owner() {
 }
 
 #[test]
+fn issue_7569_monitor_launch_refuses_a_live_close_after_the_cached_open_observation() {
+    assert_issue_7569_launch_denied(Some("CLOSED"), "Issue #42 is closed on GitHub");
+}
+
+#[test]
+fn issue_7569_monitor_defers_launch_without_a_fresh_open_state() {
+    assert_issue_7569_launch_denied(None, gwt_agent::TRANSIENT_LAUNCH_RETRY_HINT);
+}
+
+fn assert_issue_7569_launch_denied(observed_state: Option<&str>, expected: &str) {
+    use gwt::project_runtime::{events::OwnerCommand, launch_payload::OwnerLaunchMetadata};
+
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let (root, owner, delivery_id) =
+        owner_monitor_fixture(temp.path(), 42, true, &["pane-contract-fixture"]);
+    let response = observed_state.map_or_else(
+        || serde_json::json!({}),
+        |state| serde_json::json!({"state": state, "updatedAt": Utc::now().to_rfc3339()}),
+    );
+    gwt::issue_cache::set_issue_launch_readback_fixture(&root, 42, &response.to_string());
+    let id = owner.pane_id("closed-issue");
+    let mut config = super::pane_control_tests::control_launch_config(&root, 42);
+    config.launch_route = gwt_agent::LaunchRoute::Autonomous;
+    let mut feedback = issue_monitor_feedback(42);
+    feedback.issue_monitor_delivery_id = delivery_id;
+    feedback.issue_monitor_project_root = Some(root.clone());
+
+    let result = owner_fixture_block_on(owner.command(OwnerCommand::LaunchAgent {
+        id: id.clone(),
+        operation_id: "closed-issue-launch".into(),
+        tab_id: id.split_once("::").unwrap().0.into(),
+        config: Box::new(config),
+        metadata: Box::new(OwnerLaunchMetadata {
+            launch_feedback_context: Some(feedback),
+            ..Default::default()
+        }),
+        cols: 80,
+        rows: 24,
+    }));
+
+    let closed = observed_state == Some("CLOSED");
+    let detail = match (closed, result) {
+        (true, Err(error)) => error,
+        (false, Ok(receipt)) => receipt["monitor_failure_closed"]["detail"]
+            .as_str()
+            .expect("transient retry receipt")
+            .to_string(),
+        (_, outcome) => panic!("unexpected Monitor launch outcome: {outcome:?}"),
+    };
+    assert!(detail.contains(expected), "{detail}");
+    let prefs =
+        gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&root)).unwrap();
+    assert_eq!(
+        prefs.closure_records.iter().any(|record| {
+            record.issue_number == 42
+                && record.state == gwt::issue_monitor::IssueClosureState::Closed
+        }),
+        closed
+    );
+    assert!(prefs.pending_launch_deliveries.is_empty());
+    if !closed {
+        assert!(prefs
+            .autonomous_records
+            .iter()
+            .any(|record| { record.issue_number == 42 && record.retry_not_before.is_some() }));
+    }
+    let inventory = owner_fixture_block_on(owner.command(OwnerCommand::ListPanes)).unwrap();
+    assert_eq!(inventory["panes"], serde_json::json!([]));
+    owner_fixture_block_on(owner.shutdown());
+}
+
+#[test]
 fn issue_5642_consumed_delivery_ack_replay_preserves_the_exact_live_pane() {
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
