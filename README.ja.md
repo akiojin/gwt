@@ -178,6 +178,11 @@ Agents に案内を表示し、**Retry model catalog** で保存値や入力途�
 
 **Settings > Supported Agents** では、全対応エージェントの導入状態と
 インストール済みバージョンを確認し、未導入の CLI をインストールできます。
+導入完了時には、検出した CLI の配置先をシェルの PATH に追加する手順を表示します。
+gwt の Installed 表示は、端末側の PATH 設定を確認したことを意味しません。
+`claude` などが見つからない場合は、表示された bash/zsh・fish・Windows 向けの手順で
+設定し、新しい端末でコマンドに `--version` を付けて確認してください。
+gwt がシェルの起動設定ファイルを書き換えることはありません。
 公式配布元の情報で新しいバージョンを確認できた場合は更新操作が表示されます。
 Codex・Grok・OpenCode・OpenClaw は npm、Antigravity は platform manifest を照会します。
 Claude native と Hermes は実効更新チャネルを検証できないため、理由を表示し、

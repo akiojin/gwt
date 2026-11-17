@@ -190,15 +190,16 @@ function renderSupportedAgentsPanel(panel, agents, options) {
     const result = maintenance.get(agent.id);
     if (result?.message) {
       const status = document.createElement("p");
-      status.className = "settings-status";
+      status.className = "settings-status settings-agent-maintenance-result";
+      status.dataset.agentMaintenanceId = agent.id;
       status.setAttribute("role", result.success === false ? "alert" : "status");
-      status.textContent = result.message;
+      status.textContent = `${agent.name}: ${result.message}`;
       if (result.before_version || result.after_version) {
         status.textContent += ` Before: ${result.before_version || "Unknown (version unavailable)"}. `
           + `After: ${result.after_version || "Unknown (version unavailable)"}.`;
       }
       status.title = status.textContent;
-      actions.appendChild(status);
+      panel.appendChild(status);
     }
     row.appendChild(actions);
   }
