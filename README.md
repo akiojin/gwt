@@ -1360,6 +1360,17 @@ slots and NeedsHuman. Record who will verify in each criterion. After the
 release or host becomes available, choose **Return to queue** (or
 `issue.monitor.requeue` with a reason) to request verification. Untagged
 implementation criteria continue through the normal queue.
+After the external-check-only delivery is settled, assign every remaining
+criterion a verifier with `issue.monitor.verification.declare`:
+
+```json
+{"schema_version":1,"operation":"issue.monitor.verification.declare","params":{"number":42,"criteria":[{"id":"AC-2","verifier":"PM on release host"}]}}
+```
+
+`issue.monitor.status` retains `verification_declaration` with the original
+criterion text, verifier, and declaration time. Every remaining AC must appear
+exactly once. Missing delivery or settlement, implementation criteria, and empty
+verifiers are refused; declaring verification does not change Autonomous mode.
 With Autonomous off, unchecked criteria retain the `NeedsHuman` state with a
 `merge 済み・未達 AC あり` comment. A `gwt-spec` Issue
 is closed only after every task phase is complete. Delegating remaining criteria

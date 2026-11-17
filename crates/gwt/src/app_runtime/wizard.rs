@@ -1169,7 +1169,7 @@ fn prepare_issue_monitor_launch(
 ) -> Result<IssueMonitorLaunchFacts, String> {
     let mut phase_started = std::time::Instant::now();
     let project_root = &request.project_root;
-    let base_branch = gwt::start_work::resolve_launch_agent_base_branch(project_root)?;
+    let base_branch = gwt::issue_monitor::issue_monitor_implementation_base_branch(project_root)?;
     record_issue_monitor_worker_phase("monitor_base_branch", &mut phase_started);
     let Some(profile) = choice.profiles.preferred_profile() else {
         return Ok(IssueMonitorLaunchFacts {
@@ -3396,7 +3396,7 @@ impl AppRuntime {
 
         let project_root = tab.project_root.clone();
         let base_branch_name =
-            match gwt::start_work::resolve_launch_agent_base_branch(&project_root) {
+            match gwt::issue_monitor::issue_monitor_implementation_base_branch(&project_root) {
                 Ok(branch) => branch,
                 Err(error) => {
                     return vec![OutboundEvent::reply(
@@ -5949,7 +5949,7 @@ impl AppRuntime {
 
         let base_branch_name = match prepared.as_ref() {
             Some(facts) => facts.base_branch.clone(),
-            None => gwt::start_work::resolve_launch_agent_base_branch(&project_root)?,
+            None => gwt::issue_monitor::issue_monitor_implementation_base_branch(&project_root)?,
         };
         let IssueMonitorLaunchProfileChoice {
             profiles: previous_profiles,
@@ -8982,7 +8982,8 @@ fn prepare_issue_monitor_resume(
     // Keep that work with the other launch facts, before returning to the GUI.
     let mut config = super::launch_config_from_persisted_session(&session);
     if autonomous_handoff.is_none() && linked_issue_kind == gwt::LinkedIssueKind::Issue {
-        let base_branch = gwt::start_work::resolve_launch_agent_base_branch(project_root)?;
+        let base_branch =
+            gwt::issue_monitor::issue_monitor_implementation_base_branch(project_root)?;
         let delivery =
             gwt::issue_monitor_owner_branch_delivery(project_root, &base_branch, target_branch);
         config.args.push(gwt::issue_monitor_launch_prompt_for_base(

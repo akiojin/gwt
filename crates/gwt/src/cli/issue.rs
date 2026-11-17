@@ -469,6 +469,13 @@ pub(super) fn run_with_data<E: CliEnv>(
             reason,
             force,
         } => run_monitor_requeue(env, project_root.as_deref(), number, &reason, force, out)?,
+        IssueCommand::MonitorVerificationDeclare {
+            project_root,
+            number,
+            criteria,
+        } => {
+            run_monitor_verification_declare(env, project_root.as_deref(), number, &criteria, out)?
+        }
         IssueCommand::MonitorQuotaHoldList { project_root } => {
             run_monitor_quota_hold_list(env, project_root.as_deref(), out)?
         }
@@ -4187,6 +4194,73 @@ fn run_monitor_failover<E: CliEnv>(
     // authority is unavailable. Keep the established command success
     // contract while reporting scan delivery truthfully in the JSON fields.
     Ok(0)
+}
+
+/// Issue #7536: retain an explicit verifier assignment without changing delivery policy.
+fn run_monitor_verification_declare<E: CliEnv>(
+    env: &mut E,
+    project_root: Option<&std::path::Path>,
+    number: u64,
+    criteria: &[(String, String)],
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let project_root = issue_monitor_project_root(env, project_root)?;
+    let entry = refresh_issue_cache(env, IssueNumber(number))?;
+    if entry.snapshot.state != IssueState::Open {
+        return Err(SpecOpsError::Validation(
+            "verification declarations require an open owner".into(),
+        ));
+    }
+    let source = if entry
+        .snapshot
+        .labels
+        .iter()
+        .any(|label| label.eq_ignore_ascii_case("gwt-spec"))
+    {
+        if let Some(error) = entry.spec_parse_error {
+            return Err(SpecOpsError::Validation(format!(
+                "cannot read SPEC acceptance: {error}"
+            )));
+        }
+        crate::issue_monitor_worker::acceptance_source_text(&entry.snapshot.body, &entry.spec_body)
+    } else {
+        entry.snapshot.body
+    };
+    let path = crate::issue_monitor_prefs_path_for_repo_path(&project_root);
+    let now = chrono::Utc::now().to_rfc3339();
+    let (_, result) = crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            prefs.clone(),
+        );
+        let result = monitor.declare_verification(number, &source, criteria, &now);
+        if result.is_ok() {
+            *prefs = monitor.prefs();
+        }
+        Ok(result)
+    })
+    .map_err(io_as_api_error)?;
+    match result {
+        Ok(declaration) => {
+            let delivery =
+                issue_monitor_scan_delivery(request_immediate_monitor_scan(&project_root));
+            out.push_str(&serde_json::json!({"number": number, "status": "awaiting_verification",
+                "verification_declaration": declaration,
+                "scan_requested": delivery.scan_requested, "scan_delivery": delivery.scan_delivery,
+                "scan_error": delivery.scan_error,
+                "recovery": "when verification is possible, use issue.monitor.requeue with number and reason"}).to_string());
+            out.push('\n');
+            Ok(0)
+        }
+        Err(detail) => {
+            out.push_str(&serde_json::json!({"number": number, "status": "refused",
+                "refusal": "verification_not_ready", "detail": detail,
+                "required_state": "delivered, settled owner awaiting_verification with exact remaining ACs and non-empty verifiers",
+                "recovery": "inspect issue.monitor.status and the current acceptance criteria; use issue.monitor.requeue to resume implementation"}).to_string());
+            out.push('\n');
+            Ok(1)
+        }
+    }
 }
 
 /// Issue #3645 AC-1 / #3628 AC-1〜AC-3: release the failure hold on one issue.
@@ -8199,6 +8273,7 @@ mod tests {
             claim_id: None,
             delivery_id: None,
             waiting: None,
+            verification_declaration: None,
             steering: None,
             idle_kind: None,
             idle_since: None,
@@ -9198,6 +9273,91 @@ mod tests {
             comments: vec![],
         });
         (tmp, env)
+    }
+
+    #[test]
+    fn issue_7536_verification_declaration_persists_condition_and_verifier() {
+        let (tmp, mut env) = seeded_edit_env(&["bug"]);
+        let _home = ScopedGwtHome::set(tmp.path().join("gwt-home"));
+        init_monitor_test_repository(tmp.path(), "https://github.com/example/repo.git");
+        env.cache_root = crate::issue_cache::issue_cache_root_for_repo_path_or_detached(tmp.path());
+        let mut snapshot = fetched(&env, 7);
+        snapshot.author_login = Some("akiojin".into());
+        snapshot.body = "## Acceptance Criteria\n- [x] AC-1: implement\n- [ ] AC-2: verify released main [main-verification]\n".into();
+        env.client.seed(snapshot.clone());
+        Cache::new(env.cache_root())
+            .write_snapshot(&snapshot)
+            .unwrap();
+        let candidate =
+            crate::issue_monitor_worker::load_cached_issue_monitor_candidate(&env.cache_root(), 7)
+                .unwrap();
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        monitor.set_autonomous_mode(true);
+        crate::issue_monitor_worker::bind_issue_monitor_source_repository(&mut monitor, tmp.path());
+        monitor.record_candidate(candidate.clone());
+        monitor.record_merged_issue_settlement(
+            7,
+            9,
+            Some("abc123".into()),
+            crate::MergedIssueSettlementAction::AwaitVerification {
+                unmet: vec!["AC-2".into()],
+            },
+            "2026-11-17T00:00:00Z",
+        );
+        let before = monitor.prefs();
+        let path = crate::issue_monitor_prefs_path_for_repo_path(tmp.path());
+        crate::save_issue_monitor_prefs(&path, &before).unwrap();
+
+        let input = serde_json::json!({"schema_version": 1,
+            "operation": "issue.monitor.verification.declare",
+            "params": {"number": 7, "criteria": [{"id": "AC-2", "verifier": "PM on release host"}]}});
+        assert_eq!(
+            crate::cli::dispatch_json_input(&mut env, "gwtd", &input.to_string()),
+            0,
+            "{}",
+            String::from_utf8_lossy(&env.stderr)
+        );
+        let prefs = crate::load_issue_monitor_prefs(&path).unwrap();
+        let mut restored =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        crate::issue_monitor_worker::bind_issue_monitor_source_repository(
+            &mut restored,
+            tmp.path(),
+        );
+        restored.record_candidate(candidate);
+        restored.rebase_daemon_driver_prefs(&before);
+        let status = serde_json::to_value(restored.agent_status()).unwrap();
+        let declaration = &status["inbox"][0]["verification_declaration"];
+        assert_eq!(declaration["criteria"][0]["id"], "AC-2");
+        assert_eq!(
+            declaration["criteria"][0]["text"],
+            "verify released main [main-verification]"
+        );
+        assert_eq!(declaration["criteria"][0]["verifier"], "PM on release host");
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(declaration["declared_at"].as_str().unwrap())
+                .is_ok()
+        );
+        assert_eq!(status["inbox"][0]["state"], "awaiting_verification");
+        assert_eq!(status["occupied_slot_count"], 0);
+        snapshot
+            .body
+            .push_str("- [ ] AC-3: implement another fix\n");
+        env.client.seed(snapshot);
+        let before_refusal = fs::read(&path).unwrap();
+        assert_eq!(
+            crate::cli::dispatch_json_input(&mut env, "gwtd", &input.to_string()),
+            1
+        );
+        assert_eq!(fs::read(&path).unwrap(), before_refusal);
+        assert!(matches!(
+            restored.requeue_failed_issue(7, "release available", "2026-11-18T00:00:00Z"),
+            crate::IssueMonitorRequeueOutcome::Requeued { .. }
+        ));
+        assert_eq!(
+            restored.inbox_item(7).unwrap().state,
+            crate::MonitorInboxState::Queued
+        );
     }
 
     #[test]
@@ -13668,6 +13828,7 @@ mod tests {
                 claim_id: None,
                 delivery_id: None,
                 waiting: None,
+                verification_declaration: None,
                 steering: None,
                 idle_kind: None,
                 idle_since: None,
@@ -13824,6 +13985,7 @@ mod tests {
                     claim_id: None,
                     delivery_id: None,
                     waiting: None,
+                    verification_declaration: None,
                     steering: None,
                     idle_kind: None,
                     idle_since: None,
@@ -18727,6 +18889,7 @@ command = "my-agent-cli"
                 claim_id: None,
                 delivery_id: None,
                 waiting: None,
+                verification_declaration: None,
                 idle_kind: None,
                 idle_since: None,
                 steering: None,

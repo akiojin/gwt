@@ -1236,6 +1236,16 @@ close を再評価でき、**Return to queue** で作業を再開することも
 active slot と NeedsHuman に含めず確認を待ちます。確認主体も各条件に記録してください。
 リリース公開後や対象ホストが利用可能になったら **Return to queue**、または理由を付けた
 `issue.monitor.requeue` で確認を起動できます。タグのない実装条件があれば通常の queue を継続します。
+外部確認だけが残る配信の精算後、残条件すべての確認主体を
+`issue.monitor.verification.declare` で登録できます。
+
+```json
+{"schema_version":1,"operation":"issue.monitor.verification.declare","params":{"number":42,"criteria":[{"id":"AC-2","verifier":"PM on release host"}]}}
+```
+
+`issue.monitor.status` の `verification_declaration` に元の条件本文、確認主体、
+宣言日時が残ります。各未達 AC を一度ずつ指定してください。未配信・未精算、実装残件を
+含む条件、空の確認主体は拒否します。この宣言で Autonomous mode は変更しません。
 Autonomous が off の場合は `merge 済み・未達 AC あり` とコメントして
 従来どおり `NeedsHuman` にします。`gwt-spec` Issue は
 全 Phase の tasks が完了したときだけ close します。残りの基準を別 Issue に

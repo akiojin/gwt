@@ -1100,6 +1100,29 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 reason: required_string(params, "reason")?,
             })
         }
+        "issue.monitor.verification.declare" => {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Assignment {
+                id: String,
+                verifier: String,
+            }
+            let criteria: Vec<Assignment> =
+                serde_json::from_value(lookup(params, "criteria").cloned().unwrap_or(Value::Null))
+                    .map_err(|error| {
+                        CliParseError::InvalidJson(format!(
+                            "criteria must contain {{id, verifier}} assignments: {error}"
+                        ))
+                    })?;
+            CliCommand::Issue(IssueCommand::MonitorVerificationDeclare {
+                project_root: optional_path(params, "project_root")?,
+                number: required_u64(params, "number")?,
+                criteria: criteria
+                    .into_iter()
+                    .map(|entry| (entry.id, entry.verifier))
+                    .collect(),
+            })
+        }
         "issue.monitor.wait" => {
             let clear = optional_bool(params, "clear")?.unwrap_or(false);
             let (reason, resume_condition) = if clear {
@@ -6900,6 +6923,29 @@ mod tests {
             err("issue.monitor.wait", json!({"reason": "x"})),
             CliParseError::MissingFlag("resume_condition")
         ));
+    }
+
+    #[test]
+    fn issue_7536_verification_declaration_requires_typed_assignments() {
+        assert_eq!(
+            ok(
+                "issue.monitor.verification.declare",
+                json!({"number":42,"criteria":[{"id":"AC-1","verifier":"PM"}]})
+            ),
+            CliCommand::Issue(IssueCommand::MonitorVerificationDeclare {
+                project_root: None,
+                number: 42,
+                criteria: vec![("AC-1".into(), "PM".into())]
+            })
+        );
+        for params in [
+            json!({"number":42}),
+            json!({"number":42,"criteria":[{"id":"AC-1"}]}),
+            json!({"number":42,"criteria":[{"id":"AC-1","verifier":"PM","text":"caller supplied"}]}),
+            json!({"number":42,"criteria":[{"id":"AC-1","verifier":"PM"}],"verifier":"extra"}),
+        ] {
+            let _ = err("issue.monitor.verification.declare", params);
+        }
     }
 
     /// Issue #4286 AC-1/AC-2: the PM invalidates one wait declaration. The
