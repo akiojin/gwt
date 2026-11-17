@@ -1426,6 +1426,42 @@ mod tests {
         );
     }
 
+    /// Issue #7522: the reverse direction. The hand-written family text is
+    /// kept, so a renamed or removed operation could survive in it and send a
+    /// caller to a name that no longer dispatches. Every operation-shaped
+    /// token in a family help must be a catalog spelling, or the prefix of
+    /// one (`issue.spec.*`).
+    #[test]
+    fn family_help_names_only_catalogued_operations() {
+        use gwt::cli::operation_catalog::{families, names};
+        let families = families();
+        let mut stale = Vec::new();
+        for family in families.iter().copied().chain(["lessons"]) {
+            let help = family_help(family).expect("catalog family help");
+            for token in help
+                .split(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')))
+                .map(|token| token.trim_matches('.'))
+            {
+                let Some((head, _)) = token.split_once('.') else {
+                    continue;
+                };
+                let known = names().any(|name| {
+                    name == token
+                        || name
+                            .strip_prefix(token)
+                            .is_some_and(|rest| rest.starts_with('.'))
+                });
+                if families.contains(&head) && !known {
+                    stale.push(format!("{family}: {token}"));
+                }
+            }
+        }
+        assert!(
+            stale.is_empty(),
+            "family help names operations the catalog does not dispatch: {stale:?}"
+        );
+    }
+
     /// Issue #7522: the global help names every family and the one operation
     /// that enumerates the whole catalog machine-readably.
     #[test]
