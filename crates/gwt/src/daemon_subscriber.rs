@@ -1478,7 +1478,7 @@ impl DaemonSubscriber {
     }
 }
 
-async fn close_project_owner_for_quit<S>(mut stream: S) -> Result<(), String>
+pub(crate) async fn close_project_owner_for_quit<S>(mut stream: S) -> Result<(), String>
 where
     S: futures_util::Sink<tokio_tungstenite::tungstenite::Message> + Unpin,
     S::Error: std::fmt::Display,
