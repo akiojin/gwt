@@ -391,20 +391,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "chrono"
-version = "0.4.45"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
-dependencies = [
- "iana-time-zone",
- "js-sys",
- "num-traits",
- "serde",
- "wasm-bindgen",
- "windows-link 0.2.1",
-]
-
-[[package]]
 name = "cipher"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1324,14 +1310,13 @@ dependencies = [
 
 [[package]]
 name = "gwt"
-version = "9.169.0"
+version = "9.170.0"
 dependencies = [
  "ammonia",
  "auto-launch",
  "axum",
  "base64 0.23.1",
  "block2",
- "chrono",
  "ctor",
  "dirs 7.0.0",
  "dispatch2",
@@ -1378,6 +1363,7 @@ dependencies = [
  "tao",
  "tempfile",
  "thiserror 2.0.21",
+ "time",
  "tokio",
  "tokio-rustls",
  "tokio-tungstenite 0.30.0",
@@ -1399,9 +1385,8 @@ dependencies = [
 
 [[package]]
 name = "gwt-agent"
-version = "9.169.0"
+version = "9.170.0"
 dependencies = [
- "chrono",
  "dunce",
  "filetime",
  "fs2",
@@ -1428,7 +1413,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-ai"
-version = "9.169.0"
+version = "9.170.0"
 dependencies = [
  "reqwest",
  "serde",
@@ -1438,7 +1423,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-clipboard"
-version = "9.169.0"
+version = "9.170.0"
 dependencies = [
  "gwt-core",
  "thiserror 2.0.21",
@@ -1446,7 +1431,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-config"
-version = "9.169.0"
+version = "9.170.0"
 dependencies = [
  "dirs 7.0.0",
  "fs2",
@@ -1463,10 +1448,9 @@ dependencies = [
 
 [[package]]
 name = "gwt-core"
-version = "9.169.0"
+version = "9.170.0"
 dependencies = [
  "base64 0.23.1",
- "chrono",
  "core-foundation",
  "dirs 7.0.0",
  "dunce",
@@ -1492,6 +1476,7 @@ dependencies = [
  "tar",
  "tempfile",
  "thiserror 2.0.21",
+ "time",
  "tokio",
  "toml 1.1.6+spec-1.1.0",
  "tracing",
@@ -1505,7 +1490,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-docker"
-version = "9.169.0"
+version = "9.170.0"
 dependencies = [
  "gwt-core",
  "libc",
@@ -1519,9 +1504,8 @@ dependencies = [
 
 [[package]]
 name = "gwt-git"
-version = "9.169.0"
+version = "9.170.0"
 dependencies = [
- "chrono",
  "dirs 7.0.0",
  "gwt-core",
  "libc",
@@ -1530,14 +1514,14 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "time",
  "tracing",
 ]
 
 [[package]]
 name = "gwt-github"
-version = "9.169.0"
+version = "9.170.0"
 dependencies = [
- "chrono",
  "fs2",
  "gwt-core",
  "hex",
@@ -1548,15 +1532,15 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.21",
+ "time",
  "uuid",
 ]
 
 [[package]]
 name = "gwt-skills"
-version = "9.169.0"
+version = "9.170.0"
 dependencies = [
  "base64 0.23.1",
- "chrono",
  "dunce",
  "fs2",
  "gwt-config",
@@ -1568,13 +1552,14 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.21",
+ "time",
  "toml 1.1.6+spec-1.1.0",
  "windows",
 ]
 
 [[package]]
 name = "gwt-terminal"
-version = "9.169.0"
+version = "9.170.0"
 dependencies = [
  "gwt-core",
  "libc",
@@ -1590,7 +1575,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-voice"
-version = "9.169.0"
+version = "9.170.0"
 dependencies = [
  "thiserror 2.0.21",
 ]
@@ -1760,30 +1745,6 @@ dependencies = [
  "tokio",
  "tower-service",
  "tracing",
-]
-
-[[package]]
-name = "iana-time-zone"
-version = "0.1.65"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e31bc9ad994ba00e440a8aa5c9ef0ec67d5cb5e5cb0cc7f8b744a35b389cc470"
-dependencies = [
- "android_system_properties",
- "core-foundation-sys",
- "iana-time-zone-haiku",
- "js-sys",
- "log",
- "wasm-bindgen",
- "windows-core",
-]
-
-[[package]]
-name = "iana-time-zone-haiku"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f31827a206f56af32e590ba56d5d2d085f558508192593743f16b2306495269f"
-dependencies = [
- "cc",
 ]
 
 [[package]]
@@ -2564,6 +2525,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "num_threads"
+version = "0.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cabcc654086861f9e1bc5115258de62ef92c79b20f4615a1b0cc57c4e82027d4"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
@@ -4058,7 +4028,9 @@ dependencies = [
  "deranged",
  "itoa",
  "js-sys",
+ "libc",
  "num-conv",
+ "num_threads",
  "powerfmt",
  "serde_core",
  "time-core",
@@ -4384,7 +4356,6 @@ version = "0.3.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb7f578e5945fb242538965c2d0b04418d38ec25c79d160cd279bf0731c8d319"
 dependencies = [
- "chrono",
  "matchers",
  "nu-ansi-term",
  "once_cell",

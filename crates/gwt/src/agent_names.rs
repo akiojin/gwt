@@ -237,7 +237,7 @@ impl AgentRoster {
             enabled: true,
             pm_eligible: false,
             pm_project_key: None,
-            created_at: chrono::Utc::now().to_rfc3339(),
+            created_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
             origin_session_id: None,
             last_issue_number: None,
             last_spec_number: None,

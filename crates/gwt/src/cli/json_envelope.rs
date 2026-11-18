@@ -983,14 +983,13 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             let recovery_id = required_string(params, "recovery_id")?;
             let body = required_string(params, "body")?;
             let recovered_at = required_string(params, "recovered_at")?;
-            let recovered_at = chrono::DateTime::parse_from_rfc3339(&recovered_at)
+            let recovered_at = gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(&recovered_at)
                 .map_err(|_| {
                     CliParseError::InvalidJson(
                         "recovered_at must be an RFC3339 timestamp of the actual intervention"
                             .into(),
                     )
                 })?
-                .with_timezone(&chrono::Utc)
                 .to_rfc3339();
             if number == 0
                 || body.trim().is_empty()
@@ -2088,6 +2087,28 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 id: optional_string(params, "id")?,
             })
         }
+        "pane.layout.place" => {
+            let lane_id = required_string(params, "lane_id")?;
+            let lane_id = serde_json::from_value(Value::String(lane_id)).map_err(|_| {
+                CliParseError::InvalidValue {
+                    flag: "lane_id",
+                    reason: "expected plan, active, blocked, or done",
+                }
+            })?;
+            let order = optional_u64(params, "order")?
+                .map(u32::try_from)
+                .transpose()
+                .map_err(|_| CliParseError::InvalidValue {
+                    flag: "order",
+                    reason: "expected a 32-bit unsigned integer",
+                })?;
+            CliCommand::ProjectControl(super::open::ProjectControlCommand::PlacePane {
+                id: required_string(params, "id")?,
+                board_id: required_string(params, "board_id")?,
+                lane_id,
+                order,
+            })
+        }
         "pane.name" => {
             reject_unknown_params(params, &["candidate"], "pane.name")?;
             CliCommand::Pane(PaneCommand::Name {
@@ -2155,6 +2176,9 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             }
             CliCommand::Pm(crate::cli::pm::PmCommand::ProjectExecutionStatus { operation_id })
         }
+        "project.open" => CliCommand::ProjectControl(super::open::ProjectControlCommand::Open {
+            path: required_string(params, "path")?.into(),
+        }),
         "pm.capabilities" => CliCommand::Pm(crate::cli::pm::PmCommand::Capabilities),
         "pm.request_tasks.read" => {
             reject_unknown_params(params, &["selector"], "pm.request_tasks.read")?;
@@ -2342,6 +2366,11 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 input,
             })
         }
+        "pm.auto_start.set" => CliCommand::Pm(crate::cli::pm::PmCommand::SetAutoStart {
+            project_root: optional_string(params, "project_root")?,
+            enabled: optional_bool(params, "enabled")?
+                .ok_or(CliParseError::MissingFlag("enabled"))?,
+        }),
         "pm.pause" | "pm.resume" => CliCommand::Pm(crate::cli::pm::PmCommand::SetPaused {
             project_root: optional_string(params, "project_root")?,
             paused: envelope.operation == "pm.pause",
@@ -3879,6 +3908,24 @@ mod tests {
         }
     }
 
+    #[test]
+    fn issue_7518_project_and_pane_operations_accept_typed_params() {
+        let _ = ok("project.open", json!({"path": "./project"}));
+        let _ = ok(
+            "pane.layout.place",
+            json!({"id":"tab::agent","board_id":"tab::board","lane_id":"active","order":0}),
+        );
+        let _ = err("project.open", json!({"path": ""}));
+        let _ = err(
+            "pane.layout.place",
+            json!({"id":"tab::agent","board_id":"tab::board","lane_id":"unknown"}),
+        );
+        let _ = err(
+            "pane.layout.place",
+            json!({"id":"tab::agent","board_id":"tab::board","lane_id":"active","project_key":"foreign"}),
+        );
+    }
+
     fn concern_call(env: &mut TestEnv, operation: &str, params: Value) -> Value {
         env.stdout.clear();
         env.stderr.clear();
@@ -4250,7 +4297,7 @@ mod tests {
     fn every_named_pr_default_action_operation_is_callable() {
         use gwt_git::pr_status::{classify_pr_lifecycle, PrInventoryFields};
 
-        let now = chrono::Utc::now();
+        let now = gwt_core::timestamp::UtcTimestamp::now();
         let mut seen_update_branch = false;
         for (mergeable, merge_state_status, ci_status, is_draft) in [
             ("MERGEABLE", "BEHIND", "SUCCESS", true),
@@ -9103,6 +9150,72 @@ mod tests {
             true,
             "the registered PM remains authorized"
         );
+    }
+
+    #[test]
+    fn pm_auto_start_set_requires_an_explicit_boolean() {
+        let _ = ok("pm.auto_start.set", json!({"enabled": false}));
+        for params in [
+            json!({}),
+            json!({"enabled": null}),
+            json!({"enabled": "false"}),
+            json!({"enabled": false, "session_id": "resident"}),
+        ] {
+            let error = err("pm.auto_start.set", params);
+            assert!(!matches!(error, CliParseError::UnknownSubcommand(_)));
+        }
+    }
+
+    #[test]
+    fn pm_auto_start_set_preserves_residency_and_requires_pm_authority() {
+        use crate::pm_registry;
+        use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
+
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path().join("state"));
+        let _session = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let mut env = TestEnv::new(repo.clone());
+        let path = pm_registry::pm_prefs_path_for_repo_path(&repo);
+        let original: pm_registry::PmPrefs = serde_json::from_value(json!({
+            "settings": {"auto_start": true, "paused": true, "loop_interval_secs": 90},
+            "registration": {"session_id":"resident", "agent_id":"codex", "worktree_path":repo}
+        }))
+        .unwrap();
+        pm_registry::save_pm_prefs(&path, &original).unwrap();
+
+        let set = |enabled| ok("pm.auto_start.set", json!({"enabled": enabled}));
+        let (_, output) = crate::cli::run_collect(&mut env, set(false)).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).unwrap()["auto_start"],
+            false
+        );
+        let mut expected = original.clone();
+        expected.settings.auto_start = false;
+        assert_eq!(pm_registry::load_pm_prefs(&path).unwrap(), expected);
+
+        let _agent = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "unrelated-agent");
+        assert!(crate::cli::run_collect(&mut env, set(true)).is_err());
+        assert_eq!(pm_registry::load_pm_prefs(&path).unwrap(), expected);
+
+        let _pm = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "resident");
+        let (_, output) = crate::cli::run_collect(
+            &mut env,
+            ok(
+                "pm.auto_start.set",
+                json!({"enabled": true, "project_root": repo}),
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).unwrap()["auto_start"],
+            true
+        );
+        assert_eq!(pm_registry::load_pm_prefs(&path).unwrap(), original);
     }
 
     // Issue #4249 FR-003: the PM self-description is a read-only diagnostic.

@@ -21,7 +21,7 @@ use std::{
     io::ErrorKind,
     net::{TcpListener, TcpStream},
     sync::Mutex,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 #[cfg(unix)]
@@ -877,7 +877,11 @@ fn owner_pagination_rejects_missing_and_repeated_cursors_as_partial() {
 
 #[test]
 fn owner_list_comments_rejects_invalid_required_identity_fields() {
-    let cases = [(0, "2026-07-14T00:00:01Z"), (501, "not-rfc3339")];
+    let cases = [
+        (0, "2026-07-14T00:00:01Z"),
+        (501, "not-rfc3339"),
+        (501, "2026-07-14Q00:00:01Z"),
+    ];
 
     for (id, updated_at) in cases {
         let transport = FakeTransport::new();
@@ -1910,7 +1914,7 @@ fn issue_labels_honor_and_settle_rest_budget() {
         assert!(ledger
             .active_block(
                 gwt_core::github_quota::GitHubQuota::Rest,
-                chrono::Utc::now()
+                SystemTime::now().into()
             )
             .is_some());
         assert!(matches!(
@@ -1919,7 +1923,7 @@ fn issue_labels_honor_and_settle_rest_budget() {
         ));
         assert_eq!(client.transport().recorded().len(), 1);
         assert_eq!(
-            ledger.snapshot(chrono::Utc::now()).local["core"].calls_last_hour,
+            ledger.snapshot(SystemTime::now().into()).local["core"].calls_last_hour,
             1
         );
     }
@@ -2554,7 +2558,7 @@ fn workflow_requests_honor_and_settle_the_shared_rest_budget() {
     assert!(ledger
         .active_block(
             gwt_core::github_quota::GitHubQuota::Rest,
-            chrono::Utc::now()
+            SystemTime::now().into()
         )
         .is_some());
     assert!(matches!(
@@ -2571,7 +2575,7 @@ fn workflow_requests_honor_and_settle_the_shared_rest_budget() {
     ));
     assert_eq!(client.transport().recorded().len(), 3);
     assert_eq!(
-        ledger.snapshot(chrono::Utc::now()).local["core"].calls_last_hour,
+        ledger.snapshot(SystemTime::now().into()).local["core"].calls_last_hour,
         3
     );
 }
@@ -2788,7 +2792,7 @@ fn pm_settings_and_discussion_requests_honor_shared_budget_refusals() {
         Err(ApiError::RateLimited { .. })
     ));
     assert_eq!(client.transport().recorded().len(), 2);
-    let snapshot = ledger.snapshot(chrono::Utc::now());
+    let snapshot = ledger.snapshot(SystemTime::now().into());
     assert_eq!(snapshot.local["core"].calls_last_hour, 1);
     assert_eq!(snapshot.local["graphql"].calls_last_hour, 1);
 }

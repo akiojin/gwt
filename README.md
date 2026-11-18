@@ -2537,13 +2537,30 @@ an entry removes its copied policy on the next refresh.
 - **Register** adds one enabled member to the shared roster. **Rest member** reduces it by one while allowing current work to finish. At least one enabled member remains. Machine safety limits can lower the effective allocation.
 - Use **Split view** to choose each pane independently; **Close split** keeps the active surface in one pane. Shells remain auxiliary terminals and do not count as members or live agents.
 
-**Active** counts live agents on this machine, including PM. **Team** counts enabled registered members, including the configured PM. **Busy** counts active implementation members; concurrent capacity excludes members holding a PM role. Member identities, enabled capacity, and confirmed
+The project browser tab title, status bar, Works, and Agents show the same **Running**
+count from the project's agent-window status snapshot, including PM agent windows. Shells
+are excluded. The status mapping is:
+
+| Agent window status | Project count |
+| --- | --- |
+| Running, Starting | Running |
+| Waiting, Stopped, Interrupted | Block |
+| Error | Block and Error |
+| Idle | Idle |
+
+**Team** counts enabled registered members, including the configured PM. **Busy** counts active implementation members; concurrent capacity excludes members holding a PM role. Member identities, enabled capacity, and confirmed
 planned-issue reassignments survive an app restart.
 
 Works shows session-attributed input, cache and output usage, a thirty-minute activity graph,
 branch and verification facts. Unavailable measurements display **—**, including context remaining
 unless the provider reports it directly. Today totals use this project's measured conversations;
 account-wide usage is not copied into them. Individual PR information is not shown here.
+**Fleet tokens/min** averages the fleet's token use over five completed UTC minutes. Each
+point sums timestamp-matched minute buckets for the project's currently observed live
+sessions, then divides by five. The chart shows the latest 25 rolling points and excludes
+each session's in-progress minute. A missing session, missing or unmeasured bucket
+(`null`), or unavailable usage makes the affected point a gap and shows **—** when it is
+the latest point. A fully measured window with no tokens shows **0**.
 Today and Fleet explain whether measurements are missing, partial, unavailable, or complete;
 unknown totals stay **—**, while measured zero stays **0**. Cost and Landed PRs are omitted
 because their data sources are not connected.
@@ -2551,6 +2568,11 @@ because their data sources are not connected.
 Issues shows host-wide **Verification slots** as running, capacity, and available counts.
 `issue.monitor.status` exposes the same observation as `verification_capacity`.
 Unavailable observations display **Unavailable** rather than zero.
+
+The Issues status strip displays **Needs human** from the Monitor's
+`needs_human_count`. The Monitor counts distinct Issues requiring a human
+response, including affected Issues during a failure surge. An observed empty
+set displays **0**. An unavailable count is `null` and the status strip omits it.
 
 Saved sessions restore into the current surfaces. The former terminal tabs, grid and Columns
 setting do not return after reload or restart; the roster's Team/Past tabs remain.

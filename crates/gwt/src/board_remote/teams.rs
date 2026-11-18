@@ -7,10 +7,11 @@
 //! the same time-window cache as Slack to bound API calls; failures surface as
 //! errors rather than a silent local fallback (FR-010).
 
+use gwt_core::timestamp::UtcTimestamp;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 use gwt_core::coordination::{
@@ -154,7 +155,7 @@ impl TeamsProvider {
     }
 
     fn cached_history(&self, worktree_root: &Path) -> Result<Vec<BoardEntry>> {
-        let now = Utc::now();
+        let now = UtcTimestamp::now();
         if let Some(cached) = self.cache.get(now) {
             return Ok(cached);
         }
@@ -178,7 +179,7 @@ impl TeamsProvider {
                 oldest_entry_id,
                 newest_entry_id,
                 total_entries,
-                updated_at: Utc::now(),
+                updated_at: UtcTimestamp::now(),
             },
         }
     }
@@ -287,7 +288,7 @@ impl TeamsProvider {
                         channel: channel.to_string(),
                         root_id: existing.root_id.clone(),
                         card_hash: hash,
-                        updated_at: Utc::now(),
+                        updated_at: UtcTimestamp::now(),
                     },
                 );
             }
@@ -304,7 +305,7 @@ impl TeamsProvider {
                 channel: channel.to_string(),
                 root_id: root_id.clone(),
                 card_hash: hash,
-                updated_at: Utc::now(),
+                updated_at: UtcTimestamp::now(),
             },
         );
         Ok(root_id)
@@ -461,11 +462,10 @@ fn graph_message_to_entry(message: &GraphMessage, workspace: &str) -> BoardEntry
     if let Some(dt) = message
         .created_date_time
         .as_deref()
-        .and_then(|raw| DateTime::parse_from_rfc3339(raw).ok())
+        .and_then(UtcTimestamp::parse_rfc3339)
     {
-        let utc = dt.with_timezone(&Utc);
-        entry.created_at = utc;
-        entry.updated_at = utc;
+        entry.created_at = dt;
+        entry.updated_at = dt;
     }
     let workspace = workspace.trim();
     if !workspace.is_empty() {
@@ -534,7 +534,7 @@ impl BoardProvider for TeamsProvider {
     fn load_entries_since(
         &self,
         worktree_root: &Path,
-        since: DateTime<Utc>,
+        since: UtcTimestamp,
     ) -> Result<Vec<BoardEntry>> {
         Ok(self
             .cached_history(worktree_root)?
@@ -546,7 +546,7 @@ impl BoardProvider for TeamsProvider {
     fn load_entries_since_for_scope(
         &self,
         worktree_root: &Path,
-        since: DateTime<Utc>,
+        since: UtcTimestamp,
         _scope: &BoardAudienceScope,
     ) -> Result<Vec<BoardEntry>> {
         self.load_entries_since(worktree_root, since)
@@ -557,9 +557,9 @@ impl BoardProvider for TeamsProvider {
         worktree_root: &Path,
         author: &str,
         kind: &BoardEntryKind,
-        within: chrono::Duration,
+        within: time::Duration,
     ) -> Result<bool> {
-        let threshold = Utc::now() - within;
+        let threshold = UtcTimestamp::now() - within;
         Ok(self.cached_history(worktree_root)?.iter().any(|entry| {
             entry.author == author && entry.kind == *kind && entry.updated_at > threshold
         }))
@@ -568,11 +568,11 @@ impl BoardProvider for TeamsProvider {
     fn load_prompt_reminder(
         &self,
         worktree_root: &Path,
-        diff_since: DateTime<Utc>,
+        diff_since: UtcTimestamp,
         _scope: &BoardAudienceScope,
         status_author: &str,
         status_kind: &BoardEntryKind,
-        status_since: DateTime<Utc>,
+        status_since: UtcTimestamp,
     ) -> Result<gwt_core::coordination::PromptBoardRead> {
         Ok(
             gwt_core::coordination::PromptBoardRead::from_channel_history(
@@ -841,7 +841,7 @@ mod tests {
                 channel: channel.to_string(),
                 root_id: root_id.to_string(),
                 card_hash: "hash".to_string(),
-                updated_at: DateTime::<Utc>::from_timestamp(0, 0).unwrap(),
+                updated_at: UtcTimestamp::UNIX_EPOCH,
             },
         )
         .unwrap();
@@ -1356,7 +1356,7 @@ mod tests {
                 channel: "team-1/chan-1".to_string(),
                 root_id: "OLD".to_string(),
                 card_hash: "stale".to_string(),
-                updated_at: DateTime::<Utc>::from_timestamp(0, 0).unwrap(),
+                updated_at: UtcTimestamp::UNIX_EPOCH,
             },
         )
         .unwrap();
@@ -1579,7 +1579,7 @@ mod tests {
             3
         );
 
-        let epoch = DateTime::<Utc>::from_timestamp(0, 0).unwrap();
+        let epoch = UtcTimestamp::UNIX_EPOCH;
         assert_eq!(prov.load_entries_since(&root, epoch).unwrap().len(), 3);
         assert_eq!(
             prov.load_entries_since_for_scope(&root, epoch, &scope)
@@ -1588,7 +1588,7 @@ mod tests {
             3
         );
 
-        let wide = chrono::Duration::days(1_000_000);
+        let wide = time::Duration::days(1_000_000);
         assert!(prov
             .has_recent_post_by(&root, "nobody", &BoardEntryKind::Status, wide)
             .is_ok());

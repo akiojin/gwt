@@ -502,15 +502,11 @@ pub fn execute_claim_renewal<C: IssueClient + ?Sized>(
             conflicting_claims: Vec::new(),
         });
     }
-    let expires_at = chrono::DateTime::parse_from_rfc3339(now)
-        .ok()
-        .and_then(|now| {
-            now.checked_add_signed(chrono::Duration::seconds(
-                (*ttl_secs).min(i64::MAX as u64) as i64
-            ))
-        })
-        .map(|expires| expires.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
-        .unwrap_or_else(|| now.to_string());
+    let expires_at = gwt_core::timestamp::shift_rfc3339_seconds(
+        now,
+        time::Duration::seconds((*ttl_secs).min(i64::MAX as u64) as i64),
+    )
+    .unwrap_or_else(|| now.to_string());
     renew_claim_mutation(
         client,
         IssueNumber(*issue_number),
@@ -1208,12 +1204,12 @@ pub fn verified_live_launch_owners(
     else {
         return owners;
     };
-    let fresh = chrono::DateTime::parse_from_rfc3339(&snapshot.observed_at)
+    let fresh = gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(&snapshot.observed_at)
         .ok()
-        .zip(chrono::DateTime::parse_from_rfc3339(now).ok())
+        .zip(gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(now).ok())
         .is_some_and(|(observed, now)| {
             now >= observed
-                && now.signed_duration_since(observed).num_seconds()
+                && now.signed_duration_since(observed).whole_seconds()
                     <= crate::issue_monitor::IDLE_WINDOW_SNAPSHOT_MAX_AGE_SECS
         });
     if !fresh {
@@ -1493,7 +1489,7 @@ pub fn refresh_issue_monitor_child_activity(
             })
             .collect::<Vec<_>>(),
     );
-    let sampled_at = chrono::Utc::now().to_rfc3339();
+    let sampled_at = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
     for (root, owner) in &roots {
         let Some((issue, identity, observed, tools)) = owner else {
             continue;
@@ -1524,7 +1520,7 @@ pub fn refresh_issue_monitor_child_activity(
                 *issue,
                 &identity.session_id,
                 &sampled_at,
-                &chrono::Utc::now().to_rfc3339(),
+                &gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
             );
         }
     }
@@ -1659,8 +1655,8 @@ pub fn issue_monitor_daemon_payloads(
 pub fn issue_monitor_read_only_daemon_payloads(
     monitor: &IssueMonitorState,
 ) -> Vec<IssueMonitorDaemonPayload> {
-    let now_instant = chrono::Utc::now();
-    let now = now_instant.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let now_instant = gwt_core::timestamp::UtcTimestamp::now();
+    let now = now_instant.to_rfc3339_seconds();
     let mut status = monitor.status_view_at(&now);
     status.github_budget = Some(gwt_core::github_budget::status_by_resource(
         &gwt_core::github_budget::BudgetLedger::global().snapshot(now_instant),
@@ -1948,9 +1944,9 @@ where
                                 entry.snapshot.updated_at.0 == *updated_at
                                     // The replacement may finish after the list read.
                                     // A newer authoritative read supersedes that list.
-                                    || chrono::DateTime::parse_from_rfc3339(&entry.snapshot.updated_at.0)
+                                    || gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(&entry.snapshot.updated_at.0)
                                         .ok()
-                                        .zip(chrono::DateTime::parse_from_rfc3339(updated_at).ok())
+                                        .zip(gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(updated_at).ok())
                                         .is_some_and(|(refreshed, listed)| refreshed > listed)
                             }) =>
                         {
@@ -2140,7 +2136,7 @@ fn load_open_pr_launch_observations(
     if candidates.is_empty() {
         return (BTreeMap::new(), None, BTreeMap::new());
     }
-    let observed_at = chrono::Utc::now().to_rfc3339();
+    let observed_at = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
     // Existing holds must be refreshable even when expensive association
     // discovery fails. Read them first, and reuse each PR's result this scan.
     let mut readbacks = BTreeMap::new();
@@ -2563,7 +2559,7 @@ pub fn refresh_issue_cache_for_scan_if_stale(
     if !crate::issue_cache::issue_cache_refresh_status(
         cache_root,
         crate::issue_cache::ISSUE_CACHE_TTL,
-        chrono::Utc::now(),
+        gwt_core::timestamp::UtcTimestamp::now(),
     )
     .stale
     {
@@ -2603,11 +2599,11 @@ fn cache_live_plain_issue_sources(
             .updated_at
             .as_deref()
             .ok_or_else(|| format!("Issue #{number} has no listed revision"))?;
-        let listed_at = chrono::DateTime::parse_from_rfc3339(updated_at)
+        let listed_at = gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(updated_at)
             .map_err(|error| format!("Issue #{number} has an invalid listed revision: {error}"))?;
         // A targeted read can be newer than a retained listing page.
         if cached.as_ref().is_some_and(|entry| {
-            chrono::DateTime::parse_from_rfc3339(&entry.snapshot.updated_at.0)
+            gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(&entry.snapshot.updated_at.0)
                 .is_ok_and(|cached_at| cached_at > listed_at)
         }) {
             continue;
@@ -2727,12 +2723,9 @@ pub fn scan_loaded_issue_monitor_candidates_for_project_tab(
             if let Some(identity) = gwt_core::usage::codex::read_auth_account_identity(&home) {
                 monitor.reconcile_provider_account("codex", &identity, now);
             }
-            if let Ok(at) = chrono::DateTime::parse_from_rfc3339(now) {
+            if let Some(at) = gwt_core::timestamp::UtcTimestamp::parse_rfc3339(now) {
                 monitor.reconcile_provider_usage(
-                    &gwt_core::usage::codex::read_codex_account(
-                        &home,
-                        at.with_timezone(&chrono::Utc),
-                    ),
+                    &gwt_core::usage::codex::read_codex_account(&home, at),
                     now,
                 );
             }
@@ -3010,7 +3003,7 @@ fn spec_completion_is_possible(issue: &IssueMonitorIssue) -> bool {
         && issue
             .updated_at
             .as_deref()
-            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+            .and_then(|value| gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(value).ok())
             .is_some()
 }
 
@@ -5020,8 +5013,8 @@ pub(crate) mod tests {
             .clone()
             .unwrap();
         assert!(
-            chrono::DateTime::parse_from_rfc3339(&activity).unwrap()
-                >= chrono::DateTime::parse_from_rfc3339(&now).unwrap()
+            gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(&activity).unwrap()
+                >= gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(&now).unwrap()
         );
 
         let settled = crate::cli::execution_state::settle(
@@ -5040,7 +5033,7 @@ pub(crate) mod tests {
         refresh_issue_monitor_child_activity(
             &mut monitor,
             repo.path(),
-            &chrono::Utc::now().to_rfc3339(),
+            &gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
         );
         assert_eq!(
             monitor
@@ -5110,8 +5103,8 @@ pub(crate) mod tests {
         )
         .save(&gwt_agent::runtime_state_path(&sessions_dir, session_id))
         .unwrap();
-        let now = chrono::Utc::now();
-        let old = (now - chrono::Duration::hours(2)).to_rfc3339();
+        let now = gwt_core::timestamp::UtcTimestamp::now();
+        let old = (now - time::Duration::hours(2)).to_rfc3339();
         let now = now.to_rfc3339();
         let mut monitor = test_monitor(Default::default());
         monitor.set_autonomous_mode(true);
@@ -5229,7 +5222,7 @@ pub(crate) mod tests {
             from_session_id: session.id.clone(),
             to_session_id: "Elvor".into(),
             reason: "verified dead predecessor".into(),
-            requested_at: chrono::Utc::now(),
+            requested_at: gwt_core::timestamp::UtcTimestamp::now(),
         };
         execution_state::prepare_generation_takeover(repo.path(), owner, &takeover).unwrap();
         let binding =
@@ -5599,7 +5592,7 @@ pub(crate) mod tests {
         }
         let item = parse_pr_inventory_json(
             r#"[{"number":7,"state":"OPEN","isDraft":false,"headRefName":"work/issue-42","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[{"status":"IN_PROGRESS"}]}]"#,
-            chrono::Utc::now(),
+            gwt_core::timestamp::UtcTimestamp::now(),
         ).unwrap().remove(0);
         PR_LIFECYCLE_READS.insert(
             format!("{}#7", repo_path.display()),
@@ -6483,8 +6476,8 @@ pub(crate) mod tests {
     fn github_budget_pause_is_visible_in_the_gui_status_payload() {
         let home = tempfile::tempdir().expect("tempdir");
         let _home = gwt_core::test_support::ScopedGwtHome::set(home.path().join("home"));
-        let now = chrono::Utc::now();
-        let deadline = now + chrono::Duration::minutes(30);
+        let now = gwt_core::timestamp::UtcTimestamp::now();
+        let deadline = now + time::Duration::minutes(30);
         gwt_core::github_budget::BudgetLedger::global().record_block(
             &gwt_core::github_quota::RateLimitBlock {
                 resource: "core".to_string(),
@@ -7516,7 +7509,7 @@ pub(crate) mod tests {
         let mut event = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Pause,
             "work-stopped-requeue",
-            chrono::Utc::now(),
+            gwt_core::timestamp::UtcTimestamp::now(),
         );
         event.agent_session_id = Some(session_id.to_string());
         let shard_path = gwt_core::paths::gwt_work_event_shard_path(
@@ -7619,7 +7612,7 @@ pub(crate) mod tests {
             session_binding_id: "binding-fresh-launch".to_string(),
             initial_session_id: "fresh-launch-holder".to_string(),
             entrypoint: "gwt-execute".to_string(),
-            requested_at: chrono::Utc::now(),
+            requested_at: gwt_core::timestamp::UtcTimestamp::now(),
         };
         execution_state::prepare_fresh_linked_owner_launch_successor(
             worktree.path(),
@@ -9088,7 +9081,7 @@ pub(crate) mod tests {
             cache_root.join("refresh-meta.json"),
             serde_json::json!({
                 "last_full_refresh":
-                    (chrono::Utc::now() - chrono::Duration::minutes(65)).to_rfc3339(),
+                    (gwt_core::timestamp::UtcTimestamp::now() - time::Duration::minutes(65)).to_rfc3339(),
                 "ttl_minutes": 15,
             })
             .to_string(),
@@ -9207,7 +9200,7 @@ pub(crate) mod tests {
             .unwrap()
             .renewed());
         let refresh_meta = cache_root.join("refresh-meta.json");
-        let fresh = serde_json::json!({"last_full_refresh": chrono::Utc::now().to_rfc3339(), "ttl_minutes": 15}).to_string();
+        let fresh = serde_json::json!({"last_full_refresh": gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(), "ttl_minutes": 15}).to_string();
         std::fs::write(&refresh_meta, &fresh).unwrap();
         let fake_gh = write_fake_gh_listing(temp.path(), &[42]);
         let _gh = gwt_core::test_support::ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
@@ -9219,7 +9212,7 @@ pub(crate) mod tests {
             )
             .unwrap(),
         );
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
         let mut monitor = test_monitor(Default::default());
         monitor.set_source_repository(Some(("akiojin", "gwt")));
         monitor.terminal_queue_push(&[42], "operator", &now);

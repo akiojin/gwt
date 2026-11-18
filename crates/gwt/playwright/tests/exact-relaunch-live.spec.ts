@@ -100,7 +100,7 @@ async function liveCodexWindow(page: Page, sessionId: string): Promise<AgentWind
   return (await codexWindows(page)).find((entry) => entry.session_id === sessionId)!;
 }
 
-async function launchCodex(page: Page, branch: string, issueNumber?: number) {
+async function launchCodex(page: Page, branch: string, issueNumber?: number, branchMode: "new" | "existing" = "new") {
   const after = await cursor(page);
   await sendLiveGwtEvent(page, { kind: "open_active_work_launch_wizard", branch_name: branch });
   await latestWizard(page, after, true);
@@ -108,8 +108,10 @@ async function launchCodex(page: Page, branch: string, issueNumber?: number) {
   // The installed (fixture) Codex is the only route: the wizard has no version choice.
   let state = await wizardAction(page, { kind: "set_agent", agent_id: "codex" });
   if (issueNumber !== undefined) {
-    await wizardAction(page, { kind: "set_branch_mode", create_new: true });
-    await wizardAction(page, { kind: "set_branch_name", value: `issue-${issueNumber}` });
+    if (branchMode === "new") {
+      await wizardAction(page, { kind: "set_branch_mode", create_new: true });
+      await wizardAction(page, { kind: "set_branch_name", value: `issue-${issueNumber}` });
+    }
     state = await wizardAction(page, { kind: "set_linked_issue", issue_number: issueNumber });
     expect(state.wizard?.linked_issue_number).toBe(issueNumber);
   }
@@ -148,6 +150,45 @@ async function attachScreenshot(page: Page, testInfo: TestInfo, name: string) {
   await page.screenshot({ path });
   await testInfo.attach(name, { path, contentType: "image/png" });
 }
+
+test("Issue #7440 publishes Work and launches Codex on an existing branch linked to an Issue", async ({ page }, info) => {
+  test.skip(process.env.GWT_PLAYWRIGHT_EXACT_RELAUNCH !== "1", "requires checkout binaries");
+  test.setTimeout(120_000);
+  const fixture = await startExactRelaunchFixture(info, {
+    async prepare({ home, project, env }) {
+      const origin = join(home, "origin.git");
+      execFileSync("git", ["clone", "--bare", "--quiet", project, origin], { cwd: project, env });
+      execFileSync("git", ["remote", "add", "origin", origin], { cwd: project, env });
+    },
+  });
+  const errors = capture(page);
+  const theme = info.project.name.includes("light") ? "light" : "dark";
+  await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+  try {
+    await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+    await launchCodex(page, fixture.branch, 43, "existing");
+    await expect.poll(async () => (await fixture.launches()).length, { timeout: 20_000 }).toBe(1);
+    const [launch] = await fixture.launches();
+    const pane = await liveCodexWindow(page, launch.gwt_session_id!);
+    const works = JSON.parse(await readFile(join(fixture.preferences, "works.json"), "utf8")).work_items;
+    expect(works).toEqual(expect.arrayContaining([expect.objectContaining({
+      owner: "Issue #43",
+      status_category: "active",
+      execution_containers: expect.arrayContaining([expect.objectContaining({
+        branch: fixture.branch,
+        worktree_path: fixture.project,
+      })]),
+      agents: expect.arrayContaining([expect.objectContaining({ session_id: pane.session_id, attached_by: "start" })]),
+    })]));
+    await page.locator('.op-rail__surface[data-surface="works"]').click();
+    await expect(page.locator(`.work-row[data-window-id="${pane.id}"]`)).toBeVisible();
+    await attachScreenshot(page, info, `existing-issue-work-${theme}`);
+    expect(errors, "console and page errors during linked launch").toEqual([]);
+  } finally {
+    await fixture.stop();
+  }
+});
 
 test.describe("Issue #6767 final quota output (isolated checkout)", () => {
   test.skip(process.env.GWT_PLAYWRIGHT_EXACT_RELAUNCH !== "1", "requires checkout binaries");
@@ -1850,16 +1891,16 @@ const at = new Date().toISOString();`);
 const directory = path.join(process.env.HOME, '.claude', 'projects', 'works-fixture');
 fs.mkdirSync(directory, {recursive:true});
 const rollout = path.join(directory, native + '.jsonl');
-for (const age of [60000, 0]) fs.appendFileSync(rollout, JSON.stringify({
+for (const age of [300000, 60000, 0]) fs.appendFileSync(rollout, JSON.stringify({
   type:'assistant',sessionId:native,cwd:process.cwd(),timestamp:new Date(Date.now()-age).toISOString(),
   message:{id:require('node:crypto').randomUUID(),model:'claude-sonnet-4-5',usage:{
     input_tokens:80,output_tokens:12,cache_read_input_tokens:40,cache_creation_input_tokens:5}}}) + '\\n');
 ` + claude.slice(transcriptEnd);
         await writeFixtureNodeCommand(bin, "claude", claude);
         execFileSync(process.execPath, ["--check", claudeScript]);
-        // All five real children need measured transcript data before a fleet total is known.
+        // Seed five completed minutes of transcript coverage for every participant.
         provider = provider.replace("// Like the real provider,", `
-for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON.stringify({
+for (const [index, age] of [300000, 60000, 0].entries()) fs.appendFileSync(rollout, JSON.stringify({
   timestamp:new Date(Date.now()-age).toISOString(),type:'event_msg',payload:{type:'token_count',info:{
     total_token_usage:{input_tokens:100*(index+1),cached_input_tokens:20*(index+1),output_tokens:10*(index+1)},
     last_token_usage:{input_tokens:100,cached_input_tokens:20,output_tokens:10},model_context_window:1000}}
@@ -1944,12 +1985,14 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
         const input = sum("today_input_tokens"), output = sum("today_output_tokens");
         const cache = sum("today_cache_read_tokens") + usage.filter((session: any) => session.provider === "claude_code")
           .reduce((total: number, session: any) => total + session.telemetry.today_cache_creation_tokens, 0);
-        const buckets = activity?.agents.map((agent: any) => usage.find((session: any) => session.session_id === agent.session_id)
-          ?.telemetry.minute_buckets.at(-1)) ?? [];
-        if (buckets.length !== 5 || buckets.some((bucket: any) => !Number.isFinite(bucket?.tokens))
-          || new Set(buckets.map((bucket: any) => bucket.started_at)).size !== 1) return false;
+        const fleetWindows = activity?.agents.map((agent: any) => usage.find((session: any) => session.session_id === agent.session_id)
+          ?.telemetry.minute_buckets.slice(-6, -1)) ?? [];
+        if (fleetWindows.length !== 5 || fleetWindows.some((buckets: any[]) => buckets?.length !== 5
+          || buckets.some(bucket => !Number.isFinite(bucket.tokens)))) return false;
+        const minuteStarts = (buckets: any[]) => buckets.map(bucket => bucket.started_at).join(",");
+        if (new Set(fleetWindows.map(minuteStarts)).size !== 1) return false;
         const expected = { "today-total": input + output, "today-input": input, "today-cache": cache,
-          "today-output": output, "fleet-now": buckets.reduce((total: number, bucket: any) => total + bucket.tokens, 0) };
+          "today-output": output, "fleet-now": fleetWindows.flat().reduce((total: number, bucket: any) => total + bucket.tokens, 0) / 5 };
         for (const [metric, value] of Object.entries(expected)) {
           if (await main.locator('[data-metric="' + metric + '"]').textContent() !== format(value)) return false;
         }
@@ -2003,7 +2046,6 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
       await expect(first.locator(".work-identity")).toHaveText("PM · claude");
       await expect(first).toHaveAttribute("data-state", "running");
       await expect(main.locator('[data-count="running"]')).toHaveText("5");
-      await expect(main.locator(".works-active")).toHaveText("Active 5");
       await expect(first.locator(".work-model")).toHaveText("claude-sonnet-4-5", { timeout: 45_000 });
       for (const metric of ["input", "cache", "output"]) await expect(first.locator(`[data-stat="${metric}"]`)).toHaveText(/^[1-9]/);
       await assertAggregates();
@@ -2033,7 +2075,7 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
       await expect(rows.first().locator(".work-purpose")).toHaveText(purpose);
       await expect(rows.first().locator(".work-identity")).toHaveText("PM · claude");
       await expect(rows.first()).toHaveAttribute("data-state", "running");
-      await expect(main.locator(".works-active")).toHaveText("Active 5");
+      await expect(main.locator('[data-count="running"]')).toHaveText("5");
       await assertAggregates();
       await expect.poll(async () => {
         const capacity = JSON.parse(await readFile(join(fixture.home, ".gwt", "machine-state", "agent-capacity.json"), "utf8"));

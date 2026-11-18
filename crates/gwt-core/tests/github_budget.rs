@@ -6,19 +6,18 @@
 //! AC-4: a budget below the reserve, an active rate-limit block, or a local
 //!       burst yields a throttle reason that callers can act on and report.
 
-use chrono::{DateTime, Duration, TimeZone, Utc};
 use gwt_core::github_budget::{
     self, BudgetLedger, ProbeSnapshot, ResourceWindow, ThrottlePolicy, SECONDARY_LIMIT_NOTE,
 };
 use gwt_core::github_quota::{GitHubQuota, RateLimitBlock};
+use gwt_core::timestamp::UtcTimestamp;
+use time::Duration;
 
-fn at(seconds: i64) -> DateTime<Utc> {
-    Utc.timestamp_opt(1_756_800_000 + seconds, 0)
-        .single()
-        .expect("timestamp")
+fn at(seconds: i64) -> UtcTimestamp {
+    UtcTimestamp::from_unix_seconds(1_756_800_000 + seconds).expect("timestamp")
 }
 
-fn probe(graphql_remaining: u64, probed_at: DateTime<Utc>) -> ProbeSnapshot {
+fn probe(graphql_remaining: u64, probed_at: UtcTimestamp) -> ProbeSnapshot {
     let mut resources = std::collections::BTreeMap::new();
     resources.insert(
         "graphql".to_string(),
@@ -420,7 +419,7 @@ fn gh_spawns_are_recorded_in_the_machine_local_budget_ledger() {
     let home = tempfile::tempdir().expect("budget ledger home");
     let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
     let hub = ProcessConsoleHub::new();
-    let before = BudgetLedger::global().snapshot(Utc::now());
+    let before = BudgetLedger::global().snapshot(UtcTimestamp::now());
     let _ = spawn_logged_blocking(
         &hub,
         ProcessKind::Gh,
@@ -435,7 +434,7 @@ fn gh_spawns_are_recorded_in_the_machine_local_budget_ledger() {
         &["api", "rate_limit"],
         SpawnOptions::new("gh api rate_limit"),
     );
-    let after = BudgetLedger::global().snapshot(Utc::now());
+    let after = BudgetLedger::global().snapshot(UtcTimestamp::now());
     assert_eq!(
         after.local["graphql"].calls_last_hour,
         before.local["graphql"].calls_last_hour + 1,
@@ -450,7 +449,7 @@ fn gh_spawns_are_recorded_in_the_machine_local_budget_ledger() {
 // ── Issue #3928 AC-1: refusals back off exponentially, and the backoff is
 //    persisted so a fresh gwtd process honours it before spawning ──
 
-fn secondary_refusal(now: DateTime<Utc>) -> RateLimitBlock {
+fn secondary_refusal(now: UtcTimestamp) -> RateLimitBlock {
     // What `block_from_probe` produces for a secondary (per-minute) refusal:
     // the primary budget still has room, so no measured reset exists.
     RateLimitBlock {

@@ -432,13 +432,17 @@ test("the name writer preserves other member drafts and revalidates coalesced ed
   assert.match(model.read().name_edits.m2.error, /Connection lost/);
 });
 
+const usageMinute = (offset, tokens) => ({
+  started_at: new Date(Date.UTC(2026, 10, 17, 12, offset)).toISOString(), tokens,
+});
+
 test("Works telemetry sums measured project conversations once, preserves missing and excludes account totals", async () => {
   const { selectWorksTelemetry } = await import("../agent-activity-model.js");
   const usage = { session_id: "s1", provider: "codex", provider_session_id: "conversation", project_path: "/repo", active: true,
     state: { kind: "ok" }, input_tokens: 20, output_tokens: 0, cache_read_tokens: 10, cache_creation_tokens: null,
     context_left_pct: 80, reported_context_left_pct: null,
     telemetry: { today_input_tokens: 20, today_output_tokens: 0, today_cache_read_tokens: 10,
-      today_cache_creation_tokens: null, minute_buckets: Array.from({ length: 30 }, (_, i) => ({ started_at: String(i), tokens: 0 })) } };
+      today_cache_creation_tokens: null, minute_buckets: Array.from({ length: 30 }, (_, i) => usageMinute(i, 0)) } };
   const params = { projectRoot: "/repo", sessions: [usage, { ...usage, project_path: "/other", input_tokens: 999 }],
     agents: [{ window_id: "w1", session_id: "s1" }], works: [{ agents: [{ session_id: "s1" }], works: [
       { agents: [{ session_id: "old" }], execution_diagnosis: { verification_state: "failed" } },
@@ -467,7 +471,7 @@ test("Works telemetry sums measured project conversations once, preserves missin
   assert.equal(result.availability.fleet.state, "measured");
   assert.equal(result.by_window.w1.verification, "Passed");
   assert.equal(result.by_window.w1.context_remaining_percent, null, "estimated context is never presented as reported");
-  assert.equal(result.fleet_tokens_per_minute[29], 0);
+  assert.equal(result.fleet_tokens_per_minute.at(-1), 0);
   assert.equal(selectWorksTelemetry({ ...params, sessions: [{ ...usage, telemetry: null }] }).today.input_tokens, null);
   assert.equal(selectWorksTelemetry({ ...params, sessions: [usage, usage] }).today.input_tokens, 20);
   assert.equal(selectWorksTelemetry({ ...params, sessions: [{ ...usage, state: { kind: "no_data" }, telemetry: null }] }).by_window.w1.input_tokens, null);
@@ -488,6 +492,26 @@ test("Works telemetry sums measured project conversations once, preserves missin
   assert.equal(incomplete.availability.today.state, "partial");
   assert.equal(incomplete.availability.fleet.state, "partial");
   assert.ok(incomplete.fleet_tokens_per_minute.every(value => value === null));
+});
+
+test("Fleet averages five completed minutes with timestamp-aligned coverage", async () => {
+  const { selectWorksTelemetry } = await import("../agent-activity-model.js");
+  const session = (name, offset, spike) => ({
+    session_id: name, provider: "codex", project_path: "/repo", active: true, state: { kind: "ok" },
+    telemetry: { minute_buckets: Array.from({ length: 30 }, (_, index) =>
+      usageMinute(index + offset, index === 29 ? 1000 : index + offset === 28 ? spike : 10)) },
+  });
+  const first = session("one", 0, 50), second = session("two", 0, 100);
+  const agents = [first, second].map(row => ({ window_id: row.session_id, session_id: row.session_id }));
+  const fleet = (...sessions) => selectWorksTelemetry({ sessions, projectRoot: "/repo", agents }).fleet_tokens_per_minute;
+  assert.equal(fleet(first, second).length, 25);
+  assert.deepEqual(fleet(first, second).slice(-2), [20, 46]);
+  assert.deepEqual(fleet(first, session("two", 1, 100)).slice(-3), [20, 46, null],
+    "the previous shared minute stays measured across unequal observation boundaries");
+  const missing = session("two", 0, 100);
+  missing.telemetry.minute_buckets[27].tokens = null;
+  assert.deepEqual(fleet(first, missing).slice(-3), [20, null, null]);
+  assert.ok(fleet(first).every(value => value === null));
 });
 
 const agent = (id, issue_number = null, is_pm = false) => ({

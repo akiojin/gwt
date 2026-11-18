@@ -1668,7 +1668,7 @@ pub struct ProjectExecutionOperationView {
     pub choice: gwt_core::project_execution_policy::Choice,
     pub effect_state: gwt_core::project_execution_policy::EffectState,
     pub reason: Option<String>,
-    pub decided_at: chrono::DateTime<chrono::Utc>,
+    pub decided_at: gwt_core::timestamp::UtcTimestamp,
 }
 
 impl From<&gwt_core::project_execution_policy::Receipt> for ProjectExecutionOperationView {
@@ -4545,7 +4545,7 @@ mod tests {
                 structured: None,
                 id: "one".into(), kind: gwt_core::pm_report::PmReportKind::Progress, question: None,
                 body: "# Report\n\n**Ready** and `code`\n\n- Item\n\n```sh\ncargo test\n```\n<script>bad()</script>".into(),
-                created_at: chrono::Utc::now(),
+                created_at: gwt_core::timestamp::UtcTimestamp::now(),
             }), super::PmReportView::from(serde_json::from_value::<gwt_core::pm_report::PmReport>(serde_json::json!({
                 "id": "qa", "kind": "qa", "question": "Can we ship?",
                 "body": "**Yes.** Checks passed.", "created_at": "2026-10-13T00:00:00Z"

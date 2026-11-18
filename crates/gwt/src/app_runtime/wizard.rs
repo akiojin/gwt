@@ -19,7 +19,6 @@ use std::{
     thread,
 };
 
-use chrono::Utc;
 use gwt::{
     knowledge_launch_target_branch_name, KnowledgeKind, LaunchWizardCompletion,
     LaunchWizardContext, LaunchWizardHydration, LaunchWizardLaunchPath, LaunchWizardLaunchRequest,
@@ -461,7 +460,7 @@ struct IssueMonitorGuiPhase {
     delivery_id: Option<String>,
     elapsed_ms: f64,
     prefs_stamp_elapsed_ms: Option<f64>,
-    captured_at: chrono::DateTime<Utc>,
+    captured_at: gwt_core::timestamp::UtcTimestamp,
 }
 
 impl IssueMonitorGuiPhase {
@@ -506,7 +505,7 @@ impl IssueMonitorGuiPhases {
             delivery_id: delivery_id.map(str::to_owned),
             elapsed_ms: now.duration_since(self.started).as_secs_f64() * 1000.0,
             prefs_stamp_elapsed_ms,
-            captured_at: Utc::now(),
+            captured_at: gwt_core::timestamp::UtcTimestamp::now(),
         };
         self.phases.push(row);
         self.started = now;
@@ -2428,7 +2427,7 @@ impl AppRuntime {
                                 projection,
                                 &current_sessions,
                                 &tab_title,
-                                Utc::now(),
+                                gwt_core::timestamp::UtcTimestamp::now(),
                             )
                         });
                 let branch = projection
@@ -3130,11 +3129,7 @@ impl AppRuntime {
                     display_name: session.display_name.clone(),
                     branch: (!session.branch.trim().is_empty()).then(|| session.branch.clone()),
                     worktree_path: Some(session.worktree_path.display().to_string()),
-                    last_activity_at: Some(
-                        session
-                            .last_activity_at
-                            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-                    ),
+                    last_activity_at: Some(session.last_activity_at.to_rfc3339_seconds()),
                     resume_kind: resume_kind_for_session(session),
                     lifecycle_status: lifecycle_status_for_session(session),
                 });
@@ -3163,9 +3158,11 @@ impl AppRuntime {
             .project_context(tab_id)
             .ok_or_else(|| "Project tab not found".to_string())?;
         let base_branch = gwt::start_work::START_WORK_BASE_BRANCH_CANDIDATES[0].to_string();
-        let work_branch =
-            gwt::start_work::reserve_start_work_branch_name_for_project(project_root, Utc::now())
-                .map_err(|error| error.to_string())?;
+        let work_branch = gwt::start_work::reserve_start_work_branch_name_for_project(
+            project_root,
+            gwt_core::timestamp::UtcTimestamp::now(),
+        )
+        .map_err(|error| error.to_string())?;
         let quick_start_root = project_root.to_path_buf();
         let quick_start_entries = Vec::new();
         let previous_profiles = agent_settings_launch_defaults(
@@ -5163,7 +5160,7 @@ impl AppRuntime {
                     Some(attempt),
                 );
             }
-            let captured_at = Utc::now();
+            let captured_at = gwt_core::timestamp::UtcTimestamp::now();
             let span = tracing::Span::current();
             let prefs_path = issue_monitor_prepared_prefs_path(&context);
             let _ = self.blocking_tasks.try_spawn(move || {
@@ -8764,7 +8761,7 @@ fn issue_monitor_owner_launch_profile_choice(
             return Err("Waiting for the selected Agent: its fixed tool, enabled slot or exact member is unavailable".into());
         }
         if !pool.is_empty() {
-            let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds();
             let selection = select_issue_monitor_profiles_with_codex_config(
                 &pool,
                 codex_config_error,
@@ -8812,7 +8809,7 @@ fn issue_monitor_owner_launch_profile_choice(
         .filter(|option| option.available)
         .map(|option| option.id)
         .collect::<Vec<_>>();
-    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds();
     let selection = select_issue_monitor_automatic_profile(
         &prefs,
         &available,
@@ -8870,7 +8867,7 @@ fn issue_monitor_launch_profile_choice(
     if let Ok(prefs) = gwt::load_issue_monitor_prefs(&prefs_path) {
         let pool = prefs.launch_profile_pool();
         if !pool.is_empty() {
-            let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds();
             let selection = gwt::select_launch_profile(
                 &pool,
                 &prefs.launch_admission_provider_quota_holds(),

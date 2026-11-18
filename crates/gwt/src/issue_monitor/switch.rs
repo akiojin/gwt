@@ -159,7 +159,7 @@ impl IssueMonitorState {
         }
         let mut reasons = proposed.claim_candidate_exclusions(intent.request.target_issue_number);
         let target = intent.request.target_issue_number;
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
         if proposed.issue_is_closed(target)
             || proposed
                 .inbox_item(target)
@@ -477,7 +477,7 @@ impl IssueMonitorPrefs {
             request,
             source,
             stage: AgentSwitchStage::Requested,
-            created_at: chrono::Utc::now().to_rfc3339(),
+            created_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
             reason: None,
             runtime_stop: None,
             checkpoint: None,

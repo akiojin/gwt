@@ -298,7 +298,7 @@ fn same_path_or_exact(left: &Path, right: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{TimeZone, Utc};
+
     use tempfile::tempdir;
 
     use super::super::test_support::*;
@@ -341,7 +341,7 @@ mod tests {
             "feature/old",
             &worktree,
             gwt_agent::AgentId::ClaudeCode,
-            Utc.with_ymd_and_hms(2026, 4, 14, 9, 0, 0).unwrap(),
+            gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 4, 14, 9, 0, 0).unwrap(),
             None,
         );
         older.session_mode = gwt_agent::SessionMode::Normal;
@@ -351,7 +351,7 @@ mod tests {
             "feature/previous",
             &worktree,
             gwt_agent::AgentId::Codex,
-            Utc.with_ymd_and_hms(2026, 4, 14, 10, 0, 0).unwrap(),
+            gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 4, 14, 10, 0, 0).unwrap(),
             Some("resume-ignored"),
         );
         newer.tool_version = Some("0.110.0".to_string());
@@ -369,7 +369,7 @@ mod tests {
             "feature/retired",
             &worktree,
             gwt_agent::AgentId::Codex,
-            Utc.with_ymd_and_hms(2026, 4, 14, 11, 0, 0).unwrap(),
+            gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 4, 14, 11, 0, 0).unwrap(),
             None,
         );
         let retired_toml = toml::to_string(&retired)
@@ -408,7 +408,7 @@ mod tests {
             "feature/hermes",
             &worktree,
             gwt_agent::AgentId::Hermes,
-            Utc.with_ymd_and_hms(2026, 9, 1, 10, 0, 0).unwrap(),
+            gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 9, 1, 10, 0, 0).unwrap(),
             None,
         );
         hermes.launch_args = [
@@ -446,7 +446,7 @@ mod tests {
             "feature/codex",
             &worktree,
             gwt_agent::AgentId::Codex,
-            Utc.with_ymd_and_hms(2026, 9, 1, 11, 0, 0).unwrap(),
+            gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 9, 1, 11, 0, 0).unwrap(),
             None,
         );
         codex.launch_args = vec!["--profile".to_string(), "work".to_string()];
@@ -460,7 +460,8 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let worktree = dir.path().join("repo");
         std::fs::create_dir_all(&worktree).expect("repo dir");
-        let timestamp = Utc.with_ymd_and_hms(2026, 4, 14, 10, 0, 0).unwrap();
+        let timestamp =
+            gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 4, 14, 10, 0, 0).unwrap();
         let mut lower_id = sample_session_record(
             "feature/lower",
             &worktree,
@@ -501,7 +502,7 @@ mod tests {
             "feature/codex",
             &codex_repo,
             gwt_agent::AgentId::Codex,
-            Utc.with_ymd_and_hms(2026, 5, 10, 9, 0, 0).unwrap(),
+            gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 5, 10, 9, 0, 0).unwrap(),
             None,
         );
         codex.model = Some("gpt-6-luna".to_string());
@@ -515,7 +516,7 @@ mod tests {
             "feature/claude",
             &claude_repo,
             gwt_agent::AgentId::ClaudeCode,
-            Utc.with_ymd_and_hms(2026, 5, 10, 10, 0, 0).unwrap(),
+            gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 5, 10, 10, 0, 0).unwrap(),
             None,
         );
         claude.model = Some("sonnet".to_string());
@@ -582,7 +583,7 @@ mod tests {
             "feature/codex",
             Path::new("/tmp/other-repo"),
             gwt_agent::AgentId::Codex,
-            Utc.with_ymd_and_hms(2026, 5, 10, 9, 0, 0).unwrap(),
+            gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 5, 10, 9, 0, 0).unwrap(),
             None,
         );
         codex.model = Some("gpt-6-luna".to_string());
@@ -631,7 +632,7 @@ mod tests {
             "feature/removed",
             &removed_worktree,
             gwt_agent::AgentId::Codex,
-            Utc.with_ymd_and_hms(2026, 4, 14, 10, 0, 0).unwrap(),
+            gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 4, 14, 10, 0, 0).unwrap(),
             None,
         );
         session.repo_hash = Some(
@@ -660,7 +661,7 @@ mod tests {
             "feature/gui",
             &removed_worktree,
             gwt_agent::AgentId::Codex,
-            Utc.with_ymd_and_hms(2026, 4, 14, 10, 0, 0).unwrap(),
+            gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 4, 14, 10, 0, 0).unwrap(),
             Some("native-session"),
         );
         session.repo_hash = Some(
@@ -690,7 +691,7 @@ mod tests {
             "feature/wrong-repo",
             &nested_path,
             gwt_agent::AgentId::Codex,
-            Utc.with_ymd_and_hms(2026, 5, 22, 10, 0, 0).unwrap(),
+            gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 5, 22, 10, 0, 0).unwrap(),
             None,
         );
         session.repo_hash = Some(
@@ -744,7 +745,7 @@ mod tests {
             "feature/gui",
             &worktree,
             gwt_agent::AgentId::Codex,
-            Utc.with_ymd_and_hms(2026, 4, 14, 10, 0, 0).unwrap(),
+            gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 4, 14, 10, 0, 0).unwrap(),
             Some("native-session"),
         );
         session.repo_hash = None;
@@ -768,7 +769,7 @@ mod tests {
             "feature/gui",
             &worktree,
             gwt_agent::AgentId::Codex,
-            Utc.with_ymd_and_hms(2026, 4, 14, 11, 0, 0).unwrap(),
+            gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 4, 14, 11, 0, 0).unwrap(),
             "resume-1",
         );
 

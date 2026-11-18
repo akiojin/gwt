@@ -1,8 +1,8 @@
 //! Host observations for Project window policy. A socket or backend context is
 //! never an actual-open grant; only the GUI's accepted one-use ready receipt
 //! publishes this observation. Readers pin its process birth before admission.
-use chrono::{DateTime, Utc};
 use gwt_core::project_execution_policy::{self as store, Choice, EffectState};
+use gwt_core::timestamp::UtcTimestamp;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -14,7 +14,7 @@ use std::{
 #[serde(deny_unknown_fields)]
 pub struct ActualViewReceipt {
     pub receipt_id: String,
-    pub accepted_at: DateTime<Utc>,
+    pub accepted_at: UtcTimestamp,
     pub admitted_policy_revision: u64,
 }
 
@@ -41,7 +41,7 @@ pub struct RuntimeObservation {
     pub last_open_receipt: Option<ActualViewReceipt>,
     #[serde(default)]
     pub close_intents: BTreeMap<String, AcceptedCloseIntent>,
-    pub observed_at: DateTime<Utc>,
+    pub observed_at: UtcTimestamp,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -733,7 +733,7 @@ pub fn local_status(
             .as_ref()
             .map_or_else(Vec::new, |value| value.authorized_work_lineage.clone()),
         operation_outcome: operation.as_ref().map(Into::into),
-        observed_at: Utc::now().to_rfc3339(),
+        observed_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
         degraded: state == "unknown",
         recovery_operation: (state == "unknown" || state == "selection_pending")
             .then(|| "project.execution.choose".into()),
@@ -888,7 +888,7 @@ mod tests {
     fn accepted_observation(repo: &Path) -> RuntimeObservation {
         let receipt = ActualViewReceipt {
             receipt_id: uuid::Uuid::new_v4().to_string(),
-            accepted_at: Utc::now(),
+            accepted_at: gwt_core::timestamp::UtcTimestamp::now(),
             admitted_policy_revision: 0,
         };
         RuntimeObservation {
@@ -904,7 +904,7 @@ mod tests {
             views: BTreeMap::from([("actual-view".into(), receipt.clone())]),
             last_open_receipt: Some(receipt),
             close_intents: BTreeMap::new(),
-            observed_at: Utc::now(),
+            observed_at: gwt_core::timestamp::UtcTimestamp::now(),
         }
     }
 
@@ -979,7 +979,7 @@ mod tests {
         observed.view_set_revision = 2;
         let receipt = ActualViewReceipt {
             receipt_id: uuid::Uuid::new_v4().to_string(),
-            accepted_at: Utc::now(),
+            accepted_at: gwt_core::timestamp::UtcTimestamp::now(),
             admitted_policy_revision: 1,
         };
         observed.views = BTreeMap::from([("fresh-view".into(), receipt.clone())]);
@@ -1056,7 +1056,7 @@ mod tests {
         let mut event = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Start,
             &successor,
-            Utc::now(),
+            gwt_core::timestamp::UtcTimestamp::now(),
         );
         event.related_work_item_id = Some("parent".into());
         gwt_core::workspace_projection::record_workspace_work_event(&repo, event).unwrap();
@@ -1065,7 +1065,7 @@ mod tests {
         let mut event = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Start,
             &next,
-            Utc::now(),
+            gwt_core::timestamp::UtcTimestamp::now(),
         );
         event.related_work_item_id = Some(successor);
         gwt_core::workspace_projection::record_workspace_work_event(&repo, event).unwrap();

@@ -255,13 +255,65 @@ pub struct MonitorRuntimeReconciler {
     worker: Option<std::thread::JoinHandle<()>>,
 }
 
+#[derive(Clone)]
+pub(crate) struct MonitorRuntimeScan(std::sync::mpsc::Sender<WorkerCommand>);
+
 enum WorkerCommand {
     Stop,
+    Reconcile {
+        deadline: std::time::Instant,
+        done: std::sync::mpsc::Sender<()>,
+    },
     #[cfg(any(test, feature = "test-gh-guard"))]
     Pause {
         ready: std::sync::mpsc::Sender<()>,
         resume: std::sync::mpsc::Receiver<()>,
     },
+}
+
+impl MonitorRuntimeReconciler {
+    pub(crate) fn scan_trigger(&self) -> MonitorRuntimeScan {
+        MonitorRuntimeScan(self.stop.clone())
+    }
+}
+
+impl MonitorRuntimeScan {
+    pub(crate) fn reconcile_closed_slots(
+        &self,
+        prefs: &crate::IssueMonitorPrefs,
+    ) -> io::Result<bool> {
+        let has_closed_slot = prefs.monitor_runtime_counts.values().any(|census| {
+            census.host_pid == std::process::id()
+                && census
+                    .counts
+                    .keys()
+                    .any(|&number| is_confirmed_closed(prefs, number))
+        });
+        if !has_closed_slot {
+            return Ok(false);
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let deadline =
+            gwt_core::operation_deadline::current().map_or(deadline, |at| at.min(deadline));
+        let (done, completed) = std::sync::mpsc::channel();
+        self.0
+            .send(WorkerCommand::Reconcile { deadline, done })
+            .map_err(|_| {
+                io::Error::new(io::ErrorKind::BrokenPipe, "Monitor runtime worker stopped")
+            })?;
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        completed.recv_timeout(remaining).map_err(|error| {
+            let kind = match error {
+                std::sync::mpsc::RecvTimeoutError::Timeout => io::ErrorKind::TimedOut,
+                std::sync::mpsc::RecvTimeoutError::Disconnected => io::ErrorKind::BrokenPipe,
+            };
+            io::Error::new(
+                kind,
+                "Monitor runtime reconciliation did not finish before the scan",
+            )
+        })?;
+        Ok(true)
+    }
 }
 
 #[cfg(any(test, feature = "test-gh-guard"))]
@@ -346,10 +398,13 @@ pub fn spawn(
             let mut retained = BTreeMap::new();
             let projects = BTreeMap::from([(project_root, sessions_dir)]);
             loop {
-                let draining = match stopped.recv_timeout(Duration::from_secs(5)) {
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => false,
+                let (draining, request) = match stopped.recv_timeout(Duration::from_secs(5)) {
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => (false, None),
                     Ok(WorkerCommand::Stop)
-                    | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => true,
+                    | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => (true, None),
+                    Ok(WorkerCommand::Reconcile { deadline, done }) => {
+                        (false, Some((deadline, done)))
+                    }
                     #[cfg(any(test, feature = "test-gh-guard"))]
                     Ok(WorkerCommand::Pause { ready, resume }) => {
                         // Receiving here proves the preceding reconciliation,
@@ -359,6 +414,9 @@ pub fn spawn(
                         continue;
                     }
                 };
+                let _deadline = request.as_ref().map(|(deadline, _)| {
+                    gwt_core::operation_deadline::ScopedOperationDeadline::enter(*deadline)
+                });
                 if let Some(current) = snapshot() {
                     for entry in current {
                         let registration = &entry.registration;
@@ -368,6 +426,9 @@ pub fn spawn(
                         );
                     }
                     reconcile_retained_projects(&projects, &mut retained);
+                }
+                if let Some((_, done)) = request {
+                    let _ = done.send(());
                 }
                 if draining {
                     break;
@@ -465,7 +526,7 @@ fn publish_counts(
     let host_pid = std::process::id();
     let host_started_at = crate::process::host_process_start_time(host_pid)
         .ok_or_else(|| io::Error::other("Monitor host process identity unavailable"))?;
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
     let (prefs, ()) = crate::try_mutate_issue_monitor_prefs(
         &crate::issue_monitor_prefs_path_for_repo_path(project_root),
         |prefs| {
@@ -592,22 +653,26 @@ pub fn stop_requested_runtimes(
     let prefs = crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(
         project_root,
     ))?;
+    apply_requested_runtime_stops(project_root, entries, &prefs.monitor_runtime_stop_requests)
+}
+
+fn apply_requested_runtime_stops(
+    project_root: &Path,
+    entries: &[RegisteredMonitorRuntime],
+    requests: &[crate::issue_monitor::IssueMonitorRuntimeStopRequest],
+) -> io::Result<bool> {
     let mut refresh_inventory = false;
     for entry in entries
         .iter()
         .filter(|entry| !entry.registration.review_dispatch)
     {
         let registration = &entry.registration;
-        for request in prefs
-            .monitor_runtime_stop_requests
-            .iter()
-            .filter(|request| {
-                request.issue_number == registration.issue_number
-                    && request.session_id == registration.session_id
-                    && request.host_pid == std::process::id()
-                    && request.runtime_incarnation == registration.incarnation
-            })
-        {
+        for request in requests.iter().filter(|request| {
+            request.issue_number == registration.issue_number
+                && request.session_id == registration.session_id
+                && request.host_pid == std::process::id()
+                && request.runtime_incarnation == registration.incarnation
+        }) {
             let proof = match runtime_proof(entry) {
                 Ok(proof) => proof,
                 Err(error) => {
@@ -683,6 +748,104 @@ pub fn stop_requested_runtimes(
     Ok(refresh_inventory)
 }
 
+fn is_confirmed_closed(prefs: &crate::IssueMonitorPrefs, number: u64) -> bool {
+    use crate::issue_monitor::{IssueClosureEvidence, IssueClosureState};
+    prefs.closure_records.iter().any(|record| {
+        record.issue_number == number
+            && record.state == IssueClosureState::Closed
+            && record.evidence != IssueClosureEvidence::CompleteLiveAbsence
+    })
+}
+
+/// A close can retire the launch before the native pane reaches its prompt.
+/// Run before publishing the physical census, using only handles owned here.
+fn reclaim_closed_idle_runtimes(
+    prefs_path: &Path,
+    prefs: &crate::IssueMonitorPrefs,
+    entries: &[RegisteredMonitorRuntime],
+) -> bool {
+    use crate::cli::{action_obligation, execution_state};
+    let is_idle = |runtime: &gwt_agent::SessionRuntimeState| {
+        runtime.status == gwt_agent::AgentStatus::Idle && runtime.is_current_normal_stop()
+    };
+    let mut refresh_inventory = false;
+    for entry in entries {
+        let registration = &entry.registration;
+        let number = registration.issue_number;
+        if registration.review_dispatch
+            || entry.handle.tree_exit_confirmed()
+            || !is_confirmed_closed(prefs, number)
+        {
+            continue;
+        }
+        let close = || {
+            let proof = runtime_proof(entry)?;
+            if !is_idle(&proof.runtime) {
+                return Ok(None);
+            }
+            let Some(identity) = gwt_agent::SessionExecutionIdentity::from_session(&proof.session)
+                .map_err(io::Error::other)?
+            else {
+                return Ok(None);
+            };
+            let worktree = &registration.worktree_path;
+            crate::session_finalizer::finalize_exact_close_if(
+                &registration.sessions_dir,
+                &identity,
+                registration.incarnation,
+                &entry.handle,
+                &registration.window_id,
+                Some(false),
+                None,
+                |runtime| {
+                    // An accepted prompt invalidates the Stop receipt, even
+                    // before its first hook publishes Running.
+                    if !is_idle(runtime) {
+                        return Ok(false);
+                    }
+                    let Some(record) = execution_state::load(worktree)? else {
+                        return Ok(false);
+                    };
+                    if record.owner_number != number
+                        || record.primary_session_id != registration.session_id
+                        || record.status != ExecutionControlStatus::Completed
+                        || !execution_state::integrity_ok(&record)
+                        || !execution_state::execution_binding_authorizes_current_generation(
+                            worktree,
+                            ExecutionOwnerKey {
+                                kind: record.owner_kind,
+                                number,
+                            },
+                            &identity.session_id,
+                            &identity.execution_binding.identity,
+                        )?
+                    {
+                        return Ok(false);
+                    }
+                    let clear = action_obligation::load(worktree)?.is_none_or(|state| {
+                        state.session_id == identity.session_id
+                            && action_obligation::integrity_ok(&state)
+                            && state.obligations.iter().all(|item| item.settled.is_some())
+                    });
+                    Ok(clear
+                        && is_confirmed_closed(
+                            &crate::load_issue_monitor_prefs(prefs_path)?,
+                            number,
+                        ))
+                },
+            )
+        };
+        match close() {
+            Ok(Some(())) => refresh_inventory = true,
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(target: "gwt.monitor.runtime", issue_number = number, session_id = %registration.session_id, %error, "could not reclaim settled Monitor runtime");
+            }
+        }
+    }
+    refresh_inventory
+}
+
 fn reconcile_project(
     project_root: &Path,
     sessions_dir: &Path,
@@ -692,7 +855,12 @@ fn reconcile_project(
     let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
         std::time::Instant::now() + Duration::from_secs(5),
     );
-    let refreshed_inventory = stop_requested_runtimes(project_root, entries)?.then(|| {
+    let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(project_root);
+    let prefs = crate::load_issue_monitor_prefs(&prefs_path)?;
+    let stopped =
+        apply_requested_runtime_stops(project_root, entries, &prefs.monitor_runtime_stop_requests)?;
+    let reclaimed = reclaim_closed_idle_runtimes(&prefs_path, &prefs, entries);
+    let refreshed_inventory = (stopped || reclaimed).then(|| {
         crate::session_inventory::ProjectSessionCensus::capture(sessions_dir).observe(project_root)
     });
     let inventory = refreshed_inventory.as_ref().unwrap_or(inventory);
@@ -1414,6 +1582,140 @@ mod stop_tests {
             entry,
             child_pid,
             root_exit_file,
+        });
+    }
+
+    #[test]
+    fn closed_idle_completed_runtime_releases_its_slot_on_reconciliation() {
+        use crate::cli::action_obligation;
+        use gwt_github::{Cache, IssueNumber, IssueSnapshot, IssueState, UpdatedAt};
+
+        with_stop_fixture(|fixture| {
+            let StopFixture {
+                project,
+                sessions,
+                owner,
+                session,
+                runtime,
+                entry,
+                ..
+            } = fixture;
+            let root = project.path();
+            let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(root);
+            let cache =
+                Cache::new(crate::issue_cache::issue_cache_root_for_repo_path_or_detached(root));
+            let revision = "2026-11-17T21:35:00Z";
+            cache
+                .write_snapshot(&IssueSnapshot {
+                    author_login: None,
+                    number: IssueNumber(owner.number),
+                    title: "Owner with a stale open cache row".into(),
+                    body: String::new(),
+                    labels: vec![gwt_github::issue_auto_claim::QUEUED_LABEL.into()],
+                    state: IssueState::Open,
+                    updated_at: UpdatedAt::new(revision),
+                    comments: Vec::new(),
+                })
+                .unwrap();
+            session.status = AgentStatus::Idle;
+            session.launch_route = gwt_agent::LaunchRoute::Autonomous;
+            session.save(sessions).unwrap();
+            runtime.status = AgentStatus::Idle;
+            let mut stop =
+                gwt_agent::session::CurrentHookEventObservation::pending("Stop").unwrap();
+            stop.outcome = Some(gwt_agent::session::HookCompletionOutcome::Normal);
+            runtime.current_hook_event = Some(stop.clone());
+            let runtime_path = gwt_agent::runtime_state_path(sessions, &session.id);
+            let publish_runtime = |runtime: &gwt_agent::SessionRuntimeState| {
+                std::fs::write(&runtime_path, serde_json::to_vec(runtime).unwrap()).unwrap();
+            };
+            publish_runtime(runtime);
+            let tick = || {
+                let inventory = crate::session_inventory::observe_sessions(root, sessions);
+                reconcile_project(root, sessions, std::slice::from_ref(entry), &inventory).unwrap();
+            };
+            let status = || {
+                let mut env = crate::cli::TestEnv::new(root.into());
+                let (code, output) = crate::cli::run_collect(
+                    &mut env,
+                    crate::cli::CliCommand::Issue(crate::cli::IssueCommand::MonitorStatus {
+                        project_root: Some(root.into()),
+                    }),
+                )
+                .unwrap();
+                assert_eq!(code, 0, "{output}");
+                serde_json::from_str::<serde_json::Value>(&output).unwrap()
+            };
+            tick();
+            assert_eq!(status()["occupied_slot_count"], 1);
+
+            assert!(matches!(
+                execution_state::settle(
+                    root,
+                    &session.id,
+                    execution_state::ExecutionSettlement::Completed,
+                )
+                .unwrap(),
+                execution_state::SettleResult::Settled(_)
+            ));
+            tick();
+            assert_eq!(
+                status()["occupied_slot_count"],
+                1,
+                "open owner keeps its pane"
+            );
+
+            action_obligation::mark_from_prompt(root, &session.id, "Create a pull request")
+                .unwrap();
+            let mut monitor = crate::IssueMonitorState::with_prefs(
+                crate::IssueMonitorConfig::default(),
+                crate::load_issue_monitor_prefs(&prefs_path).unwrap(),
+            );
+            monitor.record_closed(owner.number, Some(revision.into()));
+            crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).unwrap();
+            tick();
+            assert_eq!(status()["occupied_slot_count"], 1, "unsettled obligation");
+            let mismatch = status()["session_row_mismatch"]["working_without_active_row"]
+                .as_array()
+                .unwrap()
+                .clone();
+            assert_eq!(mismatch[0]["issue_number"], owner.number);
+
+            action_obligation::settle_kinds_best_effort(
+                root,
+                &session.id,
+                &[action_obligation::ObligationKind::Pr],
+                "test: delivery complete",
+            );
+            // Prompt admission invalidates Stop before the hook switches
+            // the projected status to Running.
+            runtime.current_hook_event = None;
+            publish_runtime(runtime);
+            tick();
+            assert_eq!(
+                status()["occupied_slot_count"],
+                1,
+                "idle status without Stop"
+            );
+
+            runtime.current_hook_event = Some(stop);
+            publish_runtime(runtime);
+            let registered = entry.clone();
+            let worker = spawn(root.to_path_buf(), sessions.clone(), move || {
+                Some(vec![registered.clone()])
+            })
+            .unwrap();
+            let before = crate::load_issue_monitor_prefs(&prefs_path).unwrap();
+            assert!(worker
+                .scan_trigger()
+                .reconcile_closed_slots(&before)
+                .unwrap());
+            let after = status();
+            assert_eq!(after["occupied_slot_count"], 0, "{after}");
+            assert_eq!(
+                after["session_row_mismatch"]["working_without_active_row"],
+                serde_json::json!([]),
+            );
         });
     }
 

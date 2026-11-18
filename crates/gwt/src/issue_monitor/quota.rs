@@ -44,7 +44,7 @@ mod tests {
 
     fn after(base: &str, secs: i64) -> String {
         format_rfc3339_utc(
-            parse_rfc3339_utc(base).expect("fixture instant") + chrono::Duration::seconds(secs),
+            parse_rfc3339_utc(base).expect("fixture instant") + time::Duration::seconds(secs),
         )
     }
 

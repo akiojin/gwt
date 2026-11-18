@@ -567,7 +567,8 @@ fn workspace_shards_preserve_the_complete_serial_test_selection() {
     assert!(workflow["env"]["CARGO_PROFILE_TEST_DEBUG"].is_null());
     assert!(job["env"]["CARGO_PROFILE_TEST_DEBUG"].is_null());
     let test_steps = [
-        "Build and inventory workspace tests",
+        "Build workspace test binaries",
+        "Inventory workspace tests",
         RUN_TESTS_STEP,
         "Run doctests",
         "Run real-binary front-door tests (Xvfb)",
@@ -579,12 +580,24 @@ fn workspace_shards_preserve_the_complete_serial_test_selection() {
             assert!(step["env"]["CARGO_PROFILE_TEST_DEBUG"].is_null());
         }
     }
-    assert!(step("Build and inventory workspace tests")["run"]
+    assert!(step("Build workspace test binaries")["run"]
         .as_str()
         .unwrap()
-        .contains("cargo nextest list --workspace --all-features --message-format json"));
+        .contains("cargo nextest list --workspace --all-features --list-type binaries-only --message-format json > target/workspace-test-evidence/binaries.json"));
+    let inventory = step("Inventory workspace tests");
+    assert_eq!(inventory["run"].as_str(), Some(
+        "cargo nextest list --profile ci --binaries-metadata target/workspace-test-evidence/binaries.json --message-format json > target/workspace-test-evidence/inventory.json"));
+    assert_eq!(inventory["timeout-minutes"].as_u64(), Some(3));
     assert_eq!(step(RUN_TESTS_STEP)["run"].as_str(), Some(
         "cargo nextest run --workspace --all-features --test-threads=1 --profile ci --partition slice:${{ matrix.shard }}/6"));
+    let config: toml::Value = toml::from_str(&read(".config/nextest.toml")).unwrap();
+    assert_eq!(
+        config["profile"]["ci"]["scripts"][0]["list-wrapper"].as_str(),
+        Some("ci-list-deadline")
+    );
+    let command = &config["scripts"]["wrapper"]["ci-list-deadline"]["command"]["command-line"];
+    assert_eq!(command[0].as_str(), Some("scripts/ci_nextest_list.py"));
+    assert_eq!(command[1].as_str(), Some("60"));
     let front_door = step("Run real-binary front-door tests (Xvfb)");
     assert_eq!(front_door["run"].as_str(), Some(
         "dbus-run-session -- xvfb-run -a cargo test --workspace --all-features --test stable_server_port --test project_restore_integration --test open_cli_integration -- --ignored --test-threads=1 --nocapture"));
@@ -965,10 +978,24 @@ fn windows_regression_slices_build_each_harness_once_and_gate_all_filters() {
             );
             for capture in invocation.captures_iter(run) {
                 assert!(build < index, "{name} must build before running filters");
-                assert!(
-                    step["if"].is_null(),
-                    "all regression filters run unconditionally"
-                );
+                if step["name"] == "Repeat pending-endpoint Quit regression on Windows" {
+                    assert!(lib);
+                    assert_eq!(
+                        step["if"],
+                        "${{ needs.source-sync.outputs.quit_subscriber_changed != 'false' }}"
+                    );
+                    assert!(step["continue-on-error"].is_null());
+                    assert_eq!(step["shell"], "bash");
+                    assert!(run.contains("for (( run = 1; run <= 50; run++ )); do"));
+                    assert!(
+                        run.contains("grep -Fq 'test result: ok. 1 passed; 0 failed; 0 ignored;'")
+                    );
+                } else {
+                    assert!(
+                        step["if"].is_null(),
+                        "all default regression filters run unconditionally"
+                    );
+                }
                 assert_eq!(&capture[1], command);
                 let filter = &capture[2];
                 assert_eq!(filter.split_whitespace().nth(1) == Some("lib"), lib);
@@ -1100,6 +1127,9 @@ fn windows_regression_slices_build_each_harness_once_and_gate_all_filters() {
         "gwt lib gwt cli::issue::tests::immediate_scan_delivery_never_claims_an_unacknowledged_schedule -- --exact --test-threads=1",
         "gwt lib gwt cli::pane::tests::pane_websocket_request_carries_the_agent_capability_in_authorization -- --exact --test-threads=1",
         "gwt lib gwt cli::pane::tests::issue_monitor_scan_client_ -- --test-threads=1",
+        // Issue #7451: shared machine admission under unknown and stale observations.
+        "gwt lib gwt machine_agent_admission::tests::uncertain_manual_observation_refuses_but_auto_preserves_existing_admission -- --exact --test-threads=1",
+        "gwt lib gwt session_inventory::tests::issue_5644_expired_inventory_is_uncertain_instead_of_empty -- --exact --test-threads=1",
         "gwt bin gwt embedded_server::tests::authenticated_monitor_scan_routes_scope_guard_and_result_only_to_origin_socket -- --exact --test-threads=1",
         "gwt bin gwt authenticated_pm_scan_now_ -- --test-threads=1",
         "gwt bin gwt authenticated_scan_now_ -- --test-threads=1",
@@ -1110,6 +1140,7 @@ fn windows_regression_slices_build_each_harness_once_and_gate_all_filters() {
         "gwt lib gwt cli::daemon::client -- --test-threads=1",
         "gwt lib gwt cli::daemon::tests -- --test-threads=1",
         "gwt lib gwt daemon_subscriber -- --test-threads=1",
+        "gwt lib gwt daemon_subscriber::project_owner_tests::explicit_quit_retries_an_endpoint_published_during_delivery -- --exact --test-threads=1 |",
         "gwt lib gwt daemon_supervisor -- --test-threads=1",
         "gwt lib gwt process::tests -- --test-threads=1",
         "gwt-core lib gwt_core daemon_pipe_name -- --test-threads=1",
@@ -1139,7 +1170,7 @@ fn windows_regression_slices_build_each_harness_once_and_gate_all_filters() {
         "gwt test cli_contracts memory_cli_test::memory_add_writes_to_machine_local_work_notes -- --exact --test-threads=1 --nocapture",
         "gwt test cli_contracts gwtd_cli_test::auto_feedback_real_worker_has_no_consent_auth_process_or_raw_sinks -- --exact --test-threads=1 --nocapture",
     ];
-    assert_eq!(expected_filters.len(), 70);
+    assert_eq!(expected_filters.len(), 73);
     expected_filters.sort_unstable();
     actual_filters.sort_unstable();
     assert_eq!(actual_filters, expected_filters);

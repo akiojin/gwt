@@ -63,7 +63,7 @@ pub(super) fn spawn(
             monitor,
             &prefs,
             gui_connected,
-            &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            &gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds(),
             |issue| {
                 crate::issue_monitor_worker::try_refresh_issue_monitor_candidate(
                     &scope.project_root,
@@ -303,7 +303,7 @@ mod tests {
         if change_capacity {
             monitor.set_max_active_agents_override(None);
         }
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
         monitor.record_autonomous_heartbeat(42, &now);
         let mut prefs = monitor.prefs();
         prefs.launch_profile = None;
@@ -321,7 +321,9 @@ mod tests {
                     .send((
                         index,
                         monitor
-                            .fresh_window_snapshot(&chrono::Utc::now().to_rfc3339())
+                            .fresh_window_snapshot(
+                                &gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
+                            )
                             .cloned(),
                     ))
                     .unwrap();
@@ -375,7 +377,7 @@ mod tests {
             assert_eq!(started.0, expected);
             // The first snapshot legitimately fences scan 1. Scan 2 already
             // owns it: only its observation time and a fresh heartbeat advance.
-            snapshot.observed_at = chrono::Utc::now().to_rfc3339();
+            snapshot.observed_at = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
             snapshot.windows[0].last_output_at = Some(snapshot.observed_at.clone());
             // An independent GUI writer refreshes the same physical census.
             // The next control imports that timestamp through its disk rebase.
@@ -502,10 +504,11 @@ mod tests {
                             issue_number: *issue_number,
                             status: gwt_github::issue_auto_claim::ClaimStatus::Active,
                             heartbeat_at: execution_now.to_string(),
-                            expires_at: (chrono::DateTime::parse_from_rfc3339(execution_now)
-                                .unwrap()
-                                + chrono::Duration::minutes(30))
-                            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                            expires_at: gwt_core::timestamp::shift_rfc3339_seconds(
+                                execution_now,
+                                time::Duration::minutes(30),
+                            )
+                            .unwrap(),
                             launched_work_id: launched_work_id.clone(),
                         },
                     ),

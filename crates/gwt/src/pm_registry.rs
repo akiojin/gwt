@@ -903,7 +903,7 @@ fn finish_pm_delivery_receipt_unlocked(
     }
     let terminal = PmDeliveryReceipt {
         operation_id: operation_id.to_string(),
-        recorded_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        recorded_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds(),
         status,
         principal_session_id: prepared.principal_session_id.clone(),
         target_window_id: prepared.target_window_id.clone(),
@@ -963,8 +963,7 @@ pub fn observe_grok_pm_delivery_prompt(
             {
                 let mut cleared = (*latest).clone();
                 cleared.grok_prompt = None;
-                cleared.recorded_at =
-                    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                cleared.recorded_at = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds();
                 append_pm_delivery_receipt_unlocked(path, &cleared)?;
                 receipts.push(cleared);
             }
@@ -994,8 +993,7 @@ pub fn observe_grok_pm_delivery_prompt(
         }
         let mut observed = (*latest).clone();
         observed.grok_prompt = Some(identity.clone());
-        observed.recorded_at =
-            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        observed.recorded_at = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds();
         append_pm_delivery_receipt_unlocked(path, &observed)
     })
 }
@@ -2852,7 +2850,7 @@ impl PmWorktreeRefreshOutcome {
 }
 
 fn pm_refresh_checked_at() -> String {
-    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds()
 }
 
 fn git_sha(repo: &Path, revision: &str) -> io::Result<Option<String>> {
@@ -5236,6 +5234,15 @@ pub fn mutate_pm_prefs<T>(
     })
 }
 
+/// Set the next project open's auto-start preference while preserving the
+/// current PM registration and loop settings.
+pub fn set_pm_auto_start(repo_path: &Path, enabled: bool) -> io::Result<PmPrefs> {
+    mutate_pm_prefs(&pm_prefs_path_for_repo_path(repo_path), |prefs| {
+        prefs.settings.auto_start = enabled;
+    })
+    .map(|(prefs, ())| prefs)
+}
+
 /// Pause only autonomous PM work. Resume re-arms the existing loop once;
 /// registration, auto-start and Issues state remain intact.
 pub fn set_pm_paused(repo_path: &Path, paused: bool) -> io::Result<PmPrefs> {
@@ -5446,17 +5453,13 @@ pub fn pm_respawn_allowed(registration: &PmRegistration, now: &str) -> bool {
 }
 
 fn rfc3339_delta_secs(earlier: &str, later: &str) -> Option<i64> {
-    let earlier = chrono::DateTime::parse_from_rfc3339(earlier).ok()?;
-    let later = chrono::DateTime::parse_from_rfc3339(later).ok()?;
-    Some((later - earlier).num_seconds())
+    let earlier = gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(earlier).ok()?;
+    let later = gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(later).ok()?;
+    Some((later - earlier).whole_seconds())
 }
 
 fn rfc3339_plus_secs(now: &str, secs: i64) -> Option<String> {
-    let parsed = chrono::DateTime::parse_from_rfc3339(now).ok()?;
-    Some(
-        (parsed + chrono::Duration::seconds(secs))
-            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-    )
+    gwt_core::timestamp::shift_rfc3339_seconds(now, time::Duration::seconds(secs))
 }
 
 /// Diagnostic snapshot for the `pm.status` JSON operation (FR-001 diagnostic

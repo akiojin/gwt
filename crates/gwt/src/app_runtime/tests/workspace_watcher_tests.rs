@@ -387,7 +387,7 @@ fn app_runtime_workspace_projection_change_updates_agent_window_title_summary() 
             affiliation_status:
                 gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Assigned,
             workspace_id: None,
-            updated_at: chrono::Utc::now(),
+            updated_at: gwt_core::timestamp::UtcTimestamp::now(),
         });
     gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
         .expect("save projection");
@@ -1913,9 +1913,12 @@ fn background_work_scan_results_refresh_active_work_off_the_gui_event_loop() {
     super::super::workspace_views::reset_full_active_work_projection_builds();
     let merge_events = runtime.apply_work_merge_status(
         &repo,
-        [("work/off-loop".to_string(), chrono::Utc::now())]
-            .into_iter()
-            .collect(),
+        [(
+            "work/off-loop".to_string(),
+            gwt_core::timestamp::UtcTimestamp::now(),
+        )]
+        .into_iter()
+        .collect(),
         HashMap::new(),
         HashSet::new(),
         HashSet::new(),

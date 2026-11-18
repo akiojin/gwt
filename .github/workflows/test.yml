@@ -55,6 +55,7 @@ jobs:
       # runs of a changed `gwt` alone would blow any step budget. The SPEC's own
       # cost model is per target ("#4550 は 54 テスト 0.53 秒で、20 回でも 11 秒").
       flake_targets: ${{ steps.classify.outputs.flake_targets }}
+      quit_subscriber_changed: ${{ steps.classify.outputs.quit_subscriber_changed }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -164,6 +165,11 @@ jobs:
           echo "flake_targets=$flake_targets"
           echo "docs_only=$docs_only" >>"$GITHUB_OUTPUT"
           echo "flake_targets=$flake_targets" >>"$GITHUB_OUTPUT"
+          if grep -Fxq 'crates/gwt/src/daemon_subscriber.rs' <<<"$files"; then
+            echo "quit_subscriber_changed=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "quit_subscriber_changed=false" >>"$GITHUB_OUTPUT"
+          fi
 
   test:
     name: Test (Rust workspace ${{ matrix.shard }}/6)
@@ -182,7 +188,7 @@ jobs:
     # Issue #4055 / #4191: the step budgets below are the operative limits;
     # this cap only bounds the job as a whole and must cover their sum
     # including nextest installation, doctests and the timeout regression.
-    timeout-minutes: 110
+    timeout-minutes: 113
     steps:
       - uses: actions/checkout@v7
       # Issue #4191 AC-2: restoring the .deb archive before the install means a
@@ -242,17 +248,23 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/develop' }}
           shared-key: linux-workspace
         continue-on-error: true
-      # Separate compilation from execution in the Actions step timings. This
-      # unpartitioned list is the original --workspace --all-features test set.
+      # Issue #7572: give compilation its own step and reuse its binary
+      # metadata for the unpartitioned inventory. The ci profile bounds
+      # each --list subprocess during inventory and before the partitioned run.
       # Omit workspace line tables only after cache restore. Keep all test
       # Cargo steps on this profile so later steps do not rebuild it.
-      - name: Build and inventory workspace tests
+      - name: Build workspace test binaries
         env:
           CARGO_PROFILE_TEST_DEBUG: "0"
         run: |
           mkdir -p target/workspace-test-evidence
-          cargo nextest list --workspace --all-features --message-format json > target/workspace-test-evidence/inventory.json
+          cargo nextest list --workspace --all-features --list-type binaries-only --message-format json > target/workspace-test-evidence/binaries.json
         timeout-minutes: 25
+      - name: Inventory workspace tests
+        env:
+          CARGO_PROFILE_TEST_DEBUG: "0"
+        run: cargo nextest list --profile ci --binaries-metadata target/workspace-test-evidence/binaries.json --message-format json > target/workspace-test-evidence/inventory.json
+        timeout-minutes: 3
       # Issue #4055: 21 green runs measured this step at 500–725s (p95 ~660s)
       # and a slow runner crossed the old 15-minute cap with every suite ok
       # (run 34063577896: gwt lib 231s + gwt bin 318s, 2.5x the usual). The
@@ -1046,6 +1058,14 @@ jobs:
           node scripts/ci-windows-tests.mjs run-lib gwt lib gwt cli::pane::tests::pane_websocket_request_carries_the_agent_capability_in_authorization -- --exact --test-threads=1
           node scripts/ci-windows-tests.mjs run-lib gwt lib gwt cli::pane::tests::issue_monitor_scan_client_ -- --test-threads=1
         timeout-minutes: 15
+      # Issue #7451: shared admission never treats an unknown or expired
+      # observation of live workers as a free slot.
+      - name: Run shared machine admission unknown and stale observation contracts
+        shell: bash
+        run: |
+          node scripts/ci-windows-tests.mjs run-lib gwt lib gwt machine_agent_admission::tests::uncertain_manual_observation_refuses_but_auto_preserves_existing_admission -- --exact --test-threads=1
+          node scripts/ci-windows-tests.mjs run-lib gwt lib gwt session_inventory::tests::issue_5644_expired_inventory_is_uncertain_instead_of_empty -- --exact --test-threads=1
+        timeout-minutes: 10
       - name: Run Windows runtime daemon named-pipe transport contracts
         shell: bash
         run: |
@@ -1057,6 +1077,17 @@ jobs:
           node scripts/ci-windows-tests.mjs run-lib gwt lib gwt process::tests -- --test-threads=1
           node scripts/ci-windows-tests.mjs run-lib gwt-core lib gwt_core daemon_pipe_name -- --test-threads=1
         timeout-minutes: 20
+      - name: Repeat pending-endpoint Quit regression on Windows
+        if: ${{ needs.source-sync.outputs.quit_subscriber_changed != 'false' }}
+        shell: bash
+        run: |
+          for (( run = 1; run <= 50; run++ )); do
+            echo "Pending-endpoint Quit run $run/50"
+            node scripts/ci-windows-tests.mjs run-lib gwt lib gwt daemon_subscriber::project_owner_tests::explicit_quit_retries_an_endpoint_published_during_delivery -- --exact --test-threads=1 |
+              tee "$RUNNER_TEMP/pending-endpoint-quit.log"
+            grep -Fq 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/pending-endpoint-quit.log"
+          done
+        timeout-minutes: 5
       # Issue #4746: Windows uses the in-process verification runner, and
       # reclaiming an exited workload's stalled driver needs native taskkill.
       - name: Run Windows verification completion and reclaim regressions
@@ -1205,14 +1236,28 @@ jobs:
         env:
           GWT_WINDOWS_AGENT_E2E_CREDENTIAL_FREE: "1"
           CARGO_PROFILE_DEV_DEBUG: "0"
+          GWT_FLAKE_TARGETS: ${{ needs.source-sync.outputs.flake_targets }}
         run: |
           status=0
+          restore_runs=1
+          # Exercise 20 real cold restores when the target changes, without
+          # repeating the rest of the installed-provider matrix.
+          if [[ " $GWT_FLAKE_TARGETS " == *" gwt|test|windows_agent_launch_e2e "* ]]; then
+            restore_runs=10
+          fi
           providers=(codex claude)
           pids=()
           # Fixtures isolate HOME, npm state, registry/server ports, and sessions.
           for provider in codex claude; do
-            GWT_WINDOWS_AGENT_PROVIDER="$provider" \
-              cargo test -p gwt --test windows_agent_launch_e2e -- --ignored --test-threads=1 --nocapture > "$RUNNER_TEMP/windows-agent-${provider}.log" 2>&1 &
+            (
+              export GWT_WINDOWS_AGENT_PROVIDER="$provider"
+              cargo test -p gwt --test windows_agent_launch_e2e -- --ignored --test-threads=1 --nocapture || exit $?
+              for ((attempt=2; attempt<=restore_runs; attempt++)); do
+                echo "Windows startup restore $provider $attempt/$restore_runs"
+                cargo test -p gwt --test windows_agent_launch_e2e -- --ignored --test-threads=1 --nocapture \
+                  --exact windows_startup_restored_provider_tree_closes_through_public_gui || exit $?
+              done
+            ) > "$RUNNER_TEMP/windows-agent-${provider}.log" 2>&1 &
             pids+=("$!")
           done
           # Keep both outcomes and the existing provider-specific diagnostics.
@@ -1220,7 +1265,13 @@ jobs:
             provider="${providers[$index]}"
             echo "::group::windows installed agent launch E2E ${provider}"
             if wait "${pids[$index]}"; then
-              echo "ok ${provider}/installed"
+              observed=$(grep -cF 'Windows startup restore acceptance:' "$RUNNER_TEMP/windows-agent-${provider}.log" || true)
+              if [ "$observed" -eq "$restore_runs" ]; then
+                echo "ok ${provider}/installed"
+              else
+                echo "::error::Expected $restore_runs startup restore receipts for $provider, got $observed"
+                status=1
+              fi
             else
               echo "::error::windows agent launch E2E failed for ${provider}/installed"
               status=1
@@ -1251,6 +1302,21 @@ jobs:
             --reporter="line,$GITHUB_WORKSPACE/crates/gwt/src/cli/verification_record/headed_e2e_reporter.cjs"
           node -e 'const assert = require("node:assert/strict"); const report = require(process.argv[1]); for (const [key, expected] of Object.entries({chromium_dark_passed: 1, chromium_light_passed: 1, failed: 0, status: "passed"})) assert.equal(report[key], expected, key);' "$GWT_HEADED_E2E_REPORT"
         timeout-minutes: 20
+      # Issue #7451: two projects under one HOME share the machine limit on a
+      # native ConPTY host. The slot returns, the other project is admitted,
+      # and the original owner resumes; neither may exceed the limit.
+      - name: Verify shared machine slot return across two projects in both themes
+        shell: bash
+        env:
+          GWT_PLAYWRIGHT_QUEUE_LAUNCH: "1"
+          GWT_HEADED_E2E_REPORT: ${{ runner.temp }}/windows-shared-pool-headed.json
+        run: |
+          bash scripts/run-visual-tests.sh issue-queue-launch-live.spec.ts \
+            --grep 'Issue #7451 shared HOME returns one machine slot' \
+            --project=chromium-dark --project=chromium-light --workers=1 --retries=0 --headed --trace=on \
+            --reporter="line,$GITHUB_WORKSPACE/crates/gwt/src/cli/verification_record/headed_e2e_reporter.cjs"
+          node -e 'const assert = require("node:assert/strict"); const report = require(process.argv[1]); for (const [key, expected] of Object.entries({chromium_dark_passed: 1, chromium_light_passed: 1, failed: 0, status: "passed"})) assert.equal(report[key], expected, key);' "$GWT_HEADED_E2E_REPORT"
+        timeout-minutes: 30
       - name: Retain Windows cold restart evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@v7
@@ -1259,6 +1325,7 @@ jobs:
           path: |
             crates/gwt/playwright/test-results/
             ${{ runner.temp }}/windows-works-headed.json*
+            ${{ runner.temp }}/windows-shared-pool-headed.json*
           if-no-files-found: warn
       - name: Check tests left real HOME project stores unchanged
         if: ${{ !cancelled() && steps.home-guard.outcome == 'success' }}

@@ -90,7 +90,12 @@ pub(crate) fn job_id(repo_hash: &str, collection: &str, run: &str) -> String {
 pub(crate) fn new_run_token() -> String {
     format!(
         "{}-{}",
-        chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ"),
+        gwt_core::timestamp::UtcTimestamp::now()
+            .utc_datetime()
+            .format(time::macros::format_description!(
+                "[year][month][day]T[hour][minute][second].[subsecond digits:3]Z"
+            ))
+            .expect("format UTC timestamp"),
         std::process::id()
     )
 }

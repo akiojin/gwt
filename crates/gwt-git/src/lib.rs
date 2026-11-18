@@ -52,3 +52,17 @@ pub use repository::{
     GitHubProjectCloneTarget, RepoType, Repository,
 };
 pub use worktree::{sibling_worktree_path, RemoteDeleteOutcome, WorktreeInfo, WorktreeManager};
+
+#[cfg(test)]
+fn shift_test_timestamp(
+    timestamp: gwt_core::timestamp::UtcTimestamp,
+    offset: time::Duration,
+) -> gwt_core::timestamp::UtcTimestamp {
+    let at = std::time::SystemTime::from(timestamp);
+    let elapsed = offset.unsigned_abs();
+    if offset.is_negative() {
+        (at - elapsed).into()
+    } else {
+        (at + elapsed).into()
+    }
+}

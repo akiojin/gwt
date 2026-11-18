@@ -16,9 +16,10 @@
 //! unreadable files are silently skipped so daemon startup is never
 //! blocked by file I/O errors.
 
+use crate::timestamp::UtcTimestamp;
+
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{GwtError, Result};
@@ -39,7 +40,7 @@ pub const WORKSPACE_PROJECTION_MIGRATION_VERSION: u32 = 6;
 struct WorkspaceProjectionMigrationMarker {
     version: u32,
     #[serde(default)]
-    migrated_at: Option<DateTime<Utc>>,
+    migrated_at: Option<UtcTimestamp>,
 }
 
 /// Result of running [`migrate_workspace_projection_path`] on a single
@@ -187,7 +188,7 @@ fn write_marker(marker_path: &Path) -> Result<()> {
     }
     let marker = WorkspaceProjectionMigrationMarker {
         version: WORKSPACE_PROJECTION_MIGRATION_VERSION,
-        migrated_at: Some(Utc::now()),
+        migrated_at: Some(UtcTimestamp::now()),
     };
     let body = serde_json::to_vec_pretty(&marker)
         .map_err(|err| GwtError::Other(format!("serialize migration marker: {err}")))?;
@@ -338,8 +339,8 @@ mod tests {
             agents: Vec::new(),
             git_details: None,
             board_refs: Vec::new(),
-            updated_at: Utc::now(),
-            created_at: Utc::now(),
+            updated_at: UtcTimestamp::now(),
+            created_at: UtcTimestamp::now(),
             creator: Some("codex".to_string()),
             lifecycle_stage: WorkspaceLifecycleStage::Active,
             blocked_reason: None,

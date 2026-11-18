@@ -222,11 +222,11 @@ fn pm_wake_loop_is_quiet(state: &pm_registry::PmLoopState, interval_secs: u64, n
             return true;
         };
         match (
-            chrono::DateTime::parse_from_rfc3339(now),
-            chrono::DateTime::parse_from_rfc3339(instant),
+            gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(now),
+            gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(instant),
         ) {
             (Ok(now_t), Ok(instant_t)) => {
-                (now_t - instant_t).num_seconds()
+                (now_t - instant_t).whole_seconds()
                     >= i64::try_from(interval_secs).unwrap_or(i64::MAX)
             }
             _ => true,
@@ -540,7 +540,7 @@ impl AppRuntime {
         // the automatic ladder must not respawn. Scoped to `Automatic` for the
         // same reason as the auto_start opt-out above — FR-021 requires the
         // explicit launcher/Restart click to start a stopped PM regardless.
-        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds();
         if trigger == PmEnsureTrigger::Automatic
             && !pm_registry::pm_respawn_allowed(&registration, &now)
         {
@@ -728,10 +728,7 @@ impl AppRuntime {
         let Some(project_root) = self.pm_project_root(context) else {
             return Vec::new();
         };
-        let prefs_path = pm_registry::pm_prefs_path_for_repo_path(&project_root);
-        if let Err(error) = pm_registry::mutate_pm_prefs(&prefs_path, |prefs| {
-            prefs.settings.auto_start = enabled;
-        }) {
+        if let Err(error) = pm_registry::set_pm_auto_start(&project_root, enabled) {
             tracing::warn!(%error, "failed to persist the PM auto-start setting");
             return Vec::new();
         }
@@ -1322,7 +1319,7 @@ impl AppRuntime {
         {
             return;
         }
-        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds();
         if let Some(decision) = self.pm_agent_idle_wake_decision_at(&context.project_root, &now) {
             self.project_state_mut(context)
                 .unwrap()
@@ -1569,7 +1566,7 @@ impl AppRuntime {
         project_root: &Path,
         inbox: &[gwt::IssueMonitorInboxItem],
     ) -> Vec<OutboundEvent> {
-        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds();
         let Some(decision) = self.pm_wake_decision_at(project_root, inbox, &now) else {
             return Vec::new();
         };
@@ -2090,8 +2087,8 @@ impl AppRuntime {
             now,
         );
         let recent_output = self.window_last_output_at.get(window_id).is_some_and(|at| {
-            chrono::DateTime::parse_from_rfc3339(now).is_ok_and(|now| {
-                now.signed_duration_since(*at).num_seconds()
+            gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(now).is_ok_and(|now| {
+                now.signed_duration_since(*at).whole_seconds()
                     < interval_secs.saturating_mul(PM_WAKE_BUSY_DEFER_MAX_INTERVALS) as i64
             })
         });
@@ -2172,7 +2169,7 @@ impl AppRuntime {
             session_id: session_id.to_string(),
             agent_id: agent_id.to_string(),
             worktree_path: worktree_path.to_string_lossy().into_owned(),
-            created_at: Some(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+            created_at: Some(gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds()),
             consecutive_crashes: 0,
             next_not_before: None,
         };
@@ -3204,10 +3201,11 @@ mod delivery_tests {
         );
         let mut state = physical.clone();
         state.status = gwt_agent::AgentStatus::Running;
-        state.updated_at = chrono::Utc::now();
+        state.updated_at = gwt_core::timestamp::UtcTimestamp::now();
         state.active_tool_calls = Some(Default::default());
         state.source_event = Some("Stop".into());
-        state.last_activity_at = chrono::Utc::now() - chrono::Duration::hours(1);
+        state.last_activity_at =
+            gwt_core::timestamp::UtcTimestamp::now() - time::Duration::hours(1);
         state.save(&path).unwrap();
         let lock_count = || {
             std::fs::read_to_string(&trace_path)

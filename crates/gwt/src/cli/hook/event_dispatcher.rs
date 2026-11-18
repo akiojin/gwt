@@ -492,7 +492,7 @@ fn handle_autonomous_answer_receipt(worktree_root: &Path, input: &str) -> Result
             .expect("validated repository identity"),
         project_state_root: current_project_state_root.to_string_lossy().into_owned(),
     };
-    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds();
     crate::issue_monitor::acknowledge_autonomous_handoff_user_prompt_submit_from_prefs(
         &prefs_path,
         &source.id,
@@ -1300,6 +1300,48 @@ mod tests {
     }
 
     #[test]
+    fn user_prompt_submit_keeps_board_context_when_runtime_writer_deadline_expires() {
+        use gwt_agent::session::{runtime_writer_lease, HookCompletionOutcome};
+        use gwt_core::operation_deadline::{ScopedOperationClock, ScopedOperationDeadline};
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        super::super::health::browser_preflight_tests::with_source(|input, _, runtime_path, _| {
+            let worktree = &input.worktree_root;
+            let _forward = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+            let _provider = crate::board_provider::test_provider_override::force_prompt_provider(
+                Rc::new(gwt_core::coordination::LocalProvider),
+            );
+            let event = "UserPromptSubmit";
+            let completion = super::super::runtime_state::begin_hook_event(worktree, event, "{}")
+                .expect("capture the pending prompt");
+            let state = gwt_agent::SessionRuntimeState::load(runtime_path).unwrap();
+            assert_eq!(state.current_hook_event.unwrap().event, event);
+            let pending = std::fs::read(runtime_path).unwrap();
+            let writer = runtime_writer_lease(runtime_path).unwrap();
+            let output = {
+                // Advance the operation clock to the aggregate deadline
+                // while another writer holds the sidecar lease.
+                let deadline = Instant::now();
+                let _clock = ScopedOperationClock::set(deadline);
+                let _deadline = ScopedOperationDeadline::enter(deadline);
+                handle_user_prompt_submit(event, "{}", worktree, false, Some(&completion))
+            };
+            assert_eq!(std::fs::read(runtime_path).unwrap(), pending);
+            assert!(!completion.runtime_was_published());
+
+            drop(writer);
+            let result = output.expect("runtime writer deadline must leave the prompt usable");
+            assert!(matches!(result, HookOutput::HookSpecificAdditionalContext {
+                    event: IntentBoundaryEvent::UserPromptSubmit, text
+                } if text.contains("# Board Post Reminder")));
+            completion.record(HookCompletionOutcome::Normal);
+            assert_eq!(std::fs::read(runtime_path).unwrap(), pending);
+        });
+    }
+
+    #[test]
     fn only_user_prompt_submit_enters_the_aggregate_deadline() {
         assert!(gwt_core::operation_deadline::current().is_none());
         let started = Instant::now();
@@ -1902,7 +1944,7 @@ mod tests {
             vec![],
             vec![],
         );
-        entry.created_at = chrono::Utc::now() - chrono::Duration::hours(1);
+        entry.created_at = gwt_core::timestamp::UtcTimestamp::now() - time::Duration::hours(1);
         entry.updated_at = entry.created_at;
         gwt_core::coordination::post_entry(&worktree, entry).expect("seed 4 MiB Board history");
 
@@ -2354,7 +2396,7 @@ mod tests {
                 timeout_seconds: 900,
                 unavailable: None,
             },
-            chrono::Utc::now(),
+            gwt_core::timestamp::UtcTimestamp::now(),
         )
         .unwrap();
         let event = IntentBoundaryEvent::UserPromptSubmit;
@@ -2612,7 +2654,7 @@ mod tests {
             from_session_id: session_id.clone(),
             to_session_id: "replacement-session".to_string(),
             reason: "test stale predecessor".to_string(),
-            requested_at: chrono::Utc::now(),
+            requested_at: gwt_core::timestamp::UtcTimestamp::now(),
         };
         crate::cli::execution_state::prepare_generation_takeover(worktree.path(), owner, &takeover)
             .unwrap();

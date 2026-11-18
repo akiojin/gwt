@@ -271,7 +271,7 @@ fn app_runtime_board_milestone_from_unassigned_origin_does_not_create_workspace_
             affiliation_status:
                 gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Unassigned,
             workspace_id: None,
-            updated_at: chrono::Utc::now(),
+            updated_at: gwt_core::timestamp::UtcTimestamp::now(),
         });
     gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
         .expect("save projection");
@@ -327,8 +327,8 @@ fn app_runtime_board_milestone_uses_latest_duplicate_session_assignment() {
         WindowProcessStatus::Ready,
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let old_at = chrono::Utc::now() - chrono::Duration::minutes(2);
-    let current_at = chrono::Utc::now() - chrono::Duration::minutes(1);
+    let old_at = gwt_core::timestamp::UtcTimestamp::now() - time::Duration::minutes(2);
+    let current_at = gwt_core::timestamp::UtcTimestamp::now() - time::Duration::minutes(1);
     let current_worktree = repo.join("feature-current");
     fs::create_dir_all(&current_worktree).expect("create current Work worktree");
     let stale = gwt_core::workspace_projection::WorkspaceAgentSummary {
@@ -444,10 +444,10 @@ fn app_runtime_old_board_milestone_does_not_rewind_latest_assigned_work_or_agent
         WindowProcessStatus::Ready,
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let stale_agent_at = chrono::Utc::now() - chrono::Duration::minutes(4);
-    let assigned_agent_at = chrono::Utc::now() - chrono::Duration::minutes(3);
-    let replayed_at = chrono::Utc::now() - chrono::Duration::minutes(2);
-    let current_work_at = chrono::Utc::now() - chrono::Duration::minutes(1);
+    let stale_agent_at = gwt_core::timestamp::UtcTimestamp::now() - time::Duration::minutes(4);
+    let assigned_agent_at = gwt_core::timestamp::UtcTimestamp::now() - time::Duration::minutes(3);
+    let replayed_at = gwt_core::timestamp::UtcTimestamp::now() - time::Duration::minutes(2);
+    let current_work_at = gwt_core::timestamp::UtcTimestamp::now() - time::Duration::minutes(1);
     let assigned = gwt_core::workspace_projection::WorkspaceAgentSummary {
         session_id: "session-duplicate-assigned".to_string(),
         window_id: None,
@@ -624,7 +624,7 @@ fn app_runtime_active_work_projection_prioritizes_handoff_agents() {
     };
 
     let mut projection = WorkspaceProjection::default_for_project("/repo");
-    let now = chrono::Utc::now();
+    let now = gwt_core::timestamp::UtcTimestamp::now();
     projection.agents.push(WorkspaceAgentSummary {
         session_id: "session-active".to_string(),
         window_id: Some("tab-1::agent-active".to_string()),

@@ -1,4 +1,6 @@
 //! Repository-scoped PM instructions, explicit native approvals and mutation audits.
+use crate::timestamp::UtcTimestamp;
+
 use std::{
     fs,
     io::{self, Write},
@@ -109,7 +111,7 @@ pub struct Approval {
     pub standing: bool,
     pub revoked: bool,
     pub consumed: bool,
-    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub created_at: UtcTimestamp,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -192,7 +194,7 @@ pub fn record_approval(
         standing,
         revoked: false,
         consumed: false,
-        created_at: chrono::Utc::now(),
+        created_at: UtcTimestamp::now(),
     };
     locked(repo, |store| {
         audit(
@@ -447,7 +449,7 @@ pub fn authorize(
         };
         audit(
             repo,
-            serde_json::json!({"event":"authorized", "at":chrono::Utc::now(), "attempt":attempt}),
+            serde_json::json!({"event":"authorized", "at":UtcTimestamp::now(), "attempt":attempt}),
         )?;
         if project_choice {
             store.project_choice_attempts.push(attempt.clone());
@@ -544,7 +546,7 @@ impl Attempt {
             audit(
                 repo,
                 serde_json::json!({
-                    "event":if succeeded {"succeeded"} else {"failed"}, "at":chrono::Utc::now(),
+                    "event":if succeeded {"succeeded"} else {"failed"}, "at":UtcTimestamp::now(),
                     "attempt_id":self.id, "operation":self.scope.operation,
                     "authority_id":self.authority_id, "before":self.before, "after":after,
                 }),

@@ -582,6 +582,8 @@ pub(crate) struct RegistryIo {
     pub(crate) mirror_publishes: usize,
     pub(crate) record_writes: Vec<String>,
     pub(crate) validated_payloads: Vec<String>,
+    /// Whole-mirror decodes: the cost that grows with a project's record.
+    pub(crate) mirror_decodes: usize,
 }
 
 #[cfg(test)]
@@ -737,6 +739,13 @@ fn load_proving(mirrors: Mirrors<'_>) -> io::Result<Option<Registry>> {
         .transpose()
 }
 
+/// The decoded mirrors a validation proved, keyed by project.
+///
+/// Decoding a mirror costs time in proportion to its project's record (Issue
+/// #7550), so the reader that asked for the proof takes its result instead of
+/// decoding the same bytes again.
+type Proven = BTreeMap<String, IssueMonitorPrefs>;
+
 #[derive(Deserialize)]
 struct StorageSchema {
     schema_version: u32,
@@ -747,28 +756,36 @@ fn decode_registry(
     mirrors: Mirrors<'_>,
     record: &dyn Fn(&str) -> io::Result<Option<String>>,
 ) -> io::Result<Registry> {
+    decode_registry_proven(raw, mirrors, record).map(|(registry, _)| registry)
+}
+
+fn decode_registry_proven(
+    raw: &str,
+    mirrors: Mirrors<'_>,
+    record: &dyn Fn(&str) -> io::Result<Option<String>>,
+) -> io::Result<(Registry, Proven)> {
     let schema: StorageSchema = serde_json::from_str(raw).map_err(io::Error::other)?;
     if schema.schema_version >= SPLIT_SCHEMA_VERSION {
         return decode_split(raw, mirrors, record);
     }
     let mut registry: Registry = serde_json::from_str(raw).map_err(io::Error::other)?;
-    validate_proving(&registry, mirrors)?;
+    let mut proven = validate_decoding(&registry, mirrors)?;
     if registry.schema_version < 3 {
         extract_legacy_runtime(&mut registry)?;
         registry.schema_version = 3;
         if let Some(roster) = &mut registry.roster {
             roster.schema_version = 3;
         }
-        validate_proving(&registry, mirrors)?;
+        proven = validate_decoding(&registry, mirrors)?;
     }
-    Ok(registry)
+    Ok((registry, proven))
 }
 
 fn decode_split(
     raw: &str,
     mirrors: Mirrors<'_>,
     record: &dyn Fn(&str) -> io::Result<Option<String>>,
-) -> io::Result<Registry> {
+) -> io::Result<(Registry, Proven)> {
     let core: Core = serde_json::from_str(raw).map_err(io::Error::other)?;
     if core.schema_version != SPLIT_SCHEMA_VERSION {
         return Err(invalid("Unsupported shared Agent registry schema or phase"));
@@ -827,8 +844,8 @@ fn decode_split(
             },
         );
     }
-    validate_proving(&registry, mirrors)?;
-    Ok(registry)
+    let proven = validate_decoding(&registry, mirrors)?;
+    Ok((registry, proven))
 }
 
 fn save(registry: &Registry) -> io::Result<()> {
@@ -1187,6 +1204,11 @@ fn settings_revision(registry: &Registry) -> u64 {
 }
 
 fn validate_proving(registry: &Registry, mirrors: Mirrors<'_>) -> io::Result<()> {
+    validate_decoding(registry, mirrors).map(drop)
+}
+
+fn validate_decoding(registry: &Registry, mirrors: Mirrors<'_>) -> io::Result<Proven> {
+    let mut proven = Proven::new();
     if !matches!(registry.schema_version, 1..=3)
         || !matches!(
             registry.phase,
@@ -1246,6 +1268,7 @@ fn validate_proving(registry: &Registry, mirrors: Mirrors<'_>) -> io::Result<()>
             if prefs.schema_version != 2 || prefs.agent_roster.is_some() {
                 return Err(invalid(format!("Invalid Agent execution mirror for {key}")));
             }
+            proven.insert(key.clone(), prefs);
         }
     }
     let shared = registry
@@ -1388,10 +1411,14 @@ fn validate_proving(registry: &Registry, mirrors: Mirrors<'_>) -> io::Result<()>
     } else if !registry.profiles.is_empty() {
         return Err(invalid("Saved Agent cores require a registered roster"));
     }
-    Ok(())
+    Ok(proven)
 }
 
 fn decode(raw: Option<&str>) -> io::Result<IssueMonitorPrefs> {
+    #[cfg(test)]
+    if raw.is_some() {
+        record_io(|io| io.mirror_decodes += 1);
+    }
     match raw {
         Some(raw) => crate::update_settings::decode_project_prefs(raw).map_err(|error| {
             io::Error::new(
@@ -3090,7 +3117,7 @@ pub(crate) fn ensure_current_pm_identity(root: &Path, sessions: &Path) -> io::Re
                             member_id: id.clone(),
                             session_identity_sha256: identity.clone(),
                             registration_identity_sha256: registration_identity,
-                            imported_at: chrono::Utc::now().to_rfc3339(),
+                            imported_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
                         },
                     );
                 id
@@ -3654,7 +3681,15 @@ fn project_identity(
 }
 
 fn project(registry: &Registry, key: &str, raw: Option<&str>) -> io::Result<IssueMonitorPrefs> {
-    let mut prefs = decode(raw)?;
+    project_decoded(registry, key, decode(raw)?)
+}
+
+/// Project a mirror that was already decoded from its committed bytes.
+fn project_decoded(
+    registry: &Registry,
+    key: &str,
+    mut prefs: IssueMonitorPrefs,
+) -> io::Result<IssueMonitorPrefs> {
     project_identity(registry, key, &mut prefs)?;
     prefs.agent_roster = project_roster(registry, key);
     if let Some(roster) = &prefs.agent_roster {
@@ -3667,7 +3702,15 @@ fn project(registry: &Registry, key: &str, raw: Option<&str>) -> io::Result<Issu
     Ok(prefs)
 }
 
-fn mirror_json(prefs: &IssueMonitorPrefs, original: Option<&str>) -> io::Result<String> {
+/// Encode the mirror a project commits, keeping what this version cannot read.
+///
+/// `decoded` is `original` as [`decode`] reads it. A caller that already holds
+/// that decode passes it, so the committed bytes are not parsed a second time.
+fn mirror_json(
+    prefs: &IssueMonitorPrefs,
+    original: Option<&str>,
+    decoded: Option<&IssueMonitorPrefs>,
+) -> io::Result<String> {
     let mut mirror = prefs.clone();
     mirror.schema_version = 2;
     mirror.agent_roster = None;
@@ -3683,34 +3726,41 @@ fn mirror_json(prefs: &IssueMonitorPrefs, original: Option<&str>) -> io::Result<
         profile.codex_speed = gwt_agent::CodexSpeed::Off;
     }
     mirror.set_launch_profile_pool(profiles);
-    let mut value = original
-        .map(serde_json::from_str::<serde_json::Value>)
-        .transpose()
-        .map_err(io::Error::other)?
-        .unwrap_or_else(|| serde_json::json!({}));
-    let object = value
-        .as_object_mut()
-        .ok_or_else(|| invalid("Project preferences must be an object"))?;
-    let mut known = serde_json::to_value(IssueMonitorPrefs::default()).map_err(io::Error::other)?;
+    let fields_of =
+        |prefs: &IssueMonitorPrefs| -> io::Result<serde_json::Map<String, serde_json::Value>> {
+            match serde_json::to_value(prefs).map_err(io::Error::other)? {
+                serde_json::Value::Object(object) => Ok(object),
+                _ => Err(invalid("Project preferences must be an object")),
+            }
+        };
+    let mut object = serde_json::Map::new();
     if let Some(original) = original {
-        let before = serde_json::to_value(decode(Some(original))?).map_err(io::Error::other)?;
-        known
-            .as_object_mut()
-            .expect("prefs object")
-            .extend(before.as_object().expect("prefs object").clone());
+        // Only the top level is read: a field this version knows is replaced
+        // whole below, and one it does not know is carried as it was written.
+        let fields: BTreeMap<String, &serde_json::value::RawValue> = serde_json::from_str(original)
+            .map_err(|error| {
+                if error.is_data() {
+                    invalid("Project preferences must be an object")
+                } else {
+                    io::Error::other(error)
+                }
+            })?;
+        let mut known = fields_of(&IssueMonitorPrefs::default())?;
+        known.extend(match decoded {
+            Some(decoded) => fields_of(decoded)?,
+            None => fields_of(&decode(Some(original))?)?,
+        });
+        for (field, value) in fields {
+            if field != "agent_roster" && !known.contains_key(&field) {
+                object.insert(
+                    field,
+                    serde_json::from_str(value.get()).map_err(io::Error::other)?,
+                );
+            }
+        }
     }
-    for key in known.as_object().expect("prefs object").keys() {
-        object.remove(key);
-    }
-    object.remove("agent_roster");
-    object.extend(
-        serde_json::to_value(mirror)
-            .map_err(io::Error::other)?
-            .as_object()
-            .expect("prefs object")
-            .clone(),
-    );
-    serde_json::to_string_pretty(&value).map_err(io::Error::other)
+    object.extend(fields_of(&mirror)?);
+    serde_json::to_string_pretty(&serde_json::Value::Object(object)).map_err(io::Error::other)
 }
 
 fn source_from(
@@ -3720,7 +3770,7 @@ fn source_from(
     original: Option<&str>,
     aliases: BTreeMap<String, String>,
 ) -> io::Result<Source> {
-    let after = mirror_json(prefs, original)?;
+    let after = mirror_json(prefs, original, None)?;
     let floor = raw(&prefs_path(key)?.with_extension("committed.json"))?;
     Ok(Source {
         was_active: registry
@@ -3796,6 +3846,20 @@ fn publish_verified(source: &Source, path: &Path) -> io::Result<()> {
     )
 }
 
+/// Where the mirror is kept as it was before retention first dropped entries.
+pub(crate) fn pre_retention_mirror_path(path: &Path) -> PathBuf {
+    path.with_extension("pre-retention.json")
+}
+
+/// Keep one generation: the mirror the first retention pass is about to shrink.
+fn keep_pre_retention_mirror(path: &Path, committed: &str) -> io::Result<()> {
+    let kept = pre_retention_mirror_path(path);
+    if kept.try_exists()? {
+        return Ok(());
+    }
+    crate::issue_monitor::durable_atomic_write(&kept, committed.as_bytes())
+}
+
 fn quarantine(path: &Path, contents: &str) -> io::Result<()> {
     let destination = path.with_file_name(format!(
         "{}.registry-quarantine-{}.json",
@@ -3849,7 +3913,8 @@ pub(crate) fn read_project(path: &Path) -> io::Result<Option<IssueMonitorPrefs>>
             continue;
         }
         let (core, record) = after;
-        let after = decode_registry(&core, Mirrors::Only(&key), &|_| Ok(record.clone()))?;
+        let (after, mut proven) =
+            decode_registry_proven(&core, Mirrors::Only(&key), &|_| Ok(record.clone()))?;
         if after.phase != RegistryPhase::Active {
             return Err(invalid(
                 "Agent registry is prepared; inspect agent.registry.status and reconcile",
@@ -3866,7 +3931,11 @@ pub(crate) fn read_project(path: &Path) -> io::Result<Option<IssueMonitorPrefs>>
                     return Err(invalid(format!("Agent recovery floor conflict for {key}: observed={floor_hash}; read agent.registry.status and explicitly reconcile with expected_floor_sha256")));
                 }
             }
-            return project(&after, &key, Some(&source.after_json)).map(Some);
+            return match proven.remove(&key) {
+                Some(committed) => project_decoded(&after, &key, committed),
+                None => project(&after, &key, Some(&source.after_json)),
+            }
+            .map(Some);
         }
         let prefs = decode(observed.as_deref())?;
         if prefs.schema_version != 1 || prefs.agent_roster.is_some() {
@@ -3928,6 +3997,8 @@ pub(crate) struct RegistryWrite {
     registry: Option<Registry>,
     key: Option<String>,
     before: Option<IssueMonitorPrefs>,
+    /// The committed mirror as decoded, so it is decoded once per generation.
+    committed: Option<IssueMonitorPrefs>,
     /// Both mirror files hold the committed generation, proven under these locks.
     mirrors_current: bool,
 }
@@ -3941,12 +4012,21 @@ impl RegistryWrite {
                 registry: None,
                 key: None,
                 before: None,
+                committed: None,
                 mirrors_current: false,
             });
         };
         let core = core_lock()?;
         let mut guard = NamedFileLock::acquire_shared(&lock_path()?, "shared Agent registry")?;
-        let mut registry = load_proving(Mirrors::Only(&key))?;
+        let loaded = raw(&self::path())?
+            .map(|core| {
+                decode_registry_proven(&core, Mirrors::Only(&key), &|key| raw(&record_path(key)))
+            })
+            .transpose()?;
+        let (mut registry, mut decoded) = match loaded {
+            Some((registry, mut proven)) => (Some(registry), proven.remove(&key)),
+            None => (None, None),
+        };
         if let Some(current) = &mut registry {
             if current.phase != RegistryPhase::Active {
                 return Err(invalid(
@@ -3977,8 +4057,12 @@ impl RegistryWrite {
                 *current = load()?.ok_or_else(|| invalid("Agent registry disappeared"))?;
                 enroll(current, &key, None, &[])?;
                 save(current)?;
+                decoded = None;
             }
             let source = &current.sources[&key];
+            if decoded.is_none() {
+                decoded = Some(decode(Some(&source.after_json))?);
+            }
             let committed = Some(source.after_json.as_str());
             let observed = raw(path)?;
             let floor = raw(&path.with_extension("committed.json"))?;
@@ -4002,14 +4086,23 @@ impl RegistryWrite {
             registry,
             key: Some(key),
             before: None,
+            committed: decoded,
         })
+    }
+
+    /// The committed generation as its readers see it.
+    fn project_committed(&self, registry: &Registry, key: &str) -> io::Result<IssueMonitorPrefs> {
+        match &self.committed {
+            Some(committed) => project_decoded(registry, key, committed.clone()),
+            None => project(registry, key, Some(&registry.sources[key].after_json)),
+        }
     }
 
     pub(crate) fn load(&mut self, path: &Path) -> io::Result<Option<IssueMonitorPrefs>> {
         let (Some(registry), Some(key)) = (&self.registry, &self.key) else {
             return Ok(None);
         };
-        let prefs = project(registry, key, Some(&registry.sources[key].after_json))?;
+        let prefs = self.project_committed(registry, key)?;
         self.before = Some(prefs.clone());
         let _ = path;
         Ok(Some(prefs))
@@ -4028,7 +4121,7 @@ impl RegistryWrite {
         // `before` is this same committed generation whenever it was loaded.
         let latest = match &self.before {
             Some(before) => before.clone(),
-            None => project(registry, key, Some(&registry.sources[key].after_json))?,
+            None => self.project_committed(registry, key)?,
         };
         let mut candidate = prefs.clone();
         if mutation {
@@ -4089,8 +4182,15 @@ impl RegistryWrite {
         )
         .map_err(invalid)?;
         validate_assignment_budget(registry, &next)?;
+        // Issue #7550: every writer saves through here, so none can keep or
+        // bring back what the retention rule drops.
+        candidate.enforce_retention();
         let source = &registry.sources[key];
-        let after_json = mirror_json(&candidate, Some(&source.after_json))?;
+        let after_json = mirror_json(
+            &candidate,
+            Some(&source.after_json),
+            self.committed.as_ref(),
+        )?;
         if next.roster == registry.roster
             && next.profiles == registry.profiles
             && next.project_assignments == registry.project_assignments
@@ -4141,8 +4241,16 @@ impl RegistryWrite {
             )?
         };
         next.sources.insert(key.clone(), committed);
+        if self
+            .committed
+            .clone()
+            .is_some_and(|mut committed| committed.enforce_retention())
+        {
+            keep_pre_retention_mirror(path, &source.after_json)?;
+        }
         // Decode the new mirror before it becomes the committed generation.
-        let saved = project(&next, key, Some(&next.sources[key].after_json))?;
+        let proven = decode(Some(&next.sources[key].after_json))?;
+        let saved = project_decoded(&next, key, proven.clone())?;
         // The sole logical commit point for an Active transaction. Its mirror
         // was serialized, fingerprinted and decoded just above.
         if registry.store.split && !global_changed {
@@ -4156,6 +4264,7 @@ impl RegistryWrite {
             ));
         }
         self.registry = Some(next.clone());
+        self.committed = Some(proven);
         // `acquire` proved both mirrors under the locks this transaction still holds.
         self.mirrors_current = false;
         publish_verified(&next.sources[key], path)?;
@@ -5020,6 +5129,44 @@ pub fn reconcile(request: &RegistryReconcileRequest) -> io::Result<RegistryStatu
     }
     drop(_registry);
     status(Some(key.as_str()))
+}
+
+/// Fill a project's prefs to the record size Issue #7550 measured (1.3 MB).
+#[cfg(test)]
+pub(crate) fn fill_heavy_prefs_for_test(prefs: &mut IssueMonitorPrefs) {
+    prefs.closure_records = (0..2_237u64)
+        .map(|issue| crate::issue_monitor::IssueClosureRecord {
+            issue_number: 10_000 + issue,
+            generation: 3,
+            state: Default::default(),
+            evidence: Default::default(),
+            issue_updated_at: Some("2026-11-17T12:16:00Z".into()),
+            reopened_after_close: false,
+        })
+        .collect();
+    prefs.claim_diagnostics = (0..377u64)
+        .map(|issue| {
+            let diagnostics = crate::issue_monitor::IssueMonitorClaimDiagnostics {
+                claim_id: Some(format!(
+                    "gwt-queue:{issue}:b47249f5-bb49-4252-a319-5eebc718ab61"
+                )),
+                owner: Some("ccs-win-125:operator:50212".into()),
+                expires_at: Some("2026-11-17T12:47:49.661945900+00:00".into()),
+                last_attempt_at: Some("2026-11-17T12:32:49.661938400+00:00".into()),
+                last_success_at: Some("2026-11-17T12:32:49.661938400+00:00".into()),
+                ..Default::default()
+            };
+            (20_000 + issue, diagnostics)
+        })
+        .collect();
+    prefs.claim_identities = (0..471u64)
+        .map(|issue| crate::issue_monitor::IssueMonitorClaimIdentity {
+            issue_number: 20_000 + issue,
+            claim_id: format!("gwt-queue:{issue}:b47249f5-bb49-4252-a319-5eebc718ab61"),
+            owner: "ccs-win-125:operator:50212".into(),
+        })
+        .collect();
+    prefs.merged_issues = (0..52_000).map(|index| 1_000_000 + index).collect();
 }
 
 #[cfg(test)]
@@ -9330,6 +9477,266 @@ mod tests {
             fs::metadata(&a_path).unwrap().len(),
             median(unchanged),
             median(committed),
+        );
+    }
+
+    /// Issue #7550: what a transaction costs grows with its project's record,
+    /// so each committed generation is decoded once and the new one proven once.
+    #[test]
+    fn a_prefs_transaction_decodes_each_mirror_generation_once() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let (a_path, ..) = two_split_sources();
+        take_registry_io_for_test();
+
+        crate::try_mutate_issue_monitor_prefs(&a_path, |prefs| {
+            prefs.merged_issues.push(7550);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(take_registry_io_for_test().mirror_decodes, 2);
+
+        crate::try_mutate_issue_monitor_prefs(&a_path, |_| Ok(())).unwrap();
+        assert_eq!(take_registry_io_for_test().mirror_decodes, 1);
+
+        let saved = crate::load_issue_monitor_prefs(&a_path).unwrap();
+        assert_eq!(take_registry_io_for_test().mirror_decodes, 1);
+        assert_eq!(saved.merged_issues, vec![7550]);
+    }
+
+    /// Issue #7550: a writer that edits the prefs directly saves them under
+    /// the same retention rule, and the mirror it shrinks first is kept once.
+    #[test]
+    fn every_registry_writer_saves_under_the_retention_rule_and_keeps_the_first_mirror() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let (a_path, ..) = two_split_sources();
+        let kept = pre_retention_mirror_path(&a_path);
+        let closed = |issue_number| crate::issue_monitor::IssueClosureRecord {
+            issue_number,
+            generation: 1,
+            state: crate::issue_monitor::IssueClosureState::Closed,
+            evidence: Default::default(),
+            issue_updated_at: None,
+            reopened_after_close: false,
+        };
+        let identity = |issue_number| crate::issue_monitor::IssueMonitorClaimIdentity {
+            issue_number,
+            claim_id: format!("gwt-queue:{issue_number}:claim"),
+            owner: "host:user:1".into(),
+        };
+        // What a version without the rule committed.
+        let mut legacy = decode(Some(&fs::read_to_string(&a_path).unwrap())).unwrap();
+        legacy.closure_records = vec![closed(1)];
+        legacy.claim_identities = vec![identity(1), identity(2)];
+        let legacy_json = mirror_json(&legacy, None, None).unwrap();
+        let mut registry = load().unwrap().unwrap();
+        let key = source_key(&a_path).unwrap();
+        let source = registry.sources.get_mut(&key).unwrap();
+        source.before_sha256 = source.after_sha256.clone();
+        source.floor_before_sha256 = source.after_sha256.clone();
+        source.after_sha256 = fingerprint(&legacy_json);
+        source.after_json = legacy_json.clone();
+        save(&registry).unwrap();
+        publish_verified(&registry.sources[&key], &a_path).unwrap();
+        assert_eq!(
+            crate::load_issue_monitor_prefs(&a_path)
+                .unwrap()
+                .claim_identities,
+            vec![identity(1), identity(2)],
+            "reading never drops anything"
+        );
+        assert!(!kept.exists());
+
+        let (saved, ()) = crate::try_mutate_issue_monitor_prefs(&a_path, |prefs| {
+            prefs.merged_issues.push(7550);
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(saved.claim_identities, vec![identity(2)]);
+        assert_eq!(fs::read_to_string(&kept).unwrap(), legacy_json);
+
+        // A writer that puts a retired entry back saves without it, and the
+        // kept mirror stays the first generation.
+        let (saved, ()) = crate::try_mutate_issue_monitor_prefs(&a_path, |prefs| {
+            prefs.claim_identities.insert(0, identity(1));
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(saved.claim_identities, vec![identity(2)]);
+        assert_eq!(
+            crate::load_issue_monitor_prefs(&a_path)
+                .unwrap()
+                .claim_identities,
+            vec![identity(2)]
+        );
+        assert_eq!(fs::read_to_string(&kept).unwrap(), legacy_json);
+    }
+
+    /// The mirror encoder as it was before Issue #7550, kept as the oracle for
+    /// the bytes a project commits.
+    fn mirror_json_before_7550(
+        prefs: &IssueMonitorPrefs,
+        original: Option<&str>,
+    ) -> io::Result<String> {
+        let mut mirror = prefs.clone();
+        mirror.schema_version = 2;
+        mirror.agent_roster = None;
+        let mut profiles = mirror.launch_profile_pool();
+        for profile in &mut profiles {
+            if profile.agent_member_id.is_none() {
+                continue;
+            }
+            profile.model = None;
+            profile.reasoning = None;
+            profile.version = None;
+            profile.fast_mode = false;
+            profile.codex_speed = gwt_agent::CodexSpeed::Off;
+        }
+        mirror.set_launch_profile_pool(profiles);
+        let mut value = original
+            .map(serde_json::from_str::<serde_json::Value>)
+            .transpose()
+            .map_err(io::Error::other)?
+            .unwrap_or_else(|| serde_json::json!({}));
+        let object = value
+            .as_object_mut()
+            .ok_or_else(|| invalid("Project preferences must be an object"))?;
+        let mut known =
+            serde_json::to_value(IssueMonitorPrefs::default()).map_err(io::Error::other)?;
+        if let Some(original) = original {
+            let before = serde_json::to_value(decode(Some(original))?).map_err(io::Error::other)?;
+            known
+                .as_object_mut()
+                .expect("prefs object")
+                .extend(before.as_object().expect("prefs object").clone());
+        }
+        for key in known.as_object().expect("prefs object").keys() {
+            object.remove(key);
+        }
+        object.remove("agent_roster");
+        object.extend(
+            serde_json::to_value(mirror)
+                .map_err(io::Error::other)?
+                .as_object()
+                .expect("prefs object")
+                .clone(),
+        );
+        serde_json::to_string_pretty(&value).map_err(io::Error::other)
+    }
+
+    /// Issue #7550: reusing the committed decode changes how the mirror is
+    /// encoded, never one byte of what is committed.
+    #[test]
+    fn the_mirror_a_project_commits_is_byte_identical_to_the_previous_encoder() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let (a_path, ..) = two_split_sources();
+        let (projected, ()) = crate::try_mutate_issue_monitor_prefs(&a_path, |prefs| {
+            fill_heavy_prefs_for_test(prefs);
+            Ok(())
+        })
+        .unwrap();
+        let committed = fs::read_to_string(&a_path).unwrap();
+        // What an older or newer version wrote: fields this version does not
+        // know, a known field written empty, a roster, and a legacy field.
+        let mut foreign: serde_json::Value = serde_json::from_str(&committed).unwrap();
+        foreign["future_field"] = serde_json::json!({"nested": [3, 1, {"z": null, "a": "é\n"}]});
+        foreign["another_future_field"] = serde_json::json!("text");
+        foreign["requeue_audit"] = serde_json::json!([]);
+        foreign["launch_usage_threshold_percent"] = serde_json::json!(80);
+        foreign["agent_roster"] =
+            serde_json::json!({"schema_version": 1, "revision": 1, "members": []});
+        let foreign = serde_json::to_string(&foreign).unwrap();
+        let mut changed = projected.clone();
+        changed.merged_issues.push(7550);
+        changed.closure_records.truncate(3);
+        changed.claim_diagnostics.clear();
+
+        let mut compared = 0;
+        for original in [None, Some(committed.as_str()), Some(foreign.as_str())] {
+            let decoded = original.map(|original| decode(Some(original)).unwrap());
+            for prefs in [&projected, &changed, &IssueMonitorPrefs::default()] {
+                let expected = mirror_json_before_7550(prefs, original).unwrap();
+                assert_eq!(mirror_json(prefs, original, None).unwrap(), expected);
+                assert_eq!(
+                    mirror_json(prefs, original, decoded.as_ref()).unwrap(),
+                    expected
+                );
+                compared += 1;
+            }
+        }
+        assert_eq!(compared, 9);
+        assert!(mirror_json_before_7550(&changed, Some(&foreign))
+            .unwrap()
+            .contains("\"future_field\""));
+        for malformed in ["[1]", "{"] {
+            assert_eq!(
+                mirror_json(&projected, Some(malformed), Some(&projected))
+                    .unwrap_err()
+                    .to_string(),
+                mirror_json_before_7550(&projected, Some(malformed))
+                    .unwrap_err()
+                    .to_string()
+            );
+        }
+    }
+
+    /// One project's transactions on the 1.3 MB record Issue #7550 reported:
+    /// the read before the lock, an unchanged transaction and a saving one.
+    /// `cargo test -p gwt --lib --release measure_heavy_record_prefs_transaction_ms -- --ignored --nocapture`
+    #[test]
+    #[ignore = "measurement, not an assertion"]
+    fn measure_heavy_record_prefs_transaction_ms() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let (a_path, a_key, ..) = two_split_sources();
+        crate::try_mutate_issue_monitor_prefs(&a_path, |prefs| {
+            fill_heavy_prefs_for_test(prefs);
+            Ok(())
+        })
+        .unwrap();
+        let ms = |began: std::time::Instant| began.elapsed().as_secs_f64() * 1000.0;
+        let median = |mut samples: Vec<f64>| {
+            samples.sort_by(f64::total_cmp);
+            samples[samples.len() / 2]
+        };
+        let (mut read, mut unchanged, mut saved) = (Vec::new(), Vec::new(), Vec::new());
+        for index in 0..40 {
+            let began = std::time::Instant::now();
+            crate::load_issue_monitor_prefs(&a_path).unwrap();
+            read.push(ms(began));
+            let began = std::time::Instant::now();
+            crate::try_mutate_issue_monitor_prefs(&a_path, |_| Ok(())).unwrap();
+            unchanged.push(ms(began));
+            let began = std::time::Instant::now();
+            crate::try_mutate_issue_monitor_prefs(&a_path, |prefs| {
+                prefs.merged_issues.push(index);
+                Ok(())
+            })
+            .unwrap();
+            saved.push(ms(began));
+        }
+        println!(
+            "mirror={}B record={}B read={:.1}ms unchanged={:.1}ms saved={:.1}ms (medians)",
+            fs::metadata(&a_path).unwrap().len(),
+            fs::metadata(record_path(&a_key)).unwrap().len(),
+            median(read),
+            median(unchanged),
+            median(saved),
         );
     }
 }

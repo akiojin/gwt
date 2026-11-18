@@ -499,7 +499,7 @@ pub fn prepare_fresh_execution_launch_session_start(
                         &pending.worktree_path,
                         &pending.operation_id,
                         |projection, work_items, _| {
-                            let now = chrono::Utc::now();
+                            let now = gwt_core::timestamp::UtcTimestamp::now();
                             let events = apply_workspace_launch_for_current_work(
                                 &pending.project_root,
                                 projection,
@@ -1478,7 +1478,7 @@ pub fn transact_pending_continue_work_with_activation(
                         created_by_start_work: active_session.branch_name.starts_with("work/"),
                     },
                     live_session_ids,
-                    now: chrono::Utc::now(),
+                    now: gwt_core::timestamp::UtcTimestamp::now(),
                 },
             );
             Ok(((), vec![event]))
@@ -3707,7 +3707,7 @@ impl ContinueWorkCoordinator<'_> {
                 &predecessor_binding,
             ));
         }
-        let requested_at = chrono::Utc::now();
+        let requested_at = gwt_core::timestamp::UtcTimestamp::now();
         let replaces_active_generation = takeover_owner.is_some();
         let execution =
             PendingContinueWorkExecution::Successor(gwt::cli::execution_state::SuccessorRequest {

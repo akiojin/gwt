@@ -705,7 +705,7 @@ readline.createInterface({input:process.stdin}).on('line', line => {
       const result = windows
         ? spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
           `[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); (Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}').CommandLine`],
-        { encoding: "utf8", windowsHide: true })
+        { encoding: "utf8", timeout: 10_000, windowsHide: true })
         : spawnSync("ps", ["-p", String(pid), "-o", "command="], { encoding: "utf8" });
       if (result.error) throw result.error;
       if (result.status !== 0 && (windows || result.status !== 1)) throw new Error(`Cannot inspect owned fixture PID ${pid}: ${result.stderr}`);
@@ -724,12 +724,24 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     return inspectLiveFixtureProcess(pid, () => {
       const result = windows
         ? spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
-          `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().Ticks`],
-        { encoding: "utf8", windowsHide: true })
-        : spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8" });
+          `$p = Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}' -ErrorAction Stop; if ($p) { $p.CreationDate.ToUniversalTime().Ticks }`],
+        { encoding: "utf8", timeout: 10_000, windowsHide: true })
+        : spawnSync("ps", ["-o", "stat=", "-o", "lstart=", "-p", String(pid)], { encoding: "utf8" });
       if (result.error) throw result.error;
-      return result.status === 0 ? result.stdout.trim() : "";
+      const output = result.stdout.trim();
+      if (!windows && result.status === 1 && !output && !result.stderr.trim()) return "";
+      if (result.status !== 0) throw new Error(`Cannot read creation time for fixture PID ${pid}: ${result.stderr}`);
+      if (windows) return output;
+      const [state, ...birth] = output.split(/\s+/);
+      return /^[ZX]/.test(state) ? "" : birth.join(" ");
     });
+  }
+  function providerProcessBirth(pid: number) {
+    const birth = processBirth(pid);
+    const provider = join(bin, windows ? "codex.cjs" : "codex");
+    // Ensure the observed process is our recorder, then check that the PID did
+    // not change hands between reading its creation time and command line.
+    return birth && processCommand(pid).includes(provider) && processBirth(pid) === birth ? birth : "";
   }
   async function captureGuiOwner() {
     const directory = join(state, "projects", hash, "runtime/daemon");
@@ -1273,7 +1285,8 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     }
   }
   await start();
-  return { get url() { return url; }, get ownedPid() { return child?.pid; }, home, project, branch, preferences, argvLog, launches, start, stopGui, stop,
+  return { get url() { return url; }, get ownedPid() { return child?.pid; }, home, project, branch, preferences, argvLog, launches,
+    processBirth, providerProcessBirth, start, stopGui, stop,
     async restart(options: ShutdownOptions & { coldOwner?: ColdCensus } = {}) {
       if (options.coldOwner) return coldRestart(options.coldOwner, options);
       await stop(undefined, options); return start();

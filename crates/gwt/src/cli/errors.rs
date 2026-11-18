@@ -1,7 +1,7 @@
 //! `errors.list` JSON operation (Issue #3778).
 
-use chrono::{DateTime, Utc};
 use gwt_core::error_ledger::{ErrorRecord, ErrorScope};
+use gwt_core::timestamp::UtcTimestamp;
 use gwt_github::{client::ApiError, SpecOpsError};
 use serde::Serialize;
 
@@ -109,13 +109,11 @@ pub fn run<E: CliEnv>(
     }
 }
 
-pub(crate) fn parse_since(raw: &str) -> Result<DateTime<Utc>, CliParseError> {
-    DateTime::parse_from_rfc3339(raw)
-        .map(|value| value.with_timezone(&Utc))
-        .map_err(|_| CliParseError::InvalidValue {
-            flag: "since",
-            reason: "must be RFC3339",
-        })
+pub(crate) fn parse_since(raw: &str) -> Result<UtcTimestamp, CliParseError> {
+    UtcTimestamp::parse_from_rfc3339(raw).map_err(|_| CliParseError::InvalidValue {
+        flag: "since",
+        reason: "must be RFC3339",
+    })
 }
 
 #[cfg(test)]
@@ -124,7 +122,6 @@ mod tests {
 
     use super::*;
     use crate::cli::TestEnv;
-    use chrono::TimeZone;
     use gwt_core::error_ledger::{ErrorKind, ErrorRecord, ErrorTarget};
     use gwt_core::process::{resolved_command, ProcessPlanRequest};
     use gwt_core::test_support::ScopedGwtHome;
@@ -284,7 +281,7 @@ mod tests {
         let older = {
             let mut record =
                 ErrorRecord::new(ErrorKind::HookFailure, "old hook", ErrorTarget::default());
-            record.recorded_at = chrono::Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+            record.recorded_at = "2026-01-01T00:00:00Z".parse().unwrap();
             record
         };
         let newer = ErrorRecord::new(
@@ -298,7 +295,7 @@ mod tests {
         gwt_core::error_ledger::record(older).expect("older");
         gwt_core::error_ledger::record(newer.clone()).expect("newer");
         let ledger_path = gwt_core::paths::gwt_error_ledger_dir()
-            .join(format!("errors.{}.jsonl", newer.recorded_at.date_naive()));
+            .join(format!("errors.{}.jsonl", newer.recorded_at.utc_date()));
         let mut ledger = std::fs::OpenOptions::new()
             .append(true)
             .open(ledger_path)

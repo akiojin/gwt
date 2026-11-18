@@ -11,7 +11,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use chrono::{DateTime, Utc};
+use time::Duration;
+
+use crate::timestamp::UtcTimestamp;
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
@@ -33,7 +35,7 @@ pub struct PmReport {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub question: Option<String>,
     pub body: String,
-    pub created_at: DateTime<Utc>,
+    pub created_at: UtcTimestamp,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub structured: Option<StructuredReport>,
 }
@@ -103,7 +105,7 @@ pub fn post_report(
         kind,
         question: question.map(str::to_owned),
         body: body.to_owned(),
-        created_at: Utc::now(),
+        created_at: UtcTimestamp::now(),
         structured: None,
     };
     append_report(&mut file, &path, &report, |file, encoded| {
@@ -189,7 +191,7 @@ pub fn load_reports(repo_path: &Path) -> Result<Vec<PmReport>> {
 /// Return the next peer timeout with the same read that projects its reports.
 pub fn load_reports_with_deadline(
     repo_path: &Path,
-) -> Result<(Vec<PmReport>, Option<DateTime<Utc>>)> {
+) -> Result<(Vec<PmReport>, Option<UtcTimestamp>)> {
     project_reports(repo_path, load_report_journal(repo_path)?.reports)
 }
 
@@ -203,7 +205,7 @@ pub fn load_reports_and_journal(repo_path: &Path) -> Result<(Vec<PmReport>, Repo
 fn project_reports(
     repo_path: &Path,
     mut reports: Vec<PmReport>,
-) -> Result<(Vec<PmReport>, Option<DateTime<Utc>>)> {
+) -> Result<(Vec<PmReport>, Option<UtcTimestamp>)> {
     // Captured Q&A and its instruction share one durable source. Legacy
     // reports remain readable without introducing a second write transaction.
     reports.extend(
@@ -213,7 +215,7 @@ fn project_reports(
     );
     let deadline = match crate::pm_peer::reports_with_deadline(
         &crate::pm_peer::project_dir(repo_path),
-        Utc::now(),
+        UtcTimestamp::now(),
     ) {
         Ok((peer, deadline)) => {
             reports.extend(peer);
@@ -224,7 +226,7 @@ fn project_reports(
                 error = %crate::error_ledger::sanitize_error_message(&error.to_string()),
                 "PM peer store unreadable; peer reports omitted"
             );
-            Some(Utc::now() + chrono::Duration::seconds(5))
+            Some(UtcTimestamp::now() + Duration::seconds(5))
         }
     };
     reports.sort_by_key(|report| report.created_at);
@@ -276,9 +278,7 @@ mod tests {
             project: "project-b".into(),
             project_dir: crate::paths::gwt_project_dir_for_repo_path(&home.path().join("b")),
         };
-        let now = DateTime::parse_from_rfc3339("2026-10-15T00:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
+        let now = UtcTimestamp::parse_rfc3339("2026-10-15T00:00:00Z").unwrap();
         let request = pm_peer::send(
             PeerSend {
                 from: a.clone(),
@@ -294,7 +294,7 @@ mod tests {
         .unwrap();
         let (before_timeout, deadline) =
             pm_peer::reports_with_deadline(&a.project_dir, now).unwrap();
-        assert_eq!(deadline, Some(now + chrono::Duration::seconds(900)));
+        assert_eq!(deadline, Some(now + Duration::seconds(900)));
         assert!(!before_timeout[0]
             .body
             .contains("Waiting for the peer PM to respond"));
@@ -311,8 +311,7 @@ mod tests {
             "context reads must not acknowledge messages"
         );
         assert!(pm_peer::pending(&a.project_dir).unwrap().is_empty());
-        let reports =
-            pm_peer::reports(&a.project_dir, now + chrono::Duration::minutes(16)).unwrap();
+        let reports = pm_peer::reports(&a.project_dir, now + Duration::minutes(16)).unwrap();
         assert_eq!(reports.len(), 1);
         assert!(reports[0]
             .body
@@ -396,7 +395,7 @@ mod tests {
                 timeout_seconds: 900,
                 unavailable: None,
             },
-            Utc::now(),
+            UtcTimestamp::now(),
         );
         assert!(
             message.is_err(),
@@ -430,7 +429,7 @@ mod tests {
                 timeout_seconds: 900,
                 unavailable: None,
             },
-            Utc::now(),
+            UtcTimestamp::now(),
         )
         .unwrap();
         for path in [

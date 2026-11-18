@@ -1,7 +1,7 @@
 //! Bounded, read-only summaries. TaskStore remains the tracking authority.
 
-use chrono::{DateTime, Utc};
 use gwt_core::pm_request_tasks::{ActorKind, Snapshot, TaskStatus, TaskStore};
+use gwt_core::timestamp::UtcTimestamp;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -88,7 +88,7 @@ pub struct PmTaskHistoryEntry {
     pub action: String,
     pub actor_kind: ActorKind,
     pub actor_id: PmTaskBoundedText,
-    pub at: DateTime<Utc>,
+    pub at: UtcTimestamp,
     pub reason: PmTaskBoundedText,
 }
 

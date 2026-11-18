@@ -118,7 +118,7 @@ pub(crate) fn finish_pm_lifecycle(
             PmLifecycleCause::Deregister => (None, false),
             PmLifecycleCause::Crash => {
                 let mut desired = expected.clone();
-                let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds();
                 let respawn = pm_registry::apply_pm_crash_backoff(&mut desired, &now);
                 (Some(desired), respawn)
             }
@@ -919,7 +919,7 @@ pub(crate) fn deliver_pm_wake(
                 let prepared = pm_registry::PmDeliveryReceipt {
                     grok_prompt: None,
                     operation_id: operation_id.to_string(),
-                    recorded_at: chrono::Utc::now().to_rfc3339(),
+                    recorded_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
                     status: pm_registry::PmDeliveryReceiptStatus::Prepared,
                     principal_session_id: format!("gwt-wake:{operation_id}"),
                     target_window_id: id.to_string(),
@@ -1101,7 +1101,7 @@ pub(crate) fn deliver_pm_wake(
                     &loop_path,
                     &pm_registry::PmLoopState {
                         last_wake_at: Some(
-                            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                            gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds(),
                         ),
                         last_wake_id: current.last_wake_id,
                         last_user_prompt_at: current.last_user_prompt_at,
@@ -1711,7 +1711,7 @@ pub(crate) fn deliver_board_notification(
     let prepared = pm_registry::PmDeliveryReceipt {
         grok_prompt: None,
         operation_id: operation_id.clone(),
-        recorded_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        recorded_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds(),
         status: pm_registry::PmDeliveryReceiptStatus::Prepared,
         principal_session_id: format!("gwt-board:{}", notification.entry_id),
         target_window_id: window_id.clone(),

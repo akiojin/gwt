@@ -33,7 +33,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use chrono::{DateTime, Utc};
+use crate::timestamp::UtcTimestamp;
 use serde::Deserialize;
 
 use super::{LogEvent, LogLevel};
@@ -65,7 +65,7 @@ pub struct ReadDiagnostics {
 /// silently ignored via `#[serde(deny_unknown_fields)]` *not* being set.
 #[derive(Debug, Clone, Deserialize)]
 pub struct LogFileEntry {
-    pub timestamp: DateTime<Utc>,
+    pub timestamp: UtcTimestamp,
     pub level: String,
     #[serde(default)]
     pub target: String,

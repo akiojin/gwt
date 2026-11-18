@@ -7,8 +7,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chrono::{DateTime, Utc};
 use gwt_core::error_ledger::{ErrorKind, ErrorRecord};
+use gwt_core::timestamp::UtcTimestamp;
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 
 const STALL_THRESHOLD: Duration = Duration::from_millis(100);
@@ -18,7 +18,7 @@ const LEDGER_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 struct ActiveDispatch {
     event: String,
     started: Instant,
-    started_at: DateTime<Utc>,
+    started_at: UtcTimestamp,
     reported: bool,
     persisted: bool,
 }
@@ -28,7 +28,7 @@ impl ActiveDispatch {
         Self {
             event,
             started,
-            started_at: Utc::now(),
+            started_at: gwt_core::timestamp::UtcTimestamp::now(),
             reported: false,
             persisted: false,
         }
@@ -52,8 +52,8 @@ impl ActiveDispatch {
 
 /// A rare, on-demand process sample, never a second periodic resource poller.
 /// The CPU value measures this interval after detection (1 core = 100%).
-fn persist_stall(event: &str, elapsed: Duration, started_at: DateTime<Utc>) -> std::io::Result<()> {
-    let detected_at = Utc::now();
+fn persist_stall(event: &str, elapsed: Duration, started_at: UtcTimestamp) -> std::io::Result<()> {
+    let detected_at = gwt_core::timestamp::UtcTimestamp::now();
     let pid = sysinfo::Pid::from_u32(std::process::id());
     let mut system = System::new().map_err(std::io::Error::other)?;
     let refresh = ProcessRefreshKind::nothing()
@@ -76,7 +76,10 @@ fn persist_stall(event: &str, elapsed: Duration, started_at: DateTime<Utc>) -> s
         ("elapsed_ms".into(), elapsed.as_millis().to_string()),
         ("pid".into(), pid.as_u32().to_string()),
         ("version".into(), env!("CARGO_PKG_VERSION").to_owned()),
-        ("resources_sampled_at".into(), Utc::now().to_rfc3339()),
+        (
+            "resources_sampled_at".into(),
+            gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
+        ),
         (
             "cpu_sample_ms".into(),
             sample_started.elapsed().as_millis().to_string(),
@@ -146,7 +149,7 @@ impl DispatchWatchdog {
 
     fn with_reporters(
         warning: impl Fn(&str, Duration, Option<&std::io::Error>) + Send + 'static,
-        persist: impl Fn(&str, Duration, DateTime<Utc>) -> std::io::Result<()> + Send + 'static,
+        persist: impl Fn(&str, Duration, UtcTimestamp) -> std::io::Result<()> + Send + 'static,
     ) -> Self {
         let (warning_tx, warning_rx) =
             mpsc::sync_channel::<(String, Duration, Option<std::io::Error>)>(1);
@@ -173,7 +176,7 @@ impl DispatchWatchdog {
         })
     }
 
-    fn with_reporter(report: impl Fn(&str, Duration, DateTime<Utc>) + Send + 'static) -> Self {
+    fn with_reporter(report: impl Fn(&str, Duration, UtcTimestamp) + Send + 'static) -> Self {
         let shared = Arc::new((Mutex::new(State::default()), Condvar::new()));
         let worker_state = Arc::clone(&shared);
         let worker = thread::Builder::new()
@@ -351,8 +354,12 @@ mod tests {
         let result = thread::scope(|scope| {
             scope.spawn(move || {
                 let _home = gwt_core::test_support::ScopedGwtHome::set(&home_path);
-                tx.send(persist_stall("refresh", Duration::from_secs(6), Utc::now()))
-                    .unwrap();
+                tx.send(persist_stall(
+                    "refresh",
+                    Duration::from_secs(6),
+                    gwt_core::timestamp::UtcTimestamp::now(),
+                ))
+                .unwrap();
             });
             let result = rx.recv_timeout(Duration::from_secs(10));
             // Release our holder before joining, including the unbounded RED case.
@@ -379,7 +386,7 @@ mod tests {
             let active = state.active.as_mut().unwrap();
             // Advance the observed duration rather than wait for the threshold.
             active.started -= Duration::from_secs(6);
-            active.started_at -= chrono::Duration::seconds(6);
+            active.started_at -= time::Duration::seconds(6);
         }
         guard.watchdog.shared.1.notify_one();
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -411,7 +418,7 @@ mod tests {
         assert!(cpu_percent > 1.0, "busy interval reported {cpu_percent}%");
         assert!(row.context["cpu_sample_ms"].parse::<u64>().unwrap() > 0);
         for key in ["started_at", "detected_at", "resources_sampled_at"] {
-            chrono::DateTime::parse_from_rfc3339(&row.context[key]).unwrap();
+            gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(&row.context[key]).unwrap();
         }
         drop(guard);
         drop(watchdog);

@@ -477,7 +477,7 @@ fn assert_registered_pm_successor_recovery(occupied_owner: &str, terminal: bool)
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let (repo, owner, pm, ordinary) = managed_owner_fixture(temp.path(), false);
     run_git(&repo, &["checkout", "-b", "work/issue-42"]);
-    let now = Utc::now();
+    let now = gwt_core::timestamp::UtcTimestamp::now();
     let predecessor_id = work::canonical_work_id(&repo, Some("work/issue-42"), None).unwrap();
     let occupied_id = work::successor_work_id(&predecessor_id);
     let mut start = work::WorkEvent::new(work::WorkEventKind::Start, &predecessor_id, now);
@@ -581,7 +581,7 @@ fn assert_registered_pm_successor_recovery(occupied_owner: &str, terminal: bool)
             resume_context: None,
             kind: WorkspaceLaunchProjectionKind::StartWork,
             live_session_ids: &HashSet::new(),
-            now: Utc::now(),
+            now: gwt_core::timestamp::UtcTimestamp::now(),
         },
         true,
     )
@@ -632,7 +632,7 @@ fn pm_successor_recovery_resolves_branch_only_history_to_the_local_owner_checkou
             checkout.to_str().unwrap(),
         ],
     );
-    let now = Utc::now();
+    let now = gwt_core::timestamp::UtcTimestamp::now();
     let predecessor_id = work::canonical_work_id(&repo, Some("work/issue-42"), None).unwrap();
     let occupied_id = work::successor_work_id(&predecessor_id);
     let branch_only = work::WorkspaceExecutionContainerRef {
@@ -696,7 +696,7 @@ fn registered_pm_workspace_close_uses_canonical_eligibility_and_current_membersh
             },
         ),
         Some("stopped"),
-        chrono::Utc::now(),
+        gwt_core::timestamp::UtcTimestamp::now(),
     )
     .unwrap();
 
@@ -761,7 +761,7 @@ fn registered_pm_workspace_close_uses_canonical_eligibility_and_current_membersh
             },
         ),
         None,
-        chrono::Utc::now(),
+        gwt_core::timestamp::UtcTimestamp::now(),
     )
     .unwrap();
     let remote = managed_close_work(&owner, &pm, "remote-work", "done");
@@ -782,7 +782,7 @@ fn registered_pm_workspace_close_uses_canonical_eligibility_and_current_membersh
         &[],
         None,
         Some(&member_session_id),
-        chrono::Utc::now(),
+        gwt_core::timestamp::UtcTimestamp::now(),
     )
     .unwrap();
     let live = managed_close_work(&owner, &pm, work_id, "done");
@@ -1412,7 +1412,7 @@ fn paused_work_does_not_inherit_shared_projection_owner() {
         .expect("save projection");
 
     // The session's own Work item with its own identity.
-    let now = chrono::Utc::now();
+    let now = gwt_core::timestamp::UtcTimestamp::now();
     let work_id =
         gwt_core::workspace_projection::canonical_work_id(&repo, Some("work/paused"), None)
             .expect("canonical id");
@@ -1751,7 +1751,7 @@ fn app_runtime_close_work_retains_worktree_and_branch() {
         .expect("save projection");
 
     // Persist a Paused Work whose execution container points at the worktree.
-    let now = chrono::Utc::now();
+    let now = gwt_core::timestamp::UtcTimestamp::now();
     gwt_core::workspace_projection::record_workspace_work_paused_event(
         &repo,
         "work-session-session-cleanup",
@@ -1850,8 +1850,12 @@ fn app_runtime_active_work_projection_resumed_paused_work_is_single_active_row()
         .active_agent_sessions
         .remove("tab-1::agent-resume")
         .unwrap();
-    gwt::project_runtime::workspace::paused_work_record_task(&repo, &stopped, Utc::now())
-        .expect("canonical domain Paused Work record")();
+    gwt::project_runtime::workspace::paused_work_record_task(
+        &repo,
+        &stopped,
+        gwt_core::timestamp::UtcTimestamp::now(),
+    )
+    .expect("canonical domain Paused Work record")();
     let paused_view = runtime
         .build_active_work_projection_for_tab_for_test("tab-1", &runtime.tabs[0])
         .expect("paused projection view");
@@ -4518,7 +4522,8 @@ fn agent_hook_arrival_refreshes_the_issue_monitor_activity_clock() {
     hook.branch = Some(probe.session.as_ref().unwrap().branch.clone());
     // A logical provider timestamp, so the durable comparison does not wait
     // for the wall clock to advance beyond the launch's heartbeat.
-    hook.occurred_at = (Utc::now() + chrono::Duration::seconds(1)).to_rfc3339();
+    hook.occurred_at =
+        (gwt_core::timestamp::UtcTimestamp::now() + time::Duration::seconds(1)).to_rfc3339();
     assert!(owner_fixture_block_on(probe.runtime_hook(&hook))
         .unwrap()
         .is_success());
@@ -4595,10 +4600,9 @@ fn issue_monitor_heartbeat_throttle_counts_from_the_last_publication() {
     let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
     let window_id = "tab-1::agent-1";
     let at = |secs: i64| {
-        chrono::DateTime::parse_from_rfc3339("2026-09-22T07:58:46Z")
+        gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339("2026-09-22T07:58:46Z")
             .expect("timestamp")
-            .with_timezone(&chrono::Utc)
-            + chrono::Duration::seconds(secs)
+            + time::Duration::seconds(secs)
     };
 
     let due = [0, 30, 59, 61, 90, 121]
@@ -4640,13 +4644,12 @@ fn issue_monitor_window_observation_carries_the_last_pane_output_time() {
     };
     assert_eq!(observed(&runtime), None, "no output seen yet is unknown");
 
-    let before = chrono::Utc::now() - chrono::Duration::seconds(1);
+    let before = gwt_core::timestamp::UtcTimestamp::now() - time::Duration::seconds(1);
     runtime.handle_runtime_output(window_id.clone(), b"Working (3s)".to_vec());
 
     let last_output_at = observed(&runtime).expect("output time recorded");
-    let last_output_at = chrono::DateTime::parse_from_rfc3339(&last_output_at)
-        .expect("rfc3339")
-        .with_timezone(&chrono::Utc);
+    let last_output_at =
+        gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(&last_output_at).expect("rfc3339");
     assert!(last_output_at >= before, "{last_output_at} < {before}");
 }
 
@@ -4787,7 +4790,7 @@ fn agent_error_frees_the_monitor_slot_even_when_the_pane_is_kept_for_diagnosis()
             runtime_hook_state_for_event("Idle", "Stop", &probe.session.as_ref().unwrap().id);
         hook.project_root = Some(repo.display().to_string());
         hook.branch = Some(probe.session.as_ref().unwrap().branch.clone());
-        hook.occurred_at = Utc::now().to_rfc3339();
+        hook.occurred_at = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
         assert!(owner_fixture_block_on(probe.runtime_hook(&hook))
             .unwrap()
             .is_success());

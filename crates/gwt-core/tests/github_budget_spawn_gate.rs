@@ -7,12 +7,13 @@
 //! same secondary limit. This test owns the process-global gate and the
 //! machine-local ledger of its own test process, so it lives in its own binary.
 
-use chrono::Utc;
 use gwt_core::github_budget::BudgetLedger;
 use gwt_core::github_quota::{self, GitHubQuota, RateLimitBlock, RATE_LIMITED_ERROR_CODE};
 use gwt_core::process_console::{
     spawn_logged_blocking, ProcessConsoleHub, ProcessKind, SpawnOptions,
 };
+use gwt_core::timestamp::UtcTimestamp;
+use time::Duration;
 
 /// A program name that certainly does not exist: reaching it proves the gate
 /// let the call through.
@@ -21,14 +22,14 @@ const MISSING_PROGRAM: &str = "gwt-nonexistent-gh-3928";
 #[test]
 fn a_refusal_persisted_by_another_process_suppresses_graphql_spawns_but_not_rest() {
     let hub = ProcessConsoleHub::new();
-    let now = Utc::now();
+    let now = UtcTimestamp::now();
     // The previous process observed a secondary refusal and persisted it.
     let effective = BudgetLedger::global().record_block(
         &RateLimitBlock {
             resource: "graphql".to_string(),
             limit: 0,
             remaining: 0,
-            reset_at: now + chrono::Duration::seconds(60),
+            reset_at: now + Duration::seconds(60),
         },
         now,
     );
@@ -52,9 +53,7 @@ fn a_refusal_persisted_by_another_process_suppresses_graphql_spawns_but_not_rest
     assert!(
         message.contains(&format!(
             "reset_at={}",
-            effective
-                .reset_at
-                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+            effective.reset_at.to_rfc3339_seconds()
         )),
         "{message}"
     );

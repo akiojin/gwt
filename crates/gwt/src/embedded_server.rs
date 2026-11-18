@@ -32,7 +32,7 @@ use crate::app_runtime::ClientScope;
 #[cfg(test)]
 use crate::DispatchTarget;
 use axum::{
-    extract::{ws::WebSocketUpgrade, Query, Request, State},
+    extract::{ws::WebSocketUpgrade, DefaultBodyLimit, FromRequest, Query, Request, State},
     http::{
         header::{AUTHORIZATION, HOST, ORIGIN},
         HeaderMap, StatusCode,
@@ -356,6 +356,12 @@ impl EmbeddedServer {
                 post(project_open_control_handler),
             )
             .route(
+                gwt::project_open_control::PANE_LAYOUT_PLACE_CONTROL_PATH,
+                post(pane_layout_place_control_handler).layer(DefaultBodyLimit::max(
+                    gwt::project_open_control::PROJECT_OPEN_CONTROL_MAX_BODY_BYTES,
+                )),
+            )
+            .route(
                 gwt::update_control::UPDATE_APPLY_CONTROL_PATH,
                 post(update_apply_control_handler),
             )
@@ -551,7 +557,7 @@ async fn oauth_callback_handler(
             &oauth_state,
             &poster,
             &gwt::board_remote::token_store::default_dir(),
-            chrono::Utc::now(),
+            gwt_core::timestamp::UtcTimestamp::now(),
         )
     })
     .await;
@@ -783,6 +789,59 @@ async fn project_open_control_handler(
     }
 }
 
+async fn pane_layout_place_control_handler(
+    State(state): State<ServerState>,
+    request: Request,
+) -> Response {
+    let refuse = |status, message: &str| {
+        (status, Json(serde_json::json!({ "error": message }))).into_response()
+    };
+    if gwt::project_open_control::authorize_control_request(
+        request
+            .headers()
+            .get(AUTHORIZATION)
+            .and_then(|value| value.to_str().ok()),
+        state.control_token.as_deref(),
+    )
+    .is_err()
+    {
+        return refuse(StatusCode::UNAUTHORIZED, "missing or invalid control token");
+    }
+    let body =
+        Json::<gwt::project_open_control::PaneLayoutPlaceRequest>::from_request(request, &state);
+    let Json(request) = match tokio::time::timeout(Duration::from_secs(5), body).await {
+        Ok(Ok(body)) => body,
+        Ok(Err(error)) => return refuse(error.status(), "invalid pane placement request"),
+        Err(_) => return refuse(StatusCode::REQUEST_TIMEOUT, "pane placement body timed out"),
+    };
+    let (reply, mut result) = tokio::sync::mpsc::channel(1);
+    if state
+        .proxy
+        .send_event(UserEvent::ControlPaneLayoutPlace { request, reply })
+        .is_err()
+    {
+        return refuse(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "gwt is not accepting project requests",
+        );
+    }
+    match tokio::time::timeout(Duration::from_secs(10), result.recv()).await {
+        Ok(Some(true)) => Json(serde_json::json!({"placed": true})).into_response(),
+        Ok(Some(false)) => refuse(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "expected an agent pane and a Kanban board in the current project",
+        ),
+        Ok(None) => refuse(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "gwt is not accepting project requests",
+        ),
+        Err(_) => refuse(
+            StatusCode::GATEWAY_TIMEOUT,
+            "pane placement acknowledgement timed out",
+        ),
+    }
+}
+
 /// An explicit CLI apply belongs to the resident GUI, which owns the panes,
 /// resume marker and helper parent PID. Acknowledgement only means queued.
 async fn update_apply_control_handler(
@@ -855,7 +914,7 @@ async fn update_apply_control_handler(
         latest: manifest.version.clone(),
         release_url: manifest.asset_url.clone(),
         asset_url: Some(manifest.asset_url),
-        checked_at: chrono::Utc::now(),
+        checked_at: gwt_core::timestamp::UtcTimestamp::now(),
     };
     if state
         .proxy
@@ -2683,7 +2742,7 @@ mod tests {
             kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
             number: 2359,
         };
-        let completed_at = chrono::Utc::now();
+        let completed_at = gwt_core::timestamp::UtcTimestamp::now();
         gwt::cli::execution_state::save(
             &repo,
             &gwt::cli::execution_state::ExecutionControlRecord {
@@ -2720,7 +2779,7 @@ mod tests {
             session_binding_id: "binding-prepared-probe".to_string(),
             initial_session_id: continuation_session_id.to_string(),
             entrypoint: "resume".to_string(),
-            requested_at: chrono::Utc::now(),
+            requested_at: gwt_core::timestamp::UtcTimestamp::now(),
         };
         gwt::cli::execution_state::prepare_successor(&repo, owner, &request)
             .expect("prepare successor");
@@ -3266,7 +3325,7 @@ mod tests {
             .save(&gwt_core::paths::gwt_sessions_dir())
             .expect("persist initial execution binding");
         let work_id = "work-materialization-probe-route";
-        let now = chrono::Utc::now();
+        let now = gwt_core::timestamp::UtcTimestamp::now();
         let mut projection =
             gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
         projection.agents = vec![gwt_core::workspace_projection::WorkspaceAgentSummary {
@@ -3289,8 +3348,9 @@ mod tests {
         }];
         gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
             .expect("save materialization probe assignment");
-        let mut work_items =
-            gwt_core::workspace_projection::WorkItemsProjection::empty(chrono::Utc::now());
+        let mut work_items = gwt_core::workspace_projection::WorkItemsProjection::empty(
+            gwt_core::timestamp::UtcTimestamp::now(),
+        );
         let mut work_event = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Start,
             work_id,
@@ -3588,8 +3648,9 @@ mod tests {
             work_items_before,
             "materialization route must not mutate WorkItems"
         );
-        let missing_work_items =
-            gwt_core::workspace_projection::WorkItemsProjection::empty(chrono::Utc::now());
+        let missing_work_items = gwt_core::workspace_projection::WorkItemsProjection::empty(
+            gwt_core::timestamp::UtcTimestamp::now(),
+        );
         gwt_core::workspace_projection::save_workspace_work_items_projection_to_path(
             &work_items_path,
             &missing_work_items,
@@ -3894,7 +3955,7 @@ mod tests {
             .expect("save bound Session");
 
         let work_id = "work-blocked-build-abort-http";
-        let now = chrono::Utc::now();
+        let now = gwt_core::timestamp::UtcTimestamp::now();
         let mut current =
             gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
         current
@@ -5502,7 +5563,7 @@ mod tests {
                 version: "99.1.0".into(),
                 asset_url: "https://example.invalid/gwt.zip".into(),
                 payload: gwt_core::update::PreparedPayload::PortableBinary { path: payload },
-                downloaded_at: chrono::Utc::now().to_rfc3339(),
+                downloaded_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
                 origin: gwt_core::update::PendingUpdateOrigin::ManualLater,
                 auto_apply_deferred: false,
             },

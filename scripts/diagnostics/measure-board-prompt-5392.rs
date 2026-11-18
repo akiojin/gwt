@@ -6,7 +6,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chrono::Utc;
 use gwt::cli::hook::{board_reminder::compute_plan, HookOutput};
 use gwt_agent::{AgentId, Session};
 use gwt_core::coordination::{reminders_dir, write_reminders_state_for_repo_hash};
@@ -31,8 +30,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
                 started + Duration::from_millis(200),
             );
-            let plan = compute_plan("UserPromptSubmit", &session, Utc::now())?
-                .ok_or("missing prompt plan")?;
+            let plan = compute_plan(
+                "UserPromptSubmit",
+                &session,
+                gwt_core::timestamp::UtcTimestamp::now(),
+            )?
+            .ok_or("missing prompt plan")?;
             durations.push(started.elapsed().as_secs_f64() * 1000.0);
             let HookOutput::HookSpecificAdditionalContext { text, .. } = plan.output else {
                 return Err("missing PM prompt context".into());

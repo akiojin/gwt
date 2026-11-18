@@ -12,7 +12,7 @@ const activityPresentation = state => JSON.stringify([state.count, (state.agents
   .sort((left, right) => String(left[0]).localeCompare(String(right[0])))]);
 const date = value => value && Number.isFinite(Date.parse(value)) ? new Date(value).toISOString().replace("T", " ").slice(0, 16) : "—";
 
-export function createAgentsSurface({ document, storage, executionModel, projectTitle, rosterModel, activityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel,
+export function createAgentsSurface({ document, storage, executionModel, projectTitle, rosterModel, activityModel, summaryModel, windowCatalogModel, supportedAgentsModel, customAgentsModel,
   tuningController, pmSettingsPanel, scheduleModel, switchModel, onSwitch = () => {}, onOpenSavedWork = () => {}, onContinueSavedWork = () => {}, isContinuePending = () => false, onReassign = () => {}, onRefreshSchedule = () => {},
   onAddMember = () => {}, onRestMember = () => {}, onActivateMember = () => {}, onRenameMember = () => {}, onRetryName = () => {}, onSetPmEligibility = () => {}, onSelectPm = () => {}, onNavigateProject = () => {}, onReloadProfile = null, onOpenWork = () => {} }) {
   const element = document.createElement("section"); element.className = "agents-surface"; element.setAttribute("aria-label", "Agents");
@@ -586,7 +586,6 @@ export function createAgentsSurface({ document, storage, executionModel, project
     const selected = members.find(member => member.member_id === selectedId);
     element.querySelector(".roster-count").textContent = String(enabledCount);
     element.querySelector(".roster-capacity-value").textContent = number(roster.capacity);
-    element.querySelector(".roster-active").textContent = `Active ${number(activity.count)}`;
     const scale = Math.max(enabledCount, roster.recommended_capacity || 0, roster.capacity || 0, 1) * 1.25;
     const bar = element.querySelector(".roster-capacity-bar"); bar.setAttribute("aria-valuemin", "0"); bar.setAttribute("aria-valuemax", String(scale)); bar.setAttribute("aria-valuenow", String(enabledCount));
     element.querySelector(".roster-capacity-fill").style.width = `${enabledCount / scale * 100}%`;
@@ -641,6 +640,11 @@ export function createAgentsSurface({ document, storage, executionModel, project
   pmSettingsPanel?.mount(element.querySelector('[data-role="pm-project-operations"]'));
   sync(); syncTools();
   const unsubscribers = [rosterModel.subscribeFrame(state => state, value => { if (value !== renderedRoster) sync(); }), activityModel.subscribeFrame(activityPresentation, value => { if (value !== renderedActivity) sync(); }), windowCatalogModel.subscribeFrame(state => state.catalog, value => { if (value !== renderedCatalog) sync(); })];
+  const running = element.querySelector(".roster-active");
+  running.textContent = "Running —";
+  if (summaryModel) unsubscribers.push(summaryModel.subscribeFrame(state => state.running, count => {
+    running.textContent = `Running ${number(count)}`;
+  }));
   if (supportedAgentsModel) unsubscribers.push(supportedAgentsModel.subscribeFrame(state => state.agents, syncTools));
   if (customAgentsModel) unsubscribers.push(customAgentsModel.subscribeFrame(state => state.catalog, syncTools));
   if (tuningController) unsubscribers.push(tuningController.model.subscribeFrame(state => state, sync));
