@@ -600,12 +600,35 @@ fn park(project_root: &Path, issue_number: u64, reason: &str) -> io::Result<()> 
                 crate::IssueMonitorConfig::default(),
                 prefs.clone(),
             );
+            let mut message = format!(
+                "duplicate Monitor runtimes: {reason}; no automatic stop (Issue #4466 AC-5)"
+            );
+            // Issue #5132: parking clears the binding, so record which window
+            // held it and keep that record while the same facts are re-observed.
+            match prefs
+                .launched_issues
+                .iter()
+                .find(|launched| launched.issue_number == issue_number)
+            {
+                Some(bound) => {
+                    message.push_str(&format!(
+                        "; Monitor binding before park: {}",
+                        bound.window_id
+                    ));
+                }
+                None if monitor.agent_status().needs_human.contains(&issue_number)
+                    && prefs.failed_issues.iter().any(|failed| {
+                        failed.issue_number == issue_number && failed.message.starts_with(&message)
+                    }) =>
+                {
+                    return Ok(());
+                }
+                None => {}
+            }
             monitor.escalate_to_needs_human(
                 issue_number,
                 crate::issue_monitor::NeedsHumanKind::UserChoiceRequired,
-                format!(
-                    "duplicate Monitor runtimes: {reason}; no automatic stop (Issue #4466 AC-5)"
-                ),
+                message,
             );
             *prefs = monitor.prefs();
             Ok(())
@@ -877,7 +900,7 @@ fn reconcile_project(
     }
     for (issue_number, pair) in groups {
         // A review process is an independent dispatch, not a duplicate implementation.
-        let live_implementations = inventory
+        let mut live_sessions = inventory
             .sessions
             .iter()
             .filter(|observed| {
@@ -887,7 +910,8 @@ fn reconcile_project(
                             && entry.registration.session_id == observed.session_id
                     })
             })
-            .count();
+            .collect::<Vec<_>>();
+        let live_implementations = live_sessions.len();
         if pair.len() < 2
             && live_implementations < 2
             && complete_counts.get(&issue_number).copied().unwrap_or(0) < 2
@@ -898,10 +922,35 @@ fn reconcile_project(
             monitor_runtime_uncertainty_affects_issue(uncertainty, sessions_dir, issue_number)
         });
         if pair.len() != 2 || live_implementations != 2 || uncertain {
+            // Issue #5132: name what was observed so the duplicate can be
+            // picked without a separate pane.list.
+            live_sessions.sort_by(|a, b| {
+                (&a.started_at, &a.session_id).cmp(&(&b.started_at, &b.session_id))
+            });
+            let sessions = live_sessions
+                .iter()
+                .map(|observed| {
+                    let window = pair
+                        .iter()
+                        .find(|entry| entry.registration.session_id == observed.session_id)
+                        .map_or("not registered on this host", |entry| {
+                            entry.registration.window_id.as_str()
+                        });
+                    format!(
+                        "{} started {} window {window}",
+                        observed.session_id, observed.started_at
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
             park(
                 project_root,
                 issue_number,
-                "the complete exact pair could not be established",
+                &format!(
+                    "the complete exact pair could not be established (registered runtimes: {}, live implementation Sessions: {live_implementations}, uncertain evidence: {}; oldest first: {sessions})",
+                    pair.len(),
+                    if uncertain { "yes" } else { "no" },
+                ),
             )?;
             continue;
         }
@@ -1302,6 +1351,61 @@ mod tests {
         assert!(monitor.agent_status().needs_human.contains(&4466));
         assert!(local.handle.try_wait().unwrap().is_none());
         assert!(peer.handle.try_wait().unwrap().is_none());
+    }
+
+    #[test]
+    fn issue_5132_unestablished_pair_reason_names_the_sessions_and_the_monitor_binding() {
+        let _env = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _profile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let project = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(project.path());
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let pair =
+            crate::cli::execution_state::seed_monitor_pair_for_test(project.path(), &sessions);
+        let (local, _local_guard) = runtime(project.path(), &sessions, &pair[0], 1);
+        let (_peer, _peer_guard) = runtime(project.path(), &sessions, &pair[1], 2);
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(project.path());
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                launched_issues: vec![crate::issue_monitor::IssueMonitorLaunchedIssue {
+                    issue_number: 4466,
+                    window_id: local.registration.window_id.clone(),
+                }],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let reason = || {
+            reconcile_project(project.path(), &sessions, std::slice::from_ref(&local)).unwrap();
+            crate::load_issue_monitor_prefs(&prefs_path)
+                .unwrap()
+                .failed_issues
+                .into_iter()
+                .find(|failed| failed.issue_number == 4466)
+                .expect("parked with a reason")
+                .message
+        };
+        let first = reason();
+        for expected in [
+            "duplicate Monitor runtimes: the complete exact pair could not be established",
+            "registered runtimes: 1",
+            "live implementation Sessions: 2",
+            "holder started ",
+            "window tab::holder",
+            "nonholder started ",
+            "window not registered on this host",
+            "no automatic stop (Issue #4466 AC-5)",
+            "Monitor binding before park: tab::holder",
+        ] {
+            assert!(first.contains(expected), "missing {expected:?} in {first}");
+        }
+        // Parking clears the binding; the next scan must not erase that evidence.
+        assert_eq!(reason(), first);
     }
 
     #[test]
