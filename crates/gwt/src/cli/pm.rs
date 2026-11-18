@@ -15,7 +15,10 @@
 //! unrestorable, which is what stops the resident loop, without depending on a
 //! running GUI or a live pane connection.
 
-use std::path::{Path, PathBuf};
+use std::{
+    io,
+    path::{Path, PathBuf},
+};
 
 use gwt_core::paths::gwt_sessions_dir;
 use gwt_core::pm_report::{self, PmReportKind};
@@ -23,12 +26,17 @@ use gwt_core::pm_status::{self, PmStatusInput};
 use gwt_github::{ApiError, SpecOpsError};
 use serde::Serialize;
 
+use crate::agent_names::{AgentMember, AgentRosterAction};
 use crate::cli::env::CliEnv;
 use crate::pm_registry;
 
 /// Parsed `pm.*` command surface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PmCommand {
+    AgentAdd {
+        name: String,
+        agent_id: String,
+    },
     /// Read a summary, bounded IDs or one record, without a raw-store dump.
     RequestTasksRead {
         selector: RequestTaskSelector,
@@ -449,6 +457,21 @@ pub(super) fn run<E: CliEnv>(
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     match command {
+        PmCommand::AgentAdd { name, agent_id } => {
+            let member = add_agent_member(env.repo_path(), name, agent_id).map_err(|error| {
+                let message = format!("pm.agent.add: {error}");
+                if error.kind() == io::ErrorKind::PermissionDenied {
+                    refusal(message)
+                } else {
+                    SpecOpsError::from(ApiError::Unexpected(message))
+                }
+            })?;
+            out.push_str(
+                &serde_json::to_string_pretty(&member).map_err(super::serde_as_api_error)?,
+            );
+            out.push('\n');
+            Ok(0)
+        }
         PmCommand::RequestTasksRead { selector } => {
             request_tasks(env.repo_path(), Some(selector), None, None, out)
         }
@@ -932,6 +955,58 @@ pub(super) fn run<E: CliEnv>(
             Ok(0)
         }
     }
+}
+
+fn add_agent_member(repo: &Path, name: String, agent_id: String) -> io::Result<AgentMember> {
+    let denied = || {
+        io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "requires this project's registered PM session; inspect pm.status",
+        )
+    };
+    let actor = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).map_err(|_| denied())?;
+    let project_dir = peer_project_dir(repo);
+    let prefs_path = project_dir.join("project-state/pm.json");
+    if !pm_registry::session_is_registered_pm(&prefs_path, &actor) {
+        return Err(denied());
+    }
+    let project_key = project_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| io::Error::other("PM project identity is unavailable"))?;
+    let project_key =
+        gwt_core::repo_hash::ProjectKey::parse(project_key).map_err(io::Error::other)?;
+    crate::agent_names::validate_registration_tool(&agent_id).map_err(io::Error::other)?;
+    pm_registry::with_pm_prefs_snapshot(&prefs_path, |prefs| {
+        if prefs
+            .registration
+            .as_ref()
+            .is_none_or(|registration| registration.session_id != actor)
+        {
+            return Err(denied());
+        }
+        let roster_missing = || io::Error::other("Agent roster is unavailable; refresh Agents");
+        let revision = crate::agent_registry::SessionMemberSnapshot::load()?
+            .project_snapshot(&project_key)?
+            .agent_roster
+            .ok_or_else(roster_missing)?
+            .revision;
+        let saved = crate::agent_registry::mutate_pm_selection(
+            &project_key,
+            AgentRosterAction::Add {
+                name: Some(name),
+                agent_id: Some(agent_id),
+                pm_eligible: false,
+                model: None,
+                reasoning: None,
+            },
+            Some(revision),
+        )?;
+        saved
+            .agent_roster
+            .and_then(|mut roster| roster.members.pop())
+            .ok_or_else(roster_missing)
+    })
 }
 
 fn request_tasks(
