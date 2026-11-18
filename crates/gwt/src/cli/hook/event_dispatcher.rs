@@ -292,7 +292,7 @@ fn handle_user_prompt_submit(
         });
         let prepared_session = join_pm_reporting()
             .map_err(HookError::from)
-            .and_then(|()| prepared_session);
+            .and(prepared_session);
         diagnostics::record_handler_duration(
             event,
             "pm-delivery-ack",
