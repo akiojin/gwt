@@ -247,6 +247,11 @@
   .switch{width:46px;height:26px;border-radius:99px;background:var(--accent);position:relative;flex:none;display:inline-block;cursor:pointer}
   .switch::after{content:"";position:absolute;top:3px;right:3px;width:20px;height:20px;border-radius:50%;background:#fff}
   .switch.off{background:var(--line2)} .switch.off::after{right:auto;left:3px}
+  .toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%) translateY(8px);background:#0f172a;color:#f8fafc;padding:9px 16px;border-radius:999px;font-size:13px;box-shadow:0 8px 24px rgba(15,23,42,.35);opacity:0;pointer-events:none;transition:opacity .18s ease,transform .18s ease;z-index:200;max-width:min(92vw,560px);text-align:center}
+  .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+  .menu-pop{position:absolute;background:#fff;border:1px solid var(--line2);border-radius:10px;box-shadow:0 10px 28px rgba(15,23,42,.18);padding:4px;z-index:150;min-width:170px}
+  .menu-item{display:block;width:100%;text-align:left;background:none;border:none;padding:7px 10px;border-radius:7px;font-size:13px;cursor:pointer;color:#0f172a}
+  .menu-item:hover{background:#eff6ff}
   .use{margin-top:5px;display:flex;align-items:center;gap:8px;font-size:12px;color:var(--ink2);flex-wrap:wrap}
   .use .bar{width:110px;flex:none}
 
@@ -623,7 +628,7 @@
               <div class="set-row"><div class="grow"><div class="t">アカウント追加ウィザードを開く</div><div class="d2">種類を選ぶ → 本体の確認 → サインイン → 完了、の順に進めます。本体（CLI）が未導入の種類は、途中でツール管理へ案内します。</div></div><button class="btn primary" type="button" data-openpage="tools" data-openscreen="tool-add">ウィザードを開く</button></div>
               <div class="set-row"><div class="grow"><div class="t">いまの状態</div><div class="d2">アカウントはまだ登録されていません。登録とサインインが済むと、ここが「完了」になり、次へ進めるようになります。</div></div><span class="badge b-block">未完了</span></div>
             </div>
-            <div class="btnrow" style="margin-top:14px"><button class="btn" type="button" data-nav="setup-welcome">戻る</button><button class="btn primary" type="button">次へ — エージェントと PM</button></div>
+            <div class="btnrow" style="margin-top:14px"><button class="btn" type="button" data-nav="setup-welcome">戻る</button><button class="btn primary" type="button" data-nav="setup-agent">次へ — エージェントと PM</button></div>
             <p class="rel" style="margin-top:8px">「次へ」は、アカウントの登録とサインインが済むと押せるようになります。</p>
           </div>
           <div class="screen-pane" data-screen="setup-agent">
@@ -856,7 +861,7 @@
           <div class="screen-pane" data-screen="agent-edit-jinsenji">
             <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="agents-ledger">&larr; 台帳へ</button></div>
             <p class="h-big">エージェント設定 — 秦泉寺 章夫</p>
-            <p class="h-sub">このエージェントの属性・特性と、割り当てるプロファイルを設定します。名前とアバターは、すべての画面にすぐ反映されます。</p>
+            <p class="h-sub">このエージェントの属性・特性と、使用するアカウント・既定のプロファイルを設定します。名前とアバターは、すべての画面にすぐ反映されます。</p>
             <div class="set-group">
               <h4>基本</h4>
               <div class="set-row"><span class="pm-face"><span class="dot"></span></span><div class="grow"><div class="t">名前</div><div class="d2">ホームとヘッダーでは、この名前で表示されます。</div></div><input class="field" type="text" value="秦泉寺 章夫" aria-label="名前" style="width:200px"></div>
@@ -889,17 +894,22 @@
 - 実装は自分では行わず、担当のエージェントに任せる。</textarea></div>
             </div>
             <div class="set-group">
-              <h4>プロファイル</h4>
-              <div class="set-row"><div class="grow"><div class="t">割り当てるプロファイル</div><div class="d2">このエージェントのセッションは、割り当てたプロファイルの環境で始まります。プロファイルの中身（環境変数など）は端末のプロファイル画面で定義し、ここでは割り当てだけを変えます。割り当ては次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div></div></div>
-              <div class="set-row"><select class="field" aria-label="割り当てるプロファイル" style="width:min(260px,100%)"><option value="default" selected>default</option><option value="rust-dev">rust-dev</option><option value="data-import">data-import</option></select><button class="btn" type="button" data-openpage="profile">プロファイルを開く</button></div>
+              <h4>使用するアカウント</h4>
+              <div class="set-row"><div class="grow"><div class="t">使用するアカウント</div><div class="d2">選択の主軸はアカウントです。ツールは、そのアカウントを使う経路として従います。アカウントが制限などで使えないときは、プール内の別のアカウントへ切り替えることがあります。モデル・推論レベルなどの実行時指定は、セッション開始時に渡されます。</div></div></div>
+              <div class="set-row"><select class="field" aria-label="使用するアカウント" style="width:min(260px,100%)"><option value="自動（プールから選ぶ）">自動（プールから選ぶ）</option><option value="Claude Code 1" selected>Claude Code 1</option><option value="Claude Code 2">Claude Code 2</option><option value="Codex 1">Codex 1</option><option value="Codex 2">Codex 2</option><option value="Codex 3">Codex 3</option><option value="Grok Build 1">Grok Build 1</option><option value="Z.ai 1">Z.ai 1</option></select><button class="btn" type="button" data-openpage="tools">アカウントを開く</button></div>
             </div>
-            <div class="notice">使うアカウントはここでは決めません。セッション開始時に、Issue 側の起動計画とアカウントの空き・制限状態から自動で決まります。</div>
+            <div class="set-group">
+              <h4>プロファイル</h4>
+              <div class="set-row"><div class="grow"><div class="t">既定のプロファイル</div><div class="d2">このエージェントの既定のプロファイルです。プロジェクトに既定のプロファイルが設定されている場合は、そちらが優先されます（プロジェクトの既定 ＞ エージェントの既定）。プロファイルの中身（環境変数など）は端末のプロファイル画面で定義し、ここでは既定の割り当てだけを変えます。割り当ては次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div></div></div>
+              <div class="set-row"><select class="field" aria-label="既定のプロファイル" style="width:min(260px,100%)"><option value="default" selected>default</option><option value="rust-dev">rust-dev</option><option value="data-import">data-import</option></select><button class="btn" type="button" data-openpage="profile">プロファイルを開く</button></div>
+            </div>
+            <div class="notice">使用するアカウントと既定のプロファイルは、次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div>
             <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">保存する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
           </div>
           <div class="screen-pane" data-screen="agent-edit-oda">
             <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="agents-ledger">&larr; 台帳へ</button></div>
             <p class="h-big">エージェント設定 — 小田 洋平</p>
-            <p class="h-sub">このエージェントの属性・特性と、割り当てるプロファイルを設定します。名前とアバターは、すべての画面にすぐ反映されます。</p>
+            <p class="h-sub">このエージェントの属性・特性と、使用するアカウント・既定のプロファイルを設定します。名前とアバターは、すべての画面にすぐ反映されます。</p>
             <div class="set-group">
               <h4>基本</h4>
               <div class="set-row"><span class="ava working" style="background:#2563eb">小</span><div class="grow"><div class="t">名前</div><div class="d2">台帳とプロジェクトの画面では、この名前で表示されます。</div></div><input class="field" type="text" value="小田 洋平" aria-label="名前" style="width:200px"></div>
@@ -930,17 +940,22 @@
 - 変更の前後で関連テストを走らせ、結果を報告に含める。</textarea></div>
             </div>
             <div class="set-group">
-              <h4>プロファイル</h4>
-              <div class="set-row"><div class="grow"><div class="t">割り当てるプロファイル</div><div class="d2">このエージェントのセッションは、割り当てたプロファイルの環境で始まります。プロファイルの中身（環境変数など）は端末のプロファイル画面で定義し、ここでは割り当てだけを変えます。割り当ては次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div></div></div>
-              <div class="set-row"><select class="field" aria-label="割り当てるプロファイル" style="width:min(260px,100%)"><option value="default">default</option><option value="rust-dev" selected>rust-dev</option><option value="data-import">data-import</option></select><button class="btn" type="button" data-openpage="profile">プロファイルを開く</button></div>
+              <h4>使用するアカウント</h4>
+              <div class="set-row"><div class="grow"><div class="t">使用するアカウント</div><div class="d2">選択の主軸はアカウントです。ツールは、そのアカウントを使う経路として従います。アカウントが制限などで使えないときは、プール内の別のアカウントへ切り替えることがあります。モデル・推論レベルなどの実行時指定は、セッション開始時に渡されます。</div></div></div>
+              <div class="set-row"><select class="field" aria-label="使用するアカウント" style="width:min(260px,100%)"><option value="自動（プールから選ぶ）">自動（プールから選ぶ）</option><option value="Claude Code 1">Claude Code 1</option><option value="Claude Code 2">Claude Code 2</option><option value="Codex 1" selected>Codex 1</option><option value="Codex 2">Codex 2</option><option value="Codex 3">Codex 3</option><option value="Grok Build 1">Grok Build 1</option><option value="Z.ai 1">Z.ai 1</option></select><button class="btn" type="button" data-openpage="tools">アカウントを開く</button></div>
             </div>
-            <div class="notice">使うアカウントはここでは決めません。セッション開始時に、Issue 側の起動計画とアカウントの空き・制限状態から自動で決まります。</div>
+            <div class="set-group">
+              <h4>プロファイル</h4>
+              <div class="set-row"><div class="grow"><div class="t">既定のプロファイル</div><div class="d2">このエージェントの既定のプロファイルです。プロジェクトに既定のプロファイルが設定されている場合は、そちらが優先されます（プロジェクトの既定 ＞ エージェントの既定）。プロファイルの中身（環境変数など）は端末のプロファイル画面で定義し、ここでは既定の割り当てだけを変えます。割り当ては次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div></div></div>
+              <div class="set-row"><select class="field" aria-label="既定のプロファイル" style="width:min(260px,100%)"><option value="default">default</option><option value="rust-dev" selected>rust-dev</option><option value="data-import">data-import</option></select><button class="btn" type="button" data-openpage="profile">プロファイルを開く</button></div>
+            </div>
+            <div class="notice">使用するアカウントと既定のプロファイルは、次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div>
             <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">保存する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
           </div>
           <div class="screen-pane" data-screen="agent-edit-himeno">
             <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="agents-ledger">&larr; 台帳へ</button></div>
             <p class="h-big">エージェント設定 — 姫野 大樹</p>
-            <p class="h-sub">このエージェントの属性・特性と、割り当てるプロファイルを設定します。名前とアバターは、すべての画面にすぐ反映されます。</p>
+            <p class="h-sub">このエージェントの属性・特性と、使用するアカウント・既定のプロファイルを設定します。名前とアバターは、すべての画面にすぐ反映されます。</p>
             <div class="set-group">
               <h4>基本</h4>
               <div class="set-row"><span class="ava working" style="background:#c2410c">姫</span><div class="grow"><div class="t">名前</div><div class="d2">台帳とプロジェクトの画面では、この名前で表示されます。</div></div><input class="field" type="text" value="姫野 大樹" aria-label="名前" style="width:200px"></div>
@@ -971,17 +986,22 @@
 - 操作の手数は増やさず、既存の画面の導線に沿わせる。</textarea></div>
             </div>
             <div class="set-group">
-              <h4>プロファイル</h4>
-              <div class="set-row"><div class="grow"><div class="t">割り当てるプロファイル</div><div class="d2">このエージェントのセッションは、割り当てたプロファイルの環境で始まります。プロファイルの中身（環境変数など）は端末のプロファイル画面で定義し、ここでは割り当てだけを変えます。割り当ては次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div></div></div>
-              <div class="set-row"><select class="field" aria-label="割り当てるプロファイル" style="width:min(260px,100%)"><option value="default" selected>default</option><option value="rust-dev">rust-dev</option><option value="data-import">data-import</option></select><button class="btn" type="button" data-openpage="profile">プロファイルを開く</button></div>
+              <h4>使用するアカウント</h4>
+              <div class="set-row"><div class="grow"><div class="t">使用するアカウント</div><div class="d2">選択の主軸はアカウントです。ツールは、そのアカウントを使う経路として従います。アカウントが制限などで使えないときは、プール内の別のアカウントへ切り替えることがあります。モデル・推論レベルなどの実行時指定は、セッション開始時に渡されます。</div></div></div>
+              <div class="set-row"><select class="field" aria-label="使用するアカウント" style="width:min(260px,100%)"><option value="自動（プールから選ぶ）">自動（プールから選ぶ）</option><option value="Claude Code 1" selected>Claude Code 1</option><option value="Claude Code 2">Claude Code 2</option><option value="Codex 1">Codex 1</option><option value="Codex 2">Codex 2</option><option value="Codex 3">Codex 3</option><option value="Grok Build 1">Grok Build 1</option><option value="Z.ai 1">Z.ai 1</option></select><button class="btn" type="button" data-openpage="tools">アカウントを開く</button></div>
             </div>
-            <div class="notice">使うアカウントはここでは決めません。セッション開始時に、Issue 側の起動計画とアカウントの空き・制限状態から自動で決まります。</div>
+            <div class="set-group">
+              <h4>プロファイル</h4>
+              <div class="set-row"><div class="grow"><div class="t">既定のプロファイル</div><div class="d2">このエージェントの既定のプロファイルです。プロジェクトに既定のプロファイルが設定されている場合は、そちらが優先されます（プロジェクトの既定 ＞ エージェントの既定）。プロファイルの中身（環境変数など）は端末のプロファイル画面で定義し、ここでは既定の割り当てだけを変えます。割り当ては次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div></div></div>
+              <div class="set-row"><select class="field" aria-label="既定のプロファイル" style="width:min(260px,100%)"><option value="default" selected>default</option><option value="rust-dev">rust-dev</option><option value="data-import">data-import</option></select><button class="btn" type="button" data-openpage="profile">プロファイルを開く</button></div>
+            </div>
+            <div class="notice">使用するアカウントと既定のプロファイルは、次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div>
             <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">保存する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
           </div>
           <div class="screen-pane" data-screen="agent-edit-ando">
             <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="agents-ledger">&larr; 台帳へ</button></div>
             <p class="h-big">エージェント設定 — 安藤 健二</p>
-            <p class="h-sub">このエージェントの属性・特性と、割り当てるプロファイルを設定します。名前とアバターは、すべての画面にすぐ反映されます。</p>
+            <p class="h-sub">このエージェントの属性・特性と、使用するアカウント・既定のプロファイルを設定します。名前とアバターは、すべての画面にすぐ反映されます。</p>
             <div class="set-group">
               <h4>基本</h4>
               <div class="set-row"><span class="ava" style="background:#0e7490">安</span><div class="grow"><div class="t">名前</div><div class="d2">台帳とプロジェクトの画面では、この名前で表示されます。</div></div><input class="field" type="text" value="安藤 健二" aria-label="名前" style="width:200px"></div>
@@ -1012,17 +1032,22 @@
 - 元データは書き換えず、変換は取り込み側で行う。</textarea></div>
             </div>
             <div class="set-group">
-              <h4>プロファイル</h4>
-              <div class="set-row"><div class="grow"><div class="t">割り当てるプロファイル</div><div class="d2">このエージェントのセッションは、割り当てたプロファイルの環境で始まります。プロファイルの中身（環境変数など）は端末のプロファイル画面で定義し、ここでは割り当てだけを変えます。割り当ては次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div></div></div>
-              <div class="set-row"><select class="field" aria-label="割り当てるプロファイル" style="width:min(260px,100%)"><option value="default">default</option><option value="rust-dev">rust-dev</option><option value="data-import" selected>data-import</option></select><button class="btn" type="button" data-openpage="profile">プロファイルを開く</button></div>
+              <h4>使用するアカウント</h4>
+              <div class="set-row"><div class="grow"><div class="t">使用するアカウント</div><div class="d2">選択の主軸はアカウントです。ツールは、そのアカウントを使う経路として従います。アカウントが制限などで使えないときは、プール内の別のアカウントへ切り替えることがあります。モデル・推論レベルなどの実行時指定は、セッション開始時に渡されます。</div></div></div>
+              <div class="set-row"><select class="field" aria-label="使用するアカウント" style="width:min(260px,100%)"><option value="自動（プールから選ぶ）">自動（プールから選ぶ）</option><option value="Claude Code 1" selected>Claude Code 1</option><option value="Claude Code 2">Claude Code 2</option><option value="Codex 1">Codex 1</option><option value="Codex 2">Codex 2</option><option value="Codex 3">Codex 3</option><option value="Grok Build 1">Grok Build 1</option><option value="Z.ai 1">Z.ai 1</option></select><button class="btn" type="button" data-openpage="tools">アカウントを開く</button></div>
             </div>
-            <div class="notice">使うアカウントはここでは決めません。セッション開始時に、Issue 側の起動計画とアカウントの空き・制限状態から自動で決まります。</div>
+            <div class="set-group">
+              <h4>プロファイル</h4>
+              <div class="set-row"><div class="grow"><div class="t">既定のプロファイル</div><div class="d2">このエージェントの既定のプロファイルです。プロジェクトに既定のプロファイルが設定されている場合は、そちらが優先されます（プロジェクトの既定 ＞ エージェントの既定）。プロファイルの中身（環境変数など）は端末のプロファイル画面で定義し、ここでは既定の割り当てだけを変えます。割り当ては次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div></div></div>
+              <div class="set-row"><select class="field" aria-label="既定のプロファイル" style="width:min(260px,100%)"><option value="default">default</option><option value="rust-dev">rust-dev</option><option value="data-import" selected>data-import</option></select><button class="btn" type="button" data-openpage="profile">プロファイルを開く</button></div>
+            </div>
+            <div class="notice">使用するアカウントと既定のプロファイルは、次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div>
             <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">保存する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
           </div>
           <div class="screen-pane" data-screen="agent-edit-hara">
             <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="agents-ledger">&larr; 台帳へ</button></div>
             <p class="h-big">エージェント設定 — 原 和正</p>
-            <p class="h-sub">このエージェントの属性・特性と、割り当てるプロファイルを設定します。名前とアバターは、すべての画面にすぐ反映されます。</p>
+            <p class="h-sub">このエージェントの属性・特性と、使用するアカウント・既定のプロファイルを設定します。名前とアバターは、すべての画面にすぐ反映されます。</p>
             <div class="set-group">
               <h4>基本</h4>
               <div class="set-row"><span class="ava" style="background:#6d28d9">原</span><div class="grow"><div class="t">名前</div><div class="d2">台帳とプロジェクトの画面では、この名前で表示されます。</div></div><input class="field" type="text" value="原 和正" aria-label="名前" style="width:200px"></div>
@@ -1053,17 +1078,22 @@
 - 環境の差異が疑われるときは、環境の情報も添える。</textarea></div>
             </div>
             <div class="set-group">
-              <h4>プロファイル</h4>
-              <div class="set-row"><div class="grow"><div class="t">割り当てるプロファイル</div><div class="d2">このエージェントのセッションは、割り当てたプロファイルの環境で始まります。プロファイルの中身（環境変数など）は端末のプロファイル画面で定義し、ここでは割り当てだけを変えます。割り当ては次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div></div></div>
-              <div class="set-row"><select class="field" aria-label="割り当てるプロファイル" style="width:min(260px,100%)"><option value="default">default</option><option value="rust-dev" selected>rust-dev</option><option value="data-import">data-import</option></select><button class="btn" type="button" data-openpage="profile">プロファイルを開く</button></div>
+              <h4>使用するアカウント</h4>
+              <div class="set-row"><div class="grow"><div class="t">使用するアカウント</div><div class="d2">選択の主軸はアカウントです。ツールは、そのアカウントを使う経路として従います。アカウントが制限などで使えないときは、プール内の別のアカウントへ切り替えることがあります。モデル・推論レベルなどの実行時指定は、セッション開始時に渡されます。</div></div></div>
+              <div class="set-row"><select class="field" aria-label="使用するアカウント" style="width:min(260px,100%)"><option value="自動（プールから選ぶ）">自動（プールから選ぶ）</option><option value="Claude Code 1">Claude Code 1</option><option value="Claude Code 2">Claude Code 2</option><option value="Codex 1">Codex 1</option><option value="Codex 2" selected>Codex 2</option><option value="Codex 3">Codex 3</option><option value="Grok Build 1">Grok Build 1</option><option value="Z.ai 1">Z.ai 1</option></select><button class="btn" type="button" data-openpage="tools">アカウントを開く</button></div>
             </div>
-            <div class="notice">使うアカウントはここでは決めません。セッション開始時に、Issue 側の起動計画とアカウントの空き・制限状態から自動で決まります。</div>
+            <div class="set-group">
+              <h4>プロファイル</h4>
+              <div class="set-row"><div class="grow"><div class="t">既定のプロファイル</div><div class="d2">このエージェントの既定のプロファイルです。プロジェクトに既定のプロファイルが設定されている場合は、そちらが優先されます（プロジェクトの既定 ＞ エージェントの既定）。プロファイルの中身（環境変数など）は端末のプロファイル画面で定義し、ここでは既定の割り当てだけを変えます。割り当ては次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div></div></div>
+              <div class="set-row"><select class="field" aria-label="既定のプロファイル" style="width:min(260px,100%)"><option value="default">default</option><option value="rust-dev" selected>rust-dev</option><option value="data-import">data-import</option></select><button class="btn" type="button" data-openpage="profile">プロファイルを開く</button></div>
+            </div>
+            <div class="notice">使用するアカウントと既定のプロファイルは、次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div>
             <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">保存する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
           </div>
           <div class="screen-pane" data-screen="agent-edit-suzuki">
             <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="agents-ledger">&larr; 台帳へ</button></div>
             <p class="h-big">エージェント設定 — 鈴木 和斗</p>
-            <p class="h-sub">このエージェントの属性・特性と、割り当てるプロファイルを設定します。名前とアバターは、すべての画面にすぐ反映されます。</p>
+            <p class="h-sub">このエージェントの属性・特性と、使用するアカウント・既定のプロファイルを設定します。名前とアバターは、すべての画面にすぐ反映されます。</p>
             <div class="set-group">
               <h4>基本</h4>
               <div class="set-row"><span class="ava" style="background:#a16207">鈴</span><div class="grow"><div class="t">名前</div><div class="d2">台帳とプロジェクトの画面では、この名前で表示されます。</div></div><input class="field" type="text" value="鈴木 和斗" aria-label="名前" style="width:200px"></div>
@@ -1094,17 +1124,22 @@
 - 決められないことは決めず、判断の材料として上げる。</textarea></div>
             </div>
             <div class="set-group">
-              <h4>プロファイル</h4>
-              <div class="set-row"><div class="grow"><div class="t">割り当てるプロファイル</div><div class="d2">このエージェントのセッションは、割り当てたプロファイルの環境で始まります。プロファイルの中身（環境変数など）は端末のプロファイル画面で定義し、ここでは割り当てだけを変えます。割り当ては次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div></div></div>
-              <div class="set-row"><select class="field" aria-label="割り当てるプロファイル" style="width:min(260px,100%)"><option value="default" selected>default</option><option value="rust-dev">rust-dev</option><option value="data-import">data-import</option></select><button class="btn" type="button" data-openpage="profile">プロファイルを開く</button></div>
+              <h4>使用するアカウント</h4>
+              <div class="set-row"><div class="grow"><div class="t">使用するアカウント</div><div class="d2">選択の主軸はアカウントです。ツールは、そのアカウントを使う経路として従います。アカウントが制限などで使えないときは、プール内の別のアカウントへ切り替えることがあります。モデル・推論レベルなどの実行時指定は、セッション開始時に渡されます。</div></div></div>
+              <div class="set-row"><select class="field" aria-label="使用するアカウント" style="width:min(260px,100%)"><option value="自動（プールから選ぶ）">自動（プールから選ぶ）</option><option value="Claude Code 1">Claude Code 1</option><option value="Claude Code 2" selected>Claude Code 2</option><option value="Codex 1">Codex 1</option><option value="Codex 2">Codex 2</option><option value="Codex 3">Codex 3</option><option value="Grok Build 1">Grok Build 1</option><option value="Z.ai 1">Z.ai 1</option></select><button class="btn" type="button" data-openpage="tools">アカウントを開く</button></div>
             </div>
-            <div class="notice">使うアカウントはここでは決めません。セッション開始時に、Issue 側の起動計画とアカウントの空き・制限状態から自動で決まります。</div>
+            <div class="set-group">
+              <h4>プロファイル</h4>
+              <div class="set-row"><div class="grow"><div class="t">既定のプロファイル</div><div class="d2">このエージェントの既定のプロファイルです。プロジェクトに既定のプロファイルが設定されている場合は、そちらが優先されます（プロジェクトの既定 ＞ エージェントの既定）。プロファイルの中身（環境変数など）は端末のプロファイル画面で定義し、ここでは既定の割り当てだけを変えます。割り当ては次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div></div></div>
+              <div class="set-row"><select class="field" aria-label="既定のプロファイル" style="width:min(260px,100%)"><option value="default" selected>default</option><option value="rust-dev">rust-dev</option><option value="data-import">data-import</option></select><button class="btn" type="button" data-openpage="profile">プロファイルを開く</button></div>
+            </div>
+            <div class="notice">使用するアカウントと既定のプロファイルは、次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div>
             <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">保存する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
           </div>
           <div class="screen-pane" data-screen="agent-edit-hamada">
             <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="agents-ledger">&larr; 台帳へ</button></div>
             <p class="h-big">エージェント設定 — 濱田 嵩翔</p>
-            <p class="h-sub">このエージェントの属性・特性と、割り当てるプロファイルを設定します。名前とアバターは、すべての画面にすぐ反映されます。</p>
+            <p class="h-sub">このエージェントの属性・特性と、使用するアカウント・既定のプロファイルを設定します。名前とアバターは、すべての画面にすぐ反映されます。</p>
             <div class="set-group">
               <h4>基本</h4>
               <div class="set-row"><span class="ava" style="background:#be123c">濱</span><div class="grow"><div class="t">名前</div><div class="d2">台帳とプロジェクトの画面では、この名前で表示されます。</div></div><input class="field" type="text" value="濱田 嵩翔" aria-label="名前" style="width:200px"></div>
@@ -1135,17 +1170,22 @@
 - 再現の取れない計測値は、結論に使わない。</textarea></div>
             </div>
             <div class="set-group">
-              <h4>プロファイル</h4>
-              <div class="set-row"><div class="grow"><div class="t">割り当てるプロファイル</div><div class="d2">このエージェントのセッションは、割り当てたプロファイルの環境で始まります。プロファイルの中身（環境変数など）は端末のプロファイル画面で定義し、ここでは割り当てだけを変えます。割り当ては次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div></div></div>
-              <div class="set-row"><select class="field" aria-label="割り当てるプロファイル" style="width:min(260px,100%)"><option value="default" selected>default</option><option value="rust-dev">rust-dev</option><option value="data-import">data-import</option></select><button class="btn" type="button" data-openpage="profile">プロファイルを開く</button></div>
+              <h4>使用するアカウント</h4>
+              <div class="set-row"><div class="grow"><div class="t">使用するアカウント</div><div class="d2">選択の主軸はアカウントです。ツールは、そのアカウントを使う経路として従います。アカウントが制限などで使えないときは、プール内の別のアカウントへ切り替えることがあります。モデル・推論レベルなどの実行時指定は、セッション開始時に渡されます。</div></div></div>
+              <div class="set-row"><select class="field" aria-label="使用するアカウント" style="width:min(260px,100%)"><option value="自動（プールから選ぶ）" selected>自動（プールから選ぶ）</option><option value="Claude Code 1">Claude Code 1</option><option value="Claude Code 2">Claude Code 2</option><option value="Codex 1">Codex 1</option><option value="Codex 2">Codex 2</option><option value="Codex 3">Codex 3</option><option value="Grok Build 1">Grok Build 1</option><option value="Z.ai 1">Z.ai 1</option></select><button class="btn" type="button" data-openpage="tools">アカウントを開く</button></div>
             </div>
-            <div class="notice">使うアカウントはここでは決めません。セッション開始時に、Issue 側の起動計画とアカウントの空き・制限状態から自動で決まります。</div>
+            <div class="set-group">
+              <h4>プロファイル</h4>
+              <div class="set-row"><div class="grow"><div class="t">既定のプロファイル</div><div class="d2">このエージェントの既定のプロファイルです。プロジェクトに既定のプロファイルが設定されている場合は、そちらが優先されます（プロジェクトの既定 ＞ エージェントの既定）。プロファイルの中身（環境変数など）は端末のプロファイル画面で定義し、ここでは既定の割り当てだけを変えます。割り当ては次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div></div></div>
+              <div class="set-row"><select class="field" aria-label="既定のプロファイル" style="width:min(260px,100%)"><option value="default" selected>default</option><option value="rust-dev">rust-dev</option><option value="data-import">data-import</option></select><button class="btn" type="button" data-openpage="profile">プロファイルを開く</button></div>
+            </div>
+            <div class="notice">使用するアカウントと既定のプロファイルは、次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div>
             <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">保存する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
           </div>
           <div class="screen-pane" data-screen="agent-new">
             <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="agents-ledger">&larr; 台帳へ</button></div>
             <p class="h-big">エージェントを追加</p>
-            <p class="h-sub">新しいエージェントの属性・特性と、割り当てるプロファイルを決めます。追加したエージェントは台帳の末尾に入り、並び順がそのまま利用優先度になります。</p>
+            <p class="h-sub">新しいエージェントの属性・特性と、使用するアカウント・既定のプロファイルを決めます。追加したエージェントは台帳の末尾に入り、並び順がそのまま利用優先度になります。</p>
             <div class="set-group">
               <h4>基本</h4>
               <div class="set-row"><div class="grow"><div class="t">名前</div><div class="d2">台帳とプロジェクトの画面では、この名前で表示されます。</div></div><input class="field" type="text" placeholder="名前（例：Ren）" aria-label="名前" style="width:200px"></div>
@@ -1173,11 +1213,16 @@
               <div class="set-row"><textarea class="field" rows="7" aria-label="性格" style="width:100%;line-height:1.6;resize:vertical" placeholder="（例）実装を重点に。変更は小さく刻み、テストで確かめてから進める。&#10;- 仕様に無い挙動は足さない。&#10;- 失敗したら原因を切り分けてから直す。"></textarea></div>
             </div>
             <div class="set-group">
-              <h4>プロファイル</h4>
-              <div class="set-row"><div class="grow"><div class="t">割り当てるプロファイル</div><div class="d2">このエージェントのセッションは、割り当てたプロファイルの環境で始まります。プロファイルの中身（環境変数など）は端末のプロファイル画面で定義し、ここでは割り当てだけを変えます。割り当ては次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div></div></div>
-              <div class="set-row"><select class="field" aria-label="割り当てるプロファイル" style="width:min(260px,100%)"><option value="default" selected>default</option><option value="rust-dev">rust-dev</option><option value="data-import">data-import</option></select><button class="btn" type="button" data-openpage="profile">プロファイルを開く</button></div>
+              <h4>使用するアカウント</h4>
+              <div class="set-row"><div class="grow"><div class="t">使用するアカウント</div><div class="d2">選択の主軸はアカウントです。ツールは、そのアカウントを使う経路として従います。アカウントが制限などで使えないときは、プール内の別のアカウントへ切り替えることがあります。モデル・推論レベルなどの実行時指定は、セッション開始時に渡されます。</div></div></div>
+              <div class="set-row"><select class="field" aria-label="使用するアカウント" style="width:min(260px,100%)"><option value="自動（プールから選ぶ）" selected>自動（プールから選ぶ）</option><option value="Claude Code 1">Claude Code 1</option><option value="Claude Code 2">Claude Code 2</option><option value="Codex 1">Codex 1</option><option value="Codex 2">Codex 2</option><option value="Codex 3">Codex 3</option><option value="Grok Build 1">Grok Build 1</option><option value="Z.ai 1">Z.ai 1</option></select><button class="btn" type="button" data-openpage="tools">アカウントを開く</button></div>
             </div>
-            <div class="notice">使うアカウントはここでは決めません。セッション開始時に、Issue 側の起動計画とアカウントの空き・制限状態から自動で決まります。</div>
+            <div class="set-group">
+              <h4>プロファイル</h4>
+              <div class="set-row"><div class="grow"><div class="t">既定のプロファイル</div><div class="d2">このエージェントの既定のプロファイルです。プロジェクトに既定のプロファイルが設定されている場合は、そちらが優先されます（プロジェクトの既定 ＞ エージェントの既定）。プロファイルの中身（環境変数など）は端末のプロファイル画面で定義し、ここでは既定の割り当てだけを変えます。割り当ては次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div></div></div>
+              <div class="set-row"><select class="field" aria-label="既定のプロファイル" style="width:min(260px,100%)"><option value="default" selected>default</option><option value="rust-dev">rust-dev</option><option value="data-import">data-import</option></select><button class="btn" type="button" data-openpage="profile">プロファイルを開く</button></div>
+            </div>
+            <div class="notice">使用するアカウントと既定のプロファイルは、次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div>
             <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">追加する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
           </div>
         </div>
@@ -1188,8 +1233,8 @@
         <div class="pagehead"><a class="plink" data-openpage="start">&larr; ホーム</a><span class="rel">アカウントは端末全体の画面です（ヘッダーから開きます）</span></div>
         <div class="content">
           <div class="screen-pane on" data-screen="tools-pool">
-            <p class="h-big">アカウント</p>
-            <p class="h-sub">アカウントは、プロバイダー単位の箱です。使用率・リセット時刻・制限状態はここで見ます。エージェントへの割り当ては、セッション開始時に「使用するアカウント」を第一に決め、ツールはそのアカウントを使えるものが従います。本体（CLI）のインストールと更新は「ツール管理」で行います。Hermes Agent／OpenCode／OpenClaw は固有のアカウントを持たず、プロバイダーのアカウントを使って動くため、「使っているアカウント」への参照として並べます。</p>
+            <p class="h-big">アカウント（実行環境）</p>
+            <p class="h-sub">実行環境は、本体（ツール）とアカウントの2つでできています。この画面は、そのうちアカウント（プロバイダー単位の箱）を扱います。使用率・リセット時刻・制限状態はここで見ます。エージェントへの割り当ては、セッション開始時に「使用するアカウント」を第一に決め、ツールはそのアカウントを使えるものが従います。本体（CLI）のインストールと更新は「ツール管理」で行います。Hermes Agent／OpenCode／OpenClaw は固有のアカウントを持たず、プロバイダーのアカウントを使って動くため、「使っているアカウント」への参照として並べます。</p>
             <div class="set-group">
               <h4>Claude Code</h4>
               <div class="set-row"><div class="grow"><div class="t">Claude Code 1（会社メール）</div><div class="d2">サインイン済み</div><div class="use"><div class="bar"><i style="width:58%"></i></div><span>週間58%使用 · 木曜 6:00にリセット</span></div></div></div>
@@ -1265,12 +1310,12 @@
           </div>
           <div class="screen-pane" data-screen="tool-add-backend">
             <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="tools-pool">&larr; アカウントへ</button></div>
-            <p class="h-big">アカウントを追加する — バックエンド設定</p>
-            <p class="h-sub">フロントエンド型のツール（OpenCode／OpenClaw／Hermes Agent）を選んだ場合のステップ3です。バックエンド（プロバイダ／モデル）の設定はツール自身が行うため、gwt はフォームを作らず、ツールのセットアップをそのまま開きます。終わると、読み取った現在の設定がここに出ます。</p>
+            <p class="h-big">アカウントを追加する — 接続先の設定</p>
+            <p class="h-sub">フロントエンド型のツール（OpenCode／OpenClaw／Hermes Agent）を選んだ場合のステップ3です。接続先（プロバイダー）の設定はツール自身が行うため、gwt はフォームを作らず、ツールのセットアップをそのまま開きます。終わると、読み取った現在の設定がここに出ます。</p>
             <div class="steps"><span class="st done">1. 種類</span><span>→</span><span class="st done">2. 本体の確認</span><span>→</span><span class="st on">3. バックエンド設定</span><span>→</span><span class="st">4. 完了</span></div>
             <div class="set-group">
               <div class="set-row"><div class="grow"><div class="t">ツールのセットアップを開く</div><div class="d2">選んだツールのセットアップ（Hermes Agent なら hermes setup、OpenCode なら接続設定、OpenClaw ならオンボーディング）をターミナル表示で開きます。プロバイダの選択とサインインは、ツール側で完結します。</div></div><button class="btn primary" type="button" data-openpage="terminal">セットアップを開く</button></div>
-              <div class="set-row"><div class="grow"><div class="t">いまの設定（読み取り）</div><div class="d2">セットアップが終わると、ツールの設定ファイルから読み取った現在のプロバイダ／モデルとサインイン状態がここに出ます。</div></div><span class="badge b-done">未設定</span></div>
+              <div class="set-row"><div class="grow"><div class="t">いまの設定（読み取り）</div><div class="d2">セットアップが終わると、ツールの設定ファイルから読み取った現在のプロバイダとサインイン状態がここに出ます（モデルは実行時に指定するもので、ここには出しません）。</div></div><span class="badge b-done">未設定</span></div>
             </div>
             <div class="btnrow" style="margin-top:14px"><button class="btn" type="button" data-nav="tool-add-body">戻る</button><button class="btn primary" type="button" data-nav="tool-add-done">次へ — 完了</button><button class="btn ghost" type="button" data-nav="tool-add-signin">アカウント型のステップ3を見る</button><button class="btn ghost" type="button" data-nav="tools-pool">中止してアカウントへ戻る</button></div>
           </div>
@@ -1284,11 +1329,11 @@
               <div class="set-row"><div class="grow"><div class="t">種類</div><div class="d2">Claude Code</div></div></div>
               <div class="set-row"><div class="grow"><div class="t">本体</div><div class="d2">導入済み（この端末に入っています）</div></div><span class="badge b-run">導入済み</span></div>
               <div class="set-row"><div class="grow"><div class="t">アカウント</div><div class="d2">会社メールでサインイン済みです</div></div><span class="badge b-run">サインイン済み</span></div>
-              <div class="set-row"><div class="grow"><div class="t">バックエンド</div><div class="d2">フロントエンド型を選んだ場合のみ、ツールの設定から読み取った現在のプロバイダ／モデルがここに出ます。</div></div></div>
+              <div class="set-row"><div class="grow"><div class="t">バックエンド</div><div class="d2">接続先を差し替えられるツールを選んだ場合のみ、ツールの設定から読み取った現在のプロバイダがここに出ます。</div></div></div>
             </div>
             <div class="set-group">
               <h4>表示名</h4>
-              <div class="set-row"><div class="grow"><div class="t">表示名</div><div class="d2">上のサマリーをもとに自動で付けた名前です。その場で変更できます（例：Claude Code 3（予備））。フロントエンド型の場合は「Hermes Agent 1（Z.ai）」のように、バックエンドも含めて提案します。</div></div><input class="field" type="text" value="Claude Code 3" aria-label="表示名" style="width:220px"></div>
+              <div class="set-row"><div class="grow"><div class="t">表示名</div><div class="d2">上のサマリーをもとに自動で付けた名前です。その場で変更できます（例：Claude Code 3（予備））。接続先を差し替えられるツールの場合は「Hermes Agent 1（Z.ai）」のように、プロバイダーも含めて提案します。</div></div><input class="field" type="text" value="Claude Code 3" aria-label="表示名" style="width:220px"></div>
               <div class="set-row"><div class="grow"><div class="t">プールの状態</div><div class="d2">アカウント画面のプールに、この表示名で並んでいます。</div></div></div>
             </div>
             <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="tools-pool">アカウントへ戻る</button><button class="btn ghost" type="button" data-nav="tool-add">続けて追加する</button></div>
@@ -1330,8 +1375,8 @@
           </div>
           <div class="screen-pane" data-screen="tools-supported">
             <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="tools-pool">&larr; アカウントへ</button></div>
-            <p class="h-big">ツール管理</p>
-            <p class="h-sub">ツール（本体＝CLI）のインストールと更新は、ここだけで行います。アカウントの追加やサインインは「アカウント」の画面で扱い、ここでは扱いません。本体が入っていない種類は、アカウントを登録できません。</p>
+            <p class="h-big">ツール管理（実行環境）</p>
+            <p class="h-sub">実行環境は、本体（ツール）とアカウントの2つでできています。この画面は、そのうち本体（ツール＝CLI）を扱い、インストールと更新は、ここだけで行います。アカウントの追加やサインインは「アカウント」の画面で扱い、ここでは扱いません。本体が入っていない種類は、アカウントを登録できません。</p>
             <table class="list" aria-label="ツール管理">
               <thead><tr><th>ツール</th><th>状態</th><th>導入済み</th><th>利用可能</th><th></th></tr></thead>
               <tbody>
@@ -1359,7 +1404,7 @@
         <div class="content">
           <div class="screen-pane on" data-screen="appsettings">
             <p class="h-big">設定</p>
-            <p class="h-sub">この端末全体の設定です。エージェントとアカウントは独立した画面にあります。プロジェクトごとの設定は、各プロジェクトページの「設定」にあります。</p>
+            <p class="h-sub">この端末全体の設定です。エージェントと実行環境（アカウント・ツール管理）は独立した画面にあります。プロジェクトごとの設定は、各プロジェクトページの「設定」にあります。</p>
             <div class="chips" role="group" aria-label="設定のタブ"><button class="chip on" type="button" data-tab="yourpm">あなたの PM</button><button class="chip" type="button" data-tab="projects">プロジェクト</button></div>
 
             <div class="set-pane on" data-pane="yourpm">
@@ -1379,9 +1424,9 @@
               </div>
               <div class="set-group">
                 <h4>性能とシステム — この端末</h4>
-                <div class="set-row"><div class="grow"><div class="t">リソースのプリセット</div><div class="d2">エージェントのプロセス優先度、1人あたりの CPU 上限、ビルドの並列数、プロセスの分離のしかた。</div></div><button class="btn" type="button">バランス ▾</button></div>
+                <div class="set-row"><div class="grow"><div class="t">リソースのプリセット</div><div class="d2">エージェントのプロセス優先度、1人あたりの CPU 上限、ビルドの並列数、プロセスの分離のしかた。</div></div><button class="btn" type="button" data-menu="バランス,性能を優先,省リソース">バランス ▾</button></div>
                 <div class="set-row"><div class="grow"><div class="t">ログイン時に gwt を起動する</div></div><span class="switch off" role="img" aria-label="オフ"></span></div>
-                <div class="set-row"><div class="grow"><div class="t">作業の出力行数</div><div class="d2">作業セッションで表示する出力の行数です（3〜10）。</div></div><button class="btn" type="button">6 ▾</button></div>
+                <div class="set-row"><div class="grow"><div class="t">作業の出力行数</div><div class="d2">作業セッションで表示する出力の行数です（3〜10）。</div></div><button class="btn" type="button" data-menu="3,4,5,6,8,10">6 ▾</button></div>
                 <div class="set-row"><div class="grow"><div class="t">端末のプロファイル</div><div class="d2">プロファイルは端末で定義し、エージェントに割り当てます。定義の管理はプロファイルの画面、割り当ては各エージェント設定で行います。</div></div><button class="btn" type="button" data-openpage="profile">プロファイルを開く</button></div>
               </div>
             </div>
@@ -1395,7 +1440,7 @@
               </div>
               <div class="set-group">
                 <h4>掲示板の共有 — この端末</h4>
-                <div class="set-row"><div class="grow"><div class="t">掲示板の共有先</div><div class="d2">この端末のみ、Slack、Teams から選びます。GitHub Discussions の受け渡し（判断・止まった報告・引き継ぎ）は、共有先が「この端末のみ」のときだけ有効です。</div></div><button class="btn" type="button">この端末のみ ▾</button></div>
+                <div class="set-row"><div class="grow"><div class="t">掲示板の共有先</div><div class="d2">この端末のみ、Slack、Teams から選びます。GitHub Discussions の受け渡し（判断・止まった報告・引き継ぎ）は、共有先が「この端末のみ」のときだけ有効です。</div></div><button class="btn" type="button" data-menu="この端末のみ,Slack,Teams">この端末のみ ▾</button></div>
                 <div class="set-row"><div class="grow"><div class="t">Slack / Teams の接続</div><div class="d2">サインインとサインアウトもここです。</div></div><button class="btn" type="button" data-nav="connect-setup">設定する</button></div>
               </div>
             </div>
@@ -1440,7 +1485,7 @@
             </div>
             <div class="set-group">
               <div class="set-head">リリースノート</div>
-              <div class="set-row"><div class="grow"><div class="t">版を選ぶ</div><div class="d2">9.171.0 — 画面の刷新と gwtd の自己回復を含みます。前の版へ戻す（ダウングレード）もここからできます。</div></div><button class="btn" type="button">9.171.0 ▾</button></div>
+              <div class="set-row"><div class="grow"><div class="t">版を選ぶ</div><div class="d2">9.171.0 — 画面の刷新と gwtd の自己回復を含みます。前の版へ戻す（ダウングレード）もここからできます。</div></div><button class="btn" type="button" data-menu="9.171.0,9.170.0,9.169.2">9.171.0 ▾</button></div>
               <div class="btnrow"><button class="btn" type="button">この版に更新</button><button class="btn ghost" type="button">前の版に戻す</button></div>
             </div>
             <div class="set-group">
@@ -1689,7 +1734,7 @@
                 <div class="grow">
                   <div class="t">秦泉寺 章夫 <span class="rel">· あなたの PM · Claude Code（ツール）</span></div>
                   <div class="d">このプロジェクトも見ています · 判断待ち 2件を運んでいます</div>
-                  <div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>速め</b></span><span class="trait">性格 <b>調整と報告を重点に</b></span></div>
+                  <div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>速め</b></span><span class="trait">性格 <b>調整と報告を重点に</b></span><span class="trait">プロファイル <b>rust-dev（プロジェクトの既定）</b></span></div>
                 </div>
                 <span class="badge b-wait">判断待ち 2件</span>
                 <button class="btn ghost" type="button" data-openpage="start">ホームで相談する</button>
@@ -1699,7 +1744,7 @@
                 <div class="grow">
                   <div class="t">小田 洋平 <span class="rel">· Codex（ツール）</span></div>
                   <div class="d">作業中：#7048、共有状態モデル · ここまで42分 · #7047 の修正も準備中</div>
-                  <div class="traits"><span class="trait">推論 <b>最大</b></span><span class="trait">速度 <b>最速</b></span><span class="trait">性格 <b>実装を重点に</b></span></div>
+                  <div class="traits"><span class="trait">推論 <b>最大</b></span><span class="trait">速度 <b>最速</b></span><span class="trait">性格 <b>実装を重点に</b></span><span class="trait">プロファイル <b>rust-dev（プロジェクトの既定）</b></span></div>
                   <div class="use"><div class="bar"><i style="width:64%"></i></div><span>Codex 1 — 週間64%使用 · 土曜21:25にリセット</span></div>
                 </div>
                 <span class="badge b-run">作業中</span>
@@ -1711,7 +1756,7 @@
                 <div class="grow">
                   <div class="t">姫野 大樹 <span class="rel">· Claude Code（ツール）</span></div>
                   <div class="d">作業中：#7007、全画面刷新 · ここまで1時間12分</div>
-                  <div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>速め</b></span><span class="trait">性格 <b>画面と体験の実装を重点に</b></span></div>
+                  <div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>速め</b></span><span class="trait">性格 <b>画面と体験の実装を重点に</b></span><span class="trait">プロファイル <b>rust-dev（プロジェクトの既定）</b></span></div>
                   <div class="use"><div class="bar"><i style="width:31%"></i></div><span>Claude Code 1 — 週間31%使用 · 木曜6:00にリセット</span></div>
                 </div>
                 <span class="badge b-run">作業中</span>
@@ -1723,7 +1768,7 @@
                 <div class="grow">
                   <div class="t">安藤 健二 <span class="rel">· Claude Code（ツール）</span></div>
                   <div class="d">いまは KeibaDB の取り込みを担当しています · このプロジェクトでは待機中</div>
-                  <div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>速め</b></span><span class="trait">性格 <b>データの調査と取り込みを重点に</b></span></div>
+                  <div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>速め</b></span><span class="trait">性格 <b>データの調査と取り込みを重点に</b></span><span class="trait">プロファイル <b>rust-dev（プロジェクトの既定）</b></span></div>
                 </div>
                 <span class="badge b-done">待機中</span>
               </div>
@@ -1893,9 +1938,9 @@
               <p class="h-sub">gwt の動作ログです。表示中 1,000件 / 全 1,000件。</p>
               <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
                 <input class="field" style="flex:1;min-width:200px" type="text" placeholder="ログを探す…" aria-label="ログを探す">
-                <button class="btn" type="button">範囲：プロジェクト ▾</button>
-                <button class="btn" type="button">重要度：Debug 以上 ▾</button>
-                <button class="btn" type="button">プロセス：すべて ▾</button>
+                <button class="btn" type="button" data-menu="範囲：プロジェクト,範囲：端末全体">範囲：プロジェクト ▾</button>
+                <button class="btn" type="button" data-menu="重要度：Debug 以上,重要度：Info 以上,重要度：Warning 以上,重要度：Error のみ">重要度：Debug 以上 ▾</button>
+                <button class="btn" type="button" data-menu="プロセス：すべて,プロセス：gwtd,プロセス：エージェント,プロセス：PM">プロセス：すべて ▾</button>
                 <button class="btn primary" type="button">更新</button>
               </div>
               <div class="logline"><span class="sev info">INFO</span><span class="lt">13:58:12</span><span class="lm">gwt_ui_action — 画面の操作（frontend）</span></div>
@@ -1924,6 +1969,10 @@
                 <div class="set-row"><div class="grow"><div class="t">自律実行（Autonomous）</div><div class="d2">人手の承認なしで、対象の課題を自動で実行します。</div></div><span class="switch" aria-hidden="true"></span></div>
                 <div class="set-row"><div class="grow"><div class="t">同時実行数（Max active）</div><div class="d2">同時に動かすエージェントの上限です。</div></div><input class="field" type="number" value="2" aria-label="同時実行数" style="width:80px"></div>
                 <div class="set-row"><div class="grow"><div class="t">詳細設定</div><div class="d2">試行上限・スタック判定・ハートビート間隔などの細かい調整値です。通常は変えません。</div></div><button class="btn" type="button" data-nav="g-settings-tuning">詳細設定を開く</button></div>
+              </div>
+              <div class="set-group">
+                <div class="set-head">プロファイル</div>
+                <div class="set-row"><div class="grow"><div class="t">既定のプロファイル</div><div class="d2">このプロジェクトで働く全エージェントに効く既定です。プロジェクトの既定が、エージェントの既定を上書きします。未設定のときは、各エージェントの既定が使われます。</div></div><select class="field" aria-label="既定のプロファイル" style="width:min(280px,100%)"><option value="">未設定（エージェントの既定を使う）</option><option value="default">default</option><option value="rust-dev" selected>rust-dev</option><option value="data-import">data-import</option></select></div>
               </div>
               <div class="set-group">
                 <div class="set-head">作業の進め方</div>
@@ -2299,7 +2348,7 @@
               <div class="rowitem">
                 <span class="pm-face"><span class="dot wait"></span></span>
                 <div class="grow"><div class="t">秦泉寺 章夫 <span class="rel">· あなたの PM · Claude Code（ツール）</span></div><div class="d">このプロジェクトも見ています · 判断待ち 1件を運んでいます</div>
-                  <div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>速め</b></span><span class="trait">性格 <b>調整と報告を重点に</b></span></div></div>
+                  <div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>速め</b></span><span class="trait">性格 <b>調整と報告を重点に</b></span><span class="trait">プロファイル <b>data-import（プロジェクトの既定）</b></span></div></div>
                 <span class="badge b-wait">判断待ち 1件</span>
                 <button class="btn ghost" type="button" data-openpage="start">ホームで相談する</button>
               </div>
@@ -2308,7 +2357,7 @@
                 <div class="grow">
                   <div class="t">安藤 健二 <span class="rel">· Claude Code（ツール）</span></div>
                   <div class="d">作業中：#130、レース結果の取り込み · #121 は判断待ちで停止中</div>
-                  <div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>速め</b></span><span class="trait">性格 <b>データの調査と取り込みを重点に</b></span></div>
+                  <div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>速め</b></span><span class="trait">性格 <b>データの調査と取り込みを重点に</b></span><span class="trait">プロファイル <b>data-import（プロジェクトの既定）</b></span></div>
                   <div class="use"><div class="bar"><i style="width:31%"></i></div><span>Claude Code 1 — 週間31%使用 · 木曜6:00にリセット</span></div>
                 </div>
                 <span class="badge b-run">作業中</span>
@@ -2430,8 +2479,8 @@
               <p class="h-sub">KeibaDB の動作ログです。表示中 212件 / 全 212件。</p>
               <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
                 <input class="field" style="flex:1;min-width:200px" type="text" placeholder="ログを探す…" aria-label="ログを探す">
-                <button class="btn" type="button">範囲：プロジェクト ▾</button>
-                <button class="btn" type="button">重要度：Debug 以上 ▾</button>
+                <button class="btn" type="button" data-menu="範囲：プロジェクト,範囲：端末全体">範囲：プロジェクト ▾</button>
+                <button class="btn" type="button" data-menu="重要度：Debug 以上,重要度：Info 以上,重要度：Warning 以上,重要度：Error のみ">重要度：Debug 以上 ▾</button>
                 <button class="btn primary" type="button">更新</button>
               </div>
               <div class="logline"><span class="sev warn">WARN</span><span class="lt">06:00:41</span><span class="lm">import — 形式の不一致を検出（対応表と食い違う行 3件）。取り込みを安全に止めました</span></div>
@@ -2452,6 +2501,10 @@
                 <div class="set-row"><div class="grow"><div class="t">自律実行（Autonomous）</div><div class="d2">人手の承認なしで、対象の課題を自動で実行します。</div></div><span class="switch" aria-hidden="true"></span></div>
                 <div class="set-row"><div class="grow"><div class="t">同時実行数（Max active）</div><div class="d2">同時に動かすエージェントの上限です。</div></div><input class="field" type="number" value="1" aria-label="同時実行数" style="width:80px"></div>
                 <div class="set-row"><div class="grow"><div class="t">詳細設定</div><div class="d2">試行上限・スタック判定・ハートビート間隔などの細かい調整値です。通常は変えません。</div></div><button class="btn" type="button" data-nav="k-settings-tuning">詳細設定を開く</button></div>
+              </div>
+              <div class="set-group">
+                <div class="set-head">プロファイル</div>
+                <div class="set-row"><div class="grow"><div class="t">既定のプロファイル</div><div class="d2">このプロジェクトで働く全エージェントに効く既定です。プロジェクトの既定が、エージェントの既定を上書きします。未設定のときは、各エージェントの既定が使われます。</div></div><select class="field" aria-label="既定のプロファイル" style="width:min(280px,100%)"><option value="">未設定（エージェントの既定を使う）</option><option value="default">default</option><option value="rust-dev">rust-dev</option><option value="data-import" selected>data-import</option></select></div>
               </div>
               <div class="set-group">
                 <div class="set-head">作業の進め方</div>
@@ -2639,7 +2692,7 @@
         <div class="content">
           <div class="screen-pane on" data-screen="profile-main">
             <p class="h-big">プロファイル</p>
-            <p class="h-sub">プロファイルは端末で定義し、エージェントに割り当てます。ここでは定義（環境変数などの中身）の一覧・追加・編集を管理します。どのエージェントに割り当てるかは、各エージェント設定で変えます。</p>
+            <p class="h-sub">プロファイルは端末で定義し、エージェントに割り当てます。ここでは定義（環境変数などの中身）の一覧・追加・編集を管理します。割り当てにはエージェントの既定とプロジェクトの既定があり、プロジェクトの既定がエージェントの既定を上書きします。</p>
             <div class="btnrow" style="margin-bottom:14px"><button class="btn primary" type="button" data-nav="profile-new">新しいプロファイル</button><button class="btn" type="button">一覧を更新</button></div>
             <div class="set-group">
               <div class="set-row"><div class="grow"><div class="t">default</div><div class="d2">既定のプロファイル · 環境変数の上書き 0件 · 割り当て：秦泉寺 章夫、姫野 大樹</div></div><button class="btn" type="button" data-nav="profile-edit">編集</button><button class="btn ghost" type="button" data-nav="profile-delete">削除</button></div>
@@ -2686,9 +2739,9 @@
             <table class="list" aria-label="rust-dev の環境変数（編集）">
               <thead><tr><th>キー</th><th>OS</th><th>扱い</th><th>値</th><th>実効値</th><th></th></tr></thead>
               <tbody>
-                <tr><td><input class="field" type="text" value="RUST_BACKTRACE" aria-label="キー" style="width:170px"></td><td>すべて</td><td><button class="btn" type="button">上書き ▾</button></td><td><input class="field" type="text" value="1" aria-label="値" style="width:120px"></td><td class="num">1</td><td><button class="btn ghost" type="button">削除</button></td></tr>
-                <tr><td><input class="field" type="text" value="CARGO_TERM_COLOR" aria-label="キー" style="width:170px"></td><td>すべて</td><td><button class="btn" type="button">上書き ▾</button></td><td><input class="field" type="text" value="always" aria-label="値" style="width:120px"></td><td class="num">always</td><td><button class="btn ghost" type="button">削除</button></td></tr>
-                <tr><td><input class="field" type="text" value="COMMAND_MODE" aria-label="キー" style="width:170px"></td><td>macOS</td><td><button class="btn" type="button">そのまま ▾</button></td><td><input class="field" type="text" value="" placeholder="（OS の値）" aria-label="値" style="width:120px"></td><td class="num">unix2003</td><td><button class="btn ghost" type="button">削除</button></td></tr>
+                <tr><td><input class="field" type="text" value="RUST_BACKTRACE" aria-label="キー" style="width:170px"></td><td>すべて</td><td><button class="btn" type="button" data-menu="上書き,そのまま,エラーにする">上書き ▾</button></td><td><input class="field" type="text" value="1" aria-label="値" style="width:120px"></td><td class="num">1</td><td><button class="btn ghost" type="button">削除</button></td></tr>
+                <tr><td><input class="field" type="text" value="CARGO_TERM_COLOR" aria-label="キー" style="width:170px"></td><td>すべて</td><td><button class="btn" type="button" data-menu="上書き,そのまま,エラーにする">上書き ▾</button></td><td><input class="field" type="text" value="always" aria-label="値" style="width:120px"></td><td class="num">always</td><td><button class="btn ghost" type="button">削除</button></td></tr>
+                <tr><td><input class="field" type="text" value="COMMAND_MODE" aria-label="キー" style="width:170px"></td><td>macOS</td><td><button class="btn" type="button" data-menu="そのまま,上書き,エラーにする">そのまま ▾</button></td><td><input class="field" type="text" value="" placeholder="（OS の値）" aria-label="値" style="width:120px"></td><td class="num">unix2003</td><td><button class="btn ghost" type="button">削除</button></td></tr>
               </tbody>
             </table>
             <p class="rel" style="margin-top:8px">扱いは「OS のまま／上書き／無効」から選びます。実効値は、この端末で実際に渡る値です。</p>
@@ -2732,8 +2785,8 @@
             <div class="set-group">
               <div class="set-head">計画</div>
               <div class="set-row"><div class="grow"><div class="t">ブランチ</div><div class="d2">work/issue-5561（develop から作ります）</div></div><button class="btn" type="button" data-nav="wizard-branch">変える</button></div>
-              <div class="set-row"><div class="grow"><div class="t">実行環境</div><div class="d2">ホスト</div></div><button class="btn" type="button">ホスト ▾</button></div>
-              <div class="set-row"><div class="grow"><div class="t">権限</div><div class="d2">通常（危険な操作は都度確認します）</div></div><button class="btn" type="button">通常 ▾</button></div>
+              <div class="set-row"><div class="grow"><div class="t">実行環境</div><div class="d2">ホスト</div></div><button class="btn" type="button" data-menu="ホスト,コンテナ,リモート">ホスト ▾</button></div>
+              <div class="set-row"><div class="grow"><div class="t">権限</div><div class="d2">通常（危険な操作は都度確認します）</div></div><button class="btn" type="button" data-menu="通常,自動で進める">通常 ▾</button></div>
             </div>
             <div class="btnrow" style="margin-top:16px"><button class="btn ghost" type="button" data-nav="wizard-step1">戻る</button><button class="btn" type="button" data-openpage="gwt" data-openscreen="g-works">やめる</button><button class="btn primary" type="button" data-nav="wizard-step3">確認へ進む</button></div>
           </div>
@@ -2988,7 +3041,7 @@
       if (envAdd) {
         envAdd.addEventListener("click", function () {
           var tr = document.createElement("tr");
-          tr.innerHTML = '<td><input class="field" type="text" value="" placeholder="キー" aria-label="キー" style="width:170px"></td><td>すべて</td><td><button class="btn" type="button">上書き ▾</button></td><td><input class="field" type="text" value="" placeholder="値" aria-label="値" style="width:120px"></td><td class="num"></td><td><button class="btn ghost" type="button">削除</button></td>';
+          tr.innerHTML = '<td><input class="field" type="text" value="" placeholder="キー" aria-label="キー" style="width:170px"></td><td>すべて</td><td><button class="btn" type="button" data-menu="上書き,そのまま,エラーにする">上書き ▾</button></td><td><input class="field" type="text" value="" placeholder="値" aria-label="値" style="width:120px"></td><td class="num"></td><td><button class="btn ghost" type="button">削除</button></td>';
           envBody.appendChild(tr);
           var keyInput = tr.querySelector("input");
           if (keyInput) keyInput.focus();
@@ -3152,6 +3205,253 @@
       if (ev.key === " " || ev.key === "Enter") { ev.preventDefault(); sw.classList.toggle("off"); syncSwitch(); }
     });
   });
+  /* ---- mock-wide button reactions (item 71): every button visibly reacts ---- */
+  var toastEl = document.createElement("div");
+  toastEl.className = "toast";
+  toastEl.setAttribute("role", "status");
+  document.body.appendChild(toastEl);
+  var toastTimer = null;
+  function showToast(msg) {
+    toastEl.textContent = msg;
+    toastEl.classList.add("show");
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { toastEl.classList.remove("show"); }, 2400);
+  }
+  /* chips: single-select within their group */
+  document.querySelectorAll(".chip").forEach(function (chip) {
+    if (chip.hasAttribute("data-tab")) return;
+    chip.addEventListener("click", function () {
+      var parent = chip.parentElement;
+      if (!parent) return;
+      parent.querySelectorAll(".chip").forEach(function (c) { c.classList.remove("on"); c.setAttribute("aria-pressed", "false"); });
+      chip.classList.add("on");
+      chip.setAttribute("aria-pressed", "true");
+    });
+  });
+  /* dropdown menus (data-menu="a,b,c") */
+  var openMenu = null;
+  function closeMenu() { if (openMenu) { openMenu.remove(); openMenu = null; } }
+  document.querySelectorAll("button[data-menu]").forEach(function (btn) {
+    btn.addEventListener("click", function (ev) {
+      ev.stopPropagation();
+      var wasOpen = openMenu && openMenu.dataset.for === btn.dataset.menu;
+      closeMenu();
+      if (wasOpen) return;
+      var pop = document.createElement("div");
+      pop.className = "menu-pop";
+      pop.dataset.for = btn.dataset.menu;
+      btn.dataset.menu.split(",").forEach(function (opt) {
+        var item = document.createElement("button");
+        item.type = "button";
+        item.className = "menu-item";
+        item.textContent = opt;
+        item.addEventListener("click", function () { btn.textContent = opt + " ▾"; closeMenu(); });
+        pop.appendChild(item);
+      });
+      document.body.appendChild(pop);
+      var r = btn.getBoundingClientRect();
+      pop.style.left = Math.max(4, Math.min(r.left, window.innerWidth - 190)) + "px";
+      pop.style.top = (r.bottom + window.scrollY + 4) + "px";
+      pop.style.position = "absolute";
+      openMenu = pop;
+    });
+  });
+  document.addEventListener("click", function (ev) { if (openMenu && !openMenu.contains(ev.target)) closeMenu(); });
+  /* PM assignment wiring (ledger + agent settings + header/home name) */
+  var AGENT_NAMES = { jinsenji: "秦泉寺 章夫", oda: "小田 洋平", himeno: "姫野 大樹", ando: "安藤 健二", hara: "原 和正", suzuki: "鈴木 和斗", hamada: "濱田 嵩翔" };
+  var pmDesignated = "秦泉寺 章夫";
+  function ledgerRowName(row) {
+    var t = row.querySelector(".t");
+    if (!t) return "";
+    var clone = t.cloneNode(true);
+    clone.querySelectorAll(".badge").forEach(function (b) { b.remove(); });
+    return clone.textContent.trim().replace(/^\d+\.\s*/, "");
+  }
+  function renderPM() {
+    document.querySelectorAll('[data-screen="agents-ledger"] .set-row').forEach(function (row) {
+      var name = ledgerRowName(row);
+      if (!name) return;
+      var t = row.querySelector(".t");
+      t.querySelectorAll(".badge").forEach(function (b) { b.remove(); });
+      var label = "";
+      if (name === pmDesignated) label = "PM 優先指定";
+      else if (!pmDesignated && name === "秦泉寺 章夫") label = "PM（先頭）";
+      if (label) {
+        var b = document.createElement("span");
+        b.className = "badge b-plan";
+        b.textContent = label;
+        t.appendChild(document.createTextNode(" "));
+        t.appendChild(b);
+      }
+      row.querySelectorAll("button[data-pmbtn]").forEach(function (btn) { btn.textContent = name === pmDesignated ? "優先指定を外す" : "PM に割り当てる"; });
+    });
+    Object.keys(AGENT_NAMES).forEach(function (key) {
+      var pane = document.querySelector('[data-screen="agent-edit-' + key + '"]');
+      if (!pane) return;
+      pane.querySelectorAll("button[data-pmbtn]").forEach(function (btn) { btn.textContent = AGENT_NAMES[key] === pmDesignated ? "優先指定を外す" : "この人を PM に割り当てる"; });
+    });
+    var eff = pmDesignated || "秦泉寺 章夫";
+    document.querySelectorAll(".hpm .hname").forEach(function (el) { el.textContent = eff; });
+    document.querySelectorAll(".chat-head .nm").forEach(function (el) { el.textContent = eff; });
+  }
+  document.querySelectorAll('[data-screen="agents-ledger"] .set-row').forEach(function (row) {
+    var name = ledgerRowName(row);
+    row.querySelectorAll("button").forEach(function (btn) {
+      var tx = btn.textContent.trim();
+      if (tx === "PM に割り当てる" || tx === "優先指定を外す") {
+        btn.setAttribute("data-pmbtn", "1");
+        btn.addEventListener("click", function () {
+          if (pmDesignated === name) { pmDesignated = null; showToast("PM の優先指定を外しました"); }
+          else { pmDesignated = name; showToast(name + " を PM に割り当てました"); }
+          renderPM();
+        });
+      }
+    });
+  });
+  Object.keys(AGENT_NAMES).forEach(function (key) {
+    var pane = document.querySelector('[data-screen="agent-edit-' + key + '"]');
+    if (!pane) return;
+    pane.querySelectorAll("button").forEach(function (btn) {
+      var tx = btn.textContent.trim();
+      if (tx === "この人を PM に割り当てる" || tx === "優先指定を外す") {
+        btn.setAttribute("data-pmbtn", "1");
+        btn.addEventListener("click", function () {
+          if (pmDesignated === AGENT_NAMES[key]) { pmDesignated = null; showToast("PM の優先指定を外しました"); }
+          else { pmDesignated = AGENT_NAMES[key]; showToast(AGENT_NAMES[key] + " を PM に割り当てました"); }
+          renderPM();
+        });
+      }
+    });
+  });
+  renderPM();
+  /* notifications: delete rows */
+  var notifPane = document.querySelector('[data-screen="notifications-main"]');
+  if (notifPane) notifPane.addEventListener("click", function (ev) {
+    var btn = ev.target.closest("button");
+    if (!btn) return;
+    var tx = btn.textContent.trim();
+    if (tx === "消す") { var row = btn.closest(".lrow"); if (row) { row.remove(); showToast("通知を消しました"); } }
+    else if (tx === "すべて消す") {
+      notifPane.querySelectorAll(".lrow").forEach(function (r) { r.remove(); });
+      if (!notifPane.querySelector(".lrow") && !notifPane.querySelector("[data-nonotif]")) {
+        var p = document.createElement("p");
+        p.className = "rel";
+        p.setAttribute("data-nonotif", "1");
+        p.textContent = "通知はありません。";
+        notifPane.appendChild(p);
+      }
+      showToast("すべての通知を消しました");
+    }
+  });
+  /* candidates: add / delete rows */
+  document.querySelectorAll('[data-screen="g-candidates"], [data-screen="k-candidates"]').forEach(function (pane) {
+    pane.addEventListener("click", function (ev) {
+      var btn = ev.target.closest("button");
+      if (!btn) return;
+      var tx = btn.textContent.trim();
+      if (tx === "削除") { var row = btn.closest(".set-row"); if (row) { row.remove(); showToast("候補を削除しました"); } }
+      else if (tx === "追加") {
+        var group = pane.querySelector(".set-group");
+        var addRow = btn.closest(".set-row");
+        var n = group.querySelectorAll(".set-row").length;
+        var nr = document.createElement("div");
+        nr.className = "set-row";
+        nr.innerHTML = '<div class="grow"><div class="t">' + n + '. 新しい候補</div><div class="d2">Session mode：新規 · Runtime：既定 · 権限スキップ：なし · Fast mode：なし · 優先：すべて</div></div><button class="btn ghost" type="button">削除</button>';
+        group.insertBefore(nr, addRow);
+        showToast("候補を追加しました");
+      }
+    });
+  });
+  /* sub-issue add / github import: one-shot state changes */
+  document.querySelectorAll("button").forEach(function (b) {
+    var tx = b.textContent.trim();
+    if (tx === "子にする") b.addEventListener("click", function () { if (b.textContent.trim() === "子にしました") return; b.textContent = "子にしました"; showToast("子として追加しました"); });
+    else if (tx === "取り込む") b.addEventListener("click", function () { if (b.textContent.trim() === "取り込み済み") return; b.textContent = "取り込み済み"; showToast("取り込みました"); });
+    else if (tx === "サインインを開く") b.addEventListener("click", function () {
+      if (b.textContent.trim() === "サインイン済み") { showToast("すでにサインイン済みです"); return; }
+      b.textContent = "サインイン済み";
+      b.classList.remove("primary");
+      showToast("サインインが完了しました");
+    });
+  });
+  /* projects list: rows without an in-mock destination open in a new tab */
+  document.querySelectorAll(".prow").forEach(function (row) {
+    row.querySelectorAll("button").forEach(function (b) {
+      if (b.textContent.trim() === "開く" && !b.hasAttribute("data-openpage")) {
+        b.addEventListener("click", function () {
+          var tag = row.querySelector(".ptag");
+          showToast((tag ? tag.textContent.trim() : "プロジェクト") + " は新しいタブで開きます");
+        });
+      }
+    });
+  });
+  /* wizard step 1: pick the person who configures */
+  document.querySelectorAll('[data-screen="wizard-step1"] .set-row').forEach(function (row) {
+    row.querySelectorAll("button").forEach(function (btn) {
+      if (btn.textContent.trim() !== "この人に変える") return;
+      btn.addEventListener("click", function () {
+        var pane = row.closest(".screen-pane");
+        pane.querySelectorAll("button").forEach(function (x) { if (x.textContent.trim() === "選択中") { x.textContent = "この人に変える"; x.classList.remove("primary"); } });
+        btn.textContent = "選択中";
+        btn.classList.add("primary");
+        var t = row.querySelector(".t");
+        showToast((t ? t.textContent.trim().split(" —")[0] : "この人") + " に変えました");
+      });
+    });
+  });
+  /* board: post the composer text */
+  document.querySelectorAll('[data-screen="g-board"], [data-screen="k-board"]').forEach(function (pane) {
+    pane.querySelectorAll("button").forEach(function (btn) {
+      if (btn.textContent.trim() !== "投稿") return;
+      btn.addEventListener("click", function () {
+        var input = btn.parentElement.querySelector("input.field");
+        var text = input ? input.value.trim() : "";
+        if (!text) { showToast("本文を入力してください"); return; }
+        var post = document.createElement("div");
+        post.className = "post";
+        post.innerHTML = '<div class="meta">あなた · <span class="badge b-plan">投稿</span> · たった今</div><div class="body"></div>';
+        post.querySelector(".body").textContent = text;
+        var anchor = pane.querySelector("p.rel") || btn.parentElement;
+        anchor.parentElement.insertBefore(post, anchor);
+        input.value = "";
+        showToast("投稿しました");
+      });
+    });
+  });
+  /* fallback: any button still without a visible reaction gets an acknowledgement toast */
+  function toastFor(label) {
+    var rules = [
+      ["設定を保存する", "設定を保存しました"], ["保存して送信する", "保存して送信しました"], ["保存", "保存しました"],
+      ["状態を更新", "状態を更新しました"], ["範囲ごとに再構築", "範囲ごとに再構築を開始しました"], ["再構築", "再構築を開始しました"],
+      ["ラベルを取り直す", "ラベルを取り直しました"], ["監査を取り直す", "監査を取り直しました"], ["再生成する", "再生成しました"],
+      ["一覧を更新", "一覧を更新しました"], ["もう一度確認", "確認しました"], ["やり直す", "やり直しました"],
+      ["更新する", "更新を開始しました"], ["この版に更新", "この版への更新を開始しました"], ["更新", "更新しました"],
+      ["複製する", "複製を開始しました"], ["フォルダを選ぶ", "ファイルを選ぶ画面を開きました"], ["保存先を選ぶ", "保存先を選ぶ画面を開きました"],
+      ["画像をアップロード", "画像を選ぶ画面を開きました"], ["サインアウト", "サインアウトしました"], ["サインイン", "サインインしました"],
+      ["配布ページを開く", "配布ページを開きました"], ["今すぐ再起動して適用", "再起動して適用します"], ["次回起動時に適用", "次回起動時に適用します"],
+      ["前の版に戻す", "前の版に戻します"], ["片付けを実行する", "片付けを実行しました"], ["承認して始める", "承認して始めました"],
+      ["変更を求める", "変更を求めました"], ["対応表を直して続ける", "対応表を直して続けます"], ["取り込みを止める", "取り込みを止めました"],
+      ["検索", "検索しました"], ["開く", "開きました"], ["あとで", "あとで対応します"]
+    ];
+    for (var i = 0; i < rules.length; i++) if (label.indexOf(rules[i][0]) !== -1) return rules[i][1];
+    return "『" + label + "』を実行しました";
+  }
+  document.addEventListener("click", function (ev) {
+    var btn = ev.target.closest ? ev.target.closest("button") : null;
+    if (!btn || btn.disabled) return;
+    if (btn.classList.contains("chip") || btn.hasAttribute("data-menu") || btn.hasAttribute("data-startstate")) return;
+    if (btn.closest(".statebar")) return;
+    function bodyHash() {
+      var s = document.body.innerHTML;
+      var h = 5381;
+      for (var i = 0; i < s.length; i += 7) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+      return h + ":" + s.length;
+    }
+    var before = bodyHash();
+    setTimeout(function () {
+      if (before === bodyHash() && !toastEl.classList.contains("show")) showToast(toastFor(btn.textContent.trim()));
+    }, 320);
+  }, true);
   /* fullscreen mode: app screen only (?full=1 or the enter button) */
   var fullEnter = document.getElementById("fullEnter");
   var fullExit = document.getElementById("fullExit");
