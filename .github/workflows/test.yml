@@ -1236,14 +1236,28 @@ jobs:
         env:
           GWT_WINDOWS_AGENT_E2E_CREDENTIAL_FREE: "1"
           CARGO_PROFILE_DEV_DEBUG: "0"
+          GWT_FLAKE_TARGETS: ${{ needs.source-sync.outputs.flake_targets }}
         run: |
           status=0
+          restore_runs=1
+          # Exercise 20 real cold restores when the target changes, without
+          # repeating the rest of the installed-provider matrix.
+          if [[ " $GWT_FLAKE_TARGETS " == *" gwt|test|windows_agent_launch_e2e "* ]]; then
+            restore_runs=10
+          fi
           providers=(codex claude)
           pids=()
           # Fixtures isolate HOME, npm state, registry/server ports, and sessions.
           for provider in codex claude; do
-            GWT_WINDOWS_AGENT_PROVIDER="$provider" \
-              cargo test -p gwt --test windows_agent_launch_e2e -- --ignored --test-threads=1 --nocapture > "$RUNNER_TEMP/windows-agent-${provider}.log" 2>&1 &
+            (
+              export GWT_WINDOWS_AGENT_PROVIDER="$provider"
+              cargo test -p gwt --test windows_agent_launch_e2e -- --ignored --test-threads=1 --nocapture || exit $?
+              for ((attempt=2; attempt<=restore_runs; attempt++)); do
+                echo "Windows startup restore $provider $attempt/$restore_runs"
+                cargo test -p gwt --test windows_agent_launch_e2e -- --ignored --test-threads=1 --nocapture \
+                  --exact windows_startup_restored_provider_tree_closes_through_public_gui || exit $?
+              done
+            ) > "$RUNNER_TEMP/windows-agent-${provider}.log" 2>&1 &
             pids+=("$!")
           done
           # Keep both outcomes and the existing provider-specific diagnostics.
@@ -1251,7 +1265,13 @@ jobs:
             provider="${providers[$index]}"
             echo "::group::windows installed agent launch E2E ${provider}"
             if wait "${pids[$index]}"; then
-              echo "ok ${provider}/installed"
+              observed=$(grep -cF 'Windows startup restore acceptance:' "$RUNNER_TEMP/windows-agent-${provider}.log" || true)
+              if [ "$observed" -eq "$restore_runs" ]; then
+                echo "ok ${provider}/installed"
+              else
+                echo "::error::Expected $restore_runs startup restore receipts for $provider, got $observed"
+                status=1
+              fi
             else
               echo "::error::windows agent launch E2E failed for ${provider}/installed"
               status=1
