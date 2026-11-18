@@ -1,7 +1,7 @@
 fn main() {
     emit_build_stamp();
 
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", not(test)))]
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
         let source = "src/issue_monitor/switch_checkpoint/process_info.c";
         println!("cargo:rerun-if-changed={source}");
