@@ -1936,6 +1936,10 @@
                 <div class="body">報告：#7048（共有状態モデル）の実装が入り、レビュー待ちになりました。残る判断は #7007 の計画承認だけです。PM の報告は、今後はこの掲示板に残します。</div>
               </div>
               <div class="post">
+                <div class="meta"><span class="pm-face sm"></span>秦泉寺 章夫 · <span class="badge b-run">報告</span> · 11:48</div>
+                <div class="body">競合：#7620 は別の端末でも開始されていたため、この端末のセッションを止め、待ち行列から外しました。</div>
+              </div>
+              <div class="post">
                 <div class="meta"><span class="pm-face sm"></span>秦泉寺 章夫 · <span class="badge b-run">判断</span> · 12:12</div>
                 <div class="body">判断：設定のセクションは1つの PR で出します（#7039）。</div>
               </div>
@@ -2083,11 +2087,11 @@
               <div class="set-group">
                 <div class="set-head">自律駆動</div>
                 <div class="set-row"><div class="grow"><div class="t">状態</div><div class="d2">プロジェクト一覧の開始・停止と同じ状態です。停止すると、新しい割り当てと PM の巡回が止まります。</div></div><span class="loopst run" data-loopchip="gwt">自律駆動中</span></div>
-                <div class="set-row"><div class="grow"><div class="t">自動で補充する</div><div class="d2">待ち行列が補充の上限未満のとき、未着手の課題から、取り込み条件に合うものを自動で補充します。</div></div><span class="switch" aria-hidden="true"></span></div>
-                <div class="set-row"><div class="grow"><div class="t">補充の上限</div><div class="d2">待ち行列に保持する課題数の目標です。0 のまま自動補充をオンにすると、既定の 3 になります。</div></div><input class="field" type="number" value="3" aria-label="補充の上限" style="width:80px"></div>
+                
+                <div class="set-row"><div class="grow"><div class="t">補充の上限</div><div class="d2">待ち行列に保持する課題数の目標です。0 のときは既定の 3 になります。</div></div><input class="field" type="number" value="3" aria-label="補充の上限" style="width:80px"></div>
                 
                 <div class="set-row"><div class="grow"><div class="t">同時実行数</div><div class="d2">同時に動かすエージェントの上限です。</div></div><input class="field" type="number" value="2" aria-label="同時実行数" style="width:80px"></div>
-                <div class="set-row" data-rownav="g-settings-tuning"><div class="grow"><div class="t">取り込み条件</div><div class="d2">取り込むのは Open の課題だけです。gwt-hold ラベルが付いた課題は除きます。条件の変更は詳細設定で行います。</div></div></div>
+                <div class="set-row" data-rownav="g-settings-tuning"><div class="grow"><div class="t">取り込み条件</div><div class="d2">取り込むのは、Open の課題で資格ラベルが付いたものだけです。gwt-hold ラベルが付いた課題は除きます。条件の変更は詳細設定で行います。</div></div></div>
                 <div class="set-row" data-rownav="g-settings-tuning"><div class="grow"><div class="t">詳細設定</div><div class="d2">試行上限・スタック判定・ハートビート間隔などの細かい調整値です。通常は変えません。</div></div></div>
               </div>
               <div class="set-group">
@@ -2146,7 +2150,7 @@
               <div class="set-group">
                 <div class="set-head">取り込み条件</div>
                 <div class="set-row"><div class="grow"><div class="t">取り込む課題</div><div class="d2">Open の課題だけを取り込みます。Closed は対象にしません。</div></div></div>
-                <div class="set-row"><div class="grow"><div class="t">対象ラベル</div><div class="d2">このラベルが付いた課題だけを取り込みます。空欄のときは、すべての課題が対象です。</div></div><input class="field" type="text" value="" aria-label="対象ラベル" style="width:min(220px,100%)"></div>
+                <div class="set-row"><div class="grow"><div class="t">資格ラベル</div><div class="d2">待ち行列に入れる資格のラベルです。このラベルが付いた課題だけを取り込みます。取り込んだ端末がラベルの状態を変えるため、他の端末は取り込みません。</div></div><input class="field" type="text" value="" aria-label="資格ラベル" style="width:min(220px,100%)"></div>
                 <div class="set-row"><div class="grow"><div class="t">除外ラベル</div><div class="d2">このラベルが付いた課題は取り込みません。Hold（gwt-hold）が付いた課題は、取り込みと起動の対象から外れます。</div></div><input class="field" type="text" value="gwt-hold" aria-label="除外ラベル" style="width:min(220px,100%)"></div>
               </div>
               <div class="set-group">
@@ -2157,7 +2161,7 @@
               </div>
               <div class="set-group">
                 <div class="set-head">監視の間隔</div>
-                <div class="set-row"><div class="grow"><div class="t">ポーリング間隔（秒）</div><div class="d2">課題のキューを見に行く間隔の秒数です。</div></div><input class="field" type="number" placeholder="秒" aria-label="ポーリング間隔" style="width:90px"></div>
+                <div class="set-row"><div class="grow"><div class="t">ポーリング間隔（秒）</div><div class="d2">待ち行列を見に行く間隔の秒数です。</div></div><input class="field" type="number" placeholder="秒" aria-label="ポーリング間隔" style="width:90px"></div>
                 <div class="set-row"><div class="grow"><div class="t">クレームのハートビート間隔（秒）</div><div class="d2">課題のクレーム（担当の確保）を保つためのハートビートの間隔です。</div></div><input class="field" type="number" placeholder="秒" aria-label="クレームのハートビート間隔" style="width:90px"></div>
                 <div class="set-row"><div class="grow"><div class="t">クレームの TTL（秒）</div><div class="d2">ハートビートが途絶えたクレームが失効するまでの秒数です。</div></div><input class="field" type="number" placeholder="秒" aria-label="クレームの TTL" style="width:90px"></div>
                 <div class="set-row"><div class="grow"><div class="t">起動を止める使用率の閾値（%）</div><div class="d2">プロバイダの使用率がこの値以上になると、新しい起動を止めます。</div></div><input class="field" type="number" placeholder="%" aria-label="起動を止める使用率の閾値" style="width:90px"></div>
@@ -2626,11 +2630,11 @@
                 <div class="set-head">自律駆動</div>
                 <div class="set-row"><div class="grow"><div class="t">状態</div><div class="d2">プロジェクト一覧の開始・停止と同じ状態です。停止待ちの間は、新しい割り当てと PM の巡回が止まります。</div></div><span class="loopst drain" data-loopchip="keibadb">停止待ち</span></div>
                 <div class="set-row"><div class="grow"><div class="t">残っている作業</div><div class="d2">作業中のエージェント 2件の完了待ちです。全員が終わると「停止中」になります。</div></div></div>
-                <div class="set-row"><div class="grow"><div class="t">自動で補充する</div><div class="d2">待ち行列が補充の上限未満のとき、未着手の課題から、取り込み条件に合うものを自動で補充します。</div></div><span class="switch" aria-hidden="true"></span></div>
-                <div class="set-row"><div class="grow"><div class="t">補充の上限</div><div class="d2">待ち行列に保持する課題数の目標です。0 のまま自動補充をオンにすると、既定の 3 になります。</div></div><input class="field" type="number" value="3" aria-label="補充の上限" style="width:80px"></div>
+                
+                <div class="set-row"><div class="grow"><div class="t">補充の上限</div><div class="d2">待ち行列に保持する課題数の目標です。0 のときは既定の 3 になります。</div></div><input class="field" type="number" value="3" aria-label="補充の上限" style="width:80px"></div>
                 
                 <div class="set-row"><div class="grow"><div class="t">同時実行数</div><div class="d2">同時に動かすエージェントの上限です。</div></div><input class="field" type="number" value="1" aria-label="同時実行数" style="width:80px"></div>
-                <div class="set-row" data-rownav="k-settings-tuning"><div class="grow"><div class="t">取り込み条件</div><div class="d2">取り込むのは Open の課題だけです。gwt-hold ラベルが付いた課題は除きます。条件の変更は詳細設定で行います。</div></div></div>
+                <div class="set-row" data-rownav="k-settings-tuning"><div class="grow"><div class="t">取り込み条件</div><div class="d2">取り込むのは、Open の課題で資格ラベルが付いたものだけです。gwt-hold ラベルが付いた課題は除きます。条件の変更は詳細設定で行います。</div></div></div>
                 <div class="set-row" data-rownav="k-settings-tuning"><div class="grow"><div class="t">詳細設定</div><div class="d2">試行上限・スタック判定・ハートビート間隔などの細かい調整値です。通常は変えません。</div></div></div>
               </div>
               <div class="set-group">
@@ -2687,7 +2691,7 @@
               <div class="set-group">
                 <div class="set-head">取り込み条件</div>
                 <div class="set-row"><div class="grow"><div class="t">取り込む課題</div><div class="d2">Open の課題だけを取り込みます。Closed は対象にしません。</div></div></div>
-                <div class="set-row"><div class="grow"><div class="t">対象ラベル</div><div class="d2">このラベルが付いた課題だけを取り込みます。空欄のときは、すべての課題が対象です。</div></div><input class="field" type="text" value="" aria-label="対象ラベル" style="width:min(220px,100%)"></div>
+                <div class="set-row"><div class="grow"><div class="t">資格ラベル</div><div class="d2">待ち行列に入れる資格のラベルです。このラベルが付いた課題だけを取り込みます。取り込んだ端末がラベルの状態を変えるため、他の端末は取り込みません。</div></div><input class="field" type="text" value="" aria-label="資格ラベル" style="width:min(220px,100%)"></div>
                 <div class="set-row"><div class="grow"><div class="t">除外ラベル</div><div class="d2">このラベルが付いた課題は取り込みません。Hold（gwt-hold）が付いた課題は、取り込みと起動の対象から外れます。</div></div><input class="field" type="text" value="gwt-hold" aria-label="除外ラベル" style="width:min(220px,100%)"></div>
               </div>
               <div class="set-group">
@@ -2698,7 +2702,7 @@
               </div>
               <div class="set-group">
                 <div class="set-head">監視の間隔</div>
-                <div class="set-row"><div class="grow"><div class="t">ポーリング間隔（秒）</div><div class="d2">課題のキューを見に行く間隔の秒数です。</div></div><input class="field" type="number" placeholder="秒" aria-label="ポーリング間隔" style="width:90px"></div>
+                <div class="set-row"><div class="grow"><div class="t">ポーリング間隔（秒）</div><div class="d2">待ち行列を見に行く間隔の秒数です。</div></div><input class="field" type="number" placeholder="秒" aria-label="ポーリング間隔" style="width:90px"></div>
                 <div class="set-row"><div class="grow"><div class="t">クレームのハートビート間隔（秒）</div><div class="d2">課題のクレーム（担当の確保）を保つためのハートビートの間隔です。</div></div><input class="field" type="number" placeholder="秒" aria-label="クレームのハートビート間隔" style="width:90px"></div>
                 <div class="set-row"><div class="grow"><div class="t">クレームの TTL（秒）</div><div class="d2">ハートビートが途絶えたクレームが失効するまでの秒数です。</div></div><input class="field" type="number" placeholder="秒" aria-label="クレームの TTL" style="width:90px"></div>
                 <div class="set-row"><div class="grow"><div class="t">起動を止める使用率の閾値（%）</div><div class="d2">プロバイダの使用率がこの値以上になると、新しい起動を止めます。</div></div><input class="field" type="number" placeholder="%" aria-label="起動を止める使用率の閾値" style="width:90px"></div>
