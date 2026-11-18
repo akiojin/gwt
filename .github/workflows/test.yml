@@ -1255,15 +1255,20 @@ jobs:
           # Keep both outcomes and the existing provider-specific diagnostics.
           for index in "${!pids[@]}"; do
             provider="${providers[$index]}"
-            log="$RUNNER_TEMP/windows-agent-${provider}.log"
             echo "::group::windows installed agent launch E2E ${provider}"
-            if wait "${pids[$index]}" && [ "$(grep -cF 'Windows startup restore acceptance:' "$log" || true)" -eq "$restore_runs" ]; then
-              echo "ok ${provider}/installed"
+            if wait "${pids[$index]}"; then
+              observed=$(grep -cF 'Windows startup restore acceptance:' "$RUNNER_TEMP/windows-agent-${provider}.log" || true)
+              if [ "$observed" -eq "$restore_runs" ]; then
+                echo "ok ${provider}/installed"
+              else
+                echo "::error::Expected $restore_runs startup restore receipts for $provider, got $observed"
+                status=1
+              fi
             else
               echo "::error::windows agent launch E2E failed for ${provider}/installed"
               status=1
             fi
-            cat "$log"
+            cat "$RUNNER_TEMP/windows-agent-${provider}.log"
             echo "::endgroup::"
           done
           exit "$status"
