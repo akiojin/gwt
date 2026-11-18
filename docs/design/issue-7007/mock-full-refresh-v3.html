@@ -162,6 +162,18 @@
   .actdot{width:9px;height:9px;border-radius:50%;background:var(--accent);display:block}
   .actdot.off{background:var(--ink3)}
   .tokchip{font-size:12px;font-weight:700;color:var(--ink2);border:1px solid var(--line2);border-radius:999px;padding:3px 9px;background:var(--panel);white-space:nowrap}
+  .kanban{display:grid;grid-template-columns:repeat(5,minmax(185px,1fr));gap:10px;align-items:start;overflow-x:auto;padding-bottom:6px}
+  .kcol{background:var(--panel2);border-radius:12px;padding:8px;min-height:110px}
+  .kcol h4{font-size:12.5px;font-weight:800;color:var(--ink2);margin:2px 2px 8px}
+  .kcard{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px;margin-bottom:8px}
+  .kcard .t{font-weight:700;font-size:13.5px;line-height:1.45}
+  .kcard .d{font-size:12.3px;color:var(--ink2);margin-top:3px;line-height:1.5}
+  .kagent{display:flex;align-items:center;gap:7px;margin-bottom:7px}
+  .kagent .kn{font-weight:700;font-size:12.8px;white-space:nowrap}
+  .kfoot{display:flex;align-items:center;gap:8px;margin-top:8px;flex-wrap:wrap}
+  .kcard .btnrow{margin-top:9px}
+  .kempty{font-size:12.3px;color:var(--ink3);padding:2px}
+  .replyrow{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
   .btnrow{display:flex;gap:8px;flex-wrap:wrap}
   .rel{color:var(--ink3);font-size:12px}
   .bar{height:8px;border-radius:99px;background:var(--gray-soft);overflow:hidden}
@@ -531,7 +543,7 @@
                         <dt>影響範囲</dt><dd>KeibaDB の取り込みだけです。他のプロジェクトには影響しません。</dd>
                       </dl>
                       <div class="btnrow"><button class="btn primary" type="button" data-say="対応表を直して、取り込みを続けて" data-reply="かしこまりました。対応表の修正を KeibaDB の担当に回しました。取り込みはそのまま続けます。">対応表を直して続ける</button><button class="btn" type="button" data-say="取り込みを止めて" data-reply="かしこまりました。KeibaDB の取り込みを安全に止めました。再開の準備ができたら声をかけてください。">取り込みを止める</button><button class="btn ghost" type="button" data-openpage="keibadb" data-openscreen="k-decide">KeibaDB の判断で決める</button></div>
-                      <div class="treply"><input type="text" placeholder="この話題に補足を書く…" aria-label="この話題への返信"><button class="btn" type="button" data-topicreply>返信</button></div>
+                      <div class="treply"><input type="text" placeholder="この話題に返信する…" aria-label="この話題への返信"><button class="btn" type="button" data-topicreply>返信</button></div>
                     </section>
                     <section class="tcard">
                       <div class="top"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><span class="badge b-wait">未解決 · 判断待ち</span><span class="rel">1時間待ち</span></div>
@@ -546,7 +558,7 @@
                         <dt>影響範囲</dt><dd>gwt の全画面。作業中のセッションは影響を受けません。</dd>
                       </dl>
                       <div class="btnrow"><button class="btn primary" type="button" data-say="#7007 の計画を承認して" data-reply="かしこまりました。承認を記録しました。担当の 姫野 大樹 がそのまま再開します。">承認して始める</button><button class="btn" type="button" data-say="#7007 の計画に変更を求めて" data-reply="かしこまりました。変更点の候補をまとめます。決まったら、またボタンで選んでください。">変更を求める</button><button class="btn ghost" type="button" data-openpage="gwt" data-openscreen="g-decide">gwt の判断で決める</button></div>
-                      <div class="treply"><input type="text" placeholder="この話題に補足を書く…" aria-label="この話題への返信"><button class="btn" type="button" data-topicreply>返信</button></div>
+                      <div class="treply"><input type="text" placeholder="この話題に返信する…" aria-label="この話題への返信"><button class="btn" type="button" data-topicreply>返信</button></div>
                     </section>
                     <section class="tcard">
                       <div class="top"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><span class="badge b-queue">未解決 · 相談中</span><span class="rel">25分前から</span></div>
@@ -1605,7 +1617,7 @@
                 <button class="btn" type="button" data-nav="g-issue">課題を開く</button>
               </div>
               <div class="lrow">
-                <div class="grow"><div class="t">新しい画面の共有状態モデル（#7048）</div><div class="d">実装 · 小田 洋平 が作業中 · レビュー待ち · 子課題 4件 · 完了 2件</div><div class="bar" style="margin-top:5px;max-width:340px"><i style="width:50%"></i></div></div>
+                <div class="grow"><div class="t">新しい画面の共有状態モデル（#7048）</div><div class="d">実装 · 小田 洋平 が作業中 · レビュー待ち · タスク「共有状態モデル」の配下 · 子課題 4件 · 完了 2件</div><div class="bar" style="margin-top:5px;max-width:340px"><i style="width:50%"></i></div></div>
                 <span class="badge b-run">実行中</span>
               </div>
               <div class="lrow">
@@ -1614,7 +1626,7 @@
                 <button class="btn" type="button" data-nav="g-task">タスクで見る</button>
               </div>
               <div class="lrow">
-                <div class="grow"><div class="t">gwtd が落ちない問題（#7541）</div><div class="d">バグ · 修正はマージ済み · リリース後の実機確認待ち</div></div>
+                <div class="grow"><div class="t">gwtd が落ちない問題（#7541）</div><div class="d">バグ · タスク「gwtd が落ちない問題の修正」の配下 · 修正はマージ済み · リリース後の実機確認待ち</div></div>
                 <span class="badge b-wait">確認待ち</span>
               </div>
               <p class="rel" style="margin-top:12px">+ gwt の課題があと127件 — 止まっているもの・実行中のものが上に来ます。</p>
@@ -1669,32 +1681,7 @@
             <div class="screen-pane" data-screen="g-works">
               <p class="h-big">作業</p>
               <p class="h-sub">今 gwt で動いているセッションです。セッションの実物はいつでもターミナル表示で見られます。</p>
-              <div class="lrow">
-                <span class="ava working"><img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+PHJlY3Qgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiBmaWxsPSIjMjU2M2ViIi8+PHBhdGggZD0iTTE4IDI2IEwxNCAxMiBMMjggMTkgWiIgZmlsbD0iI2ZmZiIvPjxwYXRoIGQ9Ik00NiAyNiBMNTAgMTIgTDM2IDE5IFoiIGZpbGw9IiNmZmYiLz48Y2lyY2xlIGN4PSIzMiIgY3k9IjM4IiByPSIxNyIgZmlsbD0iI2ZmZiIvPjxjaXJjbGUgY3g9IjI2IiBjeT0iMzYiIHI9IjIuNCIgZmlsbD0iIzFlM2E1ZiIvPjxjaXJjbGUgY3g9IjM4IiBjeT0iMzYiIHI9IjIuNCIgZmlsbD0iIzFlM2E1ZiIvPjxwYXRoIGQ9Ik0yOSA0MyBRMzIgNDUgMzUgNDMiIHN0cm9rZT0iIzFlM2E1ZiIgc3Ryb2tlLXdpZHRoPSIxLjgiIGZpbGw9Im5vbmUiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIvPjxwYXRoIGQ9Ik0xMiA0MCBMMjAgNDEgTTEzIDQ2IEwyMCA0NCBNNTIgNDAgTDQ0IDQxIE01MSA0NiBMNDQgNDQiIHN0cm9rZT0iI2ZmZiIgc3Ryb2tlLXdpZHRoPSIxLjYiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIvPjwvc3ZnPg==" alt=""></span><div class="grow"><div class="t">新しい画面の共有状態モデル（#7048）</div><div class="d">Codex · 小田 洋平 · 42分実行中 · 子課題 5件 · 完了 3件 · 実装が入ってレビュー待ち</div><div class="bar" style="margin-top:5px;max-width:340px"><i style="width:60%"></i></div></div>
-                <span class="act" title="最後の活動は2分前 · 直近1分の出力 320 tokens"><i class="actdot"></i><span class="tokchip">320 tokens/min</span></span>
-                <span class="badge b-wait">レビュー待ち</span>
-                <button class="btn" type="button" data-openpage="terminal">ターミナルで見る</button>
-              </div>
-              <div class="lrow">
-                <span class="ava working"><img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+PHJlY3Qgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiBmaWxsPSIjYzI0MTBjIi8+PGVsbGlwc2UgY3g9IjMyIiBjeT0iMzYiIHJ4PSIxOCIgcnk9IjIwIiBmaWxsPSIjZmJiZjI0Ii8+PGNpcmNsZSBjeD0iMjUiIGN5PSIzMiIgcj0iNi41IiBmaWxsPSIjZmZmIi8+PGNpcmNsZSBjeD0iMzkiIGN5PSIzMiIgcj0iNi41IiBmaWxsPSIjZmZmIi8+PGNpcmNsZSBjeD0iMjUiIGN5PSIzMiIgcj0iMyIgZmlsbD0iIzQzMTQwNyIvPjxjaXJjbGUgY3g9IjM5IiBjeT0iMzIiIHI9IjMiIGZpbGw9IiM0MzE0MDciLz48cGF0aCBkPSJNMjggNDAgTDM2IDQwIEwzMiA0NSBaIiBmaWxsPSIjNDMxNDA3Ii8+PHBhdGggZD0iTTE2IDIyIFEyMCAxNCAyNiAxOCBNNDggMjIgUTQ0IDE0IDM4IDE4IiBzdHJva2U9IiNmYmJmMjQiIHN0cm9rZS13aWR0aD0iMyIgZmlsbD0ibm9uZSIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIi8+PC9zdmc+" alt=""></span><div class="grow"><div class="t">全画面刷新のホームと判断の画面（#7007）</div><div class="d">Claude Code · 姫野 大樹 · 1時間12分実行中 · 子課題 8件 · 完了 5件</div><div class="bar" style="margin-top:5px;max-width:340px"><i style="width:62%"></i></div></div>
-                <span class="act" title="最後の活動はたった今 · 直近1分の出力 6,400 tokens"><i class="actdot"></i><span class="tokchip">6,400 tokens/min</span></span>
-                <span class="badge b-run">実行中</span>
-                <button class="btn" type="button" data-openpage="terminal">ターミナルで見る</button>
-              </div>
-              <div class="lrow">
-                <span class="ava"><img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+PHJlY3Qgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiBmaWxsPSIjMjU2M2ViIi8+PHBhdGggZD0iTTE4IDI2IEwxNCAxMiBMMjggMTkgWiIgZmlsbD0iI2ZmZiIvPjxwYXRoIGQ9Ik00NiAyNiBMNTAgMTIgTDM2IDE5IFoiIGZpbGw9IiNmZmYiLz48Y2lyY2xlIGN4PSIzMiIgY3k9IjM4IiByPSIxNyIgZmlsbD0iI2ZmZiIvPjxjaXJjbGUgY3g9IjI2IiBjeT0iMzYiIHI9IjIuNCIgZmlsbD0iIzFlM2E1ZiIvPjxjaXJjbGUgY3g9IjM4IiBjeT0iMzYiIHI9IjIuNCIgZmlsbD0iIzFlM2E1ZiIvPjxwYXRoIGQ9Ik0yOSA0MyBRMzIgNDUgMzUgNDMiIHN0cm9rZT0iIzFlM2E1ZiIgc3Ryb2tlLXdpZHRoPSIxLjgiIGZpbGw9Im5vbmUiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIvPjxwYXRoIGQ9Ik0xMiA0MCBMMjAgNDEgTTEzIDQ2IEwyMCA0NCBNNTIgNDAgTDQ0IDQxIE01MSA0NiBMNDQgNDQiIHN0cm9rZT0iI2ZmZiIgc3Ryb2tlLXdpZHRoPSIxLjYiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIvPjwvc3ZnPg==" alt=""></span><div class="grow"><div class="t">状態モデルの変更でチェックが失敗（#7047）</div><div class="d">Codex · 小田 洋平 · 停止中 · 子課題 3件 · 完了 2件 · チェック4件が失敗 · PM が見ています</div><div class="bar" style="margin-top:5px;max-width:340px"><i style="width:67%"></i></div></div>
-                <span class="act" title="最後の活動は18分前 · 活動なし"><i class="actdot off"></i><span class="tokchip">0 tokens/min</span></span>
-                <span class="badge b-block">止まっている</span>
-                <button class="btn" type="button" data-nav="g-board">掲示板で見る</button>
-                <button class="btn" type="button" data-openpage="terminal">ターミナルで見る</button>
-              </div>
-              <p class="h-sec">待ち行列</p>
-              <div class="lrow">
-                <div class="grow"><div class="t">長時間のセッションでメモリが増え続ける（#5561）</div><div class="d">先頭 — 空きが出たら自動で始まります</div></div>
-                <span class="badge b-queue">開始待ち</span>
-                <button class="btn" type="button" data-nav="g-issue">課題を開く</button>
-                <button class="btn" type="button" data-openpage="wizard">起動ウィザード</button>
-              </div>
+              <div class="kanban"><div class="kcol"><h4>開始待ち</h4><div class="kcard"><div class="t">長時間のセッションでメモリが増え続ける（#5561）</div><div class="d">待ち行列の先頭 — 空きが出たら自動で始まります · 子課題 5件 · 完了 3件</div><div class="bar" style="margin-top:5px"><i style="width:60%"></i></div><div class="kfoot"><span class="badge b-queue">開始待ち</span></div><div class="btnrow"><button class="btn" type="button" data-nav="g-issue">課題を開く</button><button class="btn" type="button" data-openpage="wizard">起動ウィザード</button></div></div></div><div class="kcol"><h4>実行中</h4><div class="kcard"><div class="kagent"><span class="ava working"><img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+PHJlY3Qgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiBmaWxsPSIjYzI0MTBjIi8+PGVsbGlwc2UgY3g9IjMyIiBjeT0iMzYiIHJ4PSIxOCIgcnk9IjIwIiBmaWxsPSIjZmJiZjI0Ii8+PGNpcmNsZSBjeD0iMjUiIGN5PSIzMiIgcj0iNi41IiBmaWxsPSIjZmZmIi8+PGNpcmNsZSBjeD0iMzkiIGN5PSIzMiIgcj0iNi41IiBmaWxsPSIjZmZmIi8+PGNpcmNsZSBjeD0iMjUiIGN5PSIzMiIgcj0iMyIgZmlsbD0iIzQzMTQwNyIvPjxjaXJjbGUgY3g9IjM5IiBjeT0iMzIiIHI9IjMiIGZpbGw9IiM0MzE0MDciLz48cGF0aCBkPSJNMjggNDAgTDM2IDQwIEwzMiA0NSBaIiBmaWxsPSIjNDMxNDA3Ii8+PHBhdGggZD0iTTE2IDIyIFEyMCAxNCAyNiAxOCBNNDggMjIgUTQ0IDE0IDM4IDE4IiBzdHJva2U9IiNmYmJmMjQiIHN0cm9rZS13aWR0aD0iMyIgZmlsbD0ibm9uZSIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIi8+PC9zdmc+" alt=""></span><span class="kn">姫野 大樹</span><span class="rel">Claude Code</span></div><div class="t">全画面刷新のホームと判断の画面（#7007）</div><div class="d">1時間12分実行中 · 子課題 8件 · 完了 5件</div><div class="bar" style="margin-top:5px"><i style="width:62%"></i></div><div class="kfoot"><span class="act" title="最後の活動はたった今 · 直近1分の出力 6,400 tokens"><i class="actdot"></i><span class="tokchip">6,400 tokens/min</span></span><span class="badge b-run">実行中</span></div><div class="btnrow"><button class="btn" type="button" data-openpage="terminal">ターミナルで見る</button></div></div></div><div class="kcol"><h4>入力待ち</h4><div class="kcard"><div class="kagent"><span class="ava working"><img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+PHJlY3Qgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiBmaWxsPSIjMjU2M2ViIi8+PHBhdGggZD0iTTE4IDI2IEwxNCAxMiBMMjggMTkgWiIgZmlsbD0iI2ZmZiIvPjxwYXRoIGQ9Ik00NiAyNiBMNTAgMTIgTDM2IDE5IFoiIGZpbGw9IiNmZmYiLz48Y2lyY2xlIGN4PSIzMiIgY3k9IjM4IiByPSIxNyIgZmlsbD0iI2ZmZiIvPjxjaXJjbGUgY3g9IjI2IiBjeT0iMzYiIHI9IjIuNCIgZmlsbD0iIzFlM2E1ZiIvPjxjaXJjbGUgY3g9IjM4IiBjeT0iMzYiIHI9IjIuNCIgZmlsbD0iIzFlM2E1ZiIvPjxwYXRoIGQ9Ik0yOSA0MyBRMzIgNDUgMzUgNDMiIHN0cm9rZT0iIzFlM2E1ZiIgc3Ryb2tlLXdpZHRoPSIxLjgiIGZpbGw9Im5vbmUiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIvPjxwYXRoIGQ9Ik0xMiA0MCBMMjAgNDEgTTEzIDQ2IEwyMCA0NCBNNTIgNDAgTDQ0IDQxIE01MSA0NiBMNDQgNDQiIHN0cm9rZT0iI2ZmZiIgc3Ryb2tlLXdpZHRoPSIxLjYiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIvPjwvc3ZnPg==" alt=""></span><span class="kn">小田 洋平</span><span class="rel">Codex</span></div><div class="t">新しい画面の共有状態モデル（#7048）</div><div class="d">42分実行中 · 子課題 5件 · 完了 3件 · 実装が入ってレビュー待ち</div><div class="bar" style="margin-top:5px"><i style="width:60%"></i></div><div class="kfoot"><span class="act" title="最後の活動は2分前 · 直近1分の出力 320 tokens"><i class="actdot"></i><span class="tokchip">320 tokens/min</span></span><span class="badge b-wait">入力待ち</span></div><div class="btnrow"><button class="btn" type="button" data-openpage="terminal">ターミナルで見る</button></div></div></div><div class="kcol"><h4>止まっている</h4><div class="kcard"><div class="kagent"><span class="ava working"><img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+PHJlY3Qgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiBmaWxsPSIjMjU2M2ViIi8+PHBhdGggZD0iTTE4IDI2IEwxNCAxMiBMMjggMTkgWiIgZmlsbD0iI2ZmZiIvPjxwYXRoIGQ9Ik00NiAyNiBMNTAgMTIgTDM2IDE5IFoiIGZpbGw9IiNmZmYiLz48Y2lyY2xlIGN4PSIzMiIgY3k9IjM4IiByPSIxNyIgZmlsbD0iI2ZmZiIvPjxjaXJjbGUgY3g9IjI2IiBjeT0iMzYiIHI9IjIuNCIgZmlsbD0iIzFlM2E1ZiIvPjxjaXJjbGUgY3g9IjM4IiBjeT0iMzYiIHI9IjIuNCIgZmlsbD0iIzFlM2E1ZiIvPjxwYXRoIGQ9Ik0yOSA0MyBRMzIgNDUgMzUgNDMiIHN0cm9rZT0iIzFlM2E1ZiIgc3Ryb2tlLXdpZHRoPSIxLjgiIGZpbGw9Im5vbmUiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIvPjxwYXRoIGQ9Ik0xMiA0MCBMMjAgNDEgTTEzIDQ2IEwyMCA0NCBNNTIgNDAgTDQ0IDQxIE01MSA0NiBMNDQgNDQiIHN0cm9rZT0iI2ZmZiIgc3Ryb2tlLXdpZHRoPSIxLjYiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIvPjwvc3ZnPg==" alt=""></span><span class="kn">小田 洋平</span><span class="rel">Codex</span></div><div class="t">状態モデルの変更でチェックが失敗（#7047）</div><div class="d">停止中 · 子課題 3件 · 完了 2件 · チェック4件が失敗 · PM が見ています</div><div class="bar" style="margin-top:5px"><i style="width:67%"></i></div><div class="kfoot"><span class="act" title="最後の活動は18分前 · 活動なし"><i class="actdot off"></i><span class="tokchip">0 tokens/min</span></span><span class="badge b-block">止まっている</span></div><div class="btnrow"><button class="btn" type="button" data-nav="g-board">掲示板で見る</button><button class="btn" type="button" data-openpage="terminal">ターミナルで見る</button></div></div></div><div class="kcol"><h4>完了</h4><div class="kcard"><div class="kagent"><span class="ava"><img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+PHJlY3Qgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiBmaWxsPSIjYTE2MjA3Ii8+PGVsbGlwc2UgY3g9IjMyIiBjeT0iMzciIHJ4PSIxNyIgcnk9IjIxIiBmaWxsPSIjMWYyOTM3Ii8+PGVsbGlwc2UgY3g9IjMyIiBjeT0iNDIiIHJ4PSIxMC41IiByeT0iMTQiIGZpbGw9IiNmOWZhZmIiLz48Y2lyY2xlIGN4PSIyNiIgY3k9IjMwIiByPSIyLjQiIGZpbGw9IiNmOWZhZmIiLz48Y2lyY2xlIGN4PSIzOCIgY3k9IjMwIiByPSIyLjQiIGZpbGw9IiNmOWZhZmIiLz48cGF0aCBkPSJNMjcgMzYgTDM3IDM2IEwzMiA0MSBaIiBmaWxsPSIjZjU5ZTBiIi8+PHBhdGggZD0iTTE1IDM4IFE4IDQyIDEzIDQ3IE00OSAzOCBRNTYgNDIgNTEgNDciIHN0cm9rZT0iIzFmMjkzNyIgc3Ryb2tlLXdpZHRoPSIzLjQiIGZpbGw9Im5vbmUiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIvPjwvc3ZnPg==" alt=""></span><span class="kn">鈴木 和斗</span><span class="rel">Codex</span></div><div class="t">ドキュメントの体裁修正</div><div class="d">完了 · 子課題 2件 · 完了 2件</div><div class="bar" style="margin-top:5px"><i style="width:100%"></i></div><div class="kfoot"><span class="act" title="活動なし"><i class="actdot off"></i><span class="tokchip">0 tokens/min</span></span><span class="badge b-done">完了</span></div><div class="btnrow"><button class="btn" type="button" data-openpage="terminal">ターミナルで見る</button></div></div></div></div>
               <p class="h-sec">過去のセッション</p>
               <div class="lrow">
                 <div class="grow"><div class="t">過去のセッションを再開する</div><div class="d">前回の続きから再開するか、同じタスクで新しく始めるか選べます。</div></div>
@@ -1715,7 +1702,7 @@
                   <dt>影響範囲</dt><dd>gwt の全画面（ホーム・プロジェクト画面群・設定）。作業中のセッション 2件は影響を受けません。</dd>
                 </dl>
                 <div class="btnrow"><button class="btn primary" type="button">承認して始める</button><button class="btn" type="button">変更を求める</button><button class="btn ghost" type="button" data-openpage="start">ホームで聞く</button></div>
-              </div>
+              <div class="replyrow"><input class="field" style="flex:1;min-width:220px" type="text" placeholder="自由に書いて返信（選択肢に無い答えも書けます）" aria-label="自由入力で返信"><button class="btn" type="button">送信</button></div></div>
               <div class="dcard">
                 <div class="top"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><span class="badge b-wait">判断待ち</span><span class="rel">26分待ち</span></div>
                 <div class="t">保存されていない変更を、保存しますか？</div>
@@ -1726,7 +1713,7 @@
                   <dt>影響範囲</dt><dd>ブランチ work/issue-7007 のみ。他のセッション・ブランチには影響しません。</dd>
                 </dl>
                 <div class="btnrow"><button class="btn amber" type="button">保存して送信する</button><button class="btn" type="button">あとで</button></div>
-              </div>
+              <div class="replyrow"><input class="field" style="flex:1;min-width:220px" type="text" placeholder="自由に書いて返信（選択肢に無い答えも書けます）" aria-label="自由入力で返信"><button class="btn" type="button">送信</button></div></div>
               <p class="rel">判断待ちは以上です。決めた内容は、ホームの会話と「タスク」にも同じ結果が残ります。</p>
             </div>
 
@@ -2295,7 +2282,7 @@
             <div class="screen-pane" data-screen="k-issue">
               <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="k-issues">&larr; 課題一覧へ</button></div>
               <p class="h-big">毎日の取り込みが停止 — 形式が変わった</p>
-              <p class="h-sub">課題 #121 · <b>KeibaDB</b> · 取り込み · 今朝 6:00 の定期実行で停止 · あなたの判断待ちです。</p>
+              <p class="h-sub">課題 #121 · <b>KeibaDB</b> · 取り込み · タスク「毎日の取り込みの維持」の配下 · 今朝 6:00 の定期実行で停止 · あなたの判断待ちです。</p>
               <div class="set-group">
                 <h4>目的</h4>
                 <p class="d">相手先の新しい形式に合わせて対応表を直し、毎日の取り込みを再開します。取り込めなかった分は、再開後にまとめて取り込みます。</p>
@@ -2322,19 +2309,7 @@
             <div class="screen-pane" data-screen="k-works">
               <p class="h-big">作業</p>
               <p class="h-sub">今 KeibaDB で動いているセッションです。セッションの実物はいつでもターミナル表示で見られます。</p>
-              <div class="lrow">
-                <span class="ava working"><img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+PHJlY3Qgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiBmaWxsPSIjMGU3NDkwIi8+PGNpcmNsZSBjeD0iMTciIGN5PSIxNyIgcj0iNyIgZmlsbD0iIzE2NGU2MyIvPjxjaXJjbGUgY3g9IjQ3IiBjeT0iMTciIHI9IjciIGZpbGw9IiMxNjRlNjMiLz48Y2lyY2xlIGN4PSIxNyIgY3k9IjE3IiByPSIzLjQiIGZpbGw9IiNhNWYzZmMiLz48Y2lyY2xlIGN4PSI0NyIgY3k9IjE3IiByPSIzLjQiIGZpbGw9IiNhNWYzZmMiLz48Y2lyY2xlIGN4PSIzMiIgY3k9IjM2IiByPSIxOSIgZmlsbD0iIzE2NGU2MyIvPjxlbGxpcHNlIGN4PSIzMiIgY3k9IjQzIiByeD0iOSIgcnk9IjciIGZpbGw9IiNhNWYzZmMiLz48Y2lyY2xlIGN4PSIyNSIgY3k9IjMzIiByPSIyLjQiIGZpbGw9IiNlY2ZlZmYiLz48Y2lyY2xlIGN4PSIzOSIgY3k9IjMzIiByPSIyLjQiIGZpbGw9IiNlY2ZlZmYiLz48ZWxsaXBzZSBjeD0iMzIiIGN5PSI0MCIgcng9IjMuNCIgcnk9IjIuNCIgZmlsbD0iIzA4MzM0NCIvPjxwYXRoIGQ9Ik0zMiA0MiBMMzIgNDUgTTMyIDQ1IFEyOCA0OCAyNSA0NiBNMzIgNDUgUTM2IDQ4IDM5IDQ2IiBzdHJva2U9IiMwODMzNDQiIHN0cm9rZS13aWR0aD0iMS43IiBmaWxsPSJub25lIiBzdHJva2UtbGluZWNhcD0icm91bmQiLz48L3N2Zz4=" alt=""></span><div class="grow"><div class="t">レース結果の取り込み（#130）</div><div class="d">Claude Code · 安藤 健二 · 25分実行中 · 子課題 6件 · 完了 4件 · 夜の分まで完了</div><div class="bar" style="margin-top:5px;max-width:340px"><i style="width:67%"></i></div></div>
-                <span class="act" title="最後の活動はたった今 · 直近1分の出力 3,900 tokens"><i class="actdot"></i><span class="tokchip">3,900 tokens/min</span></span>
-                <span class="badge b-run">実行中</span>
-                <button class="btn" type="button" data-openpage="terminal">ターミナルで見る</button>
-              </div>
-              <div class="lrow">
-                <span class="ava"><img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+PHJlY3Qgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiBmaWxsPSIjMGU3NDkwIi8+PGNpcmNsZSBjeD0iMTciIGN5PSIxNyIgcj0iNyIgZmlsbD0iIzE2NGU2MyIvPjxjaXJjbGUgY3g9IjQ3IiBjeT0iMTciIHI9IjciIGZpbGw9IiMxNjRlNjMiLz48Y2lyY2xlIGN4PSIxNyIgY3k9IjE3IiByPSIzLjQiIGZpbGw9IiNhNWYzZmMiLz48Y2lyY2xlIGN4PSI0NyIgY3k9IjE3IiByPSIzLjQiIGZpbGw9IiNhNWYzZmMiLz48Y2lyY2xlIGN4PSIzMiIgY3k9IjM2IiByPSIxOSIgZmlsbD0iIzE2NGU2MyIvPjxlbGxpcHNlIGN4PSIzMiIgY3k9IjQzIiByeD0iOSIgcnk9IjciIGZpbGw9IiNhNWYzZmMiLz48Y2lyY2xlIGN4PSIyNSIgY3k9IjMzIiByPSIyLjQiIGZpbGw9IiNlY2ZlZmYiLz48Y2lyY2xlIGN4PSIzOSIgY3k9IjMzIiByPSIyLjQiIGZpbGw9IiNlY2ZlZmYiLz48ZWxsaXBzZSBjeD0iMzIiIGN5PSI0MCIgcng9IjMuNCIgcnk9IjIuNCIgZmlsbD0iIzA4MzM0NCIvPjxwYXRoIGQ9Ik0zMiA0MiBMMzIgNDUgTTMyIDQ1IFEyOCA0OCAyNSA0NiBNMzIgNDUgUTM2IDQ4IDM5IDQ2IiBzdHJva2U9IiMwODMzNDQiIHN0cm9rZS13aWR0aD0iMS43IiBmaWxsPSJub25lIiBzdHJva2UtbGluZWNhcD0icm91bmQiLz48L3N2Zz4=" alt=""></span><div class="grow"><div class="t">毎日の取り込み（#121）</div><div class="d">Claude Code · 安藤 健二 · 停止中 · 子課題 4件 · 完了 1件 · 形式の変更で停止 · 判断待ち</div><div class="bar" style="margin-top:5px;max-width:340px"><i style="width:25%"></i></div></div>
-                <span class="act" title="最後の活動は9分前 · 活動なし"><i class="actdot off"></i><span class="tokchip">0 tokens/min</span></span>
-                <span class="badge b-block">止まっている</span>
-                <button class="btn" type="button" data-nav="k-decide">判断へ</button>
-                <button class="btn" type="button" data-openpage="terminal">ターミナルで見る</button>
-              </div>
+              <div class="kanban"><div class="kcol"><h4>開始待ち</h4><p class="kempty">開始待ちの課題はありません</p></div><div class="kcol"><h4>実行中</h4><div class="kcard"><div class="kagent"><span class="ava"><img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+PHJlY3Qgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiBmaWxsPSIjMGU3NDkwIi8+PGNpcmNsZSBjeD0iMTciIGN5PSIxNyIgcj0iNyIgZmlsbD0iIzE2NGU2MyIvPjxjaXJjbGUgY3g9IjQ3IiBjeT0iMTciIHI9IjciIGZpbGw9IiMxNjRlNjMiLz48Y2lyY2xlIGN4PSIxNyIgY3k9IjE3IiByPSIzLjQiIGZpbGw9IiNhNWYzZmMiLz48Y2lyY2xlIGN4PSI0NyIgY3k9IjE3IiByPSIzLjQiIGZpbGw9IiNhNWYzZmMiLz48Y2lyY2xlIGN4PSIzMiIgY3k9IjM2IiByPSIxOSIgZmlsbD0iIzE2NGU2MyIvPjxlbGxpcHNlIGN4PSIzMiIgY3k9IjQzIiByeD0iOSIgcnk9IjciIGZpbGw9IiNhNWYzZmMiLz48Y2lyY2xlIGN4PSIyNSIgY3k9IjMzIiByPSIyLjQiIGZpbGw9IiNlY2ZlZmYiLz48Y2lyY2xlIGN4PSIzOSIgY3k9IjMzIiByPSIyLjQiIGZpbGw9IiNlY2ZlZmYiLz48ZWxsaXBzZSBjeD0iMzIiIGN5PSI0MCIgcng9IjMuNCIgcnk9IjIuNCIgZmlsbD0iIzA4MzM0NCIvPjxwYXRoIGQ9Ik0zMiA0MiBMMzIgNDUgTTMyIDQ1IFEyOCA0OCAyNSA0NiBNMzIgNDUgUTM2IDQ4IDM5IDQ2IiBzdHJva2U9IiMwODMzNDQiIHN0cm9rZS13aWR0aD0iMS43IiBmaWxsPSJub25lIiBzdHJva2UtbGluZWNhcD0icm91bmQiLz48L3N2Zz4=" alt=""></span><span class="kn">安藤 健二</span><span class="rel">Claude Code</span></div><div class="t">レース結果の取り込み（#130）</div><div class="d">25分実行中 · 子課題 6件 · 完了 4件 · 夜の分まで完了</div><div class="bar" style="margin-top:5px"><i style="width:67%"></i></div><div class="kfoot"><span class="act" title="最後の活動はたった今 · 直近1分の出力 3,900 tokens"><i class="actdot"></i><span class="tokchip">3,900 tokens/min</span></span><span class="badge b-run">実行中</span></div><div class="btnrow"><button class="btn" type="button" data-openpage="terminal">ターミナルで見る</button></div></div></div><div class="kcol"><h4>入力待ち</h4><p class="kempty">入力待ちの作業はありません</p></div><div class="kcol"><h4>止まっている</h4><div class="kcard"><div class="kagent"><span class="ava"><img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+PHJlY3Qgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiBmaWxsPSIjMGU3NDkwIi8+PGNpcmNsZSBjeD0iMTciIGN5PSIxNyIgcj0iNyIgZmlsbD0iIzE2NGU2MyIvPjxjaXJjbGUgY3g9IjQ3IiBjeT0iMTciIHI9IjciIGZpbGw9IiMxNjRlNjMiLz48Y2lyY2xlIGN4PSIxNyIgY3k9IjE3IiByPSIzLjQiIGZpbGw9IiNhNWYzZmMiLz48Y2lyY2xlIGN4PSI0NyIgY3k9IjE3IiByPSIzLjQiIGZpbGw9IiNhNWYzZmMiLz48Y2lyY2xlIGN4PSIzMiIgY3k9IjM2IiByPSIxOSIgZmlsbD0iIzE2NGU2MyIvPjxlbGxpcHNlIGN4PSIzMiIgY3k9IjQzIiByeD0iOSIgcnk9IjciIGZpbGw9IiNhNWYzZmMiLz48Y2lyY2xlIGN4PSIyNSIgY3k9IjMzIiByPSIyLjQiIGZpbGw9IiNlY2ZlZmYiLz48Y2lyY2xlIGN4PSIzOSIgY3k9IjMzIiByPSIyLjQiIGZpbGw9IiNlY2ZlZmYiLz48ZWxsaXBzZSBjeD0iMzIiIGN5PSI0MCIgcng9IjMuNCIgcnk9IjIuNCIgZmlsbD0iIzA4MzM0NCIvPjxwYXRoIGQ9Ik0zMiA0MiBMMzIgNDUgTTMyIDQ1IFEyOCA0OCAyNSA0NiBNMzIgNDUgUTM2IDQ4IDM5IDQ2IiBzdHJva2U9IiMwODMzNDQiIHN0cm9rZS13aWR0aD0iMS43IiBmaWxsPSJub25lIiBzdHJva2UtbGluZWNhcD0icm91bmQiLz48L3N2Zz4=" alt=""></span><span class="kn">安藤 健二</span><span class="rel">Claude Code</span></div><div class="t">毎日の取り込み（#121）</div><div class="d">停止中 · 子課題 4件 · 完了 1件 · 形式の変更で停止 · 判断待ち</div><div class="bar" style="margin-top:5px"><i style="width:25%"></i></div><div class="kfoot"><span class="act" title="最後の活動は9分前 · 活動なし"><i class="actdot off"></i><span class="tokchip">0 tokens/min</span></span><span class="badge b-block">止まっている</span></div><div class="btnrow"><button class="btn" type="button" data-nav="k-decide">判断へ</button><button class="btn" type="button" data-openpage="terminal">ターミナルで見る</button></div></div></div><div class="kcol"><h4>完了</h4><div class="kcard"><div class="kagent"><span class="ava"><img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+PHJlY3Qgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiBmaWxsPSIjMGU3NDkwIi8+PGNpcmNsZSBjeD0iMTciIGN5PSIxNyIgcj0iNyIgZmlsbD0iIzE2NGU2MyIvPjxjaXJjbGUgY3g9IjQ3IiBjeT0iMTciIHI9IjciIGZpbGw9IiMxNjRlNjMiLz48Y2lyY2xlIGN4PSIxNyIgY3k9IjE3IiByPSIzLjQiIGZpbGw9IiNhNWYzZmMiLz48Y2lyY2xlIGN4PSI0NyIgY3k9IjE3IiByPSIzLjQiIGZpbGw9IiNhNWYzZmMiLz48Y2lyY2xlIGN4PSIzMiIgY3k9IjM2IiByPSIxOSIgZmlsbD0iIzE2NGU2MyIvPjxlbGxpcHNlIGN4PSIzMiIgY3k9IjQzIiByeD0iOSIgcnk9IjciIGZpbGw9IiNhNWYzZmMiLz48Y2lyY2xlIGN4PSIyNSIgY3k9IjMzIiByPSIyLjQiIGZpbGw9IiNlY2ZlZmYiLz48Y2lyY2xlIGN4PSIzOSIgY3k9IjMzIiByPSIyLjQiIGZpbGw9IiNlY2ZlZmYiLz48ZWxsaXBzZSBjeD0iMzIiIGN5PSI0MCIgcng9IjMuNCIgcnk9IjIuNCIgZmlsbD0iIzA4MzM0NCIvPjxwYXRoIGQ9Ik0zMiA0MiBMMzIgNDUgTTMyIDQ1IFEyOCA0OCAyNSA0NiBNMzIgNDUgUTM2IDQ4IDM5IDQ2IiBzdHJva2U9IiMwODMzNDQiIHN0cm9rZS13aWR0aD0iMS43IiBmaWxsPSJub25lIiBzdHJva2UtbGluZWNhcD0icm91bmQiLz48L3N2Zz4=" alt=""></span><span class="kn">安藤 健二</span><span class="rel">Claude Code</span></div><div class="t">前日分の取り込みの事後確認</div><div class="d">完了 · 子課題 3件 · 完了 3件</div><div class="bar" style="margin-top:5px"><i style="width:100%"></i></div><div class="kfoot"><span class="act" title="活動なし"><i class="actdot off"></i><span class="tokchip">0 tokens/min</span></span><span class="badge b-done">完了</span></div><div class="btnrow"><button class="btn" type="button" data-openpage="terminal">ターミナルで見る</button></div></div></div></div>
               <p class="h-sec">過去のセッション</p>
               <div class="lrow">
                 <div class="grow"><div class="t">過去のセッションを再開する</div><div class="d">前回の続きから再開するか、同じタスクで新しく始めるか選べます。</div></div>
@@ -2355,7 +2330,7 @@
                   <dt>影響範囲</dt><dd>KeibaDB の取り込みだけです。他のプロジェクト・gwt の作業には影響しません。</dd>
                 </dl>
                 <div class="btnrow"><button class="btn primary" type="button">対応表を直して続ける</button><button class="btn" type="button">取り込みを止める</button><button class="btn ghost" type="button" data-openpage="start">ホームで聞く</button></div>
-              </div>
+              <div class="replyrow"><input class="field" style="flex:1;min-width:220px" type="text" placeholder="自由に書いて返信（選択肢に無い答えも書けます）" aria-label="自由入力で返信"><button class="btn" type="button">送信</button></div></div>
               <p class="rel">判断待ちは以上です。ホームの会話からも、同じ判断をその場で決められます。</p>
             </div>
 
