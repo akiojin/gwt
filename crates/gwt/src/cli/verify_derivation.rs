@@ -857,6 +857,9 @@ fn validate_pre_pr_ci(worktree: &Path, required: &[String]) -> Result<(), String
                                         || ([
                                             "Run doctests",
                                             "Run real-binary front-door tests (Xvfb)",
+                                            "Build checkout binaries for the live Issue Monitor regression",
+                                            "Install Chromium for the live Issue Monitor regression",
+                                            "Verify Issue Monitor operator hold in both themes",
                                             "Voice accuracy regression (optional local dataset)",
                                         ]
                                         .contains(&n)
