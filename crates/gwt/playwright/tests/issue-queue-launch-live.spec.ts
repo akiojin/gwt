@@ -1946,7 +1946,8 @@ request.catch(() => {});
             expect(targetClaimId).toBe(finalPreferences.launched_claims?.[44]);
             expect(targetClaimId).not.toBe(saved.source.claim_id);
             await expect.poll(async () => (await fixture.switchCwdCensus()).filter(fields =>
-              fields.source_pid === source.pid && fields.unknown === 0 && fields.excluded_by_uid !== undefined).length,
+              fields.source_pid === source.pid && fields.complete === true && fields.matching === 0 &&
+              fields.unknown === 0 && fields.excluded_by_uid !== undefined).length,
             { timeout: 10_000, message: "macOS Host recorded clear censuses for the source provider" }).toBeGreaterThanOrEqual(2);
           }
           await info.attach(`agent-switch-completed-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
