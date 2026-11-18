@@ -2077,16 +2077,16 @@
                 <div class="set-head">再起動後の継続</div>
                 <div class="set-row">
                   <div class="grow"><div class="t">gwt の再起動をまたいで、このプロジェクトは動き続けます</div><div class="d2">状態：実行中 · 保存した選択：続ける。止めるときは、このプロジェクトのエージェントが終わるのを待ってから止めます。</div></div>
-                  <button class="btn ghost" type="button" data-nav="g-project-stop">このプロジェクトを止める</button>
+                  <button class="btn ghost" type="button" data-nav="g-project-stop">再起動後の継続を止める</button>
                 </div>
               </div>
               <div class="set-group">
                 <div class="set-head">自律駆動</div>
                 <div class="set-row"><div class="grow"><div class="t">状態</div><div class="d2">プロジェクト一覧の開始・停止と同じ状態です。停止すると、新しい割り当てと PM の巡回が止まります。</div></div><span class="loopst run" data-loopchip="gwt">自律駆動中</span></div>
-                <div class="set-row"><div class="grow"><div class="t">自動で補充する（Auto Refill）</div><div class="d2">キューが補充の上限（Refill limit）未満のとき、Backlog から対象の課題を自動で補充します。</div></div><span class="switch" aria-hidden="true"></span></div>
-                <div class="set-row"><div class="grow"><div class="t">補充の上限（Refill limit）</div><div class="d2">キューに保持する課題数の目標です。0 のまま自動補充をオンにすると、既定の 3 になります。</div></div><input class="field" type="number" value="3" aria-label="補充の上限" style="width:80px"></div>
-                <div class="set-row"><div class="grow"><div class="t">自律実行（Autonomous）</div><div class="d2">人手の承認なしで、対象の課題を自動で実行します。</div></div><span class="switch" aria-hidden="true"></span></div>
-                <div class="set-row"><div class="grow"><div class="t">同時実行数（Max active）</div><div class="d2">同時に動かすエージェントの上限です。</div></div><input class="field" type="number" value="2" aria-label="同時実行数" style="width:80px"></div>
+                <div class="set-row"><div class="grow"><div class="t">自動で補充する</div><div class="d2">待ち行列が補充の上限未満のとき、未着手の課題から、取り込み条件に合うものを自動で補充します。</div></div><span class="switch" aria-hidden="true"></span></div>
+                <div class="set-row"><div class="grow"><div class="t">補充の上限</div><div class="d2">待ち行列に保持する課題数の目標です。0 のまま自動補充をオンにすると、既定の 3 になります。</div></div><input class="field" type="number" value="3" aria-label="補充の上限" style="width:80px"></div>
+                
+                <div class="set-row"><div class="grow"><div class="t">同時実行数</div><div class="d2">同時に動かすエージェントの上限です。</div></div><input class="field" type="number" value="2" aria-label="同時実行数" style="width:80px"></div>
                 <div class="set-row" data-rownav="g-settings-tuning"><div class="grow"><div class="t">取り込み条件</div><div class="d2">取り込むのは Open の課題だけです。gwt-hold ラベルが付いた課題は除きます。条件の変更は詳細設定で行います。</div></div></div>
                 <div class="set-row" data-rownav="g-settings-tuning"><div class="grow"><div class="t">詳細設定</div><div class="d2">試行上限・スタック判定・ハートビート間隔などの細かい調整値です。通常は変えません。</div></div></div>
               </div>
@@ -2108,7 +2108,7 @@
                 <div class="set-head">作業の進め方</div>
                 <div class="set-row"><div class="grow"><div class="t">監視</div><div class="d2">PM がこのプロジェクトを見て、止まったエージェントを再起動します。オフにすると、このプロジェクトには触りません。</div></div><span class="switch" aria-hidden="true"></span></div>
                 <div class="set-row"><div class="grow"><div class="t">起動候補（Candidates）</div><div class="d2">課題を始めるときの候補と、その起動条件（Session mode／Runtime など）です。</div></div><button class="btn" type="button" data-nav="g-candidates">候補を編集</button></div>
-                <div class="set-row"><div class="grow"><div class="t">許可するラベル</div><div class="d2">このラベルが付いた課題は、聞かずに始めてよい：bug、docs。</div></div><button class="btn" type="button" data-nav="g-labels">ラベルを編集</button></div>
+                
               </div>
               <div class="set-group">
                 <div class="set-head">PM とフック</div>
@@ -2147,7 +2147,7 @@
                 <div class="set-head">取り込み条件</div>
                 <div class="set-row"><div class="grow"><div class="t">取り込む課題</div><div class="d2">Open の課題だけを取り込みます。Closed は対象にしません。</div></div></div>
                 <div class="set-row"><div class="grow"><div class="t">対象ラベル</div><div class="d2">このラベルが付いた課題だけを取り込みます。空欄のときは、すべての課題が対象です。</div></div><input class="field" type="text" value="" aria-label="対象ラベル" style="width:min(220px,100%)"></div>
-                <div class="set-row"><div class="grow"><div class="t">除外ラベル</div><div class="d2">このラベルが付いた課題は取り込みません。</div></div><input class="field" type="text" value="gwt-hold" aria-label="除外ラベル" style="width:min(220px,100%)"></div>
+                <div class="set-row"><div class="grow"><div class="t">除外ラベル</div><div class="d2">このラベルが付いた課題は取り込みません。Hold（gwt-hold）が付いた課題は、取り込みと起動の対象から外れます。</div></div><input class="field" type="text" value="gwt-hold" aria-label="除外ラベル" style="width:min(220px,100%)"></div>
               </div>
               <div class="set-group">
                 <div class="set-head">リトライとレビュー</div>
@@ -2220,27 +2220,14 @@
 
             <div class="screen-pane" data-screen="g-project-stop">
               <div class="btnrow" style="margin-bottom:14px"><button class="btn iconbtn" type="button" data-nav="g-settings" title="設定へ戻る" aria-label="設定へ戻る">&larr;</button></div>
-              <p class="h-big">このプロジェクトを止める</p>
+              <p class="h-big">再起動後の継続を止める</p>
               <p class="h-sub">gwt の再起動をまたいで動き続ける設定を止めます。ファイルや課題は消えません。</p>
               <div class="set-group">
                 <div class="set-row"><div class="grow"><div class="t">実行中のエージェント</div><div class="d2">小田 洋平（#7048）と姫野 大樹（#7007）が動いています。止めるときは、エージェントが終わるのを待ってから止めます。</div></div></div>
                 <div class="set-row"><div class="grow"><div class="t">PM の監視</div><div class="d2">このプロジェクトへの PM の監視も止まります。判断待ちは残り、再開時にそのまま出ます。</div></div></div>
                 <div class="set-row"><div class="grow"><div class="t">再開</div><div class="d2">プロジェクト画面の一覧から、いつでも再開できます。</div></div></div>
               </div>
-              <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="g-settings">プロジェクトを止める</button><button class="btn ghost" type="button" data-nav="g-settings">やめる</button></div>
-            </div>
-
-            <div class="screen-pane" data-screen="g-labels">
-              <div class="btnrow" style="margin-bottom:14px"><button class="btn iconbtn" type="button" data-nav="g-settings" title="設定へ戻る" aria-label="設定へ戻る">&larr;</button></div>
-              <p class="h-big">許可するラベルを編集 — gwt</p>
-              <p class="h-sub">このラベルが付いた課題は、PM が聞かずに始めてよい対象です。</p>
-              <div class="set-group">
-                <div class="set-row"><span class="checkrow"><input type="checkbox" checked aria-label="bug" style="accent-color:var(--accent)"><span>bug</span></span></div>
-                <div class="set-row"><span class="checkrow"><input type="checkbox" checked aria-label="docs" style="accent-color:var(--accent)"><span>docs</span></span></div>
-                <div class="set-row"><span class="checkrow"><input type="checkbox" aria-label="gwt-feedback" style="accent-color:var(--accent)"><span>gwt-feedback</span></span></div>
-                <div class="set-row"><span class="checkrow"><input type="checkbox" aria-label="enhancement" style="accent-color:var(--accent)"><span>enhancement</span></span></div>
-              </div>
-              <div class="btnrow" style="margin-top:14px"><button class="btn" type="button">ラベルを取り直す</button><button class="btn primary" type="button" data-nav="g-settings">保存する</button><button class="btn ghost" type="button" data-nav="g-settings">キャンセル</button></div>
+              <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="g-settings">再起動後の継続を止める</button><button class="btn ghost" type="button" data-nav="g-settings">やめる</button></div>
             </div>
 
             <div class="screen-pane" data-screen="g-hooks">
@@ -2632,17 +2619,17 @@
                 <div class="set-head">再起動後の継続</div>
                 <div class="set-row">
                   <div class="grow"><div class="t">gwt の再起動をまたいで、このプロジェクトは動き続けます</div><div class="d2">状態：停止待ち · 保存した選択：続ける。止めるときは、このプロジェクトのエージェントが終わるのを待ってから止めます。</div></div>
-                  <button class="btn ghost" type="button" data-nav="k-project-stop">このプロジェクトを止める</button>
+                  <button class="btn ghost" type="button" data-nav="k-project-stop">再起動後の継続を止める</button>
                 </div>
               </div>
               <div class="set-group">
                 <div class="set-head">自律駆動</div>
                 <div class="set-row"><div class="grow"><div class="t">状態</div><div class="d2">プロジェクト一覧の開始・停止と同じ状態です。停止待ちの間は、新しい割り当てと PM の巡回が止まります。</div></div><span class="loopst drain" data-loopchip="keibadb">停止待ち</span></div>
                 <div class="set-row"><div class="grow"><div class="t">残っている作業</div><div class="d2">作業中のエージェント 2件の完了待ちです。全員が終わると「停止中」になります。</div></div></div>
-                <div class="set-row"><div class="grow"><div class="t">自動で補充する（Auto Refill）</div><div class="d2">キューが補充の上限（Refill limit）未満のとき、Backlog から対象の課題を自動で補充します。</div></div><span class="switch" aria-hidden="true"></span></div>
-                <div class="set-row"><div class="grow"><div class="t">補充の上限（Refill limit）</div><div class="d2">キューに保持する課題数の目標です。0 のまま自動補充をオンにすると、既定の 3 になります。</div></div><input class="field" type="number" value="3" aria-label="補充の上限" style="width:80px"></div>
-                <div class="set-row"><div class="grow"><div class="t">自律実行（Autonomous）</div><div class="d2">人手の承認なしで、対象の課題を自動で実行します。</div></div><span class="switch" aria-hidden="true"></span></div>
-                <div class="set-row"><div class="grow"><div class="t">同時実行数（Max active）</div><div class="d2">同時に動かすエージェントの上限です。</div></div><input class="field" type="number" value="1" aria-label="同時実行数" style="width:80px"></div>
+                <div class="set-row"><div class="grow"><div class="t">自動で補充する</div><div class="d2">待ち行列が補充の上限未満のとき、未着手の課題から、取り込み条件に合うものを自動で補充します。</div></div><span class="switch" aria-hidden="true"></span></div>
+                <div class="set-row"><div class="grow"><div class="t">補充の上限</div><div class="d2">待ち行列に保持する課題数の目標です。0 のまま自動補充をオンにすると、既定の 3 になります。</div></div><input class="field" type="number" value="3" aria-label="補充の上限" style="width:80px"></div>
+                
+                <div class="set-row"><div class="grow"><div class="t">同時実行数</div><div class="d2">同時に動かすエージェントの上限です。</div></div><input class="field" type="number" value="1" aria-label="同時実行数" style="width:80px"></div>
                 <div class="set-row" data-rownav="k-settings-tuning"><div class="grow"><div class="t">取り込み条件</div><div class="d2">取り込むのは Open の課題だけです。gwt-hold ラベルが付いた課題は除きます。条件の変更は詳細設定で行います。</div></div></div>
                 <div class="set-row" data-rownav="k-settings-tuning"><div class="grow"><div class="t">詳細設定</div><div class="d2">試行上限・スタック判定・ハートビート間隔などの細かい調整値です。通常は変えません。</div></div></div>
               </div>
@@ -2664,7 +2651,7 @@
                 <div class="set-row"><div class="grow"><div class="t">監視</div><div class="d2">PM がこのプロジェクトを見て、止まったエージェントを再起動します。オフにすると、このプロジェクトには触りません。</div></div><span class="switch" aria-hidden="true"></span></div>
                 <div class="set-row"><div class="grow"><div class="t">取り込みは毎日 6:00</div><div class="d2">このプロジェクトだけの違いです（端末全体の設定とは別に持っています）。</div></div><button class="btn" type="button" data-nav="k-import-time">変える</button></div>
                 <div class="set-row"><div class="grow"><div class="t">起動候補（Candidates）</div><div class="d2">課題を始めるときの候補と、その起動条件（Session mode／Runtime など）です。</div></div><button class="btn" type="button" data-nav="k-candidates">候補を編集</button></div>
-                <div class="set-row"><div class="grow"><div class="t">許可するラベル</div><div class="d2">このラベルが付いた課題は、聞かずに始めてよい：import、bug。</div></div><button class="btn" type="button" data-nav="k-labels">ラベルを編集</button></div>
+                
               </div>
               <div class="set-group">
                 <div class="set-head">PM とフック</div>
@@ -2701,7 +2688,7 @@
                 <div class="set-head">取り込み条件</div>
                 <div class="set-row"><div class="grow"><div class="t">取り込む課題</div><div class="d2">Open の課題だけを取り込みます。Closed は対象にしません。</div></div></div>
                 <div class="set-row"><div class="grow"><div class="t">対象ラベル</div><div class="d2">このラベルが付いた課題だけを取り込みます。空欄のときは、すべての課題が対象です。</div></div><input class="field" type="text" value="" aria-label="対象ラベル" style="width:min(220px,100%)"></div>
-                <div class="set-row"><div class="grow"><div class="t">除外ラベル</div><div class="d2">このラベルが付いた課題は取り込みません。</div></div><input class="field" type="text" value="gwt-hold" aria-label="除外ラベル" style="width:min(220px,100%)"></div>
+                <div class="set-row"><div class="grow"><div class="t">除外ラベル</div><div class="d2">このラベルが付いた課題は取り込みません。Hold（gwt-hold）が付いた課題は、取り込みと起動の対象から外れます。</div></div><input class="field" type="text" value="gwt-hold" aria-label="除外ラベル" style="width:min(220px,100%)"></div>
               </div>
               <div class="set-group">
                 <div class="set-head">リトライとレビュー</div>
@@ -2769,18 +2756,6 @@
               <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="k-agents">一時停止する</button><button class="btn ghost" type="button" data-nav="k-agents">やめる</button></div>
             </div>
 
-            <div class="screen-pane" data-screen="k-labels">
-              <div class="btnrow" style="margin-bottom:14px"><button class="btn iconbtn" type="button" data-nav="k-settings" title="設定へ戻る" aria-label="設定へ戻る">&larr;</button></div>
-              <p class="h-big">許可するラベルを編集 — KeibaDB</p>
-              <p class="h-sub">このラベルが付いた課題は、PM が聞かずに始めてよい対象です。</p>
-              <div class="set-group">
-                <div class="set-row"><span class="checkrow"><input type="checkbox" checked aria-label="import" style="accent-color:var(--accent)"><span>import</span></span></div>
-                <div class="set-row"><span class="checkrow"><input type="checkbox" checked aria-label="bug" style="accent-color:var(--accent)"><span>bug</span></span></div>
-                <div class="set-row"><span class="checkrow"><input type="checkbox" aria-label="data" style="accent-color:var(--accent)"><span>data</span></span></div>
-              </div>
-              <div class="btnrow" style="margin-top:14px"><button class="btn" type="button">ラベルを取り直す</button><button class="btn primary" type="button" data-nav="k-settings">保存する</button><button class="btn ghost" type="button" data-nav="k-settings">キャンセル</button></div>
-            </div>
-
             <div class="screen-pane" data-screen="k-hooks">
               <div class="btnrow" style="margin-bottom:14px"><button class="btn iconbtn" type="button" data-nav="k-settings" title="設定へ戻る" aria-label="設定へ戻る">&larr;</button></div>
               <p class="h-big">フック — KeibaDB</p>
@@ -2799,14 +2774,14 @@
 
             <div class="screen-pane" data-screen="k-project-stop">
               <div class="btnrow" style="margin-bottom:14px"><button class="btn iconbtn" type="button" data-nav="k-settings" title="設定へ戻る" aria-label="設定へ戻る">&larr;</button></div>
-              <p class="h-big">このプロジェクトを止める</p>
+              <p class="h-big">再起動後の継続を止める</p>
               <p class="h-sub">gwt の再起動をまたいで動き続ける設定を止めます。ファイルや課題は消えません。</p>
               <div class="set-group">
                 <div class="set-row"><div class="grow"><div class="t">実行中のエージェント</div><div class="d2">安藤 健二（#130）が動いています。止めるときは、エージェントが終わるのを待ってから止めます。</div></div></div>
                 <div class="set-row"><div class="grow"><div class="t">PM の監視</div><div class="d2">このプロジェクトへの PM の監視も止まります。判断待ちは残り、再開時にそのまま出ます。</div></div></div>
                 <div class="set-row"><div class="grow"><div class="t">再開</div><div class="d2">プロジェクト画面の一覧から、いつでも再開できます。</div></div></div>
               </div>
-              <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="k-settings">プロジェクトを止める</button><button class="btn ghost" type="button" data-nav="k-settings">やめる</button></div>
+              <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="k-settings">再起動後の継続を止める</button><button class="btn ghost" type="button" data-nav="k-settings">やめる</button></div>
             </div>
 
             <div ss="screen-pane" data-screen="k-close-project">
@@ -3118,9 +3093,9 @@
   var screenTitles = {
     appsettings: "設定", "agents-ledger": "エージェント", "agent-edit-jinsenji": "エージェント設定 — 秦泉寺 章夫", "agent-edit-oda": "エージェント設定 — 小田 洋平", "agent-edit-himeno": "エージェント設定 — 姫野 大樹", "agent-edit-ando": "エージェント設定 — 安藤 健二", "agent-new": "エージェントを追加", "tools-pool": "アカウント", "tools-env": "実行環境", "tools-env-add": "実行環境を追加", "tools-env-edit": "実行環境を編集", "tools-env-edit-fe": "実行環境を編集（フロントエンド型経由）", "tools-env-delete": "実行環境を削除", "profile-main": "環境変数", "terminal-main": "ターミナル表示", "terminal-pm": "ターミナル表示 — PM の出力",
     "g-settings-tuning": "自律駆動の詳細設定", "g-tasks": "タスク", "g-task": "タスク詳細", "g-issues": "課題", "g-issue": "課題 #5561", "g-decide": "判断待ち", "g-agents": "エージェント履歴・予定",
-    "g-board": "掲示板", "g-index": "検索", "g-branches": "ブランチ", "g-logs": "ログ", "g-settings": "設定", "g-task-new": "タスクを作る", "g-subissue-add": "子課題を追加", "g-session-picker": "セッションを選ぶ", "g-agent-pause": "一時停止の確認", "g-project-stop": "プロジェクトを止める", "g-labels": "ラベルを編集", "g-hooks": "フック", "g-close-project": "プロジェクトを閉じる", "g-issue-new": "新しい課題", "g-candidates": "起動候補", "g-branch-cleanup": "ブランチの片付け",
+    "g-board": "掲示板", "g-index": "検索", "g-branches": "ブランチ", "g-logs": "ログ", "g-settings": "設定", "g-task-new": "タスクを作る", "g-subissue-add": "子課題を追加", "g-session-picker": "セッションを選ぶ", "g-agent-pause": "一時停止の確認", "g-project-stop": "再起動後の継続を止める", "g-hooks": "フック", "g-close-project": "プロジェクトを閉じる", "g-issue-new": "新しい課題", "g-candidates": "起動候補", "g-branch-cleanup": "ブランチの片付け",
     "k-settings-tuning": "自律駆動の詳細設定", "k-tasks": "タスク", "k-task": "タスク詳細", "k-issues": "課題", "k-issue": "課題 #121", "k-decide": "判断待ち", "k-agents": "エージェント履歴・予定",
-    "k-board": "掲示板", "k-index": "検索", "k-branches": "ブランチ", "k-logs": "ログ", "k-settings": "設定", "k-task-new": "タスクを作る", "k-subissue-add": "子課題を追加", "k-session-picker": "セッションを選ぶ", "k-agent-pause": "一時停止の確認", "k-labels": "ラベルを編集", "k-hooks": "フック", "k-close-project": "プロジェクトを閉じる", "k-import-time": "取り込みの時刻", "k-issue-new": "新しい課題", "k-candidates": "起動候補"
+    "k-board": "掲示板", "k-index": "検索", "k-branches": "ブランチ", "k-logs": "ログ", "k-settings": "設定", "k-task-new": "タスクを作る", "k-subissue-add": "子課題を追加", "k-session-picker": "セッションを選ぶ", "k-agent-pause": "一時停止の確認", "k-hooks": "フック", "k-close-project": "プロジェクトを閉じる", "k-import-time": "取り込みの時刻", "k-issue-new": "新しい課題", "k-candidates": "起動候補"
   };
   var current = { start: "start", firstrun: "setup-welcome", addproject: "add-github", notifications: "notifications-main", settings: "appsettings", agents: "agents-ledger", tools: "tools-env", profile: "profile-main", wizard: "wizard", terminal: "terminal-main", gwt: "g-issues", keibadb: "k-issues" };
   var activePage = "start";
