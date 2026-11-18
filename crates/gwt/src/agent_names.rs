@@ -312,6 +312,18 @@ fn canonical_tool(value: &str) -> Result<String, String> {
     Ok(tool.command().to_string())
 }
 
+pub(crate) fn validate_registration_tool(value: &str) -> Result<(), String> {
+    match gwt_agent::resolve_agent_id(value) {
+        Some(gwt_agent::AgentId::Custom(id))
+            if crate::issue_monitor::custom_coding_agent_definition(&id).is_none() =>
+        {
+            Err("Choose a known coding tool when registering an Agent".into())
+        }
+        Some(_) => Ok(()),
+        None => Err("Unknown Agent tool".into()),
+    }
+}
+
 /// Upgrade provider-only preferences under the existing project writer lock.
 /// Current assignments keep their person and tool, including when their future
 /// slot is rested to preserve the configured capacity for the saved primary.
@@ -813,19 +825,18 @@ pub fn mutate_project_roster_snapshot(
         agent_id: Some(id), ..
     } = &action
     {
-        if let Some(gwt_agent::AgentId::Custom(id)) = gwt_agent::resolve_agent_id(id) {
-            if crate::issue_monitor::custom_coding_agent_definition(&id).is_none() {
-                return Err("Choose a known coding tool when registering an Agent".into());
-            }
-        }
-        canonical_tool(id)?;
+        validate_registration_tool(id)?;
     }
     let path = crate::issue_monitor_prefs_path_for_repo_path(root);
     let pm_identity = crate::agent_registry::ensure_current_pm_identity(root, sessions_dir)
         .map_err(|error| error.to_string())?;
     if pm_identity && !path.exists() {
-        return crate::agent_registry::mutate_pm_selection(root, action, expected_revision)
-            .map_err(|error| error.to_string());
+        return crate::agent_registry::mutate_pm_selection(
+            &gwt_core::paths::project_scope_hash(root),
+            action,
+            expected_revision,
+        )
+        .map_err(|error| error.to_string());
     }
     crate::agent_registry::ensure_active_for_project(root).map_err(|error| error.to_string())?;
     if matches!(
@@ -834,8 +845,12 @@ pub fn mutate_project_roster_snapshot(
             | AgentRosterAction::SetPmEligibility { .. }
             | AgentRosterAction::SelectPm { .. }
     ) {
-        return crate::agent_registry::mutate_pm_selection(root, action, expected_revision)
-            .map_err(|error| error.to_string());
+        return crate::agent_registry::mutate_pm_selection(
+            &gwt_core::paths::project_scope_hash(root),
+            action,
+            expected_revision,
+        )
+        .map_err(|error| error.to_string());
     }
     let seed = initial_project_members(root, &path, sessions_dir)?;
     let dead = dead_project_assignments(root, &path, sessions_dir)?;
