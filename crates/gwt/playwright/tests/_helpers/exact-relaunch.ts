@@ -6,6 +6,7 @@ import { homedir, tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import type { Page, TestInfo } from "@playwright/test";
+import { watchExactRelaunchProcesses } from "./exact-relaunch-processes.cjs";
 import { inspectLiveFixtureProcess } from "./process-inspection.mjs";
 
 export async function readProcessState(pid: number): Promise<{ birth: number; parent: number } | null> {
@@ -530,15 +531,19 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     active_tab_id: "exact-relaunch", recent_projects: [],
   }));
 
-  await setup.beforeStart?.({ home, project, env, preferences });
-
+  const capacityExecutable = join(root, `target/debug/examples/exact_relaunch_capacity${suffix}`);
+  let reapProcesses: (() => Promise<void>) | undefined;
+  async function armProcessCleanup() {
+    // Native Windows verification already contains the worker and descendants
+    // in a kill-on-close Job Object. The POSIX launcher uses process groups.
+    if (!windows) reapProcesses ??= await watchExactRelaunchProcesses(home, capacityExecutable);
+  }
   let child: ChildProcess | undefined;
   let capacityChild: ChildProcess | undefined;
   async function startCapacityFixture() {
     if (!setup.fixedMachineCapacity || capacityChild) return;
-    const executable = join(root, `target/debug/examples/exact_relaunch_capacity${suffix}`);
-    await access(executable);
-    const current = spawn(executable, [project], {
+    await access(capacityExecutable);
+    const current = spawn(capacityExecutable, [project], {
       cwd: project, env, windowsHide: true, stdio: ["pipe", "pipe", "pipe"],
     });
     capacityChild = current;
@@ -801,13 +806,16 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     if (signalFree && timedOut) throw new Error("Fixture signal-free GUI shutdown timed out");
   }
   async function stop(afterGuiStop?: () => Promise<void>, options: ShutdownOptions = {}) {
-    let failure: unknown;
-    try { await stopGuiAndProviders(afterGuiStop, options); } catch (error) { failure = error; }
-    try { await stopCapacityFixture(); } catch (error) {
-      if (failure) throw new AggregateError([failure, error], "Fixture cleanup failed");
-      throw error;
-    }
-    if (failure) throw failure;
+    const failures: unknown[] = [];
+    try { await stopGuiAndProviders(afterGuiStop, options); } catch (error) { failures.push(error); }
+    try { await stopCapacityFixture(); } catch (error) { failures.push(error); }
+    // Let the existing graceful shutdown assertions run before enforcing fixture
+    // cleanup, even when an assertion, callback or evidence attachment failed.
+    const reap = reapProcesses;
+    reapProcesses = undefined;
+    try { await reap?.(); } catch (error) { failures.push(error); }
+    if (failures.length === 1) throw failures[0];
+    if (failures.length) throw new AggregateError(failures, "Fixture cleanup failed");
   }
   async function stopGuiAndProviders(afterGuiStop?: () => Promise<void>, options: ShutdownOptions = {}) {
     let browserError: Error | undefined;
@@ -1247,9 +1255,14 @@ readline.createInterface({input:process.stdin}).on('line', line => {
       stream.once("error", resolve);
     });
     try {
+      await armProcessCleanup();
       await startCapacityFixture();
       child = spawn(gwt, ["--no-tray", "--no-open"], {
-        cwd: project, env: { ...env, GWT_BROWSER_URL_FILE: urlFile }, windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
+        cwd: project, windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
+        // Keep executing checkout binaries and identify this fixture even when
+        // verify.run has already removed its temporary cwd.
+        argv0: windows ? undefined : join(bin, "gwt"),
+        env: { ...env, GWT_BROWSER_URL_FILE: urlFile, ...(windows ? {} : { GWT_BIN_PATH: join(bin, "gwtd") }) },
       });
       const current = child;
       let failure: Error | undefined;
@@ -1283,6 +1296,12 @@ readline.createInterface({input:process.stdin}).on('line', line => {
       await stop();
       throw error;
     }
+  }
+  await armProcessCleanup();
+  try { await setup.beforeStart?.({ home, project, env, preferences }); }
+  catch (error) {
+    await stop();
+    throw error;
   }
   await start();
   return { get url() { return url; }, get ownedPid() { return child?.pid; }, home, project, branch, preferences, argvLog, launches,
