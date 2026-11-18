@@ -377,6 +377,13 @@ impl CloseCause {
     fn is_diagnostic(self) -> bool {
         matches!(self, Self::DiagnosticExit | Self::PmGenericCrash)
     }
+
+    fn permits_retained_row_close(self, runtime: &WindowRuntime) -> bool {
+        matches!(self, Self::ExplicitStop)
+            || (matches!(self, Self::DiagnosticExit)
+                && runtime.agent.is_some()
+                && !runtime_uses_pm_worktree(runtime))
+    }
 }
 
 /// Exact cleanup evidence stays in the existing owner until teardown commits.
@@ -758,7 +765,7 @@ pub(crate) enum OwnerMessage {
         cause: CloseCause,
         result: Result<(), String>,
     },
-    CloseAfterStop {
+    CloseAfterRuntimeExit {
         id: String,
         incarnation: u64,
         result: OwnerReply,
@@ -2197,7 +2204,7 @@ impl OwnerState {
                     cause,
                     result,
                 } => self.closed(id, incarnation, runtime, cause, result),
-                OwnerMessage::CloseAfterStop {
+                OwnerMessage::CloseAfterRuntimeExit {
                     id,
                     incarnation,
                     result,
@@ -2206,7 +2213,7 @@ impl OwnerState {
                     self.input_jobs = self.input_jobs.saturating_sub(1);
                     if result
                         .as_ref()
-                        .is_ok_and(|receipt| receipt["explicit_stop"] == true)
+                        .is_ok_and(|receipt| receipt["retained_window"] == true)
                     {
                         self.request(
                             OwnerRequest {
@@ -4196,8 +4203,8 @@ impl OwnerState {
                             .or_default()
                             .push(reply);
                     } else {
-                        // Close must still remove the row when a preceding STOP
-                        // is currently draining the same physical incarnation.
+                        // A stop or diagnostic exit can retire the exact PTY
+                        // while leaving its workspace row for Close to remove.
                         let (completed, receive) = oneshot::channel();
                         self.close_replies
                             .entry((id.clone(), incarnation))
@@ -4209,7 +4216,7 @@ impl OwnerState {
                             let result = receive.blocking_recv().unwrap_or_else(|_| {
                                 Err("owner stopped before close acknowledgement".into())
                             });
-                            let _ = sender.send(OwnerMessage::CloseAfterStop {
+                            let _ = sender.send(OwnerMessage::CloseAfterRuntimeExit {
                                 id,
                                 incarnation,
                                 result,
@@ -4228,7 +4235,7 @@ impl OwnerState {
                         Retirement::Runtime { runtime, cause } => {
                             self.retirements.remove(&(id.clone(), incarnation));
                             let cause =
-                                if !explicit_stop && matches!(cause, CloseCause::ExplicitStop) {
+                                if !explicit_stop && cause.permits_retained_row_close(&runtime) {
                                     CloseCause::ExplicitClose
                                 } else {
                                     cause
@@ -8104,6 +8111,7 @@ impl OwnerState {
         cause: CloseCause,
         result: Result<(), String>,
     ) {
+        let retained_window = cause.permits_retained_row_close(&runtime);
         let result = if self
             .closing
             .get(&id)
@@ -8227,6 +8235,7 @@ impl OwnerState {
                         receipt["closed"] = json!(true);
                         receipt["natural_exit"] = json!(!diagnostic_exit);
                         receipt["diagnostic_exit"] = json!(diagnostic_exit);
+                        receipt["retained_window"] = json!(retained_window);
                         receipt["status"] = json!(status);
                         receipt["detail"] = json!(runtime.detail);
                         if let Some(proof) = diagnostic_runtime {
@@ -8308,11 +8317,16 @@ impl OwnerState {
                     if let Some(Ok(receipt)) = operation.result.as_mut() {
                         receipt["closed"] = json!(true);
                         receipt["explicit_stop"] = json!(true);
+                        receipt["retained_window"] = json!(true);
                         receipt["status"] = json!(crate::WindowProcessStatus::Stopped);
                     }
                 }
             }
-            result.map(|_| json!({"closed":true,"id":id,"incarnation":incarnation,"pm_lifecycle":pm_lifecycle,"explicit_stop":matches!(cause, CloseCause::ExplicitStop)}))
+            result.map(|_| json!({
+                "closed": true, "id": id, "incarnation": incarnation, "pm_lifecycle": pm_lifecycle,
+                "explicit_stop": matches!(cause, CloseCause::ExplicitStop),
+                "retained_window": retained_window,
+            }))
         };
         for reply in self
             .close_replies
@@ -9833,15 +9847,16 @@ impl OwnerState {
         {
             return None;
         }
-        let operation = self.agent_operations.values().find(|operation| {
-            operation.id == id
-                && operation.incarnation == incarnation
-                && !operation.current.load(Ordering::Acquire)
-                && operation.result.as_ref().is_some_and(|result| {
-                    result.as_ref().is_ok_and(|receipt| {
-                        receipt["closed"] == true && receipt["explicit_stop"] == true
-                    })
-                })
+        let (operation, receipt) = self.agent_operations.values().find_map(|operation| {
+            if operation.id != id
+                || operation.incarnation != incarnation
+                || operation.current.load(Ordering::Acquire)
+            {
+                return None;
+            }
+            let receipt = operation.result.as_ref()?.as_ref().ok()?;
+            (receipt["closed"] == true && receipt["retained_window"] == true)
+                .then_some((operation, receipt))
         })?;
         let session_id = operation.session_id.as_ref()?;
         let raw = id.strip_prefix(&format!("{}::", self.project_key))?;
@@ -9851,15 +9866,15 @@ impl OwnerState {
             .iter()
             .find(|row| row.id == raw)?;
         if row.session_id.as_ref() != Some(session_id)
-            || row.status != crate::WindowProcessStatus::Stopped
-            || row.persist
+            || receipt["status"] != json!(row.status)
+            || (receipt["explicit_stop"] == true && row.persist)
         {
             return None;
         }
         Some(super::agent_dispatch::StoppedWindowRetirement {
             sessions_dir: gwt_core::paths::gwt_sessions_dir(),
-            // The exact successful STOP already committed Session/Work and
-            // reaped its tree. This retirement removes only that retained row.
+            // The exact finalizer already committed Session/Work and reaped
+            // its tree. This retirement removes only that retained row.
             expected: None,
             cleanup: super::agent_dispatch::OwnedWindowRecordCleanup {
                 registry: self.agent_registry.as_ref().ok()?.clone(),
