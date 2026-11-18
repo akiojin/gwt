@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
     fs::OpenOptions,
-    io::{BufRead, BufReader, Write},
+    io::{self, BufRead, BufReader, Write},
     path::Path,
 };
 
@@ -381,7 +381,8 @@ fn synchronize_roster_tools(
                 }
             }
         }
-        return validate_registered_profiles(prefs, &prefs.launch_profile_pool());
+        return validate_registered_profiles(prefs, &prefs.launch_profile_pool())
+            .map_err(String::from);
     }
     let pool = prefs.launch_profile_pool();
     let tools: Vec<_> = pool
@@ -508,14 +509,24 @@ fn synchronize_roster_tools(
     if legacy {
         prefs.set_launch_profile_pool(migrated);
     }
-    validate_registered_profiles(prefs, &prefs.launch_profile_pool())
+    validate_registered_profiles(prefs, &prefs.launch_profile_pool()).map_err(String::from)
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct RegisteredProfileError(String);
+
+impl From<RegisteredProfileError> for String {
+    fn from(error: RegisteredProfileError) -> Self {
+        error.0
+    }
 }
 
 /// Provider is only a capability key; a bound candidate must name its owner.
 pub fn validate_registered_profiles(
     prefs: &crate::IssueMonitorPrefs,
     profiles: &[crate::IssueMonitorLaunchProfile],
-) -> Result<(), String> {
+) -> Result<(), RegisteredProfileError> {
     for profile in profiles {
         let Some(id) = profile.agent_member_id.as_ref() else {
             continue;
@@ -529,18 +540,27 @@ pub fn validate_registered_profiles(
                     .iter()
                     .find(|member| &member.agent_member_id == id)
             })
-            .ok_or_else(|| format!("Registered Agent {id} is unavailable; reload Agents"))?;
-        if member.agent_id.as_deref() != Some(canonical_tool(&profile.agent_id)?.as_str()) {
-            return Err(format!(
-                "Agent {} has a fixed tool; choose its registered profile",
-                member.name
-            ));
-        }
+            .ok_or_else(|| {
+                RegisteredProfileError(format!(
+                    "Registered Agent {id} is unavailable. Reload Agents."
+                ))
+            })?;
+        let name = &member.name;
         if !member.implementation_eligible() {
-            return Err(format!(
-                "Agent {} is configured or reserved as PM; choose another implementation candidate",
-                member.name
-            ));
+            return Err(RegisteredProfileError(format!(
+                "Agent {name} is configured or reserved as PM. Choose another implementation candidate."
+            )));
+        }
+        let tool = canonical_tool(&profile.agent_id).map_err(RegisteredProfileError)?;
+        let Some(registered_tool) = member.agent_id.as_deref() else {
+            return Err(RegisteredProfileError(format!(
+                "Agent {name} needs a registered tool. Reload Agents."
+            )));
+        };
+        if registered_tool != tool {
+            return Err(RegisteredProfileError(format!(
+                "Agent {name} has a fixed tool. In Settings → Issues → Candidates, select “Use registered profiles” to apply {name} ({registered_tool})."
+            )));
         }
     }
     Ok(())
@@ -550,30 +570,26 @@ pub fn validate_registered_profiles(
 pub(crate) fn synchronize_roster_capacity(
     prefs: &mut crate::IssueMonitorPrefs,
     prefs_path: &Path,
-) -> Result<(), String> {
+) -> io::Result<()> {
     let default_tool = prefs
         .launch_profile_pool()
         .first()
         .map(|profile| profile.agent_id.clone())
         .unwrap_or_else(|| "codex".into());
     if let Some(roster) = prefs.agent_roster.as_mut() {
-        roster.validate()?;
-        if matches!(roster.schema_version, 2 | 3) {
-            return validate_registered_profiles(prefs, &prefs.launch_profile_pool());
-        }
-        if roster.enabled_count() != prefs.max_active_agents {
-            roster.resize(
-                prefs.max_active_agents,
-                &history_for_prefs(prefs_path)?,
-                &default_tool,
-            )?;
+        roster.validate().map_err(io::Error::other)?;
+        if roster.schema_version == 1 && roster.enabled_count() != prefs.max_active_agents {
+            let history = history_for_prefs(prefs_path).map_err(io::Error::other)?;
+            roster
+                .resize(prefs.max_active_agents, &history, &default_tool)
+                .map_err(io::Error::other)?;
             roster.revision = roster
                 .revision
                 .checked_add(1)
-                .ok_or("Agent roster revision exhausted")?;
+                .ok_or_else(|| io::Error::other("Agent roster revision exhausted"))?;
         }
     }
-    validate_registered_profiles(prefs, &prefs.launch_profile_pool())
+    validate_registered_profiles(prefs, &prefs.launch_profile_pool()).map_err(io::Error::other)
 }
 
 pub(crate) const MAX_AGENT_ROSTER_SIZE: usize = 256;
