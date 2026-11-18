@@ -6,10 +6,12 @@
  *   (b) after a window restart and an app restart the relaunched window is
  *       rebound to that same exact session.
  */
-import { chmod, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
-import { execFileSync, spawnSync } from "node:child_process";
+import { chmod, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { once } from "node:events";
 import { basename, dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { pathToFileURL } from "node:url";
 import { expect, test, type Page, type TestInfo } from "@playwright/test";
 import { readLatestOwnActivity, readProcessState, startExactRelaunchFixture, writeFixtureNodeCommand, type ExactRelaunchInvocation } from "./_helpers/exact-relaunch";
 import { gotoLiveGwt, liveGwtProjectUrl, sendLiveGwtEvent } from "./_helpers/live-gwt";
@@ -448,6 +450,79 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       } catch (error) {
         await info.attach("quit-cleanup-failure", { body: String(error), contentType: "text/plain" });
         if (!failed) throw error;
+      }
+    }
+  });
+
+  test("worker interruption reaps the managed daemon and recorder", async ({ page }, info) => {
+    const helper = pathToFileURL(join(__dirname, "_helpers/exact-relaunch.ts")).href;
+    const worker = spawn(process.execPath, ["--experimental-strip-types", "--input-type=module", "-e", `
+      const { startExactRelaunchFixture } = await import(${JSON.stringify(helper)});
+      const f = await startExactRelaunchFixture({ attach() {} });
+      process.send({ home: f.home, url: f.url, pid: f.ownedPid, preferences: f.preferences });
+      process.on("message", () => {});
+    `], { detached: true, stdio: ["ignore", "ignore", "inherit", "ipc"] });
+    const exited = once(worker, "exit");
+    const owned = new Map<number, number>();
+    async function remember(pid: number) {
+      const state = await readProcessState(pid);
+      expect(state, `fixture PID ${pid} is live before cancellation`).not.toBeNull();
+      owned.set(pid, state!.birth);
+    }
+    async function survivors() {
+      const live = [];
+      for (const [pid, birth] of owned) {
+        const stat = spawnSync("ps", ["-p", String(pid), "-o", "stat="], { encoding: "utf8", timeout: 5_000 });
+        if (stat.error) throw stat.error;
+        if (stat.status === 1 && !stat.stdout.trim() && !stat.stderr.trim()) continue;
+        if (stat.status !== 0) throw new Error(`Could not observe fixture PID ${pid}`);
+        if (!/^[ZX]/.test(stat.stdout.trim()) && (await readProcessState(pid))?.birth === birth) live.push(pid);
+      }
+      return live;
+    }
+    try {
+      const ready = await Promise.race([once(worker, "message"), exited.then(() => {
+        throw new Error("Exact relaunch worker exited before fixture readiness");
+      })]);
+      const { home, url, pid, preferences } = ready[0];
+      await remember(pid);
+      const errors = capture(page);
+      await gotoLiveGwt(page, url, { enableTestBridge: true });
+      await launchCodex(page, "main");
+      const argvLog = join(home, "provider-argv.jsonl");
+      await expect.poll(async () => (await readFile(argvLog, "utf8")).trim(), { timeout: 60_000 }).not.toBe("");
+      const provider = JSON.parse((await readFile(argvLog, "utf8")).trim());
+      await liveCodexWindow(page, provider.gwt_session_id);
+      await remember(provider.pid);
+      const daemonDir = join(dirname(preferences), "runtime/daemon");
+      const [descriptor] = (await readdir(daemonDir)).filter(name => name.endsWith(".json"));
+      const daemon = JSON.parse(await readFile(join(daemonDir, descriptor), "utf8"));
+      await remember(daemon.pid);
+      expect(errors).toEqual([]);
+
+      // verify.run kills the command group, including the GUI. The daemon and
+      // its PTY can leave that group. The verification temp tree is then removed.
+      process.kill(-worker.pid!, "SIGKILL");
+      expect(await exited).toEqual([null, "SIGKILL"]);
+      await page.close();
+      await rm(join(home, "project"), { recursive: true });
+      try {
+        await expect.poll(survivors, { timeout: 12_000, message: "Interrupted worker released all fixture PIDs" }).toEqual([]);
+      } finally {
+        await info.attach("interrupted-fixture-processes", { body: JSON.stringify({
+          home, gui: pid, daemon: daemon.pid, provider: provider.pid, remaining: await survivors(),
+        }), contentType: "application/json" });
+      }
+    } finally {
+      if (worker.pid && worker.exitCode === null && worker.signalCode === null) {
+        try { process.kill(-worker.pid, "SIGKILL"); } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+        }
+      }
+      for (const pid of await survivors()) {
+        try { process.kill(pid, "SIGKILL"); } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+        }
       }
     }
   });
