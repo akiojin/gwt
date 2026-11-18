@@ -128,6 +128,7 @@ fn issue_monitor_periodic_read_max_age() -> Option<Duration> {
     (!max_age.is_zero()).then_some(max_age)
 }
 const ISSUE_MONITOR_AUTHORITY_RETRY_DELAY: Duration = Duration::from_millis(50);
+const ISSUE_MONITOR_AUTHORITY_RETRY_LIMIT: u32 = 8;
 const DAEMON_RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 const ISSUE_MONITOR_AUTHORITY_RECOVERY_GUIDANCE: &str =
     "Recovery: preserve the prefs and authority marker, resolve the reported lock or invalid \
@@ -2323,7 +2324,8 @@ fn spawn_issue_monitor_worker(
                                         && observation_baseline.as_ref().is_some_and(|before| {
                                             monitor.scan_observations_compatible_with(before, &gwt_core::timestamp::UtcTimestamp::now().to_rfc3339())
                                         });
-                                    let launch_authority_unchanged = refused_launch_ack || unchanged_delivery_stage || coalesced_observation;
+                                    let profile_rejected = matches!(outcome, IssueMonitorControlCommit::ProfileRejected { .. });
+                                    let launch_authority_unchanged = refused_launch_ack || unchanged_delivery_stage || coalesced_observation || profile_rejected;
                                     tracing::info!(
                                         target: "gwt.issue_monitor.scan",
                                         project_root = %scope.project_root.display(),
@@ -2351,7 +2353,9 @@ fn spawn_issue_monitor_worker(
                                     if review_deferred || launch_authority_unchanged {
                                         // Publish the row diagnostic without immediately
                                         // redelivering an unchanged launch notification.
-                                        publish_issue_monitor_read_only_payloads(&hub, &monitor, &project_store);
+                                        if !matches!(outcome, IssueMonitorControlCommit::ProfileRejected { diagnostic_changed: false }) || capacity_policy_changed {
+                                            publish_issue_monitor_read_only_payloads(&hub, &monitor, &project_store);
+                                        }
                                     } else {
                                         publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
                                     }
@@ -2406,11 +2410,22 @@ fn spawn_issue_monitor_worker(
                     let immediate_admission = matches!(&accepted.control, IssueMonitorControl::ScanNow);
                     let authority_epoch_before_retry = monitor.effect_authority_epoch();
                     let retry_baseline = monitor.clone();
-                    let retry_result = try_apply_accepted_issue_monitor_control_with_disk_migration(
+                    let mut retry_result = try_apply_accepted_issue_monitor_control_with_disk_migration(
                         &prefs_path,
                         &mut monitor,
                         accepted,
                     );
+                    let mut retry_exhausted = false;
+                    if retry_result == IssueMonitorControlCommit::RetryableFailure {
+                        let pending = pending_authority_controls
+                            .as_mut()
+                            .expect("authority barrier exists during retry");
+                        pending.retry_failed(Instant::now());
+                        retry_exhausted = pending.is_terminal();
+                        if retry_exhausted {
+                            retry_result = IssueMonitorControlCommit::TerminalFailure;
+                        }
+                    }
                     match retry_result {
                         IssueMonitorControlCommit::Committed {
                             should_scan,
@@ -2447,6 +2462,7 @@ fn spawn_issue_monitor_worker(
                             effect_execution_requested = !monitor.pending_effects().is_empty();
                         }
                         rejection @ (IssueMonitorControlCommit::Rejected
+                        | IssueMonitorControlCommit::ProfileRejected { .. }
                         | IssueMonitorControlCommit::ConfigConflict
                         | IssueMonitorControlCommit::WaitNotLaunched
                         | IssueMonitorControlCommit::WaitCapExpired) => {
@@ -2480,13 +2496,9 @@ fn spawn_issue_monitor_worker(
                             }
                             effect_execution_requested = !monitor.pending_effects().is_empty();
                         }
-                        IssueMonitorControlCommit::RetryableFailure => {
-                            pending_authority_controls
-                                .as_mut()
-                                .expect("authority barrier exists during retry")
-                                .retry_failed();
-                        }
+                        IssueMonitorControlCommit::RetryableFailure => {}
                         IssueMonitorControlCommit::TerminalFailure => {
+                            effect_permit.close_lane();
                             let pending = pending_authority_controls
                                 .as_ref()
                                 .expect("authority barrier exists during retry");
@@ -2494,6 +2506,7 @@ fn spawn_issue_monitor_worker(
                                 &prefs_path,
                                 &mut monitor,
                                 &pending.front_accepted().expect("pending control").control,
+                                retry_exhausted,
                             );
                             pending_authority_controls
                                 .as_mut()
@@ -2520,7 +2533,7 @@ fn spawn_issue_monitor_worker(
                     if let Some(observe) = &test_hooks.control_retry_observer {
                         observe(revision_before_retry, revision);
                     }
-                    if review_deferred {
+                    if review_deferred || matches!(retry_result, IssueMonitorControlCommit::ProfileRejected { .. }) {
                         publish_issue_monitor_read_only_payloads(&hub, &monitor, &project_store);
                     } else {
                         publish_issue_monitor_payloads(&hub, &mut monitor, &project_store);
@@ -2915,7 +2928,8 @@ fn spawn_issue_monitor_worker(
                 &mut deferred_restart_reviews,
             );
 
-            if admission_requested
+            if control_open
+                && admission_requested
                 && in_flight_admission.is_none()
                 && !pending_authority_controls
                     .as_ref()
@@ -2939,7 +2953,8 @@ fn spawn_issue_monitor_worker(
                 });
             }
 
-            if (scan_requested || periodic_scan_requested)
+            if control_open
+                && (scan_requested || periodic_scan_requested)
                 && scan_retry_at.is_none()
                 && in_flight_scan.is_none()
                 && !pending_authority_controls
@@ -3962,6 +3977,9 @@ enum IssueMonitorControlCommit {
         authority_changed: bool,
     },
     Rejected,
+    ProfileRejected {
+        diagnostic_changed: bool,
+    },
     ConfigConflict,
     WaitNotLaunched,
     WaitCapExpired,
@@ -3990,6 +4008,7 @@ struct PendingIssueMonitorAuthorityControl {
 struct PendingIssueMonitorAuthorityControls {
     controls: VecDeque<PendingIssueMonitorAuthorityControl>,
     retry_at: Option<Instant>,
+    retries_attempted: u32,
 }
 
 impl PendingIssueMonitorAuthorityControls {
@@ -4009,6 +4028,7 @@ impl PendingIssueMonitorAuthorityControls {
                 completion,
             }]),
             retry_at: Some(Instant::now() + ISSUE_MONITOR_AUTHORITY_RETRY_DELAY),
+            retries_attempted: 0,
         }
     }
 
@@ -4023,6 +4043,7 @@ impl PendingIssueMonitorAuthorityControls {
                 completion,
             }]),
             retry_at: None,
+            retries_attempted: 0,
         }
     }
 
@@ -4070,6 +4091,7 @@ impl PendingIssueMonitorAuthorityControls {
 
     fn committed_front(&mut self) -> (bool, Option<IssueMonitorControlCompletion>, bool) {
         let entry = self.controls.pop_front();
+        self.retries_attempted = 0;
         let authorizing = entry.as_ref().is_some_and(|entry| entry.authorizing);
         let completion = entry.and_then(|entry| entry.completion);
         if self.controls.is_empty() {
@@ -4081,8 +4103,10 @@ impl PendingIssueMonitorAuthorityControls {
         }
     }
 
-    fn retry_failed(&mut self) {
-        self.retry_at = Some(Instant::now() + ISSUE_MONITOR_AUTHORITY_RETRY_DELAY);
+    fn retry_failed(&mut self, now: Instant) {
+        self.retries_attempted += 1;
+        self.retry_at = (self.retries_attempted < ISSUE_MONITOR_AUTHORITY_RETRY_LIMIT)
+            .then(|| now + ISSUE_MONITOR_AUTHORITY_RETRY_DELAY * (1 << self.retries_attempted));
     }
 
     fn terminal_failure(&mut self) {
@@ -4204,6 +4228,7 @@ fn apply_or_queue_issue_monitor_control(
             }
         }
         rejection @ (IssueMonitorControlCommit::Rejected
+        | IssueMonitorControlCommit::ProfileRejected { .. }
         | IssueMonitorControlCommit::ConfigConflict
         | IssueMonitorControlCommit::WaitNotLaunched
         | IssueMonitorControlCommit::WaitCapExpired) => {
@@ -4231,7 +4256,13 @@ fn apply_or_queue_issue_monitor_control(
             );
         }
         IssueMonitorControlCommit::TerminalFailure => {
-            record_issue_monitor_control_recovery_blocked(prefs_path, monitor, &accepted.control);
+            effect_permit.close_lane();
+            record_issue_monitor_control_recovery_blocked(
+                prefs_path,
+                monitor,
+                &accepted.control,
+                false,
+            );
             *pending_authority_controls = Some(PendingIssueMonitorAuthorityControls::terminal(
                 accepted, completion,
             ));
@@ -4244,12 +4275,15 @@ fn record_issue_monitor_control_recovery_blocked(
     prefs_path: &Path,
     monitor: &mut crate::IssueMonitorState,
     control: &IssueMonitorControl,
+    retry_exhausted: bool,
 ) {
     let epoch = crate::load_issue_monitor_prefs(prefs_path)
         .map(|prefs| prefs.effect_authority_epoch)
         .unwrap_or_else(|_| monitor.effect_authority_epoch());
     let cause = if epoch == u64::MAX {
         "authority epoch exhausted"
+    } else if retry_exhausted {
+        "control commit retry limit exhausted"
     } else {
         "accepted control could not be applied"
     };
@@ -4260,6 +4294,25 @@ fn record_issue_monitor_control_recovery_blocked(
         issue_monitor_shutdown_revoke_marker_path(prefs_path).display(),
         ISSUE_MONITOR_AUTHORITY_RECOVERY_GUIDANCE,
     ));
+}
+
+fn record_issue_monitor_profile_error(
+    prefs_path: &Path,
+    monitor: &mut crate::IssueMonitorState,
+    error: &io::Error,
+) -> Option<bool> {
+    let error = error
+        .get_ref()?
+        .downcast_ref::<crate::agent_names::RegisteredProfileError>()?;
+    let changed = monitor.record_registered_profile_error(error.to_string());
+    if changed {
+        tracing::warn!(
+            path = %prefs_path.display(),
+            %error,
+            "Issues Agent profile configuration is invalid"
+        );
+    }
+    Some(changed)
 }
 
 fn reconcile_deferred_grant_after_authority_commit(
@@ -5039,6 +5092,7 @@ fn apply_issue_monitor_control_with_disk_migration(
     match try_apply_issue_monitor_control_with_disk_migration(prefs_path, monitor, control) {
         IssueMonitorControlCommit::Committed { should_scan, .. } => should_scan,
         IssueMonitorControlCommit::Rejected
+        | IssueMonitorControlCommit::ProfileRejected { .. }
         | IssueMonitorControlCommit::ConfigConflict
         | IssueMonitorControlCommit::WaitNotLaunched
         | IssueMonitorControlCommit::WaitCapExpired
@@ -5566,6 +5620,7 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
                         .map_err(io::Error::other)?;
                     candidate.rebase_gui_observer_prefs(&resized);
                 }
+                candidate.synchronize_agent_roster_capacity(prefs_path)?;
                 let explicit_max_active =
                     matches!(&accepted.control, IssueMonitorControl::MaxActiveAgents(_))
                         || matches!(&accepted.control,
@@ -5608,7 +5663,6 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
                         candidate.persist_machine_max_active_change(&accepted.control_id)?;
                     }
                 }
-                candidate.synchronize_agent_roster_capacity(prefs_path)?;
                 candidate.set_last_control_receipt(crate::IssueMonitorControlReceipt {
                     control_id: accepted.control_id.clone(),
                     should_scan: applied.flatten().unwrap_or(false),
@@ -5621,7 +5675,7 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
         },
     );
     match transaction {
-        Ok(_) => {
+        Ok((committed, ())) => {
             if let Some(rejection) = rejected {
                 *monitor = candidate;
                 return rejection;
@@ -5635,6 +5689,7 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
             let Some(should_scan) = applied.flatten() else {
                 return IssueMonitorControlCommit::TerminalFailure;
             };
+            candidate.clear_registered_profile_error_if_valid(&committed);
             *monitor = candidate;
             IssueMonitorControlCommit::Committed {
                 should_scan,
@@ -5648,6 +5703,11 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
             IssueMonitorControlCommit::ConfigConflict
         }
         Err(error) => {
+            if let Some(diagnostic_changed) =
+                record_issue_monitor_profile_error(prefs_path, monitor, &error)
+            {
+                return IssueMonitorControlCommit::ProfileRejected { diagnostic_changed };
+            }
             tracing::warn!(
                 error = %error,
                 "Issues control prefs transaction failed; volatile mutation revoked"
@@ -5715,6 +5775,105 @@ mod profiles_patch_contract_tests {
             u32::MAX,
         ))
         .expect("sparse profile control")
+    }
+
+    #[test]
+    fn fixed_tool_profile_conflict_does_not_queue_control_retry() {
+        let _prefs_budget = pin_prefs_hang_guard();
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let path = temp.path().join("issue-monitor.json");
+        let mut prefs = crate::IssueMonitorPrefs {
+            enabled: true,
+            max_active_agents: 2,
+            agent_roster: Some(
+                serde_json::from_value(serde_json::json!({
+                    "schema_version": 2, "revision": 1, "members": [
+                        {"agent_member_id": "sato", "agent_id": "codex", "name": "Sato", "enabled": true, "created_at": "2026-11-18T00:00:00Z"},
+                        {"agent_member_id": "hotaru", "agent_id": "claude", "name": "Hotaru", "enabled": true, "created_at": "2026-11-18T00:00:00Z"}
+                    ]
+                }))
+                .expect("parse roster"),
+            ),
+            ..Default::default()
+        };
+        prefs.set_launch_profile_pool(vec![serde_json::from_value(serde_json::json!({
+            "agent_member_id": "sato", "agent_id": "claude", "skip_permissions": false,
+        }))
+        .expect("parse profile")]);
+        let before = serde_json::to_vec(&prefs).expect("encode stored prefs");
+        std::fs::write(&path, &before).expect("seed an existing mismatch");
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            prefs.clone(),
+        );
+        let hub = BroadcastHub::new();
+        let mut permit = IssueMonitorEffectPermit::new();
+        let mut pending = None;
+        for diagnostic_changed in [true, false] {
+            let outcome = apply_or_queue_issue_monitor_control(
+                &hub,
+                &path,
+                &mut monitor,
+                IssueMonitorControl::PriorityOrder(vec![42]),
+                &mut permit,
+                &mut pending,
+                None,
+            );
+            assert_eq!(
+                outcome,
+                IssueMonitorControlCommit::ProfileRejected { diagnostic_changed }
+            );
+            assert!(
+                pending.is_none(),
+                "configuration errors must not be retried"
+            );
+        }
+        assert_eq!(std::fs::read(&path).expect("read prefs"), before);
+        crate::scan_issue_monitor_candidates(&mut monitor, &[], "2026-11-18T00:00:00Z");
+        assert!(!monitor.allows_delivery_publication());
+        assert_eq!(monitor.status_view().state, "error");
+        let status = monitor.agent_status();
+        assert_eq!(status.last_error_source.as_deref(), Some("monitor"));
+        assert_eq!(
+            status.last_error.as_deref(),
+            Some("Agent Sato has a fixed tool. In Settings → Issues → Candidates, select “Use registered profiles” to apply Sato (codex).")
+        );
+
+        let repair = patch_control(
+            &prefs,
+            serde_json::json!([{"agent_member_id": "sato", "agent_id": "codex"}]),
+        );
+        let outcome = apply_or_queue_issue_monitor_control(
+            &hub,
+            &path,
+            &mut monitor,
+            repair,
+            &mut permit,
+            &mut pending,
+            None,
+        );
+        assert!(outcome.should_scan(), "a valid profile must still commit");
+        assert!(monitor.allows_delivery_publication());
+        assert!(monitor.agent_status().last_error.is_none());
+        let saved = crate::load_issue_monitor_prefs(&path).expect("read repaired prefs");
+        assert_eq!(saved.launch_profile_pool()[0].agent_id, "codex");
+    }
+
+    #[test]
+    fn transient_control_retries_back_off_and_stop_at_the_limit() {
+        let mut pending = PendingIssueMonitorAuthorityControls::after_accepted_failure(
+            AcceptedIssueMonitorControl::new(IssueMonitorControl::Enabled(false)),
+            None,
+        );
+        let now = Instant::now();
+        let mut delay = ISSUE_MONITOR_AUTHORITY_RETRY_DELAY;
+        for _ in 1..ISSUE_MONITOR_AUTHORITY_RETRY_LIMIT {
+            delay *= 2;
+            pending.retry_failed(now);
+            assert_eq!(pending.retry_at(), Some(now + delay));
+        }
+        pending.retry_failed(now);
+        assert!(pending.is_terminal());
     }
 
     #[test]
@@ -7860,8 +8019,10 @@ fn expire_daemon_windowless_launches(
             expired
         }
         Err(error) => {
-            refresh_monitor_after_wait_error(monitor, &error);
-            tracing::warn!(%error, "Issues launch deadline transaction failed");
+            if record_issue_monitor_profile_error(prefs_path, monitor, &error).is_none() {
+                refresh_monitor_after_wait_error(monitor, &error);
+                tracing::warn!(%error, "Issues launch deadline transaction failed");
+            }
             false
         }
     }
@@ -7893,11 +8054,13 @@ fn persist_daemon_issue_monitor_state_observed(
     ) {
         Ok((_persisted, ())) => true,
         Err(error) => {
-            refresh_monitor_after_wait_error(monitor, &error);
-            tracing::warn!(
-                error = %error,
-                "Issues daemon prefs transaction failed"
-            );
+            if record_issue_monitor_profile_error(prefs_path, monitor, &error).is_none() {
+                refresh_monitor_after_wait_error(monitor, &error);
+                tracing::warn!(
+                    error = %error,
+                    "Issues daemon prefs transaction failed"
+                );
+            }
             false
         }
     }
@@ -8033,7 +8196,8 @@ fn commit_issue_monitor_scan_if_current(
         },
     );
     match transaction {
-        Ok((_, true)) => {
+        Ok((committed, true)) => {
+            scanned.clear_registered_profile_error_if_valid(&committed);
             *monitor = scanned;
             true
         }
@@ -8046,11 +8210,13 @@ fn commit_issue_monitor_scan_if_current(
             false
         }
         Err(error) => {
-            refresh_monitor_after_wait_error(monitor, &error);
-            tracing::warn!(
-                error = %error,
-                "Issues scan proposal commit failed"
-            );
+            if record_issue_monitor_profile_error(prefs_path, monitor, &error).is_none() {
+                refresh_monitor_after_wait_error(monitor, &error);
+                tracing::warn!(
+                    error = %error,
+                    "Issues scan proposal commit failed"
+                );
+            }
             false
         }
     }
@@ -9850,6 +10016,10 @@ fn publish_issue_monitor_payloads(
     monitor: &mut crate::IssueMonitorState,
     project_store: &crate::runtime_daemon_events::ProjectStoreIdentity,
 ) {
+    if !monitor.allows_delivery_publication() {
+        publish_issue_monitor_read_only_payloads(hub, monitor, project_store);
+        return;
+    }
     // Read the leases before the snapshot so a connected window does not
     // publish one scan late as "Open the gwt window".
     monitor.set_gui_connected(issue_monitor_gui_connected(hub));
@@ -13727,10 +13897,9 @@ exit 0
     /// interruption used to end it too, and each one reported a state that was
     /// already published as one that never arrived.
     ///
-    /// The one that actually fired is lag. The worker republishes its whole
-    /// projection on every control retry - one every
-    /// `ISSUE_MONITOR_AUTHORITY_RETRY_DELAY` while a contended prefs lock keeps
-    /// the barrier up - and `BroadcastHub` retains only
+    /// The one that actually fired is lag. The worker republishes its
+    /// projection on control retries while a contended prefs lock keeps the
+    /// barrier up, and `BroadcastHub` retains only
     /// `DEFAULT_CHANNEL_CAPACITY` frames. A caller that waits on a process
     /// marker or a receipt in between falls that far behind on any host slow
     /// enough to keep the barrier up for a few seconds, and the lag it is then

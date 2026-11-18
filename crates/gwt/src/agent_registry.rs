@@ -4180,7 +4180,7 @@ impl RegistryWrite {
             &candidate,
             &candidate.launch_profile_pool(),
         )
-        .map_err(invalid)?;
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
         validate_assignment_budget(registry, &next)?;
         // Issue #7550: every writer saves through here, so none can keep or
         // bring back what the retention rule drops.
