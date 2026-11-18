@@ -1643,6 +1643,9 @@ mod tests {
                     entry.clone(),
                 )])));
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    // With no terminal frontend, answer ConPTY's startup cursor query.
+                    #[cfg(windows)]
+                    handle.write_input(b"\x1b[1;1R").unwrap();
                     std::fs::write(directory.join("go"), b"").unwrap();
                     wait_for(&directory.join("ready"));
                     let before = std::fs::read(path).unwrap();
