@@ -210,16 +210,22 @@ impl DerivedPlan {
 }
 
 fn git_lines(worktree: &Path, args: &[&str]) -> Vec<String> {
-    checked_git_lines(worktree, args).unwrap_or_default()
+    let stdout = checked_git_output(worktree, args)
+        .ok()
+        .and_then(|output| String::from_utf8(output).ok())
+        .unwrap_or_default();
+    stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
-fn checked_git_lines(worktree: &Path, args: &[&str]) -> Result<Vec<String>, String> {
+fn checked_git_output(worktree: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
     let output = hidden_command("git")
         .arg("-C")
         .arg(worktree)
-        // Non-ASCII paths must come back verbatim, not quote-escaped —
-        // escaped spellings would defeat every classifier and exclusion.
-        .args(["-c", "core.quotepath=false"])
         .args(args)
         .output()
         .map_err(|error| format!("git {} failed: {error}", args.join(" ")))?;
@@ -230,14 +236,7 @@ fn checked_git_lines(worktree: &Path, args: &[&str]) -> Result<Vec<String>, Stri
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
-    let stdout = String::from_utf8(output.stdout)
-        .map_err(|error| format!("git {} returned unreadable paths: {error}", args.join(" ")))?;
-    Ok(stdout
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(str::to_string)
-        .collect())
+    Ok(output.stdout)
 }
 
 /// Resolve the integration base the committed span is diffed against.
@@ -274,33 +273,44 @@ fn changed_paths(worktree: &Path) -> Result<Vec<String>, TrivialReason> {
 }
 
 /// The source paths `worktree` holds that `base` does not: the committed span,
-/// uncommitted changes against HEAD, and untracked files, with `.gwt/` and
+/// staged and unstaged changes, and untracked files, with `.gwt/` and
 /// `tasks/` bookkeeping excluded. Shared with the delivered-owner classifier so
 /// "nothing to deliver" means exactly what the verification matrix means by it.
 pub(crate) fn changed_source_paths_since(
     worktree: &Path,
     base: &str,
 ) -> Result<Vec<String>, String> {
-    let mut paths: BTreeSet<String> = BTreeSet::new();
-    paths.extend(checked_git_lines(
-        worktree,
-        &["diff", "--no-renames", "--name-only", base, "HEAD"],
-    )?);
-    paths.extend(checked_git_lines(
-        worktree,
-        &["diff", "--no-renames", "--name-only", "HEAD"],
-    )?);
-    paths.extend(checked_git_lines(
-        worktree,
-        &["ls-files", "--others", "--exclude-standard"],
-    )?);
-    Ok(paths
-        .into_iter()
-        .filter(|path| {
-            super::delivery_paths::classify_path(path.as_bytes())
-                == super::delivery_paths::DeliveryPath::Product
-        })
-        .collect())
+    use super::delivery_paths::{classify_path, DeliveryPath};
+
+    let commands: &[&[&str]] = &[
+        &["diff", "--no-renames", "--name-only", "-z", base, "HEAD"],
+        &[
+            "diff",
+            "--no-renames",
+            "--name-only",
+            "-z",
+            "--cached",
+            "HEAD",
+        ],
+        &["diff", "--no-renames", "--name-only", "-z"],
+        &["ls-files", "--others", "--exclude-standard", "-z"],
+    ];
+    let mut paths = BTreeSet::new();
+    for args in commands {
+        let output = checked_git_output(worktree, args)?;
+        for path in output
+            .split(|byte| *byte == 0)
+            .filter(|path| !path.is_empty())
+        {
+            if classify_path(path) == DeliveryPath::Product {
+                let path = std::str::from_utf8(path).map_err(|error| {
+                    format!("git {} returned unreadable paths: {error}", args.join(" "))
+                })?;
+                paths.insert(path.to_string());
+            }
+        }
+    }
+    Ok(paths.into_iter().collect())
 }
 
 fn crate_of(path: &str) -> Option<&str> {
@@ -1859,6 +1869,26 @@ mod tests {
         let plain = tempfile::tempdir().unwrap();
         let err = derive(plain.path()).unwrap_err();
         assert!(err.contains("git worktree"), "{err}");
+    }
+
+    #[test]
+    fn source_probe_preserves_path_whitespace_and_index_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        fixture(repo);
+        write(repo, "tracked.rs", "initial");
+        git(repo, &["add", "tracked.rs"]);
+        git(repo, &["commit", "-qm", "test: establish tracked source"]);
+        git(repo, &["update-ref", "refs/remotes/origin/develop", "HEAD"]);
+
+        write(repo, "tracked.rs", "staged");
+        git(repo, &["add", "tracked.rs"]);
+        write(repo, "tracked.rs", "initial");
+        write(repo, " tasks/product.rs", "untracked product source");
+        assert_eq!(
+            changed_source_paths_since(repo, "origin/develop").unwrap(),
+            [" tasks/product.rs", "tracked.rs"]
+        );
     }
 
     /// The parsed workflow document.
