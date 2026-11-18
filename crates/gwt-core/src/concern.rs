@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use chrono::{SecondsFormat, Utc};
+use crate::timestamp::UtcTimestamp;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -715,7 +715,7 @@ fn default_escalate_after_cycles() -> u32 {
 }
 
 fn now() -> String {
-    Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
+    UtcTimestamp::now().to_rfc3339_millis()
 }
 
 fn other(message: impl Into<String>) -> GwtError {

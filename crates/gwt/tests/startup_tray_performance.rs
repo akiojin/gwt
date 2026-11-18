@@ -134,15 +134,15 @@ impl Fixture {
             );
             worktrees.push(path);
         }
-        let old = chrono::Utc::now() - chrono::Duration::days(7);
+        let old = gwt_core::timestamp::UtcTimestamp::now() - time::Duration::days(7);
         for index in 0..1500 {
             let root = &worktrees[index % worktrees.len()];
             let mut session = Session::new(root, "fixture", AgentId::Codex);
             session.status = AgentStatus::Stopped;
             session.restore_window_on_startup = false;
-            session.created_at = old.into();
-            session.updated_at = old.into();
-            session.last_activity_at = old.into();
+            session.created_at = old;
+            session.updated_at = old;
+            session.last_activity_at = old;
             session.save(&template).expect("seed stopped Session");
         }
         Self {
@@ -265,7 +265,7 @@ fn startup_latency_budget_passes(
         && click_ms.is_some_and(|ms| ms <= 500.0)
 }
 
-fn click_ack(log: &str, sent_at: chrono::DateTime<chrono::Utc>) -> Option<(f64, Value)> {
+fn click_ack(log: &str, sent_at: gwt_core::timestamp::UtcTimestamp) -> Option<(f64, Value)> {
     log.lines()
         .filter_map(|line| {
             let row: Value = serde_json::from_str(line).ok()?;
@@ -280,8 +280,11 @@ fn click_ack(log: &str, sent_at: chrono::DateTime<chrono::Utc>) -> Option<(f64, 
             {
                 return None;
             }
-            let received = chrono::DateTime::parse_from_rfc3339(row["timestamp"].as_str()?).ok()?;
-            let elapsed = received.signed_duration_since(sent_at).to_std().ok()?;
+            let received =
+                gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(row["timestamp"].as_str()?)
+                    .ok()?;
+            let elapsed =
+                std::time::Duration::try_from(received.signed_duration_since(sent_at)).ok()?;
             Some((elapsed.as_secs_f64() * 1000.0, row))
         })
         .min_by(|left, right| left.0.total_cmp(&right.0))
@@ -289,9 +292,8 @@ fn click_ack(log: &str, sent_at: chrono::DateTime<chrono::Utc>) -> Option<(f64, 
 
 #[test]
 fn startup_metric_and_native_command_contract() {
-    let sent_at = chrono::DateTime::parse_from_rfc3339("2026-10-21T02:00:00Z")
-        .unwrap()
-        .with_timezone(&chrono::Utc);
+    let sent_at =
+        gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339("2026-10-21T02:00:00Z").unwrap();
     let ack = r#"{"timestamp":"2026-10-21T11:00:00.120+09:00","target":"gwt_tray","fields":{"message":"tray request accepted during startup"}}"#;
     let ack_ms = |log: &str| click_ack(log, sent_at).map(|(ms, _)| ms);
     // Reading this record after 600ms must still measure the ACK at 120ms.
@@ -417,7 +419,7 @@ fn startup_tray_under_large_stopped_session_load() {
         if let Some(hwnd) = hwnd {
             if ready.is_some() && !is_control {
                 let click = Instant::now();
-                click_sent_at = Some(chrono::Utc::now());
+                click_sent_at = Some(gwt_core::timestamp::UtcTimestamp::now());
                 menu_command(hwnd, OPEN);
                 while click.elapsed() < Duration::from_secs(2) {
                     text = logs(&log_dir);
@@ -575,7 +577,7 @@ fn startup_update_resume_under_large_session_load() {
         gwt_core::update::persist_update_resume_marker(&gwt_core::update::UpdateResumeMarker {
             from_version: "fixture".into(),
             to_version: env!("CARGO_PKG_VERSION").into(),
-            started_at: chrono::Utc::now().to_rfc3339(),
+            started_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
             restart_args: Vec::new(),
             projects: vec![gwt_core::update::UpdateResumeProject {
                 hash: gwt_core::paths::project_scope_hash(&fixture.repo).to_string(),

@@ -567,7 +567,7 @@ pub(crate) enum OwnerMessage {
     ObserveRuntimePolicy {
         id: String,
         incarnation: u64,
-        wall: chrono::DateTime<chrono::Utc>,
+        wall: gwt_core::timestamp::UtcTimestamp,
         now: std::time::Instant,
         reply: oneshot::Sender<Result<(), String>>,
     },
@@ -868,7 +868,7 @@ impl OwnerHandle {
         &self,
         id: &str,
         incarnation: u64,
-        wall: chrono::DateTime<chrono::Utc>,
+        wall: gwt_core::timestamp::UtcTimestamp,
         now: std::time::Instant,
     ) -> Result<(), String> {
         let (reply, receive) = oneshot::channel();
@@ -2505,7 +2505,9 @@ impl OwnerState {
         self.next_incarnation = self.next_incarnation.max(incarnation);
         let child_pid = pane.pty().process_id();
         let child_started_at = child_pid.and_then(crate::process::host_process_start_time);
-        let started_at_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
+        let started_at_ms = gwt_core::timestamp::UtcTimestamp::now()
+            .timestamp_millis()
+            .max(0) as u64;
         let pty = pane.shared_pty();
         let pane = Arc::new(Mutex::new(pane));
         let send = self.sender.clone();
@@ -7598,7 +7600,7 @@ impl OwnerState {
         &self,
         excluded_id: &str,
     ) -> crate::IssueMonitorWindowSnapshot {
-        let observed_at = chrono::Utc::now().to_rfc3339();
+        let observed_at = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
         let windows = self
             .runtimes
             .iter()
@@ -7945,7 +7947,7 @@ impl OwnerState {
                             child_started_at: runtime
                                 .child_started_at
                                 .filter(|birth| *birth > 0)?,
-                            requested_at: chrono::Utc::now().to_rfc3339(),
+                            requested_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
                         })
                     })
                     .flatten();
@@ -10140,7 +10142,7 @@ impl OwnerState {
         if hook_status.is_none() && !progress {
             return;
         }
-        let now = chrono::Utc::now();
+        let now = gwt_core::timestamp::UtcTimestamp::now();
         let runtime = self.runtimes.get_mut(&id).expect("matched exact Session");
         let effective_before = Self::runtime_status(runtime);
         if progress {
@@ -10151,7 +10153,7 @@ impl OwnerState {
         let publish_heartbeat = runtime
             .policy
             .last_heartbeat
-            .is_none_or(|last| (now - last).num_seconds() >= 60);
+            .is_none_or(|last| (now - last).whole_seconds() >= 60);
         if publish_heartbeat {
             runtime.policy.last_heartbeat = Some(now);
         }
@@ -10517,14 +10519,14 @@ impl OwnerState {
             return None;
         }
         let now = std::time::Instant::now();
-        let wall = chrono::Utc::now();
+        let wall = gwt_core::timestamp::UtcTimestamp::now();
         self.runtimes
             .values()
             .flat_map(|runtime| {
                 let quota = runtime.policy.quota_candidate_since.map(|first| {
-                    let remaining = (first + chrono::Duration::seconds(120) - wall)
-                        .to_std()
-                        .unwrap_or_default();
+                    let remaining =
+                        std::time::Duration::try_from(first + time::Duration::seconds(120) - wall)
+                            .unwrap_or_default();
                     now + remaining
                 });
                 [runtime.policy.approval_settle_at, quota]
@@ -10542,7 +10544,7 @@ impl OwnerState {
         if self.stopping {
             return;
         }
-        let wall = chrono::Utc::now();
+        let wall = gwt_core::timestamp::UtcTimestamp::now();
         let due: Vec<_> = self
             .runtimes
             .iter()
@@ -10554,7 +10556,7 @@ impl OwnerState {
                     || runtime
                         .policy
                         .quota_candidate_since
-                        .is_some_and(|first| (wall - first).num_seconds() >= 120)
+                        .is_some_and(|first| (wall - first).whole_seconds() >= 120)
             })
             .map(|(id, _)| id.clone())
             .collect();
@@ -10567,7 +10569,7 @@ impl OwnerState {
     fn observe_owner_screen_policy(
         &mut self,
         id: &str,
-        now: chrono::DateTime<chrono::Utc>,
+        now: gwt_core::timestamp::UtcTimestamp,
         monotonic_now: std::time::Instant,
         captured_screen: Option<String>,
     ) {
@@ -10728,7 +10730,7 @@ impl OwnerState {
     }
 
     fn apply_policy_usage_snapshot(&mut self, accounts: Vec<gwt_core::usage::ProviderUsage>) {
-        let now = chrono::Utc::now();
+        let now = gwt_core::timestamp::UtcTimestamp::now();
         let mut changed = Vec::new();
         for (id, runtime) in &mut self.runtimes {
             if super::runtime_events::release_policy_quota(&mut runtime.policy, &accounts, now) {
@@ -11068,7 +11070,7 @@ impl OwnerState {
                 detail,
                 final_screen: screen.as_deref(),
                 accounts: &self.policy_usage_accounts,
-                now: chrono::Utc::now(),
+                now: gwt_core::timestamp::UtcTimestamp::now(),
             },
         );
         runtime.pty_status = raw_status;
@@ -11285,7 +11287,7 @@ impl OwnerState {
                     let runtime = self.runtimes.get_mut(&id).expect("exact output pane");
                     runtime.output_bytes = runtime.output_bytes.saturating_add(data.len() as u64);
                     runtime.last_output_at =
-                        Some(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
+                        Some(gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds());
                     std::mem::replace(&mut runtime.last_published_output_seq, seq)
                 };
                 use base64::Engine;
@@ -11314,7 +11316,7 @@ impl OwnerState {
                 };
                 self.observe_owner_screen_policy(
                     &id,
-                    chrono::Utc::now(),
+                    gwt_core::timestamp::UtcTimestamp::now(),
                     std::time::Instant::now(),
                     Some(screen.clone()),
                 );
@@ -12367,7 +12369,7 @@ fn close_agent_runtime(
             if let Some(task) = super::workspace::paused_work_record_task(
                 &runtime.project_root,
                 &agent.active,
-                chrono::Utc::now(),
+                gwt_core::timestamp::UtcTimestamp::now(),
             ) {
                 task();
             }
@@ -12777,7 +12779,7 @@ fn retry_unclaimed_monitor_capacity(
     }) else {
         return Ok(false);
     };
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
     let (_, requeued) = crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
         // Capacity may have recovered since rejection. Only the same unclaimed
         // delivery may be returned; never release another materializer's work.
@@ -13318,7 +13320,7 @@ mod tests {
         };
         let receipt = ActualViewReceipt {
             receipt_id: uuid::Uuid::new_v4().to_string(),
-            accepted_at: chrono::Utc::now(),
+            accepted_at: gwt_core::timestamp::UtcTimestamp::now(),
             admitted_policy_revision: gwt_core::project_execution_policy::load(root)
                 .map_or(0, |policy| policy.revision),
         };
@@ -13346,7 +13348,7 @@ mod tests {
                             crate::project_execution_policy::policy_corruption_digest(root),
                     },
                 )]),
-                observed_at: chrono::Utc::now(),
+                observed_at: gwt_core::timestamp::UtcTimestamp::now(),
             },
         )
         .unwrap();
@@ -14262,7 +14264,7 @@ mod tests {
             status: None,
             tool_name: None,
             message: None,
-            occurred_at: chrono::Utc::now().to_rfc3339(),
+            occurred_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
         };
         let issued = state
             .issuer
@@ -14353,7 +14355,7 @@ mod tests {
                 session_binding_id: "binding".into(),
                 initial_session_id: snapshot.id.clone(),
                 entrypoint: "fixture".into(),
-                requested_at: chrono::Utc::now(),
+                requested_at: gwt_core::timestamp::UtcTimestamp::now(),
             },
             binding: binding.clone(),
             session_identity: gwt_agent::SessionExecutionIdentity {

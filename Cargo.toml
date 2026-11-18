@@ -81,7 +81,6 @@ tempfile = "3"
 include_dir = "0.7"
 
 # Utilities
-chrono = { version = "0.4", features = ["serde"] }
 time = { version = "0.3", features = ["formatting", "macros"] }
 uuid = { version = "1", features = ["v4"] }
 libc = "0.2"

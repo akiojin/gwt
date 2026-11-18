@@ -1,6 +1,7 @@
+use gwt_core::timestamp::UtcTimestamp;
+
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, Utc};
 use gwt_core::error::GwtError;
 use gwt_core::paths::{
     gwt_projects_dir, gwt_workspace_projection_path_for_repo_path,
@@ -1548,10 +1549,11 @@ pub(super) fn run<E: CliEnv>(
                             )));
                         }
                     }
-                    let workspace_id = canonical_id
-                        .unwrap_or_else(|| format!("workspace-{}", Utc::now().timestamp_millis()));
+                    let workspace_id = canonical_id.unwrap_or_else(|| {
+                        format!("workspace-{}", UtcTimestamp::now().timestamp_millis())
+                    });
                     let owner = owner_from_spec_or_issue(spec, issue);
-                    let now = Utc::now();
+                    let now = UtcTimestamp::now();
                     let next_action = boundary
                         .as_deref()
                         .map(|boundary| format!("Boundary: {boundary}"))
@@ -1751,7 +1753,7 @@ pub(super) fn run<E: CliEnv>(
             run_projection_list_with_scan_root(
                 &scan_root,
                 &WorkspaceRetentionConfig::default(),
-                Utc::now(),
+                UtcTimestamp::now(),
                 stale,
                 all,
                 |_| false,
@@ -1766,7 +1768,7 @@ pub(super) fn run<E: CliEnv>(
             run_projection_prune_with_scan_root(
                 &scan_root,
                 &WorkspaceRetentionConfig::default(),
-                Utc::now(),
+                UtcTimestamp::now(),
                 dry_run,
                 &ids,
                 |_| false,
@@ -2216,7 +2218,7 @@ fn run_work_prune(
         match gwt_core::workspace_projection::emit_workspace_done_event_if_absent(
             repo_path,
             &candidate.work_id,
-            Utc::now(),
+            UtcTimestamp::now(),
         ) {
             Ok(_) => closed += 1,
             Err(error) => {
@@ -2244,7 +2246,7 @@ fn run_work_prune(
         match gwt_core::workspace_projection::emit_workspace_discard_event_if_absent(
             repo_path,
             &candidate.work_id,
-            Utc::now(),
+            UtcTimestamp::now(),
         ) {
             Ok(_) => discarded += 1,
             Err(error) => {
@@ -2279,7 +2281,7 @@ fn run_work_prune(
         match gwt_core::workspace_projection::emit_workspace_discard_event_if_absent(
             repo_path,
             &candidate.work_id,
-            Utc::now(),
+            UtcTimestamp::now(),
         ) {
             Ok(_) => discarded += 1,
             Err(error) => {
@@ -2367,7 +2369,7 @@ fn run_work_prune(
 fn run_projection_list_with_scan_root<F>(
     scan_root: &Path,
     config: &WorkspaceRetentionConfig,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
     stale: bool,
     all: bool,
     is_active_session: F,
@@ -2397,7 +2399,7 @@ where
             entry.lifecycle_stage,
             reason,
             action,
-            entry.updated_at.format("%Y-%m-%dT%H:%M:%SZ"),
+            entry.updated_at.to_rfc3339_seconds(),
         ));
     }
     Ok(0)
@@ -2409,7 +2411,7 @@ where
 fn run_projection_prune_with_scan_root<F>(
     scan_root: &Path,
     config: &WorkspaceRetentionConfig,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
     dry_run: bool,
     ids: &[String],
     is_active_session: F,
@@ -2591,7 +2593,7 @@ pub(super) fn ensure_workspace_for_agent(
                         let work_items = load_workspace_work_items_from_path(
                             &gwt_workspace_work_items_path_for_repo_path(&recovery.project_state_root),
                         )?
-                        .unwrap_or_else(|| WorkItemsProjection::empty(Utc::now()));
+                        .unwrap_or_else(|| WorkItemsProjection::empty(UtcTimestamp::now()));
                         if let Some(canonical_id) = gwt_core::workspace_projection::current_work_id(
                             &work_items,
                             &recovery.project_state_root,
@@ -2825,7 +2827,7 @@ fn probe_workspace_ensure_with_recovery(
     };
     let work_items = match load_workspace_work_items_from_path(&work_items_path) {
         Ok(Some(work_items)) => work_items,
-        Ok(None) => WorkItemsProjection::empty(Utc::now()),
+        Ok(None) => WorkItemsProjection::empty(UtcTimestamp::now()),
         Err(error) => {
             return RecoveryProbe::unavailable(
                 "workspace.ensure",
@@ -3367,7 +3369,11 @@ fn apply_workspace_ensure_transition(
                 input.agent_session
             )));
         }
-        crate::cli::hook::register_session_in_projection(projection, &recovery.session, Utc::now());
+        crate::cli::hook::register_session_in_projection(
+            projection,
+            &recovery.session,
+            UtcTimestamp::now(),
+        );
     }
     let mut agent = projection
         .latest_agent_for_session(&input.agent_session)
@@ -3586,7 +3592,11 @@ fn apply_session_bound_workspace_ensure_transition(
         .latest_agent_for_session(&input.agent_session)
         .is_none()
     {
-        crate::cli::hook::register_session_in_projection(projection, &recovery.session, Utc::now());
+        crate::cli::hook::register_session_in_projection(
+            projection,
+            &recovery.session,
+            UtcTimestamp::now(),
+        );
     }
     let mut agent = projection
         .latest_agent_for_session(&input.agent_session)
@@ -3843,14 +3853,18 @@ fn workspace_authority_correction_event(
         .max()
         .unwrap_or(item.updated_at);
     let strictly_after_latest = latest
-        .checked_add_signed(chrono::Duration::nanoseconds(1))
+        .checked_add(time::Duration::nanoseconds(1))
         .ok_or_else(|| {
             GwtError::Other(format!(
                 "canonical Work {} has an unrepresentable future event timestamp",
                 item.id
             ))
         })?;
-    let mut event = WorkEvent::new(kind, item.id.clone(), Utc::now().max(strictly_after_latest));
+    let mut event = WorkEvent::new(
+        kind,
+        item.id.clone(),
+        UtcTimestamp::now().max(strictly_after_latest),
+    );
     event.agent_session_id = Some(session_id.to_string());
     event.agent_id = Some(canonical_agent_id.to_string());
     event.owner = canonical_owner.map(str::to_string);
@@ -3968,7 +3982,7 @@ fn workspace_claim_event(
     boundary: Option<&str>,
     agent: &WorkspaceAgentSummary,
 ) -> WorkEvent {
-    let now = Utc::now();
+    let now = UtcTimestamp::now();
     let mut event = WorkEvent::new(WorkEventKind::Claim, workspace_id.to_string(), now);
     event.intent = current_focus;
     event.summary = title_summary.map(|title| format!("Joined Workspace: {title}"));
@@ -3996,8 +4010,8 @@ fn create_workspace_for_agent(
         agent.branch.as_deref(),
         agent.worktree_path.as_deref(),
     )
-    .unwrap_or_else(|| format!("workspace-{}", Utc::now().timestamp_millis()));
-    let now = Utc::now();
+    .unwrap_or_else(|| format!("workspace-{}", UtcTimestamp::now().timestamp_millis()));
+    let now = UtcTimestamp::now();
     let event = workspace_start_event(&workspace_id, input, owner.clone(), agent);
 
     projection.start_work(
@@ -4031,7 +4045,7 @@ fn workspace_start_event(
     owner: Option<String>,
     agent: &WorkspaceAgentSummary,
 ) -> WorkEvent {
-    let mut event = WorkEvent::new(WorkEventKind::Start, workspace_id, Utc::now());
+    let mut event = WorkEvent::new(WorkEventKind::Start, workspace_id, UtcTimestamp::now());
     event.title = Some(input.title_summary.clone());
     event.intent = input
         .current_focus
@@ -4108,7 +4122,7 @@ fn current_agent_intent(
 }
 
 fn apply_workspace_item_to_projection(projection: &mut WorkspaceProjection, item: &WorkItem) {
-    projection.apply_work_item(item, Utc::now());
+    projection.apply_work_item(item, UtcTimestamp::now());
 }
 
 fn assign_agent_to_workspace(
@@ -4123,7 +4137,7 @@ fn assign_agent_to_workspace(
         workspace_id,
         current_focus,
         title_summary,
-        Utc::now(),
+        UtcTimestamp::now(),
     ) {
         return Err(string_error(format!(
             "agent session not found: {agent_session}"
@@ -4549,7 +4563,7 @@ pub(crate) mod tests {
         use super::*;
 
         fn work(id: &str, owner: Option<&str>, status: WorkspaceStatusCategory) -> WorkItem {
-            let now = Utc::now();
+            let now = UtcTimestamp::now();
             WorkItem {
                 id: id.to_string(),
                 title: id.to_string(),
@@ -4664,7 +4678,7 @@ pub(crate) mod tests {
             item.events = vec![WorkEvent::new(
                 WorkEventKind::Backfill,
                 "work-work-issue-3403-bc4a663e",
-                Utc::now(),
+                UtcTimestamp::now(),
             )];
 
             let plan = super::super::classify_orphaned_backfill_works(&[item], |path| {
@@ -4696,7 +4710,7 @@ pub(crate) mod tests {
             item.events = vec![WorkEvent::new(
                 WorkEventKind::Backfill,
                 "work-work-issue-3245-aaa",
-                Utc::now(),
+                UtcTimestamp::now(),
             )];
 
             let plan = super::super::classify_orphaned_backfill_works(&[item], |_| true);
@@ -4730,7 +4744,7 @@ pub(crate) mod tests {
             item.events = vec![WorkEvent::new(
                 WorkEventKind::Backfill,
                 "work-work-issue-3403-bc4a663e",
-                Utc::now(),
+                UtcTimestamp::now(),
             )];
 
             let plan = super::super::classify_stale_works(&[item], |_| Some(false));
@@ -4769,7 +4783,7 @@ pub(crate) mod tests {
             item.events = vec![WorkEvent::new(
                 WorkEventKind::Backfill,
                 "work-work-issue-3403-bc4a663e",
-                Utc::now(),
+                UtcTimestamp::now(),
             )];
 
             let plan = super::super::classify_orphaned_backfill_works(&[item], |_| false);
@@ -4797,7 +4811,7 @@ pub(crate) mod tests {
             item.events = vec![WorkEvent::new(
                 WorkEventKind::Backfill,
                 "work-foreign-owner",
-                Utc::now(),
+                UtcTimestamp::now(),
             )];
 
             let plan = super::super::classify_orphaned_backfill_works(&[item], |_| false);
@@ -4821,25 +4835,25 @@ pub(crate) mod tests {
             owned.events = vec![WorkEvent::new(
                 WorkEventKind::Backfill,
                 "w-owner",
-                Utc::now(),
+                UtcTimestamp::now(),
             )];
             let mut with_agent = work("w-agent", None, WorkspaceStatusCategory::Idle);
             with_agent.events = vec![WorkEvent::new(
                 WorkEventKind::Backfill,
                 "w-agent",
-                Utc::now(),
+                UtcTimestamp::now(),
             )];
             with_agent.agents = vec![WorkAgentRef {
                 session_id: "s1".to_string(),
                 agent_id: Some("codex".to_string()),
                 display_name: Some("Codex".to_string()),
-                updated_at: Utc::now(),
+                updated_at: UtcTimestamp::now(),
                 attached_by: None,
             }];
             let mut started = work("w-started", None, WorkspaceStatusCategory::Idle);
             started.events = vec![
-                WorkEvent::new(WorkEventKind::Backfill, "w-started", Utc::now()),
-                WorkEvent::new(WorkEventKind::Start, "w-started", Utc::now()),
+                WorkEvent::new(WorkEventKind::Backfill, "w-started", UtcTimestamp::now()),
+                WorkEvent::new(WorkEventKind::Start, "w-started", UtcTimestamp::now()),
             ];
 
             let plan = super::super::classify_orphaned_backfill_works(
@@ -4910,7 +4924,7 @@ pub(crate) mod tests {
                 compacted.events.push(WorkEvent::new(
                     WorkEventKind::Update,
                     "w-open",
-                    compacted.created_at + chrono::Duration::seconds(index as i64),
+                    compacted.created_at + time::Duration::seconds(index as i64),
                 ));
             }
             let mut projection = WorkItemsProjection {
@@ -4949,7 +4963,7 @@ pub(crate) mod tests {
         #[test]
         fn already_terminal_work_is_not_reclosed() {
             let mut done = work("w-done", Some("3327"), WorkspaceStatusCategory::Done);
-            done.completed_at = Some(Utc::now());
+            done.completed_at = Some(UtcTimestamp::now());
             let mut discarded = work("w-discarded", Some("3327"), WorkspaceStatusCategory::Active);
             discarded.discarded = true;
             let works = vec![done, discarded];
@@ -5188,7 +5202,7 @@ pub(crate) mod tests {
             coordination_scope: None,
             affiliation_status: WorkspaceAgentAffiliationStatus::Unassigned,
             workspace_id: None,
-            updated_at: Utc::now(),
+            updated_at: UtcTimestamp::now(),
         }
     }
 
@@ -5279,7 +5293,7 @@ pub(crate) mod tests {
         session.linked_issue_number = Some(3412);
         session.save(&sessions_dir).expect("write session");
 
-        let mut event = WorkEvent::new(WorkEventKind::Start, "work-session", Utc::now());
+        let mut event = WorkEvent::new(WorkEventKind::Start, "work-session", UtcTimestamp::now());
         event.status_category = Some(WorkspaceStatusCategory::Active);
         event.owner = Some("Issue #3412".to_string());
         event.agent_session_id = Some(session_id.to_string());
@@ -5626,7 +5640,7 @@ pub(crate) mod tests {
             Some(canonical_worktree.as_path()),
         )
         .expect("canonical Work id");
-        let mut start = WorkEvent::new(WorkEventKind::Start, work_id.clone(), Utc::now());
+        let mut start = WorkEvent::new(WorkEventKind::Start, work_id.clone(), UtcTimestamp::now());
         start.title = Some("Exact recovery Work".to_string());
         start.status_category = Some(WorkspaceStatusCategory::Active);
         start.owner = owner.map(str::to_string);
@@ -5652,7 +5666,7 @@ pub(crate) mod tests {
         status: WorkspaceStatusCategory,
     ) {
         let canonical_worktree = dunce::canonicalize(worktree).expect("canonical worktree");
-        let mut start = WorkEvent::new(WorkEventKind::Start, work_id, Utc::now());
+        let mut start = WorkEvent::new(WorkEventKind::Start, work_id, UtcTimestamp::now());
         start.status_category = Some(WorkspaceStatusCategory::Active);
         start.owner = Some("Issue #9999".to_string());
         start.agent_session_id = Some(session_id.to_string());
@@ -5675,7 +5689,7 @@ pub(crate) mod tests {
             WorkspaceStatusCategory::Unknown => WorkEventKind::Update,
             WorkspaceStatusCategory::Active => unreachable!(),
         };
-        let mut transition = WorkEvent::new(kind, work_id, Utc::now());
+        let mut transition = WorkEvent::new(kind, work_id, UtcTimestamp::now());
         transition.status_category = Some(status);
         transition.agent_session_id = Some(session_id.to_string());
         record_recovery_work_event(project_state_root, worktree, transition);
@@ -5715,7 +5729,7 @@ pub(crate) mod tests {
         use crate::cli::execution_state::{
             ExecutionControlRecord, ExecutionControlStatus, ExecutionOwnerKind,
         };
-        let now = Utc::now();
+        let now = UtcTimestamp::now();
         let record = ExecutionControlRecord {
             owner_kind: ExecutionOwnerKind::Issue,
             owner_number: owner,
@@ -6053,7 +6067,7 @@ pub(crate) mod tests {
             pr_url: Some("https://github.com/akiojin/gwt/pull/3672".to_string()),
             pr_created_at: None,
             created_by_start_work: true,
-            created_at: Utc::now(),
+            created_at: UtcTimestamp::now(),
         });
         save_workspace_projection(&repo, &projection).expect("save git details");
         let _session = crate::cli::test_support::ScopedEnvVar::set(
@@ -7060,7 +7074,7 @@ pub(crate) mod tests {
         let mut split_agent =
             assigned_agent_with_window("session-1", "project::agent-1", &worktree);
         split_agent.title_summary = Some("must not be repaired".to_string());
-        split_agent.updated_at = canonical_updated_at + chrono::Duration::seconds(1);
+        split_agent.updated_at = canonical_updated_at + time::Duration::seconds(1);
         split.agents.push(split_agent);
         save_workspace_projection(&worktree, &split).expect("save split projection");
 
@@ -7119,7 +7133,11 @@ pub(crate) mod tests {
         let mut projection = WorkspaceProjection::default_for_project(&repo);
         projection.agents.push(unassigned_agent("session-1"));
         save_workspace_projection(&repo, &projection).expect("save projection");
-        let mut event = WorkEvent::new(WorkEventKind::Start, "workspace-existing", Utc::now());
+        let mut event = WorkEvent::new(
+            WorkEventKind::Start,
+            "workspace-existing",
+            UtcTimestamp::now(),
+        );
         event.title = Some("Workspace history".to_string());
         event.summary = Some("Existing Workspace".to_string());
         event.status_category = Some(WorkspaceStatusCategory::Active);
@@ -7208,7 +7226,7 @@ pub(crate) mod tests {
             current.agents.push(unassigned_agent("session-1"));
             save_workspace_projection(&repo, &current).expect("save projection");
             let work_id = format!("work-{label}");
-            let mut start = WorkEvent::new(WorkEventKind::Start, &work_id, Utc::now());
+            let mut start = WorkEvent::new(WorkEventKind::Start, &work_id, UtcTimestamp::now());
             start.title = Some(format!("{label} Work"));
             start.status_category = Some(WorkspaceStatusCategory::Active);
             record_workspace_work_event(&repo, start).expect("record workspace");
@@ -7217,7 +7235,7 @@ pub(crate) mod tests {
                     gwt_core::workspace_projection::emit_workspace_done_event_if_absent(
                         &repo,
                         &work_id,
-                        Utc::now(),
+                        UtcTimestamp::now(),
                     )
                     .expect("complete Work");
                 }
@@ -7225,7 +7243,7 @@ pub(crate) mod tests {
                     gwt_core::workspace_projection::emit_workspace_discard_event_if_absent(
                         &repo,
                         &work_id,
-                        Utc::now(),
+                        UtcTimestamp::now(),
                     )
                     .expect("discard Work");
                 }
@@ -7279,12 +7297,12 @@ pub(crate) mod tests {
             current.agents.push(unassigned_agent("session-1"));
             save_workspace_projection(&repo, &current).expect("save projection");
             let work_id = format!("work-partial-{label}");
-            let mut start = WorkEvent::new(WorkEventKind::Start, &work_id, Utc::now());
+            let mut start = WorkEvent::new(WorkEventKind::Start, &work_id, UtcTimestamp::now());
             start.title = Some(format!("Partial {label} Work"));
             start.status_category = Some(WorkspaceStatusCategory::Active);
             record_workspace_work_event(&repo, start).expect("record workspace");
 
-            let mut close = WorkEvent::new(close_kind, &work_id, Utc::now());
+            let mut close = WorkEvent::new(close_kind, &work_id, UtcTimestamp::now());
             if close_kind == WorkEventKind::Done {
                 close.status_category = Some(WorkspaceStatusCategory::Done);
             }
@@ -7480,7 +7498,11 @@ pub(crate) mod tests {
         let mut projection = WorkspaceProjection::default_for_project(&repo);
         projection.agents.push(unassigned_agent("session-1"));
         save_workspace_projection(&repo, &projection).expect("save projection");
-        let mut event = WorkEvent::new(WorkEventKind::Start, "workspace-existing", Utc::now());
+        let mut event = WorkEvent::new(
+            WorkEventKind::Start,
+            "workspace-existing",
+            UtcTimestamp::now(),
+        );
         event.title = Some("Workspace history".to_string());
         event.intent = Some("Implement Workspace history with affiliation state".to_string());
         event.status_category = Some(WorkspaceStatusCategory::Active);
@@ -7514,7 +7536,11 @@ pub(crate) mod tests {
         let mut projection = WorkspaceProjection::default_for_project(&repo);
         projection.agents.push(unassigned_agent("session-1"));
         save_workspace_projection(&repo, &projection).expect("save projection");
-        let mut event = WorkEvent::new(WorkEventKind::Start, "workspace-existing", Utc::now());
+        let mut event = WorkEvent::new(
+            WorkEventKind::Start,
+            "workspace-existing",
+            UtcTimestamp::now(),
+        );
         event.title = Some("Workspace history".to_string());
         event.intent = Some("Implement Workspace history with affiliation state".to_string());
         event.status_category = Some(WorkspaceStatusCategory::Active);
@@ -7551,7 +7577,11 @@ pub(crate) mod tests {
         let mut projection = WorkspaceProjection::default_for_project(&repo);
         projection.agents.push(unassigned_agent("session-1"));
         save_workspace_projection(&repo, &projection).expect("save projection");
-        let mut event = WorkEvent::new(WorkEventKind::Start, "workspace-existing", Utc::now());
+        let mut event = WorkEvent::new(
+            WorkEventKind::Start,
+            "workspace-existing",
+            UtcTimestamp::now(),
+        );
         event.title = Some("Workspace history".to_string());
         event.intent = Some("Implement Workspace history with affiliation state".to_string());
         event.status_category = Some(WorkspaceStatusCategory::Active);
@@ -7612,7 +7642,7 @@ pub(crate) mod tests {
             None,
         )
         .expect("canonical id");
-        let now = Utc::now();
+        let now = UtcTimestamp::now();
         let mut start = WorkEvent::new(WorkEventKind::Start, canonical_id.clone(), now);
         start.title = Some("totally different wording".to_string());
         start.status_category = Some(WorkspaceStatusCategory::Active);
@@ -7696,7 +7726,11 @@ pub(crate) mod tests {
         let mut projection = WorkspaceProjection::default_for_project(&repo);
         projection.agents.push(unassigned_agent("session-1"));
         save_workspace_projection(&repo, &projection).expect("save projection");
-        let mut event = WorkEvent::new(WorkEventKind::Start, "workspace-existing", Utc::now());
+        let mut event = WorkEvent::new(
+            WorkEventKind::Start,
+            "workspace-existing",
+            UtcTimestamp::now(),
+        );
         event.title = Some("Workspace materialization".to_string());
         event.intent = Some("Ensure actionable Unassigned Agents join Workspace".to_string());
         event.status_category = Some(WorkspaceStatusCategory::Active);
@@ -7845,7 +7879,11 @@ pub(crate) mod tests {
             &project_root,
             3412,
         );
-        let mut foreign = WorkEvent::new(WorkEventKind::Start, "work-foreign-similar", Utc::now());
+        let mut foreign = WorkEvent::new(
+            WorkEventKind::Start,
+            "work-foreign-similar",
+            UtcTimestamp::now(),
+        );
         foreign.title = Some("Launch Work projection bootstrap".to_string());
         foreign.intent = Some("Recover the missing launch projection".to_string());
         foreign.status_category = Some(WorkspaceStatusCategory::Active);
@@ -8045,7 +8083,7 @@ pub(crate) mod tests {
         gwt_core::workspace_projection::repair_resume_owner_bleed_paths(
             &gwt_workspace_work_items_path_for_repo_path(&project_root),
             &current_path,
-            Utc::now(),
+            UtcTimestamp::now(),
         )
         .expect("restart intake repair");
         let session = gwt_agent::Session::load_and_migrate(
@@ -8219,7 +8257,7 @@ pub(crate) mod tests {
             Some("Issue #3412"),
             "Codex",
         );
-        let future_alias_at = Utc::now() + chrono::Duration::days(7);
+        let future_alias_at = UtcTimestamp::now() + time::Duration::days(7);
         let mut future_alias =
             WorkEvent::new(WorkEventKind::Update, work_id.clone(), future_alias_at);
         future_alias.agent_session_id = Some(session_id.to_string());
@@ -9684,7 +9722,7 @@ pub(crate) mod tests {
         record_recovery_work_event(
             &project_root,
             &worktree,
-            WorkEvent::new(WorkEventKind::Discard, &predecessor_id, Utc::now()),
+            WorkEvent::new(WorkEventKind::Discard, &predecessor_id, UtcTimestamp::now()),
         );
         let predecessor = load_workspace_work_items(&project_root)
             .unwrap()
@@ -9697,7 +9735,7 @@ pub(crate) mod tests {
             "work-successor-{}",
             hex::encode(sha2::Sha256::digest(predecessor_id.as_bytes()))
         );
-        let mut start = WorkEvent::new(WorkEventKind::Start, &successor_id, Utc::now());
+        let mut start = WorkEvent::new(WorkEventKind::Start, &successor_id, UtcTimestamp::now());
         start.owner = predecessor.owner.clone();
         start.execution_container = predecessor.execution_containers.first().cloned();
         // Cross-host legacy snapshots may retain only the branch identity.
@@ -9946,7 +9984,7 @@ pub(crate) mod tests {
             gwt_core::workspace_projection::load_workspace_work_items_from_path(&works_path)
                 .expect("load exact WorkItems")
                 .expect("exact WorkItems");
-        let mut done = WorkEvent::new(WorkEventKind::Done, work_id, Utc::now());
+        let mut done = WorkEvent::new(WorkEventKind::Done, work_id, UtcTimestamp::now());
         done.status_category = Some(WorkspaceStatusCategory::Done);
         work_items.apply_event(done.clone());
         gwt_core::workspace_projection::save_workspace_work_items_projection_to_path(
@@ -10098,13 +10136,13 @@ pub(crate) mod tests {
         // Real #3165 Work work-work-issue-3165-72a0e454 remains Discarded/Idle
         // despite Resume events from a fresh Session with an Active ECR.
         let discarded_at = "2026-09-10T05:01:26.337050Z"
-            .parse::<DateTime<Utc>>()
+            .parse::<UtcTimestamp>()
             .expect("real discard timestamp");
         let mut discard = WorkEvent::new(WorkEventKind::Discard, &work_id, discarded_at);
         discard.id = "a46c1a5f-abc8-48cd-81d6-bfba65caa4d7".to_string();
         discard.agent_session_id = Some("session-3165-predecessor".to_string());
         record_recovery_work_event(&project_root, &worktree, discard);
-        let mut resume = WorkEvent::new(WorkEventKind::Resume, &work_id, Utc::now());
+        let mut resume = WorkEvent::new(WorkEventKind::Resume, &work_id, UtcTimestamp::now());
         resume.agent_session_id = Some(session_id.to_string());
         resume.status_category = Some(WorkspaceStatusCategory::Active);
         record_recovery_work_event(&project_root, &worktree, resume);
@@ -10171,7 +10209,7 @@ pub(crate) mod tests {
                 start_evidence: None,
                 active: true,
                 owner_spec: Some(3587),
-                started_at: Utc::now(),
+                started_at: UtcTimestamp::now(),
                 phase: Some("verify".to_string()),
                 session_id: session_id.to_string(),
             },
@@ -10270,7 +10308,7 @@ pub(crate) mod tests {
         let worktree = project_root.join("work").join("issue-3412");
         write_bound_projectionless_session("session-wrong-work", &worktree, &project_root, 3412);
 
-        let mut foreign = WorkEvent::new(WorkEventKind::Start, "work-foreign", Utc::now());
+        let mut foreign = WorkEvent::new(WorkEventKind::Start, "work-foreign", UtcTimestamp::now());
         foreign.title = Some("Launch Work projection recovery".to_string());
         foreign.status_category = Some(WorkspaceStatusCategory::Active);
         foreign.owner = Some("Issue #3412".to_string());
@@ -10394,11 +10432,19 @@ pub(crate) mod tests {
             &project_root,
             3412,
         );
-        let mut start = WorkEvent::new(WorkEventKind::Start, "work-terminal-foreign", Utc::now());
+        let mut start = WorkEvent::new(
+            WorkEventKind::Start,
+            "work-terminal-foreign",
+            UtcTimestamp::now(),
+        );
         start.agent_session_id = Some("session-terminal-foreign".to_string());
         start.owner = Some("Issue #3412".to_string());
         record_recovery_work_event(&project_root, &worktree, start);
-        let mut done = WorkEvent::new(WorkEventKind::Done, "work-terminal-foreign", Utc::now());
+        let mut done = WorkEvent::new(
+            WorkEventKind::Done,
+            "work-terminal-foreign",
+            UtcTimestamp::now(),
+        );
         done.status_category = Some(WorkspaceStatusCategory::Done);
         record_recovery_work_event(&project_root, &worktree, done);
         let paths = [
@@ -10450,7 +10496,7 @@ pub(crate) mod tests {
         let mut start = WorkEvent::new(
             WorkEventKind::Start,
             "work-terminal-container-shadow",
-            Utc::now(),
+            UtcTimestamp::now(),
         );
         start.agent_session_id = Some("foreign-session".to_string());
         start.agent_id = Some("codex".to_string());
@@ -10466,7 +10512,7 @@ pub(crate) mod tests {
         let mut done = WorkEvent::new(
             WorkEventKind::Done,
             "work-terminal-container-shadow",
-            Utc::now(),
+            UtcTimestamp::now(),
         );
         done.status_category = Some(WorkspaceStatusCategory::Done);
         record_recovery_work_event(&project_root, &worktree, done);
@@ -10518,7 +10564,7 @@ pub(crate) mod tests {
         let mut shadow = WorkEvent::new(
             WorkEventKind::Start,
             "work-terminal-foreign-shadow",
-            Utc::now(),
+            UtcTimestamp::now(),
         );
         shadow.agent_session_id = Some("historical-session".to_string());
         shadow.agent_id = Some("codex".to_string());
@@ -10534,7 +10580,7 @@ pub(crate) mod tests {
         let mut done = WorkEvent::new(
             WorkEventKind::Done,
             "work-terminal-foreign-shadow",
-            Utc::now(),
+            UtcTimestamp::now(),
         );
         done.status_category = Some(WorkspaceStatusCategory::Done);
         record_recovery_work_event(&project_root, &worktree, done);
@@ -10604,7 +10650,7 @@ pub(crate) mod tests {
         let mut shadow = WorkEvent::new(
             WorkEventKind::Start,
             "work-paused-foreign-shadow",
-            Utc::now(),
+            UtcTimestamp::now(),
         );
         shadow.agent_session_id = Some("historical-session".to_string());
         shadow.agent_id = Some("codex".to_string());
@@ -10620,7 +10666,7 @@ pub(crate) mod tests {
         let mut pause = WorkEvent::new(
             WorkEventKind::Pause,
             "work-paused-foreign-shadow",
-            Utc::now(),
+            UtcTimestamp::now(),
         );
         pause.agent_session_id = Some("historical-session".to_string());
         record_recovery_work_event(&project_root, &worktree, pause);
@@ -10704,7 +10750,7 @@ pub(crate) mod tests {
             let mut shadow = WorkEvent::new(
                 WorkEventKind::Start,
                 format!("work-{label}-shadow"),
-                Utc::now(),
+                UtcTimestamp::now(),
             );
             shadow.agent_session_id = Some(shadow_session.to_string());
             shadow.agent_id = Some("codex".to_string());
@@ -10721,7 +10767,7 @@ pub(crate) mod tests {
             let shadow_id = shadow.work_item_id.clone();
             record_recovery_work_event(&project_root, &worktree, shadow);
             if terminal {
-                let mut done = WorkEvent::new(WorkEventKind::Done, shadow_id, Utc::now());
+                let mut done = WorkEvent::new(WorkEventKind::Done, shadow_id, UtcTimestamp::now());
                 done.status_category = Some(WorkspaceStatusCategory::Done);
                 record_recovery_work_event(&project_root, &worktree, done);
             }
@@ -11917,7 +11963,11 @@ pub(crate) mod tests {
         projection.id = "workspace-existing".to_string();
         projection.agents.push(agent);
         save_workspace_projection(&repo, &projection).expect("save projection");
-        let mut event = WorkEvent::new(WorkEventKind::Start, "workspace-existing", Utc::now());
+        let mut event = WorkEvent::new(
+            WorkEventKind::Start,
+            "workspace-existing",
+            UtcTimestamp::now(),
+        );
         event.title = Some("Workspace materialization".to_string());
         event.status_category = Some(WorkspaceStatusCategory::Active);
         record_workspace_work_event(&repo, event).expect("record workspace");
@@ -12178,7 +12228,7 @@ pub(crate) mod tests {
         scan_root: &std::path::Path,
         id: &str,
         hash: &str,
-        updated_at: chrono::DateTime<chrono::Utc>,
+        updated_at: UtcTimestamp,
         lifecycle: WorkspaceLifecycleStage,
     ) {
         let project_dir = scan_root.join(hash);
@@ -12195,12 +12245,12 @@ pub(crate) mod tests {
     #[test]
     fn run_projection_list_with_scan_root_emits_actionable_only_by_default() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let now = Utc::now();
+        let now = UtcTimestamp::now();
         seed_stale_workspace(
             tmp.path(),
             "ws-stale",
             "stale-hash",
-            now - chrono::Duration::days(40),
+            now - time::Duration::days(40),
             WorkspaceLifecycleStage::Active,
         );
         seed_stale_workspace(
@@ -12234,7 +12284,7 @@ pub(crate) mod tests {
     #[test]
     fn run_projection_list_with_scan_root_includes_fresh_when_all_flag_set() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let now = Utc::now();
+        let now = UtcTimestamp::now();
         seed_stale_workspace(
             tmp.path(),
             "ws-fresh",
@@ -12262,12 +12312,12 @@ pub(crate) mod tests {
     #[test]
     fn run_projection_prune_with_scan_root_dry_run_reports_plan_without_changes() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let now = Utc::now();
+        let now = UtcTimestamp::now();
         seed_stale_workspace(
             tmp.path(),
             "ws-archive-me",
             "stale-hash",
-            now - chrono::Duration::days(40),
+            now - time::Duration::days(40),
             WorkspaceLifecycleStage::Active,
         );
 
@@ -12296,12 +12346,12 @@ pub(crate) mod tests {
     #[test]
     fn run_projection_prune_with_scan_root_apply_persists_archive() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let now = Utc::now();
+        let now = UtcTimestamp::now();
         seed_stale_workspace(
             tmp.path(),
             "ws-archive-me",
             "stale-hash",
-            now - chrono::Duration::days(40),
+            now - time::Duration::days(40),
             WorkspaceLifecycleStage::Active,
         );
 
@@ -12330,19 +12380,19 @@ pub(crate) mod tests {
     #[test]
     fn run_projection_prune_with_scan_root_filters_by_id() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let now = Utc::now();
+        let now = UtcTimestamp::now();
         seed_stale_workspace(
             tmp.path(),
             "ws-keep",
             "keep-hash",
-            now - chrono::Duration::days(40),
+            now - time::Duration::days(40),
             WorkspaceLifecycleStage::Active,
         );
         seed_stale_workspace(
             tmp.path(),
             "ws-take",
             "take-hash",
-            now - chrono::Duration::days(40),
+            now - time::Duration::days(40),
             WorkspaceLifecycleStage::Active,
         );
 
@@ -12392,7 +12442,7 @@ pub(crate) mod tests {
         let code = run_projection_prune_with_scan_root(
             tmp.path(),
             &WorkspaceRetentionConfig::default(),
-            Utc::now(),
+            UtcTimestamp::now(),
             true,
             &[],
             |_| false,
@@ -12427,7 +12477,7 @@ pub(crate) mod tests {
         let code = run_projection_prune_with_scan_root(
             tmp.path(),
             &WorkspaceRetentionConfig::default(),
-            Utc::now(),
+            UtcTimestamp::now(),
             true,
             &[],
             |_| false,
@@ -12454,7 +12504,7 @@ pub(crate) mod tests {
         let code = run_projection_prune_with_scan_root(
             tmp.path(),
             &WorkspaceRetentionConfig::default(),
-            Utc::now(),
+            UtcTimestamp::now(),
             false,
             &[],
             |_| false,
@@ -12490,13 +12540,18 @@ pub(crate) mod tests {
             pr_url: None,
             pr_state: None,
         };
-        let mut start = WorkEvent::new(WorkEventKind::Start, canonical_id.clone(), Utc::now());
+        let mut start = WorkEvent::new(
+            WorkEventKind::Start,
+            canonical_id.clone(),
+            UtcTimestamp::now(),
+        );
         start.title = Some("Canonical Work".to_string());
         start.status_category = Some(WorkspaceStatusCategory::Active);
         start.execution_container = Some(container.clone());
         record_workspace_work_event(repo, start).expect("seed canonical work");
 
-        let mut duplicate = WorkEvent::new(WorkEventKind::Start, "work-legacy-dup", Utc::now());
+        let mut duplicate =
+            WorkEvent::new(WorkEventKind::Start, "work-legacy-dup", UtcTimestamp::now());
         duplicate.title = Some("Legacy duplicate Work".to_string());
         duplicate.status_category = Some(WorkspaceStatusCategory::Active);
         duplicate.agent_session_id = Some("session-old".to_string());
@@ -12565,7 +12620,7 @@ pub(crate) mod tests {
         let repo = temp.path().join("repo");
         let canonical_id = seed_same_container_duplicate_fixture(&repo, "session-cand");
 
-        let mut foreign = WorkEvent::new(WorkEventKind::Start, "work-foreign", Utc::now());
+        let mut foreign = WorkEvent::new(WorkEventKind::Start, "work-foreign", UtcTimestamp::now());
         foreign.title = Some("Foreign collaboration Work".to_string());
         foreign.status_category = Some(WorkspaceStatusCategory::Active);
         foreign.execution_container = Some(WorkspaceExecutionContainerRef {
@@ -12642,7 +12697,7 @@ pub(crate) mod tests {
                 session_id: "session-victim".to_string(),
                 agent_id: Some("codex".to_string()),
                 display_name: Some("Codex".to_string()),
-                updated_at: Utc::now(),
+                updated_at: UtcTimestamp::now(),
                 attached_by: Some(WorkEventKind::Claim),
             });
         gwt_core::workspace_projection::save_workspace_work_items_projection_to_path(
@@ -12818,7 +12873,7 @@ pub(crate) mod tests {
         work_id: &str,
         session_id: &str,
     ) {
-        let mut own = WorkEvent::new(WorkEventKind::Start, work_id, Utc::now());
+        let mut own = WorkEvent::new(WorkEventKind::Start, work_id, UtcTimestamp::now());
         own.title = Some("Stale Work with its own container".to_string());
         own.status_category = Some(WorkspaceStatusCategory::Active);
         own.owner = Some("Issue #2359".to_string());
@@ -12834,7 +12889,7 @@ pub(crate) mod tests {
         record_recovery_work_event(project_state_root, worktree, own);
 
         let canonical_worktree = dunce::canonicalize(worktree).expect("canonical worktree");
-        let mut accreted = WorkEvent::new(WorkEventKind::Update, work_id, Utc::now());
+        let mut accreted = WorkEvent::new(WorkEventKind::Update, work_id, UtcTimestamp::now());
         accreted.agent_session_id = Some(session_id.to_string());
         accreted.execution_container = Some(WorkspaceExecutionContainerRef {
             branch: Some("work/20260601-0934".to_string()),

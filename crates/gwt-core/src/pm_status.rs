@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use chrono::{DateTime, Utc};
+use crate::timestamp::UtcTimestamp;
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
@@ -23,7 +23,7 @@ pub enum PmStatusItemKind {
 pub struct PmStatusItem {
     pub kind: PmStatusItemKind,
     pub text: String,
-    pub started_at: DateTime<Utc>,
+    pub started_at: UtcTimestamp,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,15 +58,15 @@ pub struct PmCurrentStatus {
     #[serde(default)]
     pub user_action: Option<String>,
     pub stale_after_minutes: u32,
-    pub updated_at: DateTime<Utc>,
+    pub updated_at: UtcTimestamp,
     #[serde(default)]
     pub monitor_fingerprint: Option<String>,
 }
 
 impl PmCurrentStatus {
     /// Elapsed whole minutes once the configured stale threshold is reached.
-    pub fn stale_minutes(&self, now: DateTime<Utc>) -> Option<i64> {
-        let elapsed = now.signed_duration_since(self.updated_at).num_minutes();
+    pub fn stale_minutes(&self, now: UtcTimestamp) -> Option<i64> {
+        let elapsed = now.signed_duration_since(self.updated_at).whole_minutes();
         (elapsed >= i64::from(self.stale_after_minutes)).then_some(elapsed)
     }
 }
@@ -142,7 +142,7 @@ pub fn set_status_from_path(
         next_trigger: input.next_trigger,
         user_action: input.user_action,
         stale_after_minutes: input.stale_after_minutes,
-        updated_at: Utc::now(),
+        updated_at: UtcTimestamp::now(),
         monitor_fingerprint,
     };
     append_status(&mut file, path, &status, |file, encoded| {
@@ -266,7 +266,7 @@ fn invalid_status_data(message: impl std::fmt::Display) -> io::Error {
 mod tests {
     use super::*;
     use crate::test_support::ScopedGwtHome;
-    use chrono::Duration;
+    use time::Duration;
 
     fn input() -> PmStatusInput {
         PmStatusInput {
@@ -366,7 +366,7 @@ mod tests {
 
     #[test]
     fn staleness_uses_the_last_real_update_and_a_deterministic_clock() {
-        let updated_at: DateTime<Utc> = "2026-10-13T00:00:00Z".parse().unwrap();
+        let updated_at: UtcTimestamp = "2026-10-13T00:00:00Z".parse().unwrap();
         let status = PmCurrentStatus {
             items: input().items,
             next_trigger: "CI completes".into(),

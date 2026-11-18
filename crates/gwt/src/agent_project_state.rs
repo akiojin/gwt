@@ -1,6 +1,7 @@
+use gwt_core::timestamp::UtcTimestamp;
+
 use std::path::{Path, PathBuf};
 
-use chrono::Utc;
 use gwt_agent::{ExecutionBindingIdentity, LaunchRuntimeTarget, Session, SessionExecutionBinding};
 use gwt_core::{
     error::{GwtError, Result},
@@ -1100,7 +1101,7 @@ pub fn apply_bound_authenticated_workspace_reopen(
                     Vec::new(),
                 ));
             }
-            let mut event = WorkEvent::new(WorkEventKind::Resume, &work_id, Utc::now());
+            let mut event = WorkEvent::new(WorkEventKind::Resume, &work_id, UtcTimestamp::now());
             event.agent_session_id = Some(session_id.to_string());
             event.agent_id = Some(target.agent_id.clone());
             event.status_category = Some(WorkspaceStatusCategory::Active);
@@ -2176,7 +2177,7 @@ fn continue_authenticated_execution_inner(
             session_binding_id: format!("execution-continue-{}", request.operation_id),
             initial_session_id: session.id.clone(),
             entrypoint: "execution.continue".to_string(),
-            requested_at: Utc::now(),
+            requested_at: UtcTimestamp::now(),
         },
         |attempt| attempt.request,
     );
@@ -3554,7 +3555,7 @@ fn apply_authenticated_work_terminalization_with_binding(
             expected_work_id,
             close_kind,
             policy,
-            Utc::now(),
+            UtcTimestamp::now(),
             terminal_provenance(&primary, match authority {
                 BoundWorkTerminalizationAuthority::BlockedBuildAbort => "build.abort",
                 BoundWorkTerminalizationAuthority::Active => match terminal_kind {
@@ -3567,7 +3568,7 @@ fn apply_authenticated_work_terminalization_with_binding(
         None => gwt_core::workspace_projection::emit_workspace_terminal_event_for_resolved_work_target_with_provenance(
             &target,
             close_kind,
-            Utc::now(),
+            UtcTimestamp::now(),
             terminal_provenance(&primary, match authority {
                 BoundWorkTerminalizationAuthority::BlockedBuildAbort => "build.abort",
                 BoundWorkTerminalizationAuthority::Active => match terminal_kind {
@@ -3943,7 +3944,7 @@ fn persist_workspace_transaction_error(error: &GwtError) -> std::io::Result<()> 
     directory.create(&log_dir)?;
     let mut file = options.open(gwt_core::logging::current_log_file(&log_dir))?;
     let mut line = serde_json::to_vec(&serde_json::json!({
-        "timestamp": Utc::now().to_rfc3339(),
+        "timestamp": UtcTimestamp::now().to_rfc3339(),
         "level": "WARN",
         "target": module_path!(),
         "fields": {
@@ -5976,12 +5977,12 @@ pub(crate) fn repair_split_agent_state_if_needed(
         let agent_updated_at = canonical_agent.updated_at;
         let changed = repair_agent_from_split(canonical_agent, &split_agent);
         if changed {
-            let repaired_floor = Utc::now()
+            let repaired_floor = UtcTimestamp::now()
                 .max(projection_updated_at)
                 .max(agent_updated_at)
                 .max(split_agent.updated_at);
             let repaired_at = repaired_floor
-                .checked_add_signed(chrono::Duration::nanoseconds(1))
+                .checked_add(time::Duration::nanoseconds(1))
                 .ok_or_else(|| {
                     gwt_core::GwtError::Other(
                         "split Agent repair timestamp exceeds the supported range".to_string(),
@@ -6350,7 +6351,7 @@ mod tests {
         session_id: &str,
         title_summary: Option<&str>,
         current_focus: Option<&str>,
-        updated_at: chrono::DateTime<Utc>,
+        updated_at: UtcTimestamp,
     ) -> WorkspaceAgentSummary {
         WorkspaceAgentSummary {
             session_id: session_id.to_string(),
@@ -6411,7 +6412,7 @@ mod tests {
     fn assigned_session_agent(
         session: &Session,
         work_id: &str,
-        updated_at: chrono::DateTime<Utc>,
+        updated_at: UtcTimestamp,
     ) -> WorkspaceAgentSummary {
         let mut agent = agent_summary(&session.id, None, None, updated_at);
         agent.worktree_path = Some(session.worktree_path.clone());
@@ -6435,7 +6436,7 @@ mod tests {
         session: &Session,
         work_id: &str,
     ) -> gwt_core::workspace_projection::WorkItemsProjection {
-        let now = Utc::now();
+        let now = UtcTimestamp::now();
         let mut projection = gwt_core::workspace_projection::WorkItemsProjection::empty(now);
         let mut event = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Start,
@@ -6511,7 +6512,11 @@ mod tests {
     ) {
         save_project_assignments(
             project_state_root,
-            vec![assigned_session_agent(session, work_id, Utc::now())],
+            vec![assigned_session_agent(
+                session,
+                work_id,
+                UtcTimestamp::now(),
+            )],
         );
         save_mutation_work_items_with_tracked_events(
             project_state_root,
@@ -6521,7 +6526,7 @@ mod tests {
     }
 
     fn save_completed_execution_fixture(worktree: &Path, session_id: &str) {
-        let now = Utc::now();
+        let now = UtcTimestamp::now();
         crate::cli::execution_state::save(
             worktree,
             &crate::cli::execution_state::ExecutionControlRecord {
@@ -6953,7 +6958,7 @@ mod tests {
         seed_work_mutation_surfaces(&workspace_home, &worktree);
         save_mutation_work_items(
             &workspace_home,
-            &gwt_core::workspace_projection::WorkItemsProjection::empty(Utc::now()),
+            &gwt_core::workspace_projection::WorkItemsProjection::empty(UtcTimestamp::now()),
         );
 
         test(&workspace_home, &worktree, &nested, &sibling, &session);
@@ -7562,7 +7567,7 @@ mod tests {
             session.agent_session_id = Some("private-claude-primary".to_string());
             save_session_fixture(&session);
             let work_id = "work-unbound-claude";
-            let mut agent = assigned_session_agent(&session, work_id, Utc::now());
+            let mut agent = assigned_session_agent(&session, work_id, UtcTimestamp::now());
             agent.agent_id = session.agent_id.command().to_string();
             agent.display_name = session.agent_id.display_name().to_string();
             save_project_assignments(repo, vec![agent]);
@@ -7636,7 +7641,7 @@ mod tests {
             let mut board_ref = WorkEvent::new(
                 gwt_core::workspace_projection::WorkEventKind::Update,
                 "work-primary-proof-repair",
-                done_at - chrono::Duration::seconds(1),
+                done_at - time::Duration::seconds(1),
             );
             board_ref.board_entry_id = Some("compacted-producer-board-ref".into());
             items.apply_event(board_ref.clone());
@@ -7655,7 +7660,7 @@ mod tests {
                 let event = gwt_core::workspace_projection::WorkEvent::new(
                     gwt_core::workspace_projection::WorkEventKind::Update,
                     "work-primary-proof-repair",
-                    done_at + chrono::Duration::seconds(index as i64 + 1),
+                    done_at + time::Duration::seconds(index as i64 + 1),
                 );
                 items.apply_event(event.clone());
                 shared.push(event);
@@ -8090,7 +8095,7 @@ mod tests {
                     start_evidence: None,
                     active: true,
                     owner_spec: Some(binding.owner_number),
-                    started_at: Utc::now(),
+                    started_at: UtcTimestamp::now(),
                     phase: Some("verify".to_string()),
                     session_id: session.id.clone(),
                 },
@@ -9800,7 +9805,7 @@ mod tests {
                 from_session_id: bound.id.clone(),
                 to_session_id: "session-adopting".to_string(),
                 reason: "explicit handoff".to_string(),
-                requested_at: Utc::now(),
+                requested_at: UtcTimestamp::now(),
             };
             crate::cli::execution_state::prepare_generation_takeover(repo, owner, &takeover)
                 .expect("prepare takeover suffix");
@@ -10010,7 +10015,7 @@ mod tests {
                 from_session_id: session.id.clone(),
                 to_session_id: "post-ledger-takeover-winner".to_string(),
                 reason: "legal handoff after response-loss publication".to_string(),
-                requested_at: Utc::now(),
+                requested_at: UtcTimestamp::now(),
             };
             crate::cli::execution_state::prepare_generation_takeover(repo, owner, &takeover)
                 .expect("prepare legal takeover suffix");
@@ -10106,7 +10111,7 @@ mod tests {
                 session_binding_id: "execution-continue-byte-loser".to_string(),
                 initial_session_id: stale_unbound.id.clone(),
                 entrypoint: "execution.continue".to_string(),
-                requested_at: Utc::now(),
+                requested_at: UtcTimestamp::now(),
             };
 
             assert!(
@@ -10159,7 +10164,7 @@ mod tests {
                 session_binding_id: "execution-continue-distinct-session-winner".to_string(),
                 initial_session_id: session_b.id.clone(),
                 entrypoint: "execution.continue".to_string(),
-                requested_at: Utc::now(),
+                requested_at: UtcTimestamp::now(),
             };
             crate::cli::execution_state::activate_successor_with_session_rebind(
                 repo,
@@ -10186,7 +10191,7 @@ mod tests {
                 session_binding_id: "execution-continue-distinct-session-loser".to_string(),
                 initial_session_id: session_a.id.clone(),
                 entrypoint: "execution.continue".to_string(),
-                requested_at: Utc::now(),
+                requested_at: UtcTimestamp::now(),
             };
             let loser = crate::cli::execution_state::activate_successor_with_session_rebind(
                 repo,
@@ -10790,7 +10795,7 @@ mod tests {
                 principal_id: "host-instance-prepared-probe".to_string(),
                 work_id: Some("work-prepared-probe".to_string()),
                 source: "continue-work".to_string(),
-                requested_at: Utc::now(),
+                requested_at: UtcTimestamp::now(),
                 session_binding_id: "binding-prepared-probe".to_string(),
                 initial_session_id: session.id.clone(),
                 entrypoint: "continue-work".to_string(),
@@ -11108,10 +11113,11 @@ mod tests {
                 vec![assigned_session_agent(
                     &session,
                     "work-build-orphan",
-                    Utc::now(),
+                    UtcTimestamp::now(),
                 )],
             );
-            let empty = gwt_core::workspace_projection::WorkItemsProjection::empty(Utc::now());
+            let empty =
+                gwt_core::workspace_projection::WorkItemsProjection::empty(UtcTimestamp::now());
             save_mutation_work_items(repo, &empty);
             let before = WorkMutationSnapshot::capture(repo, repo);
             assert!(
@@ -11171,10 +11177,10 @@ mod tests {
         with_strict_target_fixture(|repo, session| {
             let (session, binding) = bind_session_to_current_execution(repo, session);
             seed_work_mutation_surfaces(repo, repo);
-            let assignment = assigned_session_agent(&session, "missing-work", Utc::now());
+            let assignment = assigned_session_agent(&session, "missing-work", UtcTimestamp::now());
             save_mutation_work_items(
                 repo,
-                &gwt_core::workspace_projection::WorkItemsProjection::empty(Utc::now()),
+                &gwt_core::workspace_projection::WorkItemsProjection::empty(UtcTimestamp::now()),
             );
             let mut foreign = assignment.clone();
             foreign.agent_id = "claude".to_string();
@@ -11359,7 +11365,7 @@ mod tests {
                 vec![assigned_session_agent(
                     &session,
                     "work-assigned-but-missing",
-                    Utc::now(),
+                    UtcTimestamp::now(),
                 )],
             );
             save_mutation_work_items(repo, &mutation_work_items(repo, &session, "work-different"));
@@ -11573,7 +11579,7 @@ mod tests {
                             start_evidence: None,
                             active: true,
                             owner_spec: Some(terminal_binding.owner_number),
-                            started_at: Utc::now(),
+                            started_at: UtcTimestamp::now(),
                             phase: Some("verify".to_string()),
                             session_id: session.id.clone(),
                         },
@@ -11652,7 +11658,7 @@ mod tests {
                     start_evidence: None,
                     active: true,
                     owner_spec: Some(binding.owner_number),
-                    started_at: Utc::now(),
+                    started_at: UtcTimestamp::now(),
                     phase: Some("verify".to_string()),
                     session_id: session.id.clone(),
                 },
@@ -11736,7 +11742,7 @@ mod tests {
                             } else {
                                 binding.owner_number
                             }),
-                            started_at: Utc::now(),
+                            started_at: UtcTimestamp::now(),
                             phase: Some("verify".to_string()),
                             session_id: if case == "foreign-build-session" {
                                 "foreign-session".to_string()
@@ -12541,7 +12547,8 @@ mod tests {
             let close_events_path =
                 gwt_core::paths::gwt_workspace_work_events_closed_path_for_repo_path(repo);
 
-            let mut unassigned = assigned_session_agent(session, "work-unassigned", Utc::now());
+            let mut unassigned =
+                assigned_session_agent(session, "work-unassigned", UtcTimestamp::now());
             unassigned.affiliation_status =
                 gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Unassigned;
             unassigned.workspace_id = None;
@@ -12567,7 +12574,7 @@ mod tests {
                 vec![assigned_session_agent(
                     session,
                     "work-assigned-but-missing",
-                    Utc::now(),
+                    UtcTimestamp::now(),
                 )],
             );
             save_mutation_work_items(repo, &mutation_work_items(repo, session, "work-different"));
@@ -12848,9 +12855,9 @@ mod tests {
                 "missing",
             );
 
-            let older = Utc::now();
+            let older = UtcTimestamp::now();
             let mut unassigned =
-                assigned_session_agent(session, work_id, older + chrono::Duration::seconds(1));
+                assigned_session_agent(session, work_id, older + time::Duration::seconds(1));
             unassigned.affiliation_status =
                 gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Unassigned;
             unassigned.workspace_id = None;
@@ -12866,7 +12873,11 @@ mod tests {
 
             save_project_assignments(
                 repo,
-                vec![assigned_session_agent(session, work_id, Utc::now())],
+                vec![assigned_session_agent(
+                    session,
+                    work_id,
+                    UtcTimestamp::now(),
+                )],
             );
             assert_workspace_ensure_error(
                 resolve_session_work_mutation_target(repo, &session.id)
@@ -13001,7 +13012,7 @@ mod tests {
                 history.status_category = status;
                 history.completed_at = (status
                     == gwt_core::workspace_projection::WorkspaceStatusCategory::Done)
-                    .then(Utc::now);
+                    .then(UtcTimestamp::now);
                 history.agents[0].session_id = "historical-session".to_string();
                 work_items.work_items.push(history);
                 save_mutation_work_items(repo, &work_items);
@@ -13610,15 +13621,15 @@ mod tests {
         save_project_assignments(
             &repo,
             vec![
-                assigned_session_agent(&provider_present, work_id, Utc::now()),
-                assigned_session_agent(&provider_absent, work_id, Utc::now()),
+                assigned_session_agent(&provider_present, work_id, UtcTimestamp::now()),
+                assigned_session_agent(&provider_absent, work_id, UtcTimestamp::now()),
             ],
         );
         let mut provider_neutral_work = mutation_work_items(&repo, &provider_present, work_id);
         let mut second_session_claim = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Claim,
             work_id,
-            Utc::now(),
+            UtcTimestamp::now(),
         );
         second_session_claim.agent_session_id = Some(provider_absent.id.clone());
         second_session_claim.agent_id = Some(provider_absent.agent_id.command().to_string());
@@ -13794,8 +13805,8 @@ mod tests {
 
     #[test]
     fn repair_agent_from_split_prefers_newer_title_and_focus() {
-        let older = Utc::now();
-        let newer = older + chrono::Duration::seconds(1);
+        let older = UtcTimestamp::now();
+        let newer = older + time::Duration::seconds(1);
         let mut canonical = agent_summary(
             "session-1",
             Some("Old canonical title"),
@@ -13816,8 +13827,8 @@ mod tests {
 
     #[test]
     fn repair_agent_from_split_keeps_newer_canonical_title_and_focus() {
-        let older = Utc::now();
-        let newer = older + chrono::Duration::seconds(1);
+        let older = UtcTimestamp::now();
+        let newer = older + time::Duration::seconds(1);
         let mut canonical = agent_summary(
             "session-1",
             Some("New canonical title"),
@@ -13855,7 +13866,7 @@ mod tests {
         let split_root = temp.path().join("split");
         std::fs::create_dir_all(&canonical_root).expect("create canonical root");
         std::fs::create_dir_all(&split_root).expect("create split root");
-        let base = Utc::now();
+        let base = UtcTimestamp::now();
 
         let canonical_stale = agent_summary(
             "duplicate-session",
@@ -13867,19 +13878,19 @@ mod tests {
             "duplicate-session",
             Some("Current canonical title"),
             Some("Current canonical focus"),
-            base + chrono::Duration::seconds(1),
+            base + time::Duration::seconds(1),
         );
         let split_stale = agent_summary(
             "duplicate-session",
             Some("Stale split title"),
             Some("Stale split focus"),
-            base + chrono::Duration::seconds(2),
+            base + time::Duration::seconds(2),
         );
         let split_current = agent_summary(
             "duplicate-session",
             Some("Latest split title"),
             Some("Latest split focus"),
-            base + chrono::Duration::seconds(3),
+            base + time::Duration::seconds(3),
         );
 
         let mut canonical_projection =
@@ -13954,11 +13965,11 @@ mod tests {
         std::fs::create_dir_all(&canonical_root).expect("create canonical root");
         std::fs::create_dir_all(&split_root).expect("create split root");
 
-        let future = Utc::now() + chrono::Duration::days(1);
-        let competing_at = future + chrono::Duration::hours(1);
-        let canonical_at = future + chrono::Duration::hours(2);
-        let split_at = future + chrono::Duration::hours(3);
-        let projection_at = future + chrono::Duration::hours(4);
+        let future = UtcTimestamp::now() + time::Duration::days(1);
+        let competing_at = future + time::Duration::hours(1);
+        let canonical_at = future + time::Duration::hours(2);
+        let split_at = future + time::Duration::hours(3);
+        let projection_at = future + time::Duration::hours(4);
         let competing = agent_summary(
             "duplicate-session",
             Some("Competing canonical title"),
@@ -14040,7 +14051,7 @@ mod tests {
         let split_root = temp.path().join("split");
         std::fs::create_dir_all(&canonical_root).expect("create canonical root");
         std::fs::create_dir_all(&split_root).expect("create split root");
-        let tied_at = Utc::now() + chrono::Duration::days(1);
+        let tied_at = UtcTimestamp::now() + time::Duration::days(1);
 
         let competing = agent_summary(
             "duplicate-session",
@@ -14108,7 +14119,7 @@ mod tests {
         let split_root = temp.path().join("split");
         std::fs::create_dir_all(&canonical_root).expect("create canonical root");
         std::fs::create_dir_all(&split_root).expect("create split root");
-        let max = chrono::DateTime::<Utc>::MAX_UTC;
+        let max = UtcTimestamp::MAX;
 
         let mut canonical =
             gwt_core::workspace_projection::WorkspaceProjection::default_for_project(

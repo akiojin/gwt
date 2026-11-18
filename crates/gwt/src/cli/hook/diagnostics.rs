@@ -12,7 +12,6 @@ use std::{
     time::Duration,
 };
 
-use chrono::{SecondsFormat, Utc};
 use serde_json::json;
 
 const GWT_HOOK_PROFILE_PATH_ENV: &str = "GWT_HOOK_PROFILE_PATH";
@@ -93,7 +92,7 @@ pub fn record_handler_duration(event: &str, handler: &str, duration: Duration, s
         "duration_ms": duration.as_secs_f64() * 1000.0,
         "remaining_budget_ms": gwt_core::operation_deadline::current()
             .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()).as_secs_f64() * 1000.0),
-        "occurred_at": Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+        "occurred_at": gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_millis(),
     });
     if EVENT_IN_FLIGHT.with(Cell::get) {
         PENDING_RECORDS.with(|records| records.borrow_mut().push(record));
@@ -124,7 +123,7 @@ pub fn record_event_total(
         "provider_read_count": metrics.provider_read_count,
         "history_materialization_count": metrics.history_materialization_count,
         "projection_load_count": metrics.projection_load_count,
-        "occurred_at": Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+        "occurred_at": gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_millis(),
     }));
     write_records(&path, &records);
 }
@@ -255,7 +254,7 @@ pub fn record_stop_gate_decision(worktree: &Path, fields: serde_json::Value) {
         return;
     }
     let record = json!({
-        "timestamp": Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+        "timestamp": gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_millis(),
         "level": "WARN",
         "target": "gwt::hook::stop_gate",
         "fields": fields,

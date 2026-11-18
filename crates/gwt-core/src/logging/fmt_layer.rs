@@ -15,7 +15,10 @@ impl fmt::time::FormatTime for LocalRfc3339 {
 }
 
 /// Preserve the timestamp bytes written by the previous JSONL timer.
-fn write_log_timestamp(writer: &mut impl std::fmt::Write, at: OffsetDateTime) -> std::fmt::Result {
+pub(crate) fn write_log_timestamp(
+    writer: &mut impl std::fmt::Write,
+    at: OffsetDateTime,
+) -> std::fmt::Result {
     write!(
         writer,
         "{}T{:02}:{:02}:{:02}",

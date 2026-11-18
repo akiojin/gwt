@@ -1,4 +1,5 @@
 use super::*;
+use gwt_core::timestamp::UtcTimestamp;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -66,18 +67,18 @@ const POLL_INTERVAL_LADDER: &[Duration] = &[
 pub struct PollState {
     failure_count: usize,
     last_seen: Option<String>,
-    retry_at: Option<chrono::DateTime<chrono::Utc>>,
+    retry_at: Option<UtcTimestamp>,
 }
 
 impl PollState {
     /// Current sleep interval before the next poll attempt.
     pub fn current_interval(&self) -> Duration {
-        self.interval_at(chrono::Utc::now())
+        self.interval_at(UtcTimestamp::now())
     }
 
-    fn interval_at(&self, now: chrono::DateTime<chrono::Utc>) -> Duration {
+    fn interval_at(&self, now: UtcTimestamp) -> Duration {
         if let Some(deadline) = self.retry_at {
-            return (deadline - now).to_std().unwrap_or_default();
+            return Duration::try_from(deadline - now).unwrap_or_default();
         }
         let idx = self.failure_count.min(POLL_INTERVAL_LADDER.len() - 1);
         POLL_INTERVAL_LADDER[idx]
@@ -120,7 +121,7 @@ impl PollState {
         self.current_interval()
     }
 
-    fn on_rate_limit(&mut self, retry_at: chrono::DateTime<chrono::Utc>) -> Duration {
+    fn on_rate_limit(&mut self, retry_at: UtcTimestamp) -> Duration {
         self.failure_count = self.failure_count.saturating_add(1);
         self.retry_at = Some(retry_at);
         self.current_interval()
@@ -132,7 +133,7 @@ pub enum StartupUpdateAction {
     Publish,
     Stop,
     Retry,
-    RetryAt(chrono::DateTime<chrono::Utc>),
+    RetryAt(UtcTimestamp),
 }
 
 pub fn classify_startup_update_state(state: &gwt_core::update::UpdateState) -> StartupUpdateAction {
@@ -193,7 +194,7 @@ pub fn spawn_startup_update_check(
                 Ok(state) => state,
                 Err(error) => gwt_core::update::UpdateState::Failed {
                     message: format!("update check worker failed: {error}"),
-                    failed_at: chrono::Utc::now(),
+                    failed_at: UtcTimestamp::now(),
                     retry_at: None,
                 },
             };
@@ -237,7 +238,7 @@ pub fn spawn_startup_update_check(
                     log_poll_outcome(
                         &gwt_core::update::UpdateState::Failed {
                             message: format!("update check worker failed: {error}"),
-                            failed_at: chrono::Utc::now(),
+                            failed_at: UtcTimestamp::now(),
                             retry_at: None,
                         },
                         "retry",
@@ -287,7 +288,7 @@ fn handle_poll_outcome(
 
 fn log_poll_schedule(stage: &str, fields: &[(&str, &str)], next: Duration) {
     let next_check_at =
-        (chrono::Utc::now() + chrono::Duration::seconds(next.as_secs() as i64)).to_rfc3339();
+        (UtcTimestamp::now() + time::Duration::seconds(next.as_secs() as i64)).to_rfc3339();
     let seconds = next.as_secs().to_string();
     let mut fields = fields.to_vec();
     fields.extend([
@@ -538,7 +539,7 @@ pub fn prepare_and_persist_pending_update(
         version: prepared.latest.clone(),
         asset_url: prepared.asset_url.clone(),
         payload: prepared.payload.clone(),
-        downloaded_at: chrono::Utc::now().to_rfc3339(),
+        downloaded_at: UtcTimestamp::now().to_rfc3339(),
         origin: gwt_core::update::PendingUpdateOrigin::ManualLater,
         auto_apply_deferred: false,
     };
@@ -725,7 +726,7 @@ fn stage_graceful_update_apply_with_ops<T>(
                 to_version: marker.to_version.clone(),
                 observed_version: marker.from_version.clone(),
                 attempt: marker.attempt,
-                recorded_at: chrono::Utc::now().to_rfc3339(),
+                recorded_at: UtcTimestamp::now().to_rfc3339(),
                 message: Some(err.clone()),
             };
             if let Err(error) = gwt_core::update::persist_update_apply_result(&result) {
@@ -817,7 +818,7 @@ fn apply_pending_manifest_and_exit(
     let marker = gwt_core::update::UpdateResumeMarker {
         from_version: env!("CARGO_PKG_VERSION").to_string(),
         to_version: manifest.version.clone(),
-        started_at: chrono::Utc::now().to_rfc3339(),
+        started_at: UtcTimestamp::now().to_rfc3339(),
         restart_args: current_restart_args(),
         projects: Vec::new(),
         attempt: 1,
@@ -928,7 +929,7 @@ fn should_apply_pending_at_bootstrap(pending_version: &str, current_version: &st
 
 #[cfg(test)]
 mod poll_state_tests {
-    use super::{commit_pending_manifest_with_ops, PollState, UpdateApplyOps};
+    use super::{commit_pending_manifest_with_ops, PollState, UpdateApplyOps, UtcTimestamp};
     use gwt_core::update::{InstallerKind, PendingUpdateManifest, PreparedPayload};
     use std::path::{Path, PathBuf};
     use std::time::Duration;
@@ -962,11 +963,10 @@ mod poll_state_tests {
         let (proxy, events) = crate::AppEventProxy::stub();
         let mut poll = PollState::default();
         super::handle_poll_outcome(&mut poll, outcome, &proxy);
-        let deadline = chrono::DateTime::parse_from_rfc3339("2099-01-01T00:00:00Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc);
+        let deadline =
+            gwt_core::timestamp::UtcTimestamp::parse_rfc3339("2099-01-01T00:00:00Z").unwrap();
         assert_eq!(
-            poll.interval_at(deadline - chrono::Duration::seconds(120)),
+            poll.interval_at(deadline - time::Duration::seconds(120)),
             Duration::from_secs(120)
         );
         assert_eq!(poll.interval_at(deadline), Duration::ZERO);
@@ -1046,7 +1046,7 @@ mod poll_state_tests {
             latest: "9.133.0".into(),
             release_url: "https://example.invalid/release".into(),
             asset_url: Some("https://example.invalid/gwt.tar.gz".into()),
-            checked_at: chrono::Utc::now(),
+            checked_at: UtcTimestamp::now(),
         };
         assert_eq!(
             super::handle_poll_outcome(&mut poll, available.clone(), &proxy),
@@ -1066,7 +1066,7 @@ mod poll_state_tests {
                 &mut poll,
                 gwt_core::update::UpdateState::Failed {
                     message: "fixture network failure".into(),
-                    failed_at: chrono::Utc::now(),
+                    failed_at: UtcTimestamp::now(),
                     retry_at: None,
                 },
                 &proxy
@@ -1089,11 +1089,13 @@ mod poll_state_tests {
         assert_eq!(entries[2]["next_check_in_secs"], "600");
         for entry in entries {
             assert_eq!(entry["stage"], "check_completed");
-            let next =
-                chrono::DateTime::parse_from_rfc3339(entry["next_check_at"].as_str().unwrap())
-                    .unwrap();
+            let next = gwt_core::timestamp::UtcTimestamp::parse_rfc3339(
+                entry["next_check_at"].as_str().unwrap(),
+            )
+            .unwrap();
             let observed =
-                chrono::DateTime::parse_from_rfc3339(entry["ts"].as_str().unwrap()).unwrap();
+                gwt_core::timestamp::UtcTimestamp::parse_rfc3339(entry["ts"].as_str().unwrap())
+                    .unwrap();
             assert!(next > observed);
         }
     }
@@ -1454,7 +1456,7 @@ mod poll_state_tests {
             "a manual attempt must reach mismatch settlement before any bootstrap replay"
         );
         manifest.origin = gwt_core::update::PendingUpdateOrigin::Automatic;
-        gwt_core::update::settle_update_resume_marker("9.30.0", chrono::Utc::now()).unwrap();
+        gwt_core::update::settle_update_resume_marker("9.30.0", UtcTimestamp::now()).unwrap();
         assert!(
             !super::permits_pending_manifest_at_bootstrap(&manifest, true, false),
             "the recorded failed version remains a manual retry"

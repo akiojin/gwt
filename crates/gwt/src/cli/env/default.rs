@@ -965,7 +965,7 @@ mod runtime_factory_tests {
                 generated_outputs: Vec::new(),
                 quarantines: Vec::new(),
                 worktree_fingerprint: String::new(),
-                created_at: chrono::Utc::now(),
+                created_at: gwt_core::timestamp::UtcTimestamp::now(),
                 content_hash: String::new(),
             }),
         )

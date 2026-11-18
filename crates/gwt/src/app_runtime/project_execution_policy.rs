@@ -147,7 +147,7 @@ impl AppRuntime {
         }
         let receipt = ActualViewReceipt {
             receipt_id: uuid::Uuid::new_v4().to_string(),
-            accepted_at: chrono::Utc::now(),
+            accepted_at: gwt_core::timestamp::UtcTimestamp::now(),
             admitted_policy_revision: policy.as_ref().map_or(0, |policy| policy.revision),
         };
         let state = self.project_state_mut(context).expect("current project");
@@ -267,7 +267,7 @@ impl AppRuntime {
                 .collect::<BTreeMap<_, _>>(),
             last_open_receipt: state.project_views.last_open_receipt.clone(),
             close_intents: state.project_views.close_intents.clone(),
-            observed_at: chrono::Utc::now(),
+            observed_at: gwt_core::timestamp::UtcTimestamp::now(),
         };
         let result =
             gwt::project_execution_policy::write_observation(&context.project_root, &observation)

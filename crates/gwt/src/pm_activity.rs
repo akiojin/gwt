@@ -112,7 +112,9 @@ pub(crate) fn record_successful_operation(repo: &Path, operation: &str) {
     let Some(path) = path else {
         return;
     };
-    let updated_at_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
+    let updated_at_ms = gwt_core::timestamp::UtcTimestamp::now()
+        .timestamp_millis()
+        .max(0) as u64;
     match record_operation(&path, &session_id, operation, updated_at_ms) {
         Ok(true) => crate::daemon_runtime::notify_pm_status_changed(),
         Ok(false) => {}

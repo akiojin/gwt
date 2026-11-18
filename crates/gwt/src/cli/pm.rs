@@ -592,7 +592,7 @@ pub(super) fn run<E: CliEnv>(
                     timeout_seconds,
                     unavailable,
                 },
-                chrono::Utc::now(),
+                gwt_core::timestamp::UtcTimestamp::now(),
             )
             .map_err(|error| refusal(error.to_string()))?;
             out.push_str(&serde_json::json!({"status":if message.unavailable.is_some() {"unavailable"} else {"queued"}, "message":message}).to_string());

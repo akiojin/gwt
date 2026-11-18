@@ -983,14 +983,13 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             let recovery_id = required_string(params, "recovery_id")?;
             let body = required_string(params, "body")?;
             let recovered_at = required_string(params, "recovered_at")?;
-            let recovered_at = chrono::DateTime::parse_from_rfc3339(&recovered_at)
+            let recovered_at = gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(&recovered_at)
                 .map_err(|_| {
                     CliParseError::InvalidJson(
                         "recovered_at must be an RFC3339 timestamp of the actual intervention"
                             .into(),
                     )
                 })?
-                .with_timezone(&chrono::Utc)
                 .to_rfc3339();
             if number == 0
                 || body.trim().is_empty()

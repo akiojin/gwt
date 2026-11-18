@@ -53,7 +53,7 @@ pub struct ReportAction {
     pub id: String,
     pub kind: ReportActionKind,
     #[serde(default)]
-    pub deadline: Option<DateTime<Utc>>,
+    pub deadline: Option<UtcTimestamp>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -156,7 +156,7 @@ pub struct ReportEvent {
     #[serde(default)]
     pub refs: Vec<String>,
     #[serde(default)]
-    pub observed_at: Option<DateTime<Utc>>,
+    pub observed_at: Option<UtcTimestamp>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -304,7 +304,7 @@ pub struct EventDecision {
 pub struct PostingReceipt {
     pub schema_version: u32,
     pub request_id: String,
-    pub created_at: DateTime<Utc>,
+    pub created_at: UtcTimestamp,
     pub decisions: Vec<EventDecision>,
     pub reports: Vec<PmReport>,
 }
@@ -358,7 +358,7 @@ fn closed(status: ReportStatus) -> bool {
 fn decide_submission(
     input: &Submission,
     states: &BTreeMap<(String, String), EventRevision>,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
 ) -> Result<PostingReceipt> {
     input.validate()?;
     let mut decisions = Vec::new();
@@ -614,7 +614,7 @@ pub fn post_submission(repo: &Path, input: &Submission) -> Result<PostingReceipt
             .find(|receipt| receipt.request_id == input.request_id)
             .expect("validated receipt"));
     }
-    let receipt = decide_submission(input, &journal.states, Utc::now())?;
+    let receipt = decide_submission(input, &journal.states, UtcTimestamp::now())?;
     let transaction = Transaction {
         submission: input.clone(),
         receipt: receipt.clone(),

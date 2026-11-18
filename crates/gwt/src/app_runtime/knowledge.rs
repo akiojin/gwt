@@ -1571,7 +1571,7 @@ fn related_action_key_from_parts(
 }
 
 fn parse_related_time_millis(value: &str) -> i64 {
-    chrono::DateTime::parse_from_rfc3339(value)
+    gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(value)
         .map(|timestamp| timestamp.timestamp_millis())
         .unwrap_or_default()
 }
@@ -1696,7 +1696,7 @@ impl AppRuntime {
                 if gwt::issue_cache::issue_cache_refresh_status(
                     &root,
                     gwt::issue_cache::ISSUE_CACHE_TTL,
-                    chrono::Utc::now(),
+                    gwt_core::timestamp::UtcTimestamp::now(),
                 )
                 .stale
                 {

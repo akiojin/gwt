@@ -125,7 +125,7 @@ mod tests {
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
         let fixture = crate::cli::verification_record::tests::WorkEventGitFixture::tracked();
-        let updated_at = chrono::Utc::now();
+        let updated_at = gwt_core::timestamp::UtcTimestamp::now();
         let mut event = WorkEvent::new(WorkEventKind::Done, "work-pending-stop", updated_at);
         event.agent_session_id = Some("session-pending-stop".to_string());
         let journal_entry = WorkspaceJournalEntry {
@@ -175,7 +175,7 @@ mod tests {
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
         let fixture = crate::cli::verification_record::tests::WorkEventGitFixture::tracked();
-        let updated_at = chrono::Utc::now();
+        let updated_at = gwt_core::timestamp::UtcTimestamp::now();
         let mut event = WorkEvent::new(WorkEventKind::Done, "work-unreadable-stop", updated_at);
         event.agent_session_id = Some("session-unreadable-stop".to_string());
         let journal_entry = WorkspaceJournalEntry {

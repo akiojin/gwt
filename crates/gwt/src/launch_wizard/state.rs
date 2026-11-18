@@ -2232,7 +2232,6 @@ impl LaunchWizardState {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{TimeZone, Utc};
 
     use super::super::test_support::*;
     use super::*;
@@ -3573,7 +3572,7 @@ mod tests {
             "feature/old",
             Path::new("/tmp/old-repo"),
             gwt_agent::AgentId::Codex,
-            Utc.with_ymd_and_hms(2026, 5, 10, 9, 0, 0).unwrap(),
+            gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 5, 10, 9, 0, 0).unwrap(),
             None,
         );
         codex.model = Some("gpt-6-luna".to_string());
@@ -3633,7 +3632,7 @@ mod tests {
             "feature/old",
             Path::new("/tmp/old-repo"),
             gwt_agent::AgentId::Codex,
-            Utc.with_ymd_and_hms(2026, 5, 10, 9, 0, 0).unwrap(),
+            gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 5, 10, 9, 0, 0).unwrap(),
             None,
         );
         let previous_profiles =
@@ -3679,7 +3678,7 @@ mod tests {
                 "feature/old",
                 Path::new("/tmp/old-repo"),
                 gwt_agent::AgentId::Codex,
-                Utc.with_ymd_and_hms(2026, 5, 10, 9, 0, 0).unwrap(),
+                gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 5, 10, 9, 0, 0).unwrap(),
                 None,
             );
             let previous_profiles =
@@ -3962,7 +3961,7 @@ mod tests {
             "feature/old",
             Path::new("/tmp/old-repo"),
             gwt_agent::AgentId::Codex,
-            Utc.with_ymd_and_hms(2026, 5, 10, 9, 0, 0).unwrap(),
+            gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 5, 10, 9, 0, 0).unwrap(),
             None,
         );
         let previous_profiles =

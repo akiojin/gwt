@@ -1187,7 +1187,7 @@ fn startup_restore_limits_windows_to_the_last_open_set() {
         age_restore_fixture_session(
             &runtime.sessions_dir,
             &session_id,
-            chrono::Duration::hours(48),
+            time::Duration::hours(48),
         );
     }
 
@@ -1285,7 +1285,7 @@ fn startup_restore_collapses_duplicate_owner_issue_windows() {
         age_restore_fixture_session(
             &runtime.sessions_dir,
             &session_id,
-            chrono::Duration::minutes(10 * (2 - index as i64)),
+            time::Duration::minutes(10 * (2 - index as i64)),
         );
     }
 

@@ -366,7 +366,7 @@ mod tests {
         }
         save(dir.path(), &record).unwrap();
         let mut changed_plan = plan.clone();
-        changed_plan.created_at += chrono::Duration::seconds(1);
+        changed_plan.created_at += time::Duration::seconds(1);
         changed_plan.content_hash = compute_plan_hash(&changed_plan);
         assert!(
             !matches(&record, &request, &changed_plan),

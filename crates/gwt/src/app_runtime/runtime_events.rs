@@ -405,7 +405,7 @@ impl AppRuntime {
         // which is the Monitor's hook-independent liveness signal.
         if !data.is_empty() {
             self.window_last_output_at
-                .insert(id.clone(), chrono::Utc::now());
+                .insert(id.clone(), gwt_core::timestamp::UtcTimestamp::now());
         }
         // Raw bytes retain their original stream position and latency. Only
         // screen-derived work and the best-effort daemon relay are batched.
@@ -940,7 +940,7 @@ impl AppRuntime {
         &mut self,
         window_id: &str,
         screen: Option<&str>,
-        now: chrono::DateTime<chrono::Utc>,
+        now: gwt_core::timestamp::UtcTimestamp,
     ) -> Vec<OutboundEvent> {
         let _project_scope = self.enter_window_log_scope(window_id);
         if self.provider_quota_holds.contains_key(window_id) {
@@ -953,12 +953,7 @@ impl AppRuntime {
             return Vec::new();
         }
         let notice = screen
-            .and_then(|screen| {
-                gwt_core::usage::limit_notice::detect_provider_limit_notice_with_clock(
-                    screen,
-                    || now.with_timezone(&chrono::Local),
-                )
-            })
+            .and_then(|screen| gwt_core::usage::detect_provider_limit_notice(screen, now))
             .filter(|notice| notice.provider == self.quota_provider_for_window(window_id));
         let Some(notice) = notice else {
             self.provider_quota_candidates.remove(window_id);
@@ -985,7 +980,7 @@ impl AppRuntime {
         });
         let settled = now
             .signed_duration_since(first_seen)
-            .num_seconds()
+            .whole_seconds()
             .ge(&PROVIDER_QUOTA_SETTLE_SECS);
         if !corroborated && !settled {
             return Vec::new();
@@ -994,7 +989,7 @@ impl AppRuntime {
         // Millisecond precision so a hold formed right after an operator's
         // clear is ordered after that release instead of sharing its second.
         let evidence = gwt::IssueMonitorProviderQuotaHoldEvidence::screen_notice(
-            &now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            &now.to_rfc3339_millis(),
             window_id,
             screen.unwrap_or_default(),
         )

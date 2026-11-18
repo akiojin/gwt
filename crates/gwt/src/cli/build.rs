@@ -1430,7 +1430,7 @@ fn record_current_work_terminal_before_finalize_with_lease<E: CliEnv>(
                     gwt_core::workspace_projection::WorkCloseKind::Discarded
                 }
             },
-            chrono::Utc::now(),
+            gwt_core::timestamp::UtcTimestamp::now(),
             gwt_core::workspace_projection::WorkTerminalProvenance {
                 source_operation: match close_kind {
                     WorkTerminalKind::Done => "build.complete",
@@ -1864,7 +1864,7 @@ mod tests {
                 start_evidence: None,
                 active: true,
                 owner_spec: Some(3327),
-                started_at: chrono::Utc::now(),
+                started_at: gwt_core::timestamp::UtcTimestamp::now(),
                 phase: None,
                 session_id: "terminal-bridge-session".to_string(),
             },
@@ -1975,7 +1975,7 @@ mod tests {
                 .expect("save bound Session fixture");
 
             let work_id = "work-terminal-bridge-canonical".to_string();
-            let now = chrono::Utc::now();
+            let now = gwt_core::timestamp::UtcTimestamp::now();
             let mut current =
                 gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&git.repo);
             current
@@ -2212,7 +2212,7 @@ mod tests {
                 .expect("save split-root Session");
 
             let work_id = "work-terminal-split-root-canonical".to_string();
-            let now = chrono::Utc::now();
+            let now = gwt_core::timestamp::UtcTimestamp::now();
             let mut current =
                 gwt_core::workspace_projection::WorkspaceProjection::default_for_project(
                     &project_state_root,
@@ -2278,7 +2278,7 @@ mod tests {
             let mut discard = gwt_core::workspace_projection::WorkEvent::new(
                 gwt_core::workspace_projection::WorkEventKind::Discard,
                 &work_id,
-                now + chrono::Duration::seconds(1),
+                now + time::Duration::seconds(1),
             );
             discard.agent_session_id = Some(session.id.clone());
             legacy.apply_event(discard.clone());
@@ -2419,7 +2419,7 @@ mod tests {
                 start_evidence: None,
                 active: true,
                 owner_spec: Some(3327),
-                started_at: chrono::Utc::now(),
+                started_at: gwt_core::timestamp::UtcTimestamp::now(),
                 phase: None,
                 session_id: "unsettled-bookkeeping-session".to_string(),
             },
@@ -2472,7 +2472,7 @@ mod tests {
                     surfaces: Vec::new(),
                     generated_outputs: Vec::new(),
                     quarantines: Vec::new(),
-                    created_at: chrono::Utc::now(),
+                    created_at: gwt_core::timestamp::UtcTimestamp::now(),
                     content_hash: String::new(),
                 },
             ),
@@ -2576,7 +2576,7 @@ mod tests {
                             pr_number: 3854,
                         },
                     ],
-                    created_at: chrono::Utc::now(),
+                    created_at: gwt_core::timestamp::UtcTimestamp::now(),
                     content_hash: String::new(),
                 },
             ),
@@ -2634,8 +2634,8 @@ format_version: Some(1),
                     },
                 ],
                 adjudications: Vec::new(),
-                started_at: Some(chrono::Utc::now()),
-                created_at: chrono::Utc::now(),
+                started_at: Some(gwt_core::timestamp::UtcTimestamp::now()),
+                created_at: gwt_core::timestamp::UtcTimestamp::now(),
                 plan_covered: true,
                 planned_missing: Vec::new(),
                 skipped_after_failure: Vec::new(),
@@ -2694,7 +2694,7 @@ format_version: Some(1),
                 start_evidence: None,
                 active: true,
                 owner_spec: Some(3248),
-                started_at: chrono::Utc::now(),
+                started_at: gwt_core::timestamp::UtcTimestamp::now(),
                 phase: None,
                 session_id: session_id.to_string(),
             },
@@ -2813,7 +2813,7 @@ format_version: Some(1),
         let mut old_pr = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Pr,
             &fixture.work_id,
-            chrono::Utc::now(),
+            gwt_core::timestamp::UtcTimestamp::now(),
         );
         old_pr.agent_session_id = Some(fixture.session.id.clone());
         old_pr.execution_container = Some(
@@ -2967,7 +2967,7 @@ format_version: Some(1),
         let mut final_event = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Done,
             &fixture.work_id,
-            chrono::Utc::now(),
+            gwt_core::timestamp::UtcTimestamp::now(),
         );
         final_event.status_category =
             Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Done);
@@ -3180,7 +3180,7 @@ format_version: Some(1),
                 start_evidence: None,
                 active: true,
                 owner_spec: Some(3431),
-                started_at: chrono::Utc::now(),
+                started_at: gwt_core::timestamp::UtcTimestamp::now(),
                 phase: None,
                 session_id: session.id.clone(),
             },
@@ -3542,7 +3542,7 @@ format_version: Some(1),
         let fixture = BoundTerminalFixture::blocked_with_done_work();
         let works_path =
             gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&fixture.git.repo);
-        let at = chrono::Utc::now();
+        let at = gwt_core::timestamp::UtcTimestamp::now();
         for index in 1..=99 {
             let mut works =
                 gwt_core::workspace_projection::load_workspace_work_items_from_path(&works_path)
@@ -3551,7 +3551,7 @@ format_version: Some(1),
             works.apply_event(gwt_core::workspace_projection::WorkEvent::new(
                 gwt_core::workspace_projection::WorkEventKind::Update,
                 &fixture.work_id,
-                at + chrono::Duration::seconds(index),
+                at + time::Duration::seconds(index),
             ));
             gwt_core::workspace_projection::save_workspace_work_items_projection_to_path(
                 &works_path,
@@ -3797,7 +3797,7 @@ format_version: Some(1),
                 let event = gwt_core::workspace_projection::WorkEvent::new(
                     gwt_core::workspace_projection::WorkEventKind::Discard,
                     &fixture.work_id,
-                    chrono::Utc::now(),
+                    gwt_core::timestamp::UtcTimestamp::now(),
                 );
                 let mut file = std::fs::OpenOptions::new()
                     .append(true)
@@ -4539,7 +4539,7 @@ format_version: Some(1),
         let mut unprojected = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Done,
             &fixture.work_id,
-            chrono::Utc::now(),
+            gwt_core::timestamp::UtcTimestamp::now(),
         );
         unprojected.status_category =
             Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Done);
@@ -5288,7 +5288,7 @@ format_version: Some(1),
                 start_evidence: None,
                 active: true,
                 owner_spec,
-                started_at: chrono::Utc::now(),
+                started_at: gwt_core::timestamp::UtcTimestamp::now(),
                 phase: None,
                 session_id: state_session_id.to_string(),
             },
@@ -5510,7 +5510,7 @@ format_version: Some(1),
                     status: crate::cli::execution_state::ExecutionControlStatus::Active,
                     blocked_reason: None,
                     missing_verification: None,
-                    launched_at: chrono::Utc::now(),
+                    launched_at: gwt_core::timestamp::UtcTimestamp::now(),
                     settled_at: None,
                     completion_evidence: None,
                     permission_decision: None,
@@ -5883,7 +5883,7 @@ format_version: Some(1),
             session_binding_id: "build-successor-binding".into(),
             initial_session_id: "build-successor-session".into(),
             entrypoint: "gwt-execute".into(),
-            requested_at: chrono::Utc::now(),
+            requested_at: gwt_core::timestamp::UtcTimestamp::now(),
         };
         if blocked {
             prepare_fresh_linked_owner_launch_successor(&fixture.git.repo, owner, &request)
@@ -6259,7 +6259,7 @@ format_version: Some(1),
                 start_evidence: None,
                 active: true,
                 owner_spec: Some(3403),
-                started_at: chrono::Utc::now(),
+                started_at: gwt_core::timestamp::UtcTimestamp::now(),
                 phase: Some("green".into()),
                 session_id: holder.into(),
             };
@@ -6313,7 +6313,9 @@ format_version: Some(1),
             gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&fixture.git.repo);
         gwt_core::workspace_projection::save_workspace_work_items_projection_to_path(
             &works_path,
-            &gwt_core::workspace_projection::WorkItemsProjection::empty(chrono::Utc::now()),
+            &gwt_core::workspace_projection::WorkItemsProjection::empty(
+                gwt_core::timestamp::UtcTimestamp::now(),
+            ),
         )
         .expect("remove materialized Work while preserving exact Session assignment");
         let before = std::fs::read(&works_path).expect("snapshot WorkItems");
@@ -6430,7 +6432,7 @@ format_version: Some(1),
                 start_evidence: None,
                 active: true,
                 owner_spec: None,
-                started_at: chrono::Utc::now(),
+                started_at: gwt_core::timestamp::UtcTimestamp::now(),
                 phase: None,
                 session_id: session.id.clone(),
             },

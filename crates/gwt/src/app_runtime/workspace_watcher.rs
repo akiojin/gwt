@@ -298,7 +298,7 @@ mod tests {
             coordination_scope: None,
             affiliation_status: WorkspaceAgentAffiliationStatus::Assigned,
             workspace_id: None,
-            updated_at: chrono::Utc::now(),
+            updated_at: gwt_core::timestamp::UtcTimestamp::now(),
         });
         let mut cached = super::super::active_work_projection_from_saved_with_journal(
             fresh.clone(),

@@ -145,7 +145,7 @@ fn observe_local_agent_activity(
     let host_pid = owner.map_or_else(std::process::id, |owner| owner.pid);
     let host_started_at = gwt::process::host_process_start_time(host_pid)
         .filter(|start| *start > 0 && owner.is_none_or(|owner| owner.host_started_at == *start));
-    let observed_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let observed_at = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_millis();
     let mut activity = gwt::LocalAgentActivityView {
         project_key: context.project_key.to_string(),
         host_id: host_started_at
@@ -176,7 +176,11 @@ fn observe_local_agent_activity(
             gwt::pm_current::latest_status(&context.project_root)
                 .ok()
                 .flatten()
-                .filter(|status| status.stale_minutes(chrono::Utc::now()).is_none())
+                .filter(|status| {
+                    status
+                        .stale_minutes(gwt_core::timestamp::UtcTimestamp::now())
+                        .is_none()
+                })
                 .map(|status| {
                     status
                         .items
@@ -270,7 +274,7 @@ struct ActiveWorkProjectionPrepareInput {
     session_ledger_cache: Arc<Mutex<crate::session_ledger_cache::SessionLedgerCache>>,
     work_items_cache: Arc<Mutex<gwt_core::workspace_projection::WorkItemsCache>>,
     work_known_branch_refs: Option<HashSet<String>>,
-    work_merged_branches: Option<HashMap<String, chrono::DateTime<chrono::Utc>>>,
+    work_merged_branches: Option<HashMap<String, gwt_core::timestamp::UtcTimestamp>>,
     work_dirty_branches: Option<HashSet<String>>,
     work_live_process_branches: Option<HashSet<String>>,
     work_cleanup_ready_branches: Option<HashMap<String, String>>,
@@ -667,7 +671,7 @@ fn active_work_projection_from_live_sessions(
 ) -> Option<gwt::ActiveWorkProjectionView> {
     let first = sessions.first()?;
     let active_agents = sessions.len();
-    let now = chrono::Utc::now();
+    let now = gwt_core::timestamp::UtcTimestamp::now();
     let mut agents = sessions
         .iter()
         .map(|session| {
@@ -721,7 +725,7 @@ fn active_work_projection_from_live_sessions(
         done_equivalent: false,
         cleanup_candidate: None,
         cleanup_blocked_reason: None,
-        updated_at: now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        updated_at: now.to_rfc3339_seconds(),
     }];
     Some(gwt::ActiveWorkProjectionView {
         id: tab_id.to_string(),
@@ -1915,9 +1919,7 @@ pub(super) fn workspace_journal_entry_view_from_entry(
 ) -> gwt::WorkspaceJournalEntryView {
     gwt::WorkspaceJournalEntryView {
         id: entry.id.clone(),
-        updated_at: entry
-            .updated_at
-            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        updated_at: entry.updated_at.to_rfc3339_seconds(),
         title: entry.title.clone(),
         status_category: entry
             .status_category
@@ -1965,15 +1967,9 @@ pub(crate) fn workspace_work_item_view_from_item(
             workspace_status_category_wire(item.status_category).to_string()
         },
         owner: item.owner.clone(),
-        created_at: item
-            .created_at
-            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        updated_at: item
-            .updated_at
-            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        completed_at: item
-            .completed_at
-            .map(|value| value.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+        created_at: item.created_at.to_rfc3339_seconds(),
+        updated_at: item.updated_at.to_rfc3339_seconds(),
+        completed_at: item.completed_at.map(|value| value.to_rfc3339_seconds()),
         agents: item
             .agents
             .iter()
@@ -2076,9 +2072,7 @@ pub(super) fn workspace_work_agent_view_from_ref(
         session_id: agent.session_id.clone(),
         agent_id,
         display_name,
-        updated_at: agent
-            .updated_at
-            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        updated_at: agent.updated_at.to_rfc3339_seconds(),
         sessions,
     }
 }
@@ -2189,9 +2183,7 @@ fn workspace_work_event_view_from_event(
         agent_session_id: event.agent_session_id.clone(),
         board_entry_id: event.board_entry_id.clone(),
         related_workspace_id: event.related_work_item_id.clone(),
-        updated_at: event
-            .updated_at
-            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        updated_at: event.updated_at.to_rfc3339_seconds(),
     }
 }
 
@@ -2756,7 +2748,7 @@ pub(super) fn attach_registry_sessions_to_active_works<'a>(
                 session_id: session.id.clone(),
                 agent_id: Some(session.agent_id.command().to_string()),
                 display_name: Some(session.display_name.clone()),
-                updated_at: session.last_activity_at.into(),
+                updated_at: session.last_activity_at,
                 attached_by: None,
             };
             let history_view =
@@ -2853,7 +2845,7 @@ fn assign_and_merge_workspace_groups_cache_only(
 /// Rows mix second-precision `...Z` and fractional `...+00:00` stamps, so
 /// compare instants; text order would rank `...56Z` above `...56.8+00:00`.
 fn updated_at_is_newer(candidate: &str, current: &str) -> bool {
-    let parse = |stamp: &str| chrono::DateTime::parse_from_rfc3339(stamp).ok();
+    let parse = |stamp: &str| gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(stamp).ok();
     match (parse(candidate), parse(current)) {
         (Some(candidate), Some(current)) => candidate > current,
         _ => candidate > current,
@@ -3056,7 +3048,7 @@ pub(super) fn mark_remote_only_active_works(
 /// "safe to delete" signal. Display-only; no automatic close (US-61).
 pub(super) fn mark_merged_active_works(
     active_works: &mut [gwt::ActiveWorkItemView],
-    merged_branches: Option<&HashMap<String, chrono::DateTime<chrono::Utc>>>,
+    merged_branches: Option<&HashMap<String, gwt_core::timestamp::UtcTimestamp>>,
     dirty_branches: Option<&HashSet<String>>,
 ) {
     for work in active_works.iter_mut() {
@@ -3087,11 +3079,7 @@ pub(super) fn mark_merged_active_works(
             .iter()
             .map(|agent| agent.updated_at.as_str())
             .chain(std::iter::once(work.updated_at.as_str()))
-            .filter_map(|stamp| {
-                chrono::DateTime::parse_from_rfc3339(stamp)
-                    .ok()
-                    .map(|value| value.with_timezone(&chrono::Utc))
-            })
+            .filter_map(|stamp| gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(stamp).ok())
             .max();
         work.done_equivalent = !terminal
             && last_activity.is_some_and(|last| {
@@ -3331,9 +3319,9 @@ fn prepare_active_work_projection(
         merge_active_sessions_into_projection(
             &mut projection,
             sessions.iter().copied(),
-            chrono::Utc::now(),
+            gwt_core::timestamp::UtcTimestamp::now(),
         );
-        let updated_at = chrono::Utc::now();
+        let updated_at = gwt_core::timestamp::UtcTimestamp::now();
         retain_live_workspace_agents(&mut projection, &sessions, updated_at);
         projection.reconcile_shell_status(
             |window_id| {
@@ -4484,13 +4472,15 @@ fn agent_roster_view_from_snapshot(
                         entry.created_at.to_rfc3339()
                     )
                 }),
-                elapsed_seconds: chrono::DateTime::parse_from_rfc3339(&observed.started_at)
-                    .ok()
-                    .map(|started| {
-                        (chrono::Utc::now() - started.with_timezone(&chrono::Utc))
-                            .num_seconds()
-                            .max(0) as u64
-                    }),
+                elapsed_seconds: gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(
+                    &observed.started_at,
+                )
+                .ok()
+                .map(|started| {
+                    (gwt_core::timestamp::UtcTimestamp::now() - started)
+                        .whole_seconds()
+                        .max(0) as u64
+                }),
                 warning_count: None,
             },
         );
@@ -4602,7 +4592,7 @@ impl AppRuntime {
                 let sessions = gwt_agent::session_ledger::load_sessions_shared(&sessions_dir)?;
                 let entries = gwt_core::coordination::load_entries_since(
                     &context_owned.project_root,
-                    chrono::DateTime::<chrono::Utc>::MIN_UTC,
+                    gwt_core::timestamp::UtcTimestamp::MIN,
                 );
                 let complete = entries.is_ok();
                 agent_roster_view_from_snapshot(
@@ -4796,7 +4786,7 @@ impl AppRuntime {
                     Ok(sessions) => {
                         let entries = gwt_core::coordination::load_entries_since(
                             &context_owned.project_root,
-                            chrono::DateTime::<chrono::Utc>::MIN_UTC,
+                            gwt_core::timestamp::UtcTimestamp::MIN,
                         );
                         let complete = entries.is_ok();
                         let view = if tuning {
@@ -5080,7 +5070,7 @@ impl AppRuntime {
         };
 
         let scan_root = gwt_projects_dir();
-        let now = chrono::Utc::now();
+        let now = gwt_core::timestamp::UtcTimestamp::now();
         let config = WorkspaceRetentionConfig::default();
         let live_session_ids: std::collections::HashSet<String> =
             self.active_agent_sessions.keys().cloned().collect();
@@ -6387,7 +6377,7 @@ pub(crate) struct ActiveWorkProjectionJob {
     sessions_dir: PathBuf,
     issue_link_cache_dir: PathBuf,
     known_branch_refs: Option<HashSet<String>>,
-    merged_branches: Option<HashMap<String, chrono::DateTime<chrono::Utc>>>,
+    merged_branches: Option<HashMap<String, gwt_core::timestamp::UtcTimestamp>>,
     cleanup_ready_branches: Option<HashMap<String, String>>,
     dirty_branches: Option<HashSet<String>>,
     live_process_branches: Option<HashSet<String>>,
@@ -6481,9 +6471,9 @@ fn build_active_work_projection(
         merge_active_sessions_into_projection(
             &mut projection,
             sessions.iter().copied(),
-            chrono::Utc::now(),
+            gwt_core::timestamp::UtcTimestamp::now(),
         );
-        let updated_at = chrono::Utc::now();
+        let updated_at = gwt_core::timestamp::UtcTimestamp::now();
         retain_live_workspace_agents(&mut projection, &sessions, updated_at);
         // SPEC-2359 US-80 (FR-428): derive each Shell Work's status from its
         // live PTY — running → Active, otherwise (exited or post-restart) →
@@ -7086,9 +7076,9 @@ mod bounded_cache_merge_tests {
         };
         let mut recorded = sessions[0].as_ref().clone();
         recorded.status = gwt_agent::AgentStatus::Stopped;
-        let exited_at = chrono::DateTime::from(recorded.created_at) + chrono::Duration::seconds(60);
-        recorded.last_exited_at = Some(exited_at.into());
-        recorded.updated_at = (exited_at + chrono::Duration::seconds(60)).into();
+        let exited_at = recorded.created_at + time::Duration::seconds(60);
+        recorded.last_exited_at = Some(exited_at);
+        recorded.updated_at = exited_at + time::Duration::seconds(60);
         let stopped = projected_history(recorded.clone());
         assert_eq!(stopped["role"], "implementation");
         assert_eq!(stopped["started_at"], recorded.created_at.to_rfc3339());
@@ -7102,7 +7092,7 @@ mod bounded_cache_merge_tests {
         recorded.last_exited_at = None;
         assert!(projected_history(recorded.clone())["ended_at"].is_null());
         recorded.status = gwt_agent::AgentStatus::Running;
-        recorded.last_exited_at = Some(exited_at.into());
+        recorded.last_exited_at = Some(exited_at);
         assert!(projected_history(recorded.clone())["ended_at"].is_null());
         recorded.review_dispatch = true;
         assert_eq!(projected_history(recorded.clone())["role"], "review");
@@ -7661,7 +7651,7 @@ mod bounded_cache_merge_tests {
             Some(4777)
         );
         assert!(measured.agents.as_ref().unwrap()[0].current_task.is_none());
-        let now = chrono::Utc::now();
+        let now = gwt_core::timestamp::UtcTimestamp::now();
         let mut status = gwt_core::pm_status::PmCurrentStatus {
             items: vec![gwt_core::pm_status::PmStatusItem {
                 kind: gwt_core::pm_status::PmStatusItemKind::Working,
@@ -7687,7 +7677,7 @@ mod bounded_cache_merge_tests {
                 .as_deref(),
             Some("Inspect the queue")
         );
-        status.updated_at = now - chrono::Duration::minutes(16);
+        status.updated_at = now - time::Duration::minutes(16);
         std::fs::write(
             status_path,
             format!("{}\n", serde_json::to_string(&status).unwrap()),
@@ -7732,7 +7722,9 @@ mod bounded_cache_merge_tests {
         assert!(unknown.agents.is_none());
         assert_eq!(unknown.project_key, context.project_key.to_string());
         assert!(!unknown.host_id.is_empty());
-        assert!(chrono::DateTime::parse_from_rfc3339(&unknown.observed_at).is_ok());
+        assert!(
+            gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(&unknown.observed_at).is_ok()
+        );
         let (runtime, _, _, _) = retired_activity_fixture(temp.path());
         assert_eq!(
             runtime.retain_current_local_agent_activity("tab-1", Some(unknown.clone())),
@@ -7762,7 +7754,7 @@ mod bounded_cache_merge_tests {
             affiliation_status:
                 gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Assigned,
             workspace_id: None,
-            updated_at: chrono::Utc::now(),
+            updated_at: gwt_core::timestamp::UtcTimestamp::now(),
         }
     }
 

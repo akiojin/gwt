@@ -95,7 +95,7 @@ pub fn record_survey(worktree_root: &Path) {
         return;
     }
     let record = SpecSurveyRecord {
-        surveyed_at: chrono::Utc::now().to_rfc3339(),
+        surveyed_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
     };
     if let Ok(body) = serde_json::to_string(&record) {
         let _ = std::fs::write(&path, body);
@@ -115,7 +115,9 @@ pub fn survey_is_fresh(worktree_root: &Path) -> bool {
     let Ok(record) = serde_json::from_str::<SpecSurveyRecord>(&body) else {
         return false;
     };
-    let Ok(surveyed_at) = chrono::DateTime::parse_from_rfc3339(&record.surveyed_at) else {
+    let Ok(surveyed_at) =
+        gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(&record.surveyed_at)
+    else {
         return false;
     };
     let surveyed_at = SystemTime::from(surveyed_at);
@@ -153,8 +155,8 @@ mod tests {
 
         let path = gwt_core::paths::gwt_pm_spec_survey_path(&worktree);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let stale =
-            chrono::Utc::now() - chrono::Duration::seconds(SURVEY_FRESHNESS.as_secs() as i64 + 60);
+        let stale = gwt_core::timestamp::UtcTimestamp::now()
+            - time::Duration::seconds(SURVEY_FRESHNESS.as_secs() as i64 + 60);
         std::fs::write(
             &path,
             serde_json::to_string(&SpecSurveyRecord {

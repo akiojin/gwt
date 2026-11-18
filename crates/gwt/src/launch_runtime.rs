@@ -1564,7 +1564,7 @@ mod tests {
                 },
             );
             if phase == crate::AutonomousPhase::Delivering {
-                let now = chrono::Utc::now().to_rfc3339();
+                let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
                 assert!(matches!(
                     monitor.declare_autonomous_wait(42, "CI", "PR merged", &now),
                     crate::AutonomousWaitOutcome::Declared { .. }

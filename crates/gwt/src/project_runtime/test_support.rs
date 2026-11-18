@@ -112,7 +112,7 @@ impl PreparedPmLaunchFixture {
 pub fn seed_actual_project_view(root: &std::path::Path) -> Result<(), String> {
     let receipt = crate::project_execution_policy::ActualViewReceipt {
         receipt_id: uuid::Uuid::new_v4().to_string(),
-        accepted_at: chrono::Utc::now(),
+        accepted_at: gwt_core::timestamp::UtcTimestamp::now(),
         admitted_policy_revision: gwt_core::project_execution_policy::load(root)
             .map_or(0, |policy| policy.revision),
     };
@@ -135,7 +135,7 @@ pub fn seed_actual_project_view(root: &std::path::Path) -> Result<(), String> {
             )]),
             last_open_receipt: Some(receipt),
             close_intents: Default::default(),
-            observed_at: chrono::Utc::now(),
+            observed_at: gwt_core::timestamp::UtcTimestamp::now(),
         },
     )
     .map_err(|error| error.to_string())
@@ -577,7 +577,7 @@ impl ProjectOwnerHarness {
         &self,
         id: &str,
         incarnation: u64,
-        wall: chrono::DateTime<chrono::Utc>,
+        wall: gwt_core::timestamp::UtcTimestamp,
         now: std::time::Instant,
     ) -> Result<(), String> {
         self.owner

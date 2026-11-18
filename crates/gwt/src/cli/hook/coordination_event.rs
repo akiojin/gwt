@@ -106,7 +106,7 @@ fn sync_coordination_for_session_with_paths(
         // Provider compaction can replay SessionStart within the same gwt
         // Session. Recognize pre-upgrade random-id starts in archived history
         // as well as new deterministic starts, without another sidecar.
-        if load_entries_since(&session.worktree_path, session.created_at.into())
+        if load_entries_since(&session.worktree_path, session.created_at)
             .map_err(coordination_as_hook_error)?
             .iter()
             .any(|prior| {
@@ -370,7 +370,6 @@ fn coordination_as_hook_error(err: gwt_core::GwtError) -> HookError {
 
 #[cfg(test)]
 mod tests {
-    use chrono::TimeZone;
     use gwt_agent::{AgentId, Session};
     use gwt_core::coordination::{
         coordination_events_path, load_snapshot, BoardEntry, BoardEntryKind,
@@ -835,7 +834,9 @@ mod tests {
             vec![],
             vec![],
         );
-        legacy_entry.created_at = chrono::Utc.with_ymd_and_hms(2026, 4, 14, 0, 0, 0).unwrap();
+        legacy_entry.created_at = "2026-04-14T00:00:00Z"
+            .parse::<gwt_core::timestamp::UtcTimestamp>()
+            .unwrap();
         legacy_entry.updated_at = legacy_entry.created_at;
         std::fs::create_dir_all(dir.path().join(".gwt/coordination")).unwrap();
         std::fs::write(
@@ -885,7 +886,9 @@ mod tests {
             vec![],
             vec![],
         );
-        legacy_entry.created_at = chrono::Utc.with_ymd_and_hms(2026, 4, 14, 0, 0, 0).unwrap();
+        legacy_entry.created_at = "2026-04-14T00:00:00Z"
+            .parse::<gwt_core::timestamp::UtcTimestamp>()
+            .unwrap();
         legacy_entry.updated_at = legacy_entry.created_at;
         std::fs::create_dir_all(dir.path().join(".gwt/coordination")).unwrap();
         std::fs::write(

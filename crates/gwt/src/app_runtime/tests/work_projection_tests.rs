@@ -111,7 +111,7 @@ fn local_agent_activity_reports_an_observed_empty_project() {
         wire["local_agent_activity"]["project_key"],
         runtime.project_key_for_tab("tab-1").unwrap().to_string()
     );
-    assert!(chrono::DateTime::parse_from_rfc3339(
+    assert!(gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(
         wire["local_agent_activity"]["observed_at"]
             .as_str()
             .unwrap()
@@ -394,7 +394,7 @@ fn workspace_work_agent_view_attaches_session_history() {
         session_id: "work-1".to_string(),
         agent_id: Some("codex".to_string()),
         display_name: Some("Codex".to_string()),
-        updated_at: chrono::Utc::now(),
+        updated_at: gwt_core::timestamp::UtcTimestamp::now(),
         attached_by: None,
     };
     let view = super::super::workspace_work_agent_view_from_ref(
@@ -539,7 +539,7 @@ fn start_work_launch_uses_repo_global_work_items_and_worktree_local_event() {
     gwt::project_runtime::workspace::paused_work_record_task(
         &project_root,
         &session,
-        chrono::Utc::now(),
+        gwt_core::timestamp::UtcTimestamp::now(),
     )
     .expect("canonical stopped Work task")();
     gwt_core::workspace_projection::mark_workspace_agent_stopped(
@@ -618,7 +618,7 @@ fn workspace_resume_context_prefers_work_item_over_shared_projection() {
         .expect("save shared projection");
 
     // The resumed branch has its own Work item with its own identity.
-    let now = chrono::Utc::now();
+    let now = gwt_core::timestamp::UtcTimestamp::now();
     let work_id = gwt_core::workspace_projection::canonical_work_id(
         &project_state_root,
         Some("work/foo"),
@@ -802,7 +802,7 @@ fn save_shell_work_projection_registers_shell_and_survives_agent_launch() {
 #[test]
 fn retain_live_workspace_agents_keeps_shell_work_with_no_live_sessions() {
     let repo = std::path::Path::new("/repo");
-    let now = chrono::Utc::now();
+    let now = gwt_core::timestamp::UtcTimestamp::now();
     let mut projection =
         gwt_core::workspace_projection::WorkspaceProjection::default_for_project(repo);
     projection.agents.push(
@@ -843,7 +843,7 @@ fn retain_live_workspace_agents_keeps_shell_work_with_no_live_sessions() {
 #[test]
 fn active_work_view_surfaces_shell_work_and_groups_with_same_branch_agent() {
     let repo = std::path::Path::new("/repo");
-    let now = chrono::Utc::now();
+    let now = gwt_core::timestamp::UtcTimestamp::now();
     let mut projection =
         gwt_core::workspace_projection::WorkspaceProjection::default_for_project(repo);
     projection.agents.push(

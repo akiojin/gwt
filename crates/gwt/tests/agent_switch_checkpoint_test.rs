@@ -199,7 +199,6 @@ fn switch_cwd_unknown_or_incomplete_observation_never_proves_clear() {
 
 #[test]
 fn switch_continuation_requires_the_source_work_and_correlated_board_handoff() {
-    use chrono::Utc;
     use gwt_core::{
         coordination::{post_entry, AuthorKind, BoardEntry, BoardEntryKind},
         test_support::ScopedGwtHome,
@@ -234,7 +233,7 @@ fn switch_continuation_requires_the_source_work_and_correlated_board_handoff() {
     session.project_state_root = Some(source.clone());
     session.linked_issue_number = Some(4777);
     session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
-    let now = Utc::now();
+    let now = gwt_core::timestamp::UtcTimestamp::now();
     let mut projection = WorkspaceProjection::default_for_project(&source);
     projection.agents.push(WorkspaceAgentSummary {
         session_id: session.id.clone(),

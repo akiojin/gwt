@@ -14,7 +14,7 @@ fn app_runtime_row_cleanup_candidate_exposes_merged_workspace_without_live_agent
         let mut event = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Update,
             "work-merged-cleanup-row",
-            chrono::Utc::now(),
+            gwt_core::timestamp::UtcTimestamp::now(),
         );
         event.title = Some("Merged cleanup row".to_string());
         event.execution_container = Some(
@@ -70,7 +70,7 @@ fn app_runtime_row_cleanup_candidate_hides_grouped_live_agent_branch() {
         let mut event = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Update,
             "work-merged-grouped-row",
-            chrono::Utc::now(),
+            gwt_core::timestamp::UtcTimestamp::now(),
         );
         event.title = Some("Merged grouped row".to_string());
         event.execution_container = Some(
@@ -150,7 +150,7 @@ fn app_runtime_row_cleanup_candidate_hides_workspace_with_live_cwd_process() {
         let mut event = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Update,
             "work-live-cwd-cleanup-row",
-            chrono::Utc::now(),
+            gwt_core::timestamp::UtcTimestamp::now(),
         );
         event.title = Some("Merged live cwd row".to_string());
         event.execution_container = Some(
@@ -1074,7 +1074,7 @@ fn runtime_state_hook_events(
     let mut source = owner.subscribe();
     owner_fixture_block_on(async {
         for _ in 0..count {
-            hook.occurred_at = Utc::now().to_rfc3339();
+            hook.occurred_at = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
             assert_eq!(
                 probe.runtime_hook(&hook).await.unwrap(),
                 reqwest::StatusCode::NO_CONTENT
@@ -1905,7 +1905,7 @@ fn app_runtime_approval_settle_stale_token_is_noop() {
     assert!(owner_fixture_block_on(owner.observe_runtime_policy(
         &before.id,
         before.incarnation + 1,
-        Utc::now(),
+        gwt_core::timestamp::UtcTimestamp::now(),
         anchor
     ))
     .is_err());
