@@ -545,7 +545,11 @@ pub fn save_workspace_state_durable(
             .map_err(|error| std::io::Error::other(error.to_string()))?;
     }
     let content = serde_json::to_string_pretty(state)?;
-    durable_atomic_write_with_parent_sync(path, content.as_bytes(), sync_parent_directory)
+    write_durable_bytes(path, content.as_bytes())
+}
+
+pub(crate) fn write_durable_bytes(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    durable_atomic_write_with_parent_sync(path, bytes, sync_parent_directory)
 }
 
 fn durable_atomic_write_with_parent_sync(
