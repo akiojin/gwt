@@ -172,6 +172,7 @@
   /* start screen */
   .start-wrap{flex:1;padding:24px 28px 28px;min-width:0}
   @media (max-width:640px){.start-wrap{padding:16px}}
+  /* home state switch: mock review control, placed outside the app screen (doc side) */
   .statebar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:0 0 14px}
   .statebar .lab{font-size:13px;font-weight:700;color:var(--ink2)}
   .statebar .seg{margin:0}
@@ -356,8 +357,7 @@
 
   /* ---------- fullscreen mode (mock utility: app screen only) ---------- */
   .full-exit{display:none}
-  body.full header.doc,body.full nav.screens,body.full footer.doc{display:none}
-  body.full .statebar{display:none}
+  body.full header.doc,body.full nav.screens,body.full footer.doc,body.full .reviewbar{display:none}
   body.full .wrap{max-width:none;margin:0;padding:0}
   body.full .mock{margin:0;border:none;border-radius:0;box-shadow:none;height:100dvh;display:flex;flex-direction:column}
   body.full .mock-head{display:none}
@@ -449,6 +449,14 @@
     </div>
   </nav>
 
+  <div class="statebar reviewbar">
+    <span class="lab">ホームの状態（モック確認用）：</span>
+    <div class="seg" role="group" aria-label="ホームの状態切替">
+      <button type="button" data-startstate="has" aria-pressed="true">プロジェクトあり</button>
+      <button type="button" data-startstate="empty" aria-pressed="false">プロジェクトなし</button>
+    </div>
+  </div>
+
   <div class="mock" id="app">
     <div class="mock-head">
       <span class="dots"><i style="background:#e0655f"></i><i style="background:#e5b95c"></i><i style="background:#63b06a"></i></span>
@@ -471,14 +479,6 @@
       <!-- ================= ホーム ================= -->
       <div class="pagegroup on" data-page="start">
         <div class="start-wrap">
-          <div class="statebar">
-            <span class="lab">状態：</span>
-            <div class="seg" role="group" aria-label="ホームの状態切替">
-              <button type="button" data-startstate="has" aria-pressed="true">プロジェクトあり</button>
-              <button type="button" data-startstate="empty" aria-pressed="false">プロジェクトなし</button>
-            </div>
-          </div>
-
           <!-- あり -->
           <div data-startpane="has">
               <div>
