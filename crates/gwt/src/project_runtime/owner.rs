@@ -821,6 +821,7 @@ pub(crate) enum OwnerMessage {
     },
     Pane(PaneRuntimeEvent),
     Transport(TransportEvent),
+    MonitorWindowSnapshot(mpsc::Sender<Option<crate::IssueMonitorWindowSnapshot>>),
     GuiAttached {
         instance: uuid::Uuid,
         reply: oneshot::Sender<Result<u64, String>>,
@@ -841,14 +842,19 @@ pub struct OwnerHandle {
         Arc<std::sync::OnceLock<crate::monitor_duplicate_runtime::MonitorRuntimeScan>>,
 }
 impl OwnerHandle {
-    #[cfg(all(test, unix))]
-    pub(crate) async fn test_retain_exhausted_retirement(&self) -> Result<(), String> {
-        let (reply, received) = oneshot::channel();
+    pub(crate) fn monitor_window_snapshot(&self) -> Option<crate::IssueMonitorWindowSnapshot> {
+        let now = gwt_core::operation_deadline::now();
+        let timeout = std::time::Duration::from_secs(1);
+        let timeout = gwt_core::operation_deadline::current().map_or(timeout, |deadline| {
+            timeout.min(deadline.saturating_duration_since(now))
+        });
+        let (reply, receive) = mpsc::channel();
         self.sender
-            .send(OwnerMessage::RetainExhaustedRetirement(reply))
-            .map_err(|_| "project owner unavailable".to_string())?;
-        received.await.map_err(|error| error.to_string())
+            .send(OwnerMessage::MonitorWindowSnapshot(reply))
+            .ok()?;
+        receive.recv_timeout(timeout).ok().flatten()
     }
+
     #[cfg(any(test, feature = "test-gh-guard"))]
     pub(crate) async fn test_pause_runtime_reconciliation(
         &self,
@@ -1040,6 +1046,14 @@ impl OwnerHandle {
         receive
             .await
             .map_err(|_| "owner stopped before reconciliation tick".to_string())
+    }
+    #[cfg(all(test, unix))]
+    pub(crate) async fn test_retain_exhausted_retirement(&self) -> Result<(), String> {
+        let (reply, received) = oneshot::channel();
+        self.sender
+            .send(OwnerMessage::RetainExhaustedRetirement(reply))
+            .map_err(|_| "project owner unavailable".to_string())?;
+        received.await.map_err(|error| error.to_string())
     }
     #[cfg(any(test, feature = "test-gh-guard"))]
     pub(crate) async fn test_check_monitor_deadlines(
@@ -2473,6 +2487,10 @@ impl OwnerState {
                 }
                 OwnerMessage::Pane(event) => self.pane_event(event),
                 OwnerMessage::Transport(event) => self.handle_transport_event(event),
+                OwnerMessage::MonitorWindowSnapshot(reply) => {
+                    let _ = reply
+                        .send((!self.stopping).then(|| self.owner_monitor_window_snapshot("")));
+                }
                 OwnerMessage::Shutdown(reply) => self.begin_shutdown(Some(reply)),
             }
             #[cfg(any(test, feature = "test-gh-guard"))]
