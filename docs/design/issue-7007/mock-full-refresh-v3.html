@@ -3215,6 +3215,7 @@
   function showToast(msg) {
     toastEl.textContent = msg;
     toastEl.classList.add("show");
+    toastEl.dataset.shownAt = String(Date.now());
     if (toastTimer) clearTimeout(toastTimer);
     toastTimer = setTimeout(function () { toastEl.classList.remove("show"); }, 2400);
   }
@@ -3449,8 +3450,10 @@
       return h + ":" + s.length;
     }
     var before = bodyHash();
+    var clickedAt = Date.now();
     setTimeout(function () {
-      if (before === bodyHash() && !toastEl.classList.contains("show")) showToast(toastFor(btn.textContent.trim()));
+      var lastShown = parseInt(toastEl.dataset.shownAt || "0", 10);
+      if (before === bodyHash() && lastShown < clickedAt) showToast(toastFor(btn.textContent.trim()));
     }, 320);
   }, true);
   /* fullscreen mode: app screen only (?full=1 or the enter button) */
