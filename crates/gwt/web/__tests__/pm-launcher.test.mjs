@@ -23,6 +23,28 @@ const componentsCss = readFileSync(resolve(here, "../styles/components.css"), "u
 const tokensCss = readFileSync(resolve(here, "../styles/tokens.css"), "utf8");
 const appJs = readFileSync(resolve(here, "../app.js"), "utf8");
 
+test("Issue #3823: PM titles use only their own typed operation activity", () => {
+  const definitions = ["windowDisplayTitle", "windowTitleTooltip"].map(name =>
+    appJs.match(new RegExp(`      function ${name}\\([^]*?\\n      \\}`))[0]).join("\n");
+  const { title, tooltip } = new Function("PM_WINDOW_TITLE", `${definitions};
+    return { title: windowDisplayTitle, tooltip: windowTitleTooltip };`)("Project Manager");
+  const foreign = {
+    is_pm: true, agent_name: "Maple", title: "Another agent failed",
+    dynamic_title: "Board: workspace.ensure refused", purpose_title: "Fix worker",
+    dynamic_title_detail: "Other agent's blocked report", status: "error",
+  };
+  assert.equal(title(foreign), "Project Manager · Maple — Starting");
+  assert.equal(tooltip(foreign), title(foreign), "a tooltip must not reintroduce worker text");
+  assert.equal(title({ ...foreign, pm_activity: "reconciling" }), "Project Manager · Maple — Reconciling");
+  assert.equal(title({ ...foreign, pm_activity: "driving_pr" }), "Project Manager · Maple — Driving PRs");
+  assert.equal(title({ ...foreign, pm_activity: "registering_issue" }), "Project Manager · Maple — Registering issues");
+  assert.equal(title({ ...foreign, pm_activity: "deciding" }), "Project Manager · Maple — Making a decision");
+  assert.equal(title({ ...foreign, pm_activity: "waiting" }), "Project Manager · Maple — Waiting for work");
+  assert.equal(title({ ...foreign, pm_activity: "Other agent's failure", agent_name: null }), "Project Manager — Starting");
+  assert.equal(title({ ...foreign, pm_activity: "reconciling", status: "idle" }),
+    title({ ...foreign, pm_activity: "reconciling", status: "running" }), "runtime state belongs to badges");
+});
+
 function doc() {
   return parseHTML(html).document;
 }

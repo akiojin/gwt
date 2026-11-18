@@ -34,6 +34,17 @@ test("Issues strip reads shared attention summaries on model-only updates", asyn
   assert.equal(document.getElementById("op-strip-issue-monitor-value").textContent, "Run Q3 A1/2");
   model.update(state => ({ ...state, counts: { queue: 0, active: 0, maxActive: 0 } }));
   assert.equal(document.getElementById("op-strip-issue-monitor-value").textContent, "Run Q0 A0/0");
+  model.update(state => ({ ...state, decisionAttention: { count: null, summary: "" },
+    status: { ...state.status, needs_human_count: 2 } }));
+  const count = document.getElementById("op-strip-needs-human");
+  assert.equal(count.hidden, false);
+  assert.equal(count.textContent, "Needs human 2");
+  assert.match(cell.getAttribute("aria-label"), /Needs human 2/);
+  model.update(state => ({ ...state, status: { ...state.status, needs_human_count: 0 } }));
+  assert.equal(count.hidden, false);
+  assert.equal(count.textContent, "Needs human 0");
+  model.update(state => ({ ...state, status: { enabled: false } }));
+  assert.equal(count.hidden, true);
   unsubscribe();
 });
 
@@ -1004,10 +1015,11 @@ test("Issue #6992: wedged recovery requires a current explicit confirmation", as
   assert.equal(document.querySelector("#owner-restart-modal"), null);
 });
 
-test("SPEC #5016 AC-HS2: one server aggregate renders the same RUN/BLOCK/IDLE/ERROR on the title, strip and Works heading", async () => {
+test("Issue #7519: all four running counters read the same server aggregate", async () => {
   const { applyTelemetryCounts } = await importOperatorShell();
   const { createProjectPageMetadata } = await import("../project-page-metadata.js");
   const { createWorksSurface } = await import("../works-surface.js");
+  const { createAgentsSurface } = await import("../agents-surface.js");
   const { document, window: domWindow } = parseHTML(html);
   const frames = new Set();
   const scheduleFrame = fn => { frames.add(fn); return () => frames.delete(fn); };
@@ -1025,6 +1037,9 @@ test("SPEC #5016 AC-HS2: one server aggregate renders the same RUN/BLOCK/IDLE/ER
     rosterModel: store({ members: [] }), systemSettingsModel: store({ worksPreviewLines: 3 }), summaryModel: metadata.summary,
     windowDisplayTitle: () => "Agent", mountTerminal() {}, mountPreview: () => () => {} });
   document.body.append(works.element);
+  const agents = createAgentsSurface({ document, summaryModel: metadata.summary,
+    windowCatalogModel: store({ catalog }), activityModel: store(activity), rosterModel: store({ members: [] }) });
+  document.body.append(agents.element);
   const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
   const start = appSource.indexOf("function recomputeOperatorTelemetry() {");
   let depth = 0, end = appSource.indexOf("{", start);
@@ -1056,6 +1071,8 @@ test("SPEC #5016 AC-HS2: one server aggregate renders the same RUN/BLOCK/IDLE/ER
     assert.deepEqual(strip, expected, "the status strip renders the server summary");
     assert.deepEqual(heading, expected, "the Works heading renders the server summary");
     assert.deepEqual(title, { running: expected.running, block: expected.block }, "the tab title renders the server summary");
+    assert.equal(agents.element.querySelector(".roster-active").textContent, `Running ${expected.running}`);
+    assert.equal(works.element.querySelector(".works-active"), null, "Works shows a single running count");
   }
-  works.dispose();
+  works.dispose(); agents.dispose();
 });

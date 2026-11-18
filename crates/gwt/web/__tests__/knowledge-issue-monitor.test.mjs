@@ -565,18 +565,38 @@ test("needs_human derives one immutable count and reason for shared Issue views"
   assert.equal(reason(), snapshot.byIssue[41].reason);
   assert.equal(detailReason(), reason());
   surface.applyIssueMonitorStatus({ enabled: true, needs_human_count: 99 });
-  assert.equal(surface.issueMonitorModel.read().humanAttention, snapshot);
+  assert.equal(surface.issueMonitorModel.read().humanAttention.count, 99);
+  assert.equal(surface.issueMonitorModel.read().decisionAttention.count, null,
+    "different snapshot memberships leave the combined total unknown");
+  assert.match(monitorBand(body).pill.title, /Needs human 99/);
   surface.applyIssueMonitorInbox([item(41, "needs_human", undefined)]);
   assert.equal(reason(), "Human decision required");
   assert.equal(detailReason(), reason());
   surface.applyIssueMonitorInbox([item(41, "queued", undefined)]);
-  assert.equal(surface.issueMonitorModel.read().humanAttention.count, 0);
+  assert.equal(surface.issueMonitorModel.read().humanAttention.count, 99);
   assert.equal(reason(), undefined);
   assert.equal(detailReason(), undefined);
+  surface.applyIssueMonitorStatus({ enabled: true, needs_human_count: null });
+  assert.equal(surface.issueMonitorModel.read().humanAttention.count, null);
+  surface.applyIssueMonitorStatus({ enabled: true, needs_human_count: 0 });
   surface.applyIssueMonitorInbox([]);
   assert.deepEqual(surface.issueMonitorModel.read().humanAttention,
     { count: 0, summary: "Needs human 0", byIssue: {} });
   assert.equal(snapshot.byIssue[41].reason, "Choose credentials");
+});
+
+test("Issue #7536 external verification waits do not retain stale decision attention", async (t) => {
+  const { surface } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  surface.applyIssueMonitorStatus({ autonomous_issues: [{ issue_number: 7536, phase: "implementing",
+    needs_human: false, review_dispatch_hold: { reason: "Old dispatch hold" },
+    steering: { reason: "Old steering request" } }] });
+  surface.applyIssueMonitorInbox([{ issue: { number: 7536, state: "open" }, state: "awaiting_verification" }]);
+  const snapshot = surface.issueMonitorModel.read();
+  assert.equal(snapshot.humanAttention.count, 0);
+  assert.equal(snapshot.reviewAttention.count, 0);
+  assert.equal(snapshot.steeringAttention.count, 0);
+  assert.equal(snapshot.decisionAttention.count, 0);
 });
 
 test("review holds derive shared counts and reasons from current status and open inbox", async (t) => {
@@ -1466,11 +1486,20 @@ test("AC-M1: approved header reads status, actions, then one filter row", async 
   assert.deepEqual([...status.querySelectorAll(".issue-monitor-stat-label")].map(node => node.textContent),
     ["Issues", "Agent slots", "Queued", "Backlog", "Verification slots", "Last scan"]);
   surface.applyIssueMonitorStatus({enabled:true,state:"idle",active_count:1,max_active_agents:3,
-    max_active_agents_override:3,queue_len:2,unqueued_open_count:8,last_scan_at:"2026-10-25T00:00:00Z"});
+    max_active_agents_override:3,queue_len:2,unqueued_open_count:8,last_scan_at:"2026-10-25T00:00:00Z",
+    verification_capacity:{capacity:4,running:1,available:3}});
   assert.equal(status.querySelector('[data-metric="capacity"]').textContent,"1 of 3");
   assert.equal(status.querySelector('[data-metric="backlog"]').textContent,"8");
   assert.equal(status.querySelector('[data-metric="last-scan"]').textContent,"00:00:00 UTC");
-  assert.equal(status.querySelector('[data-metric="verification"]').textContent,"Not reported");
+  const verification = status.querySelector('[data-metric="verification"]');
+  assert.equal(verification.textContent,"1 of 4 · 3 available");
+  assert.match(verification.getAttribute("aria-description"), /1 running, 3 available, capacity 4/);
+  assert.equal(verification.getAttribute("title"), null, "no stale native unavailable tooltip");
+  surface.applyIssueMonitorStatus({verification_capacity:{capacity:4,running:0,available:4}});
+  assert.equal(verification.textContent,"0 of 4 · 4 available");
+  surface.applyIssueMonitorStatus({});
+  assert.equal(verification.textContent,"Unavailable", "missing observations clear stale measured values");
+  surface.applyIssueMonitorStatus({enabled:true,state:"idle",active_count:1,max_active_agents:3,max_active_agents_override:3});
   const limit = controls.querySelector('[data-action="monitor-limit"]');
   assert.equal(limit.value,"3");
   limit.value="4";
@@ -1939,7 +1968,7 @@ test("queue priority displays canonical reasons and observed assignment without 
   surface.applyKnowledgeReceiveEvent({ kind: "knowledge_entries", id: "win-1", knowledge_kind: "issue",
     request_id: load.request_id, entries: [1, 2, 3].map(number => knowledgeEntry(number, "queued", number)), refresh_enabled: true });
   surface.applyIssueMonitorStatus({ terminal_queue: [
-    { number: 1, queued_by: "urgent", priority: "urgent", priority_reason: "urgent_label", assigned_by: "alice", assigned_at: "2026-10-03T01:00:00Z" },
+    { number: 1, queued_by: "urgent", priority: "urgent", priority_reason: "urgent", assigned_by: "alice", assigned_at: "2026-10-03T01:00:00Z" },
     { number: 2, priority: "normal", priority_reason: "urgent_limit_reached" },
     { number: 3, priority: "normal", priority_reason: "pm_demoted", assigned_by: "pm-session", assigned_at: "2026-10-03T02:00:00Z" },
   ] });

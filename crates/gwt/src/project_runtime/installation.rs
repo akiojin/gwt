@@ -3,7 +3,10 @@
 mod project_catalog;
 pub(crate) use project_catalog::owner_host_project_catalog;
 
-use super::workspace::{save_resumed_workspace_projection, save_start_work_workspace_projection};
+use super::workspace::{
+    save_resumed_workspace_projection, save_start_work_workspace_projection,
+    save_workspace_launch_projection, WorkspaceLaunchProjectionKind,
+};
 use super::{launch_finalization::*, launch_payload::*, ActiveLaunchHandshakeCleanup};
 use crate::launch_runtime::same_worktree_path;
 use crate::session_launch::{
@@ -74,6 +77,7 @@ pub(crate) struct OwnerSavedSessionRestore {
     pub registry_after: Option<Result<crate::PersistedWindowRegistry, String>>,
     pub launch_started: bool,
     pub member_reservation: Option<(String, String)>,
+    pub pm_prior_assignment: Option<crate::agent_names::AgentMemberAssignment>,
     pub refusal: Option<OwnerRestoreRefusal>,
 }
 
@@ -220,14 +224,60 @@ fn remove_restore_placeholders(
     Ok(())
 }
 
+/// Issue #4735 RSR: a restore rebound to its source's current Active binding
+/// keeps the source Session ID under a fresh pane. Retire only the captured
+/// placeholders that are neither that pane nor another live pane, so the
+/// restored Session maps to exactly one registry row.
+pub(crate) fn retire_same_session_restore_placeholders(
+    root: &Path,
+    restore: &OwnerSavedSessionRestore,
+    launched_session_id: &str,
+    is_live: impl Fn(&str) -> bool,
+) -> Result<(), String> {
+    if restore.source.id != launched_session_id {
+        return Ok(());
+    }
+    let project_key = gwt_core::paths::project_scope_hash(root).to_string();
+    for row in &restore.placeholders {
+        let canonical_id = format!("{project_key}::{}", row.id);
+        if is_live(&canonical_id) {
+            continue;
+        }
+        super::agent_dispatch::OwnedWindowRecordCleanup {
+            registry: restore.registry.clone(),
+            registry_path: crate::persistence::workspace_state_path(root),
+            root: root.into(),
+            project_key: project_key.clone(),
+            canonical_id,
+            expected_session_id: Some(restore.source.id.clone()),
+        }
+        .finish()?;
+    }
+    Ok(())
+}
+
 pub(crate) fn finish_owner_restore_failure(
     root: &Path,
     sessions_dir: &Path,
     restore: &mut OwnerSavedSessionRestore,
     detail: &str,
 ) -> Result<(), String> {
-    if let Some((member, reservation)) = restore.member_reservation.take() {
-        crate::agent_names::release_project_member(root, sessions_dir, &member, &reservation)?;
+    if let Some((member, reservation)) = restore.member_reservation.as_ref() {
+        if crate::pm_registry::is_canonical_pm_worktree(&restore.source.worktree_path) {
+            crate::agent_registry::cancel_unspawned_pm_member(
+                root,
+                sessions_dir,
+                member,
+                reservation,
+                None,
+                Some((&restore.source, restore.pm_prior_assignment.as_ref())),
+            )
+            .map_err(|error| error.to_string())?;
+        } else {
+            crate::agent_names::release_project_member(root, sessions_dir, member, reservation)?;
+        }
+        restore.member_reservation = None;
+        restore.pm_prior_assignment = None;
     }
     if restore.refusal.is_none() {
         restore.refuse("restore_launch_failed", detail, true);
@@ -329,6 +379,49 @@ fn owner_restore_placeholder_known_empty(restore: &OwnerSavedSessionRestore) -> 
             .window(&expected.id)
             .is_some_and(|row| restore_row_is_empty(row, &session.id))
     })
+}
+
+fn reserve_pm_after_census<T>(
+    automatic: bool,
+    current: &AtomicBool,
+    mut reserve: impl FnMut() -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    loop {
+        if !current.load(Ordering::Acquire) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "PM restore cancelled",
+            ));
+        }
+        if automatic {
+            gwt_core::operation_deadline::ensure_remaining("PM restore census")?;
+        }
+        let error = match reserve() {
+            Ok(value) => return Ok(value),
+            Err(error) => error,
+        };
+        if !automatic
+            || error.kind() != std::io::ErrorKind::WouldBlock
+            || error.to_string()
+                != "Machine Agent census is uncertain; wait for its next observation"
+        {
+            return Err(error);
+        }
+        let Some(deadline) = gwt_core::operation_deadline::current() else {
+            return Err(error);
+        };
+        let remaining = deadline.saturating_duration_since(gwt_core::operation_deadline::now());
+        if remaining.is_zero() {
+            return Err(error);
+        }
+        if !current.load(Ordering::Acquire) {
+            continue;
+        }
+        // Reservation failed before commit and released its locks. Keep the
+        // same source/token and deadline while the sampler publishes fresh facts.
+        std::thread::sleep(std::time::Duration::from_millis(100).min(remaining));
+        gwt_core::operation_deadline::ensure_remaining("PM restore census")?;
+    }
 }
 
 pub(crate) fn prepare_owner_saved_session_restore(
@@ -519,7 +612,7 @@ pub(crate) fn prepare_owner_saved_session_restore(
             let name = match existing_name {
                 Some(name) => name,
                 None => {
-                    let known = restore
+                    let mut known: HashSet<_> = restore
                         .registry
                         .lock()
                         .map_err(|error| error.to_string())?
@@ -528,11 +621,19 @@ pub(crate) fn prepare_owner_saved_session_restore(
                         .iter()
                         .filter_map(|row| row.agent_name.clone())
                         .collect();
+                    let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(root);
+                    // Imported members may not yet have a history entry.
+                    if let Some(roster) = crate::load_issue_monitor_prefs(&prefs_path)
+                        .map_err(|error| error.to_string())?
+                        .agent_roster
+                    {
+                        known.extend(roster.members.into_iter().map(|member| member.name));
+                    }
                     let language = gwt_config::Settings::load()
                         .map(|settings| settings.ai.effective_language())
                         .unwrap_or("en");
                     crate::agent_names::allocate(
-                        &own_project_dir.join("agent-names.jsonl"),
+                        &crate::agent_names::history_for_prefs(&prefs_path)?,
                         language,
                         &HashSet::new(),
                         &known,
@@ -603,9 +704,51 @@ pub(crate) fn prepare_owner_saved_session_restore(
             })
             .find_map(|row| row.agent_name.clone())
     });
-    if let Some(member_root) = member_root {
+    if is_pm {
+        let existing = restore.member_reservation.is_some();
+        let token = restore
+            .member_reservation
+            .as_ref()
+            .map(|(_, token)| token.clone())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let prepared = reserve_pm_after_census(
+            restore.origin == gwt_agent::SessionLaunchOrigin::AutomaticRestore,
+            current,
+            || {
+                crate::agent_registry::reserve_resume_pm_member(
+                    root,
+                    sessions_dir,
+                    &restore.source,
+                    &token,
+                    restore.worktree_reserved,
+                )
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        if !existing {
+            restore.pm_prior_assignment = prepared.prior_assignment;
+        }
+        let member = prepared.member;
+        let assignment = member.assignment.as_ref().expect("PM restore reservation");
+        config
+            .env_vars
+            .insert("GWT_AGENT_MEMBER_ID".into(), member.agent_member_id.clone());
+        config.env_vars.insert(
+            "GWT_AGENT_RESERVATION_ID".into(),
+            assignment.reservation_id.clone(),
+        );
+        config.env_vars.insert(
+            "GWT_PM_PROFILE_REVISION".into(),
+            assignment
+                .pm_profile_revision
+                .clone()
+                .expect("PM restore profile"),
+        );
+        agent_name = Some(member.name);
+        restore.member_reservation = Some((member.agent_member_id, token));
+    } else if let Some(member_root) = member_root {
         let token = uuid::Uuid::new_v4().to_string();
-        let member = crate::agent_names::reserve_project_member_for_agent(
+        let member = crate::agent_names::reserve_project_member_for_session(
             member_root,
             sessions_dir,
             &token,
@@ -613,10 +756,7 @@ pub(crate) fn prepare_owner_saved_session_restore(
             config.linked_issue_number.and_then(|number| {
                 crate::issue_monitor_worker::cached_agent_member_spec_owner(root, number)
             }),
-            None,
-            restore.source.agent_member_id.as_deref(),
-            restore.source.agent_id.command(),
-            None,
+            &restore.source,
         )?;
         let reservation = member
             .assignment
@@ -929,7 +1069,7 @@ pub fn install_agent_launch(
         std::time::Duration::from_secs(2),
         |session| {
             session.restore_window_on_startup = true;
-            session.updated_at = chrono::Utc::now();
+            session.updated_at = gwt_core::timestamp::UtcTimestamp::now();
             session.launch_origin = input.origin;
             session.restore_source_session_id = input.auto_resume_source_session_id.clone();
             Ok(())
@@ -1099,7 +1239,7 @@ pub fn install_agent_launch(
             session_id: session_id.clone(),
             agent_id: agent_id.command().to_string(),
             worktree_path: worktree_path.to_string_lossy().into_owned(),
-            created_at: Some(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+            created_at: Some(gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds()),
             consecutive_crashes: 0,
             next_not_before: None,
         };
@@ -1127,6 +1267,7 @@ pub fn install_agent_launch(
             }
             let status = super::pm_delivery::pm_status_from_launch_prefs(
                 &input.sessions_dir,
+                &root,
                 &prefs,
                 prefs.registration.as_ref(),
             );
@@ -1180,6 +1321,19 @@ pub fn install_agent_launch(
                 None,
             )
             .map(|()| true)
+        } else if let Some(genesis) = genesis.as_ref() {
+            // An Issue-linked NEW session can start on an existing branch.
+            save_workspace_launch_projection(
+                &input.project_root,
+                &active,
+                None,
+                linked_issue_number,
+                Some(genesis.owner),
+                None,
+                WorkspaceLaunchProjectionKind::StartWork,
+                None,
+            )
+            .map(|()| true)
         } else {
             Ok(false)
         }
@@ -1230,17 +1384,15 @@ pub fn install_agent_launch(
                 "genesis recovery receipt could not be settled",
                 &mut input.removed_genesis_session,
             );
-            return Err(format!(
-                "genesis launch readiness could not be committed: {error}; rollback: {rollback:?}"
-            ));
+            tracing::warn!(%error, ?rollback, "genesis launch readiness could not be committed");
+            return Err("The agent launch could not be confirmed. Cleanup was attempted. Open Logs and review the launch error before launching again.".into());
         }
     }
     let cached_session = if durable_launch_recovery_exists(&input.sessions_dir, &session_id)
         .map_err(|error| {
-            format!(
-                "launch recovery probe failed for Session {session_id} ({:?}): {error}",
-                error.kind()
-            )
+            tracing::warn!(session_id, error_kind = ?error.kind(), %error,
+                "launch recovery probe failed");
+            "The previous launch could not be checked. Launch is paused. Open Logs and review the launch error before launching again.".to_string()
         })? {
         None
     } else {
@@ -1548,28 +1700,41 @@ fn issue_monitor_prefs_admission_map(
 /// Metadata is read before the content, so an unchanged metadata pair always
 /// still describes the digested bytes; a metadata change falls back to the
 /// content digest so observation-only rewrites keep prepared facts current.
+/// Shared roster/core changes use their existing settings revision because
+/// those values are deliberately absent from the project execution mirror.
+/// An Active source without a mirror still retains that shared revision.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IssueMonitorPrefsStamp {
-    metadata: (u64, std::time::SystemTime),
-    content: [u8; 32],
+    metadata: Option<(u64, std::time::SystemTime)>,
+    agent_settings_revision: Option<u64>,
+    content: Option<[u8; 32]>,
     keys: std::collections::BTreeMap<String, [u8; 32]>,
 }
 
 impl IssueMonitorPrefsStamp {
     pub fn read(path: &Path) -> std::io::Result<Option<Self>> {
+        let agent_settings_revision = crate::agent_registry::active_settings_revision(path)?;
         let metadata = match std::fs::metadata(path) {
-            Ok(metadata) => (metadata.len(), metadata.modified()?),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Ok(metadata) => Some((metadata.len(), metadata.modified()?)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => return Err(error),
         };
-        let bytes = match std::fs::read(path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        let (content, keys) = match std::fs::read(path) {
+            Ok(bytes) => {
+                let (content, keys) = issue_monitor_prefs_digests(&bytes);
+                (Some(content), keys)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                (None, Default::default())
+            }
             Err(error) => return Err(error),
         };
-        let (content, keys) = issue_monitor_prefs_digests(&bytes);
+        if content.is_none() && agent_settings_revision.is_none() {
+            return Ok(None);
+        }
         Ok(Some(Self {
-            metadata,
+            metadata: if content.is_some() { metadata } else { None },
+            agent_settings_revision,
             content,
             keys,
         }))
@@ -1578,39 +1743,64 @@ impl IssueMonitorPrefsStamp {
     /// Issue #6096 diagnostics: the admission-relevant top-level keys whose
     /// content differs between `expected` and the current file.
     pub fn changed_keys(expected: Option<&Self>, path: &Path) -> Vec<String> {
+        let expected_settings_revision = expected.and_then(|stamp| stamp.agent_settings_revision);
         let current = std::fs::read(path)
             .map(|bytes| issue_monitor_prefs_digests(&bytes).1)
             .unwrap_or_default();
         let empty = std::collections::BTreeMap::new();
         let expected = expected.map_or(&empty, |stamp| &stamp.keys);
-        expected
+        let mut changed = expected
             .keys()
             .chain(current.keys())
             .filter(|key| expected.get(*key) != current.get(*key))
             .cloned()
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .collect()
+            .collect::<std::collections::BTreeSet<_>>();
+        if !crate::agent_registry::active_settings_revision(path)
+            .is_ok_and(|current| current == expected_settings_revision)
+        {
+            changed.insert("agent_registry_revision".to_string());
+        }
+        changed.into_iter().collect()
     }
 
-    /// True when `path` still carries the same admission-relevant content.
-    /// Unchanged metadata needs no read; otherwise compare the digest.
+    /// True when the project content and shared settings remain current.
+    /// Unchanged project metadata needs no project-content read.
     pub fn matches_current(expected: Option<&Self>, path: &Path) -> bool {
+        let settings_revision = match crate::agent_registry::active_settings_revision(path) {
+            Ok(revision) => revision,
+            Err(_) => return false,
+        };
         let metadata = std::fs::metadata(path);
         let Some(expected) = expected else {
-            return matches!(
-                metadata,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound
-            );
+            return settings_revision.is_none()
+                && matches!(
+                    metadata,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound
+                );
         };
-        let unchanged_metadata = metadata.is_ok_and(|metadata| {
-            metadata
-                .modified()
-                .is_ok_and(|modified| (metadata.len(), modified) == expected.metadata)
-        });
+        if settings_revision != expected.agent_settings_revision {
+            return false;
+        }
+        let unchanged_metadata = match metadata {
+            Ok(metadata) => {
+                expected.content.is_some()
+                    && metadata
+                        .modified()
+                        .is_ok_and(|modified| Some((metadata.len(), modified)) == expected.metadata)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                expected.content.is_none()
+            }
+            Err(_) => false,
+        };
         unchanged_metadata
-            || std::fs::read(path)
-                .is_ok_and(|bytes| issue_monitor_prefs_content_digest(&bytes) == expected.content)
+            || match std::fs::read(path) {
+                Ok(bytes) => Some(issue_monitor_prefs_content_digest(&bytes)) == expected.content,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    expected.content.is_none()
+                }
+                Err(_) => false,
+            }
     }
 }
 
@@ -1915,7 +2105,7 @@ struct IssueMonitorSpawnAdmissionDecision {
 
 impl IssueMonitorSpawnAdmissionDecision {
     fn evaluate(monitor: &crate::IssueMonitorState, issue_number: u64) -> Self {
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
         Self {
             update_drain: monitor.update_drain().is_some(),
             source_exclusion: monitor.launch_source_exclusion(issue_number),
@@ -1984,7 +2174,8 @@ impl PreparedIssueMonitorSpawnAdmission {
     /// trusted without re-deriving that limit.
     fn capacity_admits(&self) -> bool {
         let sample_current = self.capacity_expires_at.is_none_or(|expires| {
-            chrono::Utc::now().timestamp() < i64::try_from(expires).unwrap_or(i64::MAX)
+            gwt_core::timestamp::UtcTimestamp::now().timestamp()
+                < i64::try_from(expires).unwrap_or(i64::MAX)
         }) && self
             .dependencies_with_role(IssueMonitorAdmissionDependencyRole::Capacity)
             .all(IssueMonitorAdmissionFileStamp::is_current);
@@ -2131,7 +2322,7 @@ impl IssueMonitorSpawnAdmissionInput {
             "Issues launch phase"
         );
         let capacity = monitor
-            .agent_status_at(&chrono::Utc::now().to_rfc3339())
+            .agent_status_at(&gwt_core::timestamp::UtcTimestamp::now().to_rfc3339())
             .agent_capacity;
         let capacity_expires_at = capacity.is_fresh().then_some(capacity.expires_at).flatten();
         let capacity_limit = monitor.effective_max_active_agents();
@@ -2672,7 +2863,7 @@ pub fn load_local_issue_monitor_fallback_projection(
     (
         cached_issues,
         cache_error.or(origin_error),
-        chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds(),
         source_repository.ok(),
     )
 }
@@ -2718,6 +2909,48 @@ pub(crate) struct PreparedOwnerAgentAdmission {
     pub issue_monitor_launch: bool,
     pub purpose_title: Option<String>,
 }
+
+pub(super) fn confirm_open_monitor_issue(
+    project_root: &Path,
+    issue_number: u64,
+) -> Result<(), String> {
+    let (state, updated_at) =
+        crate::issue_cache::fetch_issue_state_for_launch(project_root, issue_number).map_err(
+            |error| {
+                format!(
+                    "Cannot confirm Issue #{issue_number} is open on GitHub: {error}; {}",
+                    gwt_agent::TRANSIENT_LAUNCH_RETRY_HINT
+                )
+            },
+        )?;
+    if state == gwt_github::IssueState::Open {
+        return Ok(());
+    }
+
+    let result = super::monitor::publish(
+        project_root,
+        serde_json::json!({
+            "issue_state": { "number": issue_number, "state": "closed", "updated_at": updated_at }
+        }),
+    );
+    let result = match result {
+        Err(error) if error.allows_local_fallback() => {
+            commit_local_issue_monitor_control_with_timeout(
+                project_root,
+                std::time::Duration::from_secs(5),
+                |monitor| monitor.record_closed(issue_number, Some(updated_at)),
+            )
+            .map(|_| ())
+        }
+        other => other,
+    };
+    let detail = format!("Issue #{issue_number} is closed on GitHub");
+    Err(match result {
+        Ok(()) => detail,
+        Err(error) => format!("{detail}; Monitor closure could not be recorded: {error}"),
+    })
+}
+
 pub(crate) fn prepare_owner_agent_admission(
     input: OwnerAgentAdmissionInput<'_>,
     config: &mut gwt_agent::LaunchConfig,
@@ -2822,7 +3055,63 @@ pub(crate) fn prepare_owner_agent_admission(
             target_branch: config.branch.clone().unwrap_or_default(),
             issue_link_cache_dir: input.issue_link_cache_dir.into(),
         })?;
-        let now = chrono::Utc::now().to_rfc3339();
+        if !review_dispatch
+            && monitor_requested_tier.is_none()
+            && !input.is_continue_work
+            && input.restore_source.is_none()
+            && config.session_mode == gwt_agent::SessionMode::Normal
+        {
+            if let Some(member_id) = selected_agent_member_id.as_deref() {
+                let prefs = crate::load_issue_monitor_prefs(
+                    &crate::issue_monitor_prefs_path_for_repo_path(input.project_root),
+                )
+                .map_err(|error| error.to_string())?;
+                let matches = crate::agent_registry::member_profile(&prefs, member_id).is_some_and(
+                    |profile| {
+                        if !profile
+                            .agent_id
+                            .eq_ignore_ascii_case(config.agent_id.command())
+                        {
+                            return false;
+                        }
+                        let (default_model, default_reasoning) =
+                            crate::launch_wizard::default_launch_tuning(
+                                config.agent_id.command(),
+                                profile.model.as_deref(),
+                            );
+                        let mut builder =
+                            gwt_agent::AgentLaunchBuilder::new(config.agent_id.clone())
+                                .runtime_target(profile.runtime_target)
+                                .fast_mode(
+                                    profile.fast_mode
+                                        && config.agent_id != gwt_agent::AgentId::Codex,
+                                )
+                                .codex_speed(profile.codex_speed);
+                        if let Some(model) = profile.model.or(default_model) {
+                            builder = builder.model(model);
+                        }
+                        if let Some(reasoning) = profile.reasoning.or(default_reasoning) {
+                            builder = builder.reasoning_level(reasoning);
+                        }
+                        let expected = builder.build();
+                        expected.model == config.model
+                            && expected.reasoning_level == config.reasoning_level
+                            && expected.runtime_target == config.runtime_target
+                            && expected.fast_mode == config.fast_mode
+                            && expected.codex_speed == config.codex_speed
+                            && config
+                                .permission_decision
+                                .requested_skip_permissions
+                                .unwrap_or(false)
+                                == profile.skip_permissions
+                    },
+                );
+                if !matches {
+                    return Err(ISSUE_MONITOR_SPAWN_ADMISSION_STALE.into());
+                }
+            }
+        }
+        let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
         let monitor = &mut prepared.monitor;
         if !review_dispatch
             && monitor
@@ -2926,7 +3215,9 @@ pub(crate) fn prepare_owner_agent_admission(
                             && profile.model == config.model
                             && profile.reasoning == config.reasoning_level
                             && profile.runtime_target == config.runtime_target
-                            && profile.fast_mode == config.fast_mode
+                            && (profile.fast_mode && config.agent_id != gwt_agent::AgentId::Codex)
+                                == config.fast_mode
+                            && profile.codex_speed == config.codex_speed
                     })
                 });
                 if !prefs.launch_auto || !eligible {
@@ -3040,7 +3331,79 @@ pub(crate) fn prepare_owner_agent_admission(
         .working_dir
         .as_deref()
         .is_some_and(crate::pm_registry::is_canonical_pm_worktree);
-    if is_pm || is_review {
+    if is_pm {
+        if let Some(reservation) = config.env_vars.get("GWT_AGENT_RESERVATION_ID").cloned() {
+            let member_id = config
+                .env_vars
+                .get("GWT_AGENT_MEMBER_ID")
+                .ok_or("PM reservation has no captured member")?;
+            let assignment =
+                crate::agent_registry::pm_assignment(input.project_root, member_id, &reservation)
+                    .map_err(|error| error.to_string())?
+                    .ok_or("PM reservation is unavailable")?;
+            if assignment.pm_profile_revision.as_ref()
+                != config.env_vars.get("GWT_PM_PROFILE_REVISION")
+            {
+                return Err("Captured PM conversation profile changed; retry Resume".into());
+            }
+            let member = crate::agent_registry::SessionMemberSnapshot::load()
+                .and_then(|snapshot| {
+                    snapshot.member_in_project(
+                        &gwt_core::paths::project_scope_hash(input.project_root),
+                        member_id,
+                    )
+                })
+                .map_err(|error| error.to_string())?
+                .ok_or("PM member is unavailable")?;
+            config.env_vars.insert("GWT_AGENT_NAME".into(), member.name);
+        } else {
+            if config.predecessor_session_id.is_some() {
+                return Err("Resume the registered PM through its saved conversation".into());
+            }
+            let expected = config
+                .env_vars
+                .get("GWT_PM_EXPECTED_MEMBER_ID")
+                .ok_or("Reload PM status before starting a NEW conversation")?
+                .clone();
+            let revision = config
+                .env_vars
+                .get("GWT_PM_PROFILE_REVISION")
+                .ok_or("Reload PM launch settings before starting a NEW conversation")?
+                .clone();
+            let token = uuid::Uuid::new_v4().to_string();
+            let worktree = config
+                .working_dir
+                .as_deref()
+                .expect("canonical PM worktree");
+            let prepared = crate::agent_registry::reserve_new_pm_member_from_draft(
+                input.project_root,
+                input.sessions_dir,
+                worktree,
+                &token,
+                &crate::agent_registry::PmLaunchDraft {
+                    member_id: (!expected.is_empty()).then_some(expected.as_str()),
+                    profile_revision: &revision,
+                    agent_id: config.agent_id.command(),
+                    model: config.model.as_deref(),
+                    reasoning: config.reasoning_level.as_deref(),
+                    codex_speed: config.codex_speed,
+                    fast_mode: config.fast_mode,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+            config.env_vars.insert(
+                "GWT_AGENT_MEMBER_ID".into(),
+                prepared.member.agent_member_id,
+            );
+            config
+                .env_vars
+                .insert("GWT_AGENT_RESERVATION_ID".into(), token);
+            config
+                .env_vars
+                .insert("GWT_AGENT_NAME".into(), prepared.member.name);
+            config.env_vars.remove("GWT_PM_EXPECTED_MEMBER_ID");
+        }
+    } else if is_review {
         config.env_vars.remove("GWT_AGENT_MEMBER_ID");
         config.env_vars.remove("GWT_AGENT_RESERVATION_ID");
         let history = gwt_core::paths::gwt_project_dir_for_repo_path(input.project_root)
@@ -3083,23 +3446,77 @@ pub(crate) fn prepare_owner_agent_admission(
             .filter(|_| inherited_agent_name.is_some())
             .cloned()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        let member = crate::agent_names::reserve_project_member_for_agent(
-            input.project_root,
-            input.sessions_dir,
-            &reservation_id,
-            config.linked_issue_number,
-            roster_spec_number,
-            launch_feedback_context
-                .as_ref()
-                .and_then(|feedback| feedback.issue_monitor_delivery_id.as_deref()),
+        // Quick Start Resume carries an exact predecessor but does not use the
+        // saved-window restore entrypoint. Bind it to the same persisted member,
+        // including when that member now has a different tool for future work.
+        let quick_start_source = if input.restore_source.is_none()
+            && config.session_mode == gwt_agent::SessionMode::Resume
+        {
             config
-                .env_vars
-                .get("GWT_AGENT_MEMBER_ID")
-                .filter(|_| inherited_agent_name.is_some() || input.is_continue_work)
-                .map(String::as_str),
-            config.agent_id.command(),
-            selected_agent_member_id.as_deref(),
-        )?;
+                .predecessor_session_id
+                .as_deref()
+                .map(|id| -> Result<Option<gwt_agent::Session>, String> {
+                    gwt_agent::validate_session_id_path_component(id)?;
+                    let source =
+                        gwt_agent::Session::load(&input.sessions_dir.join(format!("{id}.toml")))
+                            .map_err(|error| error.to_string())?;
+                    let same_handle = source
+                        .exact_resume_session_id()
+                        .zip(config.resume_session_id.as_deref())
+                        .is_some_and(|(saved, requested)| saved == requested);
+                    let same_worktree = config
+                        .working_dir
+                        .as_ref()
+                        .and_then(|path| std::fs::canonicalize(path).ok())
+                        .zip(std::fs::canonicalize(&source.worktree_path).ok())
+                        .is_some_and(|(requested, saved)| requested == saved);
+                    if source.id != id
+                        || source.agent_id != config.agent_id
+                        || !same_handle
+                        || !same_worktree
+                    {
+                        return Err(
+                            "Saved conversation changed. Reload Quick Start and retry Resume."
+                                .into(),
+                        );
+                    }
+                    // Sessions predating registered members keep the existing
+                    // generic allocation path; they cannot claim this exemption.
+                    Ok(crate::agent_names::registered_session_member_id(&source)?.map(|_| source))
+                })
+                .transpose()?
+                .flatten()
+        } else {
+            None
+        };
+        let member = if let Some(source) = input.restore_source.or(quick_start_source.as_ref()) {
+            crate::agent_names::reserve_project_member_for_session(
+                input.project_root,
+                input.sessions_dir,
+                &reservation_id,
+                config.linked_issue_number,
+                roster_spec_number,
+                source,
+            )?
+        } else {
+            crate::agent_names::reserve_project_member_for_agent(
+                input.project_root,
+                input.sessions_dir,
+                &reservation_id,
+                config.linked_issue_number,
+                roster_spec_number,
+                launch_feedback_context
+                    .as_ref()
+                    .and_then(|feedback| feedback.issue_monitor_delivery_id.as_deref()),
+                config
+                    .env_vars
+                    .get("GWT_AGENT_MEMBER_ID")
+                    .filter(|_| inherited_agent_name.is_some() || input.is_continue_work)
+                    .map(String::as_str),
+                config.agent_id.command(),
+                selected_agent_member_id.as_deref(),
+            )?
+        };
         let assignment = member.assignment.as_ref().expect("reserved assignment");
         config
             .env_vars
@@ -3110,25 +3527,44 @@ pub(crate) fn prepare_owner_agent_admission(
         );
         config.env_vars.insert("GWT_AGENT_NAME".into(), member.name);
     }
-    let prepared_manual_launch_claim = super::continuation::claim_prepared_manual_successor_launch(
-        input.sessions_dir,
-        input.project_root,
-        config,
-    )
-    .inspect_err(|_| {
-        if let Some((member, reservation)) = config
-            .env_vars
-            .get("GWT_AGENT_MEMBER_ID")
-            .zip(config.env_vars.get("GWT_AGENT_RESERVATION_ID"))
-        {
-            let _ = crate::agent_names::release_project_member(
-                input.project_root,
-                input.sessions_dir,
-                member,
-                reservation,
-            );
-        }
-    })?;
+    let prepared_manual_launch_claim =
+        match super::continuation::claim_prepared_manual_successor_launch(
+            input.sessions_dir,
+            input.project_root,
+            config,
+        ) {
+            Ok(claim) => claim,
+            Err(error) => {
+                if let Some((member, reservation)) = config
+                    .env_vars
+                    .get("GWT_AGENT_MEMBER_ID")
+                    .zip(config.env_vars.get("GWT_AGENT_RESERVATION_ID"))
+                {
+                    if is_pm {
+                        if input.restore_source.is_none() {
+                            if let Err(cleanup) = crate::agent_registry::cancel_unspawned_pm_member(
+                                input.project_root,
+                                input.sessions_dir,
+                                member,
+                                reservation,
+                                None,
+                                None,
+                            ) {
+                                return Err(format!("{error}; PM reservation retained pending exact reconciliation: {cleanup}"));
+                            }
+                        }
+                    } else {
+                        let _ = crate::agent_names::release_project_member(
+                            input.project_root,
+                            input.sessions_dir,
+                            member,
+                            reservation,
+                        );
+                    }
+                }
+                return Err(error);
+            }
+        };
     Ok(PreparedOwnerAgentAdmission {
         workspace_resume_context,
         launch_feedback_context,
@@ -3909,7 +4345,7 @@ mod delivery_ack_tests {
             materialized_window_id: Some(window_id.into()),
             workspace_durable_window_id: Some(window_id.into()),
             launch_session_strategy: gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
-            created_at: chrono::Utc::now().to_rfc3339(),
+            created_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
             requeue_reason: None,
         };
         let prefs = gwt::IssueMonitorPrefs {
@@ -4101,6 +4537,625 @@ pub fn issue_monitor_delivery_marker_result(
 #[cfg(test)]
 mod owner_admission_tests {
     use super::*;
+    use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
+
+    #[test]
+    fn automatic_pm_restore_waits_for_census_before_retrying_the_same_reservation() {
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            gwt_core::operation_deadline::now() + std::time::Duration::from_secs(5),
+        );
+        let current = AtomicBool::new(true);
+        let mut attempts = 0;
+        let result = reserve_pm_after_census(true, &current, || {
+            attempts += 1;
+            if attempts == 1 {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "Machine Agent census is uncertain; wait for its next observation",
+                ))
+            } else {
+                Ok("same reservation")
+            }
+        });
+        assert_eq!(result.unwrap(), "same reservation");
+        assert_eq!(attempts, 2);
+    }
+
+    #[test]
+    fn pm_census_wait_preserves_manual_other_error_and_cancellation_boundaries() {
+        let current = AtomicBool::new(true);
+        for (automatic, with_deadline, message) in [
+            (
+                true,
+                true,
+                "Machine Agent capacity is occupied; wait for an exact slot to be released",
+            ),
+            (
+                false,
+                true,
+                "Machine Agent census is uncertain; wait for its next observation",
+            ),
+            (
+                true,
+                false,
+                "Machine Agent census is uncertain; wait for its next observation",
+            ),
+        ] {
+            let _deadline = with_deadline.then(|| {
+                gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+                    gwt_core::operation_deadline::now() + std::time::Duration::from_secs(5),
+                )
+            });
+            let mut attempts = 0;
+            let result: std::io::Result<()> = reserve_pm_after_census(automatic, &current, || {
+                attempts += 1;
+                Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, message))
+            });
+            assert_eq!(result.unwrap_err().to_string(), message);
+            assert_eq!(
+                attempts, 1,
+                "no deadline or nonautomatic refusal is not retried"
+            );
+        }
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            gwt_core::operation_deadline::now() + std::time::Duration::from_secs(5),
+        );
+        let mut attempts = 0;
+        let cancelled: std::io::Result<()> = reserve_pm_after_census(true, &current, || {
+            attempts += 1;
+            current.store(false, Ordering::Release);
+            Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "Machine Agent census is uncertain; wait for its next observation",
+            ))
+        });
+        assert_eq!(
+            cancelled.unwrap_err().kind(),
+            std::io::ErrorKind::Interrupted
+        );
+        assert_eq!(attempts, 1);
+        current.store(true, Ordering::Release);
+        let _expired = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            gwt_core::operation_deadline::now(),
+        );
+        let mut attempts = 0;
+        let expired: std::io::Result<()> = reserve_pm_after_census(true, &current, || {
+            attempts += 1;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "Machine Agent census is uncertain; wait for its next observation",
+            ))
+        });
+        assert!(expired.is_err());
+        assert_eq!(attempts, 0, "an elapsed deadline cannot be extended");
+    }
+
+    #[test]
+    fn owner_rejects_stale_fresh_selected_member_tuning() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path());
+        let root = temp.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec![
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/fixture.git",
+            ],
+        ] {
+            assert!(gwt_core::process::hidden_command("git")
+                .current_dir(&root)
+                .args(args)
+                .status()
+                .unwrap()
+                .success());
+        }
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let roster = crate::agent_names::read_project_roster(&root, &sessions).unwrap();
+        let id = roster.members[0].agent_member_id.clone();
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&root);
+        crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+            let profile = serde_json::from_value(serde_json::json!({"agent_id":"codex", "agent_member_id":id, "model":"old-model", "reasoning":"high"})).unwrap();
+            prefs.set_launch_profile_pool(vec![profile]);
+            Ok(())
+        }).unwrap();
+        let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .working_dir(&root)
+            .model("old-model")
+            .reasoning_level("high")
+            .build();
+        config.branch = Some("work/issue-43".into());
+        let feedback = LaunchFeedbackContext {
+            client_id: "test".into(),
+            title: "test".into(),
+            issue_monitor_issue_number: Some(43),
+            issue_monitor_delivery_id: None,
+            issue_monitor_project_root: Some(root.clone()),
+            issue_monitor_session_mode: Some(gwt_agent::SessionMode::Normal),
+            issue_monitor_autonomous_handoff: None,
+            issue_monitor_autonomous_submit_started: false,
+            issue_monitor_review_dispatch: false,
+        };
+        let roots = vec![root.clone()];
+        let known = std::collections::HashSet::new();
+        let runtime_handles = std::collections::HashMap::new();
+        let make_input = || OwnerAgentAdmissionInput {
+            project_root: &root,
+            sessions_dir: &sessions,
+            issue_link_cache_dir: temp.path(),
+            window_id: "pane",
+            materializer_id: "test",
+            host_project_roots: &roots,
+            snapshot: crate::IssueMonitorWindowSnapshot {
+                project_tab_id: "tab".into(),
+                observed_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
+                windows: vec![],
+            },
+            snapshot_tabs: Default::default(),
+            runtime_handles: &runtime_handles,
+            known_names: &known,
+            metadata: OwnerLaunchMetadata {
+                selected_agent_member_id: Some(id.clone()),
+                launch_feedback_context: Some(feedback.clone()),
+                ..Default::default()
+            },
+            is_continue_work: false,
+            restore_source: None,
+        };
+        let result = prepare_owner_agent_admission(make_input(), &mut config);
+        assert!(
+            result.is_ok(),
+            "matching selection must be admitted: {:?}",
+            result.err()
+        );
+        let reservation = config.env_vars.remove("GWT_AGENT_RESERVATION_ID").unwrap();
+        crate::agent_names::release_project_member(&root, &sessions, &id, &reservation).unwrap();
+        crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+            let mut profiles = prefs.launch_profile_pool();
+            profiles[0].model = Some("new-model".into());
+            profiles[0].reasoning = Some("medium".into());
+            prefs.set_launch_profile_pool(profiles);
+            Ok(())
+        })
+        .unwrap();
+        let mut stale = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .working_dir(&root)
+            .model("old-model")
+            .reasoning_level("high")
+            .build();
+        stale.branch = Some("work/issue-43".into());
+        let result = prepare_owner_agent_admission(make_input(), &mut stale);
+        assert!(
+            matches!(result, Err(ref error) if error.contains(ISSUE_MONITOR_SPAWN_ADMISSION_STALE)),
+            "stale selected tuning must be rejected before allocation: {:?}",
+            result.err()
+        );
+        crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+            prefs.priority_order = vec![7];
+            Ok(())
+        })
+        .unwrap();
+        let mut fresh = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .working_dir(&root)
+            .model("new-model")
+            .reasoning_level("medium")
+            .build();
+        fresh.branch = Some("work/issue-43".into());
+        let result = prepare_owner_agent_admission(make_input(), &mut fresh);
+        assert!(
+            result.is_ok(),
+            "fresh preparation must admit matching tuning despite unrelated revision: {:?}",
+            result.err()
+        );
+        let reservation = fresh.env_vars.remove("GWT_AGENT_RESERVATION_ID").unwrap();
+        crate::agent_names::release_project_member(&root, &sessions, &id, &reservation).unwrap();
+        let mut stale_speed = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .working_dir(&root)
+            .model("new-model")
+            .reasoning_level("medium")
+            .codex_speed(gwt_agent::CodexSpeed::Ultrafast)
+            .build();
+        stale_speed.branch = Some("work/issue-43".into());
+        assert!(
+            matches!(
+                prepare_owner_agent_admission(make_input(), &mut stale_speed),
+                Err(ref error) if error.contains(ISSUE_MONITOR_SPAWN_ADMISSION_STALE)
+            ),
+            "a stale selected member speed must be rejected before allocation"
+        );
+        let mut stale_permissions = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .working_dir(&root)
+            .model("new-model")
+            .reasoning_level("medium")
+            .skip_permissions(true)
+            .build();
+        stale_permissions.branch = Some("work/issue-43".into());
+        assert!(
+            matches!(prepare_owner_agent_admission(make_input(), &mut stale_permissions),
+                Err(ref error) if error.contains(ISSUE_MONITOR_SPAWN_ADMISSION_STALE)),
+            "a changed member permission preference must be rejected before allocation"
+        );
+        for (runtime, skip) in [
+            (gwt_agent::LaunchRuntimeTarget::Host, false),
+            (gwt_agent::LaunchRuntimeTarget::Docker, true),
+        ] {
+            let core = crate::agent_registry::SessionMemberSnapshot::load()
+                .unwrap()
+                .implementation_core(&id)
+                .unwrap();
+            let tuning = serde_json::from_value(serde_json::json!({"member_id":id,
+                "model":"new-model", "reasoning":"medium", "runtime_target":runtime,
+                "skip_permissions":skip, "expected_core_revision":core.1}))
+            .unwrap();
+            assert!(crate::agent_registry::set_member_tuning(&tuning)
+                .error
+                .is_none());
+            let prefs = crate::load_issue_monitor_prefs(&prefs_path).unwrap();
+            let profile = crate::agent_registry::member_profile(&prefs, &id).unwrap();
+            let mut configured = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+                .working_dir(&root)
+                .model(profile.model.unwrap())
+                .reasoning_level(profile.reasoning.unwrap())
+                .runtime_target(profile.runtime_target)
+                .skip_permissions(profile.skip_permissions)
+                .build();
+            configured.branch = Some("work/issue-43".into());
+            assert_eq!(configured.runtime_target, runtime);
+            assert_eq!(configured.args.iter().any(|arg| arg == "--yolo"), skip);
+            let result = prepare_owner_agent_admission(make_input(), &mut configured);
+            assert!(
+                result.is_ok(),
+                "fresh saved runtime and permissions must be admitted: {:?}",
+                result.err()
+            );
+            let reservation = configured
+                .env_vars
+                .remove("GWT_AGENT_RESERVATION_ID")
+                .unwrap();
+            crate::agent_names::release_project_member(&root, &sessions, &id, &reservation)
+                .unwrap();
+        }
+        // Unspecified saved tuning must match the effective values produced by
+        // the same wizard used for a fresh Monitor launch.
+        for agent_id in [gwt_agent::AgentId::Codex, gwt_agent::AgentId::ClaudeCode] {
+            let roster = crate::agent_names::mutate_project_roster(
+                &root,
+                &sessions,
+                crate::agent_names::AgentRosterAction::Add {
+                    model: None,
+                    reasoning: None,
+                    pm_eligible: false,
+                    name: None,
+                    agent_id: Some(agent_id.command().into()),
+                },
+                None,
+            )
+            .unwrap();
+            let member_id = roster.members.last().unwrap().agent_member_id.clone();
+            let mut profile: crate::IssueMonitorLaunchProfile = serde_json::from_value(
+                serde_json::json!({"agent_id":agent_id.command(), "agent_member_id":member_id}),
+            )
+            .unwrap();
+            if agent_id == gwt_agent::AgentId::Codex {
+                profile.fast_mode = true;
+                profile.codex_speed = gwt_agent::CodexSpeed::Fast;
+            }
+            crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+                prefs.set_launch_profile_pool(vec![profile.clone()]);
+                Ok(())
+            })
+            .unwrap();
+            let context = crate::LaunchWizardContext {
+                selected_branch: crate::BranchListEntry {
+                    name: "work/issue-43".into(),
+                    scope: crate::BranchScope::Local,
+                    is_head: false,
+                    upstream: None,
+                    ahead: 0,
+                    behind: 0,
+                    last_commit_date: None,
+                    cleanup_ready: true,
+                    cleanup: Default::default(),
+                    resume: crate::BranchResumeInfo::unavailable(),
+                    start_work_eligibility: None,
+                },
+                normalized_branch_name: "work/issue-43".into(),
+                worktree_path: Some(root.clone()),
+                quick_start_root: root.clone(),
+                live_sessions: vec![],
+                docker_context: None,
+                docker_service_status: gwt_docker::ComposeServiceStatus::NotFound,
+                linked_issue_number: None,
+                linked_issue_kind: None,
+                ultracode_supported: false,
+                claude_workflows_enabled: false,
+            };
+            let mut wizard = crate::LaunchWizardState::open_with_previous_profile(
+                context,
+                vec![crate::AgentOption {
+                    id: agent_id.command().into(),
+                    name: agent_id.display_name().into(),
+                    available: true,
+                    installed_version: None,
+                    custom_agent: None,
+                }],
+                vec![],
+                Some(profile.into()),
+            );
+            wizard.use_profile_launch_preferences();
+            let mut defaults = wizard.build_launch_config().unwrap();
+            assert!(defaults.reasoning_level.is_some());
+            if agent_id == gwt_agent::AgentId::Codex {
+                assert!(!defaults.fast_mode);
+                assert!(!defaults.codex_fast_mode);
+                assert_eq!(defaults.codex_speed, gwt_agent::CodexSpeed::Fast);
+            }
+            let mut input = make_input();
+            input.metadata.selected_agent_member_id = Some(member_id.clone());
+            let result = prepare_owner_agent_admission(input, &mut defaults);
+            assert!(
+                result.is_ok(),
+                "unchanged {agent_id:?} defaults must be admitted: {:?}",
+                result.err()
+            );
+            let reservation = defaults
+                .env_vars
+                .remove("GWT_AGENT_RESERVATION_ID")
+                .unwrap();
+            crate::agent_names::release_project_member(&root, &sessions, &member_id, &reservation)
+                .unwrap();
+        }
+        let roster = crate::agent_names::mutate_project_roster(
+            &root,
+            &sessions,
+            crate::agent_names::AgentRosterAction::Add {
+                model: None,
+                reasoning: None,
+                pm_eligible: false,
+                name: None,
+                agent_id: Some("grok".into()),
+            },
+            None,
+        )
+        .unwrap();
+        let grok_id = roster.members.last().unwrap().agent_member_id.clone();
+        crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+            let profile = serde_json::from_value(serde_json::json!({"agent_id":"grok", "agent_member_id":grok_id, "model":"  grok-model  ", "reasoning":"auto"})).unwrap();
+            prefs.set_launch_profile_pool(vec![profile]);
+            Ok(())
+        }).unwrap();
+        let mut grok = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::GrokBuild)
+            .working_dir(&root)
+            .model("  grok-model  ")
+            .reasoning_level("auto")
+            .build();
+        grok.branch = Some("work/issue-43".into());
+        let mut input = make_input();
+        input.metadata.selected_agent_member_id = Some(grok_id);
+        let result = prepare_owner_agent_admission(input, &mut grok);
+        assert!(
+            result.is_ok(),
+            "canonical Grok normalization must remain admissible: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn owner_preserves_exact_session_after_future_provider_change() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path());
+        let root = temp.path().join("project");
+        std::fs::create_dir_all(&root).unwrap();
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let member = crate::agent_names::reserve_project_member(
+            &root, &sessions, "original", None, None, None, None,
+        )
+        .unwrap();
+        let mut source = gwt_agent::Session::new(&root, "main", gwt_agent::AgentId::Codex);
+        source.agent_member_id = Some(member.agent_member_id.clone());
+        source.agent_name = Some(member.name.clone());
+        source.agent_session_id = Some("original-native".into());
+        source.update_status(gwt_agent::AgentStatus::Stopped);
+        source.save(&sessions).unwrap();
+        crate::agent_names::bind_project_member_session(
+            &root,
+            &member.agent_member_id,
+            "original",
+            &source.id,
+        )
+        .unwrap();
+        let revision = crate::agent_registry::SessionMemberSnapshot::load()
+            .unwrap()
+            .implementation_core(&member.agent_member_id)
+            .unwrap()
+            .1;
+        let tuning = serde_json::from_value(serde_json::json!({"member_id": member.agent_member_id,
+            "model": null, "reasoning": null, "agent_id":"claude", "expected_core_revision":revision})).unwrap();
+        assert!(crate::agent_registry::set_member_tuning(&tuning)
+            .error
+            .is_none());
+        let mut config = crate::session_launch::launch_config_from_persisted_session(&source);
+        config.suppress_execution_control = true;
+        let roots = vec![root.clone()];
+        let runtime_handles = std::collections::HashMap::new();
+        let names = std::collections::HashSet::new();
+        let before = std::fs::read(sessions.join(format!("{}.toml", source.id))).unwrap();
+        let input = |saved_restore: bool| OwnerAgentAdmissionInput {
+            project_root: &root,
+            sessions_dir: &sessions,
+            issue_link_cache_dir: temp.path(),
+            window_id: "restore",
+            materializer_id: "test",
+            host_project_roots: &roots,
+            snapshot: crate::IssueMonitorWindowSnapshot {
+                project_tab_id: "tab".into(),
+                observed_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
+                windows: vec![],
+            },
+            snapshot_tabs: Default::default(),
+            runtime_handles: &runtime_handles,
+            known_names: &names,
+            metadata: OwnerLaunchMetadata {
+                inherited_agent_name: saved_restore.then(|| member.name.clone()),
+                ..Default::default()
+            },
+            is_continue_work: false,
+            restore_source: saved_restore.then_some(&source),
+        };
+        for invalid in ["provider", "native", "worktree", "missing", "unsafe"] {
+            let mut rejected = config.clone();
+            match invalid {
+                "provider" => rejected.agent_id = gwt_agent::AgentId::ClaudeCode,
+                "native" => rejected.resume_session_id = Some("different-conversation".into()),
+                "worktree" => rejected.working_dir = Some(temp.path().into()),
+                "missing" => rejected.resume_session_id = None,
+                "unsafe" => rejected.predecessor_session_id = Some("../outside".into()),
+                _ => unreachable!(),
+            }
+            assert!(
+                prepare_owner_agent_admission(input(false), &mut rejected).is_err(),
+                "{invalid} must not authorize an exact member reservation"
+            );
+        }
+        for saved_restore in [true, false] {
+            let mut config = config.clone();
+            let result = prepare_owner_agent_admission(input(saved_restore), &mut config);
+            assert!(
+                result.is_ok(),
+                "exact owner restore (saved={saved_restore}) must retain old provider: {:?}",
+                result.err()
+            );
+            assert_eq!(config.agent_id, gwt_agent::AgentId::Codex);
+            assert_eq!(
+                config.env_vars.get("GWT_AGENT_MEMBER_ID"),
+                Some(&member.agent_member_id)
+            );
+            assert_eq!(
+                std::fs::read(sessions.join(format!("{}.toml", source.id))).unwrap(),
+                before
+            );
+            crate::agent_names::release_project_member(
+                &root,
+                &sessions,
+                &member.agent_member_id,
+                config.env_vars.get("GWT_AGENT_RESERVATION_ID").unwrap(),
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn owner_admission_refreshes_same_decision_but_preserves_the_target_fence() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let _gwt_home = ScopedGwtHome::set(temp.path());
+        let _clock =
+            gwt_core::operation_deadline::ScopedOperationClock::set(std::time::Instant::now());
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec![
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "init",
+            ],
+        ] {
+            let output = gwt_core::process::hidden_command("git")
+                .current_dir(&repo)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let repo = dunce::canonicalize(repo).unwrap();
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        crate::machine_agent_settings::set(
+            Some(8),
+            crate::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
+            "2026-11-01T00:00:00Z",
+        )
+        .unwrap();
+        let input = IssueMonitorSpawnAdmissionInput {
+            project_root: repo.clone(),
+            host_project_roots: vec![repo],
+            issue_number: 43,
+            target_branch: "work/issue-43".into(),
+            issue_link_cache_dir: temp.path().join("links"),
+        };
+        let mut prepared = input.prepare().unwrap();
+        assert!(
+            prepared.is_current(&input.host_project_roots),
+            "baseline must be current"
+        );
+        let original_decision = prepared.decision.clone();
+        let original_purpose = prepared.purpose_title.clone();
+        let mut prefs = crate::load_issue_monitor_prefs(&prefs_path).unwrap();
+        prefs.priority_order = vec![7];
+        crate::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+        assert!(!prepared.is_current(&input.host_project_roots));
+        assert!(prepared.can_revalidate(&input.host_project_roots));
+        let unchanged_bytes = std::fs::read(&prefs_path).unwrap();
+
+        prepared
+            .revalidate_if_needed(&input)
+            .expect("owner must retain the same decision after unrelated target prefs churn");
+        assert!(prepared.is_current(&input.host_project_roots));
+        assert_eq!(prepared.decision, original_decision);
+        assert_eq!(prepared.purpose_title, original_purpose);
+        assert_eq!(std::fs::read(&prefs_path).unwrap(), unchanged_bytes);
+
+        prefs.open_pr_observations.insert(
+            43,
+            crate::issue_monitor::IssueMonitorOpenPrObservation {
+                observed_at: "2026-11-01T00:00:00Z".into(),
+                hold: Some(crate::issue_monitor::IssueMonitorOpenPrHold {
+                    pr_number: 99,
+                    lifecycle: "open".into(),
+                }),
+            },
+        );
+        crate::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+        assert!(!prepared.can_revalidate(&input.host_project_roots));
+        let held_bytes = std::fs::read(&prefs_path).unwrap();
+        assert_eq!(
+            prepared.revalidate_if_needed(&input),
+            Err(ISSUE_MONITOR_SPAWN_ADMISSION_STALE.into())
+        );
+        assert_eq!(std::fs::read(&prefs_path).unwrap(), held_bytes);
+    }
+
     use tracing_subscriber::layer::SubscriberExt;
 
     type PrefsUpdate = fn(&mut crate::IssueMonitorPrefs);
@@ -4148,6 +5203,7 @@ mod owner_admission_tests {
     }
 
     fn admit_after_prefs_update(
+        requested_tier: Option<u8>,
         update: PrefsUpdate,
     ) -> Result<PreparedOwnerAgentAdmission, String> {
         let home = tempfile::tempdir().unwrap();
@@ -4171,7 +5227,7 @@ mod owner_admission_tests {
                 .status
                 .success());
         }
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
         let cache = crate::issue_cache::issue_cache_root_for_repo_path(&repo).unwrap();
         gwt_github::Cache::new(cache)
             .write_snapshot(&gwt_github::IssueSnapshot {
@@ -4190,6 +5246,13 @@ mod owner_admission_tests {
             &path,
             &crate::IssueMonitorPrefs {
                 enabled: true,
+                launch_auto: requested_tier.is_some(),
+                launch_tiers: requested_tier.map_or_else(Vec::new, |_| {
+                    vec![vec![serde_json::from_value(serde_json::json!({
+                        "agent_id":"codex", "fast_mode":true, "codex_speed":"fast"
+                    }))
+                    .unwrap()]]
+                }),
                 launch_profile: Some(
                     serde_json::from_value(serde_json::json!({"agent_id":"codex"})).unwrap(),
                 ),
@@ -4206,6 +5269,11 @@ mod owner_admission_tests {
             .working_dir(&repo)
             .branch("work/issue-7016")
             .linked_issue_number(7016)
+            .codex_speed(if requested_tier.is_some() {
+                gwt_agent::CodexSpeed::Fast
+            } else {
+                gwt_agent::CodexSpeed::Off
+            })
             .build();
         let result = tracing::subscriber::with_default(subscriber, || {
             prepare_owner_agent_admission(
@@ -4225,6 +5293,7 @@ mod owner_admission_tests {
                     runtime_handles: &std::collections::HashMap::new(),
                     known_names: &HashSet::new(),
                     metadata: OwnerLaunchMetadata {
+                        monitor_requested_tier: requested_tier,
                         launch_feedback_context: Some(LaunchFeedbackContext {
                             client_id: "fixture".into(),
                             title: "Issues".into(),
@@ -4250,16 +5319,30 @@ mod owner_admission_tests {
 
     #[test]
     fn issue_7016_owner_admission_revalidates_same_decision_prefs_churn() {
-        let result = admit_after_prefs_update(|prefs| prefs.priority_order = vec![7]);
+        let result = admit_after_prefs_update(None, |prefs| prefs.priority_order = vec![7]);
         assert!(result.is_ok(), "owner admission failed: {:?}", result.err());
+        let matching = admit_after_prefs_update(Some(0), |_| {});
+        assert!(
+            matching.is_ok(),
+            "the current Fast tier must be admitted: {:?}",
+            matching.err()
+        );
+        let stale = admit_after_prefs_update(Some(0), |prefs| {
+            prefs.launch_tiers[0][0].codex_speed = gwt_agent::CodexSpeed::Ultrafast;
+        });
+        assert!(
+            matches!(stale, Err(ref error) if error.contains("requested Monitor tier/config changed")),
+            "a tier speed changed after preparation must reject the stale draft: {:?}",
+            stale.err()
+        );
     }
 
     #[test]
     fn issue_7016_owner_admission_preserves_strict_fences_after_prefs_churn() {
-        let result = admit_after_prefs_update(|prefs| {
+        let result = admit_after_prefs_update(None, |prefs| {
             prefs.update_drain = Some(crate::IssueMonitorUpdateDrain {
                 version: "99.0.0".into(),
-                since: chrono::Utc::now().to_rfc3339(),
+                since: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
                 reason: crate::IssueMonitorUpdateDrainReason::Manual,
                 automatic: None,
                 blocking: Vec::new(),

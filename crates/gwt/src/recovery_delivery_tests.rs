@@ -6,8 +6,8 @@ use std::{
     },
 };
 
-use chrono::{DateTime, Utc};
 use gwt_agent::{AgentId, ExecutionBindingIdentity, Session, SessionExecutionBinding};
+use gwt_core::timestamp::UtcTimestamp;
 use gwt_core::{
     coordination::{
         BoardAudienceScope, BoardEntry, BoardEntryKind, BoardExactAppendConflict,
@@ -157,7 +157,7 @@ impl BoardProvider for ExactSpyProvider {
     fn load_entries_since(
         &self,
         worktree_root: &Path,
-        since: DateTime<Utc>,
+        since: UtcTimestamp,
     ) -> Result<Vec<BoardEntry>> {
         LocalProvider.load_entries_since(worktree_root, since)
     }
@@ -165,7 +165,7 @@ impl BoardProvider for ExactSpyProvider {
     fn load_entries_since_for_scope(
         &self,
         worktree_root: &Path,
-        since: DateTime<Utc>,
+        since: UtcTimestamp,
         scope: &BoardAudienceScope,
     ) -> Result<Vec<BoardEntry>> {
         LocalProvider.load_entries_since_for_scope(worktree_root, since, scope)
@@ -176,7 +176,7 @@ impl BoardProvider for ExactSpyProvider {
         worktree_root: &Path,
         author: &str,
         kind: &BoardEntryKind,
-        within: chrono::Duration,
+        within: time::Duration,
     ) -> Result<bool> {
         LocalProvider.has_recent_post_by(worktree_root, author, kind, within)
     }

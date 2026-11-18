@@ -11,7 +11,7 @@
 use crate::process_executor::{
     ExecutionMode, ProcessExecutor, ProcessRequest, SystemProcessExecutor,
 };
-use chrono::{DateTime, Utc};
+use crate::timestamp::UtcTimestamp;
 use flate2::read::GzDecoder;
 use reqwest::blocking::Client;
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, USER_AGENT};
@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
+mod http_date;
 #[cfg(target_os = "windows")]
 mod windows_msi;
 
@@ -45,7 +46,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct UpdateCacheFile {
-    checked_at: DateTime<Utc>,
+    checked_at: UtcTimestamp,
     latest_version: Option<String>,
     release_url: Option<String>,
     #[serde(default)]
@@ -65,7 +66,7 @@ pub enum UpdateState {
     UpToDate {
         /// When the last update check completed (if known).
         #[serde(skip_serializing_if = "Option::is_none")]
-        checked_at: Option<DateTime<Utc>>,
+        checked_at: Option<UtcTimestamp>,
     },
     /// A newer version is available on GitHub Releases.
     Available {
@@ -79,17 +80,17 @@ pub enum UpdateState {
         #[serde(skip_serializing_if = "Option::is_none")]
         asset_url: Option<String>,
         /// When this update was last checked.
-        checked_at: DateTime<Utc>,
+        checked_at: UtcTimestamp,
     },
     /// Update check or apply failed (best-effort; the app should keep running).
     Failed {
         /// Human-readable failure message.
         message: String,
         /// When the failure was recorded.
-        failed_at: DateTime<Utc>,
+        failed_at: UtcTimestamp,
         /// Server-directed retry deadline; absent for ordinary failures.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        retry_at: Option<DateTime<Utc>>,
+        retry_at: Option<UtcTimestamp>,
     },
 }
 
@@ -719,7 +720,7 @@ impl UpdateResumeSettlement {
 /// second bootstrap after a successful apply a no-op.
 pub fn settle_update_resume_marker(
     current_version: &str,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
 ) -> Option<UpdateResumeSettlement> {
     let settlement = settle_update_resume_marker_in(
         &update_resume_dir(),
@@ -746,7 +747,7 @@ pub fn settle_update_resume_marker_in(
     resume_dir: &Path,
     updates_dir: &Path,
     current_version: &str,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
 ) -> Option<UpdateResumeSettlement> {
     let marker = load_update_resume_marker_in(resume_dir)?;
     let normalize = |v: &str| v.trim().trim_start_matches('v').to_string();
@@ -820,16 +821,12 @@ pub fn settle_update_resume_marker_in(
 /// modal's `[Open log]` button has a stable target. Format:
 /// `~/.gwt/logs/update-YYYY-MM-DD.log`.
 pub fn update_log_path() -> PathBuf {
-    update_log_path_for(chrono::Utc::now())
+    update_log_path_for(time::OffsetDateTime::now_utc())
 }
 
 /// Test-friendly variant: derive the log filename from a fixed timestamp.
-pub fn update_log_path_for<Tz>(now: chrono::DateTime<Tz>) -> PathBuf
-where
-    Tz: chrono::TimeZone,
-    Tz::Offset: std::fmt::Display,
-{
-    let date = now.format("%Y-%m-%d").to_string();
+pub fn update_log_path_for(now: time::OffsetDateTime) -> PathBuf {
+    let date = now.date();
     crate::paths::gwt_logs_dir().join(format!("update-{date}.log"))
 }
 
@@ -902,7 +899,7 @@ pub fn log_update_event(stage: &str, fields: &[(&str, &str)]) {
     let mut entry = serde_json::Map::new();
     entry.insert(
         "ts".to_string(),
-        serde_json::Value::String(chrono::Utc::now().to_rfc3339()),
+        serde_json::Value::String(UtcTimestamp::now().to_rfc3339()),
     );
     entry.insert(
         "stage".to_string(),
@@ -1042,7 +1039,7 @@ pub struct UpdateManager {
 #[derive(Clone)]
 struct ReleaseFetchError {
     message: String,
-    retry_at: Option<DateTime<Utc>>,
+    retry_at: Option<UtcTimestamp>,
 }
 
 type ReleaseFlight = Arc<OnceLock<Result<GitHubRelease, ReleaseFetchError>>>;
@@ -1098,8 +1095,8 @@ fn release_http_failure(
     status: reqwest::StatusCode,
     headers: &HeaderMap,
     body: &str,
-    now: DateTime<Utc>,
-) -> (&'static str, Option<DateTime<Utc>>) {
+    now: UtcTimestamp,
+) -> (&'static str, Option<UtcTimestamp>) {
     if status != reqwest::StatusCode::FORBIDDEN && status != reqwest::StatusCode::TOO_MANY_REQUESTS
     {
         return ("http_error", None);
@@ -1118,7 +1115,7 @@ fn release_http_failure(
             header("x-ratelimit-reset")?
                 .parse::<i64>()
                 .ok()
-                .and_then(|seconds| DateTime::from_timestamp(seconds, 0))
+                .and_then(UtcTimestamp::from_unix_seconds)
         })
         .flatten();
     let retry_after = header("retry-after").and_then(|value| {
@@ -1126,13 +1123,9 @@ fn release_http_failure(
             .parse::<i64>()
             .ok()
             .filter(|seconds| *seconds >= 0)
-            .and_then(chrono::Duration::try_seconds)
-            .and_then(|delay| now.checked_add_signed(delay))
-            .or_else(|| {
-                chrono::DateTime::parse_from_rfc2822(value)
-                    .ok()
-                    .map(|time| time.with_timezone(&Utc))
-            })
+            .map(time::Duration::seconds)
+            .and_then(|delay| now.checked_add(delay))
+            .or_else(|| http_date::parse_http_retry_date(value))
     });
     // Honour both lower bounds if GitHub supplies both headers.
     let deadline = reset
@@ -1140,7 +1133,7 @@ fn release_http_failure(
         .chain(retry_after)
         .max()
         .filter(|deadline| *deadline > now)
-        .unwrap_or(now + chrono::Duration::seconds(60));
+        .unwrap_or(now + time::Duration::seconds(60));
     (
         if primary {
             "primary_rate_limit"
@@ -1254,16 +1247,13 @@ impl UpdateManager {
         current_exe: Option<&Path>,
         allow_failed_release: bool,
     ) -> UpdateState {
-        let now = Utc::now();
+        let now = UtcTimestamp::now();
         let cache = read_cache(&self.cache_path).ok();
 
         if !force {
             if let Some(cache) = &cache {
-                if now
-                    .signed_duration_since(cache.checked_at)
-                    .to_std()
-                    .ok()
-                    .is_some_and(|age| age < self.ttl)
+                if Duration::try_from(now.signed_duration_since(cache.checked_at))
+                    .is_ok_and(|age| age < self.ttl)
                 {
                     return self.state_from_cache(cache, current_exe);
                 }
@@ -1835,7 +1825,8 @@ impl UpdateManager {
             let status = res.status();
             let headers = res.headers().clone();
             let body = res.text().unwrap_or_default();
-            let (reason, retry_at) = release_http_failure(status, &headers, &body, Utc::now());
+            let (reason, retry_at) =
+                release_http_failure(status, &headers, &body, UtcTimestamp::now());
             let retry = retry_at.map(|time| time.to_rfc3339()).unwrap_or_default();
             log_update_event(
                 "release_request_failed",
@@ -1915,7 +1906,7 @@ impl UpdateManager {
             latest: normalized,
             release_url: release.html_url,
             asset_url,
-            checked_at: Utc::now(),
+            checked_at: UtcTimestamp::now(),
         })
     }
 
@@ -3187,7 +3178,6 @@ mod tests {
         assert_eq!(value["version"], "9.106.0");
         assert!(value["observed_at"].as_str().is_some());
     }
-    use chrono::TimeZone;
     use std::{
         io::{Cursor, Read, Write},
         net::TcpListener,
@@ -3295,7 +3285,7 @@ mod tests {
             .with_updates_dir(temp.path().join("updates"));
 
         let cache = UpdateCacheFile {
-            checked_at: Utc::now(),
+            checked_at: UtcTimestamp::now(),
             latest_version: Some("999.0.0".to_string()),
             release_url: Some("https://example.com/release".to_string()),
             portable_asset_url: None,
@@ -3320,7 +3310,7 @@ mod tests {
             .with_updates_dir(temp.path().join("updates"));
 
         let cache = UpdateCacheFile {
-            checked_at: Utc::now(),
+            checked_at: UtcTimestamp::now(),
             latest_version: Some("999.0.0".to_string()),
             release_url: Some("https://example.com/release".to_string()),
             portable_asset_url: None,
@@ -3348,7 +3338,7 @@ mod tests {
         write_cache(
             mgr.cache_path(),
             &UpdateCacheFile {
-                checked_at: Utc::now(),
+                checked_at: UtcTimestamp::now(),
                 latest_version: Some("999.0.0".to_string()),
                 release_url: Some("https://example.com/cached".to_string()),
                 portable_asset_url: None,
@@ -3363,7 +3353,7 @@ mod tests {
             to_version: "99.0.0".to_string(),
             observed_version: mgr.current_version.to_string(),
             attempt: 1,
-            recorded_at: Utc::now().to_rfc3339(),
+            recorded_at: UtcTimestamp::now().to_rfc3339(),
             message: Some("version mismatch".to_string()),
         })
         .unwrap();
@@ -3434,7 +3424,7 @@ mod tests {
             to_version: "99.0.0".to_string(),
             observed_version: manager.current_version.to_string(),
             attempt: 1,
-            recorded_at: Utc::now().to_rfc3339(),
+            recorded_at: UtcTimestamp::now().to_rfc3339(),
             message: Some("version mismatch".to_string()),
         })
         .unwrap();
@@ -3479,7 +3469,7 @@ mod tests {
     fn issue_6001_release_failure_preserves_reset_and_logs_cause() {
         let home = tempfile::tempdir().unwrap();
         let _home = crate::test_support::ScopedGwtHome::set(home.path());
-        let reset = Utc.with_ymd_and_hms(2099, 1, 1, 0, 0, 0).unwrap();
+        let reset = "2099-01-01T00:00:00Z".parse::<UtcTimestamp>().unwrap();
         let base = serve_once(
             "",
             "403 Forbidden",
@@ -3491,10 +3481,7 @@ mod tests {
         );
         let state = UpdateManager::new().with_api_base_url(base).check(true);
         let value = serde_json::to_value(&state).unwrap();
-        assert_eq!(
-            value["retry_at"],
-            reset.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
-        );
+        assert_eq!(value["retry_at"], reset.to_rfc3339_seconds());
         let log = fs::read_to_string(update_log_path()).unwrap();
         assert!(log.contains("primary_rate_limit"), "{log}");
 
@@ -3573,7 +3560,7 @@ mod tests {
 
     #[test]
     fn issue_6001_secondary_limit_uses_retry_after_without_waiting_for_core_reset() {
-        let now = Utc.with_ymd_and_hms(2026, 10, 22, 0, 0, 0).unwrap();
+        let now = "2026-10-22T00:00:00Z".parse::<UtcTimestamp>().unwrap();
         let mut headers = HeaderMap::new();
         headers.insert("retry-after", HeaderValue::from_static("120"));
         headers.insert("x-ratelimit-remaining", HeaderValue::from_static("100"));
@@ -3585,7 +3572,18 @@ mod tests {
             release_http_failure(reqwest::StatusCode::TOO_MANY_REQUESTS, &headers, "", now),
             (
                 "secondary_rate_limit",
-                Some(now + chrono::Duration::seconds(120))
+                Some(now + time::Duration::seconds(120))
+            )
+        );
+        headers.insert(
+            "retry-after",
+            HeaderValue::from_static("Thu, 22 Oct 2026 00:02:00 GMT"),
+        );
+        assert_eq!(
+            release_http_failure(reqwest::StatusCode::TOO_MANY_REQUESTS, &headers, "", now),
+            (
+                "secondary_rate_limit",
+                Some(now + time::Duration::seconds(120))
             )
         );
         headers.remove("retry-after");
@@ -3598,7 +3596,7 @@ mod tests {
             ),
             (
                 "secondary_rate_limit",
-                Some(now + chrono::Duration::seconds(60))
+                Some(now + time::Duration::seconds(60))
             )
         );
     }
@@ -4965,7 +4963,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let cache_path = temp.path().join("cache").join("update.json");
         let cache = UpdateCacheFile {
-            checked_at: Utc.with_ymd_and_hms(2026, 4, 20, 10, 0, 0).unwrap(),
+            checked_at: "2026-04-20T10:00:00Z".parse::<UtcTimestamp>().unwrap(),
             latest_version: Some("9.9.0".to_string()),
             release_url: Some("https://github.com/akiojin/gwt/releases/tag/v9.9.0".to_string()),
             portable_asset_url: Some("https://example.com/gwt-linux-x86_64.tar.gz".to_string()),
@@ -4997,7 +4995,7 @@ mod tests {
         let mgr = UpdateManager::default()
             .with_cache_path(temp.path().join("cache").join("update.json"))
             .with_updates_dir(temp.path().join("updates"));
-        let checked_at = Utc.with_ymd_and_hms(2026, 4, 20, 11, 0, 0).unwrap();
+        let checked_at = "2026-04-20T11:00:00Z".parse::<UtcTimestamp>().unwrap();
 
         let missing = UpdateCacheFile {
             checked_at,
@@ -6161,7 +6159,7 @@ mod tests {
         let updates_dir = tempfile::tempdir().expect("updates dir");
         persist_update_resume_marker_in(resume_dir.path(), &sample_resume_marker())
             .expect("persist");
-        let now = chrono::Utc.with_ymd_and_hms(2026, 9, 7, 1, 0, 0).unwrap();
+        let now = "2026-09-07T01:00:00Z".parse::<UtcTimestamp>().unwrap();
 
         let settlement =
             settle_update_resume_marker_in(resume_dir.path(), updates_dir.path(), "v9.31.0", now)
@@ -6185,7 +6183,7 @@ mod tests {
                 resume_dir.path(),
                 updates_dir.path(),
                 "9.31.0",
-                now + chrono::Duration::minutes(1),
+                now + time::Duration::minutes(1),
             )
             .is_none(),
             "settling twice must not re-apply side effects"
@@ -6204,7 +6202,7 @@ mod tests {
         let updates_dir = tempfile::tempdir().expect("updates dir");
         persist_update_resume_marker_in(resume_dir.path(), &sample_resume_marker())
             .expect("persist");
-        let now = chrono::Utc.with_ymd_and_hms(2026, 9, 7, 1, 0, 0).unwrap();
+        let now = "2026-09-07T01:00:00Z".parse::<UtcTimestamp>().unwrap();
 
         let settlement =
             settle_update_resume_marker_in(resume_dir.path(), updates_dir.path(), "9.30.0", now)
@@ -6244,7 +6242,7 @@ mod tests {
             payload: PreparedPayload::PortableBinary {
                 path: payload.clone(),
             },
-            downloaded_at: Utc::now().to_rfc3339(),
+            downloaded_at: UtcTimestamp::now().to_rfc3339(),
             origin: PendingUpdateOrigin::Automatic,
             auto_apply_deferred: false,
         };
@@ -6254,7 +6252,7 @@ mod tests {
             ..sample_resume_marker()
         };
         persist_update_resume_marker(&marker).unwrap();
-        let now = Utc::now();
+        let now = UtcTimestamp::now();
         let result = settle_update_resume_marker(env!("CARGO_PKG_VERSION"), now).unwrap();
         assert!(matches!(
             result.outcome,
@@ -6359,7 +6357,7 @@ mod tests {
             resume_dir.path(),
             updates_dir.path(),
             "9.31.0",
-            chrono::Utc::now()
+            UtcTimestamp::now()
         )
         .is_none());
         assert!(load_update_apply_result_in(updates_dir.path()).is_none());

@@ -11,6 +11,9 @@ test.describe("Agent window scrollback lifecycle", () => {
   test.use({
     deviceScaleFactor: 1,
     viewport: { width: 1440, height: 900 },
+    // Exercise the host's native selection/copy modifiers. Desktop Chrome's
+    // Windows UA otherwise disagrees with navigator.platform on macOS.
+    userAgent: "",
   });
 
   test("mouse motion cannot return history review to the live screen", async ({ page }, info) => {

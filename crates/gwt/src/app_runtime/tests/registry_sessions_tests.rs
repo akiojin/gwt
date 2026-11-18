@@ -15,6 +15,7 @@ fn registry_monitor_pane(
     let root = runtime.tab(tab_id).unwrap().project_root.clone();
     pane_control_tests::control_init_repo(&root);
     seed_owner_fixture_roster(&root, 8);
+    configure_owner_fixture_tools(&root, &["pane-contract-fixture"]);
     let owner = Arc::new(
         owner_fixture_block_on(
             gwt::project_runtime::test_support::ProjectOwnerHarness::start_with_monitor(&root),
@@ -86,7 +87,7 @@ fn handle_work_events_ingested_commits_prepared_state_and_refreshes_only_on_chan
     let mut seed = gwt_core::workspace_projection::WorkEvent::new(
         gwt_core::workspace_projection::WorkEventKind::Start,
         "work-session-ingest-seed",
-        chrono::Utc::now(),
+        gwt_core::timestamp::UtcTimestamp::now(),
     );
     seed.status_category = Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Active);
     seed.title = Some("seed".to_string());
@@ -185,7 +186,7 @@ fn inactive_project_completion_refreshes_projection_cache_before_tab_change() {
     let mut seed = gwt_core::workspace_projection::WorkEvent::new(
         gwt_core::workspace_projection::WorkEventKind::Start,
         "work-inactive-cache",
-        chrono::Utc::now(),
+        gwt_core::timestamp::UtcTimestamp::now(),
     );
     seed.status_category = Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Idle);
     seed.title = Some(branch.to_string());
@@ -675,12 +676,10 @@ fn mark_merged_classifies_done_equivalent_for_stale_merged_rows() {
         }
     }
 
-    let merge_at = chrono::Utc::now();
-    let stale =
-        (merge_at - chrono::Duration::hours(2)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    let fresh =
-        (merge_at + chrono::Duration::hours(2)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    let merged: HashMap<String, chrono::DateTime<chrono::Utc>> =
+    let merge_at = gwt_core::timestamp::UtcTimestamp::now();
+    let stale = (merge_at - time::Duration::hours(2)).to_rfc3339_seconds();
+    let fresh = (merge_at + time::Duration::hours(2)).to_rfc3339_seconds();
+    let merged: HashMap<String, gwt_core::timestamp::UtcTimestamp> =
         [("work/merged".to_string(), merge_at)]
             .into_iter()
             .collect();

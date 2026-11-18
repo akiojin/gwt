@@ -3,21 +3,21 @@
 //! truth; mapping back to a `BoardEntry` only needs the fields the Board UI
 //! renders (id, author, body, created_at, parent_id, audience).
 
+use gwt_core::timestamp::UtcTimestamp;
+
 use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 
-use chrono::{DateTime, TimeZone, Utc};
 use gwt_core::board_remote_roots::GENERAL_THREAD_KEY;
 use gwt_core::coordination::{AuthorKind, BoardEntry, BoardEntryKind, BoardMentionTargetKind};
 use gwt_core::workspace_projection::{WorkItem, WorkspaceStatusCategory};
 
 /// Parse a Slack message timestamp (`"1700000000.123456"`) into UTC.
-pub fn slack_ts_to_datetime(ts: &str) -> Option<DateTime<Utc>> {
+pub fn slack_ts_to_datetime(ts: &str) -> Option<UtcTimestamp> {
     let mut parts = ts.split('.');
     let secs: i64 = parts.next()?.parse().ok()?;
     let micros: u32 = parts.next().and_then(|m| m.parse().ok()).unwrap_or(0);
-    Utc.timestamp_opt(secs, micros.saturating_mul(1_000))
-        .single()
+    UtcTimestamp::from_timestamp(secs, micros.saturating_mul(1_000))
 }
 
 /// The text to post to Slack for a Board entry. The body is the canonical

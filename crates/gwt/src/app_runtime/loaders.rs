@@ -86,7 +86,10 @@ impl AppRuntime {
                 client_id,
                 BackendEvent::BranchError {
                     id: id.to_string(),
-                    message: format!("Window preset {:?} is not a Work surface", window.preset),
+                    message: format!(
+                        "{} is not a Work surface. Open Works to use this action.",
+                        window.preset.title()
+                    ),
                 },
             )];
         }

@@ -203,7 +203,15 @@ export function createTerminalSnapshotWriteCoordinator({
     return writeInFlight || hasPendingSnapshot();
   }
 
-  return Object.freeze({ shouldDeferOutput, start });
+  function recordUserScroll() {
+    if (!writeInFlight || !viewport || !isRuntimeCurrent()) return;
+    // A wheel/touch gesture can land while xterm is still parsing the
+    // replacement. Its newer intent must win over the pre-write position.
+    const buffer = terminal.buffer.active;
+    viewport = { line: buffer.viewportY, atBottom: buffer.viewportY >= buffer.baseY };
+  }
+
+  return Object.freeze({ shouldDeferOutput, start, recordUserScroll });
 }
 
 /**
@@ -993,7 +1001,12 @@ export function runTerminalActivationSequence({
       reason: "fit-dimensions-unavailable",
     });
   }
+  const buffer = terminal.buffer?.active;
+  const wasAtBottom = buffer && buffer.viewportY >= buffer.baseY;
   fitAddon.fit();
+  // Reflow can leave a tail reader one line above the new bottom. Restore
+  // that intent before the native resize redraw, without moving history readers.
+  if (wasAtBottom) terminal.scrollToBottom();
   const fittedGrid = currentTerminalGrid(terminal);
   const gridChanged =
     fittedGrid.cols !== currentGrid.cols || fittedGrid.rows !== currentGrid.rows;

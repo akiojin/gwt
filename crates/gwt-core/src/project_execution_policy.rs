@@ -1,7 +1,7 @@
 //! Durable project window choices. Runtime and CLI callers establish authority
 //! before entering this store; a saved choice never replaces execution gates.
 
-use chrono::{DateTime, Utc};
+use crate::timestamp::UtcTimestamp;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -53,7 +53,7 @@ pub struct Receipt {
     pub authorized_work_lineage: Vec<String>,
     pub effect_state: EffectState,
     pub reason: Option<String>,
-    pub decided_at: DateTime<Utc>,
+    pub decided_at: UtcTimestamp,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,7 +65,7 @@ pub struct Policy {
     pub choice: Option<Choice>,
     pub consent_source_id: Option<String>,
     pub actor: Option<String>,
-    pub decided_at: Option<DateTime<Utc>>,
+    pub decided_at: Option<UtcTimestamp>,
     pub authorized_work_lineage: Vec<String>,
     pub receipts: Vec<Receipt>,
 }
@@ -255,7 +255,7 @@ fn persist_choice(
         authorized_work_lineage: request.authorized_work_lineage.clone(),
         effect_state: EffectState::Pending,
         reason: None,
-        decided_at: Utc::now(),
+        decided_at: crate::timestamp::UtcTimestamp::now(),
     };
     policy.revision = revision;
     policy.choice = Some(request.choice);

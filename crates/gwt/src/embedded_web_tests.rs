@@ -745,7 +745,7 @@ fn embedded_web_terminal_runtime_buffers_writes_until_initial_fit_handshake() {
     // windows still wait for reveal. Inlining replay before fit would
     // defeat the bounded output queue (CodeRabbit PR #2693 concern).
     let create_runtime_handshake = regex::Regex::new(
-            r#"(?s)isReady: false,[\s\S]*?handshakeAttempts: 0,[\s\S]*?\};\s*terminalMap\.set\(windowId, runtime\);\s*decoderMap\.set\(windowId, new TextDecoder\(\)\);[\s\S]*?scheduleInitialFitHandshake\(windowId\);\s*return runtime;"#,
+            r#"(?s)isReady: false,[\s\S]*?handshakeAttempts: 0,[\s\S]*?\};\s*terminalMap\.set\(windowId, runtime\);\s*if \(typeof reconcileAttachmentProgress === "function"\) reconcileAttachmentProgress\(\);\s*decoderMap\.set\(windowId, new TextDecoder\(\)\);[\s\S]*?scheduleInitialFitHandshake\(windowId\);\s*if \(replacedSession\) requestSocketSnapshots\(\);\s*return runtime;"#,
         )
         .expect("valid regex");
     let scheduled_handshake = regex::Regex::new(

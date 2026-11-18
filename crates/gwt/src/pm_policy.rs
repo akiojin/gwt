@@ -2,7 +2,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use gwt_core::timestamp::UtcTimestamp;
 use serde::Serialize;
+use time::{Duration, UtcOffset};
 
 use crate::{
     issue_monitor::{IssueMonitorDependencyStatus, IssueMonitorInboxCoverage},
@@ -308,15 +310,31 @@ pub struct RecurringRunObservation {
     pub missing_inputs: Vec<&'static str>,
 }
 
-fn parse_observed_instant(value: &str) -> Option<chrono::DateTime<chrono::FixedOffset>> {
-    // Chrono silently discards fractional digits beyond nanoseconds.
-    chrono::DateTime::parse_from_rfc3339(value)
-        .ok()
+#[derive(Clone, Copy)]
+struct ObservedInstant {
+    instant: UtcTimestamp,
+    offset: UtcOffset,
+}
+
+impl ObservedInstant {
+    fn signed_duration_since(self, earlier: Self) -> Duration {
+        self.instant - earlier.instant
+    }
+
+    fn to_rfc3339(self) -> String {
+        self.instant.to_rfc3339_with_offset(self.offset)
+    }
+}
+
+fn parse_observed_instant(value: &str) -> Option<ObservedInstant> {
+    // Preserve the existing rejection of precision beyond nanoseconds before reporting a value.
+    UtcTimestamp::parse_with_offset(value)
         .filter(|_| {
             value.split_once('.').is_none_or(|(_, fraction)| {
                 fraction.bytes().take_while(u8::is_ascii_digit).count() <= 9
             })
         })
+        .map(|(instant, offset)| ObservedInstant { instant, offset })
 }
 
 fn observe_recurring_runs(
@@ -371,7 +389,9 @@ fn observe_recurring_runs(
             RecurringRunObservation {
                 id: item.id.clone(),
                 next_run: item.next_run.clone(),
-                due_at_scan: scan.zip(next_run).map(|(scan, next_run)| scan >= next_run),
+                due_at_scan: scan
+                    .zip(next_run)
+                    .map(|(scan, next_run)| scan.instant >= next_run.instant),
                 configuration_missing_inputs,
                 missing_inputs,
             }
@@ -451,15 +471,18 @@ fn observe_terminal_queue(
                 if scan.is_none() {
                     missing_inputs.push("monitor_scan_time");
                 }
-                let age_seconds_at_scan = scan.zip(queued).and_then(|(scan, queued)| {
-                    match scan.signed_duration_since(queued).to_std() {
-                        Ok(duration) => Some(duration.as_secs()),
-                        Err(_) => {
-                            missing_inputs.push("queued_after_scan");
-                            None
-                        }
-                    }
-                });
+                let age_seconds_at_scan =
+                    scan.zip(queued).and_then(
+                        |(scan, queued)| match std::time::Duration::try_from(
+                            scan.signed_duration_since(queued),
+                        ) {
+                            Ok(duration) => Some(duration.as_secs()),
+                            Err(_) => {
+                                missing_inputs.push("queued_after_scan");
+                                None
+                            }
+                        },
+                    );
                 let age_limits = state
                     .policies
                     .iter()
@@ -540,7 +563,7 @@ fn observe_idle_windows(status: &IssueMonitorAgentStatus) -> Vec<IdleWindowObser
                 missing_inputs.push("idle_since");
             }
             let idle_seconds_at_scan = scan.zip(since).and_then(|(scan, since)| {
-                match scan.signed_duration_since(since).to_std() {
+                match std::time::Duration::try_from(scan.signed_duration_since(since)) {
                     Ok(duration) => Some(duration.as_secs()),
                     Err(_) => {
                         missing_inputs.push("idle_after_scan");
@@ -610,9 +633,7 @@ fn observe_retry_deadlines(status: &IssueMonitorAgentStatus) -> Vec<RetryDeadlin
                 state: row.state,
                 retry_not_before: expiry.map(|value| value.to_rfc3339()),
                 remaining_seconds_at_scan: scan.zip(expiry).map(|(scan, expiry)| {
-                    expiry
-                        .signed_duration_since(scan)
-                        .to_std()
+                    std::time::Duration::try_from(expiry.signed_duration_since(scan))
                         .unwrap_or_default()
                         .as_secs()
                 }),
@@ -673,7 +694,7 @@ fn observe_declared_waits(status: &IssueMonitorAgentStatus) -> Vec<DeclaredWaitO
                 missing_inputs.push("wait_expires_at");
             }
             let elapsed_seconds_at_scan = scan.zip(since).and_then(|(scan, since)| {
-                match scan.signed_duration_since(since).to_std() {
+                match std::time::Duration::try_from(scan.signed_duration_since(since)) {
                     Ok(duration) => Some(duration.as_secs()),
                     Err(_) => {
                         missing_inputs.push("wait_after_scan");
@@ -683,15 +704,13 @@ fn observe_declared_waits(status: &IssueMonitorAgentStatus) -> Vec<DeclaredWaitO
             });
             let invalid_interval = since
                 .zip(expiry)
-                .is_some_and(|(since, expiry)| expiry < since);
+                .is_some_and(|(since, expiry)| expiry.instant < since.instant);
             let remaining_seconds_at_scan = if invalid_interval {
                 missing_inputs.push("wait_interval");
                 None
             } else {
                 scan.zip(expiry).map(|(scan, expiry)| {
-                    expiry
-                        .signed_duration_since(scan)
-                        .to_std()
+                    std::time::Duration::try_from(expiry.signed_duration_since(scan))
                         .unwrap_or_default()
                         .as_secs()
                 })
@@ -741,9 +760,7 @@ fn observe_claim_blocks(status: &IssueMonitorAgentStatus) -> Vec<ClaimBlockObser
                 missing_inputs.push("claim_expires_at");
             }
             let remaining_seconds_at_scan = scan.zip(expiry).map(|(scan, expiry)| {
-                expiry
-                    .signed_duration_since(scan)
-                    .to_std()
+                std::time::Duration::try_from(expiry.signed_duration_since(scan))
                     .unwrap_or_default()
                     .as_secs()
             });
@@ -786,7 +803,7 @@ fn observe_launch_activity(status: &IssueMonitorAgentStatus) -> Vec<LaunchActivi
             }
             let inactivity_seconds_at_scan = match (scan, activity) {
                 (Some(scan), Some(activity)) => {
-                    match scan.signed_duration_since(activity).to_std() {
+                    match std::time::Duration::try_from(scan.signed_duration_since(activity)) {
                         Ok(duration) => Some(duration.as_secs()),
                         Err(_) => {
                             missing_inputs.push("activity_after_scan");
@@ -1033,13 +1050,12 @@ fn observe_calendar_date(
     date_input: &'static str,
 ) -> CalendarDateObservation {
     let target = target.and_then(|value| {
-        chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d")
-            .ok()
-            .filter(|date| value.len() == 10 && date.format("%Y-%m-%d").to_string() == value)
+        gwt_core::timestamp::parse_utc_date(value)
+            .filter(|date| value.len() == 10 && date.to_string() == value)
     });
     let scan = scan
-        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
-        .map(|value| value.with_timezone(&chrono::Utc).date_naive());
+        .and_then(|value| gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(value).ok())
+        .map(|value| value.utc_date());
     let mut missing_inputs = Vec::new();
     if target.is_none() {
         missing_inputs.push(date_input);
@@ -1051,7 +1067,7 @@ fn observe_calendar_date(
         scan_date_utc: scan.map(|date| date.to_string()),
         days_past_date_at_scan: scan
             .zip(target)
-            .map(|(scan, target)| scan.signed_duration_since(target).num_days().max(0) as u64),
+            .map(|(scan, target)| (scan - target).whole_days().max(0) as u64),
         missing_inputs,
     }
 }

@@ -6,7 +6,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chrono::{SecondsFormat, Utc};
 use gwt_agent::{
     Session, GWT_HOOK_FORWARD_TOKEN_ENV, GWT_HOOK_FORWARD_URL_ENV, GWT_SESSION_ID_ENV,
     GWT_SESSION_RUNTIME_PATH_ENV,
@@ -1771,7 +1770,7 @@ impl RuntimeHookEvent {
                 .as_ref()
                 .and_then(|event| event.tool_name().map(str::to_string)),
             message,
-            occurred_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+            occurred_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds(),
         }
     }
 }

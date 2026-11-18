@@ -245,9 +245,16 @@ export function renderIssueMonitorStatus(doc, { status = {}, counts = { queue: 0
   wireIssueMonitorStatusCell(doc, cell);
   const view = issueMonitorStatusStripView(status, counts);
   value.textContent = view.value;
+  const needsHuman = doc.getElementById("op-strip-needs-human");
+  const needsHumanLabel = view.needsHuman == null ? "" : `Needs human ${view.needsHuman}`;
+  if (needsHuman) {
+    needsHuman.hidden = !needsHumanLabel;
+    needsHuman.textContent = needsHumanLabel;
+  }
+  const attention = attentionSummary || needsHumanLabel;
   cell.dataset.state = view.state;
-  cell.setAttribute("aria-label", [`Open Issues: ${view.value}`, attentionSummary].filter(Boolean).join(". "));
-  cell.setAttribute("title", ["Open Issues", view.title, attentionSummary].filter(Boolean).join(" | "));
+  cell.setAttribute("aria-label", [`Open Issues: ${view.value}`, attention].filter(Boolean).join(". "));
+  cell.setAttribute("title", ["Open Issues", view.title, attention].filter(Boolean).join(" | "));
   if (view.alert) {
     cell.classList.add("op-status-strip__cell--alert");
   } else {
@@ -293,11 +300,13 @@ function issueMonitorStatusStripView(status, counts) {
     state = "idle";
   }
   const { queue, active, maxActive } = counts;
+  const needsHuman = status.needs_human_count ?? null;
 
   if (state === "disabled") {
     return {
       state,
       value: "Off",
+      needsHuman,
       title: "Issues: Off",
       alert: false,
     };
@@ -318,6 +327,7 @@ function issueMonitorStatusStripView(status, counts) {
   return {
     state,
     value,
+    needsHuman,
     title: detail ? `Issues: ${value} | ${detail}` : `Issues: ${value}`,
     alert: state === "error" || state === "auth_required",
   };

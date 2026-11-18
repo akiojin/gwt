@@ -21,7 +21,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chrono::Utc;
 use gwt_config::PerfConfig;
 
 use super::{
@@ -116,7 +115,7 @@ impl PerfRuntime {
         }
         if self.governor.should_sample() {
             let sample = PerfRecord::sample(
-                Utc::now(),
+                gwt_core::timestamp::UtcTimestamp::now(),
                 PerfStream::Ui,
                 route.metric_target(metric),
                 value,
@@ -163,7 +162,7 @@ impl PerfRuntime {
             .unwrap_or_default();
 
         if self.governor.should_sample() {
-            let now = Utc::now();
+            let now = gwt_core::timestamp::UtcTimestamp::now();
             let sample = with_role(
                 PerfRecord::sample(now, stream, &target, value_ms, PerfUnit::Milliseconds),
                 role,

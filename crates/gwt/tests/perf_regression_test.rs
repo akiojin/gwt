@@ -22,7 +22,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chrono::{TimeZone as _, Utc};
 use gwt::perf::{
     budget::PerfBudgets,
     global::PerfRuntime,
@@ -145,9 +144,7 @@ fn sample_record(target: &str, value: f64) -> PerfLogRecord {
     PerfLogRecord {
         schema_version: 1,
         record_type: "sample".to_string(),
-        timestamp: Utc
-            .with_ymd_and_hms(2026, 9, 8, 10, 0, 0)
-            .single()
+        timestamp: gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 9, 8, 10, 0, 0)
             .expect("valid timestamp"),
         stream: "ui".to_string(),
         target: target.to_string(),
@@ -171,9 +168,7 @@ fn a_sustained_budget_overage_still_fails_the_budget_check() {
     let over_budget = budget * 4.0;
 
     let mut smoother = ViolationSmoother::new();
-    let base = Utc
-        .with_ymd_and_hms(2026, 9, 8, 10, 0, 0)
-        .single()
+    let base = gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 9, 8, 10, 0, 0)
         .expect("valid timestamp");
     let violation = (0..3)
         .filter_map(|step| {
@@ -181,7 +176,7 @@ fn a_sustained_budget_overage_still_fails_the_budget_check() {
                 &PerfRoute::PaneClose.target(),
                 over_budget,
                 budget,
-                base + chrono::Duration::milliseconds(step * 10),
+                base + time::Duration::milliseconds(step * 10),
             )
         })
         .next()

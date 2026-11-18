@@ -257,9 +257,8 @@ fn final_audit_failure_does_not_reverse_a_completed_reset() {
 
 #[test]
 fn proposals_use_configurable_wait_and_never_offer_claude_paid_usage() {
-    let now = chrono::DateTime::parse_from_rfc3339("2026-10-01T00:00:00Z")
-        .unwrap()
-        .with_timezone(&chrono::Utc);
+    let now =
+        gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339("2026-10-01T00:00:00Z").unwrap();
     let holds = std::collections::BTreeMap::from([
         ("codex".into(), "2026-10-02T00:00:00Z".into()),
         ("claude".into(), "2026-10-02T00:00:00Z".into()),

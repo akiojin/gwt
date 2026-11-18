@@ -776,7 +776,7 @@ impl AppRuntime {
                         offer_update = false;
                         result = gwt_core::update::UpdateState::Failed {
                             message: error,
-                            failed_at: chrono::Utc::now(),
+                            failed_at: gwt_core::timestamp::UtcTimestamp::now(),
                             retry_at: None,
                         };
                     }

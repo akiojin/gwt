@@ -11,7 +11,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, Utc};
+use gwt_core::timestamp::UtcTimestamp;
 use serde::{Deserialize, Serialize};
 
 /// OAuth token set persisted for a remote provider.
@@ -24,13 +24,13 @@ pub struct TokenSet {
     pub refresh_token: Option<String>,
     /// Absolute expiry of the access token, if known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expires_at: Option<DateTime<Utc>>,
+    pub expires_at: Option<UtcTimestamp>,
 }
 
 impl TokenSet {
     /// Whether the access token is expired at `now`. A token with no known
     /// expiry is treated as not-expired (callers may still refresh on 401).
-    pub fn is_expired(&self, now: DateTime<Utc>) -> bool {
+    pub fn is_expired(&self, now: UtcTimestamp) -> bool {
         self.expires_at.is_some_and(|expiry| now >= expiry)
     }
 }
@@ -155,7 +155,7 @@ fn restrict_permissions(_path: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
+
     use tempfile::tempdir;
 
     fn token(access: &str) -> TokenSet {
@@ -208,16 +208,16 @@ mod tests {
 
     #[test]
     fn is_expired_respects_expires_at() {
-        let now = Utc.timestamp_opt(1_000, 0).unwrap();
+        let now = gwt_core::timestamp::UtcTimestamp::from_timestamp(1_000, 0).unwrap();
         let expired = TokenSet {
             access_token: "a".into(),
             refresh_token: None,
-            expires_at: Some(Utc.timestamp_opt(500, 0).unwrap()),
+            expires_at: Some(gwt_core::timestamp::UtcTimestamp::from_timestamp(500, 0).unwrap()),
         };
         let valid = TokenSet {
             access_token: "a".into(),
             refresh_token: None,
-            expires_at: Some(Utc.timestamp_opt(2_000, 0).unwrap()),
+            expires_at: Some(gwt_core::timestamp::UtcTimestamp::from_timestamp(2_000, 0).unwrap()),
         };
         let no_expiry = TokenSet {
             access_token: "a".into(),

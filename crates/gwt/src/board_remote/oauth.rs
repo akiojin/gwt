@@ -6,9 +6,10 @@
 //! later phase alongside the embedded-server `/oauth/callback` route.
 
 use base64::Engine;
-use chrono::{DateTime, Duration, Utc};
+use gwt_core::timestamp::UtcTimestamp;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use time::Duration;
 
 use crate::board_remote::token_store::TokenSet;
 
@@ -175,14 +176,14 @@ struct OidcTokenResponse {
     expires_in: Option<i64>,
 }
 
-fn expires_at(now: DateTime<Utc>, expires_in: Option<i64>) -> Option<DateTime<Utc>> {
+fn expires_at(now: UtcTimestamp, expires_in: Option<i64>) -> Option<UtcTimestamp> {
     expires_in.map(|secs| now + Duration::seconds(secs))
 }
 
 fn parse_token_response(
     provider: OAuthProvider,
     body: &str,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
 ) -> Result<TokenSet, String> {
     match provider {
         OAuthProvider::Slack => {
@@ -221,7 +222,7 @@ pub fn exchange_code(
     code: &str,
     pkce_verifier: Option<&str>,
     poster: &dyn FormPoster,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
 ) -> Result<TokenSet, String> {
     let mut params: Vec<(&str, &str)> = vec![
         ("grant_type", "authorization_code"),
@@ -244,7 +245,7 @@ pub fn refresh(
     config: &OAuthConfig,
     refresh_token: &str,
     poster: &dyn FormPoster,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
 ) -> Result<TokenSet, String> {
     let mut params: Vec<(&str, &str)> = vec![
         ("grant_type", "refresh_token"),
@@ -266,7 +267,6 @@ pub fn refresh(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
 
     struct MockPoster {
         body: String,
@@ -282,8 +282,8 @@ mod tests {
         }
     }
 
-    fn now() -> DateTime<Utc> {
-        Utc.timestamp_opt(1_000_000, 0).unwrap()
+    fn now() -> UtcTimestamp {
+        gwt_core::timestamp::UtcTimestamp::from_timestamp(1_000_000, 0).unwrap()
     }
 
     #[test]

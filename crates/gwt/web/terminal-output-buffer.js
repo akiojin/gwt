@@ -4,10 +4,23 @@
 // pays per `write()` call once terminal_output reaches app.js. This helper
 // batches decoded text per window so dense PTY bursts produce one xterm write
 // per frame for normal chunk sizes while preserving per-window ordering.
+//
+// Issue #7553 — a window revealed after a long hidden period can sit on a
+// backlog close to the retention cap. Draining it one frame budget at a time
+// made the terminal visibly replay its history long after the window opened.
+// When a writable window's pending backlog reaches the catch-up threshold,
+// flushPending keeps running extra passes inside the same scheduled flush,
+// bounded by a time budget (the same 8ms long-task budget the WebSocket
+// receive dispatcher uses). Every pass still honours the per-window,
+// aggregate, and window-count caps, so write granularity, per-window
+// ordering, fairness, and the snapshot barrier are unchanged; small live
+// bursts never reach the threshold and keep the exact per-frame behaviour.
 
 export const DEFAULT_MAX_CHARS_PER_FLUSH = 65536;
 export const DEFAULT_MAX_WINDOWS_PER_FLUSH = 8;
 export const DEFAULT_MAX_TOTAL_CHARS_PER_FLUSH = DEFAULT_MAX_CHARS_PER_FLUSH;
+export const DEFAULT_CATCH_UP_THRESHOLD_BYTES = 256 * 1024;
+export const DEFAULT_CATCH_UP_BUDGET_MS = 8;
 const DEFAULT_MAX_PENDING_BYTES_PER_WINDOW = 512 * 1024;
 const DEFAULT_MAX_PENDING_BYTES_PER_PROJECT = 4 * 1024 * 1024;
 
@@ -79,6 +92,27 @@ function normalizeMaxTotalCharsPerFlush(value) {
   return Math.floor(value);
 }
 
+function normalizeCatchUpThresholdBytes(value) {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    return DEFAULT_CATCH_UP_THRESHOLD_BYTES;
+  }
+  return value;
+}
+
+function normalizeCatchUpBudgetMs(value) {
+  if (!Number.isFinite(value) || value <= 0) {
+    return DEFAULT_CATCH_UP_BUDGET_MS;
+  }
+  return value;
+}
+
+function defaultNow() {
+  if (typeof performance !== "undefined" && typeof performance.now === "function") {
+    return performance.now();
+  }
+  return Date.now();
+}
+
 function defaultMergeChunks(chunks) {
   return chunks.join("");
 }
@@ -116,6 +150,9 @@ export function createTerminalOutputBatcher({
   projectForWindow = () => null,
   maxPendingBytesPerWindow = DEFAULT_MAX_PENDING_BYTES_PER_WINDOW,
   maxPendingBytesPerProject = DEFAULT_MAX_PENDING_BYTES_PER_PROJECT,
+  catchUpThresholdBytes = DEFAULT_CATCH_UP_THRESHOLD_BYTES,
+  catchUpBudgetMs = DEFAULT_CATCH_UP_BUDGET_MS,
+  now = defaultNow,
 } = {}) {
   if (typeof write !== "function") {
     throw new TypeError("createTerminalOutputBatcher requires a write callback");
@@ -125,6 +162,9 @@ export function createTerminalOutputBatcher({
   const charsPerFlush = normalizeMaxCharsPerFlush(maxCharsPerFlush);
   const windowsPerFlush = normalizeMaxWindowsPerFlush(maxWindowsPerFlush);
   const totalCharsPerFlush = normalizeMaxTotalCharsPerFlush(maxTotalCharsPerFlush);
+  const catchUpThreshold = normalizeCatchUpThresholdBytes(catchUpThresholdBytes);
+  const catchUpBudget = normalizeCatchUpBudgetMs(catchUpBudgetMs);
+  const nowImpl = typeof now === "function" ? now : defaultNow;
   const mergeChunksImpl =
     typeof mergeChunks === "function" ? mergeChunks : defaultMergeChunks;
   const canWriteImpl = typeof canWrite === "function" ? canWrite : () => true;
@@ -265,11 +305,7 @@ export function createTerminalOutputBatcher({
     }
   }
 
-  function flushPending() {
-    scheduled = false;
-    if (pendingByWindow.size === 0) {
-      return false;
-    }
+  function flushPass() {
     let flushed = false;
     let windowsFlushed = 0;
     let charsFlushed = 0;
@@ -295,6 +331,56 @@ export function createTerminalOutputBatcher({
       flushed = result.flushed || flushed;
       charsFlushed += result.chars;
       windowsFlushed += 1;
+    }
+    return flushed;
+  }
+
+  // Issue #7553: a window is playing catch-up when, at the start of a
+  // scheduled flush, it is writable and already holds at least the catch-up
+  // threshold of pending output. Quiesced and snapshot-barred windows never
+  // count: their bytes wait for reveal or for the snapshot barrier, not for
+  // more passes.
+  function catchUpWindowIds() {
+    const ids = new Set();
+    for (const [windowId, entry] of pendingByWindow) {
+      if (entry.bytes < catchUpThreshold) {
+        continue;
+      }
+      if (quiescedWindows.has(windowId)) {
+        continue;
+      }
+      if (writable(windowId)) {
+        ids.add(windowId);
+      }
+    }
+    return ids;
+  }
+
+  function flushPending() {
+    scheduled = false;
+    if (pendingByWindow.size === 0) {
+      return false;
+    }
+    const startedAt = nowImpl();
+    const catchUp = catchUpWindowIds();
+    let flushed = flushPass();
+    // Catch-up drain: while a catch-up window still has pending output,
+    // repeat capped passes inside this scheduled flush until the time
+    // budget runs out. Each pass re-applies every frame cap, so this only
+    // changes how many capped passes share one scheduled callback, never
+    // what a single pass may write.
+    while (flushed && catchUp.size > 0 && nowImpl() - startedAt < catchUpBudget) {
+      for (const windowId of catchUp) {
+        if (!pendingByWindow.has(windowId) || !writable(windowId)) {
+          catchUp.delete(windowId);
+        }
+      }
+      if (catchUp.size === 0) {
+        break;
+      }
+      if (!flushPass()) {
+        break;
+      }
     }
     if (hasSchedulablePendingWindow()) {
       scheduleFlush();

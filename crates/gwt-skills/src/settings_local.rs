@@ -309,7 +309,9 @@ pub(crate) fn write_settings_atomically(path: &Path, value: &Value) -> io::Resul
 }
 
 pub(crate) fn write_text_atomically(path: &Path, content: &str) -> io::Result<()> {
+    crate::asset_io::ensure_safe_mutation(path, crate::asset_io::AssetRoute::Write)?;
     let tmp_path = atomic_staging_path(path, "gwt-managed")?;
+    crate::asset_io::ensure_safe_mutation(&tmp_path, crate::asset_io::AssetRoute::Write)?;
     // Only clean up a staging file this invocation successfully created.
     let staging_write = |source| {
         crate::asset_io::AssetIoError::new(crate::asset_io::AssetRoute::Write, &tmp_path, source)
@@ -362,6 +364,7 @@ fn commit_staged_file(staging_path: &Path, destination: &Path) -> io::Result<()>
 }
 
 pub(crate) fn set_executable(path: &Path) -> io::Result<()> {
+    crate::asset_io::ensure_safe_mutation(path, crate::asset_io::AssetRoute::Write)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

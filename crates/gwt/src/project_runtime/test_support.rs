@@ -2,13 +2,117 @@
 
 use std::sync::{atomic::AtomicBool, Arc, Mutex};
 
+/// A process-preparation fixture that never starts an OS child. Its exact
+/// reservation and provisional runtime still use the production PM guards.
+pub struct PreparedPmLaunchFixture {
+    pub completion: super::launch_payload::AgentLaunchCompletion,
+    captured_runtime: Result<Option<Vec<u8>>, String>,
+    restore_prior: Option<(
+        gwt_agent::Session,
+        Option<crate::agent_names::AgentMemberAssignment>,
+    )>,
+}
+
+impl PreparedPmLaunchFixture {
+    pub fn prepare(
+        mut input: super::launch::AgentLaunchInput,
+        source: Option<&gwt_agent::Session>,
+    ) -> Result<Self, String> {
+        let root = std::path::Path::new(&input.project_root);
+        let reservation = uuid::Uuid::new_v4().to_string();
+        let prepared = match source {
+            Some(source) => crate::agent_registry::reserve_resume_pm_member(
+                root,
+                &input.sessions_dir,
+                source,
+                &reservation,
+                false,
+            ),
+            None => crate::agent_registry::reserve_new_pm_member(
+                root,
+                &input.sessions_dir,
+                input.config.working_dir.as_deref().ok_or("PM worktree")?,
+                &reservation,
+            ),
+        }
+        .map_err(|error| error.to_string())?;
+        let revision = prepared
+            .member
+            .assignment
+            .as_ref()
+            .and_then(|assignment| assignment.pm_profile_revision.clone())
+            .ok_or("captured PM profile revision")?;
+        input.config.env_vars.extend([
+            (
+                "GWT_AGENT_MEMBER_ID".into(),
+                prepared.member.agent_member_id,
+            ),
+            ("GWT_AGENT_RESERVATION_ID".into(), reservation),
+            ("GWT_AGENT_NAME".into(), prepared.member.name),
+            ("GWT_PM_PROFILE_REVISION".into(), revision),
+        ]);
+        input.pm_restore_prior = source.map(|source| (source.clone(), prepared.prior_assignment));
+        let restore_prior = input.pm_restore_prior.clone();
+        let sessions = input.sessions_dir.clone();
+        let completion =
+            super::launch::prepare_agent_launch(input, |_| {}).map_err(|error| error.detail)?;
+        let captured_runtime =
+            match std::fs::read(gwt_agent::runtime_state_path(&sessions, &completion.1)) {
+                Ok(bytes) => Ok(Some(bytes)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(error.to_string()),
+            };
+        Ok(Self {
+            completion,
+            captured_runtime,
+            restore_prior,
+        })
+    }
+
+    pub fn retire_unspawned(
+        &self,
+        root: &std::path::Path,
+        sessions: &std::path::Path,
+        expected: &gwt_agent::Session,
+    ) -> Result<gwt_agent::Session, String> {
+        if let Some(handshake) = self.completion.11.active_launch_handshake.as_ref() {
+            crate::cli::execution_state::finish_active_session_launch_handshake(
+                sessions, handshake,
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        let stopped = super::owner::retire_unspawned_launch_runtime(
+            sessions,
+            expected,
+            Some(&self.captured_runtime),
+        )?;
+        let env = &self.completion.0.env;
+        if !crate::agent_registry::cancel_unspawned_pm_member(
+            root,
+            sessions,
+            env.get("GWT_AGENT_MEMBER_ID").ok_or("PM member")?,
+            env.get("GWT_AGENT_RESERVATION_ID")
+                .ok_or("PM reservation")?,
+            Some(&stopped),
+            self.restore_prior
+                .as_ref()
+                .map(|(source, prior)| (source, prior.as_ref())),
+        )
+        .map_err(|error| error.to_string())?
+        {
+            return Err("exact unspawned PM fixture reservation changed".into());
+        }
+        Ok(stopped)
+    }
+}
+
 /// Model a visible Project accepted by the fixture's live controller process.
 /// This supplies only the actual-view prerequisite, never a Continue choice.
 #[doc(hidden)]
 pub fn seed_actual_project_view(root: &std::path::Path) -> Result<(), String> {
     let receipt = crate::project_execution_policy::ActualViewReceipt {
         receipt_id: uuid::Uuid::new_v4().to_string(),
-        accepted_at: chrono::Utc::now(),
+        accepted_at: gwt_core::timestamp::UtcTimestamp::now(),
         admitted_policy_revision: gwt_core::project_execution_policy::load(root)
             .map_or(0, |policy| policy.revision),
     };
@@ -31,7 +135,7 @@ pub fn seed_actual_project_view(root: &std::path::Path) -> Result<(), String> {
             )]),
             last_open_receipt: Some(receipt),
             close_intents: Default::default(),
-            observed_at: chrono::Utc::now(),
+            observed_at: gwt_core::timestamp::UtcTimestamp::now(),
         },
     )
     .map_err(|error| error.to_string())
@@ -239,6 +343,14 @@ impl ProjectOwnerHarness {
     /// acceptance is dropped or its exact captured ticket is replayed.
     pub async fn settled_self_closes(&self) -> Result<(), String> {
         self.owner.test_agent_dispatch_barrier(true).await
+    }
+
+    /// Drain the current census writer and pause the next one until the guard
+    /// drops. Dispatch barriers alone do not synchronize this background worker.
+    pub async fn pause_runtime_reconciliation(
+        &self,
+    ) -> Result<crate::monitor_duplicate_runtime::RuntimeReconciliationPause, String> {
+        self.owner.test_pause_runtime_reconciliation().await
     }
 
     pub fn commit_self_close(
@@ -465,7 +577,7 @@ impl ProjectOwnerHarness {
         &self,
         id: &str,
         incarnation: u64,
-        wall: chrono::DateTime<chrono::Utc>,
+        wall: gwt_core::timestamp::UtcTimestamp,
         now: std::time::Instant,
     ) -> Result<(), String> {
         self.owner
@@ -524,6 +636,15 @@ impl ProjectOwnerHarness {
             Some(OwnerHarnessTransport::Daemon(daemon)) => {
                 Ok(daemon.monitor_snapshot.borrow().clone())
             }
+            _ => Err("the canonical Monitor daemon fixture is required".into()),
+        }
+    }
+
+    /// Observe the same published projection served by the daemon's status RPC,
+    /// without coupling fixture ordering to the GUI client's latency budget.
+    pub fn monitor_status(&self) -> Result<Option<serde_json::Value>, String> {
+        match self.transport.as_ref() {
+            Some(OwnerHarnessTransport::Daemon(daemon)) => Ok(daemon.hub.issue_monitor_status()),
             _ => Err("the canonical Monitor daemon fixture is required".into()),
         }
     }

@@ -1251,6 +1251,8 @@ pub(crate) fn with_codex_config_lock<T>(
     config_path: &Path,
     body: impl FnOnce() -> io::Result<T>,
 ) -> io::Result<T> {
+    // Paths come from CODEX_HOME / OS home, not gwt_home, so tests need their own guard.
+    gwt_config::home::assert_test_path(config_path);
     if let Some(parent) = config_path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -1771,6 +1773,24 @@ mod tests {
             0
         );
         assert!(!absent.parent().unwrap().exists());
+    }
+
+    #[test]
+    fn shared_config_writes_panic_before_unisolated_test_io() {
+        // SPEC #5082 AC-22: an inherited CODEX_HOME must not reach the real trust config.
+        let config = Path::new("/__gwt_protected_test_home__/.codex/config.toml");
+        let worktree = tempfile::tempdir().unwrap();
+        assert!(std::panic::catch_unwind(|| {
+            let _ = with_codex_config_lock(config, || -> io::Result<()> {
+                panic!("body must not run for an unisolated config")
+            });
+        })
+        .is_err());
+        assert!(std::panic::catch_unwind(|| {
+            let _ = register_codex_managed_project_trust(worktree.path(), config);
+        })
+        .is_err());
+        assert!(!config.parent().unwrap().exists());
     }
 
     #[test]

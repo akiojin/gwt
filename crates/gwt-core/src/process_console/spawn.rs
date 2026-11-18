@@ -398,7 +398,7 @@ async fn spawn_logged_inner(
         (manage_gh_quota && matches!(kind, ProcessKind::Gh)).then(|| gh_arg_strings(args));
     if let Some(args) = &gh_quota {
         let ledger = crate::github_budget::BudgetLedger::global();
-        let now = chrono::Utc::now();
+        let now = crate::timestamp::UtcTimestamp::now();
         if let Some(detail) = crate::github_budget::suppressed_spawn_detail(
             crate::github_quota::global(),
             &ledger,
@@ -777,7 +777,7 @@ async fn reconcile_github_quota(
         return stderr;
     }
 
-    let now = chrono::Utc::now();
+    let now = crate::timestamp::UtcTimestamp::now();
     let probe = probe_rate_limit(hub, program, options, quota, deadline).await;
     // Issue #3891: the refusal is also visible to the next process, which can
     // then throttle its non-essential reads instead of re-discovering it.
@@ -818,7 +818,7 @@ async fn probe_rate_limit(
     if !output.success() {
         return None;
     }
-    let now = chrono::Utc::now();
+    let now = crate::timestamp::UtcTimestamp::now();
     if let Some(snapshot) = crate::github_budget::parse_rate_limit_probe_all(&output.stdout, now) {
         crate::github_budget::BudgetLedger::global().record_probe(&snapshot);
     }

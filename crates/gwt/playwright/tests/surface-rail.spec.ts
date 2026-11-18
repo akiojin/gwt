@@ -206,7 +206,7 @@ test.describe("Surface rail", () => {
     expect(errors).toEqual([]);
   });
 
-  test("PM owns only its terminal and auxiliary Settings across reload with nearby agents and Start Work", async ({ page }, testInfo) => {
+  test("PM owns only its terminal and opens Agents settings across reload with nearby agents and Start Work", async ({ page }, testInfo) => {
     const errors: string[] = [];
     page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
     page.on("pageerror", error => errors.push(String(error)));
@@ -232,28 +232,42 @@ test.describe("Surface rail", () => {
     } }));
     await expectPm();
     await main.locator('[data-id="pm-window"] .xterm').evaluate(node => { (window as any).__ownedPmTerminal = node; });
+    const operations = main.locator('.agents-surface [data-role="pm-project-operations"]');
+    const expectPmOperations = async () => {
+      await expect(main).toHaveAttribute("data-surface", "agents");
+      await expect(operations).toBeVisible();
+      await expect(windowById(page, "pm-window")).toBeHidden();
+      await expect(operations.locator('[data-action="close"]')).toHaveCount(0);
+      expect((await sentMessages(page)).filter(message => message.kind === "create_window" && message.surface_owner === "pm")).toEqual([]);
+      await expectSurfaceOnly(page);
+    };
     await page.locator("#op-pm-settings-button").click();
-    const auxiliary = main.locator('.workspace-window[data-preset="settings"]');
-    await expect(auxiliary).toBeVisible();
-    const auxiliaryId = await auxiliary.getAttribute("data-id");
-    expect((await sentMessages(page)).filter(message => message.kind === "create_window" && message.surface_owner === "pm")).toHaveLength(1);
-    await auxiliary.getByRole("tab", { name: "Project Manager", exact: true }).click();
+    await expectPmOperations();
+    await operations.evaluate(node => { (window as any).__ownedPmOperations = node; });
     await openPm();
     expect(await main.locator('[data-id="pm-window"] .xterm').evaluate(node => node === (window as any).__ownedPmTerminal)).toBe(true);
     await page.locator('.op-rail__surface[data-surface="works"]').click();
     await expect(main.locator(".work-row")).toHaveCount(4);
     await openPm();
     await page.locator("#op-pm-settings-button").click();
+    await expectPmOperations();
+    expect(await operations.evaluate(node => node === (window as any).__ownedPmOperations)).toBe(true);
     await page.reload();
     await openPm();
     await expectPm();
+    await main.locator('[data-id="pm-window"] .xterm').evaluate(node => { (window as any).__ownedPmTerminal = node; });
     await page.locator("#op-pm-settings-button").click();
-    await expect(auxiliary).toHaveAttribute("data-id", auxiliaryId!);
-    await expect(auxiliary.locator('[data-action="close"]')).toHaveCount(0);
-    await page.evaluate(id => (window as any).__removeSurfaceAgent(id), auxiliaryId);
+    await expectPmOperations();
+    // The Agents editor does not depend on a Settings window remaining open.
+    await page.evaluate(() => (window as any).__removeSurfaceAgent("settings-window"));
+    await expect(windowById(page, "settings-window")).toHaveCount(0);
+    await expectPmOperations();
+    await openPm();
     await expectPm();
+    expect(await main.locator('[data-id="pm-window"] .xterm').evaluate(node => node === (window as any).__ownedPmTerminal)).toBe(true);
     await page.locator("#op-pm-settings-button").click();
-    await expect(auxiliary).toBeVisible();
+    await expectPmOperations();
+    await expect(windowById(page, "settings-window")).toHaveCount(0);
     await openPm();
     await expectPm();
     await page.locator('.op-rail__surface[data-surface="works"]').click();
@@ -516,8 +530,9 @@ test.describe("Surface rail", () => {
         max_active_agents_mode: "manual", terminal_queue_auto_refill: true, terminal_queue_auto_refill_limit: 3,
         allowed_labels: ["bug"], terminal_queue: [], queue_len: 0,
       } });
-      (window as any).__surfaceRailSocket().emit({ kind: "pm_status", available: true, paused: false,
-        auto_start: true, configured_agent_id: "claude", loop_interval_secs: 60, running_agent_id: "claude", is_running: true,
+      (window as any).__surfaceRailSocket().emit({ kind: "pm_status", project_key: location.pathname.split("/").filter(Boolean).at(-1), available: true, paused: false,
+        auto_start: true, configured_agent_id: "claude", configured_model: "next-model", loop_interval_secs: 60,
+        running_agent_id: "claude", running_model: "current-model", is_running: true,
         agent_options: [{ id: "claude", name: "Claude Code" }, { id: "codex", name: "Codex" }],
       });
     });
@@ -569,12 +584,16 @@ test.describe("Surface rail", () => {
       ["Autonomous", /human approval/i], ["Monitoring", /queued issues/i],
       ["Auto-refill", /queue/i], ["Refill limit", /on with 0.*default limit of 3/i], ["Allowed labels", /matching issues/i],
     ] as const) await explain(issues.locator("[data-settings-issues-controls]").getByLabel(name, { exact: true }), pattern);
-    await settings.getByRole("tab", { name: "Project Manager", exact: true }).click();
-    const pm = settings.locator('[data-settings-panel="project-manager"]');
+    await page.locator("#op-pm-settings-button").click();
+    await expect(page.getByRole("region", { name: "Main pane", exact: true })).toHaveAttribute("data-surface", "agents");
+    const pm = page.locator('.agents-surface [data-role="pm-project-operations"]');
+    await expect(pm).toBeVisible();
     for (const [role, pattern] of [
       ["pm-autonomy-status", /autonomous coordination/i], ["pm-pause-toggle", /Issues stays unchanged/],
-      ["pm-agent-select", /after restart/], ["pm-model-input", /after restart/], ["pm-effort-select", /after restart/],
+      ["pm-running-as", /agent, model and effort.*after restart/],
+      ["pm-pending-chip", /Agent, model, and effort.*after restart/],
       ["pm-loop-interval", /Minimum: 10 seconds/], ["pm-auto-start", /automatically/],
+      ["pm-restart", /new conversation[\s\S]*configured agent/],
     ] as const) await explain(pm.locator(`[data-role="${role}"]`), pattern);
     await page.screenshot({ path: testInfo.outputPath("settings-control-explanations.png") });
     await pm.locator('[data-role="pm-autonomy-status"]').focus();
@@ -582,7 +601,12 @@ test.describe("Surface rail", () => {
     await expect(page.locator(`#${popupId}`)).toBeVisible();
     await page.evaluate(() => (window as any).__removeSurfaceAgent("settings-window"));
     await expect(windowById(page, "settings-window")).toHaveCount(0);
-    await expect(page.locator(`#${popupId}`)).toHaveCount(0);
+    await expect(pm).toBeVisible();
+    await expect(page.locator(`#${popupId}`)).toBeVisible();
+    await page.locator("#op-pm-entry").click();
+    await expect(pm).toBeHidden();
+    await expect(page.locator(`#${popupId}`)).toBeHidden();
+    expect((await sentMessages(page)).filter(message => message.kind === "create_window" && message.surface_owner === "pm")).toEqual([]);
     expect((await sentMessages(page)).filter(message => /^(set_issue_monitor|set_pm|restart_pm|update_viewport)/.test(message.kind || ""))).toEqual([]);
     await expect(page.locator("html")).toHaveAttribute("data-theme", testInfo.project.name.includes("light") ? "light" : "dark");
     expect(errors).toEqual([]);
@@ -869,6 +893,10 @@ test.describe("Surface rail", () => {
   // other tab controls or the desktop sidebar.
   test.describe("Settings touch navigation", () => {
     test.use({ hasTouch: true });
+    const settingsPanelIds = [
+      "system", "supported-agents", "custom-agents", "agent-backends",
+      "usage", "issues", "hooks",
+    ];
     test("Settings navigation tabs are 44px tap targets on a phone", async ({ page }, info) => {
       const errors = captureBrowserErrors(page);
       await installSurfaceAssets(page);
@@ -877,11 +905,13 @@ test.describe("Surface rail", () => {
       await page.locator("#op-rail [data-surface='settings']").click();
       const settings = page.locator(".settings-root:visible");
       const tabs = settings.locator(".settings-tabs [role='tab']");
-      await expect(tabs).toHaveCount(8);
+      await expect(tabs).toHaveCount(settingsPanelIds.length);
+      expect(await tabs.evaluateAll(nodes => nodes.map(node => node.getAttribute("data-settings-tab"))))
+        .toEqual(settingsPanelIds);
       const heights = () => tabs.evaluateAll(nodes => nodes.map(node => node.getBoundingClientRect().height));
-      expect(await heights()).toEqual(Array(8).fill(30));
+      expect(await heights()).toEqual(Array(settingsPanelIds.length).fill(30));
       await page.setViewportSize({ width: 601, height: 900 });
-      expect(await heights(), "601px retains desktop tab heights").toEqual(Array(8).fill(30));
+      expect(await heights(), "601px retains desktop tab heights").toEqual(Array(settingsPanelIds.length).fill(30));
       for (const width of [320, 390]) {
         await page.setViewportSize({ width, height: 844 });
         const sizes = await tabs.evaluateAll(nodes => nodes.map(node => {
@@ -904,6 +934,80 @@ test.describe("Surface rail", () => {
         await expect(settings.locator('[data-settings-panel="custom-agents"]')).toBeHidden();
         await page.screenshot({ path: info.outputPath(`settings-tabs-${width}.png`) });
       }
+      expect(errors, "zero console/page errors").toEqual([]);
+    });
+
+    // SPEC #6476 T-005sf: inside the panels, checkboxes were 13-16px, selects
+    // and inputs 32px and buttons 36px on a phone. A checkbox's tap target is
+    // its label when it has one, otherwise the box itself.
+    test("Settings panel form controls are 44px tap targets on a phone", async ({ page }, info) => {
+      const errors = captureBrowserErrors(page);
+      await installSurfaceAssets(page);
+      await installSurfaceRailBackend(page);
+      await page.goto(surfaceAppUrl);
+      await page.locator("#op-rail [data-surface='settings']").click();
+      const settings = page.locator(".settings-root:visible");
+      const tabs = settings.locator(".settings-tabs [role='tab']");
+      await expect(tabs).toHaveCount(settingsPanelIds.length);
+      expect(await tabs.evaluateAll(nodes => nodes.map(node => node.getAttribute("data-settings-tab"))))
+        .toEqual(settingsPanelIds);
+      // Render a custom agent row so its 24px icon buttons are measured too.
+      await page.evaluate(() => (window as any).__surfaceRailSocket().emit({ kind: "custom_agent_list", agents: [{
+        id: "fixture-cli", display_name: "Fixture CLI", command: "fixture-command", default_args: [],
+        mode_args: { normal: [], continue: [], resume: [] }, skip_permissions_args: [], env: {} }] }));
+      await tabs.filter({ hasText: "Custom Agents" }).click();
+      await expect(settings.locator(".icon-button:visible")).not.toHaveCount(0);
+      const targets = () => settings.evaluate(root => [...root.querySelectorAll(":is(button, input, select, textarea)")]
+        .filter(node => !node.closest(".settings-tabs") && (node as HTMLElement).offsetParent !== null)
+        .map(node => {
+          const input = node as HTMLInputElement;
+          const label = input.type === "checkbox"
+            ? input.closest("label") || (input.id ? root.querySelector(`label[for="${input.id}"]`) : null)
+            : null;
+          const target = (label || node) as HTMLElement;
+          const box = target.getBoundingClientRect();
+          return { name: input.getAttribute("aria-label") || target.textContent!.trim().slice(0, 30) || input.name || input.type || node.tagName,
+            width: box.width, height: box.height, minHeight: getComputedStyle(target).minHeight };
+        }));
+      const desktop: string[] = [];
+      for (let index = 0; index < settingsPanelIds.length; index++) {
+        await tabs.nth(index).click();
+        desktop.push(...(await targets()).map(target => `${index}:${target.name}:${target.minHeight}`));
+      }
+      expect(desktop.join("\n")).not.toContain(":44px");
+      await page.setViewportSize({ width: 601, height: 900 });
+      const at601: string[] = [];
+      for (let index = 0; index < settingsPanelIds.length; index++) {
+        await tabs.nth(index).click();
+        at601.push(...(await targets()).map(target => `${index}:${target.name}:${target.minHeight}`));
+      }
+      expect(at601, "601px keeps each panel control's desktop size").toEqual(desktop);
+      for (const width of [320, 390]) {
+        await page.setViewportSize({ width, height: 844 });
+        for (let index = 0; index < settingsPanelIds.length; index++) {
+          await tabs.nth(index).tap();
+          const panel = (await tabs.nth(index).textContent())!.trim();
+          for (const target of await targets()) {
+            expect(target.width, `${panel} ${target.name} width at ${width}px`).toBeGreaterThanOrEqual(44);
+            expect(target.height, `${panel} ${target.name} height at ${width}px`).toBeGreaterThanOrEqual(44);
+          }
+          expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth),
+            `${panel} does not scroll sideways at ${width}px`).toBe(true);
+          const captions = await settings.evaluate(root => [...root.querySelectorAll("label")]
+            .filter(label => (label as HTMLElement).offsetParent !== null && !label.querySelector("input[type=checkbox]"))
+            .map(label => getComputedStyle(label).minHeight));
+          expect(captions, `${panel} caption labels keep their own height`).not.toContain("44px");
+        }
+        await settings.getByRole("tab", { name: "System", exact: true }).tap();
+        await page.screenshot({ path: info.outputPath(`settings-form-${width}.png`) });
+      }
+      const trust = settings.locator('input[type="checkbox"][id$="settings-system-codex-hooks"]');
+      const label = settings.locator("label", { has: page.locator('input[id$="settings-system-codex-hooks"]') });
+      await expect(trust).toBeEnabled();
+      const before = await trust.isChecked();
+      const box = (await label.boundingBox())!;
+      await label.tap({ position: { x: box.width - 4, y: box.height - 4 } });
+      await expect(trust).toBeChecked({ checked: !before });
       expect(errors, "zero console/page errors").toEqual([]);
     });
   });
@@ -947,6 +1051,76 @@ test.describe("Surface rail", () => {
       await page.screenshot({ path: info.outputPath(`board-controls-${width}.png`) });
     }
     expect(errors, "zero console/page errors").toEqual([]);
+  });
+
+  // SPEC #6476 T-005lg (AC-1): on a phone the Logs refresh was 24px and the
+  // filters 32px tall, and the two-column timeline squeezed the detail pane.
+  test.describe("Logs touch targets", () => {
+    test.use({ hasTouch: true });
+    test("Logs controls and entries are 44px tap targets on a phone", async ({ page }, info) => {
+      const errors = captureBrowserErrors(page);
+      await installSurfaceAssets(page); await installSurfaceRailBackend(page); await page.goto(surfaceAppUrl);
+      await page.locator("#op-rail [data-cmd='open-logs']").click();
+      const logs = page.locator(".logs-root:visible");
+      await expect(logs.locator(".logs-search-input")).toBeVisible({ timeout: 10_000 });
+      const windowId = await page.locator(".workspace-window[data-preset='logs']").getAttribute("data-id");
+      // Answer the initial project request, then load global entries: they carry
+      // no project scope, so the fixture needs no project tab.
+      const emitLogs = (entries: unknown[]) => page.evaluate(({ id, entries }) =>
+        (window as any).__surfaceRailSocket().emit({ kind: "log_entries", id, entries }), { id: windowId, entries });
+      await emitLogs([]);
+      await expect(logs.locator(".logs-status")).toHaveText("0 visible / 0 total");
+      await logs.locator(".logs-scope-select").selectOption("global");
+      await emitLogs([
+        { id: "t005lg-1", severity: "error", source: "gwt::launch", message: "Launch timed out", timestamp: "2026-11-14T00:00:00Z", detail: "after 30s", fields: {} },
+        { id: "t005lg-2", severity: "info", source: "gwt::scan", message: "Scan finished", timestamp: "2026-11-14T00:01:00Z", fields: { count: 3 } },
+      ]);
+      await expect(logs.locator(".logs-entry")).toHaveCount(2);
+      // A live warning shows the unread-alerts button, which must be tappable too.
+      await page.evaluate(() => (window as any).__surfaceRailSocket().emit({ kind: "log_entry_appended", entry:
+        { id: "t005lg-3", severity: "warn", source: "gwt::pm", message: "Slot released", timestamp: "2026-11-14T00:02:00Z", fields: {} } }));
+      await expect(logs.locator(".logs-unread-button")).toHaveText("1 unread alert");
+      const controls = ".logs-root:visible :is(.workspace-toolbar-actions button, .logs-filter-bar :is(select, input), .logs-entry):visible";
+      const sizes = () => page.locator(controls).evaluateAll(nodes => nodes.map(node => {
+        const box = node.getBoundingClientRect();
+        return { name: node.getAttribute("aria-label") || node.className, left: box.left, right: box.right, width: box.width, height: box.height };
+      }));
+      const minHeights = () => page.locator(controls).evaluateAll(nodes => nodes.map(node => getComputedStyle(node).minHeight));
+      expect((await sizes()).some(control => control.height < 44), "the fixture has desktop-sized controls").toBe(true);
+      const desktop = await minHeights();
+      expect(desktop).not.toContain("44px");
+      await page.setViewportSize({ width: 601, height: 900 });
+      await expect.poll(minHeights, { message: "601px keeps the desktop control sizes" }).toEqual(desktop);
+      expect(await logs.locator(".logs-layout").evaluate(node => getComputedStyle(node).gridTemplateColumns.split(" ").length),
+        "601px keeps the timeline and detail side by side").toBe(2);
+      for (const [width, height] of [[320, 568], [390, 844]]) {
+        await page.setViewportSize({ width, height });
+        const viewport = await page.evaluate(() => document.documentElement.clientWidth);
+        const measured = await sizes();
+        expect(measured.map(control => control.name)).toEqual(expect.arrayContaining(["Refresh logs", "text-button logs-unread-button", "logs-scope-select", "logs-search-input"]));
+        for (const control of measured) {
+          expect(control.height, `${control.name} height at ${width}px`).toBeGreaterThanOrEqual(44);
+          expect(control.width, `${control.name} width at ${width}px`).toBeGreaterThanOrEqual(44);
+          expect(control.left, `${control.name} is on screen at ${width}px`).toBeGreaterThanOrEqual(0);
+          expect(control.right, `${control.name} is on screen at ${width}px`).toBeLessThanOrEqual(viewport);
+        }
+        expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth),
+          "the page itself must not scroll sideways").toBeLessThanOrEqual(0);
+        const timeline = (await logs.locator(".logs-timeline").boundingBox())!;
+        const detail = (await logs.locator(".logs-detail-pane").boundingBox())!;
+        expect(detail.width, `the detail pane uses the window width at ${width}px`).toBeGreaterThanOrEqual(width / 2);
+        expect(detail.y, `the detail sits below the timeline at ${width}px`).toBeGreaterThanOrEqual(timeline.y + timeline.height - 1);
+        for (const pane of [timeline, detail]) expect(pane.height, `neither pane collapses at ${width}x${height}`).toBeGreaterThanOrEqual(120);
+        await logs.locator(".logs-entry", { hasText: "Scan finished" }).tap();
+        await expect(logs.locator(".logs-detail-message")).toHaveText("Scan finished");
+        await logs.locator(".logs-severity-select").selectOption("error");
+        await expect(logs.locator(".logs-entry")).toHaveCount(1);
+        await expect(logs.locator(".logs-unread-button")).toBeVisible();
+        await logs.locator(".logs-severity-select").selectOption("debug");
+        await page.screenshot({ path: info.outputPath(`logs-controls-${width}.png`) });
+      }
+      expect(errors, "zero console/page errors").toEqual([]);
+    });
   });
 });
 

@@ -572,7 +572,7 @@ fn bump_signature(path: &Path, signature: &str) -> Option<u32> {
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_default();
-    let now = chrono::Local::now().to_rfc3339();
+    let now = gwt_core::timestamp::UtcTimestamp::now_local_rfc3339();
     let record = ledger
         .signatures
         .entry(signature.to_string())

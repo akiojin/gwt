@@ -893,6 +893,103 @@ test.describe("Project Index status surface", () => {
     });
   });
 
+  // SPEC #6476 T-005ix (AC-1): on a phone the Index tabs were 30px, the search
+  // controls 24-32px, and the two result columns needed 580px.
+  test.describe("Index touch targets", () => {
+    test.use({ hasTouch: true });
+    test("Index controls are 44px tap targets and the results stack on a phone", async ({ page }, info) => {
+      const errors: string[] = [];
+      page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+      page.on("pageerror", error => errors.push(String(error)));
+      await installEmbeddedRoutes(page);
+      await installIndexStatusBackend(page, {
+        state: "repair_required",
+        scopes: {
+          issues: { healthy: true, repair_required: false, document_count: 27 },
+          specs: { healthy: false, repair_required: true, document_count: 5, reason: "count_mismatch" },
+          files: { wtAhash: { healthy: false, repair_required: true, document_count: 0, reason: "manifest_missing" } },
+        },
+        worktrees: { wtAhash: { branch: "develop", path: "/abs/wtA" } },
+      });
+      await page.goto(APP_URL);
+      const { root } = await openIndexSearchPanel(page);
+      await root.locator(".index-scope-button[data-scope='files']").click();
+      await root.locator(".index-search-input").fill("phone layout");
+      const request = await page.waitForFunction(() =>
+        window.__gwtFixtureWebSocket.recordedSends.map(raw => JSON.parse(raw))
+          .findLast(message => message.kind === "search_project_index" && message.query === "phone layout"),
+      ).then(handle => handle.jsonValue());
+      await page.evaluate(payload => window.__gwtFixtureWebSocket.emit(payload), {
+        kind: "project_index_search_results", id: request.id, request_id: request.request_id,
+        query: request.query, suggestions: [],
+        results: [
+          { scope: "issues", title: "Phone layout issue", subtitle: "Issue #6476", preview: "Stack the panes.", distance: 0.1 },
+          { scope: "specs", title: "Touch target spec", subtitle: "SPEC #6476", preview: "44px controls.", distance: 0.2 },
+          // Enough rows to overflow the stacked list pane.
+          ...Array.from({ length: 13 }, (_, index) =>
+            ({ scope: "issues", title: `Filler result ${index + 1}`, preview: "Filler.", distance: 0.3 + index / 100 })),
+        ],
+      });
+      await expect(root.locator(".index-result-row")).toHaveCount(15);
+      const measure = (selector: string) => page.locator(selector).evaluateAll(nodes => nodes.map(node => {
+        const box = node.getBoundingClientRect();
+        return { name: node.getAttribute("aria-label") || node.textContent!.trim().slice(0, 24) || node.className,
+          left: box.left, right: box.right, width: box.width, height: box.height, minHeight: getComputedStyle(node).minHeight };
+      }));
+      const tabs = ".index-search-root .index-window-tabs .settings-tab:visible";
+      const search = `${tabs}, .index-search-root [data-index-panel='search'] :is(input, select, button):visible`;
+      const health = `${tabs}, .index-search-root [data-index-panel='health'] button:visible`;
+      const desktop = (await measure(search)).map(control => control.minHeight);
+      expect(desktop).not.toContain("44px");
+      await page.setViewportSize({ width: 601, height: 900 });
+      await expect.poll(async () => (await measure(search)).map(control => control.minHeight),
+        { message: "601px keeps the desktop control sizes" }).toEqual(desktop);
+      expect(await root.locator(".index-search-layout").evaluate(node => getComputedStyle(node).gridTemplateColumns.split(" ").length),
+        "601px keeps the result list and detail side by side").toBe(2);
+      // Opening a panel re-renders it (Health refreshes its table), so a node
+      // measured mid-render can be detached; retry until the DOM settles.
+      const assertTargets = (selector: string, width: number, required: string[]) =>
+        expect(() => assertTargetsOnce(selector, width, required)).toPass({ timeout: 5_000 });
+      const assertTargetsOnce = async (selector: string, width: number, required: string[]) => {
+        const viewport = await page.evaluate(() => document.documentElement.clientWidth);
+        const measured = await measure(selector);
+        expect(measured.map(control => control.name)).toEqual(expect.arrayContaining(required));
+        for (const control of measured) {
+          expect(control.height, `${control.name} height at ${width}px`).toBeGreaterThanOrEqual(44);
+          expect(control.width, `${control.name} width at ${width}px`).toBeGreaterThanOrEqual(44);
+          expect(control.left, `${control.name} is on screen at ${width}px`).toBeGreaterThanOrEqual(0);
+          expect(control.right, `${control.name} is on screen at ${width}px`).toBeLessThanOrEqual(viewport);
+        }
+        expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth),
+          "the page itself must not scroll sideways").toBeLessThanOrEqual(0);
+        expect(await root.evaluate(node => node.scrollWidth - node.clientWidth),
+          "the Index surface must not scroll sideways").toBeLessThanOrEqual(0);
+      };
+      for (const [width, height] of [[320, 568], [390, 844]]) {
+        await page.setViewportSize({ width, height });
+        await root.locator("[data-index-tab='search']").tap();
+        await assertTargets(search, width, ["Search", "Health", "Search indexed content", "Semantic", "All terms",
+          "Files", "Files and Docs worktree", "Open"]);
+        const list = (await root.locator(".index-result-list").boundingBox())!;
+        const detail = (await root.locator(".index-result-detail").boundingBox())!;
+        expect(list.width, `the result list uses the window width at ${width}px`).toBeGreaterThanOrEqual(width / 2);
+        expect(detail.width, `the detail uses the window width at ${width}px`).toBeGreaterThanOrEqual(width / 2);
+        expect(detail.y, `the detail sits below the results at ${width}px`).toBeGreaterThanOrEqual(list.y + list.height - 1);
+        for (const pane of [list, detail]) expect(pane.height, `neither pane collapses at ${width}x${height}`).toBeGreaterThanOrEqual(120);
+        expect(await root.locator(".index-result-list").evaluate(node => node.scrollHeight > node.clientHeight),
+          `the result list scrolls inside its pane at ${width}px`).toBe(true);
+        await root.locator(".index-result-row", { hasText: "Touch target spec" }).tap();
+        await expect(root.locator(".index-detail-title")).toHaveText("Touch target spec");
+        await page.screenshot({ path: info.outputPath(`index-search-${width}.png`) });
+        await root.locator("[data-index-tab='health']").tap();
+        await expect(root.locator("[data-role='index-settings-table']")).toBeVisible();
+        await assertTargets(health, width, ["Refresh index status"]);
+        await page.screenshot({ path: info.outputPath(`index-health-${width}.png`) });
+      }
+      expect(errors, "zero console/page errors").toEqual([]);
+    });
+  });
+
 });
 
 async function openIndexHealthPanel(page, createWindow = true, live = false) {
