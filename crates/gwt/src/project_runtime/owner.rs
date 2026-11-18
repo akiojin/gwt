@@ -25,6 +25,25 @@ use std::{
 };
 use tokio::sync::{broadcast, oneshot};
 
+/// Budget for cleaning up and reporting a failed launch (Issue #7670).
+const FAILED_LAUNCH_SETTLEMENT_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// End the launch deadline and give the failure settlement its own budget.
+///
+/// A launch that fails *because* its deadline ran out used to settle under the
+/// same, already expired deadline: the Monitor readback timed out at once, the
+/// failure was never recorded, and the row stayed `launching` until someone
+/// requeued it by hand. Nested deadlines only ever shorten, so the launch
+/// deadline has to be released before the settlement one is entered.
+fn enter_failed_launch_settlement_deadline(
+    launch_deadline: &mut Option<gwt_core::operation_deadline::ScopedOperationDeadline>,
+) -> gwt_core::operation_deadline::ScopedOperationDeadline {
+    drop(launch_deadline.take());
+    gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+        gwt_core::operation_deadline::now() + FAILED_LAUNCH_SETTLEMENT_BUDGET,
+    )
+}
+
 fn spawn_owner_worker<T: Send + 'static>(
     work: impl FnOnce() -> T + Send + 'static,
 ) -> thread::JoinHandle<T> {
@@ -6233,8 +6252,10 @@ impl OwnerState {
             tracing::info!(target: "gwt.launch.timing", phase = "owner_dispatch", state = "finished",
                 elapsed_ms = launch_requested.elapsed().as_secs_f64() * 1000.0, "Issues owner launch phase");
             let owner_phase = super::launch::LaunchPhaseTimer::start("owner_materialization");
-            let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-                gwt_core::operation_deadline::now() + std::time::Duration::from_secs(120),
+            let mut launch_deadline = Some(
+                gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+                    gwt_core::operation_deadline::now() + std::time::Duration::from_secs(120),
+                ),
             );
             let sessions_dir = gwt_core::paths::gwt_sessions_dir();
             let expected_registry_row: Result<
@@ -6776,6 +6797,9 @@ impl OwnerState {
                     }
                     success
                 });
+            let _settlement_deadline = result
+                .is_err()
+                .then(|| enter_failed_launch_settlement_deadline(&mut launch_deadline));
             let mut unspawned_runtime_retired = false;
             if result.is_err()
                 && !input.physical_spawn_started
@@ -16263,6 +16287,27 @@ mod tests {
 mod drop_tests {
     use super::*;
     use std::time::Duration;
+
+    /// Issue #7670: a launch that spent its whole deadline still has to
+    /// report the failure to the Monitor, which reads under the deadline.
+    #[test]
+    fn failed_launch_settlement_gets_a_budget_after_the_launch_deadline_expired() {
+        let now = std::time::Instant::now();
+        let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(now);
+        let mut launch_deadline =
+            Some(gwt_core::operation_deadline::ScopedOperationDeadline::enter(now));
+        gwt_core::operation_deadline::ensure_remaining("launch")
+            .expect_err("the launch deadline is spent");
+
+        let _settlement = enter_failed_launch_settlement_deadline(&mut launch_deadline);
+
+        assert!(launch_deadline.is_none());
+        assert_eq!(
+            gwt_core::operation_deadline::ensure_remaining("settlement")
+                .expect("failure settlement must not inherit the spent launch deadline"),
+            Some(now + FAILED_LAUNCH_SETTLEMENT_BUDGET)
+        );
+    }
 
     #[test]
     fn later_failed_cleanup_gets_its_own_recovery_budget() {
