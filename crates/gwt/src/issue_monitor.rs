@@ -1901,6 +1901,15 @@ pub enum IssueMonitorClaimHealth {
     Released,
 }
 
+/// The owner's admission refusals that hold a spawn without failing it: slot
+/// exhaustion, and (Issue #7665) the named non-capacity holds.
+pub(crate) const MONITOR_SPAWN_HOLD_PREFIX: &str = "Issues launch hold before launching Issue #";
+
+pub(crate) fn is_monitor_spawn_hold_refusal(message: &str) -> bool {
+    message.starts_with("Issues max_active reached (")
+        || message.starts_with(MONITOR_SPAWN_HOLD_PREFIX)
+}
+
 /// Last attempt, last successful readback, and last failure remain inspectable
 /// after a restart. Foreign claims are evidence, never an arbitration decision.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -16244,6 +16253,7 @@ impl IssueMonitorState {
                             let mut reasons =
                                 item.exclusion_reason.iter().cloned().collect::<Vec<_>>();
                             reasons.extend(self.claim_candidate_exclusions(item.issue.number));
+                            reasons.extend(self.claim_project_policy_hold(item.issue.number));
                             // Issue #7266 AC-2 / AC-3: only the Issue whose own
                             // floor holds it reads `retry_backoff`, with when it lifts.
                             if !self.retry_ready_for_saved_profile(item.issue.number, now)
@@ -18334,6 +18344,27 @@ impl IssueMonitorState {
 
     /// Check the current cap at the final boundary before adding a pane.
     /// Only a reservation that has not become a pane supplies its own slot.
+    /// Issue #7665: `has_capacity_for_monitor_spawn` also refuses for holds
+    /// that are not slot exhaustion. Callers name them, so a refusal never
+    /// reads `max_active reached (0/8)` while no slot is occupied.
+    pub fn monitor_spawn_hold_reason(
+        &self,
+        issue_number: u64,
+        review_dispatch: bool,
+    ) -> Option<String> {
+        if let Some(drain) = self.update_drain() {
+            return Some(format!(
+                "update_drain for v{} holds new launches; use {UPDATE_DRAIN_RELEASE_OPERATION}",
+                drain.version
+            ));
+        }
+        if review_dispatch {
+            return self.review_dispatch_exclusion_reason(issue_number);
+        }
+        self.agent_schedule_launch_exclusion(issue_number)
+            .map(|reason| format!("schedule admission: {reason}"))
+    }
+
     pub fn has_capacity_for_monitor_spawn(&self, issue_number: u64, review_dispatch: bool) -> bool {
         if self.launch_source_exclusion(issue_number).is_some() || self.update_drain().is_some() {
             return false;
@@ -20529,6 +20560,30 @@ impl IssueMonitorState {
             Ok(prepared) => prepared,
             Err(never) => match never {},
         }
+    }
+
+    /// Issue #7665 AC-5: the effect executor does not submit a Prepared claim
+    /// that the Project execution policy refuses. This names that hold for the
+    /// row, `issue.monitor.launch_now` and the log; it is one `; `-free entry.
+    pub(crate) fn claim_project_policy_hold(&self, issue_number: u64) -> Option<String> {
+        let root = self.wait_project_root.as_deref()?;
+        self.pending_effects
+            .iter()
+            .any(|effect| {
+                effect.state == IssueMonitorEffectState::Prepared
+                    && matches!(effect.payload, IssueMonitorEffectPayload::AcquireClaim { issue_number: owner, .. } if owner == issue_number)
+            })
+            .then(|| {
+                crate::project_execution_policy::admission(root, &[format!("issue:{issue_number}")])
+                    .err()
+            })
+            .flatten()
+            .map(|reason| {
+                format!(
+                    "claim_withheld_by_project_policy: {}",
+                    reason.replace("; ", ", ")
+                )
+            })
     }
 
     fn pending_claim_issue_numbers(&self) -> BTreeSet<u64> {
@@ -27582,7 +27637,7 @@ impl IssueMonitorState {
         // Keep them queued behind the existing transient infrastructure backoff.
         if gwt_agent::is_transient_launch_failure(&message)
             || (state == MonitorInboxState::LaunchFailed
-                && message.starts_with("Issues max_active reached (")
+                && is_monitor_spawn_hold_refusal(&message)
                 && !self.review_failure_applies(issue_number, state, now))
         {
             self.record_transient_launch_retry(issue_number, message, now);
@@ -44523,6 +44578,71 @@ mod tests {
         assert_eq!(monitor.next_launch_request(now).unwrap().issue_number, 42);
     }
 
+    /// Issue #7665 AC-5 / AC-6: no Project view is registered and the saved
+    /// Continue choice does not list this Issue, so its claim is withheld.
+    /// The row must say so instead of a bare `claim_pending`.
+    #[test]
+    fn issue7665_claim_withheld_by_project_policy_names_its_reason_on_the_row() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        gwt_core::project_execution_policy::choose(
+            temp.path(),
+            &gwt_core::project_execution_policy::ChoiceRequest {
+                operation_id: uuid::Uuid::new_v4().to_string(),
+                expected_revision: 0,
+                generation: 1,
+                choice: gwt_core::project_execution_policy::Choice::Continue,
+                consent_source_id: "human-continue".into(),
+                actor: "human".into(),
+                authorized_work_lineage: vec!["issue:42".into()],
+            },
+        )
+        .unwrap();
+        let mut monitor = test_monitor(IssueMonitorConfig {
+            enabled: true,
+            max_active: 2,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.set_wait_project_root(temp.path());
+        monitor.set_gui_connected(true);
+        scan_queued_candidates(
+            &mut monitor,
+            &[issue(42), issue(43)],
+            "2026-07-27T00:00:00Z",
+        );
+        assert_eq!(
+            monitor.prepare_claim_effects_with_probe(
+                "host/session",
+                "2026-07-27T00:00:01Z",
+                2,
+                |_| false,
+            ),
+            2
+        );
+        let status = monitor.agent_status_at("2026-07-27T00:00:02Z");
+        let reason = |number: u64| {
+            status
+                .inbox
+                .iter()
+                .find(|row| row.issue_number == number)
+                .and_then(|row| row.exclusion_reason.clone())
+                .unwrap_or_default()
+        };
+        assert!(
+            reason(43).contains("claim_withheld_by_project_policy: lineage_not_admitted"),
+            "{}",
+            reason(43)
+        );
+        assert!(
+            !reason(43)
+                .split("; ")
+                .any(|part| part == "use project.execution.status"),
+            "the reason stays one entry for launch_now's `; ` split: {}",
+            reason(43)
+        );
+        assert!(!reason(42).contains("claim_withheld_by_project_policy"));
+    }
+
     #[test]
     fn scan_claim_planning_is_side_effect_free_and_deduplicated() {
         // Phase 7 T-140: the cloned scan may select candidates, but GitHub
@@ -55378,6 +55498,39 @@ mod tests {
             !monitor.retry_ready(5379, now),
             "capacity retries are backed off"
         );
+    }
+
+    /// Issue #7665: an update drain refuses a spawn through the capacity
+    /// predicate while no slot is occupied. The refusal used to read
+    /// `max_active reached (0/8)`; it must name the hold and stay a retry.
+    #[test]
+    fn issue7665_non_capacity_spawn_hold_names_its_reason_and_requeues() {
+        let now = "2026-11-18T08:19:24Z";
+        let mut monitor = autonomous_state();
+        scan_queued_candidates(
+            &mut monitor,
+            &[auto_issue(8, "## Acceptance Criteria\n- [ ] AC-1: x\n")],
+            now,
+        );
+        assert_eq!(monitor.monitor_spawn_hold_reason(8, false), None);
+        monitor.set_update_drain(IssueMonitorUpdateDrainReason::Manual, "9.171.0", now);
+        assert!(!monitor.has_capacity_for_monitor_spawn(8, false));
+        assert_eq!(monitor.active_count(), 0, "no slot is occupied");
+        let reason = monitor
+            .monitor_spawn_hold_reason(8, false)
+            .expect("the drain is the refusal");
+        assert!(reason.starts_with("update_drain for v9.171.0"), "{reason}");
+
+        let message = format!("Issues launch hold before launching Issue #8: {reason}");
+        monitor.complete_active_launch(8, "tab-1::preparing-8");
+        monitor.set_autonomous_phase(8, AutonomousPhase::Implementing);
+        monitor.record_launch_failed_at(8, &message, now);
+        assert_eq!(
+            monitor.inbox_item(8).unwrap().state,
+            MonitorInboxState::Queued
+        );
+        assert_eq!(monitor.attempt_count(8), 0, "a hold is not an attempt");
+        assert!(!monitor.failed_issues.contains_key(&8));
     }
 
     #[test]
