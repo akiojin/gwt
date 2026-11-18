@@ -2875,7 +2875,8 @@ request.catch(() => {});
       const confirmation = (await preferences()).launch_confirmations[43];
       expect(confirmation).toMatchObject({ claim_id: identity.claim_id, window_id: identity.launched_window_id });
       expect(confirmation.delivery_id).toBeTruthy();
-      const stoppedReply = fixture.fixtureOperation("issue.monitor.stop", {
+      // Stop reads the loopback GitHub service on this worker; a synchronous child would starve it.
+      const stoppedReply = await fixture.operationAsync("issue.monitor.stop", {
         number: 43, reason, remove_from_queue: false, claim_id: identity.claim_id,
         delivery_id: confirmation.delivery_id, window_id: identity.launched_window_id,
       });
