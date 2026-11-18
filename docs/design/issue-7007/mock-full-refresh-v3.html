@@ -331,6 +331,7 @@
     <div class="row">
       <a data-openpage="start">開始画面</a>
       <a data-openpage="agents">エージェント</a>
+      <a data-openpage="agents" data-openscreen="agent-edit-tsumugi">エージェント設定</a>
       <a data-openpage="tools">ツール</a>
       <a data-openpage="settings">アプリ設定</a>
       <a data-openpage="profile">プロファイル</a>
@@ -533,9 +534,30 @@
             <p class="h-big">エージェント台帳</p>
             <p class="h-sub">並び順が利用優先度です。エージェントは名前・役割・アバターと「特性」を持つ担当者です。<b>特性（推論レベル・速度・性格）はエージェントごとに固定</b>で、起動のたびに変わることはありません。</p>
             <div class="set-group">
-              <div class="set-row"><span class="pm-face"><span class="dot"></span></span><div class="grow"><div class="t">1. ツムギ — PM</div><div class="d2">いま、この端末の PM を務めています</div><div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>Fast</b></span><span class="trait">性格 <b>全体の調整と報告を重点に。詰まりは自分で抱えず早めに知らせる</b></span></div></div><button class="btn" type="button">編集</button></div>
+              <div class="set-row"><span class="pm-face"><span class="dot"></span></span><div class="grow"><div class="t">1. ツムギ — PM</div><div class="d2">いま、この端末の PM を務めています</div><div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>Fast</b></span><span class="trait">性格 <b>全体の調整と報告を重点に。詰まりは自分で抱えず早めに知らせる</b></span></div></div><button class="btn" type="button" data-nav="agent-edit-tsumugi">編集</button></div>
+            </div>
+            <div class="set-group">
+              <div class="set-row"><span class="ava working" style="background:#2563eb">H</span><div class="grow"><div class="t">2. Haruto — 実装</div><div class="d2">いま作業中（gwt）</div><div class="traits"><span class="trait">推論 <b>xhigh</b></span><span class="trait">速度 <b>Ultrafast</b></span><span class="trait">性格 <b>実装を重点に。変更は小さく刻み、テストで確かめてから進める</b></span></div></div><button class="btn" type="button" data-nav="agent-edit-haruto">編集</button></div>
+              <div class="set-row"><span class="ava working" style="background:#c2410c">Y</span><div class="grow"><div class="t">3. Yui — 実装</div><div class="d2">いま作業中（gwt）</div><div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>Fast</b></span><span class="trait">性格 <b>画面と体験の実装を重点に。実機で見て確かめる</b></span></div></div><button class="btn" type="button" data-nav="agent-edit-yui">編集</button></div>
+              <div class="set-row"><span class="ava" style="background:#0e7490">S</span><div class="grow"><div class="t">4. Sora — データ取り込み</div><div class="d2">いま作業中（KeibaDB）</div><div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>Fast</b></span><span class="trait">性格 <b>データの調査と取り込みを重点に。形式の変化は止めて知らせる</b></span></div></div><button class="btn" type="button" data-nav="agent-edit-sora">編集</button></div>
+              <div class="set-row"><div class="grow"><div class="t">エージェントを追加する</div><div class="d2">追加と並び替えで、レート制限の偏りを吸収します。PM 専用の予備は作りません。</div></div><button class="btn" type="button" data-nav="agent-new">追加</button></div>
+            </div>
+            <div class="notice" style="margin-top:0">台帳に「使えるツール種別」の項目はありません。どのツール（アカウント）で動くかは、セッション開始時に、Issue 側の起動計画とツールの空き・制限状態から自動で決まります。担当の履歴と予定は台帳には置かず、各プロジェクトの「担当者」で見ます。</div>
+          </div>
+          <div class="screen-pane" data-screen="agent-edit-tsumugi">
+            <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="agents-ledger">&larr; 台帳へ</button></div>
+            <p class="h-big">エージェント設定 — ツムギ</p>
+            <p class="h-sub">このエージェントの属性と特性を設定します。名前とアバターは、すべての画面にすぐ反映されます。</p>
+            <div class="set-group">
+              <h4>基本</h4>
+              <div class="set-row"><span class="pm-face"><span class="dot"></span></span><div class="grow"><div class="t">名前</div><div class="d2">開始画面とヘッダーでは、この名前で表示されます。</div></div><input class="field" type="text" value="ツムギ" aria-label="名前" style="width:200px"></div>
+              <div class="set-row"><div class="grow"><div class="t">役割</div><div class="d2">台帳と担当者の表示に出る、このエージェントの担当の種類です。</div></div><input class="field" type="text" value="PM" aria-label="役割" style="width:200px"></div>
               <div class="set-row"><div class="grow"><div class="t">PM を務める</div><div class="d2">このエージェントは PM になることができます。「PM を務める」が付いたエージェントの中で、いちばん上の適格な1人が PM を務めます。</div></div><input type="checkbox" checked aria-label="PM を務める" style="accent-color:var(--accent);width:18px;height:18px;flex:none"></div>
-              <div class="set-row"><div class="grow"><div class="t">アバター</div><div class="d2">プリセットから選ぶか、自分の画像をアップロードできます。すべての画面にすぐ反映されます。アバターはエージェントの属性で、使うツールが変わっても変わりません。</div></div></div>
+              <div class="set-row"><div class="grow"><div class="t">いまの状態</div><div class="d2">この端末の PM を務めています。PM の振る舞い（知らせ方など）は、設定の「あなたの PM」で変えます。</div></div><button class="btn" type="button" data-openpage="settings">あなたの PM を開く</button></div>
+            </div>
+            <div class="set-group">
+              <h4>アバター</h4>
+              <div class="set-row"><div class="grow"><div class="t">アバター</div><div class="d2">プリセットから選ぶか、自分の画像をアップロードできます。アバターはエージェントの属性で、使うツールが変わっても変わりません。</div></div></div>
               <div class="set-row"><div class="ava-presets" role="group" aria-label="アバターのプリセット">
                 <span class="ava sel" style="background:#0f766e">ツ</span>
                 <span class="ava" style="background:#2563eb">ツ</span>
@@ -546,12 +568,142 @@
               <div class="set-row"><div class="grow"><div class="t">アバターの動き</div><div class="d2">作業中は小さく動き、待機中は静かになります。止めると全画面で止まります。</div></div><span class="switch" role="img" aria-label="オン"></span></div>
             </div>
             <div class="set-group">
-              <div class="set-row"><span class="ava working" style="background:#2563eb">H</span><div class="grow"><div class="t">2. Haruto — 実装</div><div class="d2">いま作業中（gwt）</div><div class="traits"><span class="trait">推論 <b>xhigh</b></span><span class="trait">速度 <b>Ultrafast</b></span><span class="trait">性格 <b>実装を重点に。変更は小さく刻み、テストで確かめてから進める</b></span></div></div><button class="btn" type="button">編集</button></div>
-              <div class="set-row"><span class="ava working" style="background:#c2410c">Y</span><div class="grow"><div class="t">3. Yui — 実装</div><div class="d2">いま作業中（gwt）</div><div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>Fast</b></span><span class="trait">性格 <b>画面と体験の実装を重点に。実機で見て確かめる</b></span></div></div><button class="btn" type="button">編集</button></div>
-              <div class="set-row"><span class="ava" style="background:#0e7490">S</span><div class="grow"><div class="t">4. Sora — データ取り込み</div><div class="d2">いま作業中（KeibaDB）</div><div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>Fast</b></span><span class="trait">性格 <b>データの調査と取り込みを重点に。形式の変化は止めて知らせる</b></span></div></div><button class="btn" type="button">編集</button></div>
-              <div class="set-row"><div class="grow"><div class="t">エージェントを追加する</div><div class="d2">追加と並び替えで、レート制限の偏りを吸収します。PM 専用の予備は作りません。</div></div><button class="btn" type="button">追加</button></div>
+              <h4>特性</h4>
+              <div class="set-row"><div class="grow"><div class="t">特性はこのエージェントの固定です</div><div class="d2">ここで決める特性が、そのままこのエージェントの特性になります。起動のたびに変わることはなく、起動計画で上書きされることもありません。</div></div></div>
+              <div class="set-row"><div class="grow"><div class="t">推論レベル</div><div class="d2">考えの深さです。</div></div><div class="chips" role="group" aria-label="推論レベル"><button class="chip on" type="button">標準</button><button class="chip" type="button">xhigh</button></div></div>
+              <div class="set-row"><div class="grow"><div class="t">速度</div><div class="d2">応答の速さの傾向です。</div></div><div class="chips" role="group" aria-label="速度"><button class="chip on" type="button">Fast</button><button class="chip" type="button">Ultrafast</button></div></div>
+              <div class="set-row"><div class="grow"><div class="t">性格</div><div class="d2">開発や調査で、どこを重点に置くかです。</div></div><input class="field" type="text" value="全体の調整と報告を重点に。詰まりは自分で抱えず早めに知らせる" aria-label="性格" style="width:min(420px,100%)"></div>
             </div>
-            <div class="notice" style="margin-top:0">台帳に「使えるツール種別」の項目はありません。どのツール（アカウント）で動くかは、セッション開始時に、Issue 側の起動計画とツールの空き・制限状態から自動で決まります。担当の履歴と予定は台帳には置かず、各プロジェクトの「担当者」で見ます。</div>
+            <div class="notice">使うツール（アカウント）はここでは決めません。セッション開始時に、Issue 側の起動計画とツールの空き・制限状態から自動で決まります。</div>
+            <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">保存する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
+          </div>
+          <div class="screen-pane" data-screen="agent-edit-haruto">
+            <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="agents-ledger">&larr; 台帳へ</button></div>
+            <p class="h-big">エージェント設定 — Haruto</p>
+            <p class="h-sub">このエージェントの属性と特性を設定します。名前とアバターは、すべての画面にすぐ反映されます。</p>
+            <div class="set-group">
+              <h4>基本</h4>
+              <div class="set-row"><span class="ava working" style="background:#2563eb">H</span><div class="grow"><div class="t">名前</div><div class="d2">台帳とプロジェクトの画面では、この名前で表示されます。</div></div><input class="field" type="text" value="Haruto" aria-label="名前" style="width:200px"></div>
+              <div class="set-row"><div class="grow"><div class="t">役割</div><div class="d2">台帳と担当者の表示に出る、このエージェントの担当の種類です。</div></div><input class="field" type="text" value="実装" aria-label="役割" style="width:200px"></div>
+              <div class="set-row"><div class="grow"><div class="t">PM を務める</div><div class="d2">このエージェントは PM になることができます。「PM を務める」が付いたエージェントの中で、いちばん上の適格な1人が PM を務めます。</div></div><input type="checkbox" aria-label="PM を務める" style="accent-color:var(--accent);width:18px;height:18px;flex:none"></div>
+            </div>
+            <div class="set-group">
+              <h4>アバター</h4>
+              <div class="set-row"><div class="grow"><div class="t">アバター</div><div class="d2">プリセットから選ぶか、自分の画像をアップロードできます。アバターはエージェントの属性で、使うツールが変わっても変わりません。</div></div></div>
+              <div class="set-row"><div class="ava-presets" role="group" aria-label="アバターのプリセット">
+                <span class="ava sel" style="background:#2563eb">H</span>
+                <span class="ava" style="background:#0f766e">H</span>
+                <span class="ava" style="background:#be123c">H</span>
+                <span class="ava" style="background:#a16207">H</span>
+                <span class="ava" style="background:#6d28d9">H</span>
+              </div><button class="btn" type="button">画像をアップロード</button></div>
+              <div class="set-row"><div class="grow"><div class="t">アバターの動き</div><div class="d2">作業中は小さく動き、待機中は静かになります。止めると全画面で止まります。</div></div><span class="switch" role="img" aria-label="オン"></span></div>
+            </div>
+            <div class="set-group">
+              <h4>特性</h4>
+              <div class="set-row"><div class="grow"><div class="t">特性はこのエージェントの固定です</div><div class="d2">ここで決める特性が、そのままこのエージェントの特性になります。起動のたびに変わることはなく、起動計画で上書きされることもありません。</div></div></div>
+              <div class="set-row"><div class="grow"><div class="t">推論レベル</div><div class="d2">考えの深さです。</div></div><div class="chips" role="group" aria-label="推論レベル"><button class="chip" type="button">標準</button><button class="chip on" type="button">xhigh</button></div></div>
+              <div class="set-row"><div class="grow"><div class="t">速度</div><div class="d2">応答の速さの傾向です。</div></div><div class="chips" role="group" aria-label="速度"><button class="chip" type="button">Fast</button><button class="chip on" type="button">Ultrafast</button></div></div>
+              <div class="set-row"><div class="grow"><div class="t">性格</div><div class="d2">開発や調査で、どこを重点に置くかです。</div></div><input class="field" type="text" value="実装を重点に。変更は小さく刻み、テストで確かめてから進める" aria-label="性格" style="width:min(420px,100%)"></div>
+            </div>
+            <div class="notice">使うツール（アカウント）はここでは決めません。セッション開始時に、Issue 側の起動計画とツールの空き・制限状態から自動で決まります。</div>
+            <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">保存する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
+          </div>
+          <div class="screen-pane" data-screen="agent-edit-yui">
+            <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="agents-ledger">&larr; 台帳へ</button></div>
+            <p class="h-big">エージェント設定 — Yui</p>
+            <p class="h-sub">このエージェントの属性と特性を設定します。名前とアバターは、すべての画面にすぐ反映されます。</p>
+            <div class="set-group">
+              <h4>基本</h4>
+              <div class="set-row"><span class="ava working" style="background:#c2410c">Y</span><div class="grow"><div class="t">名前</div><div class="d2">台帳とプロジェクトの画面では、この名前で表示されます。</div></div><input class="field" type="text" value="Yui" aria-label="名前" style="width:200px"></div>
+              <div class="set-row"><div class="grow"><div class="t">役割</div><div class="d2">台帳と担当者の表示に出る、このエージェントの担当の種類です。</div></div><input class="field" type="text" value="実装" aria-label="役割" style="width:200px"></div>
+              <div class="set-row"><div class="grow"><div class="t">PM を務める</div><div class="d2">このエージェントは PM になることができます。「PM を務める」が付いたエージェントの中で、いちばん上の適格な1人が PM を務めます。</div></div><input type="checkbox" aria-label="PM を務める" style="accent-color:var(--accent);width:18px;height:18px;flex:none"></div>
+            </div>
+            <div class="set-group">
+              <h4>アバター</h4>
+              <div class="set-row"><div class="grow"><div class="t">アバター</div><div class="d2">プリセットから選ぶか、自分の画像をアップロードできます。アバターはエージェントの属性で、使うツールが変わっても変わりません。</div></div></div>
+              <div class="set-row"><div class="ava-presets" role="group" aria-label="アバターのプリセット">
+                <span class="ava sel" style="background:#c2410c">Y</span>
+                <span class="ava" style="background:#2563eb">Y</span>
+                <span class="ava" style="background:#0f766e">Y</span>
+                <span class="ava" style="background:#a16207">Y</span>
+                <span class="ava" style="background:#6d28d9">Y</span>
+              </div><button class="btn" type="button">画像をアップロード</button></div>
+              <div class="set-row"><div class="grow"><div class="t">アバターの動き</div><div class="d2">作業中は小さく動き、待機中は静かになります。止めると全画面で止まります。</div></div><span class="switch" role="img" aria-label="オン"></span></div>
+            </div>
+            <div class="set-group">
+              <h4>特性</h4>
+              <div class="set-row"><div class="grow"><div class="t">特性はこのエージェントの固定です</div><div class="d2">ここで決める特性が、そのままこのエージェントの特性になります。起動のたびに変わることはなく、起動計画で上書きされることもありません。</div></div></div>
+              <div class="set-row"><div class="grow"><div class="t">推論レベル</div><div class="d2">考えの深さです。</div></div><div class="chips" role="group" aria-label="推論レベル"><button class="chip on" type="button">標準</button><button class="chip" type="button">xhigh</button></div></div>
+              <div class="set-row"><div class="grow"><div class="t">速度</div><div class="d2">応答の速さの傾向です。</div></div><div class="chips" role="group" aria-label="速度"><button class="chip on" type="button">Fast</button><button class="chip" type="button">Ultrafast</button></div></div>
+              <div class="set-row"><div class="grow"><div class="t">性格</div><div class="d2">開発や調査で、どこを重点に置くかです。</div></div><input class="field" type="text" value="画面と体験の実装を重点に。実機で見て確かめる" aria-label="性格" style="width:min(420px,100%)"></div>
+            </div>
+            <div class="notice">使うツール（アカウント）はここでは決めません。セッション開始時に、Issue 側の起動計画とツールの空き・制限状態から自動で決まります。</div>
+            <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">保存する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
+          </div>
+          <div class="screen-pane" data-screen="agent-edit-sora">
+            <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="agents-ledger">&larr; 台帳へ</button></div>
+            <p class="h-big">エージェント設定 — Sora</p>
+            <p class="h-sub">このエージェントの属性と特性を設定します。名前とアバターは、すべての画面にすぐ反映されます。</p>
+            <div class="set-group">
+              <h4>基本</h4>
+              <div class="set-row"><span class="ava" style="background:#0e7490">S</span><div class="grow"><div class="t">名前</div><div class="d2">台帳とプロジェクトの画面では、この名前で表示されます。</div></div><input class="field" type="text" value="Sora" aria-label="名前" style="width:200px"></div>
+              <div class="set-row"><div class="grow"><div class="t">役割</div><div class="d2">台帳と担当者の表示に出る、このエージェントの担当の種類です。</div></div><input class="field" type="text" value="データ取り込み" aria-label="役割" style="width:200px"></div>
+              <div class="set-row"><div class="grow"><div class="t">PM を務める</div><div class="d2">このエージェントは PM になることができます。「PM を務める」が付いたエージェントの中で、いちばん上の適格な1人が PM を務めます。</div></div><input type="checkbox" aria-label="PM を務める" style="accent-color:var(--accent);width:18px;height:18px;flex:none"></div>
+            </div>
+            <div class="set-group">
+              <h4>アバター</h4>
+              <div class="set-row"><div class="grow"><div class="t">アバター</div><div class="d2">プリセットから選ぶか、自分の画像をアップロードできます。アバターはエージェントの属性で、使うツールが変わっても変わりません。</div></div></div>
+              <div class="set-row"><div class="ava-presets" role="group" aria-label="アバターのプリセット">
+                <span class="ava sel" style="background:#0e7490">S</span>
+                <span class="ava" style="background:#2563eb">S</span>
+                <span class="ava" style="background:#be123c">S</span>
+                <span class="ava" style="background:#a16207">S</span>
+                <span class="ava" style="background:#6d28d9">S</span>
+              </div><button class="btn" type="button">画像をアップロード</button></div>
+              <div class="set-row"><div class="grow"><div class="t">アバターの動き</div><div class="d2">作業中は小さく動き、待機中は静かになります。止めると全画面で止まります。</div></div><span class="switch" role="img" aria-label="オン"></span></div>
+            </div>
+            <div class="set-group">
+              <h4>特性</h4>
+              <div class="set-row"><div class="grow"><div class="t">特性はこのエージェントの固定です</div><div class="d2">ここで決める特性が、そのままこのエージェントの特性になります。起動のたびに変わることはなく、起動計画で上書きされることもありません。</div></div></div>
+              <div class="set-row"><div class="grow"><div class="t">推論レベル</div><div class="d2">考えの深さです。</div></div><div class="chips" role="group" aria-label="推論レベル"><button class="chip on" type="button">標準</button><button class="chip" type="button">xhigh</button></div></div>
+              <div class="set-row"><div class="grow"><div class="t">速度</div><div class="d2">応答の速さの傾向です。</div></div><div class="chips" role="group" aria-label="速度"><button class="chip on" type="button">Fast</button><button class="chip" type="button">Ultrafast</button></div></div>
+              <div class="set-row"><div class="grow"><div class="t">性格</div><div class="d2">開発や調査で、どこを重点に置くかです。</div></div><input class="field" type="text" value="データの調査と取り込みを重点に。形式の変化は止めて知らせる" aria-label="性格" style="width:min(420px,100%)"></div>
+            </div>
+            <div class="notice">使うツール（アカウント）はここでは決めません。セッション開始時に、Issue 側の起動計画とツールの空き・制限状態から自動で決まります。</div>
+            <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">保存する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
+          </div>
+          <div class="screen-pane" data-screen="agent-new">
+            <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button" data-nav="agents-ledger">&larr; 台帳へ</button></div>
+            <p class="h-big">エージェントを追加</p>
+            <p class="h-sub">新しいエージェントの属性と特性を決めます。追加したエージェントは台帳の末尾に入り、並び順がそのまま利用優先度になります。</p>
+            <div class="set-group">
+              <h4>基本</h4>
+              <div class="set-row"><div class="grow"><div class="t">名前</div><div class="d2">台帳とプロジェクトの画面では、この名前で表示されます。</div></div><input class="field" type="text" placeholder="名前（例：Ren）" aria-label="名前" style="width:200px"></div>
+              <div class="set-row"><div class="grow"><div class="t">役割</div><div class="d2">台帳と担当者の表示に出る、このエージェントの担当の種類です。</div></div><input class="field" type="text" placeholder="役割（例：実装）" aria-label="役割" style="width:200px"></div>
+              <div class="set-row"><div class="grow"><div class="t">PM を務める</div><div class="d2">このエージェントは PM になることができます。「PM を務める」が付いたエージェントの中で、いちばん上の適格な1人が PM を務めます。</div></div><input type="checkbox" aria-label="PM を務める" style="accent-color:var(--accent);width:18px;height:18px;flex:none"></div>
+            </div>
+            <div class="set-group">
+              <h4>アバター</h4>
+              <div class="set-row"><div class="grow"><div class="t">アバター</div><div class="d2">プリセットから選ぶか、自分の画像をアップロードできます。選ばなければ、名前の頭文字の既定アバターになります。アバターはエージェントの属性で、使うツールが変わっても変わりません。</div></div></div>
+              <div class="set-row"><div class="ava-presets" role="group" aria-label="アバターのプリセット">
+                <span class="ava" style="background:#0f766e">？</span>
+                <span class="ava" style="background:#2563eb">？</span>
+                <span class="ava" style="background:#be123c">？</span>
+                <span class="ava" style="background:#a16207">？</span>
+                <span class="ava" style="background:#6d28d9">？</span>
+              </div><button class="btn" type="button">画像をアップロード</button></div>
+              <div class="set-row"><div class="grow"><div class="t">アバターの動き</div><div class="d2">作業中は小さく動き、待機中は静かになります。止めると全画面で止まります。</div></div><span class="switch" role="img" aria-label="オン"></span></div>
+            </div>
+            <div class="set-group">
+              <h4>特性</h4>
+              <div class="set-row"><div class="grow"><div class="t">特性はこのエージェントの固定です</div><div class="d2">ここで決める特性が、そのままこのエージェントの特性になります。起動のたびに変わることはなく、起動計画で上書きされることもありません。</div></div></div>
+              <div class="set-row"><div class="grow"><div class="t">推論レベル</div><div class="d2">考えの深さです。</div></div><div class="chips" role="group" aria-label="推論レベル"><button class="chip on" type="button">標準</button><button class="chip" type="button">xhigh</button></div></div>
+              <div class="set-row"><div class="grow"><div class="t">速度</div><div class="d2">応答の速さの傾向です。</div></div><div class="chips" role="group" aria-label="速度"><button class="chip on" type="button">Fast</button><button class="chip" type="button">Ultrafast</button></div></div>
+              <div class="set-row"><div class="grow"><div class="t">性格</div><div class="d2">開発や調査で、どこを重点に置くかです。</div></div><input class="field" type="text" placeholder="性格（例：調査を重点に。根拠を確かめてから進める）" aria-label="性格" style="width:min(420px,100%)"></div>
+            </div>
+            <div class="notice">使うツール（アカウント）はここでは決めません。セッション開始時に、Issue 側の起動計画とツールの空き・制限状態から自動で決まります。</div>
+            <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">追加する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
           </div>
         </div>
       </div>
@@ -1676,7 +1828,7 @@
 
   <footer class="doc">
     <h3>このモックについて</h3>
-    <p>全画面刷新モック v3（Issue #7007）。開始画面（PM との会話がメイン、プロジェクトの内容は出さず一覧は名前だけの導線、判断は会話の中のカードでその場で決定）、エージェント台帳とツールの独立画面（ヘッダーから開く。台帳は特性＝推論・速度・性格が固定で、使えるツール種別の項目は無し。ツールはアカウント単位のプールと使用量）、アプリ設定、プロファイル、コマンドパレット、起動ウィザード、ターミナル表示を網羅しています。プロジェクト画面群（相談／タスク／課題／課題詳細／作業／判断待ち／担当者（履歴・予定つき）／掲示板（PM の報告を統合）／検索／ブランチ／ログ／プロジェクト設定）は、gwt と KeibaDB の2プロジェクト分あります。PM 専用の画面（8タブ）は作らず、会話は「相談」に一本化しています。画面の移動は上のボタン、各プロジェクトのレール、カードから行えます。</p>
+    <p>全画面刷新モック v3（Issue #7007）。開始画面（PM との会話がメイン、プロジェクトの内容は出さず一覧は名前だけの導線、判断は会話の中のカードでその場で決定）、エージェント台帳とツールの独立画面（ヘッダーから開く。台帳は特性＝推論・速度・性格が固定で、使えるツール種別の項目は無し。台帳の各行の「編集」と「追加」からは、エージェントごとの設定画面（名前・アバター・役割・PM 適格・特性の編集と新規作成）を開く。ツールはアカウント単位のプールと使用量）、アプリ設定、プロファイル、コマンドパレット、起動ウィザード、ターミナル表示を網羅しています。プロジェクト画面群（相談／タスク／課題／課題詳細／作業／判断待ち／担当者（履歴・予定つき）／掲示板（PM の報告を統合）／検索／ブランチ／ログ／プロジェクト設定）は、gwt と KeibaDB の2プロジェクト分あります。PM 専用の画面（8タブ）は作らず、会話は「相談」に一本化しています。画面の移動は上のボタン、各プロジェクトのレール、カードから行えます。</p>
   </footer>
 </div>
 
@@ -1684,7 +1836,7 @@
 (function () {
   var pageLabels = { start: "開始画面", settings: "設定", agents: "エージェント", tools: "ツール", profile: "プロファイル", palette: "コマンドパレット", wizard: "起動ウィザード", terminal: "ターミナル表示", gwt: "gwt", keibadb: "KeibaDB" };
   var screenTitles = {
-    appsettings: "設定", "agents-ledger": "エージェント", "tools-pool": "ツール", "profile-main": "プロファイル", "palette-main": "コマンドパレット", "terminal-main": "ターミナル表示",
+    appsettings: "設定", "agents-ledger": "エージェント", "agent-edit-tsumugi": "エージェント設定 — ツムギ", "agent-edit-haruto": "エージェント設定 — Haruto", "agent-edit-yui": "エージェント設定 — Yui", "agent-edit-sora": "エージェント設定 — Sora", "agent-new": "エージェントを追加", "tools-pool": "ツール", "profile-main": "プロファイル", "palette-main": "コマンドパレット", "terminal-main": "ターミナル表示",
     "g-ask": "相談", "g-tasks": "タスク", "g-task": "タスク詳細", "g-issues": "課題", "g-issue": "課題 #5561", "g-works": "作業", "g-decide": "判断待ち", "g-agents": "担当者",
     "g-board": "掲示板", "g-index": "検索", "g-branches": "ブランチ", "g-logs": "ログ", "g-settings": "設定",
     "k-ask": "相談", "k-tasks": "タスク", "k-task": "タスク詳細", "k-issues": "課題", "k-issue": "課題 #121", "k-works": "作業", "k-decide": "判断待ち", "k-agents": "担当者",
