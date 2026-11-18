@@ -1583,6 +1583,8 @@ pub fn reconcile_issue_monitor_windows_with_observations(
     monitor.reconcile_observed_launch_bindings(live_launch_owners, observed_at, now);
     monitor.reconcile_cancelled_claim_phases(settlements, now);
     monitor.recover_stuck_autonomous(now);
+    // Issue #7688: a scan with no canvas still ends an unspawned review.
+    monitor.expire_unbound_review_reservations(now);
     let mut outcome = monitor.reconcile_idle_windows(settlements, now);
     outcome.released.extend(terminal.released);
     outcome.requeued.extend(terminal.requeued);
