@@ -10,7 +10,10 @@ use std::{
 };
 
 use fs2::FileExt;
-use gwt_core::timestamp::UtcTimestamp;
+use gwt_core::{
+    operation_deadline::{self, NamedFileLock},
+    timestamp::UtcTimestamp,
+};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -925,7 +928,7 @@ impl Session {
         validate_session_id_path_component(&self.id)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
         let content = serialize_session_toml(self)?;
-        with_session_lock(dir, &self.id, || {
+        with_session_lock(dir, &self.id, "Session::save", None, || {
             write_session_toml_atomic(&session_file_path(dir, &self.id), &content)
         })
     }
@@ -938,7 +941,7 @@ impl Session {
         validate_session_id_path_component(&self.id)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
         let content = serialize_session_toml(self)?;
-        with_session_lock(dir, &self.id, || {
+        with_session_lock(dir, &self.id, "Session::save_if_absent", None, || {
             let path = session_file_path(dir, &self.id);
             match inspect_session_path(&path) {
                 SessionPathState::Missing => {
@@ -974,7 +977,8 @@ impl Session {
             return Ok(false);
         }
         let content = serialize_session_toml(self)?;
-        with_session_lock(dir, &self.id, || {
+        let operation = "Session::save_if_execution_identity_matches";
+        with_session_lock(dir, &self.id, operation, None, || {
             let path = session_file_path(dir, &self.id);
             let durable = match inspect_session_path(&path) {
                 SessionPathState::Present(session) => session,
@@ -1009,7 +1013,7 @@ impl Session {
         }
         let content = serialize_session_toml(self)?;
         let expected_content = serialize_session_toml(expected)?;
-        with_session_lock(dir, &self.id, || {
+        with_session_lock(dir, &self.id, "Session::save_if_unchanged", None, || {
             self.commit_if_unchanged_under_lease(dir, &content, &expected_content)
         })
     }
@@ -1069,7 +1073,8 @@ impl Session {
         }
         let content = serialize_session_toml(self)?;
         let expected_content = serialize_session_toml(expected)?;
-        with_session_lock(dir, &self.id, || {
+        let operation = "Session::save_if_absent_or_unchanged";
+        with_session_lock(dir, &self.id, operation, None, || {
             let path = session_file_path(dir, &self.id);
             match inspect_session_path(&path) {
                 SessionPathState::Missing => {}
@@ -1302,83 +1307,45 @@ fn serialize_session_toml(session: &Session) -> io::Result<String> {
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
 }
 
-fn with_session_lock<T, F>(dir: &Path, session_id: &str, action: F) -> io::Result<T>
-where
-    F: FnOnce() -> io::Result<T>,
-{
-    let _thread_guard = SessionLeaseThreadGuard::enter()?;
-    fs::create_dir_all(dir)?;
-    let lock_path = session_lock_path(dir, session_id);
-    let lock_file = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .truncate(false)
-        .write(true)
-        .open(&lock_path)?;
-    lock_file.lock_exclusive()?;
-    let result = action();
-    match lock_file.unlock() {
-        Ok(()) => result,
-        Err(unlock_error) => match result {
-            Ok(_) => Err(unlock_error),
-            Err(action_error) => Err(action_error),
-        },
-    }
-}
-
-fn with_session_lock_wait<T, F>(
+fn with_session_lock<T>(
     dir: &Path,
     session_id: &str,
-    wait: Duration,
-    action: F,
-) -> io::Result<T>
-where
-    F: FnOnce() -> io::Result<T>,
-{
+    operation: &str,
+    deadline: Option<Instant>,
+    action: impl FnOnce() -> io::Result<T>,
+) -> io::Result<T> {
     let _thread_guard = SessionLeaseThreadGuard::enter()?;
     fs::create_dir_all(dir)?;
-    let lock_path = session_lock_path(dir, session_id);
-    let lock_file = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .truncate(false)
-        .write(true)
-        .open(&lock_path)?;
-    let deadline = Instant::now() + wait;
-    loop {
-        match lock_file.try_lock_exclusive() {
-            Ok(()) => break,
-            Err(error)
-                if error.kind() == io::ErrorKind::WouldBlock
-                    || error.raw_os_error() == fs2::lock_contended_error().raw_os_error() =>
-            {
-                let now = Instant::now();
-                if now >= deadline {
-                    return Err(io::Error::new(
-                        io::ErrorKind::WouldBlock,
-                        "Session lease is held by another gwt operation; hook bookkeeping skipped",
-                    ));
-                }
-                std::thread::sleep(SESSION_LEASE_POLL.min(deadline.saturating_duration_since(now)));
-            }
-            Err(error) => return Err(error),
-        }
-    }
+    let lock = acquire_session_lock(dir, session_id, operation, deadline)?;
     let result = action();
-    match lock_file.unlock() {
-        Ok(()) => result,
-        Err(unlock_error) => match result {
-            Ok(_) => Err(unlock_error),
-            Err(action_error) => Err(action_error),
-        },
-    }
+    let unlocked = lock.unlock();
+    result.and_then(|value| unlocked.map(|()| value))
+}
+
+fn acquire_session_lock(
+    dir: &Path,
+    session_id: &str,
+    operation: &str,
+    deadline: Option<Instant>,
+) -> io::Result<NamedFileLock> {
+    NamedFileLock::acquire_until(&session_lock_path(dir, session_id), operation, deadline)
+        .map_err(|error| {
+            if error.kind() == io::ErrorKind::WouldBlock {
+                io::Error::new(
+                    error.kind(),
+                    format!("Session lease is held by another gwt operation; retry after it settles: {error}"),
+                )
+            } else {
+                error
+            }
+        })
 }
 
 /// Ordered Session path locks held until this guard is dropped.
 /// Acquire owner leases first and do not persist these Sessions while held.
 #[must_use]
 pub struct SessionPathLeases {
-    files: Vec<File>,
+    files: Vec<NamedFileLock>,
     _thread_guard: Option<SessionLeaseThreadGuard>,
     _not_send: std::marker::PhantomData<std::rc::Rc<()>>,
 }
@@ -1386,7 +1353,7 @@ pub struct SessionPathLeases {
 impl SessionPathLeases {
     fn unlock(self) -> io::Result<()> {
         let mut result = Ok(());
-        for file in self.files.iter().rev() {
+        for file in self.files.into_iter().rev() {
             if let Err(error) = file.unlock() {
                 if result.is_ok() {
                     result = Err(error);
@@ -1399,11 +1366,17 @@ impl SessionPathLeases {
 
 /// Hold sorted, deduplicated Session path leases across an external transaction.
 /// An empty set takes no lock and may be used inside an existing Session lease.
+#[track_caller]
 pub fn acquire_session_path_leases(
     sessions_dir: &Path,
     session_ids: &[&str],
 ) -> io::Result<SessionPathLeases> {
-    acquire_session_path_leases_wait(sessions_dir, session_ids, SESSION_LEASE_WAIT)
+    acquire_session_path_leases_until(
+        sessions_dir,
+        session_ids,
+        &format!("Session transaction at {}", std::panic::Location::caller()),
+        operation_deadline::now() + SESSION_LEASE_WAIT,
+    )
 }
 
 /// Hold the per-Session lease while classifying its durable path and running
@@ -1411,6 +1384,7 @@ pub fn acquire_session_path_leases(
 ///
 /// Callers combining this with an owner ledger lease must acquire the owner
 /// lease first and must not persist the same Session from `operation`.
+#[track_caller]
 pub fn with_session_path_lease<T, F>(
     sessions_dir: &Path,
     session_id: &str,
@@ -1424,6 +1398,7 @@ where
 
 /// [`with_session_path_lease`] with an explicit wait bound for retry-aware
 /// callers and deterministic contention tests.
+#[track_caller]
 pub fn with_session_path_lease_wait<T, F>(
     sessions_dir: &Path,
     session_id: &str,
@@ -1433,7 +1408,25 @@ pub fn with_session_path_lease_wait<T, F>(
 where
     F: FnOnce(SessionPathState) -> io::Result<T>,
 {
-    let leases = acquire_session_path_leases_wait(sessions_dir, &[session_id], wait)?;
+    with_named_session_path_lease_until(
+        sessions_dir,
+        session_id,
+        &format!("Session transaction at {}", std::panic::Location::caller()),
+        operation_deadline::now() + wait,
+        operation,
+    )
+}
+
+/// Lease an exact Session path with an absolute wait limit and a diagnostic operation name.
+pub fn with_named_session_path_lease_until<T>(
+    sessions_dir: &Path,
+    session_id: &str,
+    operation_name: &str,
+    deadline: Instant,
+    operation: impl FnOnce(SessionPathState) -> io::Result<T>,
+) -> io::Result<T> {
+    let leases =
+        acquire_session_path_leases_until(sessions_dir, &[session_id], operation_name, deadline)?;
     let result = operation(inspect_session_path(&session_file_path(
         sessions_dir,
         session_id,
@@ -1447,10 +1440,11 @@ where
     }
 }
 
-fn acquire_session_path_leases_wait(
+fn acquire_session_path_leases_until(
     sessions_dir: &Path,
     session_ids: &[&str],
-    wait: Duration,
+    operation: &str,
+    deadline: Instant,
 ) -> io::Result<SessionPathLeases> {
     let ids: BTreeSet<_> = session_ids.iter().copied().collect();
     let mut leases = SessionPathLeases {
@@ -1470,37 +1464,13 @@ fn acquire_session_path_leases_wait(
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     }
     fs::create_dir_all(sessions_dir)?;
-    let deadline = Instant::now() + wait;
-    let is_contended = |error: &io::Error| {
-        error.kind() == io::ErrorKind::WouldBlock
-            || error.raw_os_error() == fs2::lock_contended_error().raw_os_error()
-    };
     for id in ids {
-        let lock_file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .truncate(false)
-            .write(true)
-            .open(session_lock_path(sessions_dir, id))?;
-        loop {
-            match lock_file.try_lock_exclusive() {
-                Ok(()) => break,
-                Err(error) if is_contended(&error) => {
-                    let now = Instant::now();
-                    if now >= deadline {
-                        return Err(io::Error::new(
-                        io::ErrorKind::WouldBlock,
-                        "Session lease is held by another gwt operation; retry after it settles",
-                    ));
-                    }
-                    std::thread::sleep(
-                        SESSION_LEASE_POLL.min(deadline.saturating_duration_since(now)),
-                    );
-                }
-                Err(error) => return Err(error),
-            }
-        }
-        leases.files.push(lock_file);
+        leases.files.push(acquire_session_lock(
+            sessions_dir,
+            id,
+            operation,
+            Some(deadline),
+        )?);
     }
     Ok(leases)
 }
@@ -1512,6 +1482,7 @@ fn acquire_session_path_leases_wait(
 /// Session persistence use the same lock file. Callers combining this with an
 /// owner ledger lease must acquire the owner lease first and must not persist
 /// the same Session from `operation`.
+#[track_caller]
 pub fn with_session_lease<T, F>(
     sessions_dir: &Path,
     session_id: &str,
@@ -1525,6 +1496,7 @@ where
 
 /// [`with_session_lease`] with an explicit wait bound for retry-aware callers
 /// and deterministic contention tests.
+#[track_caller]
 pub fn with_session_lease_wait<T, F>(
     sessions_dir: &Path,
     session_id: &str,
@@ -1534,19 +1506,43 @@ pub fn with_session_lease_wait<T, F>(
 where
     F: FnOnce(&Session) -> io::Result<T>,
 {
-    with_session_path_lease_wait(sessions_dir, session_id, wait, |state| match state {
-        SessionPathState::Present(session) => operation(&session),
-        SessionPathState::Missing => Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("Session not found: {session_id}"),
-        )),
-        SessionPathState::Error(error) => Err(error),
-    })
+    with_named_session_lease_wait(
+        sessions_dir,
+        session_id,
+        &format!("Session transaction at {}", std::panic::Location::caller()),
+        wait,
+        operation,
+    )
+}
+
+/// Like [`with_session_lease_wait`] with a diagnostic name for the protected operation.
+pub fn with_named_session_lease_wait<T>(
+    sessions_dir: &Path,
+    session_id: &str,
+    operation_name: &str,
+    wait: Duration,
+    operation: impl FnOnce(&Session) -> io::Result<T>,
+) -> io::Result<T> {
+    with_named_session_path_lease_until(
+        sessions_dir,
+        session_id,
+        operation_name,
+        operation_deadline::now() + wait,
+        |state| match state {
+            SessionPathState::Present(session) => operation(&session),
+            SessionPathState::Missing => Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("Session not found: {session_id}"),
+            )),
+            SessionPathState::Error(error) => Err(error),
+        },
+    )
 }
 
 /// Lease two distinct Sessions in lexical order under an already-held owner
 /// lease. A single thread guard covers the pair; ordinary nested Session
 /// leases remain forbidden. The callback receives Sessions in caller order.
+#[track_caller]
 pub fn with_session_pair_lease<T>(
     sessions_dir: &Path,
     session_ids: [&str; 2],
@@ -1566,37 +1562,19 @@ pub fn with_session_pair_lease<T>(
     fs::create_dir_all(sessions_dir)?;
     let mut ordered = session_ids;
     ordered.sort_unstable();
-    let deadline = Instant::now() + SESSION_LEASE_WAIT;
+    let deadline = operation_deadline::now() + SESSION_LEASE_WAIT;
+    let operation_name = format!(
+        "Session pair transaction at {}",
+        std::panic::Location::caller()
+    );
     let mut locks = Vec::with_capacity(2);
     for id in ordered {
-        let file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(session_lock_path(sessions_dir, id))?;
-        loop {
-            match file.try_lock_exclusive() {
-                Ok(()) => break,
-                Err(error)
-                    if error.kind() == io::ErrorKind::WouldBlock
-                        || error.raw_os_error() == fs2::lock_contended_error().raw_os_error() =>
-                {
-                    let now = Instant::now();
-                    if now >= deadline {
-                        return Err(io::Error::new(
-                            io::ErrorKind::WouldBlock,
-                            "Session pair lease is held; retry after it settles",
-                        ));
-                    }
-                    std::thread::sleep(
-                        SESSION_LEASE_POLL.min(deadline.saturating_duration_since(now)),
-                    );
-                }
-                Err(error) => return Err(error),
-            }
-        }
-        locks.push(file);
+        locks.push(acquire_session_lock(
+            sessions_dir,
+            id,
+            &operation_name,
+            Some(deadline),
+        )?);
     }
     let sessions = [
         Session::load(&session_file_path(sessions_dir, session_ids[0]))?,
@@ -1789,7 +1767,7 @@ where
 {
     validate_session_id_path_component(session_id)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-    with_session_lock(sessions_dir, session_id, || {
+    with_session_lock(sessions_dir, session_id, "update_session", None, || {
         let path = session_file_path(sessions_dir, session_id);
         let mut session = Session::load_and_migrate(&path)?;
         mutate(&mut session)?;
@@ -1831,7 +1809,9 @@ where
 {
     validate_session_id_path_component(session_id)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-    with_session_lock_wait(sessions_dir, session_id, wait, || {
+    let operation = "update_session_with_wait";
+    let deadline = Some(operation_deadline::now() + wait);
+    with_session_lock(sessions_dir, session_id, operation, deadline, || {
         let path = session_file_path(sessions_dir, session_id);
         let mut session = Session::load_and_migrate(&path)?;
         mutate(&mut session)?;
@@ -1857,7 +1837,8 @@ where
 {
     validate_session_id_path_component(session_id)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-    with_session_lock(sessions_dir, session_id, || {
+    let operation = "update_session_if_changed";
+    with_session_lock(sessions_dir, session_id, operation, None, || {
         let path = session_file_path(sessions_dir, session_id);
         let mut session = Session::load(&path)?;
         let before = serialize_session_toml(&session)?;
@@ -2023,7 +2004,8 @@ where
     {
         return Ok(false);
     }
-    with_session_lock(sessions_dir, session_id, || {
+    let operation = "remove_session_if_execution_identity_matches";
+    with_session_lock(sessions_dir, session_id, operation, None, || {
         let path = session_file_path(sessions_dir, session_id);
         let session = match inspect_session_path(&path) {
             SessionPathState::Present(session) => session,
@@ -2730,7 +2712,8 @@ pub fn persist_session_status(
 ) -> std::io::Result<()> {
     validate_session_id_path_component(session_id)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-    with_session_lock(sessions_dir, session_id, || {
+    let operation = "persist_session_status";
+    with_session_lock(sessions_dir, session_id, operation, None, || {
         let path = session_file_path(sessions_dir, session_id);
         let mut session = Session::load_and_migrate(&path)?;
         session.update_status(status);
@@ -3078,9 +3061,13 @@ pub fn persist_session_completed_stop(
 ) -> std::io::Result<()> {
     validate_session_id_path_component(session_id)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-    with_session_lock(sessions_dir, session_id, || {
-        persist_session_completed_stop_under_lease(sessions_dir, session_id)
-    })
+    with_session_lock(
+        sessions_dir,
+        session_id,
+        "persist_session_completed_stop",
+        None,
+        || persist_session_completed_stop_under_lease(sessions_dir, session_id),
+    )
     .map(|_| ())
 }
 
@@ -3177,7 +3164,9 @@ pub fn persist_session_hook_metadata_with_wait(
 ) -> io::Result<Session> {
     validate_session_id_path_component(session_id)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-    with_session_lock_wait(sessions_dir, session_id, wait, || {
+    let operation = "hook session metadata";
+    let deadline = Some(operation_deadline::now() + wait);
+    with_session_lock(sessions_dir, session_id, operation, deadline, || {
         persist_session_hook_metadata_under_lease(
             sessions_dir,
             session_id,
@@ -4139,6 +4128,45 @@ display_name = "Codex"
             .expect("inspect a genuinely missing Session under its lease");
 
         assert!(observed);
+    }
+
+    #[test]
+    fn session_lease_error_identifies_the_metadata_writer_and_hold_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = Session::new(dir.path(), "work/metadata", AgentId::Codex);
+        session.save(dir.path()).unwrap();
+        let (locked, acquire) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+
+        let error = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                update_session_if_changed(dir.path(), &session.id, move |_| {
+                    locked.send(()).unwrap();
+                    released.recv().unwrap();
+                    Ok(())
+                })
+                .unwrap();
+            });
+            acquire.recv().unwrap();
+            let result =
+                with_session_lease_wait(dir.path(), &session.id, Duration::ZERO, |_| Ok(()));
+            release.send(()).unwrap();
+            result.unwrap_err()
+        });
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        let error = error.to_string();
+        assert!(
+            error.contains("operation=update_session_if_changed"),
+            "{error}"
+        );
+        let hold_time = error
+            .split_whitespace()
+            .find_map(|part| part.strip_prefix("elapsed_ms="))
+            .unwrap();
+        assert!(
+            hold_time.trim_end_matches(',').parse::<u64>().is_ok(),
+            "{error}"
+        );
     }
 
     #[test]

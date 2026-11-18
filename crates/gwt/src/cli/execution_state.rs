@@ -5559,9 +5559,10 @@ fn with_current_execution_binding_lease_wait<T>(
     };
 
     with_resolved_generation_owner_lease(&context, |context| {
-        gwt_agent::with_session_lease_wait(
+        gwt_agent::session::with_named_session_lease_wait(
             sessions_dir,
             &expected.session_id,
+            &format!("execution binding {authority:?}"),
             session_wait,
             |session| {
                 let canonical_worktree = match dunce::canonicalize(&session.worktree_path) {
