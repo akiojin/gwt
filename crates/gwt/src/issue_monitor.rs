@@ -26042,9 +26042,9 @@ impl IssueMonitorState {
                 {
                     return false;
                 }
-                // The reaper proved this generation's holder had exited. An ACK
-                // ordered before that proof needs no second canvas observation
-                // or registration grace. A later ACK can be a fresh launch.
+                // On a confirmed restart, an ACK ordered before the reaper
+                // settled the old holder needs no registration grace or second
+                // canvas observation. A surviving host uses the normal path.
                 if let Some(reaped_at) = observation.reaped_at.filter(|_| settlement == Interrupted)
                 {
                     if let Some(confirmed_at) = self
@@ -26053,7 +26053,8 @@ impl IssueMonitorState {
                         .filter(|ack| ack.window_id == **window)
                         .and_then(|ack| parse_rfc3339_utc(&ack.confirmed_at))
                     {
-                        return observation.held_holder_session_id.is_none()
+                        return observation.holder_host_dead
+                            && observation.held_holder_session_id.is_none()
                             && confirmed_at < reaped_at;
                     }
                 }
@@ -26517,8 +26518,12 @@ impl IssueMonitorState {
             .into_iter()
             .filter(|idle| {
                 idle.bound
-                    && !idle.pane_present
                     && idle.idle_kind == IssueMonitorIdleKind::ExecutionSettled
+                    && idle.issue_number.is_some_and(|number| {
+                        settlements.get(&number).is_some_and(|observation| {
+                            observation.holder_host_dead && !observation.process_held
+                        })
+                    })
             })
             .collect();
         let mut outcome = IssueMonitorIdleReconciliation {
@@ -42967,8 +42972,9 @@ mod tests {
         holder.process_held = true;
         holder.held_holder_session_id = Some("restored-holder".into());
         for number in [43, 44] {
-            observed.get_mut(&number).unwrap().reaped_at =
-                parse_rfc3339_utc("2026-09-07T04:09:45Z");
+            let execution = observed.get_mut(&number).unwrap();
+            execution.holder_host_dead = true;
+            execution.reaped_at = parse_rfc3339_utc("2026-09-07T04:09:45Z");
         }
         let mut protected = monitor.clone();
         protected
