@@ -359,6 +359,7 @@
   .term{background:#14181f;border:1px solid #2a3038;border-radius:12px;overflow:hidden}
   .term-head{display:flex;align-items:center;gap:9px;padding:9px 14px;background:#1b2027;color:#c8d0da;font-size:13px;flex-wrap:wrap}
   .term-head b{color:#fff}
+  .term-input{display:flex;gap:8px;align-items:center;margin-top:10px}.term-input .term-in{flex:1;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--ink);font:inherit}
   .term-body{padding:14px 16px;font-family:var(--mono);font-size:12px;line-height:1.75;color:#b9c4cf;white-space:pre-wrap;word-break:break-word;max-height:430px;overflow:auto}
   .term-body .ok{color:#5fc98e}.term-body .warn{color:#e5b95c}.term-body .err{color:#e0655f}.term-body .dim{color:#6d7885}.term-body .hl{color:#7dd3fc}
   /* log lines */
@@ -524,17 +525,27 @@
       <a data-openpage="projects">プロジェクト</a>
       <a data-openpage="agents">エージェント</a>
       <a data-openpage="agents" data-openscreen="agent-edit-jinsenji">エージェント設定</a>
+      <a data-openpage="agents" data-openscreen="agent-edit-oda">エージェント設定 — 小田 洋平</a>
+      <a data-openpage="agents" data-openscreen="agent-edit-himeno">エージェント設定 — 姫野 大樹</a>
+      <a data-openpage="agents" data-openscreen="agent-edit-ando">エージェント設定 — 安藤 健二</a>
+      <a data-openpage="agents" data-openscreen="agent-edit-hara">エージェント設定 — 原 和正</a>
+      <a data-openpage="agents" data-openscreen="agent-edit-suzuki">エージェント設定 — 鈴木 和斗</a>
+      <a data-openpage="agents" data-openscreen="agent-edit-hamada">エージェント設定 — 濱田 嵩翔</a>
       <a data-openpage="tools">実行環境</a>
       <a data-openpage="tools" data-openscreen="tools-pool">アカウント</a>
+      <a data-openpage="tools" data-openscreen="tools-account">アカウントの詳細</a>
       <a data-openpage="tools" data-openscreen="tool-add">アカウントを追加</a>
+      <a data-openpage="tools" data-openscreen="tool-add-apikey">API キーで追加</a>
       <a data-openpage="tools" data-openscreen="tools-supported">ツール管理</a>
       <a data-openpage="tools" data-openscreen="tools-env-add">実行環境を追加</a>
       <a data-openpage="tools" data-openscreen="tools-env-edit">実行環境を編集</a>
       <a data-openpage="tools" data-openscreen="tools-env-edit-fe">実行環境を編集（フロントエンド型経由）</a>
       <a data-openpage="settings">アプリ設定</a>
+      <a data-openpage="settings" data-openscreen="device-logs">端末全体のログ</a>
       <a data-openpage="profile">環境変数</a>
       <a data-openpage="notifications">通知</a>
       <a data-openpage="addproject">プロジェクトを追加</a>
+      <a data-openpage="addproject" data-openscreen="add-nogit">未 Git 化フォルダ</a>
       <span class="sep">gwt：</span>
       <a data-openpage="gwt" data-openscreen="g-tasks">テーマ</a>
       <a data-openpage="gwt" data-openscreen="g-issues">課題</a>
@@ -741,6 +752,10 @@
               <div class="set-row"><div class="grow"><div class="t">最初のエージェント（必須）</div><div class="d2">エージェントを1人作ります。作った人が、この端末の PM として指名されます。</div></div></div>
               <div class="set-row"><div class="grow"><div class="t">プロジェクト（任意）</div><div class="d2">最初のプロジェクトを開きます。ここで開かなくても、後からいつでも開けます。</div></div></div>
             </div>
+            <div class="set-group">
+              <h4>以前のバージョンの gwt から引き継ぐ場合</h4>
+              <div class="set-row"><div class="grow"><div class="t">引き継ぎ</div><div class="d2">これまでの設定・プロジェクト・エージェントは自動で引き継がれます。初回起動時に、引き継いだ内容と、確認が要る項目をここに出します。</div></div></div>
+            </div>
             <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="setup-account">始める — アカウントへ</button></div>
           </div>
           <div class="screen-pane" data-screen="setup-account">
@@ -750,10 +765,12 @@
             <div class="set-group" data-setuppane="todo">
               <div class="set-row"><div class="grow"><div class="t">アカウント追加ウィザードを開く</div><div class="d2">本体（CLI）が未導入の種類は、途中でツール管理へ案内します。</div></div><button class="btn primary" type="button" data-openpage="tools" data-openscreen="tool-add">ウィザードを開く</button></div>
               <div class="set-row"><div class="grow"><div class="t">いまの状態</div><div class="d2">アカウントはまだ登録されていません。登録とサインインが済むと、ここが「完了」になり、次へ進めるようになります。</div></div><span class="badge b-block">未完了</span></div>
+              <div class="set-row"><div class="grow"><div class="t">GitHub</div><div class="d2">まだサインインしていません。課題とテーマの読み書きに必要です（アカウントの登録とは別です）。</div></div><button class="btn" type="button" data-openpage="tools" data-openscreen="tools-pool">アカウント画面でサインイン</button></div>
             </div>
             <div class="set-group" data-setuppane="done" hidden>
               <div class="set-row"><div class="grow"><div class="t">Claude Code 1</div><div class="d2">会社メールでサインイン済みです。実行環境で選べるようになっています。</div></div><span class="badge b-done">完了</span></div>
               <div class="set-row"><div class="grow"><div class="t">別のアカウントを追加する</div><div class="d2">追加の操作は、アカウント追加ウィザードで行います。</div></div><button class="btn" type="button" data-openpage="tools" data-openscreen="tool-add">ウィザードを開く</button></div>
+              <div class="set-row"><div class="grow"><div class="t">GitHub</div><div class="d2">akiojin でサインイン済みです。課題とテーマの読み書きに使います。</div></div><span class="badge b-done">完了</span></div>
             </div>
             <div class="btnrow" style="margin-top:14px" data-setuppane="todo"><button class="btn iconbtn" type="button" data-nav="setup-welcome" title="戻る" aria-label="戻る">&larr;</button><button class="btn primary" type="button" data-nav="setup-agent" disabled>次へ — エージェントと PM</button></div>
             <p class="rel" style="margin-top:8px" data-setuppane="todo">「次へ」は、アカウントの登録とサインインが済むと押せるようになります。</p>
@@ -775,6 +792,7 @@
                 <span class="ava" style="background:#6d28d9">秦</span>
               </div><button class="btn" type="button">画像をアップロード</button></div>
               <div class="set-row"><div class="grow"><div class="t">この人が PM を務めます</div><div class="d2">PM は指名制です。ここで作った人が PM として指名されます。変更は、エージェントの画面での割り当て直しだけです。</div></div><span class="badge b-run">PM</span></div>
+              <div class="set-row"><div class="grow"><div class="t">PM を務める人</div><div class="d2">既にエージェントがいる場合は、その中からも選べます。</div></div><div class="chips" role="group" aria-label="PM を務める人"><button class="chip on" type="button">いま作る人</button><button class="chip" type="button">秦泉寺 章夫（既にいるエージェント）</button></div></div>
               <div class="set-row"><div class="grow"><div class="t">詳しく設定する</div><div class="d2">特性（推論レベル・速度・性格）は、エージェント設定で決めます。ここで決めなくても始められます。</div></div><button class="btn" type="button" data-openpage="agents" data-openscreen="agent-new">エージェント設定を開く</button></div>
             </div>
             <div class="btnrow" style="margin-top:14px"><button class="btn iconbtn" type="button" data-nav="setup-account" title="戻る" aria-label="戻る">&larr;</button><button class="btn primary" id="setupAgentNext" type="button" data-nav="setup-project" disabled>次へ — プロジェクト</button></div>
@@ -834,6 +852,11 @@
               <div class="prow"><span class="ptag"><i style="background:#0d9488"></i>garden-plan</span><div class="grow"><div class="meta"><span class="st"><i></i>待機中</span><span class="loopst run">自律駆動中</span><span>最終更新 3か月前</span><span class="path">~/Repos/garden-plan</span></div></div><button class="btn ghost" type="button" data-dlg="proj-stop">自律駆動を止める</button></div>
               <div class="prow"><span class="ptag"><i style="background:#9333ea"></i>trip-note</span><div class="grow"><div class="meta"><span class="st"><i></i>待機中</span><span class="loopst run">自律駆動中</span><span>最終更新 半年前</span><span class="path">~/Repos/trip-note</span></div></div><button class="btn ghost" type="button" data-dlg="proj-stop">自律駆動を止める</button></div>
             </div>
+            <p class="h-sec" style="margin-top:18px">閉じたプロジェクト</p>
+            <div id="closedProjects">
+              <div class="prow" data-closedrow><span class="ptag"><i style="background:#64748b"></i>old-prototype</span><div class="grow"><div class="meta"><span>閉じたのは先月</span><span class="path">~/Repos/old-prototype</span></div></div><button class="btn ghost" type="button" data-reopen>一覧に戻す</button></div>
+            </div>
+            <p class="rel" id="closedEmpty" hidden>閉じたプロジェクトはありません。</p>
             <p class="rel" style="margin-top:8px">プロジェクトが多いときは、上の検索で名前から探せます（この一覧が全件の置き場です）。ホームにはプロジェクトの状態は出さず、件数が多くてもホームの見え方は変わりません。</p>
             <p class="h-sec" style="margin-top:18px">プロジェクトを追加する</p>
             <div class="btnrow">
@@ -898,13 +921,22 @@
             <div class="lrow">
               <div class="grow"><div class="t">~/Documents/notes</div><div class="d">Git 管理されていないフォルダ — 開くときに理由と始め方（そのまま開く／Git 化する）を案内します</div></div>
               <span class="badge b-wait">未 Git 化</span>
-              <button class="btn" type="button">開く</button>
+              <button class="btn" type="button" data-nav="add-nogit">開く</button>
             </div>
             <div class="lrow" data-rownav="add-migrate-locked">
               <div class="grow"><div class="t">~/Repos/gwt-legacy</div><div class="d">Git リポジトリ · 通常のチェックアウト · ワークツリーがロック中</div></div>
               <span class="badge b-wait">ロック中</span>
             </div>
             <div class="btnrow" style="margin-top:14px"><button class="btn iconbtn" type="button" data-openpage="start" title="ホームへ戻る" aria-label="ホームへ戻る">&larr;</button><button class="btn ghost" type="button" data-nav="add-github">GitHub から取り込む</button><button class="btn ghost" type="button" data-nav="add-clone">URL から複製する</button></div>
+          </div>
+                    <div class="screen-pane" data-screen="add-nogit">
+            <div class="btnrow" style="margin-bottom:14px"><button class="btn iconbtn" type="button" data-nav="add-folder" title="フォルダを開くへ戻る" aria-label="フォルダを開くへ戻る">&larr;</button></div>
+            <p class="h-big">Git 管理されていないフォルダを開く</p>
+            <p class="h-sub">~/Documents/notes は Git 管理されていません。課題の実行と変更の管理は Git を前提にしているため、始め方を選んでください。</p>
+            <div class="set-group">
+              <div class="set-row"><div class="grow"><div class="t">そのまま開く</div><div class="d2">Git 化せずに開きます。見ることと PM への相談はできますが、課題の実行と変更の管理はできません。</div></div><button class="btn" type="button" data-openpage="projects" data-openscreen="projects-main">そのまま開く</button></div>
+              <div class="set-row"><div class="grow"><div class="t">Git 化して開く</div><div class="d2">このフォルダで Git リポジトリを初期化し、最初のコミットを作ってから開きます。課題の実行まで使えるようになります。</div></div><button class="btn primary" type="button" data-openpage="projects" data-openscreen="projects-main">Git 化して開く</button></div>
+            </div>
           </div>
           <div class="screen-pane" data-screen="add-migrate">
             <div class="btnrow" style="margin-bottom:14px"><button class="btn iconbtn" type="button" data-nav="add-folder" title="フォルダを開くへ戻る" aria-label="フォルダを開くへ戻る">&larr;</button></div>
@@ -994,29 +1026,35 @@
           <div class="screen-pane on" data-screen="notifications-main">
             <p class="h-big">通知</p>
             <p class="h-sub">止まった作業・判断・更新などを残します（最大100件）。</p>
+            <p class="rel" style="margin-bottom:10px">分類：<span class="badge b-wait">判断</span> 3件 · <span class="badge b-done">完了報告</span> 1件 · <span class="badge b-plan">情報</span> 1件</p>
             <div class="btnrow" style="margin-bottom:14px"><button class="btn" type="button">すべて消す</button></div>
             <div class="lrow" data-rowpage="gwt" data-rowscreen="g-decide">
               <div class="grow"><div class="t">判断待ちが 5件あります</div><div class="d">秦泉寺 章夫 · gwt 2件・KeibaDB 1件・ほか 2件 · 12:20</div></div>
+              <span class="badge b-wait">判断</span>
               <span class="badge b-wait">未読</span>
               <button class="btn ghost" type="button">消す</button>
             </div>
             <div class="lrow" data-rowpage="gwt" data-rowscreen="g-issues">
               <div class="grow"><div class="t">作業が止まりました — #7047（チェック4件が失敗）</div><div class="d">gwt · 小田 洋平 のセッション · PM が見ています · 12:03</div></div>
+              <span class="badge b-wait">判断</span>
               <span class="badge b-block">未読</span>
               <button class="btn ghost" type="button">消す</button>
             </div>
             <div class="lrow" data-rowpage="keibadb" data-rowscreen="k-decide">
               <div class="grow"><div class="t">毎日の取り込みが止まりました — 形式の変更（#121）</div><div class="d">KeibaDB · あなたの判断待ちです · 06:00</div></div>
+              <span class="badge b-wait">判断</span>
               <span class="badge b-block">未読</span>
               <button class="btn ghost" type="button">消す</button>
             </div>
             <div class="lrow" data-rowpage="settings" data-rowscreen="update-flow">
               <div class="grow"><div class="t">gwt の更新の準備ができました（9.171.0）</div><div class="d">アプリの更新 · 再起動の前に、止まる作業の確認ができます · 昨日 21:14</div></div>
+              <span class="badge b-plan">情報</span>
               <span class="badge b-plan">既読</span>
               <button class="btn ghost" type="button">消す</button>
             </div>
             <div class="lrow" data-rowpage="gwt" data-rowscreen="g-board">
               <div class="grow"><div class="t">報告：#7541 の修正がマージされました</div><div class="d">gwt · 秦泉寺 章夫の報告は掲示板にも残っています · 昨日 18:40</div></div>
+              <span class="badge b-done">完了報告</span>
               <span class="badge b-done">既読</span>
               <button class="btn ghost" type="button">消す</button>
             </div>
@@ -1033,13 +1071,13 @@
             <p class="h-big">エージェント</p>
             
             <div class="set-group">
-              <div class="set-row" data-rownav="agent-edit-jinsenji"><span class="pm-face photo"><img src="data:image/jpeg;base64,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" alt=""><span class="dot"></span></span><div class="grow"><div class="t">1. 秦泉寺 章夫 <span class="badge b-plan">PM</span></div><div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>速め</b></span><span class="trait persona">性格 <b>全体の調整と報告を重点に。詰まりは自分で抱えず早めに知らせる</b></span></div></div><button class="btn ghost iconbtn" type="button" data-openpage="terminal" data-openscreen="terminal-pm" title="出力を見る" aria-label="出力を見る">&#9654;</button><button class="btn ghost iconbtn" type="button" data-pmbtn="1" title="PM に割り当てる" aria-label="PM に割り当てる" disabled>&#9733;</button></div>
-              <div class="set-row" data-rownav="agent-edit-oda"><span class="ava working"><img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+PHJlY3Qgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiBmaWxsPSIjMjU2M2ViIi8+PHBhdGggZD0iTTE4IDI2IEwxNCAxMiBMMjggMTkgWiIgZmlsbD0iI2ZmZiIvPjxwYXRoIGQ9Ik00NiAyNiBMNTAgMTIgTDM2IDE5IFoiIGZpbGw9IiNmZmYiLz48Y2lyY2xlIGN4PSIzMiIgY3k9IjM4IiByPSIxNyIgZmlsbD0iI2ZmZiIvPjxjaXJjbGUgY3g9IjI2IiBjeT0iMzYiIHI9IjIuNCIgZmlsbD0iIzFlM2E1ZiIvPjxjaXJjbGUgY3g9IjM4IiBjeT0iMzYiIHI9IjIuNCIgZmlsbD0iIzFlM2E1ZiIvPjxwYXRoIGQ9Ik0yOSA0MyBRMzIgNDUgMzUgNDMiIHN0cm9rZT0iIzFlM2E1ZiIgc3Ryb2tlLXdpZHRoPSIxLjgiIGZpbGw9Im5vbmUiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIvPjxwYXRoIGQ9Ik0xMiA0MCBMMjAgNDEgTTEzIDQ2IEwyMCA0NCBNNTIgNDAgTDQ0IDQxIE01MSA0NiBMNDQgNDQiIHN0cm9rZT0iI2ZmZiIgc3Ryb2tlLXdpZHRoPSIxLjYiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIvPjwvc3ZnPg==" alt=""></span><div class="grow"><div class="t">2. 小田 洋平</div><div class="traits"><span class="trait">推論 <b>最大</b></span><span class="trait">速度 <b>最速</b></span><span class="trait persona">性格 <b>実装を重点に。変更は小さく刻み、テストで確かめてから進める</b></span></div></div><button class="btn ghost iconbtn" type="button" data-pmbtn="1" title="PM に割り当てる" aria-label="PM に割り当てる">&#9733;</button></div>
-              <div class="set-row" data-rownav="agent-edit-himeno"><span class="ava working"><img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+PHJlY3Qgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiBmaWxsPSIjYzI0MTBjIi8+PGVsbGlwc2UgY3g9IjMyIiBjeT0iMzYiIHJ4PSIxOCIgcnk9IjIwIiBmaWxsPSIjZmJiZjI0Ii8+PGNpcmNsZSBjeD0iMjUiIGN5PSIzMiIgcj0iNi41IiBmaWxsPSIjZmZmIi8+PGNpcmNsZSBjeD0iMzkiIGN5PSIzMiIgcj0iNi41IiBmaWxsPSIjZmZmIi8+PGNpcmNsZSBjeD0iMjUiIGN5PSIzMiIgcj0iMyIgZmlsbD0iIzQzMTQwNyIvPjxjaXJjbGUgY3g9IjM5IiBjeT0iMzIiIHI9IjMiIGZpbGw9IiM0MzE0MDciLz48cGF0aCBkPSJNMjggNDAgTDM2IDQwIEwzMiA0NSBaIiBmaWxsPSIjNDMxNDA3Ii8+PHBhdGggZD0iTTE2IDIyIFEyMCAxNCAyNiAxOCBNNDggMjIgUTQ0IDE0IDM4IDE4IiBzdHJva2U9IiNmYmJmMjQiIHN0cm9rZS13aWR0aD0iMyIgZmlsbD0ibm9uZSIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIi8+PC9zdmc+" alt=""></span><div class="grow"><div class="t">3. 姫野 大樹</div><div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>速め</b></span><span class="trait persona">性格 <b>画面と体験の実装を重点に。実機で見て確かめる。迷ったら利用者の手元で起きることを優先し、見た目の崩れは小さいうちに知らせる。作業は小さく刻んで報告し、詰まったら抱えずに早めに相談する。表示の文言は、利用者が読んで迷わない言葉を選ぶ。</b></span></div></div><button class="btn ghost iconbtn" type="button" data-pmbtn="1" title="PM に割り当てる" aria-label="PM に割り当てる">&#9733;</button></div>
-              <div class="set-row" data-rownav="agent-edit-ando"><span class="ava"><img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+PHJlY3Qgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiBmaWxsPSIjMGU3NDkwIi8+PGNpcmNsZSBjeD0iMTciIGN5PSIxNyIgcj0iNyIgZmlsbD0iIzE2NGU2MyIvPjxjaXJjbGUgY3g9IjQ3IiBjeT0iMTciIHI9IjciIGZpbGw9IiMxNjRlNjMiLz48Y2lyY2xlIGN4PSIxNyIgY3k9IjE3IiByPSIzLjQiIGZpbGw9IiNhNWYzZmMiLz48Y2lyY2xlIGN4PSI0NyIgY3k9IjE3IiByPSIzLjQiIGZpbGw9IiNhNWYzZmMiLz48Y2lyY2xlIGN4PSIzMiIgY3k9IjM2IiByPSIxOSIgZmlsbD0iIzE2NGU2MyIvPjxlbGxpcHNlIGN4PSIzMiIgY3k9IjQzIiByeD0iOSIgcnk9IjciIGZpbGw9IiNhNWYzZmMiLz48Y2lyY2xlIGN4PSIyNSIgY3k9IjMzIiByPSIyLjQiIGZpbGw9IiNlY2ZlZmYiLz48Y2lyY2xlIGN4PSIzOSIgY3k9IjMzIiByPSIyLjQiIGZpbGw9IiNlY2ZlZmYiLz48ZWxsaXBzZSBjeD0iMzIiIGN5PSI0MCIgcng9IjMuNCIgcnk9IjIuNCIgZmlsbD0iIzA4MzM0NCIvPjxwYXRoIGQ9Ik0zMiA0MiBMMzIgNDUgTTMyIDQ1IFEyOCA0OCAyNSA0NiBNMzIgNDUgUTM2IDQ4IDM5IDQ2IiBzdHJva2U9IiMwODMzNDQiIHN0cm9rZS13aWR0aD0iMS43IiBmaWxsPSJub25lIiBzdHJva2UtbGluZWNhcD0icm91bmQiLz48L3N2Zz4=" alt=""></span><div class="grow"><div class="t">4. 安藤 健二</div><div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>速め</b></span><span class="trait persona">性格 <b>データの調査と取り込みを重点に。形式の変化は止めて知らせる</b></span></div></div><button class="btn ghost iconbtn" type="button" data-pmbtn="1" title="PM に割り当てる" aria-label="PM に割り当てる">&#9733;</button></div>
-              <div class="set-row" data-rownav="agent-edit-hara"><span class="ava"><img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+PHJlY3Qgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiBmaWxsPSIjNmQyOGQ5Ii8+PHBhdGggZD0iTTE1IDMwIEwxMiAxMCBMMjcgMjAgWiIgZmlsbD0iI2ZiOTIzYyIvPjxwYXRoIGQ9Ik00OSAzMCBMNTIgMTAgTDM3IDIwIFoiIGZpbGw9IiNmYjkyM2MiLz48cGF0aCBkPSJNMzIgMTQgQzQ1IDE0IDUwIDI2IDUwIDM2IEM1MCA0OCA0MSA1NiAzMiA1NiBDMjMgNTYgMTQgNDggMTQgMzYgQzE0IDI2IDE5IDE0IDMyIDE0IFoiIGZpbGw9IiNmYjkyM2MiLz48cGF0aCBkPSJNMjAgNDIgUTMyIDU4IDQ0IDQyIFE0NCA1NCAzMiA1NiBRMjAgNTQgMjAgNDIgWiIgZmlsbD0iI2ZmZjdlZCIvPjxjaXJjbGUgY3g9IjI1IiBjeT0iMzUiIHI9IjIuNCIgZmlsbD0iIzJlMTA2NSIvPjxjaXJjbGUgY3g9IjM5IiBjeT0iMzUiIHI9IjIuNCIgZmlsbD0iIzJlMTA2NSIvPjxlbGxpcHNlIGN4PSIzMiIgY3k9IjQzIiByeD0iMyIgcnk9IjIuMiIgZmlsbD0iIzJlMTA2NSIvPjwvc3ZnPg==" alt=""></span><div class="grow"><div class="t">5. 原 和正</div><div class="traits"><span class="trait">推論 <b>最大</b></span><span class="trait">速度 <b>速め</b></span><span class="trait persona">性格 <b>ビルドと検証を重点に。失敗は切り分けてから直す</b></span></div></div><button class="btn ghost iconbtn" type="button" data-pmbtn="1" title="PM に割り当てる" aria-label="PM に割り当てる">&#9733;</button></div>
-              <div class="set-row" data-rownav="agent-edit-suzuki"><span class="ava"><img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+PHJlY3Qgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiBmaWxsPSIjYTE2MjA3Ii8+PGVsbGlwc2UgY3g9IjMyIiBjeT0iMzciIHJ4PSIxNyIgcnk9IjIxIiBmaWxsPSIjMWYyOTM3Ii8+PGVsbGlwc2UgY3g9IjMyIiBjeT0iNDIiIHJ4PSIxMC41IiByeT0iMTQiIGZpbGw9IiNmOWZhZmIiLz48Y2lyY2xlIGN4PSIyNiIgY3k9IjMwIiByPSIyLjQiIGZpbGw9IiNmOWZhZmIiLz48Y2lyY2xlIGN4PSIzOCIgY3k9IjMwIiByPSIyLjQiIGZpbGw9IiNmOWZhZmIiLz48cGF0aCBkPSJNMjcgMzYgTDM3IDM2IEwzMiA0MSBaIiBmaWxsPSIjZjU5ZTBiIi8+PHBhdGggZD0iTTE1IDM4IFE4IDQyIDEzIDQ3IE00OSAzOCBRNTYgNDIgNTEgNDciIHN0cm9rZT0iIzFmMjkzNyIgc3Ryb2tlLXdpZHRoPSIzLjQiIGZpbGw9Im5vbmUiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIvPjwvc3ZnPg==" alt=""></span><div class="grow"><div class="t">6. 鈴木 和斗</div><div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>最速</b></span><span class="trait persona">性格 <b>調査と整理を重点に。根拠を並べてから提案する</b></span></div></div><button class="btn ghost iconbtn" type="button" data-pmbtn="1" title="PM に割り当てる" aria-label="PM に割り当てる">&#9733;</button></div>
-              <div class="set-row" data-rownav="agent-edit-hamada"><span class="ava"><img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+PHJlY3Qgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiBmaWxsPSIjYmUxMjNjIi8+PHBhdGggZD0iTTMyIDE0IEwzMiA3IiBzdHJva2U9IiNmZWNkZDMiIHN0cm9rZS13aWR0aD0iMyIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIi8+PGNpcmNsZSBjeD0iMzIiIGN5PSI2IiByPSIzIiBmaWxsPSIjZmVjZGQzIi8+PHJlY3QgeD0iMTQiIHk9IjE0IiB3aWR0aD0iMzYiIGhlaWdodD0iMzAiIHJ4PSI5IiBmaWxsPSIjZTVlN2ViIi8+PHJlY3QgeD0iMTAiIHk9IjI0IiB3aWR0aD0iNSIgaGVpZ2h0PSIxMiIgcng9IjIuNSIgZmlsbD0iIzljYTNhZiIvPjxyZWN0IHg9IjQ5IiB5PSIyNCIgd2lkdGg9IjUiIGhlaWdodD0iMTIiIHJ4PSIyLjUiIGZpbGw9IiM5Y2EzYWYiLz48Y2lyY2xlIGN4PSIyNSIgY3k9IjI4IiByPSIzLjQiIGZpbGw9IiMwZWE1ZTkiLz48Y2lyY2xlIGN4PSIzOSIgY3k9IjI4IiByPSIzLjQiIGZpbGw9IiMwZWE1ZTkiLz48cmVjdCB4PSIyNCIgeT0iMzciIHdpZHRoPSIxNiIgaGVpZ2h0PSIzLjQiIHJ4PSIxLjciIGZpbGw9IiMzNzQxNTEiLz48cmVjdCB4PSIyMiIgeT0iNDQiIHdpZHRoPSIyMCIgaGVpZ2h0PSI4IiByeD0iMyIgZmlsbD0iIzljYTNhZiIvPjwvc3ZnPg==" alt=""></span><div class="grow"><div class="t">7. 濱田 嵩翔</div><div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>速め</b></span><span class="trait persona">性格 <b>性能の計測を重点に。数字で確かめてから変える</b></span></div></div><button class="btn ghost iconbtn" type="button" data-pmbtn="1" title="PM に割り当てる" aria-label="PM に割り当てる">&#9733;</button></div>
+              <div class="set-row" data-rownav="agent-edit-jinsenji"><span class="pm-face photo"><img src="data:image/jpeg;base64,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" alt=""><span class="dot"></span></span><div class="grow"><div class="t">1. 秦泉寺 章夫 <span class="badge b-plan">PM</span></div><div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>速め</b></span><span class="trait persona">性格 <b>全体の調整と報告を重点に。詰まりは自分で抱えず早めに知らせる</b></span></div></div><button class="btn ghost iconbtn" type="button" data-openpage="terminal" data-openscreen="terminal-pm" title="出力を見る" aria-label="出力を見る">&#9654;</button><button class="btn ghost iconbtn" type="button" data-pmbtn="1" title="PM に割り当てる" aria-label="PM に割り当てる" disabled>&#9733;</button><button class="btn ghost iconbtn" type="button" data-agentmove="up" title="上へ" aria-label="上へ">&#8593;</button><button class="btn ghost iconbtn" type="button" data-agentmove="down" title="下へ" aria-label="下へ">&#8595;</button><button class="btn ghost" type="button" disabled title="PM を務めているため削除できません。先に PM を割り当て直してください">削除</button></div>
+              <div class="set-row" data-rownav="agent-edit-oda"><span class="ava working"><img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+PHJlY3Qgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiBmaWxsPSIjMjU2M2ViIi8+PHBhdGggZD0iTTE4IDI2IEwxNCAxMiBMMjggMTkgWiIgZmlsbD0iI2ZmZiIvPjxwYXRoIGQ9Ik00NiAyNiBMNTAgMTIgTDM2IDE5IFoiIGZpbGw9IiNmZmYiLz48Y2lyY2xlIGN4PSIzMiIgY3k9IjM4IiByPSIxNyIgZmlsbD0iI2ZmZiIvPjxjaXJjbGUgY3g9IjI2IiBjeT0iMzYiIHI9IjIuNCIgZmlsbD0iIzFlM2E1ZiIvPjxjaXJjbGUgY3g9IjM4IiBjeT0iMzYiIHI9IjIuNCIgZmlsbD0iIzFlM2E1ZiIvPjxwYXRoIGQ9Ik0yOSA0MyBRMzIgNDUgMzUgNDMiIHN0cm9rZT0iIzFlM2E1ZiIgc3Ryb2tlLXdpZHRoPSIxLjgiIGZpbGw9Im5vbmUiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIvPjxwYXRoIGQ9Ik0xMiA0MCBMMjAgNDEgTTEzIDQ2IEwyMCA0NCBNNTIgNDAgTDQ0IDQxIE01MSA0NiBMNDQgNDQiIHN0cm9rZT0iI2ZmZiIgc3Ryb2tlLXdpZHRoPSIxLjYiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIvPjwvc3ZnPg==" alt=""></span><div class="grow"><div class="t">2. 小田 洋平</div><div class="traits"><span class="trait">推論 <b>最大</b></span><span class="trait">速度 <b>最速</b></span><span class="trait persona">性格 <b>実装を重点に。変更は小さく刻み、テストで確かめてから進める</b></span></div></div><button class="btn ghost iconbtn" type="button" data-pmbtn="1" title="PM に割り当てる" aria-label="PM に割り当てる">&#9733;</button><button class="btn ghost iconbtn" type="button" data-agentmove="up" title="上へ" aria-label="上へ">&#8593;</button><button class="btn ghost iconbtn" type="button" data-agentmove="down" title="下へ" aria-label="下へ">&#8595;</button><button class="btn ghost" type="button" data-dlg="agent-delete">削除</button></div>
+              <div class="set-row" data-rownav="agent-edit-himeno"><span class="ava working"><img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+PHJlY3Qgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiBmaWxsPSIjYzI0MTBjIi8+PGVsbGlwc2UgY3g9IjMyIiBjeT0iMzYiIHJ4PSIxOCIgcnk9IjIwIiBmaWxsPSIjZmJiZjI0Ii8+PGNpcmNsZSBjeD0iMjUiIGN5PSIzMiIgcj0iNi41IiBmaWxsPSIjZmZmIi8+PGNpcmNsZSBjeD0iMzkiIGN5PSIzMiIgcj0iNi41IiBmaWxsPSIjZmZmIi8+PGNpcmNsZSBjeD0iMjUiIGN5PSIzMiIgcj0iMyIgZmlsbD0iIzQzMTQwNyIvPjxjaXJjbGUgY3g9IjM5IiBjeT0iMzIiIHI9IjMiIGZpbGw9IiM0MzE0MDciLz48cGF0aCBkPSJNMjggNDAgTDM2IDQwIEwzMiA0NSBaIiBmaWxsPSIjNDMxNDA3Ii8+PHBhdGggZD0iTTE2IDIyIFEyMCAxNCAyNiAxOCBNNDggMjIgUTQ0IDE0IDM4IDE4IiBzdHJva2U9IiNmYmJmMjQiIHN0cm9rZS13aWR0aD0iMyIgZmlsbD0ibm9uZSIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIi8+PC9zdmc+" alt=""></span><div class="grow"><div class="t">3. 姫野 大樹</div><div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>速め</b></span><span class="trait persona">性格 <b>画面と体験の実装を重点に。実機で見て確かめる。迷ったら利用者の手元で起きることを優先し、見た目の崩れは小さいうちに知らせる。作業は小さく刻んで報告し、詰まったら抱えずに早めに相談する。表示の文言は、利用者が読んで迷わない言葉を選ぶ。</b></span></div></div><button class="btn ghost iconbtn" type="button" data-pmbtn="1" title="PM に割り当てる" aria-label="PM に割り当てる">&#9733;</button><button class="btn ghost iconbtn" type="button" data-agentmove="up" title="上へ" aria-label="上へ">&#8593;</button><button class="btn ghost iconbtn" type="button" data-agentmove="down" title="下へ" aria-label="下へ">&#8595;</button><button class="btn ghost" type="button" data-dlg="agent-delete">削除</button></div>
+              <div class="set-row" data-rownav="agent-edit-ando"><span class="ava"><img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+PHJlY3Qgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiBmaWxsPSIjMGU3NDkwIi8+PGNpcmNsZSBjeD0iMTciIGN5PSIxNyIgcj0iNyIgZmlsbD0iIzE2NGU2MyIvPjxjaXJjbGUgY3g9IjQ3IiBjeT0iMTciIHI9IjciIGZpbGw9IiMxNjRlNjMiLz48Y2lyY2xlIGN4PSIxNyIgY3k9IjE3IiByPSIzLjQiIGZpbGw9IiNhNWYzZmMiLz48Y2lyY2xlIGN4PSI0NyIgY3k9IjE3IiByPSIzLjQiIGZpbGw9IiNhNWYzZmMiLz48Y2lyY2xlIGN4PSIzMiIgY3k9IjM2IiByPSIxOSIgZmlsbD0iIzE2NGU2MyIvPjxlbGxpcHNlIGN4PSIzMiIgY3k9IjQzIiByeD0iOSIgcnk9IjciIGZpbGw9IiNhNWYzZmMiLz48Y2lyY2xlIGN4PSIyNSIgY3k9IjMzIiByPSIyLjQiIGZpbGw9IiNlY2ZlZmYiLz48Y2lyY2xlIGN4PSIzOSIgY3k9IjMzIiByPSIyLjQiIGZpbGw9IiNlY2ZlZmYiLz48ZWxsaXBzZSBjeD0iMzIiIGN5PSI0MCIgcng9IjMuNCIgcnk9IjIuNCIgZmlsbD0iIzA4MzM0NCIvPjxwYXRoIGQ9Ik0zMiA0MiBMMzIgNDUgTTMyIDQ1IFEyOCA0OCAyNSA0NiBNMzIgNDUgUTM2IDQ4IDM5IDQ2IiBzdHJva2U9IiMwODMzNDQiIHN0cm9rZS13aWR0aD0iMS43IiBmaWxsPSJub25lIiBzdHJva2UtbGluZWNhcD0icm91bmQiLz48L3N2Zz4=" alt=""></span><div class="grow"><div class="t">4. 安藤 健二</div><div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>速め</b></span><span class="trait persona">性格 <b>データの調査と取り込みを重点に。形式の変化は止めて知らせる</b></span></div></div><button class="btn ghost iconbtn" type="button" data-pmbtn="1" title="PM に割り当てる" aria-label="PM に割り当てる">&#9733;</button><button class="btn ghost iconbtn" type="button" data-agentmove="up" title="上へ" aria-label="上へ">&#8593;</button><button class="btn ghost iconbtn" type="button" data-agentmove="down" title="下へ" aria-label="下へ">&#8595;</button><button class="btn ghost" type="button" data-dlg="agent-delete">削除</button></div>
+              <div class="set-row" data-rownav="agent-edit-hara"><span class="ava"><img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+PHJlY3Qgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiBmaWxsPSIjNmQyOGQ5Ii8+PHBhdGggZD0iTTE1IDMwIEwxMiAxMCBMMjcgMjAgWiIgZmlsbD0iI2ZiOTIzYyIvPjxwYXRoIGQ9Ik00OSAzMCBMNTIgMTAgTDM3IDIwIFoiIGZpbGw9IiNmYjkyM2MiLz48cGF0aCBkPSJNMzIgMTQgQzQ1IDE0IDUwIDI2IDUwIDM2IEM1MCA0OCA0MSA1NiAzMiA1NiBDMjMgNTYgMTQgNDggMTQgMzYgQzE0IDI2IDE5IDE0IDMyIDE0IFoiIGZpbGw9IiNmYjkyM2MiLz48cGF0aCBkPSJNMjAgNDIgUTMyIDU4IDQ0IDQyIFE0NCA1NCAzMiA1NiBRMjAgNTQgMjAgNDIgWiIgZmlsbD0iI2ZmZjdlZCIvPjxjaXJjbGUgY3g9IjI1IiBjeT0iMzUiIHI9IjIuNCIgZmlsbD0iIzJlMTA2NSIvPjxjaXJjbGUgY3g9IjM5IiBjeT0iMzUiIHI9IjIuNCIgZmlsbD0iIzJlMTA2NSIvPjxlbGxpcHNlIGN4PSIzMiIgY3k9IjQzIiByeD0iMyIgcnk9IjIuMiIgZmlsbD0iIzJlMTA2NSIvPjwvc3ZnPg==" alt=""></span><div class="grow"><div class="t">5. 原 和正</div><div class="traits"><span class="trait">推論 <b>最大</b></span><span class="trait">速度 <b>速め</b></span><span class="trait persona">性格 <b>ビルドと検証を重点に。失敗は切り分けてから直す</b></span></div></div><button class="btn ghost iconbtn" type="button" data-pmbtn="1" title="PM に割り当てる" aria-label="PM に割り当てる">&#9733;</button><button class="btn ghost iconbtn" type="button" data-agentmove="up" title="上へ" aria-label="上へ">&#8593;</button><button class="btn ghost iconbtn" type="button" data-agentmove="down" title="下へ" aria-label="下へ">&#8595;</button><button class="btn ghost" type="button" data-dlg="agent-delete">削除</button></div>
+              <div class="set-row" data-rownav="agent-edit-suzuki"><span class="ava"><img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+PHJlY3Qgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiBmaWxsPSIjYTE2MjA3Ii8+PGVsbGlwc2UgY3g9IjMyIiBjeT0iMzciIHJ4PSIxNyIgcnk9IjIxIiBmaWxsPSIjMWYyOTM3Ii8+PGVsbGlwc2UgY3g9IjMyIiBjeT0iNDIiIHJ4PSIxMC41IiByeT0iMTQiIGZpbGw9IiNmOWZhZmIiLz48Y2lyY2xlIGN4PSIyNiIgY3k9IjMwIiByPSIyLjQiIGZpbGw9IiNmOWZhZmIiLz48Y2lyY2xlIGN4PSIzOCIgY3k9IjMwIiByPSIyLjQiIGZpbGw9IiNmOWZhZmIiLz48cGF0aCBkPSJNMjcgMzYgTDM3IDM2IEwzMiA0MSBaIiBmaWxsPSIjZjU5ZTBiIi8+PHBhdGggZD0iTTE1IDM4IFE4IDQyIDEzIDQ3IE00OSAzOCBRNTYgNDIgNTEgNDciIHN0cm9rZT0iIzFmMjkzNyIgc3Ryb2tlLXdpZHRoPSIzLjQiIGZpbGw9Im5vbmUiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIvPjwvc3ZnPg==" alt=""></span><div class="grow"><div class="t">6. 鈴木 和斗</div><div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>最速</b></span><span class="trait persona">性格 <b>調査と整理を重点に。根拠を並べてから提案する</b></span></div></div><button class="btn ghost iconbtn" type="button" data-pmbtn="1" title="PM に割り当てる" aria-label="PM に割り当てる">&#9733;</button><button class="btn ghost iconbtn" type="button" data-agentmove="up" title="上へ" aria-label="上へ">&#8593;</button><button class="btn ghost iconbtn" type="button" data-agentmove="down" title="下へ" aria-label="下へ">&#8595;</button><button class="btn ghost" type="button" data-dlg="agent-delete">削除</button></div>
+              <div class="set-row" data-rownav="agent-edit-hamada"><span class="ava"><img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+PHJlY3Qgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiBmaWxsPSIjYmUxMjNjIi8+PHBhdGggZD0iTTMyIDE0IEwzMiA3IiBzdHJva2U9IiNmZWNkZDMiIHN0cm9rZS13aWR0aD0iMyIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIi8+PGNpcmNsZSBjeD0iMzIiIGN5PSI2IiByPSIzIiBmaWxsPSIjZmVjZGQzIi8+PHJlY3QgeD0iMTQiIHk9IjE0IiB3aWR0aD0iMzYiIGhlaWdodD0iMzAiIHJ4PSI5IiBmaWxsPSIjZTVlN2ViIi8+PHJlY3QgeD0iMTAiIHk9IjI0IiB3aWR0aD0iNSIgaGVpZ2h0PSIxMiIgcng9IjIuNSIgZmlsbD0iIzljYTNhZiIvPjxyZWN0IHg9IjQ5IiB5PSIyNCIgd2lkdGg9IjUiIGhlaWdodD0iMTIiIHJ4PSIyLjUiIGZpbGw9IiM5Y2EzYWYiLz48Y2lyY2xlIGN4PSIyNSIgY3k9IjI4IiByPSIzLjQiIGZpbGw9IiMwZWE1ZTkiLz48Y2lyY2xlIGN4PSIzOSIgY3k9IjI4IiByPSIzLjQiIGZpbGw9IiMwZWE1ZTkiLz48cmVjdCB4PSIyNCIgeT0iMzciIHdpZHRoPSIxNiIgaGVpZ2h0PSIzLjQiIHJ4PSIxLjciIGZpbGw9IiMzNzQxNTEiLz48cmVjdCB4PSIyMiIgeT0iNDQiIHdpZHRoPSIyMCIgaGVpZ2h0PSI4IiByeD0iMyIgZmlsbD0iIzljYTNhZiIvPjwvc3ZnPg==" alt=""></span><div class="grow"><div class="t">7. 濱田 嵩翔</div><div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>速め</b></span><span class="trait persona">性格 <b>性能の計測を重点に。数字で確かめてから変える</b></span></div></div><button class="btn ghost iconbtn" type="button" data-pmbtn="1" title="PM に割り当てる" aria-label="PM に割り当てる">&#9733;</button><button class="btn ghost iconbtn" type="button" data-agentmove="up" title="上へ" aria-label="上へ">&#8593;</button><button class="btn ghost iconbtn" type="button" data-agentmove="down" title="下へ" aria-label="下へ">&#8595;</button><button class="btn ghost" type="button" data-dlg="agent-delete">削除</button></div>
               <div class="set-row"><div class="grow"><div class="t">エージェントを追加する</div></div><button class="btn iconbtn" type="button" data-nav="agent-new" title="追加" aria-label="追加">&#65291;</button></div>
             </div>
           </div>
@@ -1073,7 +1111,7 @@
 - 変化があったら、聞かれる前に知らせる。報告は結論から短く書く。
 - 実装は自分では行わず、担当のエージェントに任せる。</textarea></div>
             </div>
-                        <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">保存する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
+                        <p class="rel" style="margin-top:14px">変更は自動で保存されます。</p>
           </div>
           <div class="screen-pane" data-screen="agent-edit-oda">
             <div class="btnrow" style="margin-bottom:14px"><button class="btn iconbtn" type="button" data-nav="agents-ledger" title="エージェントへ戻る" aria-label="エージェントへ戻る">&larr;</button></div>
@@ -1104,7 +1142,7 @@
 - 失敗したら原因を切り分けてから直す。場当たり的な回避策は入れない。
 - 変更の前後で関連テストを走らせ、結果を報告に含める。</textarea></div>
             </div>
-                        <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">保存する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
+                        <p class="rel" style="margin-top:14px">変更は自動で保存されます。</p>
           </div>
           <div class="screen-pane" data-screen="agent-edit-himeno">
             <div class="btnrow" style="margin-bottom:14px"><button class="btn iconbtn" type="button" data-nav="agents-ledger" title="エージェントへ戻る" aria-label="エージェントへ戻る">&larr;</button></div>
@@ -1132,7 +1170,7 @@
               <div class="set-row"><div class="grow"><div class="t">性格（起動時に読み込む設定）</div></div></div>
               <div class="set-row"><textarea class="field" title="起動時に毎回読み込まれる指示文です。一覧では冒頭の抜粋だけが表示されます" rows="7" aria-label="性格" style="width:100%;line-height:1.6;resize:vertical">画面と体験の実装を重点に。実機で見て確かめる。迷ったら利用者の手元で起きることを優先し、見た目の崩れは小さいうちに知らせる。作業は小さく刻んで報告し、詰まったら抱えずに早めに相談する。表示の文言は、利用者が読んで迷わない言葉を選ぶ。</textarea></div>
             </div>
-                        <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">保存する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
+                        <p class="rel" style="margin-top:14px">変更は自動で保存されます。</p>
           </div>
           <div class="screen-pane" data-screen="agent-edit-ando">
             <div class="btnrow" style="margin-bottom:14px"><button class="btn iconbtn" type="button" data-nav="agents-ledger" title="エージェントへ戻る" aria-label="エージェントへ戻る">&larr;</button></div>
@@ -1163,7 +1201,7 @@
 - 件数と中身の突き合わせを行い、欠けや重複はその場で報告する。
 - 元データは書き換えず、変換は取り込み側で行う。</textarea></div>
             </div>
-                        <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">保存する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
+                        <p class="rel" style="margin-top:14px">変更は自動で保存されます。</p>
           </div>
           <div class="screen-pane" data-screen="agent-edit-hara">
             <div class="btnrow" style="margin-bottom:14px"><button class="btn iconbtn" type="button" data-nav="agents-ledger" title="エージェントへ戻る" aria-label="エージェントへ戻る">&larr;</button></div>
@@ -1194,7 +1232,7 @@
 - 検証は関連するテストから走らせ、結果は数字と一緒に報告する。
 - 環境の差異が疑われるときは、環境の情報も添える。</textarea></div>
             </div>
-                        <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">保存する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
+                        <p class="rel" style="margin-top:14px">変更は自動で保存されます。</p>
           </div>
           <div class="screen-pane" data-screen="agent-edit-suzuki">
             <div class="btnrow" style="margin-bottom:14px"><button class="btn iconbtn" type="button" data-nav="agents-ledger" title="エージェントへ戻る" aria-label="エージェントへ戻る">&larr;</button></div>
@@ -1225,7 +1263,7 @@
 - 調査結果は結論・根拠・残る不明点の順にまとめる。
 - 決められないことは決めず、判断の材料として上げる。</textarea></div>
             </div>
-                        <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">保存する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
+                        <p class="rel" style="margin-top:14px">変更は自動で保存されます。</p>
           </div>
           <div class="screen-pane" data-screen="agent-edit-hamada">
             <div class="btnrow" style="margin-bottom:14px"><button class="btn iconbtn" type="button" data-nav="agents-ledger" title="エージェントへ戻る" aria-label="エージェントへ戻る">&larr;</button></div>
@@ -1256,7 +1294,7 @@
 - 体感の報告と計測値が食い違う場合は、両方を併記する。
 - 再現の取れない計測値は、結論に使わない。</textarea></div>
             </div>
-                        <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">保存する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
+                        <p class="rel" style="margin-top:14px">変更は自動で保存されます。</p>
           </div>
           <div class="screen-pane" data-screen="agent-new">
             <div class="btnrow" style="margin-bottom:14px"><button class="btn iconbtn" type="button" data-nav="agents-ledger" title="エージェントへ戻る" aria-label="エージェントへ戻る">&larr;</button></div>
@@ -1301,8 +1339,12 @@
             <p class="h-sub">プールに登録されたアカウントを、プロバイダー単位で管理する画面です。</p>
             
             <div class="set-group">
+              <h4>GitHub</h4>
+              <div class="set-row"><div class="grow"><div class="t">GitHub（akiojin）</div><div class="d2">サインイン済み — 課題とテーマの読み書きに使います</div></div><button class="btn ghost" type="button" data-dlg="signout">サインアウト</button></div>
+            </div>
+            <div class="set-group">
               <h4>Anthropic（プール）</h4>
-              <div class="set-row"><div class="grow"><div class="t">Claude Code 1（会社メール）</div><div class="d2">サインイン済み</div><div class="use"><div class="bar"><i style="width:58%"></i></div><span>週間58%使用 · 木曜 6:00にリセット</span></div></div></div>
+              <div class="set-row" data-rownav="tools-account" data-acctrow="claude1"><div class="grow"><div class="t">Claude Code 1（会社メール）</div><div class="d2">サインイン済み</div><div class="use"><div class="bar"><i style="width:58%"></i></div><span>週間58%使用 · 木曜 6:00にリセット</span></div></div></div>
               <div class="set-row"><div class="grow"><div class="t">Claude Code 2（個人メール）</div><div class="d2">サインイン済み</div><div class="use"><div class="bar"><i class="red" style="width:100%"></i></div><span>週間100%使用 · 金曜 18:00にリセット · 上限のため、いまは割り当て対象外</span></div></div><span class="badge b-block">上限</span></div>
             </div>
             <div class="set-group">
@@ -1322,6 +1364,10 @@
             <div class="set-group">
               <h4>Z.ai（GLM）（プール）</h4>
               <div class="set-row" data-rownav="tools-env"><div class="grow"><div class="t">Z.ai 1</div><div class="d2">サインイン済み（API キー）</div><div class="use"><div class="bar"><i style="width:35%"></i></div><span>週間35%使用 · 日曜 9:00にリセット</span></div><div class="d2">属するプールを使う実行環境：GLM プール（Hermes Agent 経由）／GLM プール（OpenClaw 経由）／GLM プール（OpenCode 経由）</div></div></div>
+            </div>
+            <div class="set-group">
+              <h4>GitHub（プール）</h4>
+              <div class="set-row"><div class="grow"><div class="t">GitHub Copilot 1</div><div class="d2">サインイン済み</div><div class="use"><div class="bar"><i style="width:62%"></i></div><span>今月62%使用（公式の残量とプールの実績から算出）</span></div></div></div>
             </div>
             <div class="set-group">
               <h4>Hermes Agent（ツール側のサインイン）</h4>
@@ -1344,8 +1390,23 @@
               <div class="set-row" data-rownav="tools-supported"><div class="grow"><div class="t">ツール管理</div><div class="d2">ツール（本体＝CLI）のインストールと更新は、ツール管理だけで行います。この画面（アカウント）では扱いません。</div></div></div>
             </div>
           </div>
+                    <div class="screen-pane" data-screen="tools-account">
+            <div class="btnrow" style="margin-bottom:14px"><button class="btn iconbtn" type="button" data-nav="tools-pool" title="アカウントへ戻る" aria-label="アカウントへ戻る">&larr;</button></div>
+            <p class="h-big">アカウントの詳細 — Claude Code 1</p>
+            <p class="h-sub">Anthropic のプールのメンバーです。</p>
+            <div class="set-group">
+              <div class="set-row"><div class="grow"><div class="t">表示名</div><div class="d2">一覧に出る名前です。変更は自動で保存されます。</div></div><input class="field" type="text" value="Claude Code 1（会社メール）" aria-label="表示名" style="width:min(320px,100%)"></div>
+              <div class="set-row"><div class="grow"><div class="t">サインイン</div><div class="d2">サインイン済み（会社メール）</div></div><button class="btn ghost" type="button" data-dlg="signout">サインアウト</button></div>
+              <div class="set-row"><div class="grow"><div class="t">属するプール</div><div class="d2">Claude プール — プールのメンバーとして使われます</div></div><button class="btn" type="button" data-nav="tools-env">実行環境を見る</button></div>
+            </div>
+            <div class="set-group">
+              <div class="set-head">削除</div>
+              <div class="set-row"><div class="grow"><div class="t">このアカウントを削除する</div><div class="d2">削除すると、このアカウントだけを使う実行環境も一緒に消えます。参照している割り当ては未設定に戻ります。</div></div><button class="btn ghost" type="button" data-dlg="acct-delete">削除</button></div>
+            </div>
+          </div>
           <div class="screen-pane on" data-screen="tools-env">
             <p class="h-big">実行環境</p>
+            <p class="h-sub">プール対象のプロバイダーはプールごとに1行、それ以外はアカウントごとに1行で並びます。</p>
             <div class="btnrow" style="margin-bottom:14px"><button class="btn primary" type="button" data-nav="tools-env-add">実行環境を追加</button></div>
               <div class="set-group">
                 <h4>Anthropic（プール）</h4>
@@ -1368,6 +1429,10 @@
                 <div class="set-row" data-rownav="tools-env-edit-fe"><div class="grow"><div class="t">GLM プール（Hermes Agent 経由）</div><div class="d2">プール：Z.ai（GLM）· 経由：Hermes Agent · メンバー 1件</div><div class="d2">プールの状態：利用可能 1件（週間35%使用）</div></div><button class="btn ghost" type="button" data-nav="tools-env-delete">削除</button></div>
                 <div class="set-row" data-rownav="tools-env-edit-fe"><div class="grow"><div class="t">GLM プール（OpenClaw 経由）</div><div class="d2">プール：Z.ai（GLM）· 経由：OpenClaw · メンバー 1件</div><div class="d2">プールの状態：利用可能 1件（週間35%使用）</div></div><button class="btn ghost" type="button" data-nav="tools-env-delete">削除</button></div>
                 <div class="set-row" data-rownav="tools-env-edit-fe"><div class="grow"><div class="t">GLM プール（OpenCode 経由）</div><div class="d2">プール：Z.ai（GLM）· 経由：OpenCode · メンバー 1件</div><div class="d2">プールの状態：利用可能 1件（週間35%使用）</div></div><button class="btn ghost" type="button" data-nav="tools-env-delete">削除</button></div>
+              </div>
+              <div class="set-group">
+                <h4>GitHub（プール）</h4>
+                <div class="set-row" data-rownav="tools-env-edit"><div class="grow"><div class="t">GitHub Copilot プール（GitHub Copilot 経由）</div><div class="d2">プール：GitHub · 経由：GitHub Copilot · メンバー 1件</div><div class="d2">プールにアカウントが登録されると自動で作られます · 削除はアカウントの削除と連動します</div><div class="d2">プールの状態：利用可能 1件（今月 62% 使用 · 公式の残量とプールの実績から算出）</div></div><span class="badge b-run">利用可能</span><button class="btn ghost" type="button" disabled>削除</button></div>
               </div>
             <div class="set-group">
               <h4>管理</h4>
@@ -1404,7 +1469,7 @@
               <div class="set-row"><div class="grow"><div class="t">権限スキップ</div><div class="d2">危険な操作の都度確認を省略します。</div></div><span class="switch off" role="img" aria-label="オフ"></span></div>
               <div class="set-row"><div class="grow"><div class="t">Fast mode</div><div class="d2">ツールに Fast mode がある場合に使います。</div></div><span class="switch off" role="img" aria-label="オフ"></span></div>
             </div>
-            <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="tools-env">保存する</button><button class="btn ghost" type="button" data-nav="tools-env">キャンセル</button></div>
+            <p class="rel" style="margin-top:14px">変更は自動で保存されます。</p>
           </div>
           <div class="screen-pane" data-screen="tools-env-edit-fe">
             <div class="btnrow" style="margin-bottom:14px"><button class="btn iconbtn" type="button" data-nav="tools-env" title="実行環境へ戻る" aria-label="実行環境へ戻る">&larr;</button></div>
@@ -1443,10 +1508,25 @@
             <div class="steps"><span class="st on">1. 種類</span><span>→</span><span class="st">2. 本体の確認</span><span>→</span><span class="st">3. 接続の設定</span><span>→</span><span class="st">4. 完了</span></div>
             <div class="set-group">
               <h4>種類を選ぶ</h4>
-              <div class="set-row"><div class="chips" role="group" aria-label="ツールの種類"><button class="chip on" type="button">Claude Code</button><button class="chip" type="button">Codex</button><button class="chip" type="button">Grok Build</button><button class="chip" type="button" disabled>GitHub Copilot（未インストール）</button><button class="chip" type="button">Antigravity CLI</button><button class="chip" type="button">OpenCode</button><button class="chip" type="button">OpenClaw</button><button class="chip" type="button">Hermes Agent</button><button class="chip" type="button" disabled>ZCode（未インストール）</button><button class="chip" type="button" disabled>Qwen Code（未インストール）</button></div></div>
-              <div class="set-row" data-rownav="tools-supported"><div class="grow"><div class="t">未インストールの種類</div><div class="d2">未インストールの種類（GitHub Copilot／ZCode／Qwen Code）は選べません。ツール管理でインストールすると選べるようになります。</div></div></div>
+              <div class="set-row"><div class="chips" role="group" aria-label="ツールの種類"><button class="chip on" type="button">Claude Code</button><button class="chip" type="button">Codex</button><button class="chip" type="button">Grok Build</button><button class="chip" type="button">GitHub Copilot</button><button class="chip" type="button">Antigravity CLI</button><button class="chip" type="button">OpenCode</button><button class="chip" type="button">OpenClaw</button><button class="chip" type="button">Hermes Agent</button><button class="chip" type="button" disabled>ZCode（未インストール）</button><button class="chip" type="button" disabled>Qwen Code（未インストール）</button></div></div>
+              <div class="set-row" data-rownav="tools-supported"><div class="grow"><div class="t">未インストールの種類</div><div class="d2">未インストールの種類（ZCode／Qwen Code）は選べません。ツール管理でインストールすると選べるようになります。</div></div></div>
+            </div>
+            <div class="set-group">
+              <h4>API キーで追加する</h4>
+              <div class="set-row"><div class="grow"><div class="t">API キーで接続する種類（Z.ai 等）</div><div class="d2">本体の CLI へのサインインではなく、API キーで接続する種類はこちらから追加します。</div></div><button class="btn" type="button" data-nav="tool-add-apikey">API キーで追加する</button></div>
             </div>
             <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="tool-add-body">次へ — 本体の確認</button><button class="btn ghost iconbtn" type="button" data-nav="tools-pool" title="中止してアカウントへ戻る" aria-label="中止してアカウントへ戻る">&larr;</button></div>
+          </div>
+                    <div class="screen-pane" data-screen="tool-add-apikey">
+            <div class="btnrow" style="margin-bottom:14px"><button class="btn iconbtn" type="button" data-nav="tool-add" title="種類の選択へ戻る" aria-label="種類の選択へ戻る">&larr;</button></div>
+            <p class="h-big">API キーでアカウントを追加する</p>
+            <p class="h-sub">API キーで接続する種類のアカウントを登録します。キーはこの端末の中だけに保存します。</p>
+            <div class="steps"><span class="st on">1. 種類</span><span>→</span><span class="st on">2. API キー</span><span>→</span><span class="st">3. 完了</span></div>
+            <div class="set-group">
+              <div class="set-row"><div class="grow"><div class="t">接続先</div></div><div class="chips" role="group" aria-label="接続先"><button class="chip on" type="button">Z.ai（GLM）</button></div></div>
+              <div class="set-row"><div class="grow"><div class="t">API キー</div><div class="d2">接続の確認が取れると、登録できます。</div></div><input class="field" type="password" placeholder="API キー" aria-label="API キー" style="width:min(320px,100%)"></div>
+            </div>
+            <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="tool-add-done">接続を確認して追加する</button><button class="btn ghost" type="button" data-nav="tool-add">やめる</button></div>
           </div>
           <div class="screen-pane" data-screen="tool-add-body">
             <div class="btnrow" style="margin-bottom:14px"><button class="btn iconbtn" type="button" data-nav="tools-pool" title="アカウントへ戻る" aria-label="アカウントへ戻る">&larr;</button></div>
@@ -1557,7 +1637,7 @@
                 <tr><td>OpenCode</td><td><span class="badge b-run">導入済み</span></td><td class="num">0.9.2</td><td class="num">1.0.0</td><td><button class="btn" type="button" data-nav="tool-update">更新</button></td></tr>
                 <tr><td>OpenClaw</td><td><span class="badge b-run">導入済み</span></td><td class="num">0.5.1</td><td class="num">0.5.1（最新）</td><td></td></tr>
                 <tr><td>Hermes Agent</td><td><span class="badge b-run">導入済み</span></td><td class="num">0.7.3</td><td class="num">0.7.3（最新）</td><td></td></tr>
-                <tr><td>GitHub Copilot</td><td><span class="badge b-done">未導入</span></td><td class="num">—</td><td class="num">1.2.0</td><td><button class="btn" type="button" data-nav="tool-install">インストール</button></td></tr>
+                <tr><td>GitHub Copilot</td><td><span class="badge b-run">導入済み</span></td><td class="num">1.2.0</td><td class="num">1.2.0</td><td><span class="rel">最新です</span></td></tr>
                 <tr><td>ZCode</td><td><span class="badge b-done">未導入</span></td><td class="num">—</td><td class="num">—</td><td><button class="btn" type="button" data-nav="tool-install">インストール</button></td></tr>
                 <tr><td>Qwen Code</td><td><span class="badge b-done">未導入</span></td><td class="num">—</td><td class="num">—</td><td><button class="btn" type="button" data-nav="tool-install">インストール</button></td></tr>
               </tbody>
@@ -1588,16 +1668,27 @@
                 <div class="set-row"><div class="grow"><div class="t">判断は、出てきた時点で知らせる</div><div class="d2">オンにすると、判断が出てきた時点で通知します。オフにすると、朝と夜の報告にまとめられます。</div></div><span class="switch" role="img" aria-label="オン"></span></div>
                 <div class="set-row"><div class="grow"><div class="t">静かな時間</div><div class="d2">この時間は、止まった作業と判断だけを知らせます。</div></div><span class="timerange"><input class="field" type="time" value="23:00" aria-label="静かな時間の開始">〜<input class="field" type="time" value="07:00" aria-label="静かな時間の終了"></span><span class="switch" role="img" aria-label="オン"></span></div>
               </div>
+              <div class="set-group">
+                <h4>PM の実行環境</h4>
+                <p class="d">PM のセッションが使う実行環境です。並び順が優先度で、使えないものを飛ばして、最初に使えるものを使います。プロジェクト側のリストとは別に持ちます。</p>
+                <div class="env-list">
+                  <div class="set-row env-item" data-name="Claude プール（Claude Code 経由）"><div class="grow"><div class="t">1. Claude プール（Claude Code 経由）</div><div class="d2">プール：Anthropic · 経由：Claude Code · メンバー 2件</div></div><button class="btn ghost ord-up iconbtn" type="button" disabled title="上へ" aria-label="上へ">&#8593;</button><button class="btn ghost ord-down iconbtn" type="button" title="下へ" aria-label="下へ">&#8595;</button><button class="btn ghost env-remove" type="button">外す</button></div>
+                  <div class="set-row env-item" data-name="Codex プール（Codex 経由）"><div class="grow"><div class="t">2. Codex プール（Codex 経由）</div><div class="d2">プール：OpenAI · 経由：Codex · メンバー 3件</div></div><button class="btn ghost ord-up iconbtn" type="button" title="上へ" aria-label="上へ">&#8593;</button><button class="btn ghost ord-down iconbtn" type="button" disabled title="下へ" aria-label="下へ">&#8595;</button><button class="btn ghost env-remove" type="button">外す</button></div>
+                </div>
+                <div class="set-row"><div class="grow"><div class="t">実行環境を追加</div><div class="d2">リストに無い実行環境を、末尾に追加します。</div></div><select class="field env-add-select" aria-label="追加する実行環境" style="width:min(280px,100%)"><option>GitHub Copilot プール（GitHub Copilot 経由）</option><option>Grok Build プール（Grok Build 経由）</option><option>Antigravity プール（Antigravity 経由）</option><option>GLM プール（OpenCode 経由）</option></select><button class="btn env-add" type="button">追加する</button></div>
+              </div>
             </div>
             <div class="set-pane" data-pane="appdevice">
               <div class="set-group">
                 <h4>アプリの更新 — gwt 本体</h4>
                 <div class="set-row"><div class="grow"><div class="t">現在のバージョン</div><div class="d2">9.170.0 — 最新です。</div></div><button class="btn" type="button" data-nav="update-flow">今すぐ確認</button></div>
                 <div class="set-row"><div class="grow"><div class="t">更新を自動で適用する</div><div class="d2">オンにすると、更新の準備ができたら、動いている作業を安全に終わらせてから gwt を再起動して適用します。適用前なら取り消せます。</div></div><span class="switch" role="img" aria-label="オン"></span></div>
+                <div class="set-row"><div class="grow"><div class="t">更新を夜間に寄せる</div><div class="d2">オンにすると、自動の適用は夜間（23:00〜6:00）に行います。日中は、準備ができたことを知らせるだけにします。</div></div><span class="switch off" role="img" aria-label="オフ"></span></div>
               </div>
               <div class="set-group">
                 <h4>性能とシステム — この端末</h4>
                 <div class="set-row"><div class="grow"><div class="t">リソースのプリセット</div><div class="d2">エージェントのプロセス優先度、1人あたりの CPU 上限、ビルドの並列数、プロセスの分離のしかた。</div></div><button class="btn" type="button" data-menu="バランス,性能を優先,省リソース">バランス ▾</button></div>
+                <div class="set-row"><div class="grow"><div class="t">同時実行数（端末全体）</div><div class="d2">この端末全体で同時に動かすエージェントの上限です。プロジェクト別の同時実行数は、この上限の内訳として扱います。</div></div><input class="field" type="number" value="4" aria-label="端末全体の同時実行数" style="width:80px"></div>
                 <div class="set-row"><div class="grow"><div class="t">ログイン時に gwt を起動する</div></div><span class="switch off" role="img" aria-label="オフ"></span></div>
                                 <div class="set-row" data-rowpage="profile"><div class="grow"><div class="t">端末の環境変数</div><div class="d2">定義は環境変数の画面で、割り当ては各プロジェクト設定で行います。</div></div></div>
               </div>
@@ -1606,9 +1697,43 @@
                 <div class="set-row"><div class="grow"><div class="t">掲示板の実体はプロジェクトごとに選ぶ</div><div class="d2">掲示板として使う場所（ローカル／Slack／Teams／GitHub Discussions）は、プロジェクト設定でプロジェクトごとに選びます。既定はローカルです。ここでは Slack／Teams への接続だけを管理します。</div></div></div>
                 <div class="set-row"><div class="grow"><div class="t">Slack / Teams の接続</div><div class="d2">サインインとサインアウトもここです。</div></div><button class="btn" type="button" data-nav="connect-setup">設定する</button></div>
               </div>
+              <div class="set-group">
+                <h4>表示と通知</h4>
+                <div class="set-row"><div class="grow"><div class="t">言語</div></div><select class="field" aria-label="言語" style="width:min(220px,100%)"><option selected>日本語</option><option>English</option></select></div>
+                <div class="set-row"><div class="grow"><div class="t">テーマ</div></div><div class="chips" role="group" aria-label="テーマ"><button class="chip on" type="button">ライト</button><button class="chip" type="button">ダーク</button><button class="chip" type="button">OS に合わせる</button></div></div>
+                <div class="set-row"><div class="grow"><div class="t">OS の通知</div><div class="d2">判断待ちと完了の報告を、OS の通知でも知らせます。</div></div><span class="switch" role="img" aria-label="オン"></span></div>
+                <div class="set-row"><div class="grow"><div class="t">通知音</div><div class="d2">OS の通知のときに音を鳴らします。</div></div><span class="switch off" role="img" aria-label="オフ"></span></div>
+              </div>
+              <div class="set-group">
+                <h4>端末全体のログと報告</h4>
+                <div class="set-row" data-rownav="device-logs"><div class="grow"><div class="t">端末全体のログ</div><div class="d2">gwt 本体・更新・端末全体の動きのログです。プロジェクト内のログとは別です。</div></div></div>
+                <div class="set-row"><div class="grow"><div class="t">不具合の報告</div><div class="d2">困ったことを開発側へ送ります。送る前に、含まれる内容を確認できます。</div></div><button class="btn" type="button" data-dlg="feedback">報告する</button></div>
+              </div>
+              <div class="set-group">
+                <h4>初回セットアップを見直す</h4>
+                <div class="set-row" data-rowpage="firstrun" data-rowscreen="setup-welcome"><div class="grow"><div class="t">ようこそ</div></div></div>
+                <div class="set-row" data-rowpage="firstrun" data-rowscreen="setup-account"><div class="grow"><div class="t">アカウント</div></div></div>
+                <div class="set-row" data-rowpage="firstrun" data-rowscreen="setup-agent"><div class="grow"><div class="t">エージェントと PM</div></div></div>
+                <div class="set-row" data-rowpage="firstrun" data-rowscreen="setup-project"><div class="grow"><div class="t">プロジェクトを開く</div></div></div>
+              </div>
             </div>
 
 
+          </div>
+                              <div class="screen-pane" data-screen="device-logs">
+            <div class="btnrow" style="margin-bottom:14px"><button class="btn iconbtn" type="button" data-nav="appsettings" title="設定へ戻る" aria-label="設定へ戻る">&larr;</button></div>
+            <p class="h-big">端末全体のログ</p>
+            <p class="h-sub">gwt 本体・更新・端末全体の動きのログです。プロジェクト内のログは、各プロジェクトの「ログ」で見ます。</p>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+              <input class="field" style="flex:1;min-width:200px" type="text" placeholder="ログを探す…" aria-label="ログを探す">
+              <button class="btn" type="button" data-menu="重要度：Debug 以上,重要度：Info 以上,重要度：Warning 以上,重要度：Error のみ">重要度：Debug 以上 ▾</button>
+              <button class="btn" type="button" data-menu="プロセス：すべて,プロセス：gwtd,プロセス：更新,プロセス：PM">プロセス：すべて ▾</button>
+              <button class="btn primary" type="button">更新</button>
+            </div>
+            <div class="logline"><span class="sev info">INFO</span><span class="lt">09:12:04</span><span class="lm">gwt 本体 — 起動しました（9.170.0）</span></div>
+            <div class="logline"><span class="sev info">INFO</span><span class="lt">09:12:05</span><span class="lm">PM — 巡回を開始しました</span></div>
+            <div class="logline"><span class="sev warn">WARN</span><span class="lt">08:12:31</span><span class="lm">更新 — 9.171.0 の確認で通信が1回失敗し、再試行で成功しました</span></div>
+            <div class="logline"><span class="sev err">ERROR</span><span class="lt">昨日 22:41</span><span class="lm">更新 — 適用に失敗しました（理由：ディスクの空き不足）。前の版のまま動き続けています</span></div>
           </div>
           <div class="screen-pane" data-screen="connect-setup">
             <div class="btnrow" style="margin-bottom:14px"><button class="btn iconbtn" type="button" data-nav="appsettings" title="設定へ戻る" aria-label="設定へ戻る">&larr;</button></div>
@@ -1621,8 +1746,8 @@
               <div class="set-row"><div class="grow"><div class="t">シークレット</div><div class="d2">この端末の中だけに保存します。画面には出しません。</div></div><input class="field" type="password" placeholder="シークレット" aria-label="シークレット" style="width:260px"></div>
               <div class="set-row"><div class="grow"><div class="t">OAuth の受け口（ポート）</div><div class="d2">サインインの戻り先に使う、この端末のポートです。</div></div><input class="field" type="text" value="8765" aria-label="OAuth のポート" style="width:120px"></div>
             </div>
-            <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button">設定を保存する</button><button class="btn" type="button">サインイン</button><button class="btn ghost" type="button" data-dlg="signout">サインアウト</button></div>
-            <p class="rel" style="margin-top:10px">保存してサインインが済むと、プロジェクト設定で実体として選べるようになります。接続が切れたときは、理由をここに出します。</p>
+            <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button">サインイン</button><button class="btn ghost" type="button" data-dlg="signout">サインアウト</button></div>
+            <p class="rel" style="margin-top:10px">変更は自動で保存されます。サインインが済むと、プロジェクト設定で実体として選べるようになります。接続が切れたときは、理由をここに出します。</p>
           </div>
           <div class="screen-pane" data-screen="update-flow">
             <div class="btnrow" style="margin-bottom:14px"><button class="btn iconbtn" type="button" data-nav="appsettings" title="設定へ戻る" aria-label="設定へ戻る">&larr;</button></div>
@@ -1654,7 +1779,7 @@
             </div>
             <div class="set-group">
               <div class="set-head">失敗したとき</div>
-              <div class="set-row"><div class="grow"><div class="t">適用に失敗した場合</div><div class="d2">理由とログへの導線を出し、やり直せる形にします。前の版のまま動き続けます。</div></div><button class="btn" type="button" data-openpage="gwt" data-openscreen="g-logs">ログを開く</button><button class="btn" type="button">やり直す</button></div>
+              <div class="set-row"><div class="grow"><div class="t">適用に失敗した場合</div><div class="d2">理由とログへの導線を出し、やり直せる形にします。前の版のまま動き続けます。</div></div><button class="btn" type="button" data-openpage="settings" data-openscreen="device-logs">端末全体のログを開く</button><button class="btn" type="button">やり直す</button></div>
             </div>
           </div>
         </div>
@@ -1724,6 +1849,7 @@
               <div class="btnrow" style="margin-bottom:14px"><button class="btn iconbtn" type="button" data-nav="g-tasks" title="テーマ一覧へ戻る" aria-label="テーマ一覧へ戻る">&larr;</button></div>
               <p class="h-big">全画面刷新（#7007）</p>
               <p class="h-sub">テーマ · <b>gwt</b> · 会話から自動で記録（11月12日、ホームで決定）· 配下の課題 4件</p>
+              <p class="rel" style="margin-top:6px">このテーマは GitHub の Issue です：#7007 <a class="plink" href="https://github.com/akiojin/gwt/issues/7007" target="_blank" rel="noopener">GitHub で開く</a></p>
               <div class="set-group">
                 <h4>このテーマについて</h4>
                 <p class="d">gwt の画面全体を作り替えるテーマです。ホームは PM との会話の場所にし、判断はその場で決められる形にします。</p>
@@ -1835,6 +1961,10 @@
                 <h4>やり取り</h4>
                 <div class="set-row"><span class="pm-face sm photo"><img src="data:image/jpeg;base64,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" alt=""><span class="dot"></span></span><div class="grow"><div class="t">秦泉寺 章夫（あなたの PM）</div><div class="d2">フィードバックの待ち行列から拾いました。Windows でも同じ遅さに気づいていたので、両方の報告をここに結びました。</div></div><span class="rel">2日前</span></div>
                 <div class="set-row"><div class="grow"><div class="t">あなた</div><div class="d2">長時間動かすと GUI が入力を受け付けなくなることもある — 同じ仲間として扱って。</div></div><span class="rel">2日前</span></div>
+                <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap;align-items:center">
+                  <input class="field" style="flex:1;min-width:220px" type="text" placeholder="コメントを書く…" aria-label="コメント">
+                  <button class="btn" type="button" data-issuecomment>コメントを投稿</button>
+                </div>
               </div>
               <div class="set-group">
                 <h4>実行</h4>
@@ -1843,6 +1973,19 @@
                 <div class="set-row"><div class="grow"><div class="t">待ち行列</div><div class="d2">開始待ちの順序は、課題の優先度で決まります。この課題は先頭です。</div></div><button class="btn ghost iconbtn ord-down" type="button" title="優先度を下げる" aria-label="優先度を下げる">&#8595;</button></div>
                 <div class="set-row"><div class="grow"><div class="t">自律駆動</div><div class="d2">対象です。取り込み条件に合っているため、空きが出たら自動で始まります。</div></div><span class="badge b-run">対象</span></div>
                 <div class="set-row"><div class="grow"><div class="t">妨げ</div><div class="d2">ありません。</div></div><span class="badge b-done">なし</span></div>
+              </div>
+              <div class="set-group">
+                <h4>PR・チェック・レビュー</h4>
+                <div class="set-row"><div class="grow"><div class="t">PR</div><div class="d2">子課題「セッションをまたいだキャッシュの保持を見直す」の作業から PR が作られています（ブランチ work/issue-5561）。</div></div><span class="badge b-wait">レビュー待ち</span></div>
+                <div class="set-row"><div class="grow"><div class="t">チェック</div><div class="d2">チェック 39件が通過し、失敗はありません。</div></div><span class="badge b-done">通過</span></div>
+                <div class="set-row"><div class="grow"><div class="t">レビュー</div><div class="d2">レビュー担当：姫野 大樹</div></div><span class="badge b-wait">レビュー待ち</span></div>
+              </div>
+              <div class="set-group">
+                <h4>課題への操作</h4>
+                <div class="set-row"><div class="grow"><div class="t">本文を編集する</div><div class="d2">GitHub の Issue の本文を、この場で編集できます。</div></div><button class="btn" type="button" data-issueedit>編集</button></div>
+                <div class="set-row"><div class="grow"><div class="t">ラベル</div><div class="d2">gwt-feedback — フィードバックとして、担当のレーンで扱います</div></div><span class="badge b-plan">gwt-feedback</span><button class="btn ghost" type="button" data-labelremove>外す</button></div>
+                <div class="set-row"><div class="grow"><div class="t">ラベルを付ける</div><div class="d2">gwt-spec を付けると、この課題は SPEC として進めます（仕様の確定を先に扱います）。</div></div><button class="btn" type="button" data-labeladd="gwt-spec">gwt-spec を付ける</button></div>
+                <div class="set-row"><div class="grow"><div class="t">課題を閉じる</div><div class="d2">閉じると、自律駆動の対象から外れます。後から開き直すこともできます。</div></div><button class="btn ghost" type="button" data-dlg="issue-close">閉じる</button></div>
               </div>
               <div class="set-group">
                 <h4>検証と成果物</h4>
@@ -1936,7 +2079,7 @@
                 <tbody>
                   <tr><td>秦泉寺 章夫</td><td>PM — 判断待ちの運搬と巡回</td><td>Claude プール（Claude Code 経由）</td><td>—</td><td><span class="badge b-wait">判断待ち 2件</span></td></tr>
                   <tr><td>小田 洋平</td><td>#7048 共有状態モデル</td><td>Codex プール（Codex 経由）</td><td>gpt-6.2-sol</td><td><span class="badge b-wait">レビュー待ち</span></td></tr>
-                  <tr><td>小田 洋平</td><td>#7047 チェック失敗の切り分け</td><td>Codex プール（Codex 経由）</td><td>gpt-6.2-sol</td><td><span class="badge b-block">停止中</span></td></tr>
+                  <tr><td>小田 洋平</td><td>#7047 チェック失敗の切り分け</td><td>Codex プール（Codex 経由）</td><td>gpt-6.2-sol</td><td><span class="badge b-block">停止中</span> <button class="btn ghost" type="button" data-openpage="terminal" data-openscreen="terminal-main">セッションを開く</button></td></tr>
                   <tr><td>姫野 大樹</td><td>#7007 ホームと判断の画面</td><td>Claude プール（Claude Code 経由）</td><td>claude-sonnet</td><td><span class="badge b-run">実行中</span></td></tr>
                 </tbody>
               </table>
@@ -2009,7 +2152,7 @@
               </div>
               <p class="rel" style="margin-top:12px">掲示板の実体：ローカル（この端末）</p>
               <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap;align-items:center">
-                <input class="field" style="flex:1;min-width:220px" type="text" placeholder="gwt の掲示板に投稿…">
+                <input class="field" style="flex:1;min-width:220px" type="text" placeholder="gwt の掲示板に投稿…（投稿は記録として残ります）">
                 <button class="btn" type="button">投稿</button>
               </div>
             </div>
@@ -2128,8 +2271,8 @@
               <div class="set-group">
                 <div class="set-head">再起動後の継続</div>
                 <div class="set-row">
-                  <div class="grow"><div class="t">gwt の再起動をまたいで、このプロジェクトは動き続けます</div><div class="d2">状態：実行中 · 保存した選択：続ける。止めるときは、このプロジェクトのエージェントが終わるのを待ってから止めます。</div></div>
-                  <button class="btn ghost" type="button" data-nav="g-project-stop">再起動後の継続を止める</button>
+                  <div class="grow"><div class="t">gwt の再起動をまたいで、このプロジェクトは動き続けます</div><div class="d2">状態：実行中。再起動後の継続は自律駆動の状態に従います（停止中なら、再起動しても動きません）。</div></div>
+                  <button class="btn ghost" type="button" data-nav="g-project-stop">自律駆動を止める</button>
                 </div>
               </div>
               <div class="set-group">
@@ -2138,7 +2281,7 @@
                 
                 <div class="set-row"><div class="grow"><div class="t">待ち行列</div><div class="d2">上限はありません。資格ラベルの付いた課題は、すべて待ち行列に入ります。実際に同時に動く数は、同時実行数で絞ります。</div></div></div>
                 
-                <div class="set-row"><div class="grow"><div class="t">同時実行数</div><div class="d2">同時に動かすエージェントの上限です。決め方は「自動（端末の負荷で調整）」と「固定」から選べます。自動では、CPU とメモリの負荷を見て上限が随時変わります。</div></div><select class="field" aria-label="同時実行数の決め方" style="width:210px"><option selected>自動（負荷で調整）</option><option>固定</option></select><input class="field" type="number" value="2" aria-label="固定のときの同時実行数" style="width:80px"></div>
+                <div class="set-row"><div class="grow"><div class="t">同時実行数</div><div class="d2">同時に動かすエージェントの上限です。端末全体の上限（アプリ設定）の内訳として扱います。決め方は「自動（端末の負荷で調整）」と「固定」から選べます。自動では、CPU とメモリの負荷を見て上限が随時変わります。</div></div><select class="field" aria-label="同時実行数の決め方" style="width:210px"><option selected>自動（負荷で調整）</option><option>固定</option></select><input class="field" type="number" value="2" aria-label="固定のときの同時実行数" style="width:80px"></div>
                 <div class="set-row" data-rownav="g-settings-tuning"><div class="grow"><div class="t">取り込み条件</div><div class="d2">取り込むのは、Open の課題で資格ラベルが付いたものだけです。条件の変更は詳細設定で行います。</div></div></div>
                 <div class="set-row" data-rownav="g-settings-tuning"><div class="grow"><div class="t">詳細設定</div><div class="d2">試行上限・スタック判定・ハートビート間隔などの細かい調整値です。通常は変えません。</div></div></div>
               </div>
@@ -2240,24 +2383,14 @@
               <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="g-issue">作って追加する</button><button class="btn ghost" type="button" data-nav="g-issue">キャンセル</button></div>
             </div>
 
-            <div class="screen-pane" data-screen="g-session-picker">
-              <div class="btnrow" style="margin-bottom:14px"><button class="btn iconbtn" type="button" data-nav="g-issues" title="課題一覧へ戻る" aria-label="課題一覧へ戻る">&larr;</button></div>
-              <p class="h-big">セッションを選ぶ</p>
-              <p class="h-sub">過去のセッションを再開します。再開すると、その作業ツリーとブランチのまま続きから動きます。</p>
-              <div class="set-group">
-                <div class="set-row"><div class="grow"><div class="t">#7048 共有状態モデル — 昨日のセッション</div><div class="d2">状態：終了 · ブランチ work/issue-7048 · 作業ツリーは残っています · 最後の活動は昨日 18:22</div></div><button class="btn" type="button" data-openpage="terminal" data-openscreen="terminal-main">再開する</button></div>
-                <div class="set-row"><div class="grow"><div class="t">#5561 メモリ調査 — 先週のセッション</div><div class="d2">状態：終了 · ブランチ work/issue-5561 · 作業ツリーは残っています · 最後の活動は6日前</div></div><button class="btn" type="button" data-openpage="terminal" data-openscreen="terminal-main">再開する</button></div>
-                <div class="set-row"><div class="grow"><div class="t">#7047 切り分け — 停止したセッション</div><div class="d2">状態：チェック失敗で停止 · 再開すると失敗したチェックの続きから確認できます</div></div><button class="btn" type="button" data-openpage="terminal" data-openscreen="terminal-main">再開する</button></div>
-              </div>
-              <div class="notice">再開できないセッション（作業ツリーが片付け済み）は、この一覧には出ません。</div>
-            </div>
+            
 
             <div class="screen-pane" data-screen="g-agent-pause">
               <div class="btnrow" style="margin-bottom:14px"><button class="btn iconbtn" type="button" data-nav="g-agents" title="エージェントへ戻る" aria-label="エージェントへ戻る">&larr;</button></div>
               <p class="h-big">一時停止の確認</p>
-              <p class="h-sub">エージェントの自動の動きを止めます。実行中のセッションは安全に止まるまで待ちます。</p>
+              <p class="h-sub">このエージェントへの新しい割り当てを止めます。</p>
               <div class="set-group">
-                <div class="set-row"><div class="grow"><div class="t">止める範囲</div><div class="d2">このプロジェクトでのエージェントの自動補充と再起動が止まります。他のプロジェクトと PM には影響しません。</div></div></div>
+                <div class="set-row"><div class="grow"><div class="t">止める範囲</div><div class="d2">このエージェントへの新しい割り当てだけが止まります。他のエージェント、他のプロジェクト、PM には影響しません。</div></div></div>
                 <div class="set-row"><div class="grow"><div class="t">実行中のセッション</div><div class="d2">いま動いているセッションは、区切りのよいところで止まります。未保存の出力は作業ツリーに残ります。</div></div></div>
                 <div class="set-row"><div class="grow"><div class="t">再開</div><div class="d2">「エージェント」の画面からいつでも再開できます。再開すると、待ち行列の先頭から自動で続きます。</div></div></div>
               </div>
@@ -2266,14 +2399,14 @@
 
             <div class="screen-pane" data-screen="g-project-stop">
               <div class="btnrow" style="margin-bottom:14px"><button class="btn iconbtn" type="button" data-nav="g-settings" title="設定へ戻る" aria-label="設定へ戻る">&larr;</button></div>
-              <p class="h-big">再起動後の継続を止める</p>
-              <p class="h-sub">gwt の再起動をまたいで動き続ける設定を止めます。ファイルや課題は消えません。</p>
+              <p class="h-big">自律駆動を止める</p>
+              <p class="h-sub">このプロジェクトの自律駆動を止めます。新しい割り当てと PM の巡回が止まり、gwt を再起動しても停止中のままです。ファイルや課題は消えません。</p>
               <div class="set-group">
                 <div class="set-row"><div class="grow"><div class="t">実行中のエージェント</div><div class="d2">小田 洋平（#7048）と姫野 大樹（#7007）が動いています。止めるときは、エージェントが終わるのを待ってから止めます。</div></div></div>
                 <div class="set-row"><div class="grow"><div class="t">PM の監視</div><div class="d2">このプロジェクトへの PM の監視も止まります。判断待ちは残り、再開時にそのまま出ます。</div></div></div>
                 <div class="set-row"><div class="grow"><div class="t">再開</div><div class="d2">プロジェクト画面の一覧から、いつでも再開できます。</div></div></div>
               </div>
-              <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="g-settings">再起動後の継続を止める</button><button class="btn ghost" type="button" data-nav="g-settings">やめる</button></div>
+              <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="g-settings">自律駆動を止める</button><button class="btn ghost" type="button" data-nav="g-settings">やめる</button></div>
             </div>
 
             <div class="screen-pane" data-screen="g-hooks">
@@ -2289,6 +2422,11 @@
                 <div class="set-head">構成と信頼</div>
                 <div class="set-row"><div class="grow"><div class="t">構成</div><div class="d2">開始・終了・停止の3つのタイミングにフックがあります。バイナリの版は gwt 本体と一致しています。</div></div></div>
                 <div class="set-row"><div class="grow"><div class="t">信頼と修復計画</div><div class="d2">信頼できないフックはありません。修復が必要な項目もありません。</div></div></div>
+              </div>
+              <div class="set-group">
+                <div class="set-head">自分のフックを登録する</div>
+                <div class="set-row"><div class="grow"><div class="t">notify.sh</div><div class="d2">タイミング：停止 · 場所：~/Repos/gwt/.gwt/hooks/notify.sh</div></div><span class="badge b-done">登録済み</span></div>
+                <div class="set-row"><div class="grow"><div class="t">フックを登録する</div><div class="d2">タイミングとスクリプトの場所を指定して登録します。登録したフックも監査の対象になります。</div></div><button class="btn" type="button" data-hookadd>登録する</button></div>
               </div>
             </div>
 
@@ -2323,10 +2461,10 @@
               <div class="set-group">
                 <div class="set-row"><div class="grow"><div class="t">1. 標準の候補</div><div class="d2">セッションの始め方：新規 · 実行環境：既定 · 権限スキップ：なし · Fast mode：なし · 優先：すべて</div></div><button class="btn ghost" type="button" data-dlg="candidate-delete">削除</button></div>
                 <div class="set-row"><div class="grow"><div class="t">2. レビュー用の候補</div><div class="d2">セッションの始め方：再開 · 実行環境：既定 · 権限スキップ：なし · Fast mode：あり · 優先：レビュー段階</div></div><button class="btn ghost" type="button" data-dlg="candidate-delete">削除</button></div>
-                <div class="set-row"><div class="grow"><div class="t">候補を追加する</div><div class="d2">候補は複数持てます。並べ替えは行の順序で決まります。</div></div><button class="btn iconbtn" type="button" title="追加" aria-label="追加">&#65291;</button></div>
+                <div class="set-row"><div class="grow"><div class="t">候補を追加する</div><div class="d2">候補は複数持てます。</div></div><button class="btn iconbtn" type="button" title="追加" aria-label="追加">&#65291;</button></div>
               </div>
-              <div class="notice">候補はこのプロジェクトの設定です。エージェントとは別で、誰が担当するかは起動時に決まります。</div>
-              <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="g-settings">保存する</button><button class="btn ghost" type="button" data-nav="g-settings">キャンセル</button></div>
+              <div class="notice">候補での指定は、その場の上書きとして実行環境の設定より優先されます。担当は PM がエージェントの並び順を既定に決め、使う実行環境はプロジェクトの優先度で決まります。</div>
+              <p class="rel" style="margin-top:14px">変更は自動で保存されます。</p>
             </div>
 
             <div class="screen-pane" data-screen="g-branch-cleanup">
@@ -2402,6 +2540,7 @@
               <div class="btnrow" style="margin-bottom:14px"><button class="btn iconbtn" type="button" data-nav="k-tasks" title="テーマ一覧へ戻る" aria-label="テーマ一覧へ戻る">&larr;</button></div>
               <p class="h-big">毎日の取り込みの維持（#121 ほか）</p>
               <p class="h-sub">テーマ · <b>KeibaDB</b> · 会話から自動で記録（今朝、ホームで決定）· 配下の課題 3件</p>
+              <p class="rel" style="margin-top:6px">このテーマは GitHub の Issue です：#121 ほか <a class="plink" href="https://github.com/akiojin/keiba-db/issues/121" target="_blank" rel="noopener">GitHub で開く</a></p>
               <div class="set-group">
                 <h4>このテーマについて</h4>
                 <p class="d">毎日の取り込みを止めずに続けるためのテーマです。形式が変わったら止めて知らせ、判断が出ればそのまま再開します。</p>
@@ -2445,7 +2584,7 @@
                 <span class="badge b-queue">開始待ち</span>
               </div>
               <div class="lrow" data-rownav="k-issue">
-                <div class="grow"><div class="t">結果表の脚注を統一する</div><div class="d">開始待ち · 自律駆動の対象</div></div>
+                <div class="grow"><div class="t">結果表の脚注を統一する</div><div class="d">開始待ち · 自律駆動の対象 · Tool 待ち：この課題で使える実行環境がすべて上限に達しています（使えるようになると自動で始まります）</div></div>
                 <span class="badge b-queue">開始待ち</span>
               </div>
               <p class="rel" style="margin-top:12px">+ KeibaDB の課題があと44件</p>
@@ -2490,6 +2629,24 @@
                 <div class="set-row"><div class="grow"><div class="t">取り込みを再開して欠けた分を取り込む</div><div class="d2">開始待ち · 判断が出ればそのまま始まります</div></div><span class="badge b-queue">開始待ち</span></div>
                 <p class="rel" style="margin-top:10px">子課題は、この課題の本文の中で項目として管理します（sub-issue にはしません）。項目の完了が、この課題の進み具合に集計されます。</p>
                 <div class="btnrow"><button class="btn" type="button" data-nav="k-subissue-add">子課題を追加</button></div>
+              </div>
+              <div class="set-group">
+                <h4>やり取り</h4>
+                <div class="set-row"><div class="grow"><div class="t">秦泉寺 章夫（あなたの PM）</div><div class="d2">形式の変更で止まりました。対応表の食い違い3件の判断が出れば、安藤がそのまま再開します。</div></div><span class="rel">今朝</span></div>
+                <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap;align-items:center">
+                  <input class="field" style="flex:1;min-width:220px" type="text" placeholder="コメントを書く…" aria-label="コメント">
+                  <button class="btn" type="button" data-issuecomment>コメントを投稿</button>
+                </div>
+              </div>
+              <div class="set-group">
+                <h4>PR・チェック・レビュー</h4>
+                <div class="set-row"><div class="grow"><div class="t">PR</div><div class="d2">まだありません。判断が済んで作業が再開すると、ここに出ます。</div></div></div>
+              </div>
+              <div class="set-group">
+                <h4>課題への操作</h4>
+                <div class="set-row"><div class="grow"><div class="t">本文を編集する</div><div class="d2">GitHub の Issue の本文を、この場で編集できます。</div></div><button class="btn" type="button" data-issueedit>編集</button></div>
+                <div class="set-row"><div class="grow"><div class="t">ラベルを付ける</div><div class="d2">gwt-spec を付けると、この課題は SPEC として進めます（仕様の確定を先に扱います）。</div></div><button class="btn" type="button" data-labeladd="gwt-spec">gwt-spec を付ける</button></div>
+                <div class="set-row"><div class="grow"><div class="t">課題を閉じる</div><div class="d2">閉じると、自律駆動の対象から外れます。後から開き直すこともできます。</div></div><button class="btn ghost" type="button" data-dlg="issue-close">閉じる</button></div>
               </div>
               <div class="set-group">
                 <h4>実行</h4>
@@ -2544,7 +2701,7 @@
                 <tbody>
                   <tr><td>秦泉寺 章夫</td><td>PM — 判断待ちの運搬と巡回</td><td>Claude プール（Claude Code 経由）</td><td>—</td><td><span class="badge b-wait">判断待ち 1件</span></td></tr>
                   <tr><td>安藤 健二</td><td>#130 レース結果の取り込み</td><td>Claude プール（Claude Code 経由）</td><td>claude-sonnet</td><td><span class="badge b-run">実行中</span></td></tr>
-                  <tr><td>安藤 健二</td><td>#121 毎日の取り込み</td><td>Claude プール（Claude Code 経由）</td><td>claude-sonnet</td><td><span class="badge b-block">停止中</span></td></tr>
+                  <tr><td>安藤 健二</td><td>#121 毎日の取り込み</td><td>Claude プール（Claude Code 経由）</td><td>claude-sonnet</td><td><span class="badge b-block">停止中</span> <button class="btn ghost" type="button" data-openpage="terminal" data-openscreen="terminal-main">セッションを開く</button></td></tr>
                   <tr><td>安藤 健二</td><td>昨日の取り込み（#119）</td><td>Claude プール（Claude Code 経由）</td><td>claude-sonnet</td><td><span class="badge b-done">完了</span></td></tr>
                 </tbody>
               </table>
@@ -2581,7 +2738,7 @@
               </div>
               <p class="rel" style="margin-top:12px">掲示板の実体：ローカル（この端末）</p>
               <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap;align-items:center">
-                <input class="field" style="flex:1;min-width:220px" type="text" placeholder="KeibaDB の掲示板に投稿…">
+                <input class="field" style="flex:1;min-width:220px" type="text" placeholder="KeibaDB の掲示板に投稿…（投稿は記録として残ります）">
                 <button class="btn" type="button">投稿</button>
               </div>
             </div>
@@ -2614,6 +2771,13 @@
 
               </div>
               <p class="h-sec">索引の健全性（要約）</p>
+              <div class="lrow" data-rownav="k-settings">
+                <div class="grow">
+                  <div class="t">準備完了 3/4 — 準備中 1</div>
+                  <div class="d">準備中の範囲：ドキュメント。索引が未準備の範囲は「結果が無い」とは別に表示します。</div>
+                </div>
+                <button class="btn" type="button">状態を更新</button>
+              </div>
               <div class="notice" style="margin-top:0"><b>ドキュメントの索引はまだ準備中です。</b> 準備中の範囲は「結果が無い」とは別に表示します。終わるまで、他の範囲の検索はそのまま使えます。</div>
               <table class="health" aria-label="索引の健全性" style="margin-top:10px">
                 <thead><tr><th>範囲</th><th>単位</th><th>文書の数</th><th>最後の修復</th><th>状態</th><th></th></tr></thead>
@@ -2624,6 +2788,7 @@
                   <tr><td>ファイル · work/issue-121</td><td>作業ツリーの差分</td><td class="num">912</td><td>今朝</td><td><span class="badge b-run">準備完了</span></td><td><button class="btn" type="button">再構築</button></td></tr>
                 </tbody>
               </table>
+              <div class="btnrow" style="margin-top:10px"><button class="btn" type="button">範囲ごとに再構築</button><button class="btn" type="button">すべて再構築</button></div>
             </div>
 
             <div class="screen-pane" data-screen="k-branches">
@@ -2651,6 +2816,7 @@
                 <input class="field" style="flex:1;min-width:200px" type="text" placeholder="ログを探す…" aria-label="ログを探す">
                 <button class="btn" type="button" data-menu="範囲：プロジェクト,範囲：端末全体">範囲：プロジェクト ▾</button>
                 <button class="btn" type="button" data-menu="重要度：Debug 以上,重要度：Info 以上,重要度：Warning 以上,重要度：Error のみ">重要度：Debug 以上 ▾</button>
+                <button class="btn" type="button" data-menu="プロセス：すべて,プロセス：gwtd,プロセス：エージェント,プロセス：PM">プロセス：すべて ▾</button>
                 <button class="btn primary" type="button">更新</button>
               </div>
               <div class="logline"><span class="sev warn">WARN</span><span class="lt">06:00:41</span><span class="lm">import — 形式の不一致を検出（対応表と食い違う行 3件）。取り込みを安全に止めました</span></div>
@@ -2665,8 +2831,8 @@
               <div class="set-group">
                 <div class="set-head">再起動後の継続</div>
                 <div class="set-row">
-                  <div class="grow"><div class="t">gwt の再起動をまたいで、このプロジェクトは動き続けます</div><div class="d2">状態：停止待ち · 保存した選択：続ける。止めるときは、このプロジェクトのエージェントが終わるのを待ってから止めます。</div></div>
-                  <button class="btn ghost" type="button" data-nav="k-project-stop">再起動後の継続を止める</button>
+                  <div class="grow"><div class="t">gwt の再起動をまたいで、このプロジェクトは動き続けます</div><div class="d2">状態：停止待ち。再起動後の継続は自律駆動の状態に従います（停止中なら、再起動しても動きません）。止めるときは、このプロジェクトのエージェントが終わるのを待ってから止めます。</div></div>
+                  <button class="btn ghost" type="button" data-nav="k-project-stop">自律駆動を止める</button>
                 </div>
               </div>
               <div class="set-group">
@@ -2676,7 +2842,7 @@
                 
                 <div class="set-row"><div class="grow"><div class="t">待ち行列</div><div class="d2">上限はありません。資格ラベルの付いた課題は、すべて待ち行列に入ります。実際に同時に動く数は、同時実行数で絞ります。</div></div></div>
                 
-                <div class="set-row"><div class="grow"><div class="t">同時実行数</div><div class="d2">同時に動かすエージェントの上限です。決め方は「自動（端末の負荷で調整）」と「固定」から選べます。自動では、CPU とメモリの負荷を見て上限が随時変わります。</div></div><select class="field" aria-label="同時実行数の決め方" style="width:210px"><option>自動（負荷で調整）</option><option selected>固定</option></select><input class="field" type="number" value="1" aria-label="固定のときの同時実行数" style="width:80px"></div>
+                <div class="set-row"><div class="grow"><div class="t">同時実行数</div><div class="d2">同時に動かすエージェントの上限です。端末全体の上限（アプリ設定）の内訳として扱います。決め方は「自動（端末の負荷で調整）」と「固定」から選べます。自動では、CPU とメモリの負荷を見て上限が随時変わります。</div></div><select class="field" aria-label="同時実行数の決め方" style="width:210px"><option>自動（負荷で調整）</option><option selected>固定</option></select><input class="field" type="number" value="1" aria-label="固定のときの同時実行数" style="width:80px"></div>
                 <div class="set-row" data-rownav="k-settings-tuning"><div class="grow"><div class="t">取り込み条件</div><div class="d2">取り込むのは、Open の課題で資格ラベルが付いたものだけです。条件の変更は詳細設定で行います。</div></div></div>
                 <div class="set-row" data-rownav="k-settings-tuning"><div class="grow"><div class="t">詳細設定</div><div class="d2">試行上限・スタック判定・ハートビート間隔などの細かい調整値です。通常は変えません。</div></div></div>
               </div>
@@ -2776,23 +2942,14 @@
               <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="k-issue">作って追加する</button><button class="btn ghost" type="button" data-nav="k-issue">キャンセル</button></div>
             </div>
 
-            <div class="screen-pane" data-screen="k-session-picker">
-              <div class="btnrow" style="margin-bottom:14px"><button class="btn iconbtn" type="button" data-nav="k-issues" title="課題一覧へ戻る" aria-label="課題一覧へ戻る">&larr;</button></div>
-              <p class="h-big">セッションを選ぶ</p>
-              <p class="h-sub">過去のセッションを再開します。再開すると、その作業ツリーとブランチのまま続きから動きます。</p>
-              <div class="set-group">
-                <div class="set-row"><div class="grow"><div class="t">#130 レース結果の取り込み — 昨夜のセッション</div><div class="d2">状態：終了 · ブランチ work/issue-130 · 作業ツリーは残っています · 最後の活動は昨夜 23:10</div></div><button class="btn" type="button" data-openpage="terminal" data-openscreen="terminal-main">再開する</button></div>
-                <div class="set-row"><div class="grow"><div class="t">#121 毎日の取り込み — 停止したセッション</div><div class="d2">状態：形式の変更で停止 · 再開すると判断の結果を受けた続きから動きます</div></div><button class="btn" type="button" data-openpage="terminal" data-openscreen="terminal-main">再開する</button></div>
-              </div>
-              <div class="notice">再開できないセッション（作業ツリーが片付け済み）は、この一覧には出ません。</div>
-            </div>
+            
 
             <div class="screen-pane" data-screen="k-agent-pause">
               <div class="btnrow" style="margin-bottom:14px"><button class="btn iconbtn" type="button" data-nav="k-agents" title="エージェントへ戻る" aria-label="エージェントへ戻る">&larr;</button></div>
               <p class="h-big">一時停止の確認</p>
-              <p class="h-sub">エージェントの自動の動きを止めます。実行中のセッションは安全に止まるまで待ちます。</p>
+              <p class="h-sub">このエージェントへの新しい割り当てを止めます。</p>
               <div class="set-group">
-                <div class="set-row"><div class="grow"><div class="t">止める範囲</div><div class="d2">このプロジェクトでのエージェントの自動補充と再起動が止まります。毎日の取り込みの予定そのものは残ります。</div></div></div>
+                <div class="set-row"><div class="grow"><div class="t">止める範囲</div><div class="d2">このエージェントへの新しい割り当てだけが止まります。他のエージェントと PM には影響しません。毎日の取り込みの予定そのものは残ります。</div></div></div>
                 <div class="set-row"><div class="grow"><div class="t">再開</div><div class="d2">「エージェント」の画面からいつでも再開できます。</div></div></div>
               </div>
               <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="k-agents">一時停止する</button><button class="btn ghost" type="button" data-nav="k-agents">やめる</button></div>
@@ -2812,18 +2969,22 @@
                 <div class="set-row"><div class="grow"><div class="t">構成</div><div class="d2">取り込みの開始・終了・停止にフックがあります。バイナリの版は gwt 本体と一致しています。</div></div></div>
                 <div class="set-row"><div class="grow"><div class="t">信頼と修復計画</div><div class="d2">信頼できないフックはありません。修復が必要な項目もありません。</div></div></div>
               </div>
+              <div class="set-group">
+                <div class="set-head">自分のフックを登録する</div>
+                <div class="set-row"><div class="grow"><div class="t">フックを登録する</div><div class="d2">タイミングとスクリプトの場所を指定して登録します。登録したフックも監査の対象になります。</div></div><button class="btn" type="button" data-hookadd>登録する</button></div>
+              </div>
             </div>
 
             <div class="screen-pane" data-screen="k-project-stop">
               <div class="btnrow" style="margin-bottom:14px"><button class="btn iconbtn" type="button" data-nav="k-settings" title="設定へ戻る" aria-label="設定へ戻る">&larr;</button></div>
-              <p class="h-big">再起動後の継続を止める</p>
-              <p class="h-sub">gwt の再起動をまたいで動き続ける設定を止めます。ファイルや課題は消えません。</p>
+              <p class="h-big">自律駆動を止める</p>
+              <p class="h-sub">このプロジェクトの自律駆動を止めます。新しい割り当てと PM の巡回が止まり、gwt を再起動しても停止中のままです。ファイルや課題は消えません。</p>
               <div class="set-group">
                 <div class="set-row"><div class="grow"><div class="t">実行中のエージェント</div><div class="d2">安藤 健二（#130）が動いています。止めるときは、エージェントが終わるのを待ってから止めます。</div></div></div>
                 <div class="set-row"><div class="grow"><div class="t">PM の監視</div><div class="d2">このプロジェクトへの PM の監視も止まります。判断待ちは残り、再開時にそのまま出ます。</div></div></div>
                 <div class="set-row"><div class="grow"><div class="t">再開</div><div class="d2">プロジェクト画面の一覧から、いつでも再開できます。</div></div></div>
               </div>
-              <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="k-settings">再起動後の継続を止める</button><button class="btn ghost" type="button" data-nav="k-settings">やめる</button></div>
+              <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="k-settings">自律駆動を止める</button><button class="btn ghost" type="button" data-nav="k-settings">やめる</button></div>
             </div>
 
             <div ss="screen-pane" data-screen="k-close-project">
@@ -2846,7 +3007,7 @@
                 <div class="set-row"><div class="grow"><div class="t">開始時刻</div><div class="d2">いまは毎日 6:00 です。レース開催日も同じ時刻に動きます。</div></div><input class="field" type="text" value="6:00" aria-label="開始時刻" style="width:120px"></div>
                 <div class="set-row"><div class="grow"><div class="t">反映</div><div class="d2">次の取り込みから新しい時刻になります。今日の分がまだなら、今日から変わります。</div></div></div>
               </div>
-              <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="k-settings">保存する</button><button class="btn ghost" type="button" data-nav="k-settings">キャンセル</button></div>
+              <p class="rel" style="margin-top:14px">変更は自動で保存されます。</p>
             </div>
 
             <div class="screen-pane" data-screen="k-issue-new">
@@ -2866,12 +3027,12 @@
               <p class="h-big">起動候補— KeibaDB</p>
               <p class="h-sub">課題を始めるときの候補の一覧です。並び順の上から起動します。</p>
               <div class="set-group">
-                <div class="set-row"><div class="grow"><div class="t">1. 取り込み用の候補</div><div class="d2">セッションの始め方：再開 · 実行環境：既定 · 権限スキップ：なし · Fast mode：なし · 優先：取り込み段階</div></div><button class="btn ghost" type="button" data-dlg="candidate-delete">削除</button></div>
+                <div class="set-row"><div class="grow"><div class="t">1. 取り込み用の候補</div><div class="d2">セッションの始め方：再開 · 実行環境：既定 · 動かす場所：Docker（サービス：自動） · 権限スキップ：なし · Fast mode：なし · 優先：取り込み段階</div></div><button class="btn ghost" type="button" data-dlg="candidate-delete">削除</button></div>
                 <div class="set-row"><div class="grow"><div class="t">2. 標準の候補</div><div class="d2">セッションの始め方：新規 · 実行環境：既定 · 権限スキップ：なし · Fast mode：なし · 優先：すべて</div></div><button class="btn ghost" type="button" data-dlg="candidate-delete">削除</button></div>
-                <div class="set-row"><div class="grow"><div class="t">候補を追加する</div><div class="d2">候補は複数持てます。並べ替えは行の順序で決まります。</div></div><button class="btn iconbtn" type="button" title="追加" aria-label="追加">&#65291;</button></div>
+                <div class="set-row"><div class="grow"><div class="t">候補を追加する</div><div class="d2">候補は複数持てます。</div></div><button class="btn iconbtn" type="button" title="追加" aria-label="追加">&#65291;</button></div>
               </div>
-              <div class="notice">候補はこのプロジェクトの設定です。エージェントとは別で、誰が担当するかは起動時に決まります。</div>
-              <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="k-settings">保存する</button><button class="btn ghost" type="button" data-nav="k-settings">キャンセル</button></div>
+              <div class="notice">候補での指定は、その場の上書きとして実行環境の設定より優先されます。担当は PM がエージェントの並び順を既定に決め、使う実行環境はプロジェクトの優先度で決まります。</div>
+              <p class="rel" style="margin-top:14px">変更は自動で保存されます。</p>
             </div>
 
           </div>
@@ -2977,8 +3138,9 @@
             <div class="set-group">
               <div class="set-head">計画</div>
               <div class="set-row"><div class="grow"><div class="t">ブランチ</div><div class="d2">work/issue-5561（develop から作ります）</div></div><button class="btn" type="button" data-nav="wizard-branch">変える</button></div>
-              <div class="set-row"><div class="grow"><div class="t">動かす場所</div><div class="d2">ホスト</div></div><button class="btn" type="button" data-menu="ホスト,コンテナ,リモート">ホスト ▾</button></div>
+              <div class="set-row"><div class="grow"><div class="t">動かす場所</div><div class="d2">ホスト（前回と同じです。このプロジェクトに Docker の設定は無いため、動かす場所はホストだけです）</div></div></div>
               <div class="set-row"><div class="grow"><div class="t">権限</div><div class="d2">通常（危険な操作は都度確認します）</div></div><button class="btn" type="button" data-menu="通常,自動で進める">通常 ▾</button></div>
+              <p class="d" style="font-size:13px;color:var(--ink2)">ここで変えた指定は、この起動だけの上書きとして、実行環境の設定より優先されます。</p>
             </div>
             <div class="btnrow" style="margin-top:16px"><button class="btn ghost iconbtn" type="button" data-nav="wizard-step1" title="戻る" aria-label="戻る">&larr;</button><button class="btn" type="button" data-openpage="gwt" data-openscreen="g-issue">やめる</button><button class="btn primary" type="button" data-nav="wizard-step3">確認へ進む</button></div>
           </div>
@@ -2993,14 +3155,14 @@
           </div>
           <div class="wiz-body">
             <p class="h-big" style="font-size:16px">課題と担当 — 長時間のセッションでメモリが増え続ける（#5561）</p>
-            <p class="h-sub">担当はエージェントの並び順と特性で自動で選ばれます。ここで変えることもできます（特性そのものは変えません）。</p>
+            <p class="h-sub">担当は PM が、エージェントの並び順を既定に、性格を読んで決めます。ここで変えることもできます（特性そのものは変えません）。</p>
             <div class="set-group">
               <div class="set-head">課題</div>
               <div class="set-row" data-rowpage="gwt" data-rowscreen="g-issue"><div class="grow"><div class="t">#5561 長時間のセッションでメモリが増え続ける</div><div class="d2">gwt · バグ · 開始待ち（待ち行列の先頭）</div></div></div>
             </div>
             <div class="set-group">
               <div class="set-head">担当の候補</div>
-              <div class="set-row"><span class="ava working"><img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+PHJlY3Qgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiBmaWxsPSIjMjU2M2ViIi8+PHBhdGggZD0iTTE4IDI2IEwxNCAxMiBMMjggMTkgWiIgZmlsbD0iI2ZmZiIvPjxwYXRoIGQ9Ik00NiAyNiBMNTAgMTIgTDM2IDE5IFoiIGZpbGw9IiNmZmYiLz48Y2lyY2xlIGN4PSIzMiIgY3k9IjM4IiByPSIxNyIgZmlsbD0iI2ZmZiIvPjxjaXJjbGUgY3g9IjI2IiBjeT0iMzYiIHI9IjIuNCIgZmlsbD0iIzFlM2E1ZiIvPjxjaXJjbGUgY3g9IjM4IiBjeT0iMzYiIHI9IjIuNCIgZmlsbD0iIzFlM2E1ZiIvPjxwYXRoIGQ9Ik0yOSA0MyBRMzIgNDUgMzUgNDMiIHN0cm9rZT0iIzFlM2E1ZiIgc3Ryb2tlLXdpZHRoPSIxLjgiIGZpbGw9Im5vbmUiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIvPjxwYXRoIGQ9Ik0xMiA0MCBMMjAgNDEgTTEzIDQ2IEwyMCA0NCBNNTIgNDAgTDQ0IDQxIE01MSA0NiBMNDQgNDQiIHN0cm9rZT0iI2ZmZiIgc3Ryb2tlLXdpZHRoPSIxLjYiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIvPjwvc3ZnPg==" alt=""></span><div class="grow"><div class="t">小田 洋平（選ばれています）</div><div class="d2">エージェントの並び順で選ばれた担当です</div><div class="traits"><span class="trait">推論 <b>最大</b></span><span class="trait">速度 <b>最速</b></span><span class="trait persona">性格 <b>実装を重点に</b></span></div></div><span class="badge b-run">担当</span></div>
+              <div class="set-row"><span class="ava working"><img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+PHJlY3Qgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiBmaWxsPSIjMjU2M2ViIi8+PHBhdGggZD0iTTE4IDI2IEwxNCAxMiBMMjggMTkgWiIgZmlsbD0iI2ZmZiIvPjxwYXRoIGQ9Ik00NiAyNiBMNTAgMTIgTDM2IDE5IFoiIGZpbGw9IiNmZmYiLz48Y2lyY2xlIGN4PSIzMiIgY3k9IjM4IiByPSIxNyIgZmlsbD0iI2ZmZiIvPjxjaXJjbGUgY3g9IjI2IiBjeT0iMzYiIHI9IjIuNCIgZmlsbD0iIzFlM2E1ZiIvPjxjaXJjbGUgY3g9IjM4IiBjeT0iMzYiIHI9IjIuNCIgZmlsbD0iIzFlM2E1ZiIvPjxwYXRoIGQ9Ik0yOSA0MyBRMzIgNDUgMzUgNDMiIHN0cm9rZT0iIzFlM2E1ZiIgc3Ryb2tlLXdpZHRoPSIxLjgiIGZpbGw9Im5vbmUiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIvPjxwYXRoIGQ9Ik0xMiA0MCBMMjAgNDEgTTEzIDQ2IEwyMCA0NCBNNTIgNDAgTDQ0IDQxIE01MSA0NiBMNDQgNDQiIHN0cm9rZT0iI2ZmZiIgc3Ryb2tlLXdpZHRoPSIxLjYiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIvPjwvc3ZnPg==" alt=""></span><div class="grow"><div class="t">小田 洋平（選ばれています）</div><div class="d2">PM が担当に決めた人です（並び順が既定です）</div><div class="traits"><span class="trait">推論 <b>最大</b></span><span class="trait">速度 <b>最速</b></span><span class="trait persona">性格 <b>実装を重点に</b></span></div></div><span class="badge b-run">担当</span></div>
               <div class="set-row"><span class="ava working"><img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+PHJlY3Qgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiBmaWxsPSIjYzI0MTBjIi8+PGVsbGlwc2UgY3g9IjMyIiBjeT0iMzYiIHJ4PSIxOCIgcnk9IjIwIiBmaWxsPSIjZmJiZjI0Ii8+PGNpcmNsZSBjeD0iMjUiIGN5PSIzMiIgcj0iNi41IiBmaWxsPSIjZmZmIi8+PGNpcmNsZSBjeD0iMzkiIGN5PSIzMiIgcj0iNi41IiBmaWxsPSIjZmZmIi8+PGNpcmNsZSBjeD0iMjUiIGN5PSIzMiIgcj0iMyIgZmlsbD0iIzQzMTQwNyIvPjxjaXJjbGUgY3g9IjM5IiBjeT0iMzIiIHI9IjMiIGZpbGw9IiM0MzE0MDciLz48cGF0aCBkPSJNMjggNDAgTDM2IDQwIEwzMiA0NSBaIiBmaWxsPSIjNDMxNDA3Ii8+PHBhdGggZD0iTTE2IDIyIFEyMCAxNCAyNiAxOCBNNDggMjIgUTQ0IDE0IDM4IDE4IiBzdHJva2U9IiNmYmJmMjQiIHN0cm9rZS13aWR0aD0iMyIgZmlsbD0ibm9uZSIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIi8+PC9zdmc+" alt=""></span><div class="grow"><div class="t">姫野 大樹</div><div class="d2">いま #7007 を作業中です。終わってからなら選べます</div><div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>速め</b></span><span class="trait persona">性格 <b>画面と体験の実装を重点に</b></span></div></div><button class="btn" type="button">この人に変える</button></div>
               <div class="set-row"><span class="ava"><img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+PHJlY3Qgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiBmaWxsPSIjMGU3NDkwIi8+PGNpcmNsZSBjeD0iMTciIGN5PSIxNyIgcj0iNyIgZmlsbD0iIzE2NGU2MyIvPjxjaXJjbGUgY3g9IjQ3IiBjeT0iMTciIHI9IjciIGZpbGw9IiMxNjRlNjMiLz48Y2lyY2xlIGN4PSIxNyIgY3k9IjE3IiByPSIzLjQiIGZpbGw9IiNhNWYzZmMiLz48Y2lyY2xlIGN4PSI0NyIgY3k9IjE3IiByPSIzLjQiIGZpbGw9IiNhNWYzZmMiLz48Y2lyY2xlIGN4PSIzMiIgY3k9IjM2IiByPSIxOSIgZmlsbD0iIzE2NGU2MyIvPjxlbGxpcHNlIGN4PSIzMiIgY3k9IjQzIiByeD0iOSIgcnk9IjciIGZpbGw9IiNhNWYzZmMiLz48Y2lyY2xlIGN4PSIyNSIgY3k9IjMzIiByPSIyLjQiIGZpbGw9IiNlY2ZlZmYiLz48Y2lyY2xlIGN4PSIzOSIgY3k9IjMzIiByPSIyLjQiIGZpbGw9IiNlY2ZlZmYiLz48ZWxsaXBzZSBjeD0iMzIiIGN5PSI0MCIgcng9IjMuNCIgcnk9IjIuNCIgZmlsbD0iIzA4MzM0NCIvPjxwYXRoIGQ9Ik0zMiA0MiBMMzIgNDUgTTMyIDQ1IFEyOCA0OCAyNSA0NiBNMzIgNDUgUTM2IDQ4IDM5IDQ2IiBzdHJva2U9IiMwODMzNDQiIHN0cm9rZS13aWR0aD0iMS43IiBmaWxsPSJub25lIiBzdHJva2UtbGluZWNhcD0icm91bmQiLz48L3N2Zz4=" alt=""></span><div class="grow"><div class="t">安藤 健二</div><div class="d2">特性がこの課題と合わないため、候補の下位です</div><div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>速め</b></span><span class="trait persona">性格 <b>データの調査と取り込みを重点に</b></span></div></div><button class="btn" type="button">この人に変える</button></div>
             </div>
@@ -3067,7 +3229,8 @@
 <span class="warn">⚠ 警告 2件：未使用の変数（従来からあるもの）</span>
 <span class="dim">— 出力はここまで。続きはライブで流れます —</span></div>
             </div>
-            <p class="rel" style="margin-top:10px">ターミナル表示は見るためのものです。指示はホームの会話から出します（会話の内容はテーマに自動で記録されます）。</p>
+            <div class="term-input"><span aria-hidden="true">$</span><input class="term-in" type="text" placeholder="入力して Enter — ツールの確認プロンプトにも、ここで答えます" aria-label="ターミナルへの入力"><button class="btn" type="button" data-termsend>送信</button></div>
+            <p class="rel" style="margin-top:10px">このターミナルは、そのまま入力できます。ツールの確認プロンプトには、ここで答えます。</p>
             <div class="btnrow"><button class="btn iconbtn" type="button" data-openpage="gwt" data-openscreen="g-issue" title="課題へ戻る" aria-label="課題へ戻る">&larr;</button><button class="btn ghost iconbtn" type="button" data-openpage="agents" title="エージェントへ戻る" aria-label="エージェントへ戻る">&larr;</button></div>
           </div>
           <div class="screen-pane" data-screen="terminal-pm">
@@ -3082,7 +3245,8 @@
   掲示板へ進捗を投稿しました
 <span class="dim">— 次の巡回は 17:10 —</span></div>
             </div>
-            <p class="rel" style="margin-top:10px">ターミナル表示は見るためのものです。PM への指示はホームの会話から出します。</p>
+            <div class="term-input"><span aria-hidden="true">$</span><input class="term-in" type="text" placeholder="入力して Enter — ツールの確認プロンプトにも、ここで答えます" aria-label="ターミナルへの入力"><button class="btn" type="button" data-termsend>送信</button></div>
+            <p class="rel" style="margin-top:10px">このターミナルは、そのまま入力できます。PM への指示は、基本はホームの会話から出します。</p>
             <div class="btnrow"><button class="btn iconbtn" type="button" data-openpage="start" title="ホームへ戻る" aria-label="ホームへ戻る">&larr;</button><button class="btn ghost iconbtn" type="button" data-openpage="agents" title="エージェントへ戻る" aria-label="エージェントへ戻る">&larr;</button></div>
           </div>
         </div>
@@ -3119,11 +3283,12 @@
 
   <footer class="doc">
     <h3>このモックについて</h3>
-    <p>全画面刷新モック v3（Issue #7007）。ホーム（PM とのチャットのみ、プロジェクトの内容は出さず、判断は会話の中のカードでその場で決定）、プロジェクト画面（ヘッダーから開く。状態・判断待ち・最終更新・場所の目安つきの一覧と追加の導線、多いときの検索つき）と、エージェントと実行環境の独立画面（ヘッダーから開く。台帳は特性＝推論・速度（ツールに依存しない共通の段階から選ぶパラメータ）と性格（起動時に読み込む指示文）が固定で、使えるツール種別の項目は無し。台帳の各行の「編集」と「追加」からは、エージェントごとの設定画面（名前・アバター・特性の編集と新規作成）を開く。環境変数は端末で定義し、割り当てはプロジェクト側で持つ（エージェントへの割り当てはない）。実行環境はアカウントと経由ツールの組の一覧でこの領域の表の画面、アカウントは資格情報と使用量、本体（CLI）のインストール・更新はツール管理で、いずれも実行環境から辿る管理側の画面）、初回セットアップ（初回起動時だけ出る、アカウント追加と最初のエージェント作成を含む流れ）、アプリ設定、環境変数、起動ウィザード（エージェントの起動計画）、ターミナル表示を網羅しています。プロジェクト画面群（相談／テーマ／課題／課題詳細／作業／判断待ち／エージェント（履歴・予定つき）／掲示板（PM の報告を統合）／検索／ブランチ／ログ／プロジェクト設定）は、gwt と KeibaDB の2プロジェクト分あります。PM 専用の画面（8タブ）は作らず、会話は「相談」に一本化しています。画面の移動は上のボタン、各プロジェクトのレール、カードから行えます。モバイル幅（スマートフォン約390px）でも主要画面が読める・操作できる形にしてあり、プロジェクト内の移動はレールの代わりに上部の横スクロールタブで行います（SPEC #6476）。冒頭の「全画面で見る」ボタン（または URL の ?full=1）で、アプリ画面だけを画面いっぱいに表示できます。</p>
-    <p>掲示板は、プロジェクト画面の中に置き、プロジェクト単位とします。独立画面（全プロジェクト横断）にはせず、ホームにも置きません。形式はスレッド形式で、記録専用（状態管理の仕組みは持ちません）。実体はプロジェクトごとにローカル／Slack／Teams／GitHub Discussions から選び、既定はローカルです。</p>
+    <p>全画面刷新モック v3（Issue #7007）。ホーム（PM とのチャットのみ、プロジェクトの内容は出さず、判断は会話の中のカードでその場で決定）、プロジェクト画面（ヘッダーから開く。状態・判断待ち・最終更新・場所の目安つきの一覧と追加の導線、多いときの検索つき）と、エージェントと実行環境の独立画面（ヘッダーから開く。台帳は特性＝推論・速度（ツールに依存しない共通の段階から選ぶパラメータ）と性格（起動時に読み込む指示文）が固定で、使えるツール種別の項目は無し。台帳の各行の「編集」と「追加」からは、エージェントごとの設定画面（名前・アバター・特性の編集と新規作成）を開く。環境変数は端末で定義し、割り当てはプロジェクト側で持つ（エージェントへの割り当てはない）。実行環境はアカウントと経由ツールの組の一覧でこの領域の表の画面、アカウントは資格情報と使用量、本体（CLI）のインストール・更新はツール管理で、いずれも実行環境から辿る管理側の画面）、初回セットアップ（初回起動時だけ出る、アカウント追加と最初のエージェント作成を含む流れ）、アプリ設定、環境変数、起動ウィザード（エージェントの起動計画）、ターミナル表示を網羅しています。プロジェクト画面群（テーマ／課題／課題詳細／判断待ち／エージェント（履歴・予定つき）／掲示板（PM の報告を統合）／検索／ブランチ／ログ／プロジェクト設定）は、gwt と KeibaDB の2プロジェクト分あります。PM 専用の画面（8タブ）は作らず、会話はホームに一本化しています。画面の移動は上のボタン、各プロジェクトのレール、カードから行えます。モバイル幅（スマートフォン約390px）でも主要画面が読める・操作できる形にしてあり、プロジェクト内の移動はレールの代わりに上部の横スクロールタブで行います（SPEC #6476）。冒頭の「全画面で見る」ボタン（または URL の ?full=1）で、アプリ画面だけを画面いっぱいに表示できます。</p>
+    <p>掲示板は、プロジェクト画面の中に置き、プロジェクト単位とします。独立画面（全プロジェクト横断）にはせず、ホームにも置きません。形式はスレッド形式で、投稿は記録として残るものとし、状態管理の仕組みは持ちません（利用者も投稿できます）。実体はプロジェクトごとにローカル／Slack／Teams／GitHub Discussions から選び、既定はローカルです。</p>
     <p>システムトレイ（端末の常駐アイコン）には、判断待ちの件数を出します。<span style="display:inline-flex;align-items:center;gap:7px;background:#22262e;color:#e8ebf0;border-radius:8px;padding:5px 10px;vertical-align:middle;margin-left:8px"><span style="display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:6px;background:#0f766e;color:#fff;font-size:10px;font-weight:800">gwt</span><span style="font-size:13px">判断待ち</span><span style="background:#d92d20;color:#fff;border-radius:999px;padding:0 7px;font-weight:800;font-size:12px;line-height:20px">5</span></span></p>
     <p>画面の外に置いた説明（モックを読む人向け）：アカウント画面の Hermes Agent／OpenCode／OpenClaw の行は、各ツールが現在使っているプロバイダーのアカウントへの参照です。Hermes Agent と OpenClaw はプロジェクトごとの起動ホームで動くため、参照先のアカウントはプロジェクトごとに変わります。エージェント（台帳）には「使えるツール種別」の項目はなく、担当の履歴と予定・現在の作業状態も台帳には置かず、各プロジェクトの「エージェント履歴・予定」と「課題」で見ます。エージェントは特定のプロジェクトに所属しない、全プロジェクト共通のマスタです。ターミナル表示の要件（大量の出力でも詰まらない描画、時間とともに劣化しないスクロール、残像・重なりなし、再接続時の再生、セッション消滅時の自動復帰）は設計正本の項目58を正とします。</p>
-    <p>画面の外に置いた説明（続き）：プロジェクト・通知・エージェント・アカウント・環境変数は端末全体の画面で、ヘッダーから開きます。プロジェクトのページは独立したページとして、ブラウザのタブで並べて開けます。初回セットアップは、エージェントの起動計画である「起動ウィザード」とは別の流れです。エージェントの並び順が利用優先度で、特性（推論レベル・速度・性格）はエージェントごとに固定です。PM は指名された1人が務め、切り替えは割り当て直しだけです。エージェントが使う実行環境は、プロジェクト設定の「利用可能な実行環境」の優先度順で決まります（エージェントごとの指定はありません）。実行環境は定義であり、複数のエージェントが同じ実行環境を同時に使えます。セッションを始めるときは、リストの上から順に見て、使えないもの（上限・未サインイン・枯渇）を飛ばし、最初に使えるものを使います。本体（ツール）のインストール・バージョン・更新はツール管理、プロバイダー単位のアカウントの資格情報・使用量・制限はアカウント画面で扱います。接続先を差し替えられるツール（Hermes Agent／OpenCode／OpenClaw）の接続先の設定はツール自身が行うため、gwt はフォームを作らず、ツールのセットアップをそのまま開きます。環境変数（名前付きの束）は端末で定義し、割り当てはプロジェクト側で持ちます（エージェント側には持たない）。プロジェクト一覧の各行には、自律駆動の状態、判断待ちの有無・最終更新・場所の目安だけを出し、課題やセッションの詳細や Issue の中身は各プロジェクトのページで見ます。ターミナル表示は課題ごとに1つで、エージェントの切り替えはありません。PM のセッションは課題のセッションとは別で、その出力画面の戻り先はホームとエージェント画面だけです。やり取りの基本はホームの会話で、ターミナルは実物の出力を見る場所です。起動ウィザードの担当は台帳の並び順と特性で決まり、特性そのものはウィザードでは変えません。実行環境のうち、セット型（アカウントとツールが一体のもの）はアカウント登録と同時に自動で作られ、実行環境の画面では個別に作ったり消したりせず、削除はアカウントの削除と連動します。経由別の実行環境（アカウントを接続先を差し替えられるツール経由で使う組）は、実行環境の画面で登録・削除でき、実行時指定（モデル・セッションの始め方・権限スキップ・Fast mode）の変更は、セット型では編集画面で行い、フロントエンド型経由の組では各ツールの設定ファイルから読み取った現在値を表示し、変更はツール自身の設定へ誘導します（項目81）。参照されている実行環境を削除すると、参照していたエージェントの選択とプロジェクトの既定は未設定に戻ります（環境変数の削除と同じ型）。この領域の画面の位置付けは階層にし、実行環境を表（ヘッダーの着地先）とし、アカウントとツール管理はその構成要素の管理側として実行環境から辿る形にしました（項目79）。選べない操作は隠さず無効な状態で置き、理由を添える方針をこの領域で統一し、アカウント追加ウィザードのステップ1でも、未インストールの種類はボタンを無効にして未インストールと分かる形にしました（項目80）。割り当ての置き場はプロジェクト側へ移し、優先度順で統一しました（項目82）。</p>
+    <p>画面の外に置いた説明（続き）：プロジェクト・通知・エージェント・アカウント・環境変数は端末全体の画面で、ヘッダーから開きます。プロジェクトのページは独立したページとして、ブラウザのタブで並べて開けます。初回セットアップは、エージェントの起動計画である「起動ウィザード」とは別の流れです。エージェントの並び順が利用優先度で、特性（推論レベル・速度・性格）はエージェントごとに固定です。PM は指名された1人が務め、切り替えは割り当て直しだけです。エージェントが使う実行環境は、プロジェクト設定の「利用可能な実行環境」の優先度順で決まります（エージェントごとの指定はありません）。実行環境は定義であり、複数のエージェントが同じ実行環境を同時に使えます。セッションを始めるときは、リストの上から順に見て、使えないもの（上限・未サインイン・枯渇）を飛ばし、最初に使えるものを使います。本体（ツール）のインストール・バージョン・更新はツール管理、プロバイダー単位のアカウントの資格情報・使用量・制限はアカウント画面で扱います。接続先を差し替えられるツール（Hermes Agent／OpenCode／OpenClaw）の接続先の設定はツール自身が行うため、gwt はフォームを作らず、ツールのセットアップをそのまま開きます。環境変数（名前付きの束）は端末で定義し、割り当てはプロジェクト側で持ちます（エージェント側には持たない）。プロジェクト一覧の各行には、自律駆動の状態、判断待ちの有無・最終更新・場所の目安だけを出し、課題やセッションの詳細や Issue の中身は各プロジェクトのページで見ます。ターミナル表示は課題ごとに1つで、エージェントの切り替えはありません。PM のセッションは課題のセッションとは別で、その出力画面の戻り先はホームとエージェント画面だけです。やり取りの基本はホームの会話で、ターミナルは入力もできる実ターミナルです（ツールの確認プロンプトには、その場で答えます）。起動ウィザードの担当は、PM が台帳の並び順を既定に性格を読んで決め、特性そのものはウィザードでは変えません。実行環境のうち、セット型（アカウントとツールが一体のもの）はアカウント登録と同時に自動で作られ、実行環境の画面では個別に作ったり消したりせず、削除はアカウントの削除と連動します。経由別の実行環境（アカウントを接続先を差し替えられるツール経由で使う組）は、実行環境の画面で登録・削除でき、実行時指定（モデル・セッションの始め方・権限スキップ・Fast mode）の変更は、セット型では編集画面で行い、フロントエンド型経由の組では各ツールの設定ファイルから読み取った現在値を表示し、変更はツール自身の設定へ誘導します（項目81）。参照されている実行環境を削除すると、プロジェクト側の優先度リストからも外れます。この領域の画面の位置付けは階層にし、実行環境を表（ヘッダーの着地先）とし、アカウントとツール管理はその構成要素の管理側として実行環境から辿る形にしました（項目79）。選べない操作は隠さず無効な状態で置き、理由を添える方針をこの領域で統一し、アカウント追加ウィザードのステップ1でも、未インストールの種類はボタンを無効にして未インストールと分かる形にしました（項目80）。割り当ての置き場はプロジェクト側へ移し、優先度順で統一しました（項目82）。</p>
+    <p>画面の外に置いた説明（整合レビュー §2・§3 の反映）：設定の優先順位は、上書き（起動候補・起動ウィザードでのその場の指定）＞実行環境（実行時指定）＞エージェント特性です（項目189）。優先順は3つの別軸（エージェントの並び順＝担当選び／実行環境の優先度＝環境選び／課題の優先度＝待ち行列）で、起動候補の適用順は担当と実行環境の合成結果です（項目190）。「止める」操作は、プロジェクト停止（自律駆動全体・ドレイン式）とエージェントの一時停止の2つで、再起動後の継続と PM の監視はプロジェクト停止の内訳です（項目191）。設定の保存は全て自動保存で、保存ボタンは置きません（項目196）。動かす場所（Host／Docker）は実行環境とは別軸で、Docker 文脈がある場合だけ選択肢に出し、既定はリポジトリ単位の前回値です（項目197）。このモックでは、Docker 文脈のある KeibaDB の起動候補にだけ Docker の指定を出し、gwt 側には出していません。</p>
   </footer>
 </div>
 
@@ -3133,11 +3298,11 @@
 (function () {
   var pageLabels = { start: "ホーム", firstrun: "初回セットアップ", projects: "プロジェクト", addproject: "プロジェクトを追加", notifications: "通知", settings: "設定", agents: "エージェント", tools: "実行環境", profile: "環境変数", wizard: "起動ウィザード", terminal: "ターミナル表示", gwt: "gwt", keibadb: "KeibaDB" };
   var screenTitles = {
-    appsettings: "設定", "agents-ledger": "エージェント", "agent-edit-jinsenji": "エージェント設定 — 秦泉寺 章夫", "agent-edit-oda": "エージェント設定 — 小田 洋平", "agent-edit-himeno": "エージェント設定 — 姫野 大樹", "agent-edit-ando": "エージェント設定 — 安藤 健二", "agent-new": "エージェントを追加", "tools-pool": "アカウント", "tools-env": "実行環境", "tools-env-add": "実行環境を追加", "tools-env-edit": "実行環境を編集", "tools-env-edit-fe": "実行環境を編集（フロントエンド型経由）", "tools-env-delete": "実行環境を削除", "profile-main": "環境変数", "terminal-main": "ターミナル表示", "terminal-pm": "ターミナル表示 — PM の出力",
-    "g-settings-tuning": "自律駆動の詳細設定", "g-tasks": "テーマ", "g-task": "テーマ詳細", "g-issues": "課題", "g-issue": "課題 #5561", "g-decide": "判断待ち", "g-agents": "エージェント履歴・予定",
-    "g-board": "掲示板", "g-index": "検索", "g-branches": "ブランチ", "g-logs": "ログ", "g-settings": "設定", "g-task-new": "テーマを作る", "g-subissue-add": "子課題を追加", "g-session-picker": "セッションを選ぶ", "g-agent-pause": "一時停止の確認", "g-project-stop": "再起動後の継続を止める", "g-hooks": "フック", "g-close-project": "プロジェクトを閉じる", "g-issue-new": "新しい課題", "g-candidates": "起動候補", "g-branch-cleanup": "ブランチの片付け",
+    appsettings: "設定", "device-logs": "端末全体のログ", "agents-ledger": "エージェント", "agent-edit-jinsenji": "エージェント設定 — 秦泉寺 章夫", "agent-edit-oda": "エージェント設定 — 小田 洋平", "agent-edit-himeno": "エージェント設定 — 姫野 大樹", "agent-edit-ando": "エージェント設定 — 安藤 健二", "agent-new": "エージェントを追加", "tools-pool": "アカウント", "tools-account": "アカウントの詳細", "tool-add-apikey": "API キーで追加", "tools-env": "実行環境", "tools-env-add": "実行環境を追加", "tools-env-edit": "実行環境を編集", "tools-env-edit-fe": "実行環境を編集（フロントエンド型経由）", "tools-env-delete": "実行環境を削除", "profile-main": "環境変数", "terminal-main": "ターミナル表示", "terminal-pm": "ターミナル表示 — PM の出力",
+    "add-nogit": "未 Git 化フォルダを開く", "g-settings-tuning": "自律駆動の詳細設定", "g-tasks": "テーマ", "g-task": "テーマ詳細", "g-issues": "課題", "g-issue": "課題 #5561", "g-decide": "判断待ち", "g-agents": "エージェント履歴・予定",
+    "g-board": "掲示板", "g-index": "検索", "g-branches": "ブランチ", "g-logs": "ログ", "g-settings": "設定", "g-task-new": "テーマを作る", "g-subissue-add": "子課題を追加", "g-agent-pause": "一時停止の確認", "g-project-stop": "自律駆動を止める", "g-hooks": "フック", "g-close-project": "プロジェクトを閉じる", "g-issue-new": "新しい課題", "g-candidates": "起動候補", "g-branch-cleanup": "ブランチの片付け",
     "k-settings-tuning": "自律駆動の詳細設定", "k-tasks": "テーマ", "k-task": "テーマ詳細", "k-issues": "課題", "k-issue": "課題 #121", "k-decide": "判断待ち", "k-agents": "エージェント履歴・予定",
-    "k-board": "掲示板", "k-index": "検索", "k-branches": "ブランチ", "k-logs": "ログ", "k-settings": "設定", "k-task-new": "テーマを作る", "k-subissue-add": "子課題を追加", "k-session-picker": "セッションを選ぶ", "k-agent-pause": "一時停止の確認", "k-hooks": "フック", "k-close-project": "プロジェクトを閉じる", "k-import-time": "取り込みの時刻", "k-issue-new": "新しい課題", "k-candidates": "起動候補"
+    "k-board": "掲示板", "k-index": "検索", "k-branches": "ブランチ", "k-logs": "ログ", "k-settings": "設定", "k-task-new": "テーマを作る", "k-subissue-add": "子課題を追加", "k-agent-pause": "一時停止の確認", "k-project-stop": "自律駆動を止める", "k-hooks": "フック", "k-close-project": "プロジェクトを閉じる", "k-import-time": "取り込みの時刻", "k-issue-new": "新しい課題", "k-candidates": "起動候補"
   };
   var current = { start: "start", firstrun: "setup-welcome", addproject: "add-github", notifications: "notifications-main", settings: "appsettings", agents: "agents-ledger", tools: "tools-env", profile: "profile-main", wizard: "wizard", terminal: "terminal-main", gwt: "g-issues", keibadb: "k-issues" };
   var activePage = "start";
@@ -3653,6 +3818,43 @@
     });
   });
   renderPM();
+  /* ledger: reorder agents (item 200) */
+  function renumberLedger() {
+    document.querySelectorAll('[data-screen="agents-ledger"] .set-row[data-rownav]').forEach(function (row, i) {
+      var t = row.querySelector(".t"); if (!t) return;
+      for (var n = 0; n < t.childNodes.length; n++) {
+        var node = t.childNodes[n];
+        if (node.nodeType === 3) { node.textContent = node.textContent.replace(/^\s*\d+\.\s*/, (i + 1) + ". "); break; }
+      }
+    });
+  }
+  function syncLedgerMoveBtns() {
+    var rows = document.querySelectorAll('[data-screen="agents-ledger"] .set-row[data-rownav]');
+    rows.forEach(function (row, i) {
+      var up = row.querySelector('[data-agentmove="up"]');
+      var down = row.querySelector('[data-agentmove="down"]');
+      if (up) up.disabled = i === 0;
+      if (down) down.disabled = i === rows.length - 1;
+    });
+  }
+  document.addEventListener("click", function (ev) {
+    var b = ev.target.closest ? ev.target.closest("[data-agentmove]") : null;
+    if (!b || b.disabled) return;
+    var row = b.closest(".set-row"); if (!row) return;
+    var dir = b.getAttribute("data-agentmove");
+    var moved = false;
+    if (dir === "up") {
+      var prev = row.previousElementSibling;
+      while (prev && !(prev.classList.contains("set-row") && prev.hasAttribute("data-rownav"))) prev = prev.previousElementSibling;
+      if (prev) { row.parentNode.insertBefore(row, prev); moved = true; }
+    } else {
+      var next = row.nextElementSibling;
+      while (next && !(next.classList.contains("set-row") && next.hasAttribute("data-rownav"))) next = next.nextElementSibling;
+      if (next) { row.parentNode.insertBefore(next, row); moved = true; }
+    }
+    if (moved) { renumberLedger(); syncLedgerMoveBtns(); showToast("並び順を変えました"); }
+  });
+  syncLedgerMoveBtns();
   /* notifications: delete rows */
   var notifPane = document.querySelector('[data-screen="notifications-main"]');
   if (notifPane) notifPane.addEventListener("click", function (ev) {
@@ -3727,6 +3929,19 @@
       });
     });
   });
+  /* decide cards: choice buttons acknowledge immediately */
+  (function () {
+    var DECIDE_MSGS = { "承認して始める": "承認して始めます", "変更を求める": "変更を求めました", "保存して送信する": "保存して送信しました", "取り込みを止める": "取り込みを止めました", "対応表を直して続ける": "対応表を直して続けます" };
+    document.querySelectorAll('[data-screen="g-decide"], [data-screen="k-decide"]').forEach(function (pane) {
+      pane.querySelectorAll(".dcard .btnrow button").forEach(function (btn) {
+        if (btn.hasAttribute("data-openpage") || btn.hasAttribute("data-nav")) return;
+        btn.addEventListener("click", function () {
+          var label = btn.textContent.trim();
+          showToast(DECIDE_MSGS[label] || (label + "しました"));
+        });
+      });
+    });
+  })();
   /* board: post the composer text */
   document.querySelectorAll('[data-screen="g-board"], [data-screen="k-board"]').forEach(function (pane) {
     pane.querySelectorAll("button").forEach(function (btn) {
@@ -3747,6 +3962,94 @@
     });
   });
   /* fallback: any button still without a visible reaction gets an acknowledgement toast */
+  function termSend(inp){
+    var pane=inp.closest('.screen-pane'); if(!pane) return;
+    var body=pane.querySelector('.term-body'); if(!body) return;
+    var v=inp.value.trim(); if(!v) return;
+    var line=document.createElement('span'); line.className='dim'; line.textContent='$ '+v;
+    body.appendChild(document.createTextNode('\n')); body.appendChild(line);
+    inp.value='';
+  }
+  document.addEventListener('click',function(e){
+    var b=e.target.closest('[data-termsend]'); if(!b) return;
+    var wrap=b.closest('.term-input'); if(!wrap) return;
+    var inp=wrap.querySelector('.term-in'); if(inp) termSend(inp);
+  });
+  document.addEventListener('keydown',function(e){
+    if(e.key!=='Enter') return;
+    var inp=e.target.closest?e.target.closest('.term-in'):null; if(!inp) return;
+    e.preventDefault(); termSend(inp);
+  });
+  document.addEventListener("click", function (e) {
+    var b = e.target.closest ? e.target.closest("[data-reopen]") : null;
+    if (!b) return;
+    var row = b.closest("[data-closedrow]");
+    if (row) row.remove();
+    var wrap = document.getElementById("closedProjects");
+    var empty = document.getElementById("closedEmpty");
+    if (wrap && empty && !wrap.querySelector("[data-closedrow]")) empty.hidden = false;
+    showToast("プロジェクトを一覧に戻しました");
+  });
+  document.addEventListener("click", function (e) {
+    var t = e.target.closest ? e.target : null;
+    if (!t) return;
+    var cb = t.closest("[data-issuecomment]");
+    if (cb) {
+      var wrap = cb.parentElement;
+      var input = wrap ? wrap.querySelector("input.field") : null;
+      var text = input ? input.value.trim() : "";
+      if (!text) { showToast("コメントを入力してください"); return; }
+      var row = document.createElement("div");
+      row.className = "set-row";
+      row.innerHTML = '<div class="grow"><div class="t">あなた</div><div class="d2"></div></div><span class="rel">たった今</span>';
+      row.querySelector(".d2").textContent = text;
+      var group = cb.closest(".set-group");
+      if (group) group.insertBefore(row, wrap);
+      input.value = "";
+      showToast("コメントを投稿しました");
+      return;
+    }
+    var eb = t.closest("[data-issueedit]");
+    if (eb) {
+      var pane2 = eb.closest(".screen-pane");
+      var body = pane2 ? pane2.querySelector(".issue-body") : null;
+      if (body) {
+        var on = body.getAttribute("contenteditable") === "true";
+        body.setAttribute("contenteditable", on ? "false" : "true");
+        eb.textContent = on ? "編集" : "編集を終える";
+        if (!on) body.focus();
+        showToast(on ? "本文を保存しました" : "本文を編集できます");
+      }
+      return;
+    }
+    var lr = t.closest("[data-labelremove]");
+    if (lr) {
+      var row2 = lr.closest(".set-row");
+      var badge = row2 ? row2.querySelector(".badge") : null;
+      if (badge) badge.remove();
+      lr.remove();
+      showToast("ラベルを外しました");
+      return;
+    }
+    var la = t.closest("[data-labeladd]");
+    if (la) {
+      var row3 = la.closest(".set-row");
+      if (row3 && !row3.querySelector(".badge")) {
+        var b2 = document.createElement("span");
+        b2.className = "badge b-plan";
+        b2.textContent = la.getAttribute("data-labeladd");
+        row3.insertBefore(b2, la);
+      }
+      la.remove();
+      showToast("ラベルを付けました");
+      return;
+    }
+  });
+  document.addEventListener("click", function (e) {
+    var b = e.target.closest ? e.target.closest("[data-hookadd]") : null;
+    if (!b) return;
+    showToast("フックの登録は、タイミングとスクリプトの場所を指定して行います");
+  });
   function toastFor(label) {
     var rules = [
       ["設定を保存する", "設定を保存しました"], ["保存して送信する", "保存して送信しました"], ["保存", "保存しました"],
@@ -3791,7 +4094,8 @@
     "Antigravity プール（Antigravity 経由）": "プール：Google · 経由：Antigravity · メンバー 1件",
     "GLM プール（Hermes Agent 経由）": "プール：Z.ai（GLM）· 経由：Hermes Agent · メンバー 1件",
     "GLM プール（OpenClaw 経由）": "プール：Z.ai（GLM）· 経由：OpenClaw · メンバー 1件",
-    "GLM プール（OpenCode 経由）": "プール：Z.ai（GLM）· 経由：OpenCode · メンバー 1件"
+    "GLM プール（OpenCode 経由）": "プール：Z.ai（GLM）· 経由：OpenCode · メンバー 1件",
+    "GitHub Copilot プール（GitHub Copilot 経由）": "プール：GitHub · 経由：GitHub Copilot · メンバー 1件"
   };
   function renumberEnvLists() {
     document.querySelectorAll(".env-list").forEach(function (list) {
@@ -4031,6 +4335,35 @@
         "サインアウトすると、この接続は使えなくなります。再度サインインすると、また使えるようになります。",
         "サインアウト",
         function () { toast("サインアウトしました"); });
+    } else if (kind === "issue-close") {
+      openDlg("課題を閉じますか",
+        "閉じると、この課題は自律駆動の対象から外れます。後から開き直すこともできます。",
+        "閉じる",
+        function () { toast("課題を閉じました"); });
+    } else if (kind === "feedback") {
+      openDlg("不具合を報告しますか",
+        "報告には、gwt のバージョンと端末全体のログの直近分が含まれます。課題の内容や会話は含まれません。",
+        "報告する",
+        function () { toast("不具合の報告を送りました"); });
+    } else if (kind === "agent-delete") {
+      var arow = btn.closest(".set-row");
+      var at = arow ? arow.querySelector(".t") : null;
+      var aname = at ? at.textContent.trim().replace(/^\d+\.\s*/, "").replace(/\s*PM$/, "") : "このエージェント";
+      openDlg("エージェントを削除しますか",
+        aname + " を台帳から削除します。過去の履歴は残ります。",
+        "削除する",
+        function () { if (arow) arow.remove(); toast("エージェントを削除しました"); });
+    } else if (kind === "acct-delete") {
+      openDlg("アカウントを削除しますか",
+        "Claude Code 1 を削除します。このアカウントだけを使う実行環境も一緒に消え、参照している割り当ては未設定に戻ります。",
+        "削除する",
+        function () {
+          var row = document.querySelector('[data-acctrow="claude1"]');
+          if (row) row.remove();
+          var back = document.querySelector('[data-screen="tools-account"] [data-nav="tools-pool"]');
+          if (back) back.click();
+          toast("アカウントを削除しました");
+        });
     } else if (kind === "apply-restart") {
       openDlg("再起動して適用しますか",
         "gwt を再起動して更新を適用します。動いているセッションは止まりますが、判断待ちと会話は gwt 側に残ります。",
