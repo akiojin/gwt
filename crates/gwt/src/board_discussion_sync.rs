@@ -1,4 +1,5 @@
 //! Optional Discussion mirroring. Local Board operations never wait for GitHub.
+use gwt_core::timestamp::UtcTimestamp;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::OpenOptions,
@@ -6,7 +7,6 @@ use std::{
     path::Path,
 };
 
-use chrono::{DateTime, Utc};
 use fs2::FileExt;
 use gwt_config::{board_config::GitHubDiscussionConfig, BoardProviderKind, ProjectBoardConfig};
 use gwt_core::coordination::{self, BoardEntry};
@@ -123,8 +123,8 @@ struct SyncState {
     topics: BTreeMap<String, Topic>,
     next_topic: usize,
     delivered: BTreeSet<String>,
-    next_attempt: DateTime<Utc>,
-    last_success: Option<DateTime<Utc>>,
+    next_attempt: UtcTimestamp,
+    last_success: Option<UtcTimestamp>,
     last_error: Option<String>,
     sent: u64,
     received: u64,
@@ -138,7 +138,7 @@ impl SyncState {
             topics: BTreeMap::new(),
             next_topic: 0,
             delivered: BTreeSet::new(),
-            next_attempt: DateTime::UNIX_EPOCH,
+            next_attempt: UtcTimestamp::UNIX_EPOCH,
             last_success: None,
             last_error: None,
             sent: 0,
@@ -154,8 +154,8 @@ pub struct SyncReport {
     topic_limit: usize,
     status: &'static str,
     last_error: Option<String>,
-    last_success: Option<DateTime<Utc>>,
-    next_attempt: Option<DateTime<Utc>>,
+    last_success: Option<UtcTimestamp>,
+    next_attempt: Option<UtcTimestamp>,
     sent: u64,
     received: u64,
 }
@@ -378,7 +378,7 @@ fn received_comment(comment: &DiscussionComment, topic: &Topic) -> Option<BoardE
     if comment.body.trim().is_empty() || comment.body.len() > MAX_COMMENT_BYTES {
         return None;
     }
-    let created_at = DateTime::from(comment.created_at);
+    let created_at = comment.created_at;
     let mut entry = BoardEntry::new(
         coordination::AuthorKind::User,
         &comment.author,
@@ -632,11 +632,11 @@ pub fn sync_now(root: &Path) -> Result<SyncReport, String> {
         return Err(e.to_string());
     }
     let mut state = load_state(root, &binding)?;
-    let now = Utc::now();
+    let now = UtcTimestamp::now();
     if now < state.next_attempt {
         return Ok(SyncReport::from_state("backoff", Some(&state)));
     }
-    state.next_attempt = now + chrono::Duration::seconds(POLL_SECONDS);
+    state.next_attempt = now + time::Duration::seconds(POLL_SECONDS);
     save_state(root, &state)?;
     let result = HttpIssueClient::from_gh_auth_with_deadline(
         &binding.owner,
@@ -650,7 +650,7 @@ pub fn sync_now(root: &Path) -> Result<SyncReport, String> {
     .and_then(|remote| synchronize(root, &mut state, &remote));
     let status = match result {
         Ok(caught_up) => {
-            state.last_success = Some(Utc::now());
+            state.last_success = Some(UtcTimestamp::now());
             if state.last_error.is_some() {
                 "partial"
             } else if caught_up {
@@ -661,7 +661,7 @@ pub fn sync_now(root: &Path) -> Result<SyncReport, String> {
         }
         Err(error) => {
             state.last_error = Some(error);
-            state.next_attempt = Utc::now() + chrono::Duration::seconds(RETRY_SECONDS);
+            state.next_attempt = UtcTimestamp::now() + time::Duration::seconds(RETRY_SECONDS);
             "error"
         }
     };
@@ -684,7 +684,7 @@ pub(crate) fn schedule(root: &Path) {
     let Ok(state) = load_state(root, &binding) else {
         return;
     };
-    if Utc::now() < state.next_attempt {
+    if UtcTimestamp::now() < state.next_attempt {
         return;
     }
     let Some(bin) = std::env::current_exe()
@@ -850,7 +850,7 @@ mod tests {
             vec![],
             parent.related_owners.clone(),
         );
-        entry.created_at = parent.created_at + chrono::Duration::seconds(1);
+        entry.created_at = parent.created_at + time::Duration::seconds(1);
         entry.updated_at = entry.created_at;
         coordination::post_entry(root, entry.clone()).unwrap();
         entry
@@ -991,7 +991,7 @@ mod tests {
                 vec![],
                 vec![],
             );
-            status.created_at = topic.created_at + chrono::Duration::seconds(index + 10);
+            status.created_at = topic.created_at + time::Duration::seconds(index + 10);
             status.updated_at = status.created_at;
             coordination::post_entry(root.path(), status).unwrap();
         }
@@ -1005,7 +1005,7 @@ mod tests {
             vec![],
             vec![],
         );
-        child.created_at = topic.created_at + chrono::Duration::seconds(1000);
+        child.created_at = topic.created_at + time::Duration::seconds(1000);
         child.updated_at = child.created_at;
         coordination::post_entry(root.path(), child).unwrap();
         assert!(!coordination::load_snapshot(root.path())

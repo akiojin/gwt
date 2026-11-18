@@ -771,9 +771,7 @@ fn launch_failure_status_preserves_worker_profile_and_uses_background_snapshot_o
     assert_eq!(stale_gui_session.agent_id, gwt_agent::AgentId::Codex);
     assert_eq!(stale_gui_session.model.as_deref(), Some("worker-profile"));
     stale_gui_session.model = Some("gui-profile".into());
-    stale_gui_session.updated_at = (chrono::DateTime::from(stale_gui_session.updated_at)
-        + chrono::Duration::seconds(1))
-    .into();
+    stale_gui_session.updated_at += time::Duration::seconds(1);
     let mut runtime = sample_runtime(
         temp.path(),
         vec![sample_project_tab(
@@ -2447,9 +2445,9 @@ fn app_runtime_active_work_projection_separates_sessions_on_same_branch() {
         agent.window_id = Some(window_id.to_string());
         agent.branch = Some("work/shared".to_string());
         agent.updated_at = if session_id == "session-a" {
-            Utc.with_ymd_and_hms(2026, 6, 17, 9, 0, 0).unwrap()
+            gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 6, 17, 9, 0, 0).unwrap()
         } else {
-            Utc.with_ymd_and_hms(2026, 6, 17, 10, 0, 0).unwrap()
+            gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 6, 17, 10, 0, 0).unwrap()
         };
         projection.agents.push(agent);
     }
@@ -2693,8 +2691,12 @@ fn app_runtime_active_work_projection_retains_stopped_agent_work_as_paused() {
         .active_agent_sessions
         .remove("tab-1::agent-paused")
         .expect("captured stopped projection source");
-    gwt::project_runtime::workspace::paused_work_record_task(&repo, &stopped, chrono::Utc::now())
-        .expect("canonical production Work pause task")();
+    gwt::project_runtime::workspace::paused_work_record_task(
+        &repo,
+        &stopped,
+        gwt_core::timestamp::UtcTimestamp::now(),
+    )
+    .expect("canonical production Work pause task")();
     assert!(!runtime
         .active_agent_sessions
         .contains_key("tab-1::agent-paused"));

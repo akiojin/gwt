@@ -1239,7 +1239,7 @@ pub fn install_agent_launch(
             session_id: session_id.clone(),
             agent_id: agent_id.command().to_string(),
             worktree_path: worktree_path.to_string_lossy().into_owned(),
-            created_at: Some(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+            created_at: Some(gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds()),
             consecutive_crashes: 0,
             next_not_before: None,
         };
@@ -2105,7 +2105,7 @@ struct IssueMonitorSpawnAdmissionDecision {
 
 impl IssueMonitorSpawnAdmissionDecision {
     fn evaluate(monitor: &crate::IssueMonitorState, issue_number: u64) -> Self {
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
         Self {
             update_drain: monitor.update_drain().is_some(),
             source_exclusion: monitor.launch_source_exclusion(issue_number),
@@ -2174,7 +2174,8 @@ impl PreparedIssueMonitorSpawnAdmission {
     /// trusted without re-deriving that limit.
     fn capacity_admits(&self) -> bool {
         let sample_current = self.capacity_expires_at.is_none_or(|expires| {
-            chrono::Utc::now().timestamp() < i64::try_from(expires).unwrap_or(i64::MAX)
+            gwt_core::timestamp::UtcTimestamp::now().timestamp()
+                < i64::try_from(expires).unwrap_or(i64::MAX)
         }) && self
             .dependencies_with_role(IssueMonitorAdmissionDependencyRole::Capacity)
             .all(IssueMonitorAdmissionFileStamp::is_current);
@@ -2321,7 +2322,7 @@ impl IssueMonitorSpawnAdmissionInput {
             "Issues launch phase"
         );
         let capacity = monitor
-            .agent_status_at(&chrono::Utc::now().to_rfc3339())
+            .agent_status_at(&gwt_core::timestamp::UtcTimestamp::now().to_rfc3339())
             .agent_capacity;
         let capacity_expires_at = capacity.is_fresh().then_some(capacity.expires_at).flatten();
         let capacity_limit = monitor.effective_max_active_agents();
@@ -2862,7 +2863,7 @@ pub fn load_local_issue_monitor_fallback_projection(
     (
         cached_issues,
         cache_error.or(origin_error),
-        chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds(),
         source_repository.ok(),
     )
 }
@@ -3110,7 +3111,7 @@ pub(crate) fn prepare_owner_agent_admission(
                 }
             }
         }
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
         let monitor = &mut prepared.monitor;
         if !review_dispatch
             && monitor
@@ -4344,7 +4345,7 @@ mod delivery_ack_tests {
             materialized_window_id: Some(window_id.into()),
             workspace_durable_window_id: Some(window_id.into()),
             launch_session_strategy: gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
-            created_at: chrono::Utc::now().to_rfc3339(),
+            created_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
             requeue_reason: None,
         };
         let prefs = gwt::IssueMonitorPrefs {
@@ -4692,7 +4693,7 @@ mod owner_admission_tests {
             host_project_roots: &roots,
             snapshot: crate::IssueMonitorWindowSnapshot {
                 project_tab_id: "tab".into(),
-                observed_at: chrono::Utc::now().to_rfc3339(),
+                observed_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
                 windows: vec![],
             },
             snapshot_tabs: Default::default(),
@@ -4996,7 +4997,7 @@ mod owner_admission_tests {
             host_project_roots: &roots,
             snapshot: crate::IssueMonitorWindowSnapshot {
                 project_tab_id: "tab".into(),
-                observed_at: chrono::Utc::now().to_rfc3339(),
+                observed_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
                 windows: vec![],
             },
             snapshot_tabs: Default::default(),
@@ -5226,7 +5227,7 @@ mod owner_admission_tests {
                 .status
                 .success());
         }
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
         let cache = crate::issue_cache::issue_cache_root_for_repo_path(&repo).unwrap();
         gwt_github::Cache::new(cache)
             .write_snapshot(&gwt_github::IssueSnapshot {
@@ -5341,7 +5342,7 @@ mod owner_admission_tests {
         let result = admit_after_prefs_update(None, |prefs| {
             prefs.update_drain = Some(crate::IssueMonitorUpdateDrain {
                 version: "99.0.0".into(),
-                since: chrono::Utc::now().to_rfc3339(),
+                since: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
                 reason: crate::IssueMonitorUpdateDrainReason::Manual,
                 automatic: None,
                 blocking: Vec::new(),

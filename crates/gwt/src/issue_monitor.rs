@@ -109,14 +109,12 @@ pub(crate) fn normalize_issue_monitor_provider(raw: &str) -> Option<String> {
     gwt_agent::resolve_agent_id(raw).map(|id| id.command().to_ascii_lowercase())
 }
 
-fn parse_rfc3339_utc(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
-    chrono::DateTime::parse_from_rfc3339(value)
-        .ok()
-        .map(|value| value.with_timezone(&chrono::Utc))
+fn parse_rfc3339_utc(value: &str) -> Option<gwt_core::timestamp::UtcTimestamp> {
+    gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(value).ok()
 }
 
-fn format_rfc3339_utc(value: chrono::DateTime<chrono::Utc>) -> String {
-    value.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+fn format_rfc3339_utc(value: gwt_core::timestamp::UtcTimestamp) -> String {
+    value.to_rfc3339_seconds()
 }
 
 fn merge_provider_quota_hold(
@@ -152,11 +150,11 @@ fn normalize_provider_keyed<T: Clone>(map: &BTreeMap<String, T>) -> BTreeMap<Str
 }
 
 fn concrete_provider_quota_deadline(resets_at: Option<&str>, now: &str) -> String {
-    let now = parse_rfc3339_utc(now).unwrap_or_else(chrono::Utc::now);
+    let now = parse_rfc3339_utc(now).unwrap_or_else(gwt_core::timestamp::UtcTimestamp::now);
     let deadline = resets_at
         .and_then(parse_rfc3339_utc)
         .filter(|reset| *reset > now)
-        .unwrap_or_else(|| now + chrono::Duration::seconds(60));
+        .unwrap_or_else(|| now + time::Duration::seconds(60));
     format_rfc3339_utc(deadline)
 }
 
@@ -3773,13 +3771,13 @@ impl IssueMonitorProviderQuotaHold {
         provider: String,
         reset_at: String,
         evidence: Option<IssueMonitorProviderQuotaHoldEvidence>,
-        now: chrono::DateTime<chrono::Utc>,
+        now: gwt_core::timestamp::UtcTimestamp,
     ) -> Self {
         let evidence_age_secs = evidence
             .as_ref()
             .and_then(|evidence| parse_rfc3339_utc(&evidence.recorded_at))
             .filter(|recorded| *recorded <= now)
-            .map(|recorded| now.signed_duration_since(recorded).num_seconds() as u64);
+            .map(|recorded| now.signed_duration_since(recorded).whole_seconds() as u64);
         Self {
             provider,
             reset_at: provider_quota_reset_label(&reset_at).to_string(),
@@ -3945,7 +3943,7 @@ impl IssueMonitorProviderQuotaHoldEvidence {
     pub fn screen_notice(recorded_at: &str, window_id: &str, screen_text: &str) -> Self {
         let matched = gwt_core::usage::limit_notice::detect_provider_limit_screen_match(
             screen_text,
-            &chrono::Local::now(),
+            gwt_core::timestamp::UtcTimestamp::now(),
         );
         Self {
             recorded_at: recorded_at.to_string(),
@@ -4011,7 +4009,7 @@ impl IssueMonitorProviderQuotaHoldEvidence {
     pub fn contradicted_by(
         &self,
         account: &gwt_core::usage::ProviderUsage,
-        _now: chrono::DateTime<chrono::Utc>,
+        _now: gwt_core::timestamp::UtcTimestamp,
     ) -> bool {
         self.account_id
             .as_deref()
@@ -4850,7 +4848,7 @@ pub fn rate_limit_reset_for_agent(
         .iter()
         .filter_map(|window| window.resets_at)
         .min()
-        .map(|reset| reset.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+        .map(gwt_core::timestamp::UtcTimestamp::to_rfc3339_seconds)
 }
 
 /// Issue #3616: whether the poller independently reports `agent_id`'s account
@@ -4940,7 +4938,7 @@ pub struct LaunchProfileSelection {
 fn hold_reset_after<'holds>(
     holds: &'holds BTreeMap<String, String>,
     provider: &str,
-    now: chrono::DateTime<chrono::Utc>,
+    now: gwt_core::timestamp::UtcTimestamp,
 ) -> Option<&'holds str> {
     let reset_at = holds.get(provider)?;
     (parse_rfc3339_utc(reset_at)? > now).then_some(reset_at.as_str())
@@ -4951,7 +4949,12 @@ fn hold_clock_label(reset_at: &str) -> String {
         return "reset unknown".to_string();
     }
     parse_rfc3339_utc(reset_at)
-        .map(|reset| reset.format("%H:%M").to_string())
+        .map(|reset| {
+            reset
+                .utc_datetime()
+                .format(time::macros::format_description!("[hour]:[minute]"))
+                .expect("format UTC reset timestamp")
+        })
         .unwrap_or_else(|| reset_at.to_string())
 }
 
@@ -4992,7 +4995,7 @@ pub fn select_launch_profile(
     avoid_provider: Option<&str>,
     now: &str,
 ) -> LaunchProfileSelection {
-    let now = parse_rfc3339_utc(now).unwrap_or_else(chrono::Utc::now);
+    let now = parse_rfc3339_utc(now).unwrap_or_else(gwt_core::timestamp::UtcTimestamp::now);
     let avoid_provider = avoid_provider.and_then(normalize_issue_monitor_provider);
     let mut selection = LaunchProfileSelection::default();
     let mut eligible = Vec::new();
@@ -6602,17 +6605,15 @@ fn rfc3339_plus_secs(now: &str, secs: u64) -> Option<String> {
     // Guard the u64→i64 cast: an absurd magnitude (only possible via corrupted
     // tuning) fails closed to None rather than wrapping negative.
     let secs = i64::try_from(secs).ok()?;
-    let parsed = chrono::DateTime::parse_from_rfc3339(now).ok()?;
-    let later = parsed + chrono::Duration::seconds(secs);
-    Some(later.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+    gwt_core::timestamp::shift_rfc3339_seconds(now, time::Duration::seconds(secs))
 }
 
 /// Whole seconds elapsed from `earlier` to `now` (both RFC3339). `None` when
 /// either is unparseable. Negative when `now` precedes `earlier`.
 fn rfc3339_elapsed_secs(earlier: &str, now: &str) -> Option<i64> {
-    let a = chrono::DateTime::parse_from_rfc3339(earlier).ok()?;
-    let b = chrono::DateTime::parse_from_rfc3339(now).ok()?;
-    Some((b - a).num_seconds())
+    let a = gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(earlier).ok()?;
+    let b = gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(now).ok()?;
+    Some((b - a).whole_seconds())
 }
 
 /// SPEC #3200 Option A: a request for the GUI to spawn an independent review
@@ -8260,8 +8261,7 @@ pub(crate) fn try_mutate_issue_monitor_prefs_recovering_observed<T>(
                         baseline.last_prefs_reset = Some(IssueMonitorPrefsReset {
                             quarantine_path: quarantine.display().to_string(),
                             reason: error.to_string(),
-                            at: chrono::Utc::now()
-                                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                            at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds(),
                         });
                         (baseline, Some((quarantine, error, false)))
                     }
@@ -9409,17 +9409,17 @@ impl IssueMonitorState {
     }
 
     fn closure_revision_floor_is_valid(value: &str) -> bool {
-        chrono::DateTime::parse_from_rfc3339(value).is_ok()
+        gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(value).is_ok()
     }
 
     fn closure_revision_floor_order(
         current_floor: Option<&str>,
         incoming_floor: Option<&str>,
     ) -> Option<std::cmp::Ordering> {
-        let current_time =
-            current_floor.and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok());
-        let incoming_time =
-            incoming_floor.and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok());
+        let current_time = current_floor
+            .and_then(|value| gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(value).ok());
+        let incoming_time = incoming_floor
+            .and_then(|value| gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(value).ok());
         match (current_time, incoming_time) {
             (Some(current), Some(incoming)) => Some(incoming.cmp(&current)),
             (Some(_), None) => Some(std::cmp::Ordering::Less),
@@ -9920,7 +9920,7 @@ impl IssueMonitorState {
         if issue
             .updated_at
             .as_deref()
-            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+            .and_then(|value| gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(value).ok())
             .is_none()
         {
             return IssueCompletionDecision::Unknown;
@@ -10375,8 +10375,8 @@ impl IssueMonitorState {
             return true;
         };
         match (
-            chrono::DateTime::parse_from_rfc3339(now),
-            chrono::DateTime::parse_from_rfc3339(not_before),
+            gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(now),
+            gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(not_before),
         ) {
             (Ok(now_t), Ok(nb_t)) => now_t >= nb_t,
             _ => true,
@@ -11327,8 +11327,8 @@ impl IssueMonitorState {
                 ..
             } => {
                 let retry_ready = match (
-                    chrono::DateTime::parse_from_rfc3339(now),
-                    chrono::DateTime::parse_from_rfc3339(&retry_not_before),
+                    gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(now),
+                    gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(&retry_not_before),
                 ) {
                     (Ok(now), Ok(not_before)) => now >= not_before,
                     // A malformed clock must not strand an explicitly bounded
@@ -12834,7 +12834,9 @@ impl IssueMonitorState {
                 known.account_id != account_id
                     && account
                         .fetched_at
-                        .zip(parse_rfc3339_utc(&known.observed_at))
+                        .zip(gwt_core::timestamp::UtcTimestamp::parse_rfc3339(
+                            &known.observed_at,
+                        ))
                         .is_none_or(|(observed, current)| observed <= current)
             })
         {
@@ -12887,7 +12889,7 @@ impl IssueMonitorState {
         if self.launch_auto && !reevaluate_auto {
             return;
         }
-        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds();
         let blocked = self
             .pending_launch_deliveries
             .iter()
@@ -13013,7 +13015,7 @@ impl IssueMonitorState {
     /// Issue #4908 B/C: only a reset or explicit release restores admission.
     fn admission_provider_quota_holds(
         &self,
-        _now: chrono::DateTime<chrono::Utc>,
+        _now: gwt_core::timestamp::UtcTimestamp,
     ) -> BTreeMap<String, String> {
         self.provider_quota_holds.clone()
     }
@@ -13210,7 +13212,7 @@ impl IssueMonitorState {
         let released_at = if parse_rfc3339_utc(now).is_some() {
             now.to_string()
         } else {
-            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+            gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_millis()
         };
         let released_reset_at = self.provider_quota_holds.remove(&provider);
         let evidence = self.provider_quota_hold_evidence.remove(&provider);
@@ -15357,14 +15359,14 @@ impl IssueMonitorState {
     fn provider_quota_hold_deadline_at(
         &self,
         now: &str,
-    ) -> Option<(String, chrono::DateTime<chrono::Utc>)> {
+    ) -> Option<(String, gwt_core::timestamp::UtcTimestamp)> {
         let now = parse_rfc3339_utc(now)?;
         let providers = self.saved_launch_providers();
         if providers.is_empty() {
             return None;
         }
         let holds = self.admission_provider_quota_holds(now);
-        let mut earliest: Option<(String, chrono::DateTime<chrono::Utc>)> = None;
+        let mut earliest: Option<(String, gwt_core::timestamp::UtcTimestamp)> = None;
         for provider in providers {
             let deadline = holds
                 .get(&provider)
@@ -15624,7 +15626,7 @@ impl IssueMonitorState {
     }
 
     pub fn status_view(&self) -> IssueMonitorStatusView {
-        let now = format_rfc3339_utc(chrono::Utc::now());
+        let now = format_rfc3339_utc(gwt_core::timestamp::UtcTimestamp::now());
         self.status_view_without_scan_at(&now)
     }
 
@@ -15925,7 +15927,7 @@ impl IssueMonitorState {
     }
 
     pub fn agent_status(&self) -> IssueMonitorAgentStatus {
-        let now = format_rfc3339_utc(chrono::Utc::now());
+        let now = format_rfc3339_utc(gwt_core::timestamp::UtcTimestamp::now());
         self.agent_status_without_scan_at(&now)
     }
 
@@ -16671,7 +16673,7 @@ impl IssueMonitorState {
         }
         let reason = "merged delivery has a failed independent acceptance review; resolve the review before closing";
         if self.autonomous_mode {
-            let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds();
             self.request_autonomous_steering(issue_number, reason, &now);
         } else {
             self.escalate_to_needs_human(issue_number, NeedsHumanKind::UserChoiceRequired, reason);
@@ -16784,7 +16786,7 @@ impl IssueMonitorState {
         settlement.settled_at = parse_rfc3339_utc(&settlement.settled_at)
             .zip(parse_rfc3339_utc(now))
             .map(|(previous, now)| {
-                now.max(previous + chrono::Duration::nanoseconds(1))
+                now.max(previous + time::Duration::nanoseconds(1))
                     .to_rfc3339()
             })
             .ok_or("declaration or settlement timestamp is invalid")?;
@@ -16887,7 +16889,7 @@ impl IssueMonitorState {
             })
             .map(|item| item.issue.number)
             .collect::<Vec<_>>();
-        let now = format_rfc3339_utc(chrono::Utc::now());
+        let now = format_rfc3339_utc(gwt_core::timestamp::UtcTimestamp::now());
         for number in delivered {
             self.release_failed_issue_hold(
                 number,
@@ -17013,12 +17015,11 @@ impl IssueMonitorState {
         // nobody had ever closed sat at generations 43-60 and were refused here
         // forever, relaunching up to fifteen times each.
         if self.issue_reopened_after_close(issue_number) {
-            let merged_at = delivery
-                .merged_at
-                .as_deref()
-                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok());
+            let merged_at = delivery.merged_at.as_deref().and_then(|value| {
+                gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(value).ok()
+            });
             let settled_at = settled.and_then(|settlement| {
-                chrono::DateTime::parse_from_rfc3339(&settlement.settled_at).ok()
+                gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(&settlement.settled_at).ok()
             });
             return matches!((merged_at, settled_at), (Some(merged), Some(settled)) if merged > settled);
         }
@@ -17362,7 +17363,7 @@ impl IssueMonitorState {
                         })
                         .and_then(parse_rfc3339_utc)
                         .is_none_or(|last| {
-                            now_at.signed_duration_since(last).num_seconds()
+                            now_at.signed_duration_since(last).whole_seconds()
                                 >= self.claim_heartbeat_interval_secs() as i64
                         })
             })
@@ -18136,7 +18137,7 @@ impl IssueMonitorState {
                 .filter(|attempts| attempts.reviewed_sha == reviewed_sha)
                 .map_or(0, |attempts| attempts.count)
                 .saturating_add(1);
-            let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds();
             record.review_attempts = Some(AutonomousReviewAttempts {
                 reviewed_sha: reviewed_sha.clone(),
                 count,
@@ -18502,8 +18503,8 @@ impl IssueMonitorState {
         }
         let not_before = attempts.not_before.as_deref()?;
         let pending = match (
-            chrono::DateTime::parse_from_rfc3339(now),
-            chrono::DateTime::parse_from_rfc3339(not_before),
+            gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(now),
+            gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(not_before),
         ) {
             (Ok(now), Ok(not_before)) => now < not_before,
             // An unparseable clock fails open, like `retry_ready`.
@@ -19319,7 +19320,7 @@ impl IssueMonitorState {
                 self.fence_relaunch_preserving_attempts(
                     issue_number,
                     "settled delivery; remaining work",
-                    &format_rfc3339_utc(chrono::Utc::now()),
+                    &format_rfc3339_utc(gwt_core::timestamp::UtcTimestamp::now()),
                     false,
                 );
                 existing = self.inbox_item(issue_number).cloned();
@@ -19510,7 +19511,7 @@ impl IssueMonitorState {
                     settlement.pr_number,
                     settlement.merge_sha,
                     MergedIssueSettlementAction::UnmetAcceptance { unmet },
-                    &format_rfc3339_utc(chrono::Utc::now()),
+                    &format_rfc3339_utc(gwt_core::timestamp::UtcTimestamp::now()),
                 );
                 // Continuation may restore retired SPEC queue membership;
                 // retain exclusions that still apply after that restoration.
@@ -20311,7 +20312,7 @@ impl IssueMonitorState {
                     *timestamp = now.to_owned();
                     return true;
                 };
-                current.signed_duration_since(at).num_seconds() < 300
+                current.signed_duration_since(at).whole_seconds() < 300
             });
             !launches.is_empty()
         });
@@ -20964,7 +20965,7 @@ impl IssueMonitorState {
 
     /// Drain queued review-agent spawn requests for emission to the GUI.
     pub fn take_pending_review_dispatches(&mut self) -> Vec<AutonomousReviewDispatch> {
-        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds();
         self.take_pending_review_dispatches_at(&now)
     }
 
@@ -21212,7 +21213,7 @@ impl IssueMonitorState {
         apply: impl FnOnce(&mut Self) -> T,
     ) -> T {
         let recorded_at = parse_rfc3339_utc(processed_at)
-            .map(|time| time.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true))
+            .map(|time| time.to_rfc3339_nanos())
             .unwrap_or_else(|| processed_at.to_string());
         let previous = self
             .event_control_context
@@ -21234,7 +21235,7 @@ impl IssueMonitorState {
             }
             None => (
                 uuid::Uuid::new_v4().to_string(),
-                chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
+                gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_nanos(),
             ),
         };
         let sequence = self
@@ -21804,7 +21805,7 @@ impl IssueMonitorState {
                     tier: None,
                     delivery_id: delivery_id.clone(),
                     confirmed_at: confirmed_at.map(str::to_string).unwrap_or_else(|| {
-                        chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
+                        gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_nanos()
                     }),
                 },
             );
@@ -21898,9 +21899,9 @@ impl IssueMonitorState {
         // the autonomous path. Every launch needs it — an agent that stalls
         // without autonomous mode stalls just as silently — and this is the
         // one place every launch is confirmed.
-        let now = confirmed_at.map(str::to_string).unwrap_or_else(|| {
-            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
-        });
+        let now = confirmed_at
+            .map(str::to_string)
+            .unwrap_or_else(|| gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds());
         self.record_autonomous_heartbeat(issue_number, &now);
         true
     }
@@ -21975,7 +21976,7 @@ impl IssueMonitorState {
     }
 
     pub fn record_launch_failed(&mut self, issue_number: u64, message: impl Into<String>) {
-        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds();
         self.record_launch_failed_at(issue_number, message, &now);
     }
 
@@ -22023,7 +22024,7 @@ impl IssueMonitorState {
         materializer_id: Option<&str>,
         retryable: bool,
     ) -> bool {
-        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds();
         self.record_launch_failed_delivery_at(
             issue_number,
             message,
@@ -22096,7 +22097,7 @@ impl IssueMonitorState {
         window_id: &str,
         message: impl Into<String>,
     ) -> Option<u64> {
-        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds();
         self.record_agent_window_failed_at(window_id, message, &now)
     }
 
@@ -22128,7 +22129,7 @@ impl IssueMonitorState {
     }
 
     pub fn record_agent_issue_failed(&mut self, issue_number: u64, message: impl Into<String>) {
-        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds();
         self.record_agent_issue_failed_at(issue_number, message, &now);
     }
 
@@ -22138,7 +22139,7 @@ impl IssueMonitorState {
         message: impl Into<String>,
         classification: IssueMonitorFailureClass,
     ) {
-        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds();
         self.record_agent_issue_failed_classified_at(issue_number, message, classification, &now);
     }
 
@@ -22171,7 +22172,7 @@ impl IssueMonitorState {
         message: impl Into<String>,
         classification: IssueMonitorFailureClass,
     ) {
-        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds();
         self.record_agent_window_issue_failed_classified_at(
             issue_number,
             window_id,
@@ -22294,8 +22295,8 @@ impl IssueMonitorState {
             return true;
         };
         match (
-            chrono::DateTime::parse_from_rfc3339(observed_at),
-            chrono::DateTime::parse_from_rfc3339(&confirmation.confirmed_at),
+            gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(observed_at),
+            gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(&confirmation.confirmed_at),
         ) {
             (Ok(observed), Ok(confirmed)) => observed > confirmed,
             _ => false,
@@ -22553,7 +22554,7 @@ impl IssueMonitorState {
         let now_at = parse_rfc3339_utc(now)?;
         let previous = previous?;
         let previous_at = parse_rfc3339_utc(&previous.at)?;
-        let elapsed = (now_at - previous_at).num_seconds();
+        let elapsed = (now_at - previous_at).whole_seconds();
         if elapsed < 0 {
             return None;
         }
@@ -22706,7 +22707,7 @@ impl IssueMonitorState {
         previous_window_id: &str,
         window_id: &str,
     ) {
-        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+        let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_nanos();
         let attempts = self.attempt_count(issue_number);
         self.failure_release_version += 1;
         let reason = format!(
@@ -23204,7 +23205,7 @@ impl IssueMonitorState {
     /// the shared completion policy decides whether the Issue is terminal or
     /// must return to the queue for remaining tasks.
     pub fn reconcile_merged_branches(&mut self, merged_branches: &BTreeSet<String>) -> Vec<u64> {
-        let now = format_rfc3339_utc(chrono::Utc::now());
+        let now = format_rfc3339_utc(gwt_core::timestamp::UtcTimestamp::now());
         self.reconcile_merged_branches_at(merged_branches, &now)
     }
 
@@ -24421,7 +24422,7 @@ impl IssueMonitorState {
                         settlement.settled_at = parse_rfc3339_utc(&settlement.settled_at)
                             .zip(parse_rfc3339_utc(now))
                             .map(|(previous, now)| {
-                                now.max(previous + chrono::Duration::nanoseconds(1))
+                                now.max(previous + time::Duration::nanoseconds(1))
                                     .to_rfc3339()
                             })
                             .unwrap_or_else(|| now.to_string());
@@ -25453,7 +25454,7 @@ impl IssueMonitorState {
     pub fn requeue_window(&mut self, window_id: &str) -> Option<u64> {
         self.requeue_window_at(
             window_id,
-            &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            &gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds(),
         )
     }
 
@@ -25472,7 +25473,7 @@ impl IssueMonitorState {
         target: &IssueMonitorStopTarget,
         classification: IssueMonitorFailureClass,
     ) -> Option<u64> {
-        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds();
         self.requeue_exact_window_classified_at(target, classification, &now)
     }
 
@@ -25682,13 +25683,14 @@ impl IssueMonitorState {
             let Some(heartbeat) = observed.last_heartbeat.as_deref() else {
                 continue;
             };
-            let Ok(observed_at) = chrono::DateTime::parse_from_rfc3339(heartbeat) else {
+            let Ok(observed_at) = gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(heartbeat)
+            else {
                 continue;
             };
             if record
                 .last_heartbeat
                 .as_deref()
-                .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+                .and_then(|at| gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(at).ok())
                 .is_some_and(|current| current > observed_at)
             {
                 continue;
@@ -25698,7 +25700,8 @@ impl IssueMonitorState {
                 .steering
                 .as_ref()
                 .and_then(|steering| {
-                    chrono::DateTime::parse_from_rfc3339(&steering.requested_at).ok()
+                    gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(&steering.requested_at)
+                        .ok()
                 })
                 .is_some_and(|requested_at| observed_at >= requested_at)
             {
@@ -25726,9 +25729,14 @@ impl IssueMonitorState {
         if self.window_snapshot.as_ref().is_some_and(|previous| {
             previous.project_tab_id == snapshot.project_tab_id
                 && self.window_snapshot_host == host
-                && chrono::DateTime::parse_from_rfc3339(&previous.observed_at)
+                && gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(&previous.observed_at)
                     .ok()
-                    .zip(chrono::DateTime::parse_from_rfc3339(&snapshot.observed_at).ok())
+                    .zip(
+                        gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(
+                            &snapshot.observed_at,
+                        )
+                        .ok(),
+                    )
                     .is_some_and(|(previous, incoming)| incoming < previous)
         }) {
             return;
@@ -26432,7 +26440,7 @@ impl IssueMonitorState {
             // Counts may include another incarnation of a reused window ID.
             // Retain residual/count-only evidence and fence only this correction.
             if let Some(previous) = parse_rfc3339_utc(&census.observed_at) {
-                let next = previous + chrono::Duration::nanoseconds(1);
+                let next = previous + time::Duration::nanoseconds(1);
                 census.observed_at = parse_rfc3339_utc(now)
                     .map_or(next, |now| now.max(next))
                     .to_rfc3339();
@@ -26567,7 +26575,7 @@ impl IssueMonitorState {
                     // Rebase rejects equal/older observations. Publish this
                     // correction after the old census, even within one tick.
                     if let Some(previous) = parse_rfc3339_utc(&census.observed_at) {
-                        let next = previous + chrono::Duration::nanoseconds(1);
+                        let next = previous + time::Duration::nanoseconds(1);
                         census.observed_at = parse_rfc3339_utc(now)
                             .map_or(next, |now| now.max(next))
                             .to_rfc3339();
@@ -27967,12 +27975,8 @@ pub fn scan_issue_monitor_candidates_for_project_tab_with_provenance(
 }
 
 fn expiry_from_now_lexical(now: &str, ttl_secs: u64) -> String {
-    chrono::DateTime::parse_from_rfc3339(now)
-        .map(|time| {
-            (time + chrono::Duration::seconds(ttl_secs as i64))
-                .to_utc()
-                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
-        })
+    gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(now)
+        .map(|time| (time + time::Duration::seconds(ttl_secs as i64)).to_rfc3339_seconds())
         .unwrap_or_else(|_| now.to_string())
 }
 
@@ -30921,13 +30925,9 @@ mod tests {
             max_active: 2,
             ..IssueMonitorConfig::default()
         });
-        let start = chrono::DateTime::parse_from_rfc3339("2026-07-02T00:00:00Z")
-            .expect("start")
-            .to_utc();
-        let at = |minute: i64| {
-            (start + chrono::Duration::minutes(minute))
-                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
-        };
+        let start = gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339("2026-07-02T00:00:00Z")
+            .expect("start");
+        let at = |minute: i64| (start + time::Duration::minutes(minute)).to_rfc3339_seconds();
         scan_queued_candidates(&mut monitor, &[issue(42), issue(43)], &at(0));
         monitor.set_gui_connected(true);
 
@@ -35496,7 +35496,7 @@ mod tests {
             monitor.vanished_launched_windows(
                 "project-a",
                 &live,
-                &chrono::Utc::now().to_rfc3339(),
+                &gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
                 &BTreeMap::new()
             ),
             vec!["project-a::agent-24".to_string()],
@@ -35522,7 +35522,7 @@ mod tests {
                 .vanished_launched_windows(
                     "project-a",
                     &live,
-                    &chrono::Utc::now().to_rfc3339(),
+                    &gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
                     &BTreeMap::new()
                 )
                 .is_empty(),
@@ -35542,7 +35542,7 @@ mod tests {
                 .vanished_launched_windows(
                     "project-a",
                     &BTreeSet::new(),
-                    &chrono::Utc::now().to_rfc3339(),
+                    &gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
                     &BTreeMap::new()
                 )
                 .is_empty(),
@@ -35555,7 +35555,7 @@ mod tests {
                 .vanished_launched_windows(
                     "project-a",
                     &BTreeSet::new(),
-                    &chrono::Utc::now().to_rfc3339(),
+                    &gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
                     &BTreeMap::new()
                 )
                 .is_empty(),
@@ -35577,7 +35577,7 @@ mod tests {
                 monitor.vanished_launched_windows(
                     "project-a",
                     &BTreeSet::new(),
-                    &chrono::Utc::now().to_rfc3339(),
+                    &gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
                     &BTreeMap::new()
                 ),
                 vec!["project-a::agent-24".to_string()],
@@ -35619,7 +35619,7 @@ mod tests {
         let vanished = restored.vanished_launched_windows(
             "project-a",
             &BTreeSet::new(),
-            &chrono::Utc::now().to_rfc3339(),
+            &gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
             &BTreeMap::new(),
         );
         assert_eq!(
@@ -35920,7 +35920,7 @@ mod tests {
             "project-a",
             &live,
             &test_live_launch_owners(&restored, &live),
-            &chrono::Utc::now().to_rfc3339(),
+            &gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
         );
 
         assert_eq!(
@@ -36166,7 +36166,7 @@ mod tests {
         for observed_owner in [4783, 5023] {
             let mut monitor = launched_monitor(5023, "project-a::old");
             monitor.launch_bindings.insert(window.into(), 5023);
-            let observed_at = chrono::Utc::now().to_rfc3339();
+            let observed_at = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
             let mut authenticated =
                 idle_observation(window, Some(5023), WindowState::Running, false);
             authenticated.session_id = Some("authenticated-predecessor".into());
@@ -36369,7 +36369,7 @@ mod tests {
             "project-a",
             &live,
             &test_live_launch_owners(&restored, &live),
-            &chrono::Utc::now().to_rfc3339(),
+            &gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
         );
         assert!(reconciliation.readopted.is_empty());
         assert_eq!(
@@ -36403,7 +36403,7 @@ mod tests {
             "project-a",
             &live_windows(&["project-a::agent-2"]),
             &test_live_launch_owners(&restored, &live_windows(&["project-a::agent-2"])),
-            &chrono::Utc::now().to_rfc3339(),
+            &gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
         );
 
         assert_eq!(
@@ -36437,7 +36437,7 @@ mod tests {
             "project-a",
             &BTreeSet::new(),
             &test_live_launch_owners(&foreign, &BTreeSet::new()),
-            &chrono::Utc::now().to_rfc3339(),
+            &gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
         );
         assert!(
             foreign_outcome.readopted.is_empty() && foreign_outcome.pruned.is_empty(),
@@ -36520,7 +36520,7 @@ mod tests {
         // Absence from a fresh observation is the only liveness evidence this
         // judgement accepts, so the canvas reports both windows: the duplicate
         // has stopped, the implementing one is still running.
-        let observed_at = chrono::Utc::now().to_rfc3339();
+        let observed_at = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
         let snapshot = pane_snapshot(
             &observed_at,
             vec![
@@ -36697,7 +36697,7 @@ mod tests {
             "project-a",
             &live,
             &test_live_launch_owners(&restarted, &live),
-            &chrono::Utc::now().to_rfc3339(),
+            &gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
         );
 
         restarted.clear_provider_quota_hold(
@@ -42958,7 +42958,7 @@ mod tests {
         let mut repaired = local.clone();
         assert!(repaired.bind_duplicate_runtime_holder(42, "tab-1::duplicate", "tab-1::holder"));
         let repair_at = parse_rfc3339_utc(&repaired.prefs().requeue_audit[0].released_at).unwrap();
-        let after = (repair_at + chrono::Duration::seconds(1)).to_rfc3339();
+        let after = (repair_at + time::Duration::seconds(1)).to_rfc3339();
         local.clear_active_tracking(42);
         local.complete_active_launch_at(42, "tab-1::successor", &after);
 
@@ -45085,15 +45085,15 @@ mod tests {
             "one retry below the cap remains retryable"
         );
 
-        let retry_at = chrono::DateTime::parse_from_rfc3339(
+        let retry_at = gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(
             monitor
                 .autonomous_record(42)
                 .and_then(|record| record.retry_not_before.as_deref())
                 .expect("AgentFailed retry has a durable backoff floor"),
         )
         .expect("retry_not_before is RFC3339")
-            + chrono::Duration::seconds(1);
-        let retry_at = retry_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            + time::Duration::seconds(1);
+        let retry_at = retry_at.to_rfc3339_seconds();
 
         let mut restored = test_monitor_with_prefs(IssueMonitorConfig::default(), monitor.prefs());
         scan_queued_candidates(&mut restored, std::slice::from_ref(&candidate), &retry_at);
@@ -49471,7 +49471,7 @@ mod tests {
                 .vanished_launched_windows(
                     "tab-1",
                     &BTreeSet::new(),
-                    &chrono::Utc::now().to_rfc3339(),
+                    &gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
                     &BTreeMap::new()
                 )
                 .is_empty(),
@@ -51650,7 +51650,7 @@ mod tests {
             assert_eq!(event["level"], notice.level);
             assert_eq!(event["message"], notice.message);
             assert!(event["id"].as_str().is_some_and(|id| !id.is_empty()));
-            assert!(chrono::DateTime::parse_from_rfc3339(
+            assert!(gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(
                 event["recorded_at"].as_str().expect("recording time")
             )
             .is_ok());
@@ -54547,9 +54547,9 @@ mod tests {
         let mut monitor = account_bound_quota_fixture();
         let mut account = codex_usage(20.0);
         account.account_id = Some("account-a".into());
-        account.fetched_at = parse_rfc3339_utc("2026-09-02T09:00:00Z");
+        account.fetched_at = "2026-09-02T09:00:00Z".parse().ok();
         assert!(!monitor.reconcile_provider_usage(&account, "2026-09-02T09:03:00Z"));
-        account.fetched_at = parse_rfc3339_utc("2026-09-02T09:02:00Z");
+        account.fetched_at = "2026-09-02T09:02:00Z".parse().ok();
         account.limit_reached = true;
         assert!(!monitor.reconcile_provider_usage(&account, "2026-09-02T09:03:00Z"));
         account.limit_reached = false;
@@ -54965,7 +54965,7 @@ mod tests {
             assert_eq!(item.error_message.as_deref(), Some(message));
             assert!(item.launched_window_id.is_none());
             // The funnel stamps the backoff from the wall clock.
-            let wall_now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            let wall_now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds();
             assert!(
                 !monitor.retry_ready(3928, &wall_now),
                 "autonomous={autonomous}: a backoff is scheduled"
@@ -57256,7 +57256,7 @@ mod tests {
             monitor.inbox_item(4308).unwrap().state,
             MonitorInboxState::Queued
         );
-        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+        let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_nanos();
         monitor.record_window_snapshot(idle_snapshot(
             &now,
             vec![idle_observation(
@@ -58276,13 +58276,9 @@ mod tests {
     fn issue_4815_three_failures_for_one_sha_stop_dispatch_until_the_head_moves() {
         let mut monitor = autonomous_launched_cohort(&[(41, "tab-1::impl-41")]);
         monitor.set_max_active_agents(3);
-        let start = chrono::DateTime::parse_from_rfc3339("2026-09-07T04:00:00Z")
-            .expect("start")
-            .to_utc();
-        let at = |secs: i64| {
-            (start + chrono::Duration::seconds(secs))
-                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
-        };
+        let start = gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339("2026-09-07T04:00:00Z")
+            .expect("start");
+        let at = |secs: i64| (start + time::Duration::seconds(secs)).to_rfc3339_seconds();
         // Failures at t=0 (backoff 60), t=120 (backoff 120), t=300 (cap).
         let mut clock = 0;
         for expected_count in 1..=3 {

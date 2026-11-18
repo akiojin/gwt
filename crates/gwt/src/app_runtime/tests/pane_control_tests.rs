@@ -5234,7 +5234,7 @@ fn switch_source_retirement_fixture(
         child_pid: probe.pty.process_id().unwrap(),
         child_started_at: gwt::process::host_process_start_time(probe.pty.process_id().unwrap())
             .unwrap(),
-        requested_at: Utc::now().to_rfc3339(),
+        requested_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
         execution_identity: gwt_agent::SessionExecutionIdentity::from_session(source)
             .unwrap()
             .unwrap(),

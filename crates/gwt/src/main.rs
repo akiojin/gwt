@@ -424,10 +424,10 @@ fn failed_update_reset_events(app: &mut AppRuntime, version: &str) -> Vec<Outbou
             latest: manifest.version.clone(),
             release_url: manifest.asset_url.clone(),
             asset_url: Some(manifest.asset_url.clone()),
-            checked_at: chrono::Utc::now(),
+            checked_at: gwt_core::timestamp::UtcTimestamp::now(),
         },
         None => gwt_core::update::UpdateState::UpToDate {
-            checked_at: Some(chrono::Utc::now()),
+            checked_at: Some(gwt_core::timestamp::UtcTimestamp::now()),
         },
     };
     app.pending_update = Some(state.clone());
@@ -2212,7 +2212,7 @@ enum UserEvent {
     /// so rows can show the "safe to delete" badge.
     WorkMergeStatus {
         project_root: PathBuf,
-        merged_branches: std::collections::HashMap<String, chrono::DateTime<chrono::Utc>>,
+        merged_branches: std::collections::HashMap<String, gwt_core::timestamp::UtcTimestamp>,
         cleanup_ready_branches: std::collections::HashMap<String, String>,
         dirty_branches: std::collections::HashSet<String>,
         live_process_branches: std::collections::HashSet<String>,
@@ -2362,7 +2362,7 @@ enum UserEvent {
         observations: Vec<app_runtime::terminal_convergence::TerminalWindowObservation>,
     },
     UpdateDrainObserved {
-        now: chrono::DateTime<chrono::Utc>,
+        now: gwt_core::timestamp::UtcTimestamp,
         observations: Vec<app_runtime::UpdateDrainObservation>,
     },
     IssueMonitorScheduledScanComplete {
@@ -3002,7 +3002,7 @@ mod tests {
 
     use axum::http::{header::AUTHORIZATION, HeaderMap, HeaderValue};
     use base64::Engine;
-    use chrono::Utc;
+
     use tempfile::tempdir;
 
     use gwt::{
@@ -5518,7 +5518,7 @@ mod tests {
                 latest: "2.0.0".into(),
                 release_url: String::new(),
                 asset_url: None,
-                checked_at: Utc::now(),
+                checked_at: gwt_core::timestamp::UtcTimestamp::now(),
             },
             super::UPDATE_CONTROL_CLIENT_ID.into(),
             "Restart now",
@@ -5564,7 +5564,7 @@ mod tests {
             latest: "99.0.0".into(),
             release_url: "https://example.invalid/release".into(),
             asset_url: Some("https://example.invalid/gwt.tar.gz".into()),
-            checked_at: Utc::now(),
+            checked_at: gwt_core::timestamp::UtcTimestamp::now(),
         };
         assert!(
             !super::admit_update_download(
@@ -5580,7 +5580,7 @@ mod tests {
             version: "99.0.0".into(),
             asset_url: "https://example.invalid/gwt.tar.gz".into(),
             payload: gwt_core::update::PreparedPayload::PortableBinary { path: payload },
-            downloaded_at: Utc::now().to_rfc3339(),
+            downloaded_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
             origin: gwt_core::update::PendingUpdateOrigin::ManualLater,
             auto_apply_deferred: false,
         };
@@ -5607,7 +5607,7 @@ mod tests {
             to_version: manifest.version.clone(),
             observed_version: "9.0.0".into(),
             attempt: 1,
-            recorded_at: Utc::now().to_rfc3339(),
+            recorded_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
             message: Some("previous helper failed".into()),
         })
         .unwrap();
@@ -5650,7 +5650,7 @@ mod tests {
             latest: "9.106.0".into(),
             release_url: "https://example.invalid/release".into(),
             asset_url: Some("https://example.invalid/gwt-windows-x86_64.zip".into()),
-            checked_at: Utc::now(),
+            checked_at: gwt_core::timestamp::UtcTimestamp::now(),
         };
         for (autonomous_mode, auto_apply_updates) in
             [(false, Some(true)), (true, Some(false)), (true, None)]
@@ -5795,7 +5795,7 @@ mod tests {
             latest: "9.108.0".into(),
             release_url: "https://example.invalid/release".into(),
             asset_url: Some("https://example.invalid/gwt.tar.gz".into()),
-            checked_at: Utc::now(),
+            checked_at: gwt_core::timestamp::UtcTimestamp::now(),
         };
         runtime.update_download_in_flight =
             Some(crate::app_runtime::UPDATE_AUTO_APPLY_CLIENT_ID.into());
@@ -5819,7 +5819,7 @@ mod tests {
             &gwt::IssueMonitorPrefs {
                 update_drain: Some(gwt::IssueMonitorUpdateDrain {
                     version: "9.107.0".into(),
-                    since: Utc::now().to_rfc3339(),
+                    since: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
                     reason: gwt::IssueMonitorUpdateDrainReason::Auto,
                     automatic: None,
                     blocking: Vec::new(),
@@ -5844,7 +5844,7 @@ mod tests {
             version: "9.107.0".into(),
             asset_url: "https://example.invalid/gwt.tar.gz".into(),
             payload: gwt_core::update::PreparedPayload::PortableBinary { path: payload },
-            downloaded_at: Utc::now().to_rfc3339(),
+            downloaded_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
             origin: gwt_core::update::PendingUpdateOrigin::ManualLater,
             auto_apply_deferred: false,
         };
@@ -5854,7 +5854,7 @@ mod tests {
             latest: "9.107.0".into(),
             release_url: "https://example.invalid/release".into(),
             asset_url: Some(manifest.asset_url.clone()),
-            checked_at: Utc::now(),
+            checked_at: gwt_core::timestamp::UtcTimestamp::now(),
         };
         super::record_update_available(&mut runtime, state.clone());
         assert!(gwt_core::update::load_pending_update_manifest().is_some());
@@ -6069,7 +6069,7 @@ mod tests {
             payload: gwt_core::update::PreparedPayload::PortableBinary {
                 path: temp.path().join("prepared"),
             },
-            downloaded_at: Utc::now().to_rfc3339(),
+            downloaded_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
             origin: gwt_core::update::PendingUpdateOrigin::ManualLater,
             auto_apply_deferred: false,
         };
@@ -6100,7 +6100,7 @@ mod tests {
             payload: gwt_core::update::PreparedPayload::PortableBinary {
                 path: temp.path().join("prepared"),
             },
-            downloaded_at: Utc::now().to_rfc3339(),
+            downloaded_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
             origin: gwt_core::update::PendingUpdateOrigin::ManualLater,
             auto_apply_deferred: false,
         };
@@ -6138,7 +6138,7 @@ mod tests {
             latest: "9.20.2".to_string(),
             release_url: "https://example.invalid/releases/v9.20.2".to_string(),
             asset_url: Some("https://example.invalid/gwt-macos-arm64.dmg".to_string()),
-            checked_at: Utc::now(),
+            checked_at: gwt_core::timestamp::UtcTimestamp::now(),
         };
 
         let events = super::record_update_available(&mut runtime, state);
@@ -6185,7 +6185,7 @@ mod tests {
             version: "999.0.1".into(),
             asset_url: "https://example.invalid/update.zip".into(),
             payload: gwt_core::update::PreparedPayload::PortableBinary { path: payload },
-            downloaded_at: Utc::now().to_rfc3339(),
+            downloaded_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
             origin: gwt_core::update::PendingUpdateOrigin::ManualLater,
             auto_apply_deferred: false,
         };
@@ -6203,7 +6203,7 @@ mod tests {
 
     #[test]
     fn startup_update_state_classification_covers_publish_stop_and_retry() {
-        let checked_at = Utc::now();
+        let checked_at = gwt_core::timestamp::UtcTimestamp::now();
 
         assert!(matches!(
             super::classify_startup_update_state(&UpdateState::Available {
@@ -11355,7 +11355,7 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::ProviderUsageSnapshot { accounts }) => {
                 // Issue #3616: corroborate and re-check pending quota
                 // candidates. See `AppRuntime::handle_provider_usage_snapshot`.
-                let events = app.handle_provider_usage_snapshot(accounts, chrono::Utc::now());
+                let events = app.handle_provider_usage_snapshot(accounts, gwt_core::timestamp::UtcTimestamp::now());
                 clients.dispatch(events);
             }
             #[cfg(test)]
@@ -12102,7 +12102,7 @@ fn main() -> std::io::Result<()> {
                                 version: prepared.latest.clone(),
                                 asset_url: prepared.asset_url.clone(),
                                 payload: prepared.payload.clone(),
-                                downloaded_at: chrono::Utc::now().to_rfc3339(),
+                                downloaded_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
                                 origin: if client_id == app_runtime::UPDATE_AUTO_APPLY_CLIENT_ID {
                                     gwt_core::update::PendingUpdateOrigin::Automatic
                                 } else {
@@ -12269,7 +12269,7 @@ fn main() -> std::io::Result<()> {
                 let marker = gwt_core::update::UpdateResumeMarker {
                     from_version: env!("CARGO_PKG_VERSION").to_string(),
                     to_version: manifest.version.clone(),
-                    started_at: chrono::Utc::now().to_rfc3339(),
+                    started_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
                     restart_args: update_front_door::current_restart_args(),
                     projects: app.update_resume_projects(),
                     attempt: 1,

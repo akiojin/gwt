@@ -2330,7 +2330,7 @@ where
         ledger.record_graphql_response(
             &github_budget::spawn_source(&["api", "graphql"]),
             &rate_limit,
-            now.into(),
+            now,
         );
     }
     // gh exits nonzero for partial GraphQL responses too. Only a NOT_FOUND
@@ -2471,7 +2471,7 @@ where
         ledger.record_graphql_response(
             &github_budget::spawn_source(&["api", "graphql"]),
             &rate_limit,
-            now.into(),
+            now,
         );
     }
     if !output.success {
@@ -2520,7 +2520,6 @@ where
     F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
 {
     let policy = ThrottlePolicy::current();
-    let now = now.into();
     let mut snapshot = ledger.snapshot(now);
     if github_budget::probe_is_stale(&snapshot, &policy) {
         if let Ok(output) = run_gh(repo_path, &["api", "rate_limit"]) {
@@ -8346,7 +8345,7 @@ mod tests {
                             ledger.record_spawn_from(
                                 GitHubQuota::GraphQl,
                                 &github_budget::spawn_source(args),
-                                now.into(),
+                                now,
                             );
                             Ok(GhCliOutput {
                                 success: true,
@@ -8367,7 +8366,7 @@ mod tests {
             };
             let owner_calls = owner_calls.into_inner();
             assert_eq!(owner_calls, 1);
-            let budget = ledger.snapshot(now.into());
+            let budget = ledger.snapshot(now);
             assert_eq!(
                 budget.local["graphql"].points_last_hour,
                 if offset == 0 { 3 } else { 6 }
@@ -8944,11 +8943,11 @@ mod tests {
             ResourceWindow {
                 limit: 5000,
                 remaining: 120,
-                reset_at: shift_test_timestamp(now_3891(), Duration::hours(1)).into(),
+                reset_at: shift_test_timestamp(now_3891(), Duration::hours(1)),
             },
         );
         ledger.record_probe(&ProbeSnapshot {
-            probed_at: exhausted_at.into(),
+            probed_at: exhausted_at,
             resources,
         });
 
@@ -9117,9 +9116,9 @@ mod tests {
                 resource: "graphql".to_string(),
                 limit: 5000,
                 remaining: 0,
-                reset_at: shift_test_timestamp(later, Duration::seconds(300)).into(),
+                reset_at: shift_test_timestamp(later, Duration::seconds(300)),
             },
-            later.into(),
+            later,
         );
         let read = cached_read(tmp.path(), &ledger, &mut gh, later, &forced).expect("read");
         assert_eq!(

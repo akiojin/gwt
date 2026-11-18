@@ -5,7 +5,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::{RuntimeHookEvent, RuntimeHookEventKind};
@@ -126,7 +125,7 @@ fn deliver_journaled(
 
 impl DeliveryState {
     fn observe(&mut self, result: &Result<(), String>) {
-        let now = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+        let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_millis();
         match result {
             Ok(()) => {
                 self.health.consecutive_failures = 0;

@@ -284,7 +284,7 @@ pub struct ScopeHealthView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub legacy_residue_detected: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_repair_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub last_repair_at: Option<gwt_core::timestamp::UtcTimestamp>,
 }
 
 impl ScopeHealthView {
@@ -387,7 +387,7 @@ pub struct ProjectIndexStatusView {
     pub state: ProjectIndexStatusState,
     pub detail: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub repair_started_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub repair_started_at: Option<gwt_core::timestamp::UtcTimestamp>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub progress: Option<RebuildProgress>,
     #[serde(skip_serializing_if = "ProjectIndexScopes::is_empty", default)]
@@ -480,8 +480,7 @@ pub fn parse_scope_health(payload: &serde_json::Value) -> Option<ScopeHealthView
     let last_repair_at = obj
         .get("last_repair_at")
         .and_then(serde_json::Value::as_str)
-        .and_then(|raw| chrono::DateTime::parse_from_rfc3339(raw).ok())
-        .map(|dt| dt.with_timezone(&chrono::Utc));
+        .and_then(|raw| gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(raw).ok());
     Some(ScopeHealthView {
         healthy,
         repair_required,
@@ -1846,7 +1845,7 @@ where
         return None;
     }
     let total = targets.len() as u32;
-    let started_at = chrono::Utc::now();
+    let started_at = gwt_core::timestamp::UtcTimestamp::now();
     let initial_scopes = initial_status.scopes.clone();
     let initial_worktrees = initial_status.worktrees.clone();
 
@@ -3975,11 +3974,8 @@ mod tests {
 
     #[test]
     fn project_index_status_view_emits_repair_progress_when_present() {
-        let started = chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(
-            chrono::NaiveDateTime::parse_from_str("2026-05-07T01:23:45", "%Y-%m-%dT%H:%M:%S")
-                .expect("parse fixed timestamp"),
-            chrono::Utc,
-        );
+        let started = gwt_core::timestamp::UtcTimestamp::parse_rfc3339("2026-05-07T01:23:45Z")
+            .expect("parse fixed timestamp");
         let view = ProjectIndexStatusView {
             state: ProjectIndexStatusState::Repairing,
             detail: "rebuilding 1/4: issues".to_string(),
@@ -5203,7 +5199,7 @@ mod tests {
         std::fs::write(
             cache_root.join("refresh-meta.json"),
             serde_json::json!({
-                "last_full_refresh": chrono::Utc::now().to_rfc3339(), "ttl_minutes": 15,
+                "last_full_refresh": gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(), "ttl_minutes": 15,
             })
             .to_string(),
         )
@@ -5266,7 +5262,7 @@ mod tests {
             issues_dir.join("meta.json"),
             serde_json::json!({
                 "schema_version": 1,
-                "last_full_refresh": chrono::Utc::now().to_rfc3339(),
+                "last_full_refresh": gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
                 "ttl_minutes": 15,
                 "source_cache_fingerprint": "stale",
                 "source_document_count": 1,

@@ -23,6 +23,8 @@ mod issue_context;
 mod plan;
 mod texts;
 
+use gwt_core::timestamp::UtcTimestamp;
+
 use std::{
     io::{self, Read},
     path::{Path, PathBuf},
@@ -30,7 +32,6 @@ use std::{
 };
 
 use crate::board_provider::load_prompt_reminder_for_repo_hash;
-use chrono::{DateTime, Utc};
 use gwt_agent::{Session, GWT_SESSION_ID_ENV};
 #[cfg(test)]
 use gwt_core::coordination::{load_reminders_state, write_reminders_state};
@@ -99,7 +100,7 @@ pub(crate) fn handle_with_input_for_session(
     let Some(intent_event) = IntentBoundaryEvent::from_name(event) else {
         return Ok(HookOutput::Silent);
     };
-    let Some(plan) = compute_plan(event, session, Utc::now())? else {
+    let Some(plan) = compute_plan(event, session, UtcTimestamp::now())? else {
         return Ok(HookOutput::Silent);
     };
     if prompt_reminder_write_has_budget(event, gwt_core::operation_deadline::current()) {
@@ -535,7 +536,7 @@ fn compute_memory_reminder_state(
     event: IntentBoundaryEvent,
     present: bool,
     current_state: &RemindersState,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
 ) -> (bool, RemindersState) {
     let mut new_state = current_state.clone();
     if event == IntentBoundaryEvent::SessionStart {
@@ -546,7 +547,7 @@ fn compute_memory_reminder_state(
     }
     let fire = match new_state.last_memory_reminded_at {
         None => true,
-        Some(last) => now - last >= chrono::Duration::hours(MEMORY_REMINDER_THROTTLE_WINDOW_HOURS),
+        Some(last) => now - last >= time::Duration::hours(MEMORY_REMINDER_THROTTLE_WINDOW_HOURS),
     };
     if fire {
         new_state.last_memory_reminded_at = Some(now);
@@ -674,7 +675,7 @@ fn load_user_prompt_board_read_inline_with(
 pub fn compute_plan(
     event: &str,
     session: &Session,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
 ) -> Result<Option<ReminderPlan>, HookError> {
     let Some(intent_event) = IntentBoundaryEvent::from_name(event) else {
         return Ok(None);
@@ -909,7 +910,7 @@ fn preserve_board_diff_cursor_after_failed_read(
     plan: &mut ReminderPlan,
     event: IntentBoundaryEvent,
     board_read_succeeded: bool,
-    previous_last_injected_at: Option<DateTime<Utc>>,
+    previous_last_injected_at: Option<UtcTimestamp>,
 ) {
     if event != IntentBoundaryEvent::UserPromptSubmit || board_read_succeeded {
         return;
@@ -999,7 +1000,6 @@ fn resolve_narrative_language() -> String {
 #[cfg(test)]
 mod tests {
     use crate::cli::test_support::ScopedEnvVar;
-    use chrono::TimeZone;
     use gwt_agent::AgentId;
     use gwt_core::{
         coordination::{post_entry, AuthorKind, BoardEntry, BoardEntryKind},
@@ -1074,7 +1074,7 @@ mod tests {
             )
             .unwrap();
         }
-        let first = compute_plan("UserPromptSubmit", &session, Utc::now())
+        let first = compute_plan("UserPromptSubmit", &session, UtcTimestamp::now())
             .unwrap()
             .unwrap();
         assert!(
@@ -1085,7 +1085,7 @@ mod tests {
         assert!(additional_context(&first.output).contains("blocked=1"));
         assert!(additional_context(&first.output).contains("handoff=1"));
         write_reminders_state(&repo, &session.id, &first.next_reminders).unwrap();
-        let second = compute_plan("UserPromptSubmit", &session, Utc::now())
+        let second = compute_plan("UserPromptSubmit", &session, UtcTimestamp::now())
             .unwrap()
             .unwrap();
         assert!(additional_context(&second.output).contains("Board unread: 2"));
@@ -1134,7 +1134,7 @@ mod tests {
             coordination_scope: None,
             affiliation_status,
             workspace_id: workspace_id.map(str::to_string),
-            updated_at: Utc::now(),
+            updated_at: UtcTimestamp::now(),
         }
     }
 
@@ -1171,7 +1171,7 @@ mod tests {
         body: &str,
         origin_branch: &str,
         origin_session: &str,
-        timestamp: DateTime<Utc>,
+        timestamp: UtcTimestamp,
     ) -> BoardEntry {
         let mut e = BoardEntry::new(
             AuthorKind::Agent,
@@ -1209,7 +1209,7 @@ mod tests {
             }],
         );
         for event in ["SessionStart", "UserPromptSubmit"] {
-            let plan = compute_plan(event, &session, Utc::now())
+            let plan = compute_plan(event, &session, UtcTimestamp::now())
                 .expect("plan")
                 .expect("some plan");
             let text = additional_context(&plan.output);
@@ -1288,7 +1288,7 @@ mod tests {
         let plan = compute_plan(
             "UserPromptSubmit",
             &session,
-            "2026-08-06T12:00:00Z".parse::<DateTime<Utc>>().unwrap(),
+            "2026-08-06T12:00:00Z".parse::<UtcTimestamp>().unwrap(),
         )
         .expect("plan")
         .expect("some plan");
@@ -1331,7 +1331,7 @@ mod tests {
         let plan = compute_plan(
             "UserPromptSubmit",
             &session,
-            "2026-09-03T12:00:00Z".parse::<DateTime<Utc>>().unwrap(),
+            "2026-09-03T12:00:00Z".parse::<UtcTimestamp>().unwrap(),
         )
         .expect("plan")
         .expect("some plan");
@@ -1361,7 +1361,7 @@ mod tests {
         let foreign = compute_plan(
             "UserPromptSubmit",
             &foreign,
-            "2026-09-03T12:00:00Z".parse::<DateTime<Utc>>().unwrap(),
+            "2026-09-03T12:00:00Z".parse::<UtcTimestamp>().unwrap(),
         )
         .unwrap()
         .unwrap();
@@ -1385,7 +1385,7 @@ mod tests {
         let plan = compute_plan(
             "UserPromptSubmit",
             &session,
-            "2026-08-06T12:00:00Z".parse::<DateTime<Utc>>().unwrap(),
+            "2026-08-06T12:00:00Z".parse::<UtcTimestamp>().unwrap(),
         )
         .expect("plan")
         .expect("some plan");
@@ -1422,7 +1422,7 @@ mod tests {
     fn hook_injection_text_is_english_even_when_language_is_ja() {
         let inputs = |event| ReminderInputs {
             event,
-            now: Utc::now(),
+            now: UtcTimestamp::now(),
             self_session_id: "sess-1".into(),
             display_name: "Codex".into(),
             self_match_keys: vec![],
@@ -1590,7 +1590,7 @@ mod tests {
             .append(true)
             .open(path)
             .unwrap();
-        let created_at = Utc::now();
+        let created_at = UtcTimestamp::now();
         let mut delayed = entry(
             "Other",
             BoardEntryKind::Status,
@@ -1605,7 +1605,7 @@ mod tests {
         let empty = compute_plan(
             "UserPromptSubmit",
             &session,
-            created_at + chrono::Duration::seconds(1),
+            created_at + time::Duration::seconds(1),
         )
         .unwrap()
         .unwrap();
@@ -1626,7 +1626,7 @@ mod tests {
             let plan = compute_plan(
                 "UserPromptSubmit",
                 &session,
-                created_at + chrono::Duration::seconds(turn as i64 + 2),
+                created_at + time::Duration::seconds(turn as i64 + 2),
             )
             .unwrap()
             .unwrap();
@@ -1639,7 +1639,7 @@ mod tests {
             }
             write_reminders_state(&repo, &session.id, &plan.next_reminders).unwrap();
         }
-        let unchanged = compute_plan("UserPromptSubmit", &session, Utc::now())
+        let unchanged = compute_plan("UserPromptSubmit", &session, UtcTimestamp::now())
             .unwrap()
             .unwrap();
         assert!(!additional_context(&unchanged.output).contains("same-id-second-append"));
@@ -1676,7 +1676,7 @@ mod tests {
         std::fs::create_dir_all(&segments).unwrap();
         let path = segments.join("0000000000000001.jsonl");
         let mut file = std::io::BufWriter::new(std::fs::File::create(&path).unwrap());
-        let base = Utc::now() - chrono::Duration::days(1);
+        let base = UtcTimestamp::now() - time::Duration::days(1);
         for index in 0..12_000 {
             let event = CoordinationEvent::MessageAppended {
                 entry: entry(
@@ -1685,7 +1685,7 @@ mod tests {
                     &"x".repeat(1024),
                     "work/fixture",
                     "fixture",
-                    base + chrono::Duration::seconds(index),
+                    base + time::Duration::seconds(index),
                 ),
             };
             serde_json::to_writer(&mut file, &event).unwrap();
@@ -1693,7 +1693,7 @@ mod tests {
         }
         file.flush().unwrap();
         drop(file);
-        let previous = Utc::now() - chrono::Duration::seconds(1);
+        let previous = UtcTimestamp::now() - time::Duration::seconds(1);
         let state = RemindersState {
             last_injected_at: Some(previous),
             last_own_status_checked_at: Some(previous),
@@ -1707,7 +1707,7 @@ mod tests {
                 "pending-append",
                 "work/fixture",
                 "agent-0",
-                Utc::now(),
+                UtcTimestamp::now(),
             ),
         };
         let mut pending = serde_json::to_vec(&pending).unwrap();
@@ -1715,7 +1715,7 @@ mod tests {
         let split = pending.len() / 2;
         let mut append = OpenOptions::new().append(true).open(&path).unwrap();
         append.write_all(&pending[..split]).unwrap();
-        let partial = compute_plan("UserPromptSubmit", &session, Utc::now())
+        let partial = compute_plan("UserPromptSubmit", &session, UtcTimestamp::now())
             .unwrap()
             .unwrap();
         assert_eq!(partial.next_reminders.last_injected_at, Some(previous));
@@ -1753,7 +1753,7 @@ mod tests {
                             &format!("agent-{index}-turn-{turn}"),
                             "work/fixture",
                             &format!("agent-{index}"),
-                            Utc::now(),
+                            UtcTimestamp::now(),
                         ),
                     };
                     let mut bytes = serde_json::to_vec(&event).unwrap();
@@ -1770,7 +1770,7 @@ mod tests {
                 control.send(turn).unwrap();
             }
             let started = Instant::now();
-            let plan = compute_plan("UserPromptSubmit", &session, Utc::now())
+            let plan = compute_plan("UserPromptSubmit", &session, UtcTimestamp::now())
                 .unwrap()
                 .unwrap();
             max_elapsed = max_elapsed.max(started.elapsed());
@@ -1800,7 +1800,7 @@ mod tests {
         for worker in workers {
             worker.join().unwrap();
         }
-        let final_plan = compute_plan("UserPromptSubmit", &session, Utc::now())
+        let final_plan = compute_plan("UserPromptSubmit", &session, UtcTimestamp::now())
             .unwrap()
             .unwrap();
         let HookOutput::HookSpecificAdditionalContext { text, .. } = final_plan.output else {
@@ -1870,8 +1870,8 @@ mod tests {
 
     #[test]
     fn failed_user_prompt_board_read_keeps_the_last_successful_diff_cursor() {
-        let previous = Utc.with_ymd_and_hms(2026, 8, 29, 10, 0, 0).unwrap();
-        let attempted = previous + chrono::Duration::minutes(1);
+        let previous = "2026-08-29T10:00:00Z".parse::<UtcTimestamp>().unwrap();
+        let attempted = previous + time::Duration::minutes(1);
         let mut plan = ReminderPlan {
             output: HookOutput::Silent,
             next_reminders: RemindersState {
@@ -1922,7 +1922,7 @@ mod tests {
         std::fs::write(repo.join(".gwt/work/memory.md"), "# Memory\n").expect("memory");
         let session = make_session(&repo, "work/memory", "Codex");
 
-        let plan = compute_plan("UserPromptSubmit", &session, Utc::now())
+        let plan = compute_plan("UserPromptSubmit", &session, UtcTimestamp::now())
             .expect("compute plan")
             .expect("plan");
 
@@ -1943,7 +1943,7 @@ mod tests {
         std::fs::write(repo.join(".gwt/work/memory.md"), "# Memory\n").expect("memory");
         let session = make_session(&repo, "work/memory", "Codex");
 
-        let plan = compute_plan("Stop", &session, Utc::now())
+        let plan = compute_plan("Stop", &session, UtcTimestamp::now())
             .expect("compute plan")
             .expect("plan");
 
@@ -1963,9 +1963,9 @@ mod tests {
         std::fs::write(repo.join("tasks/memory.md"), "# Memory\n").expect("memory");
         let session = make_session(&repo, "work/memory", "Codex");
 
-        let t0 = "2026-06-04T12:00:00Z".parse::<DateTime<Utc>>().unwrap();
-        let t1 = "2026-06-04T13:00:00Z".parse::<DateTime<Utc>>().unwrap();
-        let t2 = "2026-06-04T18:01:00Z".parse::<DateTime<Utc>>().unwrap();
+        let t0 = "2026-06-04T12:00:00Z".parse::<UtcTimestamp>().unwrap();
+        let t1 = "2026-06-04T13:00:00Z".parse::<UtcTimestamp>().unwrap();
+        let t2 = "2026-06-04T18:01:00Z".parse::<UtcTimestamp>().unwrap();
 
         let plan = compute_plan("UserPromptSubmit", &session, t0)
             .expect("compute plan")
@@ -2012,7 +2012,7 @@ mod tests {
         std::fs::write(repo.join("tasks/memory.md"), "# Memory\n").expect("memory");
         let session = make_session(&repo, "work/memory", "Codex");
 
-        let plan = compute_plan("SessionStart", &session, Utc::now())
+        let plan = compute_plan("SessionStart", &session, UtcTimestamp::now())
             .expect("compute plan")
             .expect("plan");
         match &plan.output {
@@ -2032,9 +2032,9 @@ mod tests {
         std::fs::write(repo.join("tasks/memory.md"), "# Memory\n").expect("memory");
         let session = make_session(&repo, "work/memory", "Codex");
 
-        let t0 = "2026-06-04T12:00:00Z".parse::<DateTime<Utc>>().unwrap();
-        let t_near = "2026-06-04T12:30:00Z".parse::<DateTime<Utc>>().unwrap();
-        let t_far = "2026-06-04T18:01:00Z".parse::<DateTime<Utc>>().unwrap();
+        let t0 = "2026-06-04T12:00:00Z".parse::<UtcTimestamp>().unwrap();
+        let t_near = "2026-06-04T12:30:00Z".parse::<UtcTimestamp>().unwrap();
+        let t_far = "2026-06-04T18:01:00Z".parse::<UtcTimestamp>().unwrap();
 
         let plan = compute_plan("UserPromptSubmit", &session, t0)
             .expect("compute plan")
@@ -2061,7 +2061,7 @@ mod tests {
         std::fs::create_dir_all(&repo).expect("repo");
         let session = make_session(&repo, "work/memory", "Codex");
 
-        let plan = compute_plan("SessionStart", &session, Utc::now())
+        let plan = compute_plan("SessionStart", &session, UtcTimestamp::now())
             .expect("compute plan")
             .expect("plan");
         match &plan.output {
@@ -2075,7 +2075,7 @@ mod tests {
 
         std::fs::create_dir_all(repo.join("tasks")).expect("tasks");
         std::fs::write(repo.join("tasks/memory.md"), "# Memory\n").expect("memory");
-        let plan = compute_plan("UserPromptSubmit", &session, Utc::now())
+        let plan = compute_plan("UserPromptSubmit", &session, UtcTimestamp::now())
             .expect("compute plan")
             .expect("plan");
         assert!(additional_context(&plan.output).contains("Memory Reminder"));
@@ -2087,7 +2087,7 @@ mod tests {
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo");
         let session = make_session(&repo, "work/memory", "Codex");
-        let now = "2026-06-04T12:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let now = "2026-06-04T12:00:00Z".parse::<UtcTimestamp>().unwrap();
 
         let state = RemindersState {
             last_memory_reminded_at: Some(now),
@@ -2100,7 +2100,7 @@ mod tests {
 
     #[test]
     fn compute_memory_reminder_state_returns_correct_suppress_flag() {
-        let now = "2026-06-04T12:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let now = "2026-06-04T12:00:00Z".parse::<UtcTimestamp>().unwrap();
         let base = RemindersState::default();
 
         let (suppress, next) =
@@ -2109,7 +2109,7 @@ mod tests {
         assert_eq!(next.last_memory_reminded_at, Some(now));
 
         let recent = RemindersState {
-            last_memory_reminded_at: Some(now - chrono::Duration::hours(2)),
+            last_memory_reminded_at: Some(now - time::Duration::hours(2)),
             ..RemindersState::default()
         };
         let (suppress, next) = compute_memory_reminder_state(
@@ -2122,7 +2122,7 @@ mod tests {
         assert_eq!(next.last_memory_reminded_at, recent.last_memory_reminded_at);
 
         let old = RemindersState {
-            last_memory_reminded_at: Some(now - chrono::Duration::hours(7)),
+            last_memory_reminded_at: Some(now - time::Duration::hours(7)),
             ..RemindersState::default()
         };
         let (suppress, next) =
@@ -2182,7 +2182,7 @@ mod tests {
                 affiliation_status:
                     gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Assigned,
                 workspace_id: None,
-                updated_at: Utc::now(),
+                updated_at: UtcTimestamp::now(),
             });
         gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
             .expect("save projection");
@@ -2334,7 +2334,7 @@ mod tests {
                 affiliation_status:
                     gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Assigned,
                 workspace_id: None,
-                updated_at: Utc::now(),
+                updated_at: UtcTimestamp::now(),
             });
         gwt_core::workspace_projection::save_workspace_projection(&project_root, &projection)
             .expect("save projection");
@@ -2373,7 +2373,7 @@ mod tests {
             coordination_scope: None,
             affiliation_status: WorkspaceAgentAffiliationStatus::Unassigned,
             workspace_id: None,
-            updated_at: Utc::now(),
+            updated_at: UtcTimestamp::now(),
         };
         let mut projection = WorkspaceProjection::default_for_project("/repo");
         projection.agents.push(agent.clone());
@@ -2511,8 +2511,8 @@ mod tests {
                 WorkspaceAgentAffiliationStatus::Assigned,
             )],
         );
-        let now = Utc.with_ymd_and_hms(2026, 10, 22, 12, 0, 0).unwrap();
-        let old = now - chrono::Duration::days(3);
+        let now = "2026-10-22T12:00:00Z".parse::<UtcTimestamp>().unwrap();
+        let old = now - time::Duration::days(3);
         for (kind, body, owners, audience) in [
             (
                 BoardEntryKind::Decision,
@@ -2636,7 +2636,7 @@ mod tests {
     fn compute_plan_session_start_persists_last_injected_at_via_handle() {
         let dir = tempfile::tempdir().unwrap();
         let session = make_session(dir.path(), "feature/me", "Codex");
-        let now = Utc::now();
+        let now = UtcTimestamp::now();
 
         let plan = compute_plan("SessionStart", &session, now)
             .unwrap()
@@ -2652,10 +2652,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let session = make_session(dir.path(), "feature/me", "Claude");
 
-        let before = Utc.with_ymd_and_hms(2026, 4, 20, 10, 0, 0).unwrap();
-        let last_inject = Utc.with_ymd_and_hms(2026, 4, 20, 11, 0, 0).unwrap();
-        let after = Utc.with_ymd_and_hms(2026, 4, 20, 12, 0, 0).unwrap();
-        let now = Utc.with_ymd_and_hms(2026, 4, 20, 13, 0, 0).unwrap();
+        let before = "2026-04-20T10:00:00Z".parse::<UtcTimestamp>().unwrap();
+        let last_inject = "2026-04-20T11:00:00Z".parse::<UtcTimestamp>().unwrap();
+        let after = "2026-04-20T12:00:00Z".parse::<UtcTimestamp>().unwrap();
+        let now = "2026-04-20T13:00:00Z".parse::<UtcTimestamp>().unwrap();
 
         let old = entry(
             "Codex",
@@ -2725,7 +2725,7 @@ mod tests {
         let progress_reminder = texts::progress_summary_reminder(false, false);
 
         // Execution (signal unset -> default Execution): both Work reminders fire.
-        let exec = compute_plan("UserPromptSubmit", &session, Utc::now())
+        let exec = compute_plan("UserPromptSubmit", &session, UtcTimestamp::now())
             .expect("compute plan")
             .expect("plan");
         let exec_text = additional_context(&exec.output);
@@ -2741,7 +2741,7 @@ mod tests {
         // SPEC #3245 FR-004 (#3379): the intake kind no longer suppresses the
         // Work-state reminders — every session gets the identical reminder
         // set, so guidance and reminders can never contradict each other.
-        let intake = compute_plan("UserPromptSubmit", &session, Utc::now())
+        let intake = compute_plan("UserPromptSubmit", &session, UtcTimestamp::now())
             .expect("compute plan")
             .expect("plan");
         let intake_text = additional_context(&intake.output);
@@ -2781,7 +2781,7 @@ mod tests {
             .save(&gwt_core::paths::gwt_sessions_dir())
             .expect("save session");
         let _session_env = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session.id);
-        let now = Utc::now();
+        let now = UtcTimestamp::now();
 
         post_entry(
             &repo_a,
@@ -2791,7 +2791,7 @@ mod tests {
                 "repo-a stale update",
                 "work/repo-a",
                 "session-repo-a",
-                now - chrono::Duration::minutes(5),
+                now - time::Duration::minutes(5),
             ),
         )
         .unwrap();
@@ -2803,7 +2803,7 @@ mod tests {
                 "repo-b current update",
                 "work/repo-b",
                 "session-repo-b",
-                now - chrono::Duration::minutes(4),
+                now - time::Duration::minutes(4),
             ),
         )
         .unwrap();
@@ -2833,14 +2833,14 @@ mod tests {
                 WorkspaceAgentAffiliationStatus::Assigned,
             )],
         );
-        let now = Utc.with_ymd_and_hms(2026, 5, 11, 12, 0, 0).unwrap();
+        let now = "2026-05-11T12:00:00Z".parse::<UtcTimestamp>().unwrap();
         let broadcast = entry(
             "Other",
             BoardEntryKind::Status,
             "broadcast update",
             "work/other",
             "session-other",
-            now - chrono::Duration::minutes(5),
+            now - time::Duration::minutes(5),
         );
         let current = entry(
             "Other",
@@ -2848,7 +2848,7 @@ mod tests {
             "current workspace update",
             "work/other",
             "session-other",
-            now - chrono::Duration::minutes(4),
+            now - time::Duration::minutes(4),
         )
         .with_audience(vec!["workspace-current"]);
         let other = entry(
@@ -2857,7 +2857,7 @@ mod tests {
             "other workspace update",
             "work/other",
             "session-other",
-            now - chrono::Duration::minutes(3),
+            now - time::Duration::minutes(3),
         )
         .with_audience(vec!["workspace-other"]);
         post_entry(dir.path(), broadcast).unwrap();
@@ -2891,7 +2891,7 @@ mod tests {
                 WorkspaceAgentAffiliationStatus::Unassigned,
             )],
         );
-        let now = Utc.with_ymd_and_hms(2026, 5, 11, 12, 0, 0).unwrap();
+        let now = "2026-05-11T12:00:00Z".parse::<UtcTimestamp>().unwrap();
         post_entry(
             dir.path(),
             entry(
@@ -2900,7 +2900,7 @@ mod tests {
                 "broadcast update",
                 "work/other",
                 "session-other",
-                now - chrono::Duration::minutes(5),
+                now - time::Duration::minutes(5),
             ),
         )
         .unwrap();
@@ -2912,7 +2912,7 @@ mod tests {
                 "workspace-only update",
                 "work/other",
                 "session-other",
-                now - chrono::Duration::minutes(4),
+                now - time::Duration::minutes(4),
             )
             .with_audience(vec!["workspace-current"]),
         )
@@ -2932,7 +2932,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let session = make_session(dir.path(), "feature/me", "Codex");
         for event in ["PreToolUse", "PostToolUse"] {
-            assert!(compute_plan(event, &session, Utc::now()).unwrap().is_none());
+            assert!(compute_plan(event, &session, UtcTimestamp::now())
+                .unwrap()
+                .is_none());
         }
     }
 
@@ -2949,7 +2951,7 @@ mod tests {
             &session.id,
         );
 
-        let plan = compute_plan("UserPromptSubmit", &session, Utc::now())
+        let plan = compute_plan("UserPromptSubmit", &session, UtcTimestamp::now())
             .unwrap()
             .unwrap();
         let text = additional_context(&plan.output);
@@ -2969,7 +2971,9 @@ mod tests {
             &session.id,
         );
 
-        let plan = compute_plan("Stop", &session, Utc::now()).unwrap().unwrap();
+        let plan = compute_plan("Stop", &session, UtcTimestamp::now())
+            .unwrap()
+            .unwrap();
         let text = system_message(&plan.output);
         assert!(text.contains("posted to the Board recently"));
     }
@@ -2981,8 +2985,8 @@ mod tests {
         let session_b = make_session(dir.path(), "feature/b", "Codex");
         assert_ne!(session_a.id, session_b.id);
 
-        let t_a = Utc.with_ymd_and_hms(2026, 4, 20, 10, 0, 0).unwrap();
-        let t_b = Utc.with_ymd_and_hms(2026, 4, 20, 11, 0, 0).unwrap();
+        let t_a = "2026-04-20T10:00:00Z".parse::<UtcTimestamp>().unwrap();
+        let t_b = "2026-04-20T11:00:00Z".parse::<UtcTimestamp>().unwrap();
 
         let plan_a = compute_plan("SessionStart", &session_a, t_a)
             .unwrap()
@@ -3014,7 +3018,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let session = make_session(dir.path(), "feature/me", "Codex");
 
-        let plan = compute_plan("UserPromptSubmit", &session, Utc::now())
+        let plan = compute_plan("UserPromptSubmit", &session, UtcTimestamp::now())
             .unwrap()
             .unwrap();
 
@@ -3038,7 +3042,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let session = make_session(dir.path(), "feature/me", "Codex");
 
-        let plan = compute_plan("Stop", &session, Utc::now()).unwrap().unwrap();
+        let plan = compute_plan("Stop", &session, UtcTimestamp::now())
+            .unwrap()
+            .unwrap();
 
         let mut buf = Vec::new();
         plan.output.serialize_to(&mut buf).unwrap();
@@ -3394,7 +3400,7 @@ mod tests {
         ] {
             let planned = plan_reminder(ReminderInputs {
                 event,
-                now: Utc::now(),
+                now: UtcTimestamp::now(),
                 self_session_id: "session-terminal".to_string(),
                 display_name: "Codex".to_string(),
                 self_match_keys: vec![],
@@ -3482,7 +3488,7 @@ mod tests {
             unchanged_turn_count: 12,
             last_current_focus_seen: Some("focus".to_string()),
             phase_changed_in_window: true,
-            last_memory_reminded_at: Some("2026-06-04T12:00:00Z".parse::<DateTime<Utc>>().unwrap()),
+            last_memory_reminded_at: Some("2026-06-04T12:00:00Z".parse::<UtcTimestamp>().unwrap()),
             last_progress_summary_seen: Some("Progress".to_string()),
             progress_summary_unchanged_turn_count: 4,
             last_progress_focus_seen: Some("focus".to_string()),

@@ -1081,7 +1081,7 @@ pub(crate) fn spawn_per_cell_rebuild_with(
     let final_status_for_closure = final_status_provider.clone();
 
     service.spawn_rebuild_with(canonical_project_root, scope, worktree_hash, move || {
-        let started_at = chrono::Utc::now();
+        let started_at = gwt_core::timestamp::UtcTimestamp::now();
         // Optimistic transition: switch the badge to `repairing(0/1)`
         // immediately so observers see auto-rebuild start before the
         // rebuild actually completes.

@@ -4,8 +4,8 @@
 //! read-only: they aggregate `~/.gwt/logs/perf/perf-<date>.jsonl` and never
 //! write, so a PM sweep cannot perturb what it is measuring.
 
-use chrono::{DateTime, Utc};
 use gwt_config::Settings;
+use gwt_core::timestamp::UtcTimestamp;
 use gwt_github::{client::ApiError, SpecOpsError};
 
 use crate::{
@@ -45,13 +45,11 @@ pub enum PerfCommand {
 }
 
 /// Parse and validate the RFC3339 `since` bound shared by both operations.
-pub(crate) fn parse_since(raw: &str) -> Result<DateTime<Utc>, CliParseError> {
-    DateTime::parse_from_rfc3339(raw)
-        .map(|value| value.with_timezone(&Utc))
-        .map_err(|_| CliParseError::InvalidValue {
-            flag: "since",
-            reason: "must be RFC3339",
-        })
+pub(crate) fn parse_since(raw: &str) -> Result<UtcTimestamp, CliParseError> {
+    UtcTimestamp::parse_from_rfc3339(raw).map_err(|_| CliParseError::InvalidValue {
+        flag: "since",
+        reason: "must be RFC3339",
+    })
 }
 
 /// Validate the `stream` filter against the perf record schema.
@@ -70,7 +68,7 @@ fn build_filter(
     since: Option<String>,
     stream: Option<String>,
     target: Option<String>,
-) -> Result<(PerfFilter, Option<DateTime<Utc>>), SpecOpsError> {
+) -> Result<(PerfFilter, Option<UtcTimestamp>), SpecOpsError> {
     let since = since
         .as_deref()
         .map(parse_since)

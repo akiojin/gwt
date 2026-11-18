@@ -4,7 +4,7 @@ use std::{
     path::Path,
 };
 
-use chrono::{DateTime, FixedOffset};
+use gwt_core::timestamp::UtcTimestamp;
 use serde::{Deserialize, Serialize};
 
 type RemoteBaseBranchRanks = HashMap<String, u8>;
@@ -618,10 +618,8 @@ fn compare_branch_commit_dates(left: &Option<String>, right: &Option<String>) ->
     }
 }
 
-fn parse_branch_commit_date(value: &str) -> Option<DateTime<FixedOffset>> {
-    DateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S %z")
-        .ok()
-        .or_else(|| DateTime::parse_from_rfc3339(value).ok())
+fn parse_branch_commit_date(value: &str) -> Option<UtcTimestamp> {
+    value.parse().ok()
 }
 
 #[cfg(test)]

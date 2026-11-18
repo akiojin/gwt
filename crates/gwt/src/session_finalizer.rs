@@ -561,7 +561,7 @@ impl TerminalPersistence {
                     "window_id": self.window_id,
                     "exit_confirmed": exit_confirmed,
                     "reason": reason,
-                    "recorded_at": chrono::Utc::now(),
+                    "recorded_at": gwt_core::timestamp::UtcTimestamp::now(),
                 }),
             )?;
             scratch.as_file().sync_all()?;
@@ -851,9 +851,7 @@ mod tests {
                     capability_generation: 1,
                 });
             } else {
-                successor.created_at = (chrono::DateTime::from(successor.created_at)
-                    + chrono::Duration::seconds(1))
-                .into();
+                successor.created_at += time::Duration::seconds(1);
             }
             successor.save(temp.path()).unwrap();
             let bytes = std::fs::read(&path).unwrap();

@@ -21,8 +21,8 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, Utc};
 use fs2::FileExt;
+use gwt_core::timestamp::UtcTimestamp;
 
 /// On-disk format for the tray-resident process lock file. Stored at
 /// `<gwt_home>/run/tray-<user_id>.lock`. The URL is empty before the
@@ -33,7 +33,7 @@ use fs2::FileExt;
 pub struct TrayLockFile {
     pub pid: u32,
     pub url: String,
-    pub started_at: DateTime<Utc>,
+    pub started_at: UtcTimestamp,
     pub version: String,
     /// Issue #4538 AC-4: per-process bearer token for the local project-open
     /// control request. Absent in locks written by older gwt releases.
@@ -311,7 +311,7 @@ fn build_lock_payload(pid: u32, url: &str, control_token: &str) -> TrayLockFile 
     TrayLockFile {
         pid,
         url: url.to_string(),
-        started_at: Utc::now(),
+        started_at: gwt_core::timestamp::UtcTimestamp::now(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         control_token: Some(control_token.to_string()),
     }
@@ -350,7 +350,7 @@ fn read_lock_contents(path: &Path) -> Result<TrayLockFile, TrayLockError> {
         return Ok(TrayLockFile {
             pid: 0,
             url: String::new(),
-            started_at: Utc::now(),
+            started_at: gwt_core::timestamp::UtcTimestamp::now(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             control_token: None,
         });
@@ -381,9 +381,7 @@ mod tests {
         let lock = TrayLockFile {
             pid: 12345,
             url: "http://127.0.0.1:54321/".to_string(),
-            started_at: DateTime::parse_from_rfc3339("2026-05-28T07:00:00Z")
-                .unwrap()
-                .with_timezone(&Utc),
+            started_at: UtcTimestamp::parse_from_rfc3339("2026-05-28T07:00:00Z").unwrap(),
             version: "10.0.0".to_string(),
             control_token: Some("a".repeat(64)),
         };

@@ -480,7 +480,7 @@ fn prepare_switch_target(
     let claims = gwt_github::issue_auto_claim::extract_claim_comments(&entry.snapshot.comments);
     if let Some(claim) = gwt_github::issue_auto_claim::select_winning_claim(
         &claims,
-        &chrono::Utc::now().to_rfc3339(),
+        &gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
     ) {
         monitor.record_blocked_by_claim(
             planned,
@@ -771,13 +771,13 @@ fn drive_switch(
                         prefs.transition_agent_switch(&intent.request.operation_id, StoppingCurrent,
                             Some("Current work is saved. Waiting for the previous runtime to exit…".into())).map_err(switch_io)?;
                         let mut monitor = gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs.clone());
-                        if !monitor.terminal_queue_move(intent.request.target_issue_number, 0, &chrono::Utc::now().to_rfc3339()) {
+                        if !monitor.terminal_queue_move(intent.request.target_issue_number, 0, &gwt_core::timestamp::UtcTimestamp::now().to_rfc3339()) {
                             return Err(switch_io("The target is no longer queued; current work is kept"));
                         }
                         let target = gwt::issue_monitor::IssueMonitorStopTarget { issue_number: proof.issue_number,
                             window_id: Some(intent.source.window_id.clone()), claim_id: Some(intent.source.claim_id.clone()),
                             delivery_id: intent.source.assignment.delivery_id.clone() };
-                        if !matches!(monitor.stop_only_with_settlement(&target, "Saved checkpoint switch", &chrono::Utc::now().to_rfc3339(),
+                        if !matches!(monitor.stop_only_with_settlement(&target, "Saved checkpoint switch", &gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
                             gwt::IssueMonitorExecutionSettlement::Active), gwt::IssueMonitorStopOutcome::Stopped { .. }) {
                             return Err(switch_io("Exact source could not be stopped"));
                         }
@@ -833,7 +833,7 @@ fn drive_switch(
             if !monitor.terminal_queue_move(
                 intent.request.target_issue_number,
                 0,
-                &chrono::Utc::now().to_rfc3339(),
+                &gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
             ) {
                 return Err(switch_io("Saved work is paused; the target is no longer queued. Open saved work in Works."));
             }

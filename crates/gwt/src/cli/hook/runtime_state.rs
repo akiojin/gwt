@@ -13,7 +13,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chrono::{SecondsFormat, Utc};
 #[cfg(test)]
 use gwt_agent::persist_agent_session_id;
 use gwt_agent::{
@@ -222,7 +221,7 @@ fn write_state_under_runtime_leases(
         ("PreToolUse" | "PostToolUse", None) => active_tool_calls = None,
         _ => {}
     }
-    let now = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+    let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds();
     let state = RuntimeState {
         status: status.to_string(),
         updated_at: now.clone(),
@@ -726,7 +725,8 @@ impl HookCompletionContext {
             // producers, while publishing timestamp/outcome atomically.
             let mut value: serde_json::Value =
                 serde_json::from_slice(&std::fs::read(&self.runtime_path)?)?;
-            value["last_completed_hook_event_at"] = serde_json::to_value(Utc::now())?;
+            value["last_completed_hook_event_at"] =
+                serde_json::to_value(gwt_core::timestamp::UtcTimestamp::now())?;
             value["last_completed_hook_outcome"] = serde_json::to_value(outcome)?;
             if let Some(mut observation) = self.observation.clone() {
                 if self.certified.get() && self.exact.is_some() {

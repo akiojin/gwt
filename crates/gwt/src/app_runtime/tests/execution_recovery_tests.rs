@@ -240,7 +240,7 @@ fn historical_fresh_receipt_waits_for_a_foreign_owner_ledger_first_repair() {
         session_binding_id: "foreign-owner-ledger-first-binding".to_string(),
         initial_session_id: "foreign-owner-ledger-first-session".to_string(),
         entrypoint: "$gwt-execute #3327".to_string(),
-        requested_at: Utc::now(),
+        requested_at: gwt_core::timestamp::UtcTimestamp::now(),
     };
     gwt::cli::execution_state::prepare_fresh_linked_owner_launch_successor(
         &fixture.repo,
@@ -395,7 +395,7 @@ fn historical_genesis_receipt_does_not_terminalize_a_different_current_owner() {
     let mut unrelated = gwt_core::workspace_projection::WorkEvent::new(
         gwt_core::workspace_projection::WorkEventKind::Start,
         unrelated_work_id,
-        Utc::now(),
+        gwt_core::timestamp::UtcTimestamp::now(),
     );
     unrelated.title = Some("Unrelated current owner Work".to_string());
     unrelated.agent_session_id = Some("superseding-genesis-owner-session".to_string());
@@ -435,7 +435,7 @@ fn historical_genesis_receipt_does_not_terminalize_a_different_current_owner() {
         session_binding_id: "foreign-genesis-owner-ledger-first-binding".to_string(),
         initial_session_id: "foreign-genesis-owner-ledger-first-session".to_string(),
         entrypoint: "$gwt-execute #3327".to_string(),
-        requested_at: Utc::now(),
+        requested_at: gwt_core::timestamp::UtcTimestamp::now(),
     };
     gwt::cli::execution_state::prepare_fresh_linked_owner_launch_successor(
         &repo,
@@ -863,7 +863,7 @@ fn startup_does_not_commit_foreign_same_operation_for_stale_activated_session() 
     let mut unrelated = gwt_core::workspace_projection::WorkEvent::new(
         gwt_core::workspace_projection::WorkEventKind::Start,
         "work-after-foreign-activated-recovery",
-        Utc::now(),
+        gwt_core::timestamp::UtcTimestamp::now(),
     );
     unrelated.title = Some("Foreign marker must remain unresolved".to_string());
     assert!(
@@ -953,7 +953,7 @@ fn startup_does_not_delete_aborted_session_when_project_state_root_is_foreign() 
     let mut unrelated = gwt_core::workspace_projection::WorkEvent::new(
         gwt_core::workspace_projection::WorkEventKind::Start,
         "work-after-foreign-aborted-recovery",
-        Utc::now(),
+        gwt_core::timestamp::UtcTimestamp::now(),
     );
     unrelated.title = Some("Canonical marker must remain unresolved".to_string());
     assert!(
@@ -2002,7 +2002,7 @@ fn continue_work_pre_dispatch_abort_surfaces_durable_write_failure() {
         session_binding_id: "binding-candidate".to_string(),
         initial_session_id: "candidate-session".to_string(),
         entrypoint: "gwt-execute".to_string(),
-        requested_at: Utc::now(),
+        requested_at: gwt_core::timestamp::UtcTimestamp::now(),
     };
     let execution = PendingContinueWorkExecution::Successor(request);
 
@@ -2072,7 +2072,7 @@ fn continue_work_authenticated_session_start_commits_stale_takeover_without_new_
     let predecessor_binding = gwt::cli::execution_state::current_execution_binding(&repo, owner)
         .expect("read predecessor binding")
         .expect("predecessor binding");
-    let now = chrono::Utc::now();
+    let now = gwt_core::timestamp::UtcTimestamp::now();
     let mut start = gwt_core::workspace_projection::WorkEvent::new(
         gwt_core::workspace_projection::WorkEventKind::Start,
         work_id,
@@ -2235,7 +2235,7 @@ fn continue_work_authenticated_session_start_commits_stale_takeover_without_new_
             "legacy Prepared identity must exactly match the actual owner Session"
         );
         readiness.agent_session_id.clone_from(&physical.session.as_ref().unwrap().agent_session_id);
-        readiness.occurred_at = chrono::Utc::now().to_rfc3339();
+        readiness.occurred_at = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
         assert_eq!(physical.runtime_hook(&readiness).await.unwrap(), reqwest::StatusCode::NO_CONTENT);
         // test-hygiene: allow-wall-clock-deadline hang guard for the exact owner outcome; accepted messages establish ordering
         let outcome = tokio::time::timeout(Duration::from_secs(30), async { loop {

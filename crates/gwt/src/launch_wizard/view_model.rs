@@ -951,7 +951,7 @@ impl LaunchWizardState {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{TimeZone, Utc};
+
     use tempfile::tempdir;
 
     use super::super::profiles::load_launch_sessions;
@@ -1372,7 +1372,7 @@ mod tests {
             "feature/old",
             Path::new("/tmp/old-repo"),
             gwt_agent::AgentId::Codex,
-            Utc.with_ymd_and_hms(2026, 6, 13, 9, 0, 0).unwrap(),
+            gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 6, 13, 9, 0, 0).unwrap(),
             None,
         );
         codex.session_mode = gwt_agent::SessionMode::Continue;
@@ -2918,7 +2918,7 @@ mod tests {
             "feature/gui",
             &worktree,
             gwt_agent::AgentId::Codex,
-            Utc.with_ymd_and_hms(2026, 4, 14, 11, 0, 0).unwrap(),
+            gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 4, 14, 11, 0, 0).unwrap(),
             "agent-session",
         );
 

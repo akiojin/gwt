@@ -646,7 +646,7 @@ fn projection_only_continue_matches_canonical_branch_for_durable_session() {
     let mut branch_alias = gwt_core::workspace_projection::WorkEvent::new(
         gwt_core::workspace_projection::WorkEventKind::Update,
         &work_id,
-        chrono::Utc::now() + chrono::Duration::seconds(1),
+        gwt_core::timestamp::UtcTimestamp::now() + time::Duration::seconds(1),
     );
     branch_alias.execution_container = Some(
         gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
@@ -889,7 +889,7 @@ fn continue_work_durable_session_requires_same_work_ref_agent() {
     let mut latest = gwt_core::workspace_projection::WorkEvent::new(
         gwt_core::workspace_projection::WorkEventKind::Update,
         &work_id,
-        chrono::Utc::now() + chrono::Duration::seconds(2),
+        gwt_core::timestamp::UtcTimestamp::now() + time::Duration::seconds(2),
     );
     latest.agent_session_id = Some("latest-codex-session".to_string());
     latest.agent_id = Some("Codex".to_string());
@@ -1158,7 +1158,7 @@ fn projection_only_continue_ignores_noncanonical_projected_session_path() {
     let mut injected_agent = gwt_core::workspace_projection::WorkEvent::new(
         gwt_core::workspace_projection::WorkEventKind::Update,
         &work_id,
-        chrono::Utc::now() + chrono::Duration::seconds(1),
+        gwt_core::timestamp::UtcTimestamp::now() + time::Duration::seconds(1),
     );
     injected_agent.agent_session_id = Some("../outside".to_string());
     injected_agent.agent_id = Some("Codex".to_string());
@@ -1257,7 +1257,7 @@ fn durable_continue_recovery_rejects_foreign_worktree_with_matching_project_root
         session_binding_id: "foreign-candidate-binding".to_string(),
         initial_session_id: candidate_session_id.to_string(),
         entrypoint: "gwt-execute".to_string(),
-        requested_at: chrono::Utc::now(),
+        requested_at: gwt_core::timestamp::UtcTimestamp::now(),
     };
     gwt::cli::execution_state::prepare_successor(&foreign, owner, &request)
         .expect("prepare foreign continuation");
@@ -1270,7 +1270,7 @@ fn durable_continue_recovery_rejects_foreign_worktree_with_matching_project_root
         })
         .collect::<Vec<_>>();
 
-    let now = chrono::Utc::now();
+    let now = gwt_core::timestamp::UtcTimestamp::now();
     let mut start = gwt_core::workspace_projection::WorkEvent::new(
         gwt_core::workspace_projection::WorkEventKind::Start,
         work_id,
@@ -1295,7 +1295,7 @@ fn durable_continue_recovery_rejects_foreign_worktree_with_matching_project_root
         gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Done,
             work_id,
-            now + chrono::Duration::seconds(1),
+            now + time::Duration::seconds(1),
         ),
     )
     .expect("settle active Work");
@@ -1641,7 +1641,7 @@ fn projection_only_continue_owner_change_before_activation_aborts_without_commit
         let mut owner_change = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Update,
             &work_id,
-            chrono::Utc::now() + chrono::Duration::seconds(1),
+            gwt_core::timestamp::UtcTimestamp::now() + time::Duration::seconds(1),
         );
         owner_change.owner = Some("SPEC #3248".into());
         gwt_core::workspace_projection::record_workspace_work_event(&repo, owner_change)
@@ -2153,7 +2153,7 @@ fn assert_actual_legacy_inspection_repair(close_during_publication: bool) {
         let mut start = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Start,
             work_id,
-            chrono::Utc::now(),
+            gwt_core::timestamp::UtcTimestamp::now(),
         );
         start.title = Some("Legacy live Work".into());
         start.owner = Some("Issue #2359".into());
@@ -2524,7 +2524,7 @@ fn continue_work_retry_after_host_crash_aborts_stale_prepared_candidate() {
         session_binding_id: "crash-candidate-binding".to_string(),
         initial_session_id: candidate_session_id.to_string(),
         entrypoint: "gwt-execute".to_string(),
-        requested_at: chrono::Utc::now(),
+        requested_at: gwt_core::timestamp::UtcTimestamp::now(),
     };
     gwt::cli::execution_state::prepare_successor(&repo, owner, &request)
         .expect("prepare crash candidate");
@@ -2532,7 +2532,7 @@ fn continue_work_retry_after_host_crash_aborts_stale_prepared_candidate() {
         gwt::cli::execution_state::prepared_successor_execution_binding(&repo, owner, &request)
             .expect("derive crash candidate binding");
 
-    let now = chrono::Utc::now();
+    let now = gwt_core::timestamp::UtcTimestamp::now();
     let mut start = gwt_core::workspace_projection::WorkEvent::new(
         gwt_core::workspace_projection::WorkEventKind::Start,
         work_id,
@@ -2558,7 +2558,7 @@ fn continue_work_retry_after_host_crash_aborts_stale_prepared_candidate() {
         gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Done,
             work_id,
-            now + chrono::Duration::seconds(1),
+            now + time::Duration::seconds(1),
         ),
     )
     .expect("settle Work");
@@ -2722,14 +2722,14 @@ fn continue_work_retry_rejects_lingering_work_transaction_for_aborted_attempt() 
         session_binding_id: "aborted-candidate-binding".to_string(),
         initial_session_id: candidate_session_id.to_string(),
         entrypoint: "gwt-execute".to_string(),
-        requested_at: chrono::Utc::now(),
+        requested_at: gwt_core::timestamp::UtcTimestamp::now(),
     };
     gwt::cli::execution_state::prepare_successor(&repo, owner, &request)
         .expect("prepare candidate");
     gwt::cli::execution_state::abort_successor(&repo, owner, &request, "simulated Host failure")
         .expect("abort candidate before Work cleanup");
 
-    let now = chrono::Utc::now();
+    let now = gwt_core::timestamp::UtcTimestamp::now();
     let mut current =
         gwt_core::workspace_projection::WorkspaceProjection::default_for_project(repo.clone());
     current.id = work_id.to_string();
@@ -2761,7 +2761,7 @@ fn continue_work_retry_rejects_lingering_work_transaction_for_aborted_attempt() 
         gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Done,
             work_id,
-            now + chrono::Duration::seconds(1),
+            now + time::Duration::seconds(1),
         ),
     )
     .expect("settle Work");
@@ -2775,7 +2775,7 @@ fn continue_work_retry_rejects_lingering_work_transaction_for_aborted_attempt() 
             let mut event = gwt_core::workspace_projection::WorkEvent::new(
                 gwt_core::workspace_projection::WorkEventKind::Update,
                 work_id,
-                now + chrono::Duration::seconds(2),
+                now + time::Duration::seconds(2),
             );
             event.summary = Some("staged aborted continuation".to_string());
             Ok(((), vec![event]))
@@ -2795,7 +2795,7 @@ fn continue_work_retry_rejects_lingering_work_transaction_for_aborted_attempt() 
         gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Update,
             work_id,
-            now + chrono::Duration::milliseconds(2500),
+            now + time::Duration::milliseconds(2500),
         ),
     );
     assert!(
@@ -2896,7 +2896,7 @@ fn continue_work_retry_rejects_lingering_work_transaction_for_aborted_attempt() 
         gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Blocked,
             work_id,
-            now + chrono::Duration::seconds(3),
+            now + time::Duration::seconds(3),
         ),
     );
     assert!(
@@ -3011,7 +3011,7 @@ fn continue_work_prepared_and_aborted_cleanup_reject_agent_substitution_without_
             },
         )
         .expect("import cleanup predecessor");
-        let now = chrono::Utc::now();
+        let now = gwt_core::timestamp::UtcTimestamp::now();
         let planned = if same_generation_takeover {
             let request = gwt::cli::execution_state::GenerationTakeoverRequest {
                 operation_id: operation_id.clone(),
@@ -3091,7 +3091,7 @@ fn continue_work_prepared_and_aborted_cleanup_reject_agent_substitution_without_
                 gwt_core::workspace_projection::WorkEvent::new(
                     gwt_core::workspace_projection::WorkEventKind::Done,
                     &work_id,
-                    now + chrono::Duration::seconds(1),
+                    now + time::Duration::seconds(1),
                 ),
             )
             .expect("settle cleanup Work");
@@ -3612,7 +3612,7 @@ fn assert_fresh_execution_preserves_terminal_work(
                 let mut other_host = gwt_core::workspace_projection::WorkEvent::new(
                     gwt_core::workspace_projection::WorkEventKind::Update,
                     projection.id.clone(),
-                    Utc::now(),
+                    gwt_core::timestamp::UtcTimestamp::now(),
                 );
                 other_host.execution_container = Some(
                     gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
@@ -3626,7 +3626,7 @@ fn assert_fresh_execution_preserves_terminal_work(
                 let event = gwt_core::workspace_projection::WorkEvent::new(
                     terminal_kind,
                     projection.id.clone(),
-                    Utc::now(),
+                    gwt_core::timestamp::UtcTimestamp::now(),
                 );
                 // The foreign container is historical input, not a new local
                 // shard. Seed its original bytes before transaction replay.

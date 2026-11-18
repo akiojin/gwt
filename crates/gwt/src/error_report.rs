@@ -7,9 +7,9 @@
 use std::collections::BTreeMap;
 use std::sync::{mpsc, OnceLock};
 
-use chrono::Duration;
 use gwt_core::error_ledger::{ErrorKind, ErrorRecord, ErrorTarget};
 use sha2::{Digest as _, Sha256};
+use time::Duration;
 
 use crate::protocol::BackendEvent;
 
@@ -293,8 +293,8 @@ fn publish_recorded(record: &ErrorRecord, project_root: Option<&str>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
     use gwt_core::test_support::ScopedGwtHome;
+    use gwt_core::timestamp::UtcTimestamp;
 
     fn isolated_home() -> (tempfile::TempDir, ScopedGwtHome) {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -376,7 +376,7 @@ mod tests {
     fn queued_duplicate_errors_keep_their_event_time_deduplication_window() {
         let (_dir, _home) = isolated_home();
         let mut record = ErrorRecord::new_host(ErrorKind::LaunchFailure, "delayed backend error");
-        record.recorded_at = Utc::now() - Duration::seconds(60);
+        record.recorded_at = UtcTimestamp::now() - Duration::seconds(60);
         assert!(append_record(record.clone(), false).is_some());
         assert!(append_record(record, false).is_none());
         assert_eq!(gwt_core::error_ledger::list_since(None).unwrap().len(), 1);
@@ -416,7 +416,7 @@ mod tests {
                 ..ErrorTarget::default()
             },
         );
-        first.recorded_at = Utc::now() - Duration::minutes(10);
+        first.recorded_at = UtcTimestamp::now() - Duration::minutes(10);
         append_record(first, false).unwrap();
         let launch_failed = BackendEvent::IssueMonitorLaunchFailed {
             issue_number: 6996,

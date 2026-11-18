@@ -46,7 +46,7 @@ impl FakeUpdateCliOps {
                 latest: "1.1.0".to_string(),
                 release_url: "https://example.test/release".to_string(),
                 asset_url: asset_url.map(str::to_string),
-                checked_at: chrono::Utc::now(),
+                checked_at: gwt_core::timestamp::UtcTimestamp::now(),
             },
             current_exe: Ok(PathBuf::from("C:/gwt/gwt.exe")),
             current_args: vec!["update".to_string(), "--check".to_string()],
@@ -378,7 +378,7 @@ fn run_with_covers_ci_and_non_available_states() {
 
     let mut up_to_date = FakeUpdateCliOps::available(Some("https://example.test/gwt.zip"));
     up_to_date.state = UpdateState::UpToDate {
-        checked_at: Some(chrono::Utc::now()),
+        checked_at: Some(gwt_core::timestamp::UtcTimestamp::now()),
     };
     assert!(matches!(
         run_with(&mut up_to_date, UpdateRunMode::Apply),
@@ -389,7 +389,7 @@ fn run_with_covers_ci_and_non_available_states() {
     let mut failed = FakeUpdateCliOps::available(Some("https://example.test/gwt.zip"));
     failed.state = UpdateState::Failed {
         message: "network down".to_string(),
-        failed_at: chrono::Utc::now(),
+        failed_at: gwt_core::timestamp::UtcTimestamp::now(),
         retry_at: None,
     };
     assert!(matches!(
