@@ -661,7 +661,7 @@
         <div class="content">
           <div class="screen-pane on" data-screen="agents-ledger">
             <p class="h-big">エージェント台帳</p>
-            <p class="h-sub">並び順が利用優先度です。エージェントは名前・アバター・PM 適格と「特性」を持つ担当者です（属性に「役割」は持ちません。担当の傾向は特性の「性格」で表します）。<b>特性（推論レベル・速度・性格）はエージェントごとに固定</b>で、起動のたびに変わることはありません。誰が PM を務めるかはエージェントの層で決まります（「PM を務める」が付いた人の中で並び順の最上位。一覧の「PM に割り当てる」で優先指定もでき、指定した人が PM を務めます）。レート制限で PM の担当者は入れ替わりません。ツールの割り当ては別の層で、セッション開始時にプールから動的に行われ、PM のセッションは優先され、使える間は同じインスタンスに sticky で、枯渇したときだけ gwtd が別のインスタンスへ切り替えます。</p>
+            <p class="h-sub">並び順が利用優先度です。エージェントは名前・アバターと「特性」を持つ担当者です（属性に「役割」も「PM 適格」も持ちません）。<b>特性（推論レベル・速度・性格）はエージェントごとに固定</b>で、起動のたびに変わることはありません。推論レベル・速度はパラメータ、性格はエージェントの起動時に読み込まれる指示文（AGENTS.md のような定義文）で、行に出ている性格はその冒頭の抜粋です。誰が PM を務めるかはエージェントの層で決まります（「PM に割り当てる」の優先指定があればその人、無ければ並び順の先頭の人）。レート制限で PM の担当者は入れ替わりません。ツールの割り当ては別の層で、セッション開始時にプールから動的に行われ、PM のセッションは優先され、使える間は同じインスタンスに sticky で、枯渇したときだけ gwtd が別のインスタンスへ切り替えます。</p>
             <div class="set-group">
               <div class="set-row"><span class="pm-face"><span class="dot"></span></span><div class="grow"><div class="t">1. 秦泉寺 章夫 <span class="badge b-plan">PM 優先指定</span></div><div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>Fast</b></span><span class="trait">性格 <b>全体の調整と報告を重点に。詰まりは自分で抱えず早めに知らせる</b></span></div></div><button class="btn ghost" type="button">優先指定を外す</button><button class="btn" type="button" data-nav="agent-edit-jinsenji">編集</button></div>
             </div>
@@ -684,7 +684,7 @@
               <h4>基本</h4>
               <div class="set-row"><span class="pm-face"><span class="dot"></span></span><div class="grow"><div class="t">名前</div><div class="d2">開始画面とヘッダーでは、この名前で表示されます。</div></div><input class="field" type="text" value="秦泉寺 章夫" aria-label="名前" style="width:200px"></div>
               
-              <div class="set-row"><div class="grow"><div class="t">PM を務める</div><div class="d2">このエージェントは PM になることができます。「PM を務める」が付いたエージェントの中で、いちばん上の適格な1人が PM を務めます。</div></div><input type="checkbox" checked aria-label="PM を務める" style="accent-color:var(--accent);width:18px;height:18px;flex:none"></div><div class="set-row"><div class="grow"><div class="t">PM への割り当て</div><div class="d2">優先指定されています。この人が PM を務めます。担当者はエージェントの層で決まるため、レート制限では入れ替わりません。ツールの割り当ては別の層で、PM のセッションはプールから優先的に割り当てられ、使える間は同じインスタンスに sticky です。インスタンスが枯渇したときだけ gwtd が別のインスタンスへ切り替えます（担当者は変わりません）。</div></div><button class="btn" type="button">優先指定を外す</button></div>
+              <div class="set-row"><div class="grow"><div class="t">PM への割り当て</div><div class="d2">優先指定されています。この人が PM を務めます。担当者はエージェントの層で決まるため、レート制限では入れ替わりません。ツールの割り当ては別の層で、PM のセッションはプールから優先的に割り当てられ、使える間は同じインスタンスに sticky です。インスタンスが枯渇したときだけ gwtd が別のインスタンスへ切り替えます（担当者は変わりません）。</div></div><button class="btn" type="button">優先指定を外す</button></div>
               <div class="set-row"><div class="grow"><div class="t">いまの状態</div><div class="d2">この端末の PM を務めています。PM の振る舞い（知らせ方など）は、設定の「あなたの PM」で変えます。</div></div><button class="btn" type="button" data-openpage="settings">あなたの PM を開く</button></div>
             </div>
             <div class="set-group">
@@ -701,15 +701,20 @@
             </div>
             <div class="set-group">
               <h4>特性</h4>
-              <div class="set-row"><div class="grow"><div class="t">特性はこのエージェントの固定です</div><div class="d2">ここで決める特性が、そのままこのエージェントの特性になります。起動のたびに変わることはなく、起動計画で上書きされることもありません。</div></div></div>
+              <div class="set-row"><div class="grow"><div class="t">特性はこのエージェントの固定です</div><div class="d2">ここで決める特性が、そのままこのエージェントの固定特性になります。推論レベル・速度はパラメータ、性格は起動時に読み込まれる指示文です。起動のたびに変わることはなく、起動計画で上書きされることもありません。</div></div></div>
               <div class="set-row"><div class="grow"><div class="t">推論レベル</div><div class="d2">考えの深さです。</div></div><div class="chips" role="group" aria-label="推論レベル"><button class="chip on" type="button">標準</button><button class="chip" type="button">xhigh</button></div></div>
               <div class="set-row"><div class="grow"><div class="t">速度</div><div class="d2">応答の速さの傾向です。</div></div><div class="chips" role="group" aria-label="速度"><button class="chip on" type="button">Fast</button><button class="chip" type="button">Ultrafast</button></div></div>
-              <div class="set-row"><div class="grow"><div class="t">性格</div><div class="d2">開発や調査で、どこを重点に置くかです。</div></div><input class="field" type="text" value="全体の調整と報告を重点に。詰まりは自分で抱えず早めに知らせる" aria-label="性格" style="width:min(420px,100%)"></div>
+              <div class="set-row"><div class="grow"><div class="t">性格（起動時に読み込む設定）</div><div class="d2">このエージェントへの指示・振る舞いの定義文です。AGENTS.md のような文章で書き、エージェントの起動時に毎回読み込まれます。台帳など他の画面では、冒頭の抜粋だけが表示されます。</div></div></div>
+              <div class="set-row"><textarea class="field" rows="7" aria-label="性格" style="width:100%;line-height:1.6;resize:vertical">全体の調整と報告を重点に。詰まりは自分で抱えず早めに知らせる。
+- 担当の割り当てと進み具合の監視を行い、詰まりを見つけたら早めに知らせる。
+- 判断が要ることは、現状・選択肢・影響範囲の材料をそろえてから上げる。
+- 変化があったら、聞かれる前に知らせる。報告は結論から短く書く。
+- 実装は自分では行わず、担当のエージェントに任せる。</textarea></div>
             </div>
             <div class="set-group">
               <h4>プロファイル</h4>
               <div class="set-row"><div class="grow"><div class="t">割り当てるプロファイル</div><div class="d2">このエージェントのセッションは、割り当てたプロファイルの環境で始まります。プロファイルの中身（環境変数など）は端末のプロファイル画面で定義し、ここでは割り当てだけを変えます。割り当ては次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div></div></div>
-              <div class="set-row"><div class="chips" role="group" aria-label="割り当てるプロファイル"><button class="chip on" type="button">default</button><button class="chip" type="button">rust-dev</button><button class="chip" type="button">data-import</button></div><button class="btn" type="button" data-openpage="profile">プロファイルを開く</button></div>
+              <div class="set-row"><select class="field" aria-label="割り当てるプロファイル" style="width:min(260px,100%)"><option value="default" selected>default</option><option value="rust-dev">rust-dev</option><option value="data-import">data-import</option></select><button class="btn" type="button" data-openpage="profile">プロファイルを開く</button></div>
             </div>
             <div class="notice">使うツール（アカウント）はここでは決めません。セッション開始時に、Issue 側の起動計画とツールの空き・制限状態から自動で決まります。</div>
             <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">保存する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
@@ -722,7 +727,7 @@
               <h4>基本</h4>
               <div class="set-row"><span class="ava working" style="background:#2563eb">小</span><div class="grow"><div class="t">名前</div><div class="d2">台帳とプロジェクトの画面では、この名前で表示されます。</div></div><input class="field" type="text" value="小田 洋平" aria-label="名前" style="width:200px"></div>
               
-              <div class="set-row"><div class="grow"><div class="t">PM を務める</div><div class="d2">このエージェントは PM になることができます。「PM を務める」が付いたエージェントの中で、いちばん上の適格な1人が PM を務めます。</div></div><input type="checkbox" aria-label="PM を務める" style="accent-color:var(--accent);width:18px;height:18px;flex:none"></div><div class="set-row"><div class="grow"><div class="t">PM への割り当て</div><div class="d2">いまは優先指定が無く、適格者の中で並び順の最上位が PM を務めます。優先指定すると、この人が PM を務めます（担当者はレート制限では入れ替わりません。ツールの切り替えは別の層で gwtd が行います）。指定には「PM を務める」が付いていることが必要です。</div></div><button class="btn" type="button">この人を PM に割り当てる</button></div>
+              <div class="set-row"><div class="grow"><div class="t">PM への割り当て</div><div class="d2">いまは優先指定が無く、台帳の並び順で先頭の人が PM を務めます。優先指定すると、この人が PM を務めます（担当者はレート制限では入れ替わりません。ツールの切り替えは別の層で gwtd が行います）。</div></div><button class="btn" type="button">この人を PM に割り当てる</button></div>
             </div>
             <div class="set-group">
               <h4>アバター</h4>
@@ -738,15 +743,19 @@
             </div>
             <div class="set-group">
               <h4>特性</h4>
-              <div class="set-row"><div class="grow"><div class="t">特性はこのエージェントの固定です</div><div class="d2">ここで決める特性が、そのままこのエージェントの特性になります。起動のたびに変わることはなく、起動計画で上書きされることもありません。</div></div></div>
+              <div class="set-row"><div class="grow"><div class="t">特性はこのエージェントの固定です</div><div class="d2">ここで決める特性が、そのままこのエージェントの固定特性になります。推論レベル・速度はパラメータ、性格は起動時に読み込まれる指示文です。起動のたびに変わることはなく、起動計画で上書きされることもありません。</div></div></div>
               <div class="set-row"><div class="grow"><div class="t">推論レベル</div><div class="d2">考えの深さです。</div></div><div class="chips" role="group" aria-label="推論レベル"><button class="chip" type="button">標準</button><button class="chip on" type="button">xhigh</button></div></div>
               <div class="set-row"><div class="grow"><div class="t">速度</div><div class="d2">応答の速さの傾向です。</div></div><div class="chips" role="group" aria-label="速度"><button class="chip" type="button">Fast</button><button class="chip on" type="button">Ultrafast</button></div></div>
-              <div class="set-row"><div class="grow"><div class="t">性格</div><div class="d2">開発や調査で、どこを重点に置くかです。</div></div><input class="field" type="text" value="実装を重点に。変更は小さく刻み、テストで確かめてから進める" aria-label="性格" style="width:min(420px,100%)"></div>
+              <div class="set-row"><div class="grow"><div class="t">性格（起動時に読み込む設定）</div><div class="d2">このエージェントへの指示・振る舞いの定義文です。AGENTS.md のような文章で書き、エージェントの起動時に毎回読み込まれます。台帳など他の画面では、冒頭の抜粋だけが表示されます。</div></div></div>
+              <div class="set-row"><textarea class="field" rows="7" aria-label="性格" style="width:100%;line-height:1.6;resize:vertical">実装を重点に。変更は小さく刻み、テストで確かめてから進める。
+- 仕様に無い挙動を足さない。迷ったら既存の実装の流儀に合わせる。
+- 失敗したら原因を切り分けてから直す。場当たり的な回避策は入れない。
+- 変更の前後で関連テストを走らせ、結果を報告に含める。</textarea></div>
             </div>
             <div class="set-group">
               <h4>プロファイル</h4>
               <div class="set-row"><div class="grow"><div class="t">割り当てるプロファイル</div><div class="d2">このエージェントのセッションは、割り当てたプロファイルの環境で始まります。プロファイルの中身（環境変数など）は端末のプロファイル画面で定義し、ここでは割り当てだけを変えます。割り当ては次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div></div></div>
-              <div class="set-row"><div class="chips" role="group" aria-label="割り当てるプロファイル"><button class="chip" type="button">default</button><button class="chip on" type="button">rust-dev</button><button class="chip" type="button">data-import</button></div><button class="btn" type="button" data-openpage="profile">プロファイルを開く</button></div>
+              <div class="set-row"><select class="field" aria-label="割り当てるプロファイル" style="width:min(260px,100%)"><option value="default">default</option><option value="rust-dev" selected>rust-dev</option><option value="data-import">data-import</option></select><button class="btn" type="button" data-openpage="profile">プロファイルを開く</button></div>
             </div>
             <div class="notice">使うツール（アカウント）はここでは決めません。セッション開始時に、Issue 側の起動計画とツールの空き・制限状態から自動で決まります。</div>
             <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">保存する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
@@ -759,7 +768,7 @@
               <h4>基本</h4>
               <div class="set-row"><span class="ava working" style="background:#c2410c">姫</span><div class="grow"><div class="t">名前</div><div class="d2">台帳とプロジェクトの画面では、この名前で表示されます。</div></div><input class="field" type="text" value="姫野 大樹" aria-label="名前" style="width:200px"></div>
               
-              <div class="set-row"><div class="grow"><div class="t">PM を務める</div><div class="d2">このエージェントは PM になることができます。「PM を務める」が付いたエージェントの中で、いちばん上の適格な1人が PM を務めます。</div></div><input type="checkbox" aria-label="PM を務める" style="accent-color:var(--accent);width:18px;height:18px;flex:none"></div><div class="set-row"><div class="grow"><div class="t">PM への割り当て</div><div class="d2">いまは優先指定が無く、適格者の中で並び順の最上位が PM を務めます。優先指定すると、この人が PM を務めます（担当者はレート制限では入れ替わりません。ツールの切り替えは別の層で gwtd が行います）。指定には「PM を務める」が付いていることが必要です。</div></div><button class="btn" type="button">この人を PM に割り当てる</button></div>
+              <div class="set-row"><div class="grow"><div class="t">PM への割り当て</div><div class="d2">いまは優先指定が無く、台帳の並び順で先頭の人が PM を務めます。優先指定すると、この人が PM を務めます（担当者はレート制限では入れ替わりません。ツールの切り替えは別の層で gwtd が行います）。</div></div><button class="btn" type="button">この人を PM に割り当てる</button></div>
             </div>
             <div class="set-group">
               <h4>アバター</h4>
@@ -775,15 +784,19 @@
             </div>
             <div class="set-group">
               <h4>特性</h4>
-              <div class="set-row"><div class="grow"><div class="t">特性はこのエージェントの固定です</div><div class="d2">ここで決める特性が、そのままこのエージェントの特性になります。起動のたびに変わることはなく、起動計画で上書きされることもありません。</div></div></div>
+              <div class="set-row"><div class="grow"><div class="t">特性はこのエージェントの固定です</div><div class="d2">ここで決める特性が、そのままこのエージェントの固定特性になります。推論レベル・速度はパラメータ、性格は起動時に読み込まれる指示文です。起動のたびに変わることはなく、起動計画で上書きされることもありません。</div></div></div>
               <div class="set-row"><div class="grow"><div class="t">推論レベル</div><div class="d2">考えの深さです。</div></div><div class="chips" role="group" aria-label="推論レベル"><button class="chip on" type="button">標準</button><button class="chip" type="button">xhigh</button></div></div>
               <div class="set-row"><div class="grow"><div class="t">速度</div><div class="d2">応答の速さの傾向です。</div></div><div class="chips" role="group" aria-label="速度"><button class="chip on" type="button">Fast</button><button class="chip" type="button">Ultrafast</button></div></div>
-              <div class="set-row"><div class="grow"><div class="t">性格</div><div class="d2">開発や調査で、どこを重点に置くかです。</div></div><input class="field" type="text" value="画面と体験の実装を重点に。実機で見て確かめる" aria-label="性格" style="width:min(420px,100%)"></div>
+              <div class="set-row"><div class="grow"><div class="t">性格（起動時に読み込む設定）</div><div class="d2">このエージェントへの指示・振る舞いの定義文です。AGENTS.md のような文章で書き、エージェントの起動時に毎回読み込まれます。台帳など他の画面では、冒頭の抜粋だけが表示されます。</div></div></div>
+              <div class="set-row"><textarea class="field" rows="7" aria-label="性格" style="width:100%;line-height:1.6;resize:vertical">画面と体験の実装を重点に。実機で見て確かめる。
+- 見た目と操作の確認は実機で行い、推測で済ませない。
+- 表示の崩れや違和感に気づいたら、再現手順と一緒に報告する。
+- 操作の手数は増やさず、既存の画面の導線に沿わせる。</textarea></div>
             </div>
             <div class="set-group">
               <h4>プロファイル</h4>
               <div class="set-row"><div class="grow"><div class="t">割り当てるプロファイル</div><div class="d2">このエージェントのセッションは、割り当てたプロファイルの環境で始まります。プロファイルの中身（環境変数など）は端末のプロファイル画面で定義し、ここでは割り当てだけを変えます。割り当ては次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div></div></div>
-              <div class="set-row"><div class="chips" role="group" aria-label="割り当てるプロファイル"><button class="chip on" type="button">default</button><button class="chip" type="button">rust-dev</button><button class="chip" type="button">data-import</button></div><button class="btn" type="button" data-openpage="profile">プロファイルを開く</button></div>
+              <div class="set-row"><select class="field" aria-label="割り当てるプロファイル" style="width:min(260px,100%)"><option value="default" selected>default</option><option value="rust-dev">rust-dev</option><option value="data-import">data-import</option></select><button class="btn" type="button" data-openpage="profile">プロファイルを開く</button></div>
             </div>
             <div class="notice">使うツール（アカウント）はここでは決めません。セッション開始時に、Issue 側の起動計画とツールの空き・制限状態から自動で決まります。</div>
             <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">保存する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
@@ -796,7 +809,7 @@
               <h4>基本</h4>
               <div class="set-row"><span class="ava" style="background:#0e7490">安</span><div class="grow"><div class="t">名前</div><div class="d2">台帳とプロジェクトの画面では、この名前で表示されます。</div></div><input class="field" type="text" value="安藤 健二" aria-label="名前" style="width:200px"></div>
               
-              <div class="set-row"><div class="grow"><div class="t">PM を務める</div><div class="d2">このエージェントは PM になることができます。「PM を務める」が付いたエージェントの中で、いちばん上の適格な1人が PM を務めます。</div></div><input type="checkbox" aria-label="PM を務める" style="accent-color:var(--accent);width:18px;height:18px;flex:none"></div><div class="set-row"><div class="grow"><div class="t">PM への割り当て</div><div class="d2">いまは優先指定が無く、適格者の中で並び順の最上位が PM を務めます。優先指定すると、この人が PM を務めます（担当者はレート制限では入れ替わりません。ツールの切り替えは別の層で gwtd が行います）。指定には「PM を務める」が付いていることが必要です。</div></div><button class="btn" type="button">この人を PM に割り当てる</button></div>
+              <div class="set-row"><div class="grow"><div class="t">PM への割り当て</div><div class="d2">いまは優先指定が無く、台帳の並び順で先頭の人が PM を務めます。優先指定すると、この人が PM を務めます（担当者はレート制限では入れ替わりません。ツールの切り替えは別の層で gwtd が行います）。</div></div><button class="btn" type="button">この人を PM に割り当てる</button></div>
             </div>
             <div class="set-group">
               <h4>アバター</h4>
@@ -812,15 +825,19 @@
             </div>
             <div class="set-group">
               <h4>特性</h4>
-              <div class="set-row"><div class="grow"><div class="t">特性はこのエージェントの固定です</div><div class="d2">ここで決める特性が、そのままこのエージェントの特性になります。起動のたびに変わることはなく、起動計画で上書きされることもありません。</div></div></div>
+              <div class="set-row"><div class="grow"><div class="t">特性はこのエージェントの固定です</div><div class="d2">ここで決める特性が、そのままこのエージェントの固定特性になります。推論レベル・速度はパラメータ、性格は起動時に読み込まれる指示文です。起動のたびに変わることはなく、起動計画で上書きされることもありません。</div></div></div>
               <div class="set-row"><div class="grow"><div class="t">推論レベル</div><div class="d2">考えの深さです。</div></div><div class="chips" role="group" aria-label="推論レベル"><button class="chip on" type="button">標準</button><button class="chip" type="button">xhigh</button></div></div>
               <div class="set-row"><div class="grow"><div class="t">速度</div><div class="d2">応答の速さの傾向です。</div></div><div class="chips" role="group" aria-label="速度"><button class="chip on" type="button">Fast</button><button class="chip" type="button">Ultrafast</button></div></div>
-              <div class="set-row"><div class="grow"><div class="t">性格</div><div class="d2">開発や調査で、どこを重点に置くかです。</div></div><input class="field" type="text" value="データの調査と取り込みを重点に。形式の変化は止めて知らせる" aria-label="性格" style="width:min(420px,100%)"></div>
+              <div class="set-row"><div class="grow"><div class="t">性格（起動時に読み込む設定）</div><div class="d2">このエージェントへの指示・振る舞いの定義文です。AGENTS.md のような文章で書き、エージェントの起動時に毎回読み込まれます。台帳など他の画面では、冒頭の抜粋だけが表示されます。</div></div></div>
+              <div class="set-row"><textarea class="field" rows="7" aria-label="性格" style="width:100%;line-height:1.6;resize:vertical">データの調査と取り込みを重点に。形式の変化は止めて知らせる。
+- 取り込み前に形式を確認し、想定と違う形式が来たら止めて知らせる。
+- 件数と中身の突き合わせを行い、欠けや重複はその場で報告する。
+- 元データは書き換えず、変換は取り込み側で行う。</textarea></div>
             </div>
             <div class="set-group">
               <h4>プロファイル</h4>
               <div class="set-row"><div class="grow"><div class="t">割り当てるプロファイル</div><div class="d2">このエージェントのセッションは、割り当てたプロファイルの環境で始まります。プロファイルの中身（環境変数など）は端末のプロファイル画面で定義し、ここでは割り当てだけを変えます。割り当ては次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div></div></div>
-              <div class="set-row"><div class="chips" role="group" aria-label="割り当てるプロファイル"><button class="chip" type="button">default</button><button class="chip" type="button">rust-dev</button><button class="chip on" type="button">data-import</button></div><button class="btn" type="button" data-openpage="profile">プロファイルを開く</button></div>
+              <div class="set-row"><select class="field" aria-label="割り当てるプロファイル" style="width:min(260px,100%)"><option value="default">default</option><option value="rust-dev">rust-dev</option><option value="data-import" selected>data-import</option></select><button class="btn" type="button" data-openpage="profile">プロファイルを開く</button></div>
             </div>
             <div class="notice">使うツール（アカウント）はここでは決めません。セッション開始時に、Issue 側の起動計画とツールの空き・制限状態から自動で決まります。</div>
             <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">保存する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
@@ -833,7 +850,7 @@
               <h4>基本</h4>
               <div class="set-row"><span class="ava" style="background:#6d28d9">原</span><div class="grow"><div class="t">名前</div><div class="d2">台帳とプロジェクトの画面では、この名前で表示されます。</div></div><input class="field" type="text" value="原 和正" aria-label="名前" style="width:200px"></div>
               
-              <div class="set-row"><div class="grow"><div class="t">PM を務める</div><div class="d2">このエージェントは PM になることができます。「PM を務める」が付いたエージェントの中で、いちばん上の適格な1人が PM を務めます。</div></div><input type="checkbox" aria-label="PM を務める" style="accent-color:var(--accent);width:18px;height:18px;flex:none"></div><div class="set-row"><div class="grow"><div class="t">PM への割り当て</div><div class="d2">いまは優先指定が無く、適格者の中で並び順の最上位が PM を務めます。優先指定すると、この人が PM を務めます（担当者はレート制限では入れ替わりません。ツールの切り替えは別の層で gwtd が行います）。指定には「PM を務める」が付いていることが必要です。</div></div><button class="btn" type="button">この人を PM に割り当てる</button></div>
+              <div class="set-row"><div class="grow"><div class="t">PM への割り当て</div><div class="d2">いまは優先指定が無く、台帳の並び順で先頭の人が PM を務めます。優先指定すると、この人が PM を務めます（担当者はレート制限では入れ替わりません。ツールの切り替えは別の層で gwtd が行います）。</div></div><button class="btn" type="button">この人を PM に割り当てる</button></div>
             </div>
             <div class="set-group">
               <h4>アバター</h4>
@@ -849,15 +866,19 @@
             </div>
             <div class="set-group">
               <h4>特性</h4>
-              <div class="set-row"><div class="grow"><div class="t">特性はこのエージェントの固定です</div><div class="d2">ここで決める特性が、そのままこのエージェントの特性になります。起動のたびに変わることはなく、起動計画で上書きされることもありません。</div></div></div>
+              <div class="set-row"><div class="grow"><div class="t">特性はこのエージェントの固定です</div><div class="d2">ここで決める特性が、そのままこのエージェントの固定特性になります。推論レベル・速度はパラメータ、性格は起動時に読み込まれる指示文です。起動のたびに変わることはなく、起動計画で上書きされることもありません。</div></div></div>
               <div class="set-row"><div class="grow"><div class="t">推論レベル</div><div class="d2">考えの深さです。</div></div><div class="chips" role="group" aria-label="推論レベル"><button class="chip" type="button">標準</button><button class="chip on" type="button">xhigh</button></div></div>
               <div class="set-row"><div class="grow"><div class="t">速度</div><div class="d2">応答の速さの傾向です。</div></div><div class="chips" role="group" aria-label="速度"><button class="chip on" type="button">Fast</button><button class="chip" type="button">Ultrafast</button></div></div>
-              <div class="set-row"><div class="grow"><div class="t">性格</div><div class="d2">開発や調査で、どこを重点に置くかです。</div></div><input class="field" type="text" value="ビルドと検証を重点に。失敗は切り分けてから直す" aria-label="性格" style="width:min(420px,100%)"></div>
+              <div class="set-row"><div class="grow"><div class="t">性格（起動時に読み込む設定）</div><div class="d2">このエージェントへの指示・振る舞いの定義文です。AGENTS.md のような文章で書き、エージェントの起動時に毎回読み込まれます。台帳など他の画面では、冒頭の抜粋だけが表示されます。</div></div></div>
+              <div class="set-row"><textarea class="field" rows="7" aria-label="性格" style="width:100%;line-height:1.6;resize:vertical">ビルドと検証を重点に。失敗は切り分けてから直す。
+- 再現できない失敗は、その旨を記録し、推測で直さない。
+- 検証は関連するテストから走らせ、結果は数字と一緒に報告する。
+- 環境の差異が疑われるときは、環境の情報も添える。</textarea></div>
             </div>
             <div class="set-group">
               <h4>プロファイル</h4>
               <div class="set-row"><div class="grow"><div class="t">割り当てるプロファイル</div><div class="d2">このエージェントのセッションは、割り当てたプロファイルの環境で始まります。プロファイルの中身（環境変数など）は端末のプロファイル画面で定義し、ここでは割り当てだけを変えます。割り当ては次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div></div></div>
-              <div class="set-row"><div class="chips" role="group" aria-label="割り当てるプロファイル"><button class="chip" type="button">default</button><button class="chip on" type="button">rust-dev</button><button class="chip" type="button">data-import</button></div><button class="btn" type="button" data-openpage="profile">プロファイルを開く</button></div>
+              <div class="set-row"><select class="field" aria-label="割り当てるプロファイル" style="width:min(260px,100%)"><option value="default">default</option><option value="rust-dev" selected>rust-dev</option><option value="data-import">data-import</option></select><button class="btn" type="button" data-openpage="profile">プロファイルを開く</button></div>
             </div>
             <div class="notice">使うツール（アカウント）はここでは決めません。セッション開始時に、Issue 側の起動計画とツールの空き・制限状態から自動で決まります。</div>
             <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">保存する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
@@ -870,7 +891,7 @@
               <h4>基本</h4>
               <div class="set-row"><span class="ava" style="background:#a16207">鈴</span><div class="grow"><div class="t">名前</div><div class="d2">台帳とプロジェクトの画面では、この名前で表示されます。</div></div><input class="field" type="text" value="鈴木 和斗" aria-label="名前" style="width:200px"></div>
               
-              <div class="set-row"><div class="grow"><div class="t">PM を務める</div><div class="d2">このエージェントは PM になることができます。「PM を務める」が付いたエージェントの中で、いちばん上の適格な1人が PM を務めます。</div></div><input type="checkbox" aria-label="PM を務める" style="accent-color:var(--accent);width:18px;height:18px;flex:none"></div><div class="set-row"><div class="grow"><div class="t">PM への割り当て</div><div class="d2">いまは優先指定が無く、適格者の中で並び順の最上位が PM を務めます。優先指定すると、この人が PM を務めます（担当者はレート制限では入れ替わりません。ツールの切り替えは別の層で gwtd が行います）。指定には「PM を務める」が付いていることが必要です。</div></div><button class="btn" type="button">この人を PM に割り当てる</button></div>
+              <div class="set-row"><div class="grow"><div class="t">PM への割り当て</div><div class="d2">いまは優先指定が無く、台帳の並び順で先頭の人が PM を務めます。優先指定すると、この人が PM を務めます（担当者はレート制限では入れ替わりません。ツールの切り替えは別の層で gwtd が行います）。</div></div><button class="btn" type="button">この人を PM に割り当てる</button></div>
             </div>
             <div class="set-group">
               <h4>アバター</h4>
@@ -886,15 +907,19 @@
             </div>
             <div class="set-group">
               <h4>特性</h4>
-              <div class="set-row"><div class="grow"><div class="t">特性はこのエージェントの固定です</div><div class="d2">ここで決める特性が、そのままこのエージェントの特性になります。起動のたびに変わることはなく、起動計画で上書きされることもありません。</div></div></div>
+              <div class="set-row"><div class="grow"><div class="t">特性はこのエージェントの固定です</div><div class="d2">ここで決める特性が、そのままこのエージェントの固定特性になります。推論レベル・速度はパラメータ、性格は起動時に読み込まれる指示文です。起動のたびに変わることはなく、起動計画で上書きされることもありません。</div></div></div>
               <div class="set-row"><div class="grow"><div class="t">推論レベル</div><div class="d2">考えの深さです。</div></div><div class="chips" role="group" aria-label="推論レベル"><button class="chip on" type="button">標準</button><button class="chip" type="button">xhigh</button></div></div>
               <div class="set-row"><div class="grow"><div class="t">速度</div><div class="d2">応答の速さの傾向です。</div></div><div class="chips" role="group" aria-label="速度"><button class="chip" type="button">Fast</button><button class="chip on" type="button">Ultrafast</button></div></div>
-              <div class="set-row"><div class="grow"><div class="t">性格</div><div class="d2">開発や調査で、どこを重点に置くかです。</div></div><input class="field" type="text" value="調査と整理を重点に。根拠を並べてから提案する" aria-label="性格" style="width:min(420px,100%)"></div>
+              <div class="set-row"><div class="grow"><div class="t">性格（起動時に読み込む設定）</div><div class="d2">このエージェントへの指示・振る舞いの定義文です。AGENTS.md のような文章で書き、エージェントの起動時に毎回読み込まれます。台帳など他の画面では、冒頭の抜粋だけが表示されます。</div></div></div>
+              <div class="set-row"><textarea class="field" rows="7" aria-label="性格" style="width:100%;line-height:1.6;resize:vertical">調査と整理を重点に。根拠を並べてから提案する。
+- 出典が曖昧な情報は、その旨を明記する。
+- 調査結果は結論・根拠・残る不明点の順にまとめる。
+- 決められないことは決めず、判断の材料として上げる。</textarea></div>
             </div>
             <div class="set-group">
               <h4>プロファイル</h4>
               <div class="set-row"><div class="grow"><div class="t">割り当てるプロファイル</div><div class="d2">このエージェントのセッションは、割り当てたプロファイルの環境で始まります。プロファイルの中身（環境変数など）は端末のプロファイル画面で定義し、ここでは割り当てだけを変えます。割り当ては次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div></div></div>
-              <div class="set-row"><div class="chips" role="group" aria-label="割り当てるプロファイル"><button class="chip on" type="button">default</button><button class="chip" type="button">rust-dev</button><button class="chip" type="button">data-import</button></div><button class="btn" type="button" data-openpage="profile">プロファイルを開く</button></div>
+              <div class="set-row"><select class="field" aria-label="割り当てるプロファイル" style="width:min(260px,100%)"><option value="default" selected>default</option><option value="rust-dev">rust-dev</option><option value="data-import">data-import</option></select><button class="btn" type="button" data-openpage="profile">プロファイルを開く</button></div>
             </div>
             <div class="notice">使うツール（アカウント）はここでは決めません。セッション開始時に、Issue 側の起動計画とツールの空き・制限状態から自動で決まります。</div>
             <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">保存する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
@@ -907,7 +932,7 @@
               <h4>基本</h4>
               <div class="set-row"><span class="ava" style="background:#be123c">濱</span><div class="grow"><div class="t">名前</div><div class="d2">台帳とプロジェクトの画面では、この名前で表示されます。</div></div><input class="field" type="text" value="濱田 嵩翔" aria-label="名前" style="width:200px"></div>
               
-              <div class="set-row"><div class="grow"><div class="t">PM を務める</div><div class="d2">このエージェントは PM になることができます。「PM を務める」が付いたエージェントの中で、いちばん上の適格な1人が PM を務めます。</div></div><input type="checkbox" aria-label="PM を務める" style="accent-color:var(--accent);width:18px;height:18px;flex:none"></div><div class="set-row"><div class="grow"><div class="t">PM への割り当て</div><div class="d2">いまは優先指定が無く、適格者の中で並び順の最上位が PM を務めます。優先指定すると、この人が PM を務めます（担当者はレート制限では入れ替わりません。ツールの切り替えは別の層で gwtd が行います）。指定には「PM を務める」が付いていることが必要です。</div></div><button class="btn" type="button">この人を PM に割り当てる</button></div>
+              <div class="set-row"><div class="grow"><div class="t">PM への割り当て</div><div class="d2">いまは優先指定が無く、台帳の並び順で先頭の人が PM を務めます。優先指定すると、この人が PM を務めます（担当者はレート制限では入れ替わりません。ツールの切り替えは別の層で gwtd が行います）。</div></div><button class="btn" type="button">この人を PM に割り当てる</button></div>
             </div>
             <div class="set-group">
               <h4>アバター</h4>
@@ -923,15 +948,19 @@
             </div>
             <div class="set-group">
               <h4>特性</h4>
-              <div class="set-row"><div class="grow"><div class="t">特性はこのエージェントの固定です</div><div class="d2">ここで決める特性が、そのままこのエージェントの特性になります。起動のたびに変わることはなく、起動計画で上書きされることもありません。</div></div></div>
+              <div class="set-row"><div class="grow"><div class="t">特性はこのエージェントの固定です</div><div class="d2">ここで決める特性が、そのままこのエージェントの固定特性になります。推論レベル・速度はパラメータ、性格は起動時に読み込まれる指示文です。起動のたびに変わることはなく、起動計画で上書きされることもありません。</div></div></div>
               <div class="set-row"><div class="grow"><div class="t">推論レベル</div><div class="d2">考えの深さです。</div></div><div class="chips" role="group" aria-label="推論レベル"><button class="chip on" type="button">標準</button><button class="chip" type="button">xhigh</button></div></div>
               <div class="set-row"><div class="grow"><div class="t">速度</div><div class="d2">応答の速さの傾向です。</div></div><div class="chips" role="group" aria-label="速度"><button class="chip on" type="button">Fast</button><button class="chip" type="button">Ultrafast</button></div></div>
-              <div class="set-row"><div class="grow"><div class="t">性格</div><div class="d2">開発や調査で、どこを重点に置くかです。</div></div><input class="field" type="text" value="性能の計測を重点に。数字で確かめてから変える" aria-label="性格" style="width:min(420px,100%)"></div>
+              <div class="set-row"><div class="grow"><div class="t">性格（起動時に読み込む設定）</div><div class="d2">このエージェントへの指示・振る舞いの定義文です。AGENTS.md のような文章で書き、エージェントの起動時に毎回読み込まれます。台帳など他の画面では、冒頭の抜粋だけが表示されます。</div></div></div>
+              <div class="set-row"><textarea class="field" rows="7" aria-label="性格" style="width:100%;line-height:1.6;resize:vertical">性能の計測を重点に。数字で確かめてから変える。
+- 変える前に測る。計測条件（端末・データ量・回数）を結果と一緒に残す。
+- 体感の報告と計測値が食い違う場合は、両方を併記する。
+- 再現の取れない計測値は、結論に使わない。</textarea></div>
             </div>
             <div class="set-group">
               <h4>プロファイル</h4>
               <div class="set-row"><div class="grow"><div class="t">割り当てるプロファイル</div><div class="d2">このエージェントのセッションは、割り当てたプロファイルの環境で始まります。プロファイルの中身（環境変数など）は端末のプロファイル画面で定義し、ここでは割り当てだけを変えます。割り当ては次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div></div></div>
-              <div class="set-row"><div class="chips" role="group" aria-label="割り当てるプロファイル"><button class="chip on" type="button">default</button><button class="chip" type="button">rust-dev</button><button class="chip" type="button">data-import</button></div><button class="btn" type="button" data-openpage="profile">プロファイルを開く</button></div>
+              <div class="set-row"><select class="field" aria-label="割り当てるプロファイル" style="width:min(260px,100%)"><option value="default" selected>default</option><option value="rust-dev">rust-dev</option><option value="data-import">data-import</option></select><button class="btn" type="button" data-openpage="profile">プロファイルを開く</button></div>
             </div>
             <div class="notice">使うツール（アカウント）はここでは決めません。セッション開始時に、Issue 側の起動計画とツールの空き・制限状態から自動で決まります。</div>
             <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">保存する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
@@ -944,7 +973,7 @@
               <h4>基本</h4>
               <div class="set-row"><div class="grow"><div class="t">名前</div><div class="d2">台帳とプロジェクトの画面では、この名前で表示されます。</div></div><input class="field" type="text" placeholder="名前（例：Ren）" aria-label="名前" style="width:200px"></div>
               
-              <div class="set-row"><div class="grow"><div class="t">PM を務める</div><div class="d2">このエージェントは PM になることができます。「PM を務める」が付いたエージェントの中で、いちばん上の適格な1人が PM を務めます。</div></div><input type="checkbox" aria-label="PM を務める" style="accent-color:var(--accent);width:18px;height:18px;flex:none"></div>
+              
             </div>
             <div class="set-group">
               <h4>アバター</h4>
@@ -960,15 +989,16 @@
             </div>
             <div class="set-group">
               <h4>特性</h4>
-              <div class="set-row"><div class="grow"><div class="t">特性はこのエージェントの固定です</div><div class="d2">ここで決める特性が、そのままこのエージェントの特性になります。起動のたびに変わることはなく、起動計画で上書きされることもありません。</div></div></div>
+              <div class="set-row"><div class="grow"><div class="t">特性はこのエージェントの固定です</div><div class="d2">ここで決める特性が、そのままこのエージェントの固定特性になります。推論レベル・速度はパラメータ、性格は起動時に読み込まれる指示文です。起動のたびに変わることはなく、起動計画で上書きされることもありません。</div></div></div>
               <div class="set-row"><div class="grow"><div class="t">推論レベル</div><div class="d2">考えの深さです。</div></div><div class="chips" role="group" aria-label="推論レベル"><button class="chip on" type="button">標準</button><button class="chip" type="button">xhigh</button></div></div>
               <div class="set-row"><div class="grow"><div class="t">速度</div><div class="d2">応答の速さの傾向です。</div></div><div class="chips" role="group" aria-label="速度"><button class="chip on" type="button">Fast</button><button class="chip" type="button">Ultrafast</button></div></div>
-              <div class="set-row"><div class="grow"><div class="t">性格</div><div class="d2">開発や調査で、どこを重点に置くかです。</div></div><input class="field" type="text" placeholder="性格（例：調査を重点に。根拠を確かめてから進める）" aria-label="性格" style="width:min(420px,100%)"></div>
+              <div class="set-row"><div class="grow"><div class="t">性格（起動時に読み込む設定）</div><div class="d2">このエージェントへの指示・振る舞いの定義文です。AGENTS.md のような文章で書き、エージェントの起動時に毎回読み込まれます。台帳など他の画面では、冒頭の抜粋だけが表示されます。</div></div></div>
+              <div class="set-row"><textarea class="field" rows="7" aria-label="性格" style="width:100%;line-height:1.6;resize:vertical" placeholder="（例）実装を重点に。変更は小さく刻み、テストで確かめてから進める。&#10;- 仕様に無い挙動は足さない。&#10;- 失敗したら原因を切り分けてから直す。"></textarea></div>
             </div>
             <div class="set-group">
               <h4>プロファイル</h4>
               <div class="set-row"><div class="grow"><div class="t">割り当てるプロファイル</div><div class="d2">このエージェントのセッションは、割り当てたプロファイルの環境で始まります。プロファイルの中身（環境変数など）は端末のプロファイル画面で定義し、ここでは割り当てだけを変えます。割り当ては次に始まるセッションから反映されます（動いているセッションは影響を受けません）。</div></div></div>
-              <div class="set-row"><div class="chips" role="group" aria-label="割り当てるプロファイル"><button class="chip on" type="button">default</button><button class="chip" type="button">rust-dev</button><button class="chip" type="button">data-import</button></div><button class="btn" type="button" data-openpage="profile">プロファイルを開く</button></div>
+              <div class="set-row"><select class="field" aria-label="割り当てるプロファイル" style="width:min(260px,100%)"><option value="default" selected>default</option><option value="rust-dev">rust-dev</option><option value="data-import">data-import</option></select><button class="btn" type="button" data-openpage="profile">プロファイルを開く</button></div>
             </div>
             <div class="notice">使うツール（アカウント）はここでは決めません。セッション開始時に、Issue 側の起動計画とツールの空き・制限状態から自動で決まります。</div>
             <div class="btnrow" style="margin-top:14px"><button class="btn primary" type="button" data-nav="agents-ledger">追加する</button><button class="btn ghost" type="button" data-nav="agents-ledger">キャンセル</button></div>
@@ -2469,7 +2499,7 @@
             </div>
             <div class="set-group">
               <div class="set-head">担当の候補</div>
-              <div class="set-row"><span class="ava working" style="background:#2563eb">小</span><div class="grow"><div class="t">小田 洋平 — 実装（選ばれています）</div><div class="d2">台帳の並び順で最上位の適格者です</div><div class="traits"><span class="trait">推論 <b>xhigh</b></span><span class="trait">速度 <b>Ultrafast</b></span><span class="trait">性格 <b>実装を重点に</b></span></div></div><span class="badge b-run">担当</span></div>
+              <div class="set-row"><span class="ava working" style="background:#2563eb">小</span><div class="grow"><div class="t">小田 洋平 — 実装（選ばれています）</div><div class="d2">台帳の並び順で選ばれた担当です</div><div class="traits"><span class="trait">推論 <b>xhigh</b></span><span class="trait">速度 <b>Ultrafast</b></span><span class="trait">性格 <b>実装を重点に</b></span></div></div><span class="badge b-run">担当</span></div>
               <div class="set-row"><span class="ava working" style="background:#c2410c">姫</span><div class="grow"><div class="t">姫野 大樹 — 実装</div><div class="d2">いま #7007 を作業中です。終わってからなら選べます</div><div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>Fast</b></span><span class="trait">性格 <b>画面と体験の実装を重点に</b></span></div></div><button class="btn" type="button">この人に変える</button></div>
               <div class="set-row"><span class="ava" style="background:#0e7490">安</span><div class="grow"><div class="t">安藤 健二 — データ取り込み</div><div class="d2">特性がこの課題と合わないため、候補の下位です</div><div class="traits"><span class="trait">推論 <b>標準</b></span><span class="trait">速度 <b>Fast</b></span><span class="trait">性格 <b>データの調査と取り込みを重点に</b></span></div></div><button class="btn" type="button">この人に変える</button></div>
             </div>
@@ -2567,7 +2597,7 @@
 
   <footer class="doc">
     <h3>このモックについて</h3>
-    <p>全画面刷新モック v3（Issue #7007）。開始画面（PM との会話がメイン、プロジェクトの内容は出さず一覧は名前だけの導線、判断は会話の中のカードでその場で決定）、エージェント台帳とツールの独立画面（ヘッダーから開く。台帳は特性＝推論・速度・性格が固定で、使えるツール種別の項目は無し。台帳の各行の「編集」と「追加」からは、エージェントごとの設定画面（名前・アバター・PM 適格・特性の編集と新規作成）を開く。プロファイルは端末で定義し、エージェントに割り当てる（エージェント設定では割り当てのみ）。ツールはアカウント単位のプールと使用量）、アプリ設定、プロファイル、起動ウィザード、ターミナル表示を網羅しています。プロジェクト画面群（相談／タスク／課題／課題詳細／作業／判断待ち／担当者（履歴・予定つき）／掲示板（PM の報告を統合）／検索／ブランチ／ログ／プロジェクト設定）は、gwt と KeibaDB の2プロジェクト分あります。PM 専用の画面（8タブ）は作らず、会話は「相談」に一本化しています。画面の移動は上のボタン、各プロジェクトのレール、カードから行えます。</p>
+    <p>全画面刷新モック v3（Issue #7007）。開始画面（PM との会話がメイン、プロジェクトの内容は出さず一覧は名前だけの導線、判断は会話の中のカードでその場で決定）、エージェント台帳とツールの独立画面（ヘッダーから開く。台帳は特性＝推論・速度（パラメータ）と性格（起動時に読み込む指示文）が固定で、使えるツール種別の項目は無し。台帳の各行の「編集」と「追加」からは、エージェントごとの設定画面（名前・アバター・特性の編集と新規作成）を開く。プロファイルは端末で定義し、エージェントに割り当てる（エージェント設定ではコンボボックスで割り当てるのみ）。ツールはアカウント単位のプールと使用量）、アプリ設定、プロファイル、起動ウィザード、ターミナル表示を網羅しています。プロジェクト画面群（相談／タスク／課題／課題詳細／作業／判断待ち／担当者（履歴・予定つき）／掲示板（PM の報告を統合）／検索／ブランチ／ログ／プロジェクト設定）は、gwt と KeibaDB の2プロジェクト分あります。PM 専用の画面（8タブ）は作らず、会話は「相談」に一本化しています。画面の移動は上のボタン、各プロジェクトのレール、カードから行えます。</p>
   </footer>
 </div>
 
