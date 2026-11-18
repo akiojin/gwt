@@ -1063,6 +1063,7 @@ impl AppRuntime {
             .unwrap_or_else(|| self.proxy.clone());
         let generations = Arc::clone(&self.window_lifecycle_generations);
         let task: WindowCloseFinalizerTask = Box::new(move || {
+            let mut owner_pane = None;
             let mut pm_outcome: Option<gwt::project_runtime::pm_delivery::PmLifecycleOutcome> =
                 None;
             let result = tokio::runtime::Builder::new_current_thread()
@@ -1085,6 +1086,7 @@ impl AppRuntime {
                                 pending.owner_pane_id == runtime.owner_pane_id
                             })
                         }) {
+                            owner_pane = Some((runtime.owner_pane_id.clone(), runtime.incarnation));
                             let receipt = tokio::time::timeout(
                                 Duration::from_secs(120),
                                 runtime.client.command(
@@ -1101,6 +1103,12 @@ impl AppRuntime {
                             {
                                 return Err("project close receipt identity changed".into());
                             }
+                            if receipt["closed"] != true
+                                || receipt["explicit_stop"] == true
+                                || receipt["retained_window"] == true
+                            {
+                                return Err("project close did not remove the owned window".into());
+                            }
                             pm_outcome = receipt
                                 .get("pm_lifecycle")
                                 .filter(|value| !value.is_null())
@@ -1116,6 +1124,18 @@ impl AppRuntime {
                         Ok(())
                     })
                 });
+            if let Some((owner_pane_id, incarnation)) = owner_pane {
+                tracing::info!(
+                    target: "gwt.pane.teardown",
+                    stage = "owner_close_result",
+                    window_id = %window_id,
+                    owner_pane_id = %owner_pane_id,
+                    incarnation,
+                    ok = result.is_ok(),
+                    reason = result.as_ref().err().map_or("", String::as_str),
+                    "owner window close result"
+                );
+            }
             if let Some(reply) = peer_reply {
                 proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
                     reply.client_id,
