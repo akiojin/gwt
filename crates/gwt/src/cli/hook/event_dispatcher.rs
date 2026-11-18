@@ -217,19 +217,8 @@ fn handle_user_prompt_submit(
     is_pm: bool,
     completion: Option<&super::runtime_state::HookCompletionContext>,
 ) -> Result<HookOutput, HookError> {
-    // PM reporting has its own settlement path; ordinary producing obligations
-    // deliberately remain unarmed in this window.
-    let reporting_started = Instant::now();
-    let reporting = super::pm_reporting::handle_user_prompt_submit(worktree_root, input);
-    diagnostics::record_handler_duration(
-        event,
-        "pm-reporting-prompt",
-        reporting_started.elapsed(),
-        if reporting.is_ok() { "ok" } else { "error" },
-    );
-    reporting?;
-    // Start the other bookkeeping together before the live RuntimeState
-    // notice. Grok records only pre-turn correlation here; its matching
+    // Start the bookkeeping together before the live RuntimeState notice.
+    // Grok records only pre-turn correlation here; its matching
     // PreToolUse/Stop later commits the ACK before that event's notice.
     let event_deadline = gwt_core::operation_deadline::current();
     #[cfg(test)]
@@ -237,6 +226,29 @@ fn handle_user_prompt_submit(
     #[cfg(test)]
     let bookkeeping_gate = tests::bookkeeping_gate();
     std::thread::scope(|scope| {
+        // PM reporting has its own settlement path; ordinary producing
+        // obligations deliberately remain unarmed in this window. Its turn
+        // receipt is a durable fsync sidecar, so it must not spend the
+        // aggregate deadline before RuntimeState publishes (Issue #7270).
+        let pm_reporting = scope.spawn(|| {
+            #[cfg(test)]
+            tests::wait_bookkeeping_gate(bookkeeping_gate.as_ref());
+            let started = Instant::now();
+            let result = super::pm_reporting::handle_user_prompt_submit(worktree_root, input);
+            (started.elapsed(), result)
+        });
+        let join_pm_reporting = || {
+            let (duration, result) = pm_reporting
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+            diagnostics::record_handler_duration(
+                event,
+                "pm-reporting-prompt",
+                duration,
+                if result.is_ok() { "ok" } else { "error" },
+            );
+            result
+        };
         let action_obligation = scope.spawn(|| {
             #[cfg(test)]
             tests::wait_bookkeeping_gate(bookkeeping_gate.as_ref());
@@ -278,6 +290,9 @@ fn handle_user_prompt_submit(
         let prepared_session = run_step(event, "runtime-state", || {
             crate::daemon_runtime::handle_runtime_state_owned(event, input, completion)
         });
+        let prepared_session = join_pm_reporting()
+            .map_err(HookError::from)
+            .and_then(|()| prepared_session);
         diagnostics::record_handler_duration(
             event,
             "pm-delivery-ack",
@@ -1296,6 +1311,115 @@ mod tests {
                 Some("UserPromptSubmit".into()),
                 PmDeliveryReceiptStatus::Verified,
             )
+        );
+    }
+
+    /// Issue #7270: the PM turn receipt is a durable fsync sidecar. On a slow
+    /// Windows disk it consumed the whole 200ms prompt deadline before the
+    /// RuntimeState publication could start, so the PM never showed Running.
+    #[test]
+    fn pm_reporting_receipt_does_not_delay_the_live_runtime_notice() {
+        use gwt_core::deadline_budget::{ScopedDeadlineBudget, HANG_GUARD};
+        use gwt_core::test_support::ScopedGwtHome;
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _gwt_home = ScopedGwtHome::set(home.path());
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let worktree = crate::pm_registry::pm_worktree_path_for_repo_path(home.path());
+        std::fs::create_dir_all(&worktree).unwrap();
+        init_git_repo(&worktree);
+        let mut session = Session::new(&worktree, "pm/worktree", AgentId::Codex);
+        session.agent_session_id = Some("native-pm-reporting".into());
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        session.save(&sessions).unwrap();
+        register_pm(&worktree, &session.id);
+        let _session = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session.id);
+        let _runtime_path = ScopedEnvVar::set(
+            GWT_SESSION_RUNTIME_PATH_ENV,
+            gwt_agent::runtime_state_path(&sessions, &session.id),
+        );
+        let _codex_thread = ScopedEnvVar::unset("CODEX_THREAD_ID");
+        let _provider = crate::board_provider::test_provider_override::force_prompt_provider(
+            Rc::new(gwt_core::coordination::LocalProvider),
+        );
+        let gate = std::sync::Arc::new(BookkeepingGate::default());
+        BOOKKEEPING_GATE.with(|held| assert!(held.borrow_mut().replace(gate.clone()).is_none()));
+        let live_gate = gate.clone();
+
+        let runtime = Runtime::new().unwrap();
+        let listener = runtime
+            .block_on(TcpListener::bind(("127.0.0.1", 0)))
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let (calls, received) = mpsc::channel();
+        let app = Router::new().route(
+            "/internal/hook-live",
+            axum::routing::post(move |Json(event): Json<crate::RuntimeHookEvent>| {
+                live_gate.open();
+                calls.send(event.source_event).unwrap();
+                async { axum::http::StatusCode::OK }
+            }),
+        );
+        let (shutdown, shutdown_rx) = oneshot::channel();
+        let server = runtime.spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .unwrap();
+        });
+        let _forward_url = ScopedEnvVar::set(
+            gwt_agent::GWT_HOOK_FORWARD_URL_ENV,
+            format!("http://{address}/internal/hook-live"),
+        );
+        let _forward_token = ScopedEnvVar::set(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV, "test-token");
+        let _live_budget = ScopedDeadlineBudget::hang_guard(
+            &crate::daemon_runtime::USER_PROMPT_SUBMIT_HOOK_LIVE_BUDGET,
+        );
+        let _attempt_budget =
+            ScopedDeadlineBudget::hang_guard(&crate::daemon_runtime::HOOK_LIVE_ATTEMPT_BUDGET);
+        let input = serde_json::json!({
+            "prompt": "review the fleet",
+            "session_id": session.agent_session_id,
+            "cwd": worktree,
+        })
+        .to_string();
+        let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(Instant::now());
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            // test-hygiene: allow-wall-clock-deadline the clock is pinned above; this hang guard never orders the receipt and live publication.
+            Instant::now() + HANG_GUARD,
+        );
+        let completion =
+            super::super::runtime_state::begin_hook_event(&worktree, "UserPromptSubmit", &input);
+        let result = handle_user_prompt_submit(
+            "UserPromptSubmit",
+            &input,
+            &worktree,
+            false,
+            completion.as_ref(),
+        );
+        shutdown.send(()).unwrap();
+        runtime.block_on(server).unwrap();
+        BOOKKEEPING_GATE.with(|held| held.borrow_mut().take());
+        result.unwrap();
+        assert!(
+            !gate.starved_the_live_notice(),
+            "the live RuntimeState notice must not wait for the PM turn receipt",
+        );
+        assert_eq!(
+            received.try_recv().unwrap(),
+            Some("UserPromptSubmit".into())
+        );
+        assert!(
+            super::super::pm_reporting::capture_qa_turn(&worktree)
+                .unwrap()
+                .is_some(),
+            "the PM turn receipt must still be written before the hook returns",
         );
     }
 
