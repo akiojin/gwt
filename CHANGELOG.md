@@ -1,6 +1,60 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.170.0] - 2026-11-18
+
+### Bug Fixes
+
+- **update:** Wait for project daemon retirement before apply
+- **gwtd:** Authenticate pane placement before reading the request
+- **gui:** 実行中・判断待ち件数と Fleet 利用率の表示をそろえる
+- **pm:** 判断待ち件数の変更をレポートに反映する
+- **ci:** Bound nextest test enumeration
+- **ci:** Bound nextest listing output forwarding
+- **issue-monitor:** 引退した Issue の claim 記録と解除済みの open PR 観測を保存時に落とす
+- **issue-monitor:** Confirm GitHub state before agent launch
+- **test:** Synchronize owner readiness before quit
+- **issue-monitor:** Reclaim closed settled runtime slots
+- **issue-monitor:** Scope scan test helper to unix
+- **test:** Require node 22 for the visual runner
+- **workspace:** 既存ブランチの Issue 付き起動で Work を公開する
+- **hook:** Preserve prompts on runtime writer timeout
+- **monitor:** Refuse expired wait renewals
+- **monitor:** Use utc timestamp for wait expiry
+- **execution:** Settle verified design-only work without a PR
+- **hook:** Retry contended session leases for runtime state
+
+### Features
+
+- **gwtd:** Add GUI operation parity ledger and controls
+
+### Miscellaneous Tasks
+
+- **work:** Record first operation parity pull request
+- **work:** Record Switch helper registration design
+- **work:** Record PR for Switch helper design
+- **work:** Record the Windows startup restore delivery
+
+### Performance
+
+- **agents:** Prefs transaction が project の mirror を重複してデコードしないようにする
+
+### Testing
+
+- **agents:** Commit する mirror の bytes が以前の encoder と一致することを固定する
+- **issue-monitor:** Seed live state for relaunch fixtures
+- **ci:** Pin conditional quit stress check
+- **windows:** 起動フィクスチャの時刻を直接代入する
+- **monitor:** 同一 HOME の 2 project で共有スロットの返却・admission・再開を実測する
+- **monitor:** 共有上限による保留を拒否と見送りの両方の形で受け入れる
+- **monitor:** 共有上限の保護が成立するまで待ってから未起動を確認する
+- **hook:** Guard the prompt regression fixture environment
+- **windows:** Wait for the old GUI and owner before cold restore
+- **windows:** Preserve the provider wait and log contract
+- **monitor:** Pin the equal-marker prefs transaction clock
+- **issues:** T94418 の issue.monitor.stop を非同期 fixture 操作で実行する
+- **monitor:** Stabilize the shared slot return fixture
+
 ## [9.169.0] - 2026-11-17
 
 ### Bug Fixes
