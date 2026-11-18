@@ -3,7 +3,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { mkdir, readFile, readdir, realpath, rename, rmdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { startIssueQueueLaunchFixture } from "./_helpers/issue-queue-launch";
-import { gotoLiveGwt, sendLiveGwtEvent } from "./_helpers/live-gwt";
+import { gotoLiveGwt, liveGwtProjectUrl, sendLiveGwtEvent } from "./_helpers/live-gwt";
 
 let rosterReadSequence = 0;
 async function readCanonicalRoster(page: Page): Promise<any> {
@@ -2947,6 +2947,213 @@ request.catch(() => {});
       await info.attach(`operator-hold-released-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
     } finally {
       try { await page.close(); } finally { await fixture.stop(); }
+    }
+    expect(errors, "zero console/page errors including owned fixture cleanup").toEqual([]);
+  });
+
+  test("Issue #7451 shared HOME returns one machine slot to a second project and resumes the original owner", async ({ page }, info) => {
+    // Each admission after a refusal waits for the Monitor's ordinary retry backoff.
+    test.setTimeout(1_500_000);
+    const fixture = await startIssueQueueLaunchFixture(info, {
+      autonomousMode: true, secondProject: { issueNumbers: [45] },
+      // Keep the ordinary retry path, with a wait short enough for a native CI host.
+      monitorPreferences: { max_active_agents: 1, autonomous_tuning: { max_attempts: 3, stuck_timeout_secs: 1800,
+        heartbeat_interval_secs: 120, merge_watch_timeout_secs: 3600, deliver_fix_loop_cap: 5,
+        retry_backoff_base_secs: 5, retry_backoff_cap_secs: 10 } },
+    });
+    const secondPage = await page.context().newPage().catch(async error => { await fixture.stop(); throw error; });
+    const errors: string[] = [];
+    for (const target of [page, secondPage]) {
+      target.on("pageerror", error => errors.push(error.message));
+      target.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    }
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    const preferences = async () => JSON.parse((await fixture.monitorPreferencesBytes()).toString());
+    const secondPreferences = async () => JSON.parse((await fixture.second.preferencesBytes()).toString());
+    const machine = async (name: string) => JSON.parse(await readFile(join(fixture.home, ".gwt/machine-state", name), "utf8"));
+    const exited = (pid: number) => { try { process.kill(pid, 0); return false; } catch { return true; } };
+    const status = async (project?: string) => JSON.parse((await fixture.operationAsync("issue.monitor.status", {}, project)).output);
+    const inboxState = async (number: number, project?: string) =>
+      (await status(project)).inbox.find((row: any) => row.issue_number === number)?.state;
+    const activity = (target: Page) => target.evaluate(() =>
+      ((window as any).__gwtPlaywrightMessages ?? [])
+        .map(({ payload }: any) => payload.kind === "local_agent_activity" ? payload.activity : payload.projection?.local_agent_activity)
+        .filter((snapshot: any) => snapshot?.project_key === location.pathname.split("/")[2])
+        .at(-1));
+    // The shared budget's own refusal, as each project's Host recorded it.
+    const capacityRefusals = async (number: number) => {
+      const rows: string[] = [];
+      const projects = join(fixture.home, ".gwt", "projects");
+      const directories = [join(fixture.home, ".gwt", "logs"),
+        ...(await readdir(projects)).map(key => join(projects, key, "logs"))];
+      for (const directory of directories) {
+        for (const file of await readdir(directory).catch(() => [])) {
+          if (!/\.log(?:\.|$)/.test(file)) continue;
+          for (const line of (await readFile(join(directory, file), "utf8")).split("\n")) {
+            let row;
+            try { row = JSON.parse(line); } catch { continue; }
+            if (row.fields?.issue_number === number
+              && String(row.fields.reason ?? "").startsWith("Machine Agent capacity is occupied;")) rows.push(row.timestamp);
+          }
+        }
+      }
+      return rows;
+    };
+    // Two completed scans: the decision under test was taken with the slot already occupied.
+    const scans = async (read: () => Promise<any>, subject: string) => {
+      for (const pass of ["first", "second"]) {
+        const previous = (await read()).last_scan_at;
+        await expect.poll(async () => {
+          const prefs = await read();
+          return !!prefs.last_scan_at && prefs.last_scan_at !== previous && !prefs.last_scan_error;
+        }, { timeout: 180_000, message: `${pass} scan of the ${subject}` }).toBe(true);
+      }
+    };
+    const live = async () => (await fixture.launches()).filter(launch => !exited(launch.pid)).length;
+    const shots = async (stage: string) => {
+      await info.attach(`shared-pool-${stage}-first-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
+      await info.attach(`shared-pool-${stage}-second-${theme}`, { body: await secondPage.screenshot(), contentType: "image/png" });
+    };
+    try {
+      for (const target of [page, secondPage])
+        await target.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+      const firstKey = fixture.fixtureOperation("issue.monitor.status").project_store.hash;
+      expect(fixture.second.key).toBeTruthy();
+      expect(fixture.second.key).not.toBe(firstKey);
+      await gotoLiveGwt(page, liveGwtProjectUrl(fixture.url, firstKey), { enableTestBridge: true });
+      await page.locator('[data-surface="issues"]').click();
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      await sendLiveGwtEvent(page, { kind: "set_issue_monitor_max_active_agents", max_active_agents: 1 });
+      await expect.poll(() => machine("agent-settings.json")).toMatchObject({ mode: "manual", manual_limit: 1 });
+      await gotoLiveGwt(secondPage, liveGwtProjectUrl(fixture.url, fixture.second.key), { enableTestBridge: true });
+      await secondPage.locator('[data-surface="issues"]').click();
+      await expect(secondPage.locator("html")).toHaveAttribute("data-theme", theme);
+
+      // 1. The original owner takes the only machine slot.
+      await sendLiveGwtEvent(page, { kind: "issue_monitor_queue_push", issue_numbers: [43] });
+      await expect.poll(() => fixture.launchIssues(), { timeout: 90_000 }).toEqual([43]);
+      const source = (await fixture.launches())[0];
+      expect(exited(source.pid)).toBe(false);
+      await expect.poll(async () => !!(await preferences()).launch_confirmations?.[43]?.delivery_id, { timeout: 30_000 }).toBe(true);
+      await expect.poll(async () => (await activity(page))?.agents?.map((agent: any) => agent.session_id),
+        { timeout: 60_000 }).toEqual([source.gwt_session_id]);
+      const sourceWindow = (await activity(page)).agents[0].window_id;
+      const sourceAssignment = (await machine("agent-registry.json")).project_assignments[firstKey];
+      expect(Object.values(sourceAssignment)).toEqual([expect.objectContaining({
+        project_key: firstKey, issue_number: 43, session_id: source.gwt_session_id })]);
+
+      // 2. The second project is ready, but the shared limit keeps it out. A Host whose
+      // capacity sample is still warming attempts the launch and the shared registry
+      // refuses it; a Host with a settled sample counts the other project and waits.
+      await sendLiveGwtEvent(secondPage, { kind: "issue_monitor_queue_push", issue_numbers: [45] });
+      const withheld = async () => {
+        const second = await status(fixture.second.project);
+        const refusals = await capacityRefusals(45);
+        const counted = second.agent_capacity.other_live_agents === 1 && second.launch_capacity.admission_saturated === true;
+        return { second, refusals, protectedBy: refusals.length > 0 ? "refused" : counted ? "counted" : null };
+      };
+      await expect.poll(async () => (await withheld()).protectedBy, { timeout: 180_000,
+        message: "the shared limit refuses the second project's launch or makes it count the original owner" }).not.toBeNull();
+      // The decision must hold across further scans, not only at one instant.
+      await scans(secondPreferences, "second project while the slot is occupied");
+      const { second: held, refusals: refusedSecond, protectedBy } = await withheld();
+      await info.attach("issue-7451-second-project-held", { body: JSON.stringify({
+        protected_by: protectedBy, refusals: refusedSecond, agent_capacity: held.agent_capacity,
+        launch_capacity: held.launch_capacity, inbox: held.inbox,
+      }, null, 2), contentType: "application/json" });
+      expect(protectedBy).not.toBeNull();
+      expect(held.inbox.find((row: any) => row.issue_number === 45)?.state).not.toBe("launched");
+      expect(await fixture.launchIssues()).toEqual([43]);
+      expect(exited(source.pid)).toBe(false);
+      expect((await machine("agent-registry.json")).project_assignments[fixture.second.key] ?? {}).toEqual({});
+      await shots("occupied");
+
+      // 3. The original owner returns the slot; its Issue stays held.
+      const identity = (await status()).inbox.find((row: any) => row.issue_number === 43);
+      const confirmation = (await preferences()).launch_confirmations[43];
+      const stopped = JSON.parse((await fixture.operationAsync("issue.monitor.stop", {
+        number: 43, reason: "Issue #7451 slot return", remove_from_queue: false, claim_id: identity.claim_id,
+        delivery_id: confirmation.delivery_id, window_id: identity.launched_window_id })).output);
+      expect(stopped).toMatchObject({ status: "stopped", removed_from_queue: false, runtime_stop: "requested" });
+      await expect.poll(() => exited(source.pid), { timeout: 60_000 }).toBe(true);
+      // Remove the exited diagnostic pane so only the hold keeps the Issue from relaunching.
+      const windows = async () => JSON.parse(await readFile(join(fixture.home, ".gwt", "projects", firstKey, "workspace.json"), "utf8")).windows;
+      expect((await windows()).some((window: any) => window.session_id === source.gwt_session_id)).toBe(true);
+      await sendLiveGwtEvent(page, { kind: "close_window", id: sourceWindow });
+      await expect.poll(async () => (await windows()).some((window: any) => window.session_id === source.gwt_session_id),
+        { timeout: 30_000 }).toBe(false);
+      const hold = async () => (await preferences()).failed_issues?.find((entry: any) => entry.issue_number === 43);
+      await expect.poll(hold, { timeout: 30_000 }).toMatchObject({ message: "stopped: Issue #7451 slot return" });
+
+      // 4. The second project is admitted by its own ordinary retry.
+      await expect.poll(() => fixture.launchIssues(), { timeout: 420_000,
+        message: "the second project takes the returned slot without a rescue operation" }).toEqual([43, 45]);
+      const other = (await fixture.launches())[1];
+      expect(exited(other.pid)).toBe(false);
+      expect(await live()).toBe(1);
+      expect(other.gwt_session_id).not.toBe(source.gwt_session_id);
+      expect(await realpath(other.cwd)).not.toBe(await realpath(source.cwd));
+      await expect.poll(async () => Object.values((await machine("agent-registry.json")).project_assignments[fixture.second.key] ?? {}),
+        { timeout: 60_000 }).toEqual([expect.objectContaining({
+        project_key: fixture.second.key, issue_number: 45, session_id: other.gwt_session_id })]);
+      expect(await hold(), "admitting the other project does not release the operator hold").toBeTruthy();
+      await expect.poll(async () => (await activity(secondPage))?.agents?.map((agent: any) => agent.session_id),
+        { timeout: 60_000 }).toEqual([other.gwt_session_id]);
+      const otherWindow = (await activity(secondPage)).agents[0].window_id;
+      await shots("admitted");
+
+      // 5. An explicit resume of the original owner waits for the slot too.
+      const requeued = JSON.parse((await fixture.operationAsync("issue.monitor.requeue", {
+        number: 43, reason: "Issue #7451 resume the original owner" })).output);
+      expect(requeued.status).toBe("requeued");
+      await expect.poll(hold, { timeout: 30_000 }).toBeUndefined();
+      await expect.poll(async () => {
+        const first = await status();
+        return first.agent_capacity.other_live_agents === 1 && first.launch_capacity.admission_saturated === true;
+      }, { timeout: 180_000, message: "the original project counts the second project's live worker" }).toBe(true);
+      await scans(preferences, "original project while the slot is occupied");
+      const waiting = await status();
+      expect(waiting.agent_capacity.other_live_agents, "the original project counts the other project's live worker").toBe(1);
+      expect(waiting.launch_capacity).toMatchObject({ admission_saturated: true, configured_max_active: 0 });
+      expect(waiting.inbox.find((row: any) => row.issue_number === 43)?.state).not.toBe("launched");
+      expect(await fixture.launchIssues()).toEqual([43, 45]);
+      expect(exited(other.pid)).toBe(false);
+
+      // 6. The second project returns the slot and the original owner resumes.
+      await sendLiveGwtEvent(secondPage, { kind: "terminal_input", id: otherWindow, data: "GWT_FIXTURE_EXIT\r" });
+      await expect.poll(() => exited(other.pid), { timeout: 60_000 }).toBe(true);
+      await expect.poll(() => fixture.launchIssues(), { timeout: 420_000,
+        message: "the original owner resumes in the returned slot" }).toEqual([43, 45, 43]);
+      const resumed = (await fixture.launches())[2];
+      expect(exited(resumed.pid)).toBe(false);
+      expect(await live()).toBe(1);
+      expect([source.pid, other.pid]).not.toContain(resumed.pid);
+      expect(await realpath(resumed.cwd), "the original owner continues in its saved worktree").toBe(await realpath(source.cwd));
+      await expect.poll(() => inboxState(43), { timeout: 60_000 }).toBe("launched");
+      expect(await hold()).toBeUndefined();
+      expect(await fixture.launchIssues()).toEqual([43, 45, 43]);
+      await shots("resumed");
+      await info.attach("issue-7451-shared-pool", { body: JSON.stringify({
+        platform: process.platform, theme, first_project: firstKey, second_project: fixture.second.key,
+        machine_policy: await machine("agent-settings.json"), source, stopped, other, requeued, resumed,
+        second_project_protected_by: protectedBy, refused_second_project: refusedSecond,
+        second_project_waiting: held.launch_capacity,
+        original_owner_waiting: waiting.launch_capacity,
+        launches: await fixture.launches(),
+      }, null, 2), contentType: "application/json" });
+    } catch (error) {
+      // A native runner's HOME is not retained; keep both projects' view of the shared pool.
+      await info.attach("issue-7451-failure-state", { body: JSON.stringify({
+        launches: await fixture.launches().catch(() => null),
+        first: await status().catch(failure => String(failure)),
+        second: await status(fixture.second.project).catch(failure => String(failure)),
+        policy: await machine("agent-settings.json").catch(() => null),
+        registry: await machine("agent-registry.json").catch(() => null),
+        capacity: await machine("agent-capacity.json").catch(() => null),
+      }, null, 2), contentType: "application/json" }).catch(() => {});
+      throw error;
+    } finally {
+      try { await secondPage.close(); await page.close(); } finally { await fixture.stop(); }
     }
     expect(errors, "zero console/page errors including owned fixture cleanup").toEqual([]);
   });

@@ -1058,6 +1058,14 @@ jobs:
           node scripts/ci-windows-tests.mjs run-lib gwt lib gwt cli::pane::tests::pane_websocket_request_carries_the_agent_capability_in_authorization -- --exact --test-threads=1
           node scripts/ci-windows-tests.mjs run-lib gwt lib gwt cli::pane::tests::issue_monitor_scan_client_ -- --test-threads=1
         timeout-minutes: 15
+      # Issue #7451: shared admission never treats an unknown or expired
+      # observation of live workers as a free slot.
+      - name: Run shared machine admission unknown and stale observation contracts
+        shell: bash
+        run: |
+          node scripts/ci-windows-tests.mjs run-lib gwt lib gwt machine_agent_admission::tests::uncertain_manual_observation_refuses_but_auto_preserves_existing_admission -- --exact --test-threads=1
+          node scripts/ci-windows-tests.mjs run-lib gwt lib gwt session_inventory::tests::issue_5644_expired_inventory_is_uncertain_instead_of_empty -- --exact --test-threads=1
+        timeout-minutes: 10
       - name: Run Windows runtime daemon named-pipe transport contracts
         shell: bash
         run: |
@@ -1274,6 +1282,21 @@ jobs:
             --reporter="line,$GITHUB_WORKSPACE/crates/gwt/src/cli/verification_record/headed_e2e_reporter.cjs"
           node -e 'const assert = require("node:assert/strict"); const report = require(process.argv[1]); for (const [key, expected] of Object.entries({chromium_dark_passed: 1, chromium_light_passed: 1, failed: 0, status: "passed"})) assert.equal(report[key], expected, key);' "$GWT_HEADED_E2E_REPORT"
         timeout-minutes: 20
+      # Issue #7451: two projects under one HOME share the machine limit on a
+      # native ConPTY host. The slot returns, the other project is admitted,
+      # and the original owner resumes; neither may exceed the limit.
+      - name: Verify shared machine slot return across two projects in both themes
+        shell: bash
+        env:
+          GWT_PLAYWRIGHT_QUEUE_LAUNCH: "1"
+          GWT_HEADED_E2E_REPORT: ${{ runner.temp }}/windows-shared-pool-headed.json
+        run: |
+          bash scripts/run-visual-tests.sh issue-queue-launch-live.spec.ts \
+            --grep 'Issue #7451 shared HOME returns one machine slot' \
+            --project=chromium-dark --project=chromium-light --workers=1 --retries=0 --headed --trace=on \
+            --reporter="line,$GITHUB_WORKSPACE/crates/gwt/src/cli/verification_record/headed_e2e_reporter.cjs"
+          node -e 'const assert = require("node:assert/strict"); const report = require(process.argv[1]); for (const [key, expected] of Object.entries({chromium_dark_passed: 1, chromium_light_passed: 1, failed: 0, status: "passed"})) assert.equal(report[key], expected, key);' "$GWT_HEADED_E2E_REPORT"
+        timeout-minutes: 30
       - name: Retain Windows cold restart evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@v7
@@ -1282,6 +1305,7 @@ jobs:
           path: |
             crates/gwt/playwright/test-results/
             ${{ runner.temp }}/windows-works-headed.json*
+            ${{ runner.temp }}/windows-shared-pool-headed.json*
           if-no-files-found: warn
       - name: Check tests left real HOME project stores unchanged
         if: ${{ !cancelled() && steps.home-guard.outcome == 'success' }}
