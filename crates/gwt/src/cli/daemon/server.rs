@@ -12267,6 +12267,121 @@ mod tests {
         ConnectionGuard, DaemonShutdown, IssueMonitorControl, IssueMonitorScanConcurrencyProbe,
     };
 
+    #[tokio::test]
+    async fn issue7619_sigterm_exits_after_exact_retirement_is_exhausted() {
+        const READY_ENV: &str = "GWT_TEST_ISSUE_7619_SIGTERM_READY";
+        if let Some(ready) = std::env::var_os(READY_ENV) {
+            use crate::project_runtime::{client::ProjectRuntimeClient, events::OwnerCommand};
+
+            let ready = PathBuf::from(ready);
+            let root = ready.parent().unwrap();
+            let _home = ScopedGwtHome::set(root.join("home"));
+            let repo = root.join("repo");
+            fs::create_dir(&repo).unwrap();
+            let scope = RuntimeScope::from_project_root(&repo, RuntimeTarget::Host).unwrap();
+            let socket_path = root.join("daemon.sock");
+            let endpoint_path = scope.endpoint_path(&gwt_core::paths::gwt_home());
+            let endpoint = DaemonEndpoint::new(
+                scope,
+                std::process::id(),
+                socket_path.display().to_string(),
+                uuid::Uuid::new_v4().to_string(),
+                env!("CARGO_PKG_VERSION").into(),
+            );
+            let _budget = pin_prefs_hang_guard();
+            let lease = super::acquire_daemon_startup_lease(&endpoint.scope).unwrap();
+            let bound = super::bind_daemon(&endpoint, &socket_path, &endpoint_path, lease).unwrap();
+            bound
+                .project_transport
+                .owner
+                .test_retain_exhausted_retirement()
+                .await
+                .unwrap();
+            let client = ProjectRuntimeClient::new(&bound.endpoint).unwrap();
+            let shutdown = Arc::new(DaemonShutdown::new());
+            super::spawn_signal_watcher(Arc::clone(&shutdown));
+            let server = tokio::spawn(super::run_bound_server(
+                endpoint,
+                endpoint_path,
+                BroadcastHub::new(),
+                shutdown,
+                crate::IssueMonitorConfig::default(),
+                HANG_GUARD,
+                bound,
+                super::IssueMonitorWorkerTestHooks::default(),
+            ));
+            let health = client.command(OwnerCommand::Health).await.unwrap();
+            assert_eq!(health["reconciliation_needs_human"], true);
+            // Query the real watcher registration before inviting SIGTERM.
+            loop {
+                let mut action = std::mem::MaybeUninit::<libc::sigaction>::uninit();
+                // SAFETY: a null new action queries SIGTERM into this valid output buffer.
+                let handler = unsafe {
+                    assert_eq!(
+                        libc::sigaction(libc::SIGTERM, std::ptr::null(), action.as_mut_ptr()),
+                        0
+                    );
+                    action.assume_init().sa_sigaction
+                };
+                if handler != libc::SIG_DFL && handler != libc::SIG_IGN {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            fs::write(ready, b"ready").unwrap();
+            assert_eq!(server.await.unwrap().unwrap(), 0);
+            return;
+        }
+
+        let temp = gwt_core::test_support::socket_tempdir().unwrap();
+        let ready = temp.path().join("ready");
+        let home = temp.path().join("home");
+        fs::create_dir(&home).unwrap();
+        let mut command = gwt_core::process::hidden_command(std::env::current_exe().unwrap());
+        gwt_core::process::scrub_git_env(&mut command);
+        let mut child = tokio::process::Command::from(command)
+            .args([
+                "--exact",
+                "cli::daemon::server::tests::issue7619_sigterm_exits_after_exact_retirement_is_exhausted",
+                "--nocapture",
+            ])
+            .env(READY_ENV, &ready)
+            .env("HOME", &home)
+            .env("USERPROFILE", &home)
+            .env_remove("GWT_SESSION_ID")
+            .env_remove("GWT_PROJECT_ROOT")
+            .env_remove("GWT_REPO_HASH")
+            .env_remove("GWT_WORKTREE_HASH")
+            .env_remove("GWT_RUNTIME_DIR")
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        // test-hygiene: allow-wall-clock-deadline The readiness marker observes actual exhausted shutdown state and signal registration.
+        tokio::time::timeout(HANG_GUARD, async {
+            while !ready.exists() {
+                assert!(
+                    child.try_wait().unwrap().is_none(),
+                    "fixture exited before readiness"
+                );
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("SIGTERM fixture did not report ready");
+        let pid = child.id().unwrap();
+        // SAFETY: the PID is from the isolated child, which has not been reaped.
+        assert_eq!(unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) }, 0);
+        // test-hygiene: allow-wall-clock-deadline Bounds the real shutdown after the exhausted target and watcher are both observed.
+        let status = tokio::time::timeout(Duration::from_secs(10), child.wait()).await;
+        if status.is_err() {
+            child.kill().await.unwrap();
+        }
+        assert!(status
+            .expect("daemon did not exit on SIGTERM")
+            .unwrap()
+            .success());
+    }
+
     /// SPEC #4778 AC-1: these cases exercise frame shape, not PM authority, so
     /// they decode with no registry reachable — the strictest of the two paths.
     fn decode_issue_monitor_control_for_test(
