@@ -197,7 +197,7 @@ export async function startIssueQueueLaunchFixture(info: TestInfo, options: {
       terminalConvergence: options.terminalConvergence,
       freshNativeIds: !!options.switching || !!options.terminalConvergence,
       switching: options.switching ? { sourceIssueNumber: issue.number,
-        positive: !!options.positive && process.platform === "linux" && process.env.GWT_PLAYWRIGHT_SWITCH_POSITIVE === "1" } : undefined,
+        positive: !!options.positive } : undefined,
       monitorPreferences: {
         enabled: true, autonomous_mode: options.autonomousMode ?? false, auto_close_merged_issues: false,
         auto_apply_updates: false, terminal_queue_auto_refill: false,
@@ -458,18 +458,23 @@ console.error('Unimplemented fixture gh: '+text);process.exit(64);
     if (timedOut || code !== 0) throw new Error("Fixture issue.close failed: " + stdout + stderr);
     return JSON.parse(stdout);
   }
-  async function restoreSummary(since: string) {
+  async function* logRows() {
     for (const directory of [join(active.home, ".gwt", "logs"), projectLogs]) {
       for (const file of await readdir(directory).catch(() => [])) {
         if (!/\.log(?:\.|$)/.test(file)) continue;
         for (const line of (await readFile(join(directory, file), "utf8")).split("\n")) {
           let row;
           try { row = JSON.parse(line); } catch { continue; } // Retry an incomplete final write.
-          if (row.target === "gwt.restore.admission" && row.fields?.scope === "startup restore"
-            && row.fields.message === "session restore admission summary"
-            && Date.parse(row.timestamp) >= Date.parse(since)) return row.fields;
+          yield row;
         }
       }
+    }
+  }
+  async function restoreSummary(since: string) {
+    for await (const row of logRows()) {
+      if (row.target === "gwt.restore.admission" && row.fields?.scope === "startup restore"
+        && row.fields.message === "session restore admission summary"
+        && Date.parse(row.timestamp) >= Date.parse(since)) return row.fields;
     }
     return null;
   }
@@ -504,6 +509,15 @@ console.error('Unimplemented fixture gh: '+text);process.exit(64);
       return active.start();
     },
     issueNumber: issue.number, targetIssueNumber: options.targetIssueNumber, requests, comments, hookAudits, restoreSummary,
+    async switchCwdCensus() {
+      const observations = [];
+      for await (const row of logRows()) {
+        if (row.target === "gwt::issue_monitor::switch_checkpoint::macos" && row.fields?.message === "Switch cwd census") {
+          observations.push({ timestamp: row.timestamp, ...row.fields });
+        }
+      }
+      return observations;
+    },
     commentsForIssue: (number: number) => (issueComments.get(number) ?? []).map(comment => ({ ...comment })),
     actorEvents: async () => (await readFile(join(active.home, "switch-actor.jsonl"), "utf8").catch(() => ""))
       .split("\n").filter(Boolean).map(line => JSON.parse(line)),
