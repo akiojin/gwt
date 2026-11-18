@@ -5895,6 +5895,21 @@ fn issue_monitor_candidate_exclusion(
     None
 }
 
+/// The refusal an owner returns when its own source admission excludes the
+/// Issue. The Monitor recognizes the same text in the reported failure.
+pub fn source_admission_refusal_message(issue_number: u64, reason: &str) -> String {
+    format!("Issues source admission refused Issue #{issue_number}: {reason}")
+}
+
+/// Whether `message` reports a source refusal only PM triage can lift. A
+/// provenance gap that a refresh repairs keeps the ordinary retry path.
+fn is_source_triage_refusal(issue_number: u64, message: &str) -> bool {
+    message.starts_with(&source_admission_refusal_message(issue_number, ""))
+        && message.contains(SOURCE_TRIAGE_REQUIRED)
+}
+
+const SOURCE_TRIAGE_REQUIRED: &str = "PM triage required";
+
 fn issue_monitor_source_exclusion(
     issue: &IssueMonitorIssue,
     source_repository: IssueMonitorSourceRepository,
@@ -22027,6 +22042,15 @@ impl IssueMonitorState {
             self.record_duplicate_launch_refusal(issue_number, message, window_id, now);
             return;
         }
+        // Issue #7632: no retry can change who wrote the Issue. Park it for
+        // the PM on the first refusal instead of spending the retry ladder.
+        if is_source_triage_refusal(issue_number, &message) {
+            self.release_confirmed_claim_for_issue(issue_number);
+            self.revoke_launch_binding(issue_number);
+            self.clear_active_tracking(issue_number);
+            self.escalate_to_needs_human(issue_number, NeedsHumanKind::UserChoiceRequired, message);
+            return;
+        }
         self.record_failed_issue_at(issue_number, message, MonitorInboxState::LaunchFailed, now);
     }
 
@@ -22086,25 +22110,37 @@ impl IssueMonitorState {
         {
             return false;
         }
+        let message = message.into();
+        // Issue #7632: the owner refuses an untrusted source before it claims
+        // the delivery, so the report has no recorded materializer to match.
+        let triage_refusal = is_source_triage_refusal(issue_number, &message);
         if let Some(delivery_id) = delivery_id {
             match self.match_pending_launch_delivery(issue_number, delivery_id) {
                 PendingLaunchDeliveryMatch::Matched(index) => {
-                    if materializer_id.is_none()
-                        || self.pending_launch_deliveries[index]
-                            .materializer_id
-                            .as_deref()
-                            != materializer_id
+                    if !triage_refusal
+                        && (materializer_id.is_none()
+                            || self.pending_launch_deliveries[index]
+                                .materializer_id
+                                .as_deref()
+                                != materializer_id)
                     {
                         return false;
                     }
                     self.pending_launch_deliveries.remove(index);
                 }
+                // The reporter repeats a refusal until it reads the hold back.
+                PendingLaunchDeliveryMatch::Missing
+                    if triage_refusal
+                        && self
+                            .failed_issues
+                            .get(&issue_number)
+                            .is_some_and(|held| is_source_triage_refusal(issue_number, held)) => {}
                 PendingLaunchDeliveryMatch::Missing | PendingLaunchDeliveryMatch::Mismatched => {
                     return false
                 }
             }
         }
-        if retryable {
+        if retryable || triage_refusal {
             self.record_launch_failed_at(issue_number, message, now);
         } else {
             self.release_confirmed_claim_for_issue(issue_number);
@@ -22116,7 +22152,7 @@ impl IssueMonitorState {
             }
             self.record_terminal_failed_issue(
                 issue_number,
-                message.into(),
+                message,
                 MonitorInboxState::LaunchFailed,
             );
         }
@@ -29207,6 +29243,39 @@ mod tests {
                 42
             );
         }
+    }
+
+    /// Issue #7632 AC-3: source admission is decided before the remaining-work
+    /// relaunch, so a merged delivery never requeues an Issue it would refuse.
+    #[test]
+    fn merged_delivery_with_remaining_work_does_not_requeue_an_untrusted_source() {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig {
+            enabled: true,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.set_source_repository(Some(("akiojin", "gwt")));
+        monitor.set_gui_connected(true);
+        let mut candidate = issue(42);
+        candidate.author_login = Some("github-actions[bot]".into());
+        candidate.body = Some("## Acceptance Criteria\n- [ ] AC-1: remaining\n".into());
+        monitor.terminal_queue_push(&[42], "operator", IDLE_NOW);
+        monitor.record_candidate(candidate.clone());
+        assert_eq!(
+            monitor.next_launch_request(IDLE_NOW).unwrap().issue_number,
+            42
+        );
+        // A later read reports an author the trust list does not name.
+        candidate.author_login = Some("external-reporter".into());
+        monitor.record_candidate(candidate);
+
+        monitor.record_merged(42);
+
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::SourceExcluded)
+        );
+        assert!(monitor.queued_issue_numbers().is_empty());
+        assert!(monitor.next_launch_request(IDLE_NOW).is_none());
     }
 
     #[test]
@@ -45224,6 +45293,81 @@ mod tests {
             monitor.prefs().pending_launch_deliveries.is_empty(),
             "a retryable issue cannot also replay its previous durable delivery"
         );
+    }
+
+    /// Issue #7632 AC-1: the owner refuses an untrusted source before it claims
+    /// the delivery, so the report names no materializer the Monitor recorded.
+    /// One refusal parks the Issue for the PM and frees its slot.
+    #[test]
+    fn source_triage_refusal_holds_after_one_refusal_and_frees_the_slot() {
+        let mut monitor = test_monitor_with_prefs(
+            IssueMonitorConfig {
+                enabled: true,
+                max_active: 2,
+                ..IssueMonitorConfig::default()
+            },
+            IssueMonitorPrefs {
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
+                autonomous_mode: true,
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        monitor.terminal_queue_push(&[42], "test", "2026-08-01T00:00:00Z");
+        monitor.record_candidate(issue(42));
+        monitor.set_autonomous_phase(42, AutonomousPhase::Implementing);
+        assert!(monitor.apply_confirmed_claim(
+            42,
+            "claim-42",
+            "host/session",
+            "effect-42",
+            "2026-07-28T00:00:00Z",
+        ));
+        let delivery_id = monitor.prefs().pending_launch_deliveries[0]
+            .delivery_id
+            .clone();
+        assert_eq!(monitor.occupied_slot_count(), 1);
+        let refusal = source_admission_refusal_message(
+            42,
+            "untrusted external Issue; PM triage required; use a separate curated execution owner",
+        );
+
+        assert!(monitor.record_launch_failed_delivery_at(
+            42,
+            refusal.clone(),
+            Some(&delivery_id),
+            Some("gui-materializer"),
+            true,
+            "2026-07-28T00:00:05Z",
+        ));
+
+        let held = |monitor: &IssueMonitorState, reason: &str| {
+            assert_eq!(
+                monitor.inbox_item(42).map(|item| item.state),
+                Some(MonitorInboxState::NeedsHuman)
+            );
+            assert_eq!(monitor.prefs().failed_issues[0].message, reason);
+            assert_eq!(monitor.occupied_slot_count(), 0);
+            assert!(monitor.queued_issue_numbers().is_empty());
+            assert!(monitor.prefs().pending_launch_deliveries.is_empty());
+            assert_eq!(monitor.attempt_count(42), 0, "a hold is not a retry");
+        };
+        held(&monitor, &refusal);
+        assert!(monitor
+            .next_launch_request("2026-07-28T01:00:00Z")
+            .is_none());
+
+        // The GUI re-reports the same refusal with its cleanup detail until
+        // the Monitor confirms it; that must settle, not start another attempt.
+        let repeated = format!("{refusal}; exact owner cleanup remains pending: I/O failure");
+        assert!(monitor.record_launch_failed_delivery_at(
+            42,
+            repeated.clone(),
+            Some(&delivery_id),
+            Some("gui-materializer"),
+            true,
+            "2026-07-28T00:00:10Z",
+        ));
+        held(&monitor, &repeated);
     }
 
     /// SPEC #3165 FR-100/FR-101 / T-224: a generic AgentFailed autonomous

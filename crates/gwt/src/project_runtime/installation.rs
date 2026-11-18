@@ -3154,8 +3154,9 @@ pub(crate) fn prepare_owner_agent_admission(
             ));
         }
         if let Some(reason) = monitor.launch_source_exclusion(issue_number) {
-            return Err(format!(
-                "Issues source admission refused Issue #{issue_number}: {reason}"
+            return Err(crate::issue_monitor::source_admission_refusal_message(
+                issue_number,
+                &reason,
             ));
         }
         if !review_dispatch {
