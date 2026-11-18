@@ -5933,7 +5933,8 @@ fn record_monitor_wait_in_prefs(
                     }
                 }
                 if record.wait.as_ref().is_some_and(|wait| {
-                    !crate::issue_monitor::wait_cap_has_time(wait, &chrono::Utc::now().to_rfc3339())
+                    let commit_at = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds();
+                    !crate::issue_monitor::wait_cap_has_time(wait, &commit_at)
                 }) {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,

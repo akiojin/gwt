@@ -6262,7 +6262,7 @@ async fn wait_control_receipt_reports_refusals_and_accepts_a_live_wait() {
                 at: if expired {
                     "2000-01-01T00:10:00Z".to_string()
                 } else {
-                    chrono::Utc::now().to_rfc3339()
+                    gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds()
                 },
             },
             &mut IssueMonitorEffectPermit::new(),
