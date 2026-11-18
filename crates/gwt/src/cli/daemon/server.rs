@@ -2448,7 +2448,8 @@ fn spawn_issue_monitor_worker(
                         }
                         rejection @ (IssueMonitorControlCommit::Rejected
                         | IssueMonitorControlCommit::ConfigConflict
-                        | IssueMonitorControlCommit::WaitNotLaunched) => {
+                        | IssueMonitorControlCommit::WaitNotLaunched
+                        | IssueMonitorControlCommit::WaitCapExpired) => {
                             let (drained, completion, authorizing) = pending_authority_controls
                                 .as_mut()
                                 .expect("authority barrier exists during retry")
@@ -2457,6 +2458,7 @@ fn spawn_issue_monitor_worker(
                                 completion.reject(match rejection {
                                     IssueMonitorControlCommit::ConfigConflict => IssueMonitorControlQueueError::ConfigConflict,
                                     IssueMonitorControlCommit::WaitNotLaunched => IssueMonitorControlQueueError::WaitNotLaunched,
+                                    IssueMonitorControlCommit::WaitCapExpired => IssueMonitorControlQueueError::WaitCapExpired,
                                     _ => IssueMonitorControlQueueError::Rejected,
                                 });
                             }
@@ -3962,6 +3964,7 @@ enum IssueMonitorControlCommit {
     Rejected,
     ConfigConflict,
     WaitNotLaunched,
+    WaitCapExpired,
     RetryableFailure,
     TerminalFailure,
 }
@@ -4202,7 +4205,8 @@ fn apply_or_queue_issue_monitor_control(
         }
         rejection @ (IssueMonitorControlCommit::Rejected
         | IssueMonitorControlCommit::ConfigConflict
-        | IssueMonitorControlCommit::WaitNotLaunched) => {
+        | IssueMonitorControlCommit::WaitNotLaunched
+        | IssueMonitorControlCommit::WaitCapExpired) => {
             if authorizing {
                 effect_permit.reopen();
             }
@@ -4213,6 +4217,9 @@ fn apply_or_queue_issue_monitor_control(
                     }
                     IssueMonitorControlCommit::WaitNotLaunched => {
                         IssueMonitorControlQueueError::WaitNotLaunched
+                    }
+                    IssueMonitorControlCommit::WaitCapExpired => {
+                        IssueMonitorControlQueueError::WaitCapExpired
                     }
                     _ => IssueMonitorControlQueueError::Rejected,
                 });
@@ -5034,6 +5041,7 @@ fn apply_issue_monitor_control_with_disk_migration(
         IssueMonitorControlCommit::Rejected
         | IssueMonitorControlCommit::ConfigConflict
         | IssueMonitorControlCommit::WaitNotLaunched
+        | IssueMonitorControlCommit::WaitCapExpired
         | IssueMonitorControlCommit::RetryableFailure
         | IssueMonitorControlCommit::TerminalFailure => false,
     }
@@ -5439,12 +5447,24 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
             // A failed pre-commit attempt must not freeze a retry deadline. Sample
             // only after acquiring the transaction locks; a committed receipt owns
             // this timestamp for every later replay.
-            let window_close_applied_at = matches!(
-                &control,
+            let window_close_applied_at = match &control {
+                IssueMonitorControl::WaitDeclared { issue_number, .. } => {
+                    if candidate
+                        .autonomous_wait(*issue_number)
+                        .is_some_and(|wait| {
+                            !crate::issue_monitor::wait_cap_has_time(wait, &current_time())
+                        })
+                        && candidate.active_issue_numbers().contains(issue_number)
+                    {
+                        rejected = Some(IssueMonitorControlCommit::WaitCapExpired);
+                        return Ok(());
+                    }
+                    None
+                }
                 IssueMonitorControl::WindowClosed { .. }
-                    | IssueMonitorControl::WindowClosedFromLaunch { .. }
-            )
-            .then(current_time);
+                | IssueMonitorControl::WindowClosedFromLaunch { .. } => Some(current_time()),
+                _ => None,
+            };
             let authority_epoch_before = candidate.effect_authority_epoch();
             applied = Some(
                 if let IssueMonitorControl::TierSet {
@@ -6192,12 +6212,14 @@ fn issue_5062_host_drain_can_requeue_a_review_delivery_through_control() {
 
 #[cfg(test)]
 #[tokio::test]
-async fn issue_5524_wait_rejection_preserves_the_not_launched_reason() {
+async fn wait_control_receipt_reports_refusals_and_accepts_a_live_wait() {
     let _prefs_budget = pin_prefs_hang_guard();
     let temp = tempfile::TempDir::new().expect("tempdir");
-    for launched in [false, true] {
-        let prefs_path = temp.path().join(format!("monitor-{launched}.json"));
-        let before = crate::IssueMonitorPrefs {
+    for (launched, expired) in [(false, false), (true, false), (true, true)] {
+        let prefs_path = temp
+            .path()
+            .join(format!("monitor-{launched}-{expired}.json"));
+        let prefs = crate::IssueMonitorPrefs {
             launched_issues: if launched {
                 vec![crate::IssueMonitorLaunchedIssue {
                     issue_number: 5524,
@@ -6208,9 +6230,17 @@ async fn issue_5524_wait_rejection_preserves_the_not_launched_reason() {
             },
             ..crate::IssueMonitorPrefs::default()
         };
+        let mut monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        if expired {
+            monitor.declare_autonomous_wait(
+                5524,
+                "previous verification",
+                "lease available",
+                "2000-01-01T00:00:00Z",
+            );
+        }
+        let before = monitor.prefs();
         crate::save_issue_monitor_prefs(&prefs_path, &before).expect("seed prefs");
-        let mut monitor =
-            test_monitor_with_prefs(crate::IssueMonitorConfig::default(), before.clone());
         let hub = BroadcastHub::new();
         let mut receiver = hub
             .take_issue_monitor_control_receiver()
@@ -6229,7 +6259,11 @@ async fn issue_5524_wait_rejection_preserves_the_not_launched_reason() {
                 issue_number: 5524,
                 reason: "verification".to_string(),
                 resume_condition: "lease available".to_string(),
-                at: "2026-10-15T00:00:00Z".to_string(),
+                at: if expired {
+                    "2000-01-01T00:10:00Z".to_string()
+                } else {
+                    chrono::Utc::now().to_rfc3339()
+                },
             },
             &mut IssueMonitorEffectPermit::new(),
             &mut pending,
@@ -6239,7 +6273,14 @@ async fn issue_5524_wait_rejection_preserves_the_not_launched_reason() {
         assert!(pending.is_none(), "a settled wait is not a retry barrier");
         let completion = receipt.await.expect("completion is settled");
         let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
-        if launched {
+        if expired {
+            let message = completion
+                .expect_err("expired cap must reject renewal")
+                .message();
+            assert!(message.contains("reason=wait_cap_expired"), "{message}");
+            assert_eq!(monitor.prefs(), before);
+            assert_eq!(persisted, before);
+        } else if launched {
             assert_eq!(completion, Ok(()), "a durable live launch is accepted");
             assert!(monitor.autonomous_wait(5524).is_some());
             assert!(monitor.last_control_receipt().is_some());

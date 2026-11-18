@@ -77,6 +77,7 @@ pub(crate) enum IssueMonitorControlQueueError {
     Rejected,
     ConfigConflict,
     WaitNotLaunched,
+    WaitCapExpired,
     ScanAlreadyInFlight,
     Busy,
 }
@@ -93,6 +94,7 @@ impl IssueMonitorControlQueueError {
             Self::WaitNotLaunched => {
                 "Issues control rejected before commit: reason=not_launched; no durable launch owns this issue; inspect issue.monitor.status and declare the wait from the actual launch context"
             }
+            Self::WaitCapExpired => crate::runtime_daemon_events::ISSUE_MONITOR_WAIT_CAP_EXPIRED_ERROR,
             Self::ScanAlreadyInFlight => crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_SCAN_ALREADY_IN_FLIGHT_ERROR,
             Self::Busy => crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_BUSY_ERROR,
         }
