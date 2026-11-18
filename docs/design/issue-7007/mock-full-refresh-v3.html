@@ -323,6 +323,55 @@
   .prow .st.wait i{background:var(--amber)}
   .prow .st.stop i{background:var(--red)}
   .prow .path{font-family:var(--mono);font-size:11.8px}
+
+  /* ---------- mobile project tab strip (replaces the rail on small screens) ---------- */
+  .mtabs{display:none}
+
+  /* ---------- fullscreen mode (mock utility: app screen only) ---------- */
+  .full-exit{display:none}
+  body.full header.doc,body.full nav.screens,body.full footer.doc{display:none}
+  body.full .wrap{max-width:none;margin:0;padding:0}
+  body.full .mock{margin:0;border:none;border-radius:0;box-shadow:none;height:100dvh;display:flex;flex-direction:column}
+  body.full .mock-head{display:none}
+  body.full .mock-body{flex:1;min-height:0;overflow-y:auto}
+  body.full .full-exit{display:block;position:fixed;right:12px;bottom:96px;z-index:120;font:inherit;font-size:12.5px;font-weight:700;border-radius:999px;border:1px solid var(--line2);background:var(--panel);color:var(--ink2);padding:8px 14px;cursor:pointer;box-shadow:var(--shadow);min-height:36px}
+
+  /* ---------- mobile (<=640px): SPEC #6476 モバイル対応 ---------- */
+  @media (max-width:640px){
+    /* shared app header: brand row + horizontally scrollable nav row */
+    .app-head{flex-wrap:wrap;padding:7px 10px;row-gap:2px}
+    .app-head .hnav{margin-left:0;width:100%;overflow-x:auto;flex-wrap:nowrap;padding:2px 0 4px;-webkit-overflow-scrolling:touch}
+    .app-head .hnav>*{flex:none;white-space:nowrap}
+    .app-foot{flex-wrap:wrap;row-gap:2px}
+    .statusbar{gap:8px;padding:8px 12px}
+    .pagehead{padding:8px 12px}
+    /* start screen chat */
+    .msg{max-width:97%}
+    .statebar .seg button{padding:6px 12px}
+    .dcard dl{grid-template-columns:52px 1fr}
+    .composer{padding:9px 10px}
+    /* project pages: tab strip instead of the (hidden) rail */
+    .mtabs{display:flex;gap:5px;overflow-x:auto;padding:8px 10px;border-bottom:1px solid var(--line);background:var(--panel);-webkit-overflow-scrolling:touch}
+    .mtabs a{flex:none;display:inline-flex;align-items:center;gap:6px;padding:7px 12px;border-radius:999px;color:var(--ink2);text-decoration:none;font-weight:600;font-size:13px;border:1px solid var(--line);min-height:36px;background:var(--panel)}
+    .mtabs a.on{background:var(--ink);color:var(--panel);border-color:var(--ink)}
+    .mtabs a .cnt{background:var(--amber);color:#fff;font-size:11px;font-weight:800;border-radius:999px;padding:1px 7px}
+    /* tables: horizontal scroll, first column stays visible */
+    table.list,table.health{display:block;overflow-x:auto;-webkit-overflow-scrolling:touch}
+    table.list th:first-child,table.list td:first-child,table.health th:first-child,table.health td:first-child{position:sticky;left:0;background:var(--panel);z-index:1}
+    table.list th:first-child,table.health th:first-child{background:var(--panel2)}
+    /* wizards: step rail becomes a horizontal strip on top */
+    .wiz{flex-direction:column}
+    .wiz-rail{display:flex;flex-direction:row;width:auto;border-right:none;border-bottom:1px solid var(--line);padding:10px;overflow-x:auto;gap:6px}
+    .wiz-step{flex:none;align-items:center;padding:7px 10px}
+    .wiz-body{padding:14px}
+    /* rows: text block takes the full width, controls wrap below */
+    .set-row .grow,.checkrow .grow,.rowitem .grow,.lrow .grow,.prow .grow{min-width:0;flex-basis:100%}
+    .field{max-width:100%}
+    .hero{padding:14px}
+    .dlg{padding:14px}
+    .term-body{padding:12px;font-size:11.8px}
+    .h-big{font-size:18px}
+  }
 </style>
 </head>
 <body>
@@ -331,6 +380,7 @@
     <div class="doc-kicker">gwt — Issue #7007</div>
     <h1>全画面刷新モック v3</h1>
     <p class="lead">全ページを1つのモックで触れる形にしたものです。起点は<strong>開始画面</strong>で、ここはプロジェクトのランチャーではなく<strong>端末 PM との会話の場所</strong>です。開始画面はチャットのみとし、プロジェクトの内容は出さず、プロジェクトへの導線はヘッダーの「プロジェクト」から開くプロジェクト画面（状態などの目安つきの一覧）に留めます。プロジェクトはそれぞれ独立したページ（ブラウザのタブ）で開き、<strong>1画面＝1文脈</strong>を原則にします。<strong>エージェント台帳</strong>と<strong>アカウント</strong>は、設定の中ではなくヘッダーから開く独立画面です。下のボタンから全画面へ移動できます。</p>
+    <p style="margin-top:14px"><button class="btn primary" type="button" id="fullEnter">全画面で見る</button> <span class="rel">アプリ画面だけを画面いっぱいに表示します（このページの説明・目次・フッターは隠れます）。URL に <b>?full=1</b> を付けても、最初から全画面で開けます。モバイル幅の確認にも使えます。</span></p>
   </header>
 
   <nav class="screens" aria-label="画面一覧">
@@ -1302,6 +1352,19 @@
       <!-- ================= プロジェクト：gwt ================= -->
       <div class="pagegroup" data-page="gwt">
         <div class="pagehead"><a class="plink" data-openpage="start">&larr; 開始画面</a><span class="rel">このプロジェクトは独立したページです（URL: /p/gwt）— ブラウザのタブで並べて開けます</span></div>
+        <nav class="mtabs" aria-label="プロジェクト内メニュー（モバイル）">
+          <a href="#" data-nav="g-ask">相談</a>
+          <a href="#" data-nav="g-tasks">タスク</a>
+          <a href="#" data-nav="g-issues" class="on">課題</a>
+          <a href="#" data-nav="g-works">作業</a>
+          <a href="#" data-nav="g-decide">判断<span class="cnt">2</span></a>
+          <a href="#" data-nav="g-agents">担当者</a>
+          <a href="#" data-nav="g-board">掲示板</a>
+          <a href="#" data-nav="g-index">検索</a>
+          <a href="#" data-nav="g-branches">ブランチ</a>
+          <a href="#" data-nav="g-logs">ログ</a>
+          <a href="#" data-nav="g-settings">設定</a>
+        </nav>
         <div class="pagerow">
           <div class="rail">
             <div class="proj-card">
@@ -1975,6 +2038,19 @@
       <!-- ================= プロジェクト：KeibaDB ================= -->
       <div class="pagegroup" data-page="keibadb">
         <div class="pagehead"><a class="plink" data-openpage="start">&larr; 開始画面</a><span class="rel">このプロジェクトは独立したページです（URL: /p/keibadb）— ブラウザのタブで並べて開けます</span></div>
+        <nav class="mtabs" aria-label="プロジェクト内メニュー（モバイル）">
+          <a href="#" data-nav="k-ask">相談</a>
+          <a href="#" data-nav="k-tasks">タスク</a>
+          <a href="#" data-nav="k-issues" class="on">課題</a>
+          <a href="#" data-nav="k-works">作業</a>
+          <a href="#" data-nav="k-decide">判断<span class="cnt">1</span></a>
+          <a href="#" data-nav="k-agents">担当者</a>
+          <a href="#" data-nav="k-board">掲示板</a>
+          <a href="#" data-nav="k-index">検索</a>
+          <a href="#" data-nav="k-branches">ブランチ</a>
+          <a href="#" data-nav="k-logs">ログ</a>
+          <a href="#" data-nav="k-settings">設定</a>
+        </nav>
         <div class="pagerow">
           <div class="rail">
             <div class="proj-card">
@@ -2684,9 +2760,11 @@
 
   <footer class="doc">
     <h3>このモックについて</h3>
-    <p>全画面刷新モック v3（Issue #7007）。開始画面（PM とのチャットのみ、プロジェクトの内容は出さず、判断は会話の中のカードでその場で決定）、プロジェクト画面（ヘッダーから開く。状態・判断待ち・最終更新・場所の目安つきの一覧と追加の導線、多いときの検索つき）と、エージェント台帳とアカウントの独立画面（ヘッダーから開く。台帳は特性＝推論・速度（ツールに依存しない共通の段階から選ぶパラメータ）と性格（起動時に読み込む指示文）が固定で、使えるツール種別の項目は無し。台帳の各行の「編集」と「追加」からは、エージェントごとの設定画面（名前・アバター・特性の編集と新規作成）を開く。プロファイルは端末で定義し、エージェントに割り当てる（エージェント設定ではコンボボックスで割り当てるのみ）。アカウントはプールと使用量、本体（CLI）のインストール・更新はツール管理）、初回セットアップ（初回起動時だけ出る、アカウント追加と最初のエージェント作成を含む流れ）、アプリ設定、プロファイル、起動ウィザード（エージェントの起動計画）、ターミナル表示を網羅しています。プロジェクト画面群（相談／タスク／課題／課題詳細／作業／判断待ち／担当者（履歴・予定つき）／掲示板（PM の報告を統合）／検索／ブランチ／ログ／プロジェクト設定）は、gwt と KeibaDB の2プロジェクト分あります。PM 専用の画面（8タブ）は作らず、会話は「相談」に一本化しています。画面の移動は上のボタン、各プロジェクトのレール、カードから行えます。</p>
+    <p>全画面刷新モック v3（Issue #7007）。開始画面（PM とのチャットのみ、プロジェクトの内容は出さず、判断は会話の中のカードでその場で決定）、プロジェクト画面（ヘッダーから開く。状態・判断待ち・最終更新・場所の目安つきの一覧と追加の導線、多いときの検索つき）と、エージェント台帳とアカウントの独立画面（ヘッダーから開く。台帳は特性＝推論・速度（ツールに依存しない共通の段階から選ぶパラメータ）と性格（起動時に読み込む指示文）が固定で、使えるツール種別の項目は無し。台帳の各行の「編集」と「追加」からは、エージェントごとの設定画面（名前・アバター・特性の編集と新規作成）を開く。プロファイルは端末で定義し、エージェントに割り当てる（エージェント設定ではコンボボックスで割り当てるのみ）。アカウントはプールと使用量、本体（CLI）のインストール・更新はツール管理）、初回セットアップ（初回起動時だけ出る、アカウント追加と最初のエージェント作成を含む流れ）、アプリ設定、プロファイル、起動ウィザード（エージェントの起動計画）、ターミナル表示を網羅しています。プロジェクト画面群（相談／タスク／課題／課題詳細／作業／判断待ち／担当者（履歴・予定つき）／掲示板（PM の報告を統合）／検索／ブランチ／ログ／プロジェクト設定）は、gwt と KeibaDB の2プロジェクト分あります。PM 専用の画面（8タブ）は作らず、会話は「相談」に一本化しています。画面の移動は上のボタン、各プロジェクトのレール、カードから行えます。モバイル幅（スマートフォン約390px）でも主要画面が読める・操作できる形にしてあり、プロジェクト内の移動はレールの代わりに上部の横スクロールタブで行います（SPEC #6476）。冒頭の「全画面で見る」ボタン（または URL の ?full=1）で、アプリ画面だけを画面いっぱいに表示できます。</p>
   </footer>
 </div>
+
+<button class="full-exit" type="button" id="fullExit">通常表示に戻る</button>
 
 <script>
 (function () {
@@ -2730,7 +2808,7 @@
       pane.classList.toggle("on", pane.getAttribute("data-screen") === name);
     });
     var railName = name.replace(/-issue$/, "-issues").replace(/-task$/, "-tasks");
-    pageEl.querySelectorAll(".rail a[data-nav]").forEach(function (a) {
+    pageEl.querySelectorAll(".rail a[data-nav], .mtabs a[data-nav]").forEach(function (a) {
       a.classList.toggle("on", a.getAttribute("data-nav") === railName);
     });
     if (p === activePage) renderTitle();
@@ -2839,6 +2917,15 @@
       }, 450);
     });
   }
+  /* fullscreen mode: app screen only (?full=1 or the enter button) */
+  var fullEnter = document.getElementById("fullEnter");
+  var fullExit = document.getElementById("fullExit");
+  function setFull(on) { document.body.classList.toggle("full", !!on); }
+  if (fullEnter) fullEnter.addEventListener("click", function () { setFull(true); window.scrollTo(0, 0); });
+  if (fullExit) fullExit.addEventListener("click", function () { setFull(false); });
+  try {
+    if (new URLSearchParams(location.search).get("full") === "1") setFull(true);
+  } catch (e) { /* file:// without query etc. */ }
 })();
 </script>
 </body>
