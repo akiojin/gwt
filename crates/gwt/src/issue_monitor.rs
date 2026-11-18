@@ -19067,25 +19067,12 @@ impl IssueMonitorState {
                         }
                     }
                     None => {
-                        if pending_review_dispatches.iter().any(|dispatch| {
-                            dispatch.issue_number == *issue_number
-                                && dispatch.pr_number == window.pr_number
-                        }) {
-                            // A queued request has not begun its spawn grace.
-                            (true, None)
-                        } else if rfc3339_elapsed_secs(&window.dispatched_at, now)
-                            .is_none_or(|elapsed| elapsed < REVIEW_WINDOW_SPAWN_GRACE_SECS)
-                        {
-                            (true, None)
-                        } else {
-                            (
-                                false,
-                                Some(format!(
-                                    "review window dispatched at {} never appeared within {REVIEW_WINDOW_SPAWN_GRACE_SECS}s",
-                                    window.dispatched_at
-                                )),
-                            )
-                        }
+                        let expired = unbound_review_reservation_expiry(
+                            pending_review_dispatches,
+                            window,
+                            now,
+                        );
+                        (expired.is_none(), expired)
                     }
                 };
                 if let Some(reason) = reason {
@@ -19094,16 +19081,55 @@ impl IssueMonitorState {
                 alive
             });
         for (issue_number, reason, window_id) in failed {
-            self.record_review_failure(issue_number, reason, now);
-            // Issue #4117 AC-7: a pane that exited without a verdict is still
-            // on the canvas; close it (a vanished one is a no-op for the GUI).
-            if let Some(window_id) = window_id {
-                self.request_review_pane_close(
-                    issue_number,
-                    window_id,
-                    IssueMonitorIdleKind::BindingDead,
-                );
-            }
+            self.fail_released_review_window(issue_number, reason, window_id, now);
+        }
+    }
+
+    /// Issue #7688: release review reservations whose window never appeared,
+    /// on the scan's clock. `reconcile_review_windows` runs only when
+    /// a canvas arrives, and a canvas is not guaranteed to arrive: with a
+    /// native owner the GUI publishes none. A reservation must not wait for
+    /// one to give its slot back.
+    pub fn expire_unbound_review_reservations(&mut self, now: &str) {
+        let pending_review_dispatches = &self.pending_review_dispatches;
+        let expired = self
+            .review_windows
+            .iter()
+            .filter(|(_, window)| window.window_id.is_none())
+            .filter_map(|(issue_number, window)| {
+                unbound_review_reservation_expiry(pending_review_dispatches, window, now)
+                    .map(|reason| (*issue_number, reason))
+            })
+            .collect::<Vec<_>>();
+        for (issue_number, reason) in expired {
+            self.review_windows.remove(&issue_number);
+            self.fail_released_review_window(issue_number, reason, None, now);
+        }
+    }
+
+    fn fail_released_review_window(
+        &mut self,
+        issue_number: u64,
+        reason: String,
+        window_id: Option<String>,
+        now: &str,
+    ) {
+        // The ladder records nothing once the review has ended another way,
+        // so the release itself is always logged.
+        tracing::warn!(
+            issue = issue_number,
+            reason = %reason,
+            "Issues: independent review reservation released"
+        );
+        self.record_review_failure(issue_number, reason, now);
+        // Issue #4117 AC-7: a pane that exited without a verdict is still
+        // on the canvas; close it (a vanished one is a no-op for the GUI).
+        if let Some(window_id) = window_id {
+            self.request_review_pane_close(
+                issue_number,
+                window_id,
+                IssueMonitorIdleKind::BindingDead,
+            );
         }
     }
 
@@ -28217,6 +28243,38 @@ fn matching_live_launch_owner(owners: &BTreeMap<String, u64>, window_id: &str) -
         .filter(|(live, _)| issue_monitor_window_ids_match(window_id, live));
     let (_, owner) = matches.next()?;
     matches.next().is_none().then_some(*owner)
+}
+
+/// Why a review reservation with no window must give its slot back, if it
+/// must. A request still queued for the GUI has not begun its spawn grace
+/// (Issue #5062). Issue #7688: a dispatch time that cannot be read cannot
+/// keep the reservation either; only an unreadable `now` defers the decision
+/// to the next clock.
+fn unbound_review_reservation_expiry(
+    pending_review_dispatches: &VecDeque<AutonomousReviewDispatch>,
+    window: &IssueMonitorReviewWindow,
+    now: &str,
+) -> Option<String> {
+    if pending_review_dispatches.iter().any(|dispatch| {
+        dispatch.issue_number == window.issue_number && dispatch.pr_number == window.pr_number
+    }) {
+        return None;
+    }
+    parse_rfc3339_utc(now)?;
+    if parse_rfc3339_utc(&window.dispatched_at).is_none() {
+        return Some(format!(
+            "review window has no readable dispatch time ({:?}) and never appeared",
+            window.dispatched_at
+        ));
+    }
+    rfc3339_elapsed_secs(&window.dispatched_at, now)
+        .is_some_and(|elapsed| elapsed >= REVIEW_WINDOW_SPAWN_GRACE_SECS)
+        .then(|| {
+            format!(
+                "review window dispatched at {} never appeared within {REVIEW_WINDOW_SPAWN_GRACE_SECS}s",
+                window.dispatched_at
+            )
+        })
 }
 
 fn issue_monitor_window_ids_match(stored: &str, incoming: &str) -> bool {
@@ -58943,6 +59001,119 @@ mod tests {
             )],
         ));
         assert!(monitor.review_windows().is_empty());
+    }
+
+    /// Issue #7688 AC-1/AC-2: the 2026-11-14 shape. The review window started
+    /// and vanished without the daemon ever receiving a canvas that showed it,
+    /// and no later canvas arrived. Reconciliation lived only in snapshot
+    /// ingestion, so the reservation outlived its spawn grace and held a slot.
+    #[test]
+    fn issue_7688_unobserved_review_reservation_expires_on_the_scan_clock() {
+        let scan = |monitor: &mut IssueMonitorState, now: &str| {
+            crate::issue_monitor_worker::reconcile_issue_monitor_windows_with_observations(
+                monitor,
+                &settlements(&[
+                    (41, IssueMonitorExecutionSettlement::Active),
+                    (42, IssueMonitorExecutionSettlement::Active),
+                ]),
+                &BTreeMap::new(),
+                now,
+                now,
+                IssueMonitorIdleReconciliation::default(),
+            );
+        };
+        let implementations = || {
+            vec![
+                idle_observation("tab-1::impl-41", Some(41), WindowState::Running, false),
+                idle_observation("tab-1::impl-42", Some(42), WindowState::Running, false),
+            ]
+        };
+        let mut monitor =
+            autonomous_launched_cohort(&[(41, "tab-1::impl-41"), (42, "tab-1::impl-42")]);
+        monitor.set_max_active_agents(3);
+        monitor.record_window_snapshot(idle_snapshot("2026-09-07T03:59:00Z", implementations()));
+        monitor
+            .dispatch_review(review_dispatch_for(41, 410), "2026-09-07T04:00:00Z")
+            .expect("review dispatch is admitted");
+
+        // A request still queued for the GUI has not begun its spawn grace.
+        scan(&mut monitor, "2026-09-07T04:10:00Z");
+        assert_eq!(monitor.review_windows().len(), 1);
+
+        assert_eq!(
+            monitor
+                .take_pending_review_dispatches_at("2026-09-07T04:10:00Z")
+                .len(),
+            1
+        );
+        // The only canvas after the spawn is the one published when the
+        // review window closed: it is already gone and the grace has not run out.
+        monitor.record_window_snapshot(idle_snapshot("2026-09-07T04:12:05Z", implementations()));
+        scan(&mut monitor, "2026-09-07T04:12:10Z");
+        assert_eq!(monitor.review_windows().len(), 1);
+        assert!(monitor
+            .review_dispatch_hold(42, 420, None, "2026-09-07T04:12:10Z")
+            .is_some_and(|hold| hold.reason.starts_with("max_active reached (3/3")));
+
+        // No further canvas arrives. The next scan past the grace releases it.
+        scan(&mut monitor, "2026-09-07T04:15:30Z");
+        assert!(monitor.review_windows().is_empty());
+        assert_eq!(monitor.occupied_slot_count(), 2);
+        assert_eq!(
+            monitor.review_dispatch_hold(42, 420, None, "2026-09-07T04:15:30Z"),
+            None
+        );
+        let attempts = review_attempts_of(&monitor, 41).expect("the release is recorded");
+        assert_eq!(attempts.count, 1);
+        assert!(
+            attempts.last_error.contains("never appeared within 300s"),
+            "{}",
+            attempts.last_error
+        );
+    }
+
+    /// Issue #7688 AC-3: a live review window binds whether the canvas names
+    /// it by the GUI alias or by the native owner's pane id.
+    #[test]
+    fn issue_7688_live_review_window_binds_under_gui_alias_and_owner_ids() {
+        let bound_as = |tab: &str, window_id: &str, from_owner: bool| {
+            let mut monitor = autonomous_launched_cohort(&[(41, "tab-1::impl-41")]);
+            monitor.set_max_active_agents(2);
+            monitor
+                .dispatch_review(review_dispatch_for(41, 410), IDLE_NOW)
+                .expect("review dispatch is admitted");
+            let snapshot = IssueMonitorWindowSnapshot {
+                project_tab_id: tab.to_string(),
+                observed_at: "2026-09-07T04:00:30Z".to_string(),
+                windows: vec![idle_observation(
+                    window_id,
+                    Some(41),
+                    WindowState::Running,
+                    true,
+                )],
+            };
+            if from_owner {
+                // The daemon scan samples its native owner with no tab list.
+                monitor.record_window_snapshot_from_host(snapshot, 4242, 1, BTreeSet::new());
+            } else {
+                monitor
+                    .record_window_snapshot_for_tabs(snapshot, BTreeSet::from([tab.to_string()]));
+            }
+            monitor.review_windows()[0].window_id.clone()
+        };
+        assert_eq!(
+            bound_as("project-52bf", "project-52bf::agent-5", false).as_deref(),
+            Some("project-52bf::agent-5")
+        );
+        assert_eq!(
+            bound_as(
+                "99a8660247f5bc49",
+                "99a8660247f5bc49::project-pane-fe79",
+                true
+            )
+            .as_deref(),
+            Some("99a8660247f5bc49::project-pane-fe79")
+        );
     }
 
     // ---------------------------------------------------------------------
