@@ -76,8 +76,11 @@ def main():
     report["build_stderr"] = build.stderr
     report["build_exit_code"] = build.returncode
     artifacts = {}
+    linked_paths = set()
     for line in build.stdout.splitlines():
         message = json.loads(line)
+        if message.get("reason") == "build-script-executed":
+            linked_paths.update(message["linked_paths"])
         if message.get("reason") != "compiler-artifact":
             continue
         name = message["target"]["name"]
@@ -95,6 +98,8 @@ def main():
         command = ["rustc", "--edition=2021", str(source), "-o", str(executable)]
         for directory_path in sorted({path.parent for path in artifacts.values()}):
             command.extend(["-L", f"dependency={directory_path}"])
+        for linked_path in sorted(linked_paths):
+            command.extend(["-L", linked_path])
         for name, path in sorted(artifacts.items()):
             command.extend(["--extern", f"{name}={path}"])
         report["compile_command"] = command

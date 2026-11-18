@@ -230,6 +230,25 @@ impl PmSettings {
 }
 
 impl PmSettings {
+    /// Resolve NEW tuning identically for the GUI draft and its owner fence.
+    /// The saved PM profile and its CAS revision remain project-specific.
+    pub fn launch_profile_with_agent_defaults(&self, project_root: &Path) -> PmLaunchProfile {
+        let mut profile = self.launch_profile_or_default();
+        if let Some(defaults) = crate::load_issue_monitor_prefs(
+            &crate::issue_monitor_prefs_path_for_repo_path(project_root),
+        )
+        .ok()
+        .and_then(|prefs| {
+            prefs.launch_profile_pool().into_iter().find(|candidate| {
+                gwt_agent::resolve_agent_id(&candidate.agent_id)
+                    == gwt_agent::resolve_agent_id(&profile.agent_id)
+            })
+        }) {
+            profile = profile.with_agent_defaults(&defaults);
+        }
+        profile.normalized()
+    }
+
     /// The profile to launch with: the configured one when it names an agent
     /// that can resolve `$gwt-pm`, the built-in default otherwise. Falling back
     /// rather than refusing keeps FR-002's "opening a project starts the PM"
@@ -375,9 +394,18 @@ pub enum PmStartBlockKind {
     /// PM. The singleton is per repository, and the other store's `pm.json`
     /// is invisible from here.
     AnotherStoreOwnsThePm,
+    /// Issue #7542: the PM launch itself failed. Unlike the others this one
+    /// is not permanent — a Restart starts a new launch, which also discards
+    /// a reservation left by a dead PM.
+    LaunchFailed,
 }
 
 impl PmStartBlockKind {
+    /// Whether pressing Restart can get past this block.
+    pub const fn restart_clears_it(self) -> bool {
+        matches!(self, Self::LaunchFailed)
+    }
+
     /// What the operator has to do. A block is only useful if it names the
     /// next action; "the PM did not start" alone sends people back to the
     /// Restart button that cannot help them.
@@ -392,6 +420,11 @@ impl PmStartBlockKind {
             Self::AnotherStoreOwnsThePm => {
                 "Stop the PM held by the other project store with `pm.stop`, \
                  passing the session id listed in `repository_registrations`."
+            }
+            Self::LaunchFailed => {
+                "Close any Project Manager window that is still open, then press \
+                 Restart Project Manager in Settings. Restarting discards the \
+                 reservation of a Project Manager that is no longer running."
             }
         }
     }
@@ -418,8 +451,8 @@ impl PmStartBlock {
     pub fn new(kind: PmStartBlockKind, reason: impl Into<String>) -> Self {
         Self {
             kind,
-            permanent: true,
-            restart_clears_it: false,
+            permanent: !kind.restart_clears_it(),
+            restart_clears_it: kind.restart_clears_it(),
             reason: reason.into(),
             required_operation: kind.required_operation().to_string(),
             observed_at: pm_refresh_checked_at(),
@@ -431,6 +464,8 @@ impl PmStartBlock {
 pub struct PmPrefs {
     #[serde(default)]
     pub registration: Option<PmRegistration>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_activity: Option<crate::pm_activity::PmActivityRecord>,
     #[serde(default)]
     pub settings: PmSettings,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -868,7 +903,7 @@ fn finish_pm_delivery_receipt_unlocked(
     }
     let terminal = PmDeliveryReceipt {
         operation_id: operation_id.to_string(),
-        recorded_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        recorded_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds(),
         status,
         principal_session_id: prepared.principal_session_id.clone(),
         target_window_id: prepared.target_window_id.clone(),
@@ -928,8 +963,7 @@ pub fn observe_grok_pm_delivery_prompt(
             {
                 let mut cleared = (*latest).clone();
                 cleared.grok_prompt = None;
-                cleared.recorded_at =
-                    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                cleared.recorded_at = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds();
                 append_pm_delivery_receipt_unlocked(path, &cleared)?;
                 receipts.push(cleared);
             }
@@ -959,8 +993,7 @@ pub fn observe_grok_pm_delivery_prompt(
         }
         let mut observed = (*latest).clone();
         observed.grok_prompt = Some(identity.clone());
-        observed.recorded_at =
-            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        observed.recorded_at = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds();
         append_pm_delivery_receipt_unlocked(path, &observed)
     })
 }
@@ -2817,7 +2850,7 @@ impl PmWorktreeRefreshOutcome {
 }
 
 fn pm_refresh_checked_at() -> String {
-    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds()
 }
 
 fn git_sha(repo: &Path, revision: &str) -> io::Result<Option<String>> {
@@ -5084,8 +5117,107 @@ pub fn load_pm_prefs(path: &Path) -> io::Result<PmPrefs> {
     load_pm_prefs_unlocked(path)
 }
 
+/// Hold the existing PM writer lock while inspecting an exact profile/identity.
+/// Callers that also need the registry always acquire it inside this callback.
+pub fn with_pm_prefs_snapshot<T>(
+    path: &Path,
+    operation: impl FnOnce(&PmPrefs) -> io::Result<T>,
+) -> io::Result<T> {
+    with_pm_prefs_lock(path, || operation(&load_pm_prefs_unlocked(path)?))
+}
+
+/// Content identity of the persisted input, including None and version selectors.
+pub fn pm_profile_revision(prefs: &PmPrefs) -> String {
+    let raw = serde_json::to_vec(&prefs.settings.launch_profile).expect("serializable PM profile");
+    format!("pm-profile-v1:{}", hex::encode(Sha256::digest(raw)))
+}
+
+/// One exact project profile CAS; selection remains fenced until durable save returns.
+pub fn set_selected_pm_profile(
+    root: &Path,
+    member_id: &str,
+    expected_revision: &str,
+    profile: PmLaunchProfile,
+) -> io::Result<PmPrefs> {
+    let path = pm_prefs_path_for_repo_path(root);
+    with_pm_prefs_lock(&path, || {
+        let mut prefs = load_pm_prefs_unlocked(&path)?;
+        crate::agent_registry::with_configured_pm_guard(
+            &gwt_core::paths::project_scope_hash(root),
+            member_id,
+            || {
+                if pm_profile_revision(&prefs) != expected_revision {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "This PM profile changed elsewhere. Reload, review your draft and retry.",
+                    ));
+                }
+                if !pm_agent_is_supported(&profile.agent_id) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Choose a tool that supports the managed PM skill",
+                    ));
+                }
+                let mut profile = profile.normalized();
+                let previous = prefs.settings.launch_profile_or_default();
+                if previous.agent_id == profile.agent_id {
+                    profile.version = previous.version;
+                }
+                gwt_agent::validate_native_tuning(
+                    &profile.agent_id,
+                    profile.model.as_deref(),
+                    profile.reasoning.as_deref(),
+                )
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+                prefs.settings.launch_profile = Some(profile);
+                // A retry of an uncertain prior rename still confirms durability.
+                save_pm_prefs_unlocked(&path, &prefs)?;
+                Ok(prefs.clone())
+            },
+        )
+    })
+}
+
+/// Reliable canonical readback, with the same PM prefs -> registry lock order.
+pub fn selected_pm_profile_snapshot(root: &Path, member_id: &str) -> io::Result<PmPrefs> {
+    with_pm_prefs_snapshot(&pm_prefs_path_for_repo_path(root), |prefs| {
+        crate::agent_registry::with_configured_pm_guard(
+            &gwt_core::paths::project_scope_hash(root),
+            member_id,
+            || Ok(prefs.clone()),
+        )
+    })
+}
+
 pub fn save_pm_prefs(path: &Path, prefs: &PmPrefs) -> io::Result<()> {
     with_pm_prefs_lock(path, || save_pm_prefs_unlocked(path, prefs))
+}
+
+/// Keep worker operations and retired PM sessions out of PM window chrome.
+pub(crate) fn record_pm_title_activity(
+    path: &Path,
+    session_id: &str,
+    activity: crate::pm_activity::PmActivity,
+    updated_at_ms: u64,
+) -> io::Result<bool> {
+    with_pm_prefs_lock(path, || {
+        let mut prefs = load_pm_prefs_unlocked(path)?;
+        if session_id.is_empty()
+            || !prefs
+                .registration
+                .as_ref()
+                .is_some_and(|registration| registration.session_id == session_id)
+        {
+            return Ok(false);
+        }
+        prefs.title_activity = Some(crate::pm_activity::PmActivityRecord {
+            session_id: session_id.to_string(),
+            activity,
+            updated_at_ms,
+        });
+        save_pm_prefs_unlocked(path, &prefs)?;
+        Ok(true)
+    })
 }
 
 /// One cross-process read-modify-write transaction under the stable sibling
@@ -5100,6 +5232,15 @@ pub fn mutate_pm_prefs<T>(
         save_pm_prefs_unlocked(path, &prefs)?;
         Ok((prefs, result))
     })
+}
+
+/// Set the next project open's auto-start preference while preserving the
+/// current PM registration and loop settings.
+pub fn set_pm_auto_start(repo_path: &Path, enabled: bool) -> io::Result<PmPrefs> {
+    mutate_pm_prefs(&pm_prefs_path_for_repo_path(repo_path), |prefs| {
+        prefs.settings.auto_start = enabled;
+    })
+    .map(|(prefs, ())| prefs)
 }
 
 /// Pause only autonomous PM work. Resume re-arms the existing loop once;
@@ -5165,6 +5306,7 @@ pub fn try_register_pm(
             None => PmRegisterOutcome::Registered,
         };
         prefs.registration = Some(candidate);
+        prefs.title_activity = None;
         save_pm_prefs_unlocked(path, &prefs)?;
         Ok((prefs, outcome))
     })
@@ -5184,6 +5326,7 @@ pub fn deregister_pm(path: &Path, session_id: &str) -> io::Result<(PmPrefs, bool
             return Ok((prefs, false));
         }
         prefs.registration = None;
+        prefs.title_activity = None;
         save_pm_prefs_unlocked(path, &prefs)?;
         Ok((prefs, true))
     })
@@ -5310,17 +5453,13 @@ pub fn pm_respawn_allowed(registration: &PmRegistration, now: &str) -> bool {
 }
 
 fn rfc3339_delta_secs(earlier: &str, later: &str) -> Option<i64> {
-    let earlier = chrono::DateTime::parse_from_rfc3339(earlier).ok()?;
-    let later = chrono::DateTime::parse_from_rfc3339(later).ok()?;
-    Some((later - earlier).num_seconds())
+    let earlier = gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(earlier).ok()?;
+    let later = gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(later).ok()?;
+    Some((later - earlier).whole_seconds())
 }
 
 fn rfc3339_plus_secs(now: &str, secs: i64) -> Option<String> {
-    let parsed = chrono::DateTime::parse_from_rfc3339(now).ok()?;
-    Some(
-        (parsed + chrono::Duration::seconds(secs))
-            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-    )
+    gwt_core::timestamp::shift_rfc3339_seconds(now, time::Duration::seconds(secs))
 }
 
 /// Diagnostic snapshot for the `pm.status` JSON operation (FR-001 diagnostic
@@ -5703,6 +5842,19 @@ mod tests {
             .expect("prior bytes remain in a same-parent recovery file");
         assert_eq!(fs::read(&recovery).expect("recovery bytes"), b"{}\n");
         assert!(error.to_string().contains(&recovery.display().to_string()));
+    }
+
+    /// Issue #7542: a failed PM launch is the one block a Restart clears, so
+    /// it must say so and name Restart as the recovery.
+    #[test]
+    fn a_failed_pm_launch_block_is_cleared_by_restart() {
+        let block = PmStartBlock::new(PmStartBlockKind::LaunchFailed, "launch refused");
+        assert!(block.restart_clears_it);
+        assert!(!block.permanent);
+        assert!(block.required_operation.contains("Restart Project Manager"));
+        let wire = serde_json::to_value(&block).expect("serialize");
+        assert_eq!(wire["kind"], "launch_failed");
+        assert_eq!(wire["restart_clears_it"], true);
     }
 
     /// #4486 AC-7: every block must name a distinct, non-empty next action.

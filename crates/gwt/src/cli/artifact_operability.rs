@@ -25,7 +25,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use chrono::{DateTime, Utc};
+use gwt_core::timestamp::UtcTimestamp;
 use serde::{Deserialize, Serialize};
 
 /// Per-section operability facts from one committed write.
@@ -45,7 +45,7 @@ pub struct SectionOperability {
     /// The final readback verified the content. False when cleanup or final
     /// confirmation failed after the commit point (Issue #4838).
     pub readback_verified: bool,
-    pub written_at: DateTime<Utc>,
+    pub written_at: UtcTimestamp,
 }
 
 /// The per-owner operability ledger.
@@ -53,7 +53,7 @@ pub struct SectionOperability {
 pub struct ArtifactOperabilityRecord {
     pub owner_number: u64,
     pub sections: BTreeMap<String, SectionOperability>,
-    pub updated_at: DateTime<Utc>,
+    pub updated_at: UtcTimestamp,
 }
 
 /// Resolve the record path. `None` when the repo hash is unresolvable.
@@ -102,7 +102,7 @@ pub fn record_write(
         _ => ArtifactOperabilityRecord {
             owner_number,
             sections: BTreeMap::new(),
-            updated_at: Utc::now(),
+            updated_at: gwt_core::timestamp::UtcTimestamp::now(),
         },
     };
     record.sections.insert(
@@ -115,10 +115,10 @@ pub fn record_write(
             sha256: receipt.sha256.clone(),
             largest_part_bytes: receipt.largest_part_bytes,
             readback_verified: receipt.verification_error.is_none(),
-            written_at: Utc::now(),
+            written_at: gwt_core::timestamp::UtcTimestamp::now(),
         },
     );
-    record.updated_at = Utc::now();
+    record.updated_at = gwt_core::timestamp::UtcTimestamp::now();
     let serialized = serde_json::to_vec_pretty(&record)
         .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?;
     gwt_github::cache::write_atomic(&path, &serialized)

@@ -14,10 +14,11 @@
 //! resolve to a remote provider scoped to that project's own channel, so Board
 //! posts and reads never mix across projects (FR-027).
 
+use gwt_core::timestamp::UtcTimestamp;
+
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use chrono::{DateTime, Utc};
 use gwt_config::{BoardProviderKind, ProjectBoardConfig, Settings, SlackConfig, TeamsConfig};
 use gwt_core::coordination::{
     BoardAudienceScope, BoardDeterministicOutcome, BoardEntry, BoardEntryKind, BoardHistoryPage,
@@ -171,13 +172,13 @@ impl BoardProvider for UnconfiguredProvider {
     ) -> Result<CoordinationSnapshot> {
         self.err()
     }
-    fn load_entries_since(&self, _: &Path, _: DateTime<Utc>) -> Result<Vec<BoardEntry>> {
+    fn load_entries_since(&self, _: &Path, _: UtcTimestamp) -> Result<Vec<BoardEntry>> {
         self.err()
     }
     fn load_entries_since_for_scope(
         &self,
         _: &Path,
-        _: DateTime<Utc>,
+        _: UtcTimestamp,
         _: &BoardAudienceScope,
     ) -> Result<Vec<BoardEntry>> {
         self.err()
@@ -187,7 +188,7 @@ impl BoardProvider for UnconfiguredProvider {
         _: &Path,
         _: &str,
         _: &BoardEntryKind,
-        _: chrono::Duration,
+        _: time::Duration,
     ) -> Result<bool> {
         self.err()
     }
@@ -592,7 +593,7 @@ pub fn refresh_scoped_board_view(
 }
 
 /// Load entries updated strictly after `since`.
-pub fn load_entries_since(worktree_root: &Path, since: DateTime<Utc>) -> Result<Vec<BoardEntry>> {
+pub fn load_entries_since(worktree_root: &Path, since: UtcTimestamp) -> Result<Vec<BoardEntry>> {
     after_local_operation(
         worktree_root,
         provider_for(worktree_root).load_entries_since(worktree_root, since),
@@ -602,7 +603,7 @@ pub fn load_entries_since(worktree_root: &Path, since: DateTime<Utc>) -> Result<
 /// Load entries updated strictly after `since`, filtered to a scope.
 pub fn load_entries_since_for_scope(
     worktree_root: &Path,
-    since: DateTime<Utc>,
+    since: UtcTimestamp,
     scope: &BoardAudienceScope,
 ) -> Result<Vec<BoardEntry>> {
     after_local_operation(
@@ -616,7 +617,7 @@ pub fn has_recent_post_by(
     worktree_root: &Path,
     author: &str,
     kind: &BoardEntryKind,
-    within: chrono::Duration,
+    within: time::Duration,
 ) -> Result<bool> {
     provider_for(worktree_root).has_recent_post_by(worktree_root, author, kind, within)
 }

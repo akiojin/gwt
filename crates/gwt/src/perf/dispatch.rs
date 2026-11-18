@@ -21,14 +21,14 @@ pub struct DispatchSummary {
     pub pending_unknown_count: usize,
     pub window_ms: f64,
     pub dropped_windows: u64,
-    pub window_ended_at: chrono::DateTime<chrono::Utc>,
+    pub window_ended_at: gwt_core::timestamp::UtcTimestamp,
 }
 
 struct DispatchBatch {
     handlers: BTreeMap<String, Vec<(f64, Option<usize>)>>,
     window_ms: f64,
     dropped_windows: u64,
-    ended_at: chrono::DateTime<chrono::Utc>,
+    ended_at: gwt_core::timestamp::UtcTimestamp,
 }
 
 impl DispatchBatch {
@@ -139,7 +139,7 @@ impl DispatchCollector {
             handlers: std::mem::take(&mut self.handlers),
             window_ms: window.as_secs_f64() * 1_000.0,
             dropped_windows: self.dropped_windows,
-            ended_at: chrono::Utc::now(),
+            ended_at: gwt_core::timestamp::UtcTimestamp::now(),
         };
         // Never wait for a slow filesystem/subscriber or for worker shutdown.
         match sender.try_send(batch) {

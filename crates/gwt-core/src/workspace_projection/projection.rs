@@ -3,9 +3,10 @@
 //! structs, and every owned state-transition method (status category
 //! changes, agent merge/assign/retain rules, launch/start composition).
 
+use crate::timestamp::UtcTimestamp;
+
 use std::path::PathBuf;
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -27,20 +28,20 @@ pub struct GitDetails {
     #[serde(default)]
     pub pr_url: Option<String>,
     #[serde(default)]
-    pub pr_created_at: Option<DateTime<Utc>>,
+    pub pr_created_at: Option<UtcTimestamp>,
     pub created_by_start_work: bool,
-    pub created_at: DateTime<Utc>,
+    pub created_at: UtcTimestamp,
 }
 
 /// SPEC-2359 Phase U-6 (FR-131): sentinel default for `created_at` when a
 /// legacy `workspace.json` is read without the field present. The retroactive
 /// migration in `workspace_projection_migration` detects this value and
 /// backfills from the oldest event timestamp or `updated_at`. Using the
-/// UNIX_EPOCH sentinel (instead of `Utc::now()`) keeps deserialization
+/// UNIX_EPOCH sentinel (instead of `UtcTimestamp::now()`) keeps deserialization
 /// deterministic for tests and avoids "this workspace was created at
 /// startup" lies for legacy data.
-pub fn workspace_projection_default_created_at() -> DateTime<Utc> {
-    DateTime::from_timestamp(0, 0).unwrap_or_else(Utc::now)
+pub fn workspace_projection_default_created_at() -> UtcTimestamp {
+    UtcTimestamp::UNIX_EPOCH
 }
 
 /// Why a branch/worktree pair is offered for cleanup: its Workspace reached
@@ -96,7 +97,7 @@ pub struct WorkspaceProjection {
     pub agents: Vec<WorkspaceAgentSummary>,
     pub git_details: Option<GitDetails>,
     pub board_refs: Vec<String>,
-    pub updated_at: DateTime<Utc>,
+    pub updated_at: UtcTimestamp,
     /// SPEC-2359 Phase U-6 (FR-131, FR-135, FR-143): Workspace creation
     /// timestamp, distinct from `updated_at`. Legacy files without the
     /// field deserialize to UNIX_EPOCH via
@@ -104,7 +105,7 @@ pub struct WorkspaceProjection {
     /// migration backfills the actual value from event timestamps or
     /// `updated_at`.
     #[serde(default = "workspace_projection_default_created_at")]
-    pub created_at: DateTime<Utc>,
+    pub created_at: UtcTimestamp,
     /// SPEC-2359 Phase U-6 (FR-131, FR-135): identifier of the Agent or
     /// user that created the Workspace, used for the Detail pane
     /// "Created by @..." line. None for legacy data; the migration
@@ -183,7 +184,7 @@ impl WorkspaceProjection {
     }
 
     pub fn default_for_project(project_root: impl Into<PathBuf>) -> Self {
-        let now = Utc::now();
+        let now = UtcTimestamp::now();
         Self {
             id: Uuid::new_v4().to_string(),
             project_root: project_root.into(),
@@ -254,7 +255,7 @@ impl WorkspaceProjection {
     pub fn record_board_milestone_with_state_cutoff(
         &mut self,
         entry: &BoardEntry,
-        state_cutoff: Option<DateTime<Utc>>,
+        state_cutoff: Option<UtcTimestamp>,
     ) {
         if !self.board_refs.iter().any(|id| id == &entry.id) {
             self.board_refs.push(entry.id.clone());
@@ -353,7 +354,7 @@ impl WorkspaceProjection {
     pub fn apply_update(
         &mut self,
         update: WorkspaceProjectionUpdate,
-        updated_at: DateTime<Utc>,
+        updated_at: UtcTimestamp,
     ) -> WorkspaceJournalEntry {
         if let Some(title) = update
             .title
@@ -467,7 +468,7 @@ impl WorkspaceProjection {
         &mut self,
         session_id: &str,
         window_id: Option<&str>,
-        updated_at: DateTime<Utc>,
+        updated_at: UtcTimestamp,
     ) -> bool {
         let before = self.agents.len();
         self.agents.retain(|agent| {
@@ -501,7 +502,7 @@ impl WorkspaceProjection {
 
     /// The single Idle transition rule: Idle category, "No active work"
     /// status text, cleared next action.
-    fn transition_to_idle(&mut self, updated_at: DateTime<Utc>) {
+    fn transition_to_idle(&mut self, updated_at: UtcTimestamp) {
         self.status_category = WorkspaceStatusCategory::Idle;
         self.status_text = "No active work".to_string();
         self.next_action = None;
@@ -555,7 +556,7 @@ impl WorkspaceProjection {
     pub fn retain_live_agents<'a>(
         &mut self,
         live_session_ids: impl IntoIterator<Item = &'a str>,
-        updated_at: DateTime<Utc>,
+        updated_at: UtcTimestamp,
     ) {
         self.retain_live_works(live_session_ids, std::iter::empty(), updated_at);
     }
@@ -570,7 +571,7 @@ impl WorkspaceProjection {
         &mut self,
         live_agent_sessions: impl IntoIterator<Item = &'a str>,
         live_shell_windows: impl IntoIterator<Item = &'b str>,
-        updated_at: DateTime<Utc>,
+        updated_at: UtcTimestamp,
     ) {
         let live_agents: std::collections::HashSet<&str> =
             live_agent_sessions.into_iter().collect();
@@ -595,7 +596,7 @@ impl WorkspaceProjection {
     pub fn retain_live_agents_keep_shells<'a>(
         &mut self,
         live_agent_sessions: impl IntoIterator<Item = &'a str>,
-        updated_at: DateTime<Utc>,
+        updated_at: UtcTimestamp,
     ) {
         let shell_ids: Vec<String> = self
             .agents
@@ -620,7 +621,7 @@ impl WorkspaceProjection {
     pub fn reconcile_shell_status(
         &mut self,
         is_live_shell: impl Fn(&str) -> bool,
-        updated_at: DateTime<Utc>,
+        updated_at: UtcTimestamp,
     ) {
         for agent in self.agents.iter_mut() {
             if !agent.is_shell_work() {
@@ -641,7 +642,7 @@ impl WorkspaceProjection {
     /// SPEC-2359 Phase W-14 (US-70 / FR-375): reset the projection to the
     /// idle "no current work" identity for a project tab, clearing the
     /// work-specific identity fields alongside the Idle transition.
-    pub fn reset_idle_identity(&mut self, tab_title: &str, updated_at: DateTime<Utc>) {
+    pub fn reset_idle_identity(&mut self, tab_title: &str, updated_at: UtcTimestamp) {
         let title = tab_title.trim();
         self.title = if title.is_empty() {
             "Project Work".to_string()
@@ -657,7 +658,7 @@ impl WorkspaceProjection {
 
     /// SPEC-2359 Phase W-14 (US-70 / FR-375): clear the git execution
     /// details (after a worktree cleanup) and apply the Idle transition.
-    pub fn clear_git_details_to_idle(&mut self, updated_at: DateTime<Utc>) {
+    pub fn clear_git_details_to_idle(&mut self, updated_at: UtcTimestamp) {
         self.git_details = None;
         self.transition_to_idle(updated_at);
     }
@@ -672,7 +673,7 @@ impl WorkspaceProjection {
         workspace_id: &str,
         current_focus: Option<String>,
         title_summary: Option<String>,
-        updated_at: DateTime<Utc>,
+        updated_at: UtcTimestamp,
     ) -> bool {
         let Some(agent) = self.latest_agent_for_session_mut(session_id) else {
             return false;
@@ -698,7 +699,7 @@ impl WorkspaceProjection {
         &mut self,
         launch: WorkspaceLaunchUpdate,
         mut agent: WorkspaceAgentSummary,
-        now: DateTime<Utc>,
+        now: UtcTimestamp,
     ) {
         if let Some(work_id) = launch.work_id {
             if work_id != self.id {
@@ -760,7 +761,7 @@ impl WorkspaceProjection {
 
     /// SPEC-2359 Phase W-14 (US-70 / FR-375): apply the Active identity of a
     /// newly started Work (the CLI `workspace create` / `ensure` paths).
-    pub fn start_work(&mut self, start: WorkspaceStartUpdate, now: DateTime<Utc>) {
+    pub fn start_work(&mut self, start: WorkspaceStartUpdate, now: UtcTimestamp) {
         self.id = start.workspace_id;
         self.title = start.title;
         self.status_category = WorkspaceStatusCategory::Active;
@@ -775,7 +776,7 @@ impl WorkspaceProjection {
 
     /// SPEC-2359 Phase W-14 (US-70 / FR-375): point the projection at an
     /// existing Work item (the CLI `workspace join` / selection paths).
-    pub fn apply_work_item(&mut self, item: &WorkItem, updated_at: DateTime<Utc>) {
+    pub fn apply_work_item(&mut self, item: &WorkItem, updated_at: UtcTimestamp) {
         self.id = item.id.clone();
         self.title = item.title.clone();
         self.status_category = item.status_category;
@@ -898,7 +899,7 @@ pub struct WorkspaceJournalEntry {
     pub agent_session_id: Option<String>,
     pub agent_current_focus: Option<String>,
     pub agent_title_summary: Option<String>,
-    pub updated_at: DateTime<Utc>,
+    pub updated_at: UtcTimestamp,
 }
 
 fn coordination_scope_for_entry(entry: &BoardEntry) -> Option<String> {
@@ -922,8 +923,6 @@ fn coordination_scope_for_entry(entry: &BoardEntry) -> Option<String> {
 mod tests {
     use std::path::Path;
 
-    use chrono::TimeZone;
-
     use super::*;
 
     #[test]
@@ -946,7 +945,7 @@ mod tests {
             coordination_scope: None,
             affiliation_status: WorkspaceAgentAffiliationStatus::Assigned,
             workspace_id: None,
-            updated_at: Utc::now(),
+            updated_at: UtcTimestamp::now(),
         });
 
         assert_eq!(
@@ -978,7 +977,7 @@ mod tests {
             coordination_scope: None,
             affiliation_status: WorkspaceAgentAffiliationStatus::Assigned,
             workspace_id: None,
-            updated_at: Utc::now(),
+            updated_at: UtcTimestamp::now(),
         });
 
         assert_eq!(
@@ -989,7 +988,7 @@ mod tests {
 
     #[test]
     fn cleanup_candidate_requires_done_or_merged_start_work_workspace_branch() {
-        let created_at = Utc.with_ymd_and_hms(2026, 5, 7, 2, 0, 0).unwrap();
+        let created_at = "2026-05-07T02:00:00Z".parse::<UtcTimestamp>().unwrap();
         let mut projection = WorkspaceProjection::default_for_project("/repo");
         projection.status_category = WorkspaceStatusCategory::Done;
         projection.git_details = Some(GitDetails {
@@ -1030,7 +1029,7 @@ mod tests {
 
     #[test]
     fn cleanup_candidate_preserves_non_workspace_or_active_branches() {
-        let created_at = Utc.with_ymd_and_hms(2026, 5, 7, 2, 0, 0).unwrap();
+        let created_at = "2026-05-07T02:00:00Z".parse::<UtcTimestamp>().unwrap();
         let mut projection = WorkspaceProjection::default_for_project("/repo");
         projection.status_category = WorkspaceStatusCategory::Done;
         projection.git_details = Some(GitDetails {
@@ -1151,7 +1150,7 @@ mod tests {
             coordination_scope: None,
             affiliation_status: WorkspaceAgentAffiliationStatus::Assigned,
             workspace_id: None,
-            updated_at: Utc::now(),
+            updated_at: UtcTimestamp::now(),
         });
         let mut blocked = BoardEntry::new(
             crate::coordination::AuthorKind::Agent,
@@ -1213,7 +1212,7 @@ mod tests {
             coordination_scope: None,
             affiliation_status: WorkspaceAgentAffiliationStatus::Assigned,
             workspace_id: None,
-            updated_at: Utc::now(),
+            updated_at: UtcTimestamp::now(),
         });
         let mut entry_value = serde_json::to_value(
             BoardEntry::new(
@@ -1266,7 +1265,7 @@ mod tests {
             coordination_scope: None,
             affiliation_status: WorkspaceAgentAffiliationStatus::Assigned,
             workspace_id: None,
-            updated_at: Utc::now(),
+            updated_at: UtcTimestamp::now(),
         });
         let mut blocked = BoardEntry::new(
             crate::coordination::AuthorKind::Agent,
@@ -1329,7 +1328,7 @@ mod tests {
             coordination_scope: None,
             affiliation_status: WorkspaceAgentAffiliationStatus::Assigned,
             workspace_id: None,
-            updated_at: Utc::now(),
+            updated_at: UtcTimestamp::now(),
         });
         let mut handoff = BoardEntry::new(
             crate::coordination::AuthorKind::Agent,
@@ -1362,7 +1361,7 @@ mod tests {
 
     #[test]
     fn latest_agent_for_session_equal_timestamp_is_vector_order_independent() {
-        let updated_at = Utc.with_ymd_and_hms(2026, 7, 16, 9, 0, 0).unwrap();
+        let updated_at = "2026-07-16T09:00:00Z".parse::<UtcTimestamp>().unwrap();
         let mut row_a = us70_agent(
             "duplicate-session",
             WorkspaceStatusCategory::Active,
@@ -1394,9 +1393,9 @@ mod tests {
 
     #[test]
     fn old_board_milestone_does_not_rewind_latest_duplicate_session_row() {
-        let replayed_at = Utc.with_ymd_and_hms(2026, 7, 15, 9, 0, 0).unwrap();
-        let work_a_at = Utc.with_ymd_and_hms(2026, 7, 15, 10, 0, 0).unwrap();
-        let work_b_at = Utc.with_ymd_and_hms(2026, 7, 15, 12, 0, 0).unwrap();
+        let replayed_at = "2026-07-15T09:00:00Z".parse::<UtcTimestamp>().unwrap();
+        let work_a_at = "2026-07-15T10:00:00Z".parse::<UtcTimestamp>().unwrap();
+        let work_b_at = "2026-07-15T12:00:00Z".parse::<UtcTimestamp>().unwrap();
         let mut projection = WorkspaceProjection::default_for_project("/repo");
 
         let mut work_a = us70_agent(
@@ -1457,7 +1456,7 @@ mod tests {
         // OLD installed gwtd lacks the SessionStart hook registration path
         // (Phase U-3) so `apply_update` is the only point where this CLI
         // path can guarantee the agent is registered.
-        let updated_at = Utc.with_ymd_and_hms(2026, 5, 15, 12, 0, 0).unwrap();
+        let updated_at = "2026-05-15T12:00:00Z".parse::<UtcTimestamp>().unwrap();
         let mut projection = WorkspaceProjection::default_for_project("/repo");
         assert!(projection.agents.is_empty());
 
@@ -1499,7 +1498,7 @@ mod tests {
         // session already exists in projection.agents (launch flow already
         // registered it with richer state). Only title_summary /
         // current_focus from the update should change.
-        let updated_at = Utc.with_ymd_and_hms(2026, 5, 15, 12, 0, 0).unwrap();
+        let updated_at = "2026-05-15T12:00:00Z".parse::<UtcTimestamp>().unwrap();
         let mut projection = WorkspaceProjection::default_for_project("/repo");
         projection.agents.push(WorkspaceAgentSummary {
             session_id: "session-launched".to_string(),
@@ -1555,9 +1554,9 @@ mod tests {
 
     #[test]
     fn apply_update_targets_latest_duplicate_session_row() {
-        let old_at = Utc.with_ymd_and_hms(2026, 7, 15, 8, 0, 0).unwrap();
-        let current_at = Utc.with_ymd_and_hms(2026, 7, 15, 9, 0, 0).unwrap();
-        let update_at = Utc.with_ymd_and_hms(2026, 7, 15, 10, 0, 0).unwrap();
+        let old_at = "2026-07-15T08:00:00Z".parse::<UtcTimestamp>().unwrap();
+        let current_at = "2026-07-15T09:00:00Z".parse::<UtcTimestamp>().unwrap();
+        let update_at = "2026-07-15T10:00:00Z".parse::<UtcTimestamp>().unwrap();
         let mut projection = WorkspaceProjection::default_for_project("/repo");
         let mut stale = WorkspaceAgentSummary {
             session_id: "session-duplicate".to_string(),
@@ -1615,7 +1614,7 @@ mod tests {
         // Journal entries from the upsert path must have the same shape as
         // entries from the pre-existing-agent path so downstream consumers
         // (UI, broadcasts) cannot tell them apart.
-        let updated_at = Utc.with_ymd_and_hms(2026, 5, 15, 12, 0, 0).unwrap();
+        let updated_at = "2026-05-15T12:00:00Z".parse::<UtcTimestamp>().unwrap();
         let mut projection = WorkspaceProjection::default_for_project("/repo");
 
         let journal = projection.apply_update(
@@ -1660,7 +1659,7 @@ mod tests {
             coordination_scope: None,
             affiliation_status: WorkspaceAgentAffiliationStatus::Unassigned,
             workspace_id: None,
-            updated_at: Utc::now(),
+            updated_at: UtcTimestamp::now(),
         });
 
         assert_eq!(projection.unassigned_agents().count(), 1);
@@ -1673,7 +1672,7 @@ mod tests {
 
     #[test]
     fn stopped_agent_is_removed_from_current_projection_without_losing_summary() {
-        let now = Utc::now();
+        let now = UtcTimestamp::now();
         let mut projection = WorkspaceProjection::default_for_project("/repo");
         projection.status_category = WorkspaceStatusCategory::Active;
         projection.status_text = "Codex is running".to_string();
@@ -1711,7 +1710,7 @@ mod tests {
 
     #[test]
     fn stopped_window_cleanup_preserves_same_session_replacement() {
-        let now = Utc::now();
+        let now = UtcTimestamp::now();
         let mut projection = WorkspaceProjection::default_for_project("/repo");
         let mut old = us70_agent(
             "session-1",
@@ -1721,7 +1720,7 @@ mod tests {
         old.window_id = Some("tab-1::agent-old".to_string());
         let mut live = old.clone();
         live.window_id = Some("tab-1::agent-live".to_string());
-        live.updated_at += chrono::Duration::seconds(1);
+        live.updated_at += time::Duration::seconds(1);
         projection.agents.extend([old, live]);
 
         assert!(projection.remove_agent_session("session-1", Some("tab-1::agent-old"), now));
@@ -1739,7 +1738,7 @@ mod tests {
 
     #[test]
     fn stopped_window_cleanup_preserves_new_session_in_reused_window() {
-        let now = Utc::now();
+        let now = UtcTimestamp::now();
         let mut projection = WorkspaceProjection::default_for_project("/repo");
         let mut old = us70_agent(
             "session-old",
@@ -1749,7 +1748,7 @@ mod tests {
         old.window_id = Some("tab-1::agent-reused".to_string());
         let mut live = old.clone();
         live.session_id = "session-live".to_string();
-        live.updated_at += chrono::Duration::seconds(1);
+        live.updated_at += time::Duration::seconds(1);
         projection.agents.extend([old, live]);
 
         assert!(projection.remove_agent_session("session-old", Some("tab-1::agent-reused"), now));
@@ -1782,7 +1781,7 @@ mod tests {
             coordination_scope: None,
             affiliation_status,
             workspace_id: None,
-            updated_at: Utc.timestamp_opt(1_000, 0).unwrap(),
+            updated_at: UtcTimestamp::from_unix_seconds(1_000).unwrap(),
         }
     }
 
@@ -1803,7 +1802,7 @@ mod tests {
             WorkspaceAgentAffiliationStatus::Assigned,
         );
         incoming.display_name = "Codex 2".to_string();
-        incoming.updated_at = Utc.timestamp_opt(2_000, 0).unwrap();
+        incoming.updated_at = UtcTimestamp::from_unix_seconds(2_000).unwrap();
         projection.upsert_agent_summary(incoming);
 
         let agent = &projection.agents[0];
@@ -1818,7 +1817,10 @@ mod tests {
             Some("blocked focus"),
             "a None incoming focus must not clear the stored focus"
         );
-        assert_eq!(agent.updated_at, Utc.timestamp_opt(2_000, 0).unwrap());
+        assert_eq!(
+            agent.updated_at,
+            UtcTimestamp::from_unix_seconds(2_000).unwrap()
+        );
     }
 
     #[test]
@@ -1829,7 +1831,7 @@ mod tests {
             WorkspaceStatusCategory::Active,
             WorkspaceAgentAffiliationStatus::Assigned,
         );
-        first.updated_at = Utc.timestamp_opt(2_000, 0).unwrap();
+        first.updated_at = UtcTimestamp::from_unix_seconds(2_000).unwrap();
         projection.upsert_agent_summary(first);
         assert_eq!(projection.agents.len(), 1);
 
@@ -1838,11 +1840,11 @@ mod tests {
             WorkspaceStatusCategory::Active,
             WorkspaceAgentAffiliationStatus::Assigned,
         );
-        stale.updated_at = Utc.timestamp_opt(500, 0).unwrap();
+        stale.updated_at = UtcTimestamp::from_unix_seconds(500).unwrap();
         projection.upsert_agent_summary(stale);
         assert_eq!(
             projection.agents[0].updated_at,
-            Utc.timestamp_opt(2_000, 0).unwrap(),
+            UtcTimestamp::from_unix_seconds(2_000).unwrap(),
             "an older upsert must not rewind updated_at"
         );
     }
@@ -1859,7 +1861,7 @@ mod tests {
             WorkspaceAgentAffiliationStatus::Assigned,
         ));
 
-        let now = Utc.timestamp_opt(3_000, 0).unwrap();
+        let now = UtcTimestamp::from_unix_seconds(3_000).unwrap();
         projection.retain_live_agents(["live-other"], now);
 
         assert!(projection.agents.is_empty());
@@ -1894,7 +1896,7 @@ mod tests {
             WorkspaceAgentAffiliationStatus::Assigned,
         ));
 
-        let now = Utc.timestamp_opt(4_000, 0).unwrap();
+        let now = UtcTimestamp::from_unix_seconds(4_000).unwrap();
         projection.retain_live_works(["live-other"], ["tab-1:shell-3"], now);
 
         assert_eq!(projection.agents.len(), 1);
@@ -1920,7 +1922,7 @@ mod tests {
             WorkspaceAgentAffiliationStatus::Assigned,
         ));
 
-        let now = Utc.timestamp_opt(5_000, 0).unwrap();
+        let now = UtcTimestamp::from_unix_seconds(5_000).unwrap();
         projection.retain_live_agents_keep_shells(["live-agent"], now);
 
         assert_eq!(projection.agents.len(), 2);
@@ -1948,7 +1950,7 @@ mod tests {
             WorkspaceAgentAffiliationStatus::Assigned,
         ));
 
-        let now = Utc.timestamp_opt(6_000, 0).unwrap();
+        let now = UtcTimestamp::from_unix_seconds(6_000).unwrap();
         projection.reconcile_shell_status(|id| id == "tab-1:shell-live", now);
 
         let live = projection
@@ -1982,7 +1984,7 @@ mod tests {
         let mut projection = WorkspaceProjection::default_for_project("/repo");
         projection.agents.push(shell_work("tab-1:shell-9"));
 
-        let now = Utc.timestamp_opt(4_000, 0).unwrap();
+        let now = UtcTimestamp::from_unix_seconds(4_000).unwrap();
         projection.retain_live_works(["some-agent"], std::iter::empty(), now);
 
         assert!(projection.agents.is_empty());
@@ -2000,7 +2002,7 @@ mod tests {
             WorkspaceAgentAffiliationStatus::Assigned,
         ));
 
-        projection.retain_live_agents(["live"], Utc.timestamp_opt(3_000, 0).unwrap());
+        projection.retain_live_agents(["live"], UtcTimestamp::from_unix_seconds(3_000).unwrap());
 
         assert_eq!(projection.agents.len(), 1);
         assert_eq!(projection.status_category, WorkspaceStatusCategory::Active);
@@ -2020,7 +2022,7 @@ mod tests {
             WorkspaceAgentAffiliationStatus::Unassigned,
         ));
 
-        let now = Utc.timestamp_opt(4_000, 0).unwrap();
+        let now = UtcTimestamp::from_unix_seconds(4_000).unwrap();
         assert!(projection.assign_agent(
             "sess-1",
             "work-abc",
@@ -2057,7 +2059,7 @@ mod tests {
             pr_url: None,
             pr_created_at: None,
             created_by_start_work: false,
-            created_at: Utc.timestamp_opt(10, 0).unwrap(),
+            created_at: UtcTimestamp::from_unix_seconds(10).unwrap(),
         });
 
         let agent = us70_agent(
@@ -2065,7 +2067,7 @@ mod tests {
             WorkspaceStatusCategory::Active,
             WorkspaceAgentAffiliationStatus::Unassigned,
         );
-        let now = Utc.timestamp_opt(5_000, 0).unwrap();
+        let now = UtcTimestamp::from_unix_seconds(5_000).unwrap();
         projection.apply_launch(
             WorkspaceLaunchUpdate {
                 work_id: Some("work-foo-12345678".to_string()),
@@ -2135,7 +2137,7 @@ mod tests {
                 created_by_start_work: false,
             },
             agent,
-            Utc.timestamp_opt(6_000, 0).unwrap(),
+            UtcTimestamp::from_unix_seconds(6_000).unwrap(),
         );
 
         assert_eq!(projection.title, "Resume Work");
@@ -2154,7 +2156,7 @@ mod tests {
     #[test]
     fn start_work_applies_active_identity_with_defaults() {
         let mut projection = WorkspaceProjection::default_for_project("/repo");
-        let now = Utc.timestamp_opt(7_000, 0).unwrap();
+        let now = UtcTimestamp::from_unix_seconds(7_000).unwrap();
         projection.start_work(
             WorkspaceStartUpdate {
                 workspace_id: "workspace-1".to_string(),
@@ -2183,7 +2185,7 @@ mod tests {
     #[test]
     fn apply_work_item_copies_status_fields() {
         let mut projection = WorkspaceProjection::default_for_project("/repo");
-        let now = Utc.timestamp_opt(8_000, 0).unwrap();
+        let now = UtcTimestamp::from_unix_seconds(8_000).unwrap();
         let item = WorkItem {
             id: "item-1".to_string(),
             title: "Item Title".to_string(),
@@ -2229,7 +2231,7 @@ mod tests {
         projection.next_action = Some("next".to_string());
         projection.board_refs.push("board-1".to_string());
 
-        let now = Utc.timestamp_opt(9_000, 0).unwrap();
+        let now = UtcTimestamp::from_unix_seconds(9_000).unwrap();
         projection.reset_idle_identity("My Repo", now);
 
         assert_eq!(projection.title, "My Repo Work");
@@ -2264,10 +2266,10 @@ mod tests {
             pr_url: None,
             pr_created_at: None,
             created_by_start_work: false,
-            created_at: Utc.timestamp_opt(10, 0).unwrap(),
+            created_at: UtcTimestamp::from_unix_seconds(10).unwrap(),
         });
 
-        let now = Utc.timestamp_opt(10_000, 0).unwrap();
+        let now = UtcTimestamp::from_unix_seconds(10_000).unwrap();
         projection.clear_git_details_to_idle(now);
 
         assert_eq!(projection.git_details, None);
@@ -2312,8 +2314,8 @@ mod tests {
 
     #[test]
     fn duplicate_session_derived_state_uses_only_latest_row() {
-        let older = Utc.timestamp_opt(10_000, 0).unwrap();
-        let newer = Utc.timestamp_opt(20_000, 0).unwrap();
+        let older = UtcTimestamp::from_unix_seconds(10_000).unwrap();
+        let newer = UtcTimestamp::from_unix_seconds(20_000).unwrap();
         let mut projection = WorkspaceProjection::default_for_project("/repo");
         projection.status_category = WorkspaceStatusCategory::Idle;
 
@@ -2378,7 +2380,7 @@ mod tests {
                 created_by_start_work: false,
             },
             agent,
-            Utc.timestamp_opt(8_000, 0).unwrap(),
+            UtcTimestamp::from_unix_seconds(8_000).unwrap(),
         );
 
         assert_eq!(projection.id, "work-new-22222222");
@@ -2432,7 +2434,7 @@ mod tests {
                 created_by_start_work: false,
             },
             agent,
-            Utc.timestamp_opt(8_100, 0).unwrap(),
+            UtcTimestamp::from_unix_seconds(8_100).unwrap(),
         );
 
         assert_eq!(projection.owner.as_deref(), Some("Issue #42"));

@@ -78,6 +78,37 @@ static BRANCH_PROTECTION_READS: RemoteReadCache<
 /// Reviewing PRs whose gate last routed to "required CI still running".
 static CI_WAIT_HOLDS: RemoteReadCache<()> = RemoteReadCache::new();
 
+/// Issue #7300: review diffs of pull requests over GitHub's 300-file `gh pr
+/// diff` limit, keyed by repository, PR and head SHA.
+static OVERSIZED_PR_DIFFS: RemoteReadCache<String> = RemoteReadCache::new();
+
+/// The diff a review dispatch reads. `gh pr diff` permanently answers HTTP 406
+/// for a head that changes more than 300 files, so that head is read once
+/// through the files API and served from `cache` afterwards: the same head
+/// costs no further GitHub call and no repeated `pr-diff-readback` failure.
+/// Every other outcome, including every other failure, is passed through
+/// uncached.
+fn read_review_diff<E: fmt::Display>(
+    cache: &RemoteReadCache<String>,
+    key: String,
+    now: Instant,
+    fetch_diff: impl FnOnce() -> Result<Option<String>, E>,
+    fetch_files_diff: impl FnOnce() -> Result<String, E>,
+) -> Result<String, E> {
+    if let Some(diff) = cache.get(&key, now, Some(Duration::MAX)) {
+        return Ok(diff);
+    }
+    match fetch_diff() {
+        Ok(diff) => Ok(diff.unwrap_or_default()),
+        Err(error) if gwt_git::pr_status::pr_diff_exceeds_github_limit(&error.to_string()) => {
+            let diff = fetch_files_diff()?;
+            cache.insert(key, now, diff.clone());
+            Ok(diff)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 /// Issue #6877 AC-2: how long a Reviewing PR whose required CI is still
 /// running waits before a timer-driven scan reads its gate evidence again.
 const ISSUE_MONITOR_CI_WAIT_RECHECK: Duration = Duration::from_secs(60);
@@ -114,8 +145,20 @@ fn ci_wait_hold_active(repo_path: &Path, pr: u64, now: Instant) -> bool {
 /// Launch discovery spreads cold and deep timelines over scans. Completion
 /// probes below retain their separate, strict full-read contract.
 const OPEN_PR_TIMELINE_CHUNK: usize = 5;
-type PendingTimelineReads =
-    HashMap<String, (Instant, Arc<Mutex<crate::cli::issue::LinkedPrBulkRead>>)>;
+/// Issue #6877 AC-2: periodic scans read at most one discovery page per this
+/// interval. It sits between one and two 30-second scan periods, so every
+/// other scan reads: a queue longer than one cache lifetime otherwise costs a
+/// `gh` start on every scan. Unread Issues keep their prior launch holds.
+const OPEN_PR_TIMELINE_PAGE_INTERVAL: Duration = Duration::from_secs(45);
+/// Per repository: last activity, pending pages, and the last page read.
+type PendingTimelineReads = HashMap<
+    String,
+    (
+        Instant,
+        Arc<Mutex<crate::cli::issue::LinkedPrBulkRead>>,
+        Option<Instant>,
+    ),
+>;
 static PENDING_TIMELINE_READS: OnceLock<Mutex<PendingTimelineReads>> = OnceLock::new();
 
 fn fetch_open_linked_prs_for_monitor(
@@ -124,12 +167,33 @@ fn fetch_open_linked_prs_for_monitor(
     numbers: &[u64],
     observe: impl FnMut(u64, &[crate::cli::LinkedPrSummary]),
 ) -> std::io::Result<BTreeMap<u64, Vec<crate::cli::LinkedPrSummary>>> {
-    let now = Instant::now();
-    fetch_linked_prs_bulk_for_monitor_with(
+    fetch_open_linked_prs_for_monitor_with(
         owner,
         repo,
         numbers,
         monitor_read_max_age(),
+        Instant::now(),
+        observe,
+        |query| crate::cli::issue::run_linked_prs_bulk_query(owner, repo, query),
+    )
+}
+
+/// Injectable core of [`fetch_open_linked_prs_for_monitor`]: `run` executes
+/// one bulk query and answers its JSON body.
+fn fetch_open_linked_prs_for_monitor_with(
+    owner: &str,
+    repo: &str,
+    numbers: &[u64],
+    max_age: Option<Duration>,
+    now: Instant,
+    observe: impl FnMut(u64, &[crate::cli::LinkedPrSummary]),
+    mut run: impl FnMut(&str) -> std::io::Result<String>,
+) -> std::io::Result<BTreeMap<u64, Vec<crate::cli::LinkedPrSummary>>> {
+    fetch_linked_prs_bulk_for_monitor_with(
+        owner,
+        repo,
+        numbers,
+        max_age,
         now,
         observe,
         |missing, observe| {
@@ -140,7 +204,7 @@ fn fetch_open_linked_prs_for_monitor(
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 // Discard idle histories, without resetting an active long
                 // queue before its later pages have had a turn.
-                reads.retain(|_, (started, _)| {
+                reads.retain(|_, (started, _, _)| {
                     now.saturating_duration_since(*started) <= ISSUE_MONITOR_PERIODIC_READ_MAX_AGE
                 });
                 if reads.len() >= REMOTE_READ_CACHE_CAPACITY {
@@ -152,8 +216,17 @@ fn fetch_open_linked_prs_for_monitor(
                         owner.to_ascii_lowercase(),
                         repo.to_ascii_lowercase()
                     ))
-                    .or_insert_with(|| (now, Arc::new(Mutex::new(Default::default()))));
+                    .or_insert_with(|| (now, Arc::new(Mutex::new(Default::default())), None));
                 entry.0 = now;
+                // A fresh scan (no max age) is never deferred.
+                if max_age.is_some()
+                    && entry.2.is_some_and(|read_at| {
+                        now.saturating_duration_since(read_at) < OPEN_PR_TIMELINE_PAGE_INTERVAL
+                    })
+                {
+                    return Ok(BTreeMap::new());
+                }
+                entry.2 = Some(now);
                 entry.1.clone()
             };
             let mut pending = pending
@@ -161,7 +234,7 @@ fn fetch_open_linked_prs_for_monitor(
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             pending.sync_numbers(missing, OPEN_PR_TIMELINE_CHUNK);
             let mut linked = BTreeMap::new();
-            pending.read_next(owner, repo, |number, prs| {
+            pending.read_next_with(&mut run, |number, prs| {
                 observe(number, prs);
                 linked.insert(number, prs.to_vec());
             })?;
@@ -429,15 +502,11 @@ pub fn execute_claim_renewal<C: IssueClient + ?Sized>(
             conflicting_claims: Vec::new(),
         });
     }
-    let expires_at = chrono::DateTime::parse_from_rfc3339(now)
-        .ok()
-        .and_then(|now| {
-            now.checked_add_signed(chrono::Duration::seconds(
-                (*ttl_secs).min(i64::MAX as u64) as i64
-            ))
-        })
-        .map(|expires| expires.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
-        .unwrap_or_else(|| now.to_string());
+    let expires_at = gwt_core::timestamp::shift_rfc3339_seconds(
+        now,
+        time::Duration::seconds((*ttl_secs).min(i64::MAX as u64) as i64),
+    )
+    .unwrap_or_else(|| now.to_string());
     renew_claim_mutation(
         client,
         IssueNumber(*issue_number),
@@ -1050,11 +1119,16 @@ pub(crate) fn read_execution_observations_from_inventory(
                 settlement
             };
             let dead_holder_hosts = if !process_held
-                && diagnosis.holder_runtime.as_deref() == Some("host_dead")
+                && matches!(
+                    diagnosis.holder_runtime.as_deref(),
+                    Some("host_dead" | "terminal" | "defunct" | "child_exited")
+                )
                 && matches!(
                     settlement,
                     IssueMonitorExecutionSettlement::Completed
                         | IssueMonitorExecutionSettlement::Blocked
+                        | IssueMonitorExecutionSettlement::Interrupted
+                        | IssueMonitorExecutionSettlement::RecoveryExhausted
                 ) {
                 dead_holder_hosts(&sessions_dir, &diagnosis)
             } else {
@@ -1065,7 +1139,10 @@ pub(crate) fn read_execution_observations_from_inventory(
                 crate::issue_monitor::IssueMonitorExecutionObservation {
                     settlement,
                     process_held,
-                    holder_host_dead: diagnosis.holder_runtime.as_deref() == Some("host_dead"),
+                    // A terminal sidecar can outlive its GUI host. Its exact
+                    // PID/start-time death remains independent runtime evidence.
+                    holder_host_dead: diagnosis.holder_runtime.as_deref() == Some("host_dead")
+                        || !dead_holder_hosts.is_empty(),
                     exited_holder_session_id: diagnosis.holder_session_id.clone().filter(|_| {
                         matches!(
                             diagnosis.holder_runtime.as_deref(),
@@ -1127,12 +1204,12 @@ pub fn verified_live_launch_owners(
     else {
         return owners;
     };
-    let fresh = chrono::DateTime::parse_from_rfc3339(&snapshot.observed_at)
+    let fresh = gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(&snapshot.observed_at)
         .ok()
-        .zip(chrono::DateTime::parse_from_rfc3339(now).ok())
+        .zip(gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(now).ok())
         .is_some_and(|(observed, now)| {
             now >= observed
-                && now.signed_duration_since(observed).num_seconds()
+                && now.signed_duration_since(observed).whole_seconds()
                     <= crate::issue_monitor::IDLE_WINDOW_SNAPSHOT_MAX_AGE_SECS
         });
     if !fresh {
@@ -1412,7 +1489,7 @@ pub fn refresh_issue_monitor_child_activity(
             })
             .collect::<Vec<_>>(),
     );
-    let sampled_at = chrono::Utc::now().to_rfc3339();
+    let sampled_at = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
     for (root, owner) in &roots {
         let Some((issue, identity, observed, tools)) = owner else {
             continue;
@@ -1443,7 +1520,7 @@ pub fn refresh_issue_monitor_child_activity(
                 *issue,
                 &identity.session_id,
                 &sampled_at,
-                &chrono::Utc::now().to_rfc3339(),
+                &gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
             );
         }
     }
@@ -1578,8 +1655,8 @@ pub fn issue_monitor_daemon_payloads(
 pub fn issue_monitor_read_only_daemon_payloads(
     monitor: &IssueMonitorState,
 ) -> Vec<IssueMonitorDaemonPayload> {
-    let now_instant = chrono::Utc::now();
-    let now = now_instant.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let now_instant = gwt_core::timestamp::UtcTimestamp::now();
+    let now = now_instant.to_rfc3339_seconds();
     let mut status = monitor.status_view_at(&now);
     status.github_budget = Some(gwt_core::github_budget::status_by_resource(
         &gwt_core::github_budget::BudgetLedger::global().snapshot(now_instant),
@@ -1867,9 +1944,9 @@ where
                                 entry.snapshot.updated_at.0 == *updated_at
                                     // The replacement may finish after the list read.
                                     // A newer authoritative read supersedes that list.
-                                    || chrono::DateTime::parse_from_rfc3339(&entry.snapshot.updated_at.0)
+                                    || gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(&entry.snapshot.updated_at.0)
                                         .ok()
-                                        .zip(chrono::DateTime::parse_from_rfc3339(updated_at).ok())
+                                        .zip(gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(updated_at).ok())
                                         .is_some_and(|(refreshed, listed)| refreshed > listed)
                             }) =>
                         {
@@ -2059,7 +2136,7 @@ fn load_open_pr_launch_observations(
     if candidates.is_empty() {
         return (BTreeMap::new(), None, BTreeMap::new());
     }
-    let observed_at = chrono::Utc::now().to_rfc3339();
+    let observed_at = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
     // Existing holds must be refreshable even when expensive association
     // discovery fails. Read them first, and reuse each PR's result this scan.
     let mut readbacks = BTreeMap::new();
@@ -2482,7 +2559,7 @@ pub fn refresh_issue_cache_for_scan_if_stale(
     if !crate::issue_cache::issue_cache_refresh_status(
         cache_root,
         crate::issue_cache::ISSUE_CACHE_TTL,
-        chrono::Utc::now(),
+        gwt_core::timestamp::UtcTimestamp::now(),
     )
     .stale
     {
@@ -2522,11 +2599,11 @@ fn cache_live_plain_issue_sources(
             .updated_at
             .as_deref()
             .ok_or_else(|| format!("Issue #{number} has no listed revision"))?;
-        let listed_at = chrono::DateTime::parse_from_rfc3339(updated_at)
+        let listed_at = gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(updated_at)
             .map_err(|error| format!("Issue #{number} has an invalid listed revision: {error}"))?;
         // A targeted read can be newer than a retained listing page.
         if cached.as_ref().is_some_and(|entry| {
-            chrono::DateTime::parse_from_rfc3339(&entry.snapshot.updated_at.0)
+            gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(&entry.snapshot.updated_at.0)
                 .is_ok_and(|cached_at| cached_at > listed_at)
         }) {
             continue;
@@ -2646,12 +2723,9 @@ pub fn scan_loaded_issue_monitor_candidates_for_project_tab(
             if let Some(identity) = gwt_core::usage::codex::read_auth_account_identity(&home) {
                 monitor.reconcile_provider_account("codex", &identity, now);
             }
-            if let Ok(at) = chrono::DateTime::parse_from_rfc3339(now) {
+            if let Some(at) = gwt_core::timestamp::UtcTimestamp::parse_rfc3339(now) {
                 monitor.reconcile_provider_usage(
-                    &gwt_core::usage::codex::read_codex_account(
-                        &home,
-                        at.with_timezone(&chrono::Utc),
-                    ),
+                    &gwt_core::usage::codex::read_codex_account(&home, at),
                     now,
                 );
             }
@@ -2929,7 +3003,7 @@ fn spec_completion_is_possible(issue: &IssueMonitorIssue) -> bool {
         && issue
             .updated_at
             .as_deref()
-            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+            .and_then(|value| gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(value).ok())
             .is_some()
 }
 
@@ -3796,9 +3870,18 @@ fn advance_one_autonomous_issue(
                     // wait for, until the stuck sweep eventually reset it.
                     let diff =
                         run_budgeted_readback_stage(IssueMonitorScanStage::PrDiffReadback, || {
-                            gwt_git::pr_status::try_fetch_pr_diff(repo_path, pr, 200_000)
-                        })?
-                        .unwrap_or_default();
+                            read_review_diff(
+                                &OVERSIZED_PR_DIFFS,
+                                format!("{}#{pr}@{sha}", repo_path.display()),
+                                Instant::now(),
+                                || gwt_git::pr_status::try_fetch_pr_diff(repo_path, pr, 200_000),
+                                || {
+                                    gwt_git::pr_status::try_fetch_pr_files_diff(
+                                        repo_path, pr, 200_000,
+                                    )
+                                },
+                            )
+                        })?;
                     let linked_issue_kind = issues
                         .iter()
                         .find(|issue| issue.number == issue_number)
@@ -4930,8 +5013,8 @@ pub(crate) mod tests {
             .clone()
             .unwrap();
         assert!(
-            chrono::DateTime::parse_from_rfc3339(&activity).unwrap()
-                >= chrono::DateTime::parse_from_rfc3339(&now).unwrap()
+            gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(&activity).unwrap()
+                >= gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(&now).unwrap()
         );
 
         let settled = crate::cli::execution_state::settle(
@@ -4950,7 +5033,7 @@ pub(crate) mod tests {
         refresh_issue_monitor_child_activity(
             &mut monitor,
             repo.path(),
-            &chrono::Utc::now().to_rfc3339(),
+            &gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
         );
         assert_eq!(
             monitor
@@ -5020,8 +5103,8 @@ pub(crate) mod tests {
         )
         .save(&gwt_agent::runtime_state_path(&sessions_dir, session_id))
         .unwrap();
-        let now = chrono::Utc::now();
-        let old = (now - chrono::Duration::hours(2)).to_rfc3339();
+        let now = gwt_core::timestamp::UtcTimestamp::now();
+        let old = (now - time::Duration::hours(2)).to_rfc3339();
         let now = now.to_rfc3339();
         let mut monitor = test_monitor(Default::default());
         monitor.set_autonomous_mode(true);
@@ -5139,7 +5222,7 @@ pub(crate) mod tests {
             from_session_id: session.id.clone(),
             to_session_id: "Elvor".into(),
             reason: "verified dead predecessor".into(),
-            requested_at: chrono::Utc::now(),
+            requested_at: gwt_core::timestamp::UtcTimestamp::now(),
         };
         execution_state::prepare_generation_takeover(repo.path(), owner, &takeover).unwrap();
         let binding =
@@ -5472,6 +5555,7 @@ pub(crate) mod tests {
                     unmet: vec!["AC-1".into()],
                 },
                 settled_at: "2026-11-13T00:00:00Z".into(),
+                verification_declaration: None,
             });
         prefs.open_pr_observations.insert(
             43,
@@ -5508,7 +5592,7 @@ pub(crate) mod tests {
         }
         let item = parse_pr_inventory_json(
             r#"[{"number":7,"state":"OPEN","isDraft":false,"headRefName":"work/issue-42","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[{"status":"IN_PROGRESS"}]}]"#,
-            chrono::Utc::now(),
+            gwt_core::timestamp::UtcTimestamp::now(),
         ).unwrap().remove(0);
         PR_LIFECYCLE_READS.insert(
             format!("{}#7", repo_path.display()),
@@ -6392,8 +6476,8 @@ pub(crate) mod tests {
     fn github_budget_pause_is_visible_in_the_gui_status_payload() {
         let home = tempfile::tempdir().expect("tempdir");
         let _home = gwt_core::test_support::ScopedGwtHome::set(home.path().join("home"));
-        let now = chrono::Utc::now();
-        let deadline = now + chrono::Duration::minutes(30);
+        let now = gwt_core::timestamp::UtcTimestamp::now();
+        let deadline = now + time::Duration::minutes(30);
         gwt_core::github_budget::BudgetLedger::global().record_block(
             &gwt_core::github_quota::RateLimitBlock {
                 resource: "core".to_string(),
@@ -7425,7 +7509,7 @@ pub(crate) mod tests {
         let mut event = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Pause,
             "work-stopped-requeue",
-            chrono::Utc::now(),
+            gwt_core::timestamp::UtcTimestamp::now(),
         );
         event.agent_session_id = Some(session_id.to_string());
         let shard_path = gwt_core::paths::gwt_work_event_shard_path(
@@ -7528,7 +7612,7 @@ pub(crate) mod tests {
             session_binding_id: "binding-fresh-launch".to_string(),
             initial_session_id: "fresh-launch-holder".to_string(),
             entrypoint: "gwt-execute".to_string(),
-            requested_at: chrono::Utc::now(),
+            requested_at: gwt_core::timestamp::UtcTimestamp::now(),
         };
         execution_state::prepare_fresh_linked_owner_launch_successor(
             worktree.path(),
@@ -7605,6 +7689,94 @@ pub(crate) mod tests {
         .save(&gwt_agent::runtime_state_path(&sessions_dir, session_id))
         .unwrap();
         (owner, session_id.to_string(), host_started)
+    }
+
+    #[test]
+    fn issue_7526_ci_wait_terminal_sidecar_preserves_dead_host_recovery() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for provider in [gwt_agent::AgentId::Codex, gwt_agent::AgentId::ClaudeCode] {
+            let home = tempfile::tempdir().unwrap();
+            let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+            let _userprofile =
+                gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+            let _session_env = [
+                gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV),
+                gwt_core::test_support::ScopedEnvVar::unset(
+                    gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV,
+                ),
+            ];
+            let worktree = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+            let (_, session_id, _) = completed_child_exit_fixture(worktree.path());
+            let sessions = gwt_core::paths::gwt_sessions_dir();
+            let mut session =
+                gwt_agent::Session::load(&sessions.join(format!("{session_id}.toml"))).unwrap();
+            session.agent_id = provider.clone();
+            session.update_status(gwt_agent::AgentStatus::Stopped);
+            session.save(&sessions).unwrap();
+            std::fs::remove_file(gwt_agent::runtime_state_path(&sessions, &session_id)).unwrap();
+            let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
+                .unwrap()
+                .unwrap();
+            let dead_pid = i32::MAX as u32;
+            gwt_agent::SessionRuntimeState::for_execution_process(
+                gwt_agent::AgentStatus::Stopped,
+                &identity,
+                41,
+                1,
+                dead_pid,
+                1,
+            )
+            .save(&gwt_agent::runtime_state_path_for_pid(
+                &sessions,
+                dead_pid,
+                &session_id,
+            ))
+            .unwrap();
+
+            let now = "2026-09-07T04:10:00Z";
+            let mut monitor = test_monitor(IssueMonitorConfig {
+                enabled: true,
+                max_active: 1,
+                ..Default::default()
+            });
+            monitor.record_candidate(issue(42));
+            monitor.complete_active_launch_at(42, "previous-tab::finished", "2026-09-07T04:00:00Z");
+            monitor.declare_autonomous_wait(42, "PR CI / auto-merge", "PR merged", now);
+            let prefs = monitor.prefs();
+            let mut restarted = test_monitor_with_prefs(monitor.config.clone(), prefs);
+            restarted.record_candidate(issue(42));
+            assert!(restarted.autonomous_wait(42).is_some());
+            let observed = read_execution_observations(worktree.path(), &[42]);
+            assert!(!observed[&42].process_held);
+            assert!(
+                observed[&42].holder_host_dead,
+                "{provider:?}: terminal proof retains host death"
+            );
+            assert_eq!(
+                observed[&42].dead_holder_hosts,
+                std::collections::BTreeSet::from([(dead_pid, 1)])
+            );
+
+            let outcome = reconcile_issue_monitor_windows(&mut restarted, worktree.path(), now);
+            assert_eq!(outcome.released, vec![42], "{provider:?}");
+            assert!(
+                outcome.pane_closes.is_empty(),
+                "the old GUI no longer exists"
+            );
+            assert_eq!(restarted.active_count(), 0);
+            assert_eq!(restarted.agent_status_at(now).occupied_slot_count, Some(0));
+            assert_eq!(restarted.attempt_count(42), monitor.attempt_count(42));
+            restarted.rebase_daemon_driver_prefs(&monitor.prefs());
+            reconcile_issue_monitor_windows(&mut restarted, worktree.path(), now);
+            assert_eq!(
+                restarted.active_count(),
+                0,
+                "fresh evidence retires a stale merged reservation"
+            );
+        }
     }
 
     #[test]
@@ -8909,7 +9081,7 @@ pub(crate) mod tests {
             cache_root.join("refresh-meta.json"),
             serde_json::json!({
                 "last_full_refresh":
-                    (chrono::Utc::now() - chrono::Duration::minutes(65)).to_rfc3339(),
+                    (gwt_core::timestamp::UtcTimestamp::now() - time::Duration::minutes(65)).to_rfc3339(),
                 "ttl_minutes": 15,
             })
             .to_string(),
@@ -9028,7 +9200,7 @@ pub(crate) mod tests {
             .unwrap()
             .renewed());
         let refresh_meta = cache_root.join("refresh-meta.json");
-        let fresh = serde_json::json!({"last_full_refresh": chrono::Utc::now().to_rfc3339(), "ttl_minutes": 15}).to_string();
+        let fresh = serde_json::json!({"last_full_refresh": gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(), "ttl_minutes": 15}).to_string();
         std::fs::write(&refresh_meta, &fresh).unwrap();
         let fake_gh = write_fake_gh_listing(temp.path(), &[42]);
         let _gh = gwt_core::test_support::ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
@@ -9040,7 +9212,7 @@ pub(crate) mod tests {
             )
             .unwrap(),
         );
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
         let mut monitor = test_monitor(Default::default());
         monitor.set_source_repository(Some(("akiojin", "gwt")));
         monitor.terminal_queue_push(&[42], "operator", &now);
@@ -10895,9 +11067,125 @@ mod remote_read_cache_tests {
         assert_eq!(fetches.get(), 4, "an expired entry is read again");
     }
 
+    /// Issue #6877 AC-2: periodic scans read launch-discovery timelines at
+    /// most one page per [`OPEN_PR_TIMELINE_PAGE_INTERVAL`], so a queue longer
+    /// than one cache lifetime no longer costs one `gh` start on every scan.
+    /// A fresh (control-driven) scan is never deferred.
+    #[test]
+    fn open_pr_timeline_pages_are_paced_across_periodic_scans() {
+        let owner = "issue6877";
+        let repo = "timeline-pace";
+        let numbers: Vec<u64> = (1..=12).collect();
+        let now = Instant::now();
+        let pages = Cell::new(0);
+        let run = |query: &str| {
+            pages.set(pages.get() + 1);
+            let issues: serde_json::Map<_, _> = numbers
+                .iter()
+                .filter(|number| query.contains(&format!("i{number}: issue(")))
+                .map(|number| {
+                    (
+                        format!("i{number}"),
+                        serde_json::json!({"timelineItems": {
+                            "nodes": [],
+                            "pageInfo": {"hasNextPage": false}
+                        }}),
+                    )
+                })
+                .collect();
+            Ok(serde_json::json!({"data": {"repository": issues}}).to_string())
+        };
+        let scan = |max_age, at| {
+            fetch_open_linked_prs_for_monitor_with(
+                owner,
+                repo,
+                &numbers,
+                max_age,
+                at,
+                |_, _| {},
+                run,
+            )
+            .unwrap()
+        };
+        let max_age = Some(ISSUE_MONITOR_PERIODIC_READ_MAX_AGE);
+
+        assert_eq!(scan(max_age, now).len(), OPEN_PR_TIMELINE_CHUNK);
+        assert_eq!(pages.get(), 1, "the first scan reads one page");
+
+        let next_scan = scan(max_age, now + Duration::from_secs(30));
+        assert_eq!(pages.get(), 1, "the next 30-second scan spawns no read");
+        assert_eq!(
+            next_scan.len(),
+            OPEN_PR_TIMELINE_CHUNK,
+            "completed timelines still answer from the cache"
+        );
+
+        let later = scan(max_age, now + Duration::from_secs(60));
+        assert_eq!(pages.get(), 2, "the scan after that reads the next page");
+        assert_eq!(later.len(), 2 * OPEN_PR_TIMELINE_CHUNK);
+
+        scan(None, now + Duration::from_secs(61));
+        assert_eq!(pages.get(), 3, "a fresh scan is never deferred");
+    }
+
     /// Issue #6877 AC-2: a held PR's lifecycle (`gh pr view`) is read once per
     /// read max age during periodic scans; errors are not cached and a fresh
     /// scan (no max age) always reads again.
+    /// Issue #7300 AC-1..AC-4: a PR over GitHub's 300-file diff limit reads
+    /// through the files API once per head SHA; later scans of that head call
+    /// GitHub for neither read and report no `pr-diff-readback` failure.
+    #[test]
+    fn oversized_pr_diff_is_classified_once_per_head_sha() {
+        const TOO_LARGE: &str = "gh pr diff: HTTP 406: Sorry, the diff exceeded the maximum \
+                                 number of files (300).";
+        let cache: RemoteReadCache<String> = RemoteReadCache::new();
+        let now = Instant::now();
+        let (diffs, files) = (Cell::new(0), Cell::new(0));
+        let scan = |key: &str, diff: Result<Option<String>, String>| {
+            run_budgeted_readback_stage(IssueMonitorScanStage::PrDiffReadback, || {
+                read_review_diff(
+                    &cache,
+                    key.to_string(),
+                    now,
+                    || {
+                        diffs.set(diffs.get() + 1);
+                        diff
+                    },
+                    || {
+                        files.set(files.get() + 1);
+                        Ok("files diff".to_string())
+                    },
+                )
+            })
+        };
+        let too_large = || Err(TOO_LARGE.to_string());
+
+        for _ in 0..3 {
+            assert_eq!(scan("repo#7@abc", too_large()).unwrap(), "files diff");
+        }
+        assert_eq!(
+            (diffs.get(), files.get()),
+            (1, 1),
+            "the same head is never asked of GitHub again"
+        );
+
+        // A new head is a new question.
+        assert_eq!(scan("repo#7@def", too_large()).unwrap(), "files diff");
+        assert_eq!((diffs.get(), files.get()), (2, 2));
+
+        // AC-4: an ordinary PR keeps the live `gh pr diff` on every scan, and
+        // any other failure still degrades the scan and is never cached.
+        for _ in 0..2 {
+            assert_eq!(
+                scan("repo#8@abc", Ok(Some("small".to_string()))).unwrap(),
+                "small"
+            );
+        }
+        let failure = scan("repo#8@abc", Err("gh pr diff: HTTP 502".to_string())).unwrap_err();
+        assert_eq!(failure.stage, IssueMonitorScanStage::PrDiffReadback);
+        assert_eq!((diffs.get(), files.get()), (5, 2));
+    }
+
     #[test]
     fn cached_remote_reads_are_reused_within_the_periodic_max_age() {
         let cache: RemoteReadCache<u32> = RemoteReadCache::new();

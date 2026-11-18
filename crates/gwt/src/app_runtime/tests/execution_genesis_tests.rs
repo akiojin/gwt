@@ -270,6 +270,7 @@ fn review_dispatch_launch_completion_keeps_the_implementation_binding() {
     let project = temp.path().join("project");
     pane_control_tests::control_init_repo(&project);
     seed_owner_fixture_roster(&project, 8);
+    configure_owner_fixture_tools(&project, &["pane-contract-fixture"]);
     let owner = Arc::new(
         owner_fixture_block_on(
             gwt::project_runtime::test_support::ProjectOwnerHarness::start_with_monitor(&project),
@@ -376,6 +377,7 @@ fn assert_genesis_pty_failure_recovers_member(roster_read_fails: bool) {
     fs::create_dir_all(&project).unwrap();
     init_repo_with_initial_commit(&project);
     seed_owner_fixture_roster(&project, 8);
+    configure_owner_fixture_tools(&project, &["pane-contract-fixture"]);
     let executor = tokio::runtime::Runtime::new().unwrap();
     executor.block_on(async {
         let owner = production_owner_fixture(&project).await;
@@ -457,7 +459,20 @@ fn assert_genesis_pty_failure_recovers_member(roster_read_fails: bool) {
         owner.shutdown().await;
         let mut retained_during_startup_fault = None;
         if roster_read_fails {
-            let failed_retry = production_owner_fixture(&project).await;
+            let failed_retry =
+                gwt::project_runtime::test_support::ProjectOwnerHarness::start(&project)
+                    .await
+                    .expect("the owner stays reachable to report registry recovery");
+            let health = failed_retry.command(OwnerCommand::Health).await.unwrap();
+            assert_eq!(health["reconciliation_required"], true, "{health}");
+            assert!(
+                health["agent_registry_initialization_error"]
+                    .as_str()
+                    .is_some_and(
+                        |error| error.contains("Shared Agent registry initialization failed")
+                    ),
+                "{health}"
+            );
             retained_during_startup_fault =
                 Some(durable_launch_recovery_exists(&sessions, &source.id).unwrap());
             failed_retry.shutdown().await;
@@ -497,7 +512,7 @@ fn assert_genesis_pty_failure_recovers_member(roster_read_fails: bool) {
             session_binding_id: "genesis-pty-retry-binding".into(),
             initial_session_id: "genesis-pty-retry-session".into(),
             entrypoint: "$gwt-execute #2359".into(),
-            requested_at: Utc::now(),
+            requested_at: gwt_core::timestamp::UtcTimestamp::now(),
         };
         gwt::cli::execution_state::prepare_fresh_linked_owner_launch_successor(
             &source.worktree_path,
@@ -864,7 +879,7 @@ fn terminalized_genesis_compensation_pauses_instead_of_discarding_resumed_work()
         &existing.board_refs,
         existing.execution_containers.first().cloned(),
         Some(&prior.session_id),
-        Utc::now(),
+        gwt_core::timestamp::UtcTimestamp::now(),
     )
     .expect("pause prior Session");
     gwt_core::workspace_projection::mark_workspace_agent_stopped(&repo, &prior.session_id, None)
@@ -899,7 +914,7 @@ fn terminalized_genesis_compensation_pauses_instead_of_discarding_resumed_work()
         session_binding_id: "genesis-late-cleanup-binding".to_string(),
         initial_session_id: "genesis-late-cleanup-session".to_string(),
         entrypoint: "$gwt-execute #2359".to_string(),
-        requested_at: Utc::now(),
+        requested_at: gwt_core::timestamp::UtcTimestamp::now(),
     };
     gwt::cli::execution_state::prepare_fresh_linked_owner_launch_successor(
         &repo, owner, &successor,

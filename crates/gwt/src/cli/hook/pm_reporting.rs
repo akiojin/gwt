@@ -1128,15 +1128,28 @@ mod tests {
         );
         let notification = "<task-notification>\n<task-id>background-1</task-id>\n<tool-use-id>tool-1</tool-use-id>\n<output-file>/tmp/result</output-file>\n<status>completed</status>\n<summary>Background task completed</summary>\n</task-notification>";
         let extended_notification = notification.replace("</task-notification>", "<note>Read the result</note>\n<result>Done</result>\n<usage><tool_uses>1</tool_uses></usage>\n</task-notification>");
+        let combined = format!("{portable_tick}\n{notification}\n$gwt-pm");
+        let protected = crate::pm_registry::protected_pm_delivery_prompt(
+            "00000000-0000-4000-8000-000000000001",
+            "Board update",
+        )
+        .unwrap();
+        let combined_protected = format!("{protected}\r\n\r\n{portable_tick}");
         for prompt in [
             "$gwt-pm",
             tick.as_str(),
             portable_tick.as_str(),
             notification,
             extended_notification.as_str(),
+            combined.as_str(),
+            combined_protected.as_str(),
         ] {
             handle_user_prompt_submit(&worktree, &serde_json::json!({"prompt":prompt}).to_string())
                 .unwrap();
+            assert!(
+                capture_qa_turn(&worktree).unwrap().is_none(),
+                "automatic notification must not arm QA: {prompt}"
+            );
             assert_eq!(
                 handle_stop(&worktree, Some("pm-session")),
                 HookOutput::Silent
@@ -1155,6 +1168,10 @@ mod tests {
             format!("Explain this notification: {notification}"),
             format!("{notification}\n何が完了しましたか？"),
             format!("{notification}\nこの二つの通知を比較してください\n{notification}"),
+            format!("この通知を説明してください\n{combined}"),
+            format!("{combined}\nこの通知を説明してください"),
+            format!("{portable_tick}\nこの通知を説明してください\n{notification}"),
+            format!("{notification} 説明してください\n$gwt-pm"),
         ] {
             let _native = native_human_fixture(home.path(), &worktree, &prompt);
             handle_user_prompt_submit(&worktree, &serde_json::json!({"prompt":prompt}).to_string())
@@ -1210,8 +1227,12 @@ mod tests {
             instruction: (kind == gwt_core::pm_report::PmReportKind::Qa).then(instruction_capture),
         };
         handle_user_prompt_submit(&worktree, r#"{"prompt":"状況は？"}"#).unwrap();
-        for (question, original) in [("$gwt-pm", "状況は？"), ("定期指示の照合", "$gwt-pm")]
-        {
+        for (question, original) in [
+            ("$gwt-pm", "状況は？"),
+            ("定期指示の照合", "$gwt-pm"),
+            ("$gwt-pm\n$gwt-pm", "状況は？"),
+            ("定期指示の照合", "$gwt-pm\n$gwt-pm"),
+        ] {
             let mut instruction = instruction_capture();
             instruction.original = original.into();
             let result = crate::cli::pm::run(

@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use chrono::DateTime;
+use crate::timestamp::UtcTimestamp;
 use serde::de::Error as DeError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -108,9 +108,9 @@ where
     D: serde::Deserializer<'de>,
 {
     let value = deserialize_nonempty_string(deserializer)?;
-    DateTime::parse_from_rfc3339(&value)
+    UtcTimestamp::parse_rfc3339(&value)
         .map(|_| value)
-        .map_err(|_| D::Error::custom("file-index timestamp must be timezone-aware ISO-8601"))
+        .ok_or_else(|| D::Error::custom("file-index timestamp must be timezone-aware ISO-8601"))
 }
 
 fn is_safe_logical_path(value: &str) -> bool {
@@ -428,7 +428,7 @@ impl TryFrom<UncheckedFileIndexGcPinDescriptor> for FileIndexGcPinDescriptor {
                 .iter()
                 .all(|path| is_safe_relative_artifact_path(path))
             || raw.owner_pid == 0
-            || DateTime::parse_from_rfc3339(&raw.created_at).is_err()
+            || UtcTimestamp::parse_rfc3339(&raw.created_at).is_none()
             || !is_lowercase_sha256(&raw.checksum)
         {
             return Err("invalid file-index GC pin descriptor".to_string());
@@ -724,7 +724,7 @@ impl TryFrom<UncheckedWorktreeViewDescriptor> for WorktreeViewDescriptor {
                 .map(String::as_str)
                 .eq(["files", "files-docs"])
             || !is_lowercase_sha256(&raw.descriptor_checksum)
-            || DateTime::parse_from_rfc3339(&raw.verified_at).is_err()
+            || UtcTimestamp::parse_rfc3339(&raw.verified_at).is_none()
         {
             return Err("invalid file-index WorktreeView descriptor".to_string());
         }

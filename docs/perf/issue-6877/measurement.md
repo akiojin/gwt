@@ -18,6 +18,159 @@ User Verification Result: n/a (autonomous)
 
 Agent Visual Check: n/a (no UI surface)
 
+## 2026-11-16: 配備済み v9.166.1 の実測（AC-2 / AC-5 達成、AC-4 未測定）（小田 洋平）
+
+fetch 後の `origin/main` は `10e48f19b150abeec1e6d7f64a90fff8527a6ca2`
+（v9.166.1）で、PR #7466 の timeline 読み取りの間引きを包含する。
+work branch に未配送の source は無く、今回の変更は計測記録だけである。
+
+- Host: macOS 27.2.1（Apple M5 Max、18 core）、`/Applications/GWT.app`
+  （installed gwtd 9.166.1）。GUI binary SHA-256
+  `19d49e23fbf8df628cc9c2a53f059e0d0a23779158eb75bffae394d326589345`。
+- 対象 process: GUI PID 78590、2026-11-16 19:27:38 JST 起動
+  （自動更新による v9.166.1 への再起動）。観測は読み取り専用で、fleet の
+  再起動・置換・agent の追加起動は行っていない。
+
+### gh 起動数（AC-2）
+
+資料は `~/.gwt/logs/gwt.log.2026-11-16` の `gwt.process.summary`
+（`kind=gh`、`phase=start`、span `issue_monitor_scan`）。scan 対象の
+project_root は `/Users/akio-jinsenji/Repos/gwt` の 1 件のみ。
+
+| 窓（JST、600 秒） | scan の gh 起動 | timeline | issues | open pulls | closed pulls |
+| --- | --- | --- | --- | --- | --- |
+| 19:30 | 16 | 10 | 4 | 1 | 1 |
+| 19:40 | 17 | 10 | 5 | 1 | 1 |
+| 19:50 | 17 | 10 | 5 | 1 | 1 |
+| 20:00 | 17 | 10 | 5 | 1 | 1 |
+| 20:10 | 17 | 10 | 5 | 1 | 1 |
+| 20:20 | 16 | 9 | 5 | 1 | 1 |
+| 20:30 | 17 | 10 | 5 | 1 | 1 |
+
+連続 7 窓すべてが 16〜17 回で、閾値 20 回以下を満たす。v9.166.0 の定常値
+27 回からの差は timeline の 20 回 → 10 回で、変更前の見込み（約 17 回）と
+一致する。この 70 分の timeline 呼出 69 回の所要時間は p50 814 ms、
+p95 2658 ms、最大 3224 ms、失敗 0。
+
+起動直後の 19:27:38〜19:30:00 は cold cache の一覧再読を含むため窓から
+除外した。この 70 分に `gh pr view` と制御操作起点の一覧再読は発生して
+いない。v9.166.0 で観測した「制御操作の直後に `gh api issues` の再読が
+重なる窓」は今回の観測では再現しておらず、その窓の上限は未測定である。
+
+### GUI の CPU（AC-5、AC-4）
+
+資料は [5 秒間隔の累積 CPU 時間](v9.166.1-gui-cpu-samples.txt)
+（`ps -o time=`、起動後 100 秒〜4598 秒の 895 行、列は epoch 秒・累積 CPU
+時間・稼働中の実装 agent 数。SHA-256
+`d747aed09e3418ae7f8abde5cf536677c257a19fc6deb55ad6fe9b9d830f285b`）。
+割合は 1 core = 100%。
+
+| 区間（起動からの秒） | CPU 平均 |
+| --- | --- |
+| 5 分時点（240〜356） | 4.3% |
+| 60 分時点（3541〜3657） | 4.4% |
+| 5〜10 分 | 4.4% |
+| 55〜60 分 | 4.5% |
+| 60〜65 分 | 4.4% |
+| 70〜80 分（計測終端まで） | 4.5% |
+
+- AC-5: 5 分時点 4.3% と 60 分時点 4.4% の差は 0.1 ポイントで、20 ポイント
+  以内を満たす。10 分刻みの平均も 10 分以降 4.3〜4.9% で推移し、時間経過に
+  よる悪化は無い。
+- 起動後 300 秒以降の 5 秒平均は 855 件すべて 100% 以下（最大 31.6%、
+  平均 4.5%）。100% を超えた 9 件は起動後 110〜175 秒の起動処理に限られる
+  （最大 176.8%）。
+- **負荷条件:** 観測中に稼働していた実装 agent は 0〜1 本（計測した本
+  agent のみ）。AC-4 の「実装 agent 6 本が動いている状態」は成立しておらず、
+  AC-4 は未測定である。上の 5 秒平均を AC-4 の達成証拠として扱わない。
+- AC-5 の値も agent 0〜1 本・scan 対象 1 project の条件での実測である。
+  起票時の Windows 6 project 構成での再実測は行っていない。
+
+### Owner の受け入れ条件
+
+| AC | 判定 |
+| --- | --- |
+| AC-2 | 達成。v9.166.1 の連続 7 窓が 16〜17 回 / 600 秒 / project。 |
+| AC-4 | 未測定（実装 agent 6 本の稼働条件が成立していない）。 |
+| AC-5 | 達成。5 分時点 4.3%、60 分時点 4.4%、差 0.1 ポイント。 |
+
+AC-4 は 6 本の実装 agent が稼働する fleet での 5 秒 CPU 実測が必要で、
+Issue #6877 は close しない。
+
+Acceptance Surface: non-user-facing (measurement records only).
+
+User Verification Result: n/a (autonomous)
+
+Agent Visual Check: n/a (no UI surface)
+
+## 2026-11-16: 配備済み v9.166.0 の定常 gh 起動数と timeline 読み取りの間引き（小田 洋平）
+
+### 配備済み runtime の実測（AC-2 未達）
+
+fetch 後の `origin/main` は `555a3add55178352e9cc5b0a6b3f5456c12bcb97`
+（v9.166.0）で、これまでの Issue #6877 の source（PR #6889〜#7201）を
+すべて包含する。work branch に未配送の source は無かった。
+
+- Host: macOS `akiojin-7th`、`/Applications/GWT.app`（installed gwtd 9.166.0）。
+  GUI binary SHA-256
+  `b61544551923d4a56174327ba475917b0f3b25dc99409ce36cfc10746e619d39`。
+- 資料: `~/.gwt/logs/gwt.log.2026-11-16` の `gwt.process.summary`
+  （`kind=gh`、`phase=start`、span `issue_monitor_scan`）。
+  scan 対象の project_root は `/Users/akio-jinsenji/Repos/gwt` の 1 件のみ。
+- 09:00〜11:30 JST の連続 15 窓（各 600 秒）は、いずれも **27 回**
+  （09:00 台と 09:10 台のみ `gh pr view` を含み 29 / 28 回）。
+  内訳は `gh api graphql issue timelines` 20、`gh api issues` 5、
+  open pulls 1、closed pulls 1。閾値 20 回を超えるため AC-2 は未達。
+- GUI 再起動（PID 1020、11:45:17 JST）直後の 3 窓は 65 / 31 / 46 回。
+  cold cache と制御操作による一覧再読を含み、定常値ではない。
+- timeline 呼出 394 回の所要時間は p50 830 ms、p95 2598 ms、最大 3757 ms、
+  失敗 0。
+
+### 根因
+
+launch discovery の timeline は 1 scan（30 秒）に 5 Issue の 1 ページだけ読み
+（Issue #6954）、完了分を 600 秒の read cache に置く。1 回の cache 寿命で
+読めるのは 100 Issue までだが、対象の open な `gwt-queued` Issue は 128 件
+あった。読み終える前に先頭が失効するため queue が空にならず、
+`Issues incremental timeline readback` は再起動から 12:12 JST までの
+72 回すべて `pending=true` で、
+毎 scan 1 回の `gh` 起動が恒常化していた。
+
+### 採否
+
+- Issue の `updatedAt` による変更検知は不採用。実 GitHub の read-only 確認
+  で、open な `gwt-queued` 40 件のうち 25 件は最新の cross-reference が
+  `updatedAt` より後であり、PR の関連付けは `updatedAt` を更新しない。
+- 1 ページの Issue 数を増やす案は不採用。5 件でも p95 が 2.6 秒で、
+  Issue #6954 の open-PR readback p95 3 秒未満を崩す。
+- 採用: 定期 scan の discovery ページ読み取りを 45 秒に 1 回までに間引く
+  （30 秒周期では 1 scan おき）。ページの大きさ、cache 寿命、完全な timeline
+  のみを公開する契約、fresh（制御起点）scan の即時読み取りは変えない。
+  読まれなかった Issue は従来どおり前回の launch hold を保持する。
+  慣例の `work/issue-N` branch の PR は open PR inventory が独立に検出する。
+
+変更後の見込みは timeline 10 回 + その他 7 回 = 約 17 回 / 600 秒。
+128 件の一巡は約 13 分から約 26 分に延びる。これは source の回帰と計算に
+基づく見込みであり、配備後の実測ではない。
+
+### 回帰と残件
+
+`open_pr_timeline_pages_are_paced_across_periodic_scans` は変更前に
+「30 秒後の scan が再度読む」assert で RED、変更後に GREEN。
+worker / daemon / monitor の既存回帰 1234 件も PASS。
+
+AC-2 は、この修正を含む release を配備した runtime の 600 秒実測まで
+未チェックを維持する。制御操作の直後に `gh api issues` の 5 ページ読みが
+600 秒内に 2〜3 回起きる窓（12:00 台は timeline 以外で 20 回）は今回の
+範囲外で、別途の根因調査が必要。AC-4 / AC-5（6 agent 稼働時の 5 秒 CPU、
+5 分 / 60 分の CPU 対）は未測定。Issue #6877 は close しない。
+
+Acceptance Surface: non-user-facing (monitor read cadence).
+
+User Verification Result: n/a (autonomous)
+
+Agent Visual Check: n/a (no UI surface)
+
 ## 2026-11-13: 失敗effectとscan却下の相互再試行（鈴木 和斗）
 
 v9.164.0 の稼働GUI（PID92211、17:48:21 JST起動）を読み取り専用で観測した。

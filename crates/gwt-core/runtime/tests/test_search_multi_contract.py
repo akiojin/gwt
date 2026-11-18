@@ -624,7 +624,28 @@ class SearchMultiContractTests(unittest.TestCase):
             self.assertIs(models[1], models[3])
             self.assertIsNot(models[0], models[1])
             self.assertEqual(constructor.call_count, 2)
+            self.assertEqual(constructor.call_args_list, [
+                mock.call(runner.FILE_INDEX_V2_MODEL_ID, local_files_only=True),
+                mock.call(runner.FILE_INDEX_V2_MODEL_ID, revision=runner.FILE_INDEX_V2_MODEL_REVISION,
+                          local_files_only=True),
+            ])
             download.assert_not_called()
+
+    def test_cold_search_downloads_only_when_the_local_model_is_missing(self):
+        model = object()
+        constructor = mock.Mock(side_effect=[OSError("model not cached"), model])
+        with mock.patch.dict(os.environ, GWT_INDEX_FAKE_EMBEDDING="0"), \
+                mock.patch.dict(sys.modules, {
+                    "sentence_transformers": types.SimpleNamespace(SentenceTransformer=constructor),
+                }), \
+                mock.patch.object(runner, "_MODEL_CACHE", {}), \
+                mock.patch.object(runner, "_SEARCH_WORKER_QOS", "interactive"):
+            self.assertIs(runner._get_embedding_model(), model)
+            self.assertIs(runner._get_embedding_model(), model)
+        self.assertEqual(constructor.call_args_list, [
+            mock.call(runner.FILE_INDEX_V2_MODEL_ID, local_files_only=True),
+            mock.call(runner.FILE_INDEX_V2_MODEL_ID),
+        ])
 
     def test_background_default_snapshot_reuses_the_pinned_graph_in_either_order(self):
         pin = runner.FILE_INDEX_V2_MODEL_REVISION
@@ -883,6 +904,41 @@ class SearchMultiContractTests(unittest.TestCase):
             self.assertNotIn("private-vector", json.dumps(payload))
             self.assertNotIn("scopes", payload)
             self.assertNotIn("scope_results", payload)
+
+    def test_unreadable_board_ann_is_unhealthy_without_blocking_issue_search(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, HOME=tmp):
+            base = Path(tmp)
+            db_root = base / "index"
+            self._write_cached_issue(base, 7493, "Available search result")
+            self.assertTrue(runner.action_index_issues_v2(
+                REPO_HASH, str(base), db_root=db_root)["ok"])
+            board_entries = [{"id": "board-7493", "body": "Broken ANN graph"}]
+            with mock.patch.object(runner, "_load_board_documents", return_value=(board_entries, [])):
+                self.assertTrue(runner.action_index_board_v2(
+                    REPO_HASH, str(base), db_root=db_root)["ok"])
+                open_collection = runner._open_chroma_collection
+
+                def open_with_unreadable_ann(path, name):
+                    client, collection = open_collection(path, name)
+                    if name == runner.V2_BOARD_COLLECTION:
+                        self.assertEqual(collection.count(), 1)
+                        collection = mock.Mock(wraps=collection)
+                        collection.query.side_effect = RuntimeError("Error loading hnsw index")
+                    return client, collection
+
+                with mock.patch.object(runner, "_open_chroma_collection", open_with_unreadable_ann):
+                    with mock.patch.object(runner, "_get_embedding_model", side_effect=AssertionError("health must not load a model")):
+                        health = runner._scope_status_v2(REPO_HASH, None, "board", db_root)
+                    self.assertFalse(health["healthy"], health)
+                    self.assertTrue(health["repair_required"], health)
+                    payload = runner.action_search_multi_v2(
+                        REPO_HASH, None, str(base), "Available search result", 5,
+                        ["board", "issues"], db_root=db_root)
+                self.assertTrue(payload["ok"], payload)
+                self.assertEqual(payload["scopes"]["board"]["state"], "corrupt")
+                self.assertEqual(payload["scopes"]["board"]["reason"], health["reason"])
+                self.assertNotIn("board", payload["scope_results"])
+                self.assertEqual(payload["issueResults"][0]["number"], 7493)
 
     def test_search_multi_reports_query_encoding_failure_without_runtime_error(self):
         with tempfile.TemporaryDirectory() as tmp:

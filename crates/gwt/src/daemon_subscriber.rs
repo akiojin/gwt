@@ -1011,6 +1011,13 @@ mod project_owner_tests {
                 crate::project_runtime::transport::BoundProjectTransport::bind(&endpoint).unwrap();
             endpoint.project_transport_url = Some(bound.private_url.clone());
             let transport = bound.serve().unwrap();
+            // Keep background owner initialization outside the Quit budget.
+            let client =
+                crate::project_runtime::client::ProjectRuntimeClient::new(&endpoint).unwrap();
+            if let Err(error) = inspect_project_owner(&client, &endpoint).await {
+                transport.shutdown().await;
+                panic!("project owner must be ready before Quit: {error}");
+            }
             let mut residency = transport.residency();
             let (healthy, received) = std::sync::mpsc::channel();
             let (resolving, entered) = std::sync::mpsc::channel();
@@ -1478,7 +1485,7 @@ impl DaemonSubscriber {
     }
 }
 
-async fn close_project_owner_for_quit<S>(mut stream: S) -> Result<(), String>
+pub(crate) async fn close_project_owner_for_quit<S>(mut stream: S) -> Result<(), String>
 where
     S: futures_util::Sink<tokio_tungstenite::tungstenite::Message> + Unpin,
     S::Error: std::fmt::Display,

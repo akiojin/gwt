@@ -17,10 +17,13 @@ const structuredReport = (id = 'typed') => ({ ...report(id),
 function fixture({ tasksDefault = false, onOpenTerminal } = {}) {
   const { document } = parseHTML('<html><body><div id="host"></div></body></html>');
   const root = document.getElementById('host');
-  const visibility = [], copied = [], sent = [], waiting = [];
+  const visibility = [], copied = [], sent = [], waiting = [], reviews = [];
   let model;
   const view = createPmChat({ document, root, sessionId: 'session', onOpenTerminal,
+    onTaskCancel: reason => { const request = model.requestPmTaskCancel('pm', reason); if (request) sent.push(request); },
+    onTaskReopen: reason => { const request = model.requestPmTaskReopen('pm', reason); if (request) sent.push(request); },
     onDecisionsWaiting: decisions => waiting.push(decisions),
+    onReviewAttention: items => reviews.push(items),
     onTaskDetail: key => { const request = model.requestPmTaskDetail('pm', key); if (request) sent.push(request); },
     onLogVisibility: visible => visibility.push(visible), copyText: async text => copied.push(text),
     onSend: text => { const request = model.requestPmChatSend('pm', text); if (request) sent.push(request); } });
@@ -38,7 +41,7 @@ function fixture({ tasksDefault = false, onOpenTerminal } = {}) {
     model.applyPmWindowReceiveEvent(event);
     return event;
   };
-  return { root, model, view, visibility, copied, sent, waiting, update };
+  return { root, model, view, visibility, copied, sent, waiting, reviews, update };
 }
 
 test('Chat opens its bound PM terminal in Works without losing the draft', () => {
@@ -76,13 +79,154 @@ const trackedTask = (key, extra = {}) => ({ key, parent_key: null, title: `Task 
   review_required: false, ...extra });
 
 const bounded = text => ({ text, total_chars: [...text].length });
-const selectedDetail = () => ({ original: bounded('Exact <original>\nrequest'), purpose: bounded('Original purpose'),
+const selectedDetail = () => ({ status: 'pending', original: bounded('Exact <original>\nrequest'), purpose: bounded('Original purpose'),
   completion_conditions: [bounded('Verify <criterion>')], completion_condition_total: 2,
   evidence: [bounded('proof:<literal>')], evidence_total: 2, history_total: 2,
   history: [{ revision: 4, action: 'complete', actor_kind: 'pm', actor_id: bounded('PM reviewer'),
     at: '2026-11-13T00:00:00Z', reason: bounded('Verified <outcome>') }] });
 const detailReply = (request, extra = {}) => ({ kind: 'pm_request_task', id: 'pm', request_id: request.request_id,
   result: { state: 'detail', key: request.task_key, revision: 4, detail: selectedDetail(), ...extra } });
+
+test('Task Reopen requires fresh completed details and matches its own action receipt', () => {
+  const { model, update } = fixture();
+  assert.equal(typeof model.requestPmTaskReopen, 'function');
+  update([], null, { request_tasks: taskOverview([trackedTask('one', { status: 'completed' })]) });
+  const read = model.requestPmTaskDetail('pm', 'one');
+  assert.equal(model.requestPmTaskReopen('pm', 'Review again'), null);
+  model.applyPmWindowReceiveEvent(detailReply(read));
+  assert.equal(model.requestPmTaskReopen('pm', 'Review again'), null, 'saved pending detail wins over completed overview');
+  const completed = { ...selectedDetail(), status: 'completed' };
+  model.applyPmWindowReceiveEvent(detailReply(model.requestPmTaskDetail('pm', 'one'), { detail: completed }));
+  assert.equal(model.requestPmTaskReopen('pm', '  '), null);
+  const request = model.requestPmTaskReopen('pm', 'Review the original outcome again');
+  assert.equal(request.kind, 'reopen_pm_request_task');
+  assert.equal(request.task_key, 'one');
+  assert.deepEqual(request.request, { operation_id: request.request.operation_id, expected_revision: 4,
+    task_id: '', reason: 'Review the original outcome again' });
+  assert.equal(model.requestPmTaskCancel('pm', 'Cancel instead'), null, 'one shared pending mutation');
+  assert.equal(model.requestPmTaskReopen('pm', 'Duplicate'), null);
+  const reply = { kind: 'pm_request_task', id: 'pm', request_id: request.request_id,
+    result: { state: 'ready', receipt: { action: 'reopen', operation_id: request.request.operation_id, revision: 5 } } };
+  model.applyPmWindowReceiveEvent({ ...reply, result: { ...reply.result, receipt: { ...reply.result.receipt, action: 'cancel' } } });
+  assert.equal(model.readPmWindowState().windows.pm.taskMutation.status, 'pending');
+  assert.equal(model.readPmWindowState().windows.pm.taskDetail.data.status, 'completed', 'never optimistic');
+  model.applyPmWindowReceiveEvent(reply);
+  assert.equal(model.readPmWindowState().windows.pm.taskMutation.status, 'recorded');
+  assert.equal(model.readPmWindowState().windows.pm.taskDetail.stale, true);
+  assert.equal(model.requestPmTaskReopen('pm', 'Old detail'), null);
+  model.applyPmWindowReceiveEvent(detailReply(model.requestPmTaskDetail('pm', 'one'), { revision: 5, detail: completed }));
+  const retry = model.requestPmTaskReopen('pm', 'Reread before retrying');
+  model.markPmTaskMutationUnavailable('pm', retry.request_id);
+  model.applyPmWindowReceiveEvent({ ...reply, request_id: retry.request_id,
+    result: { ...reply.result, receipt: { ...reply.result.receipt, operation_id: retry.request.operation_id, revision: 6 } } });
+  assert.equal(model.readPmWindowState().windows.pm.taskMutation.status, 'error', 'late receipt cannot confirm a timed-out action');
+  model.bindPmWindowState('pm', 'replacement');
+  assert.equal(model.readPmWindowState().windows.pm.taskMutation, null);
+});
+
+test('completed Task Reopen exposes a labelled reason and retains drafts on conflict', () => {
+  const { model, update, root, sent } = fixture();
+  update([], null, { request_tasks: taskOverview([trackedTask('one', { status: 'completed' })]) });
+  const read = model.requestPmTaskDetail('pm', 'one');
+  model.applyPmWindowReceiveEvent(detailReply(read, { detail: { ...selectedDetail(), status: 'completed' } }));
+  const reopen = [...root.querySelectorAll('button')].find(node => node.textContent === 'Reopen task');
+  assert.ok(reopen);
+  assert.equal(reopen.hidden, false);
+  reopen.click();
+  assert.equal(sent.length, 0);
+  const reason = root.querySelector('[aria-label="Reason for this task change"]');
+  reason.value = 'The original outcome is not met';
+  reason.dispatchEvent(new root.ownerDocument.defaultView.Event('input'));
+  root.querySelector('.pm-chat__draft').value = 'Keep my conversation draft';
+  reopen.click();
+  reopen.click();
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].kind, 'reopen_pm_request_task');
+  model.applyPmWindowReceiveEvent({ kind: 'pm_request_task', id: 'pm', request_id: sent[0].request_id,
+    result: { state: 'error', code: 'conflict', message: 'The task changed. Reload details.' } });
+  assert.equal(reason.value, 'The original outcome is not met');
+  assert.equal(root.querySelector('.pm-chat__draft').value, 'Keep my conversation draft');
+  assert.equal(reopen.getAttribute('aria-disabled'), 'true');
+  assert.match(root.querySelector('.pm-chat__task-cancel-status').textContent, /task changed/);
+});
+
+test('Task cancellation requires a fresh selected read and correlates only its own receipt', () => {
+  const { model, update } = fixture();
+  assert.equal(typeof model.requestPmTaskCancel, 'function');
+  update([], null, { request_tasks: taskOverview([trackedTask('one')]) });
+  const read = model.requestPmTaskDetail('pm', 'one');
+  assert.equal(model.requestPmTaskCancel('pm', 'Withdraw'), null);
+  model.applyPmWindowReceiveEvent(detailReply(read));
+  assert.equal(model.requestPmTaskCancel('pm', '  '), null);
+  const request = model.requestPmTaskCancel('pm', 'Withdraw <literally>');
+  assert.equal(request.kind, 'cancel_pm_request_task');
+  assert.equal(request.task_key, 'one');
+  assert.equal(request.request.task_id, '');
+  assert.equal(request.request.expected_revision, 4);
+  assert.equal(request.request.reason, 'Withdraw <literally>');
+  assert.match(request.request.operation_id, /^task-cancel-/);
+  assert.equal(model.requestPmTaskCancel('pm', 'Duplicate'), null);
+  const reply = { kind: 'pm_request_task', id: 'pm', request_id: request.request_id,
+    result: { state: 'ready', revision: 5, task: { status: 'cancelled' },
+      receipt: { action: 'cancel', operation_id: request.request.operation_id, revision: 5 } } };
+  model.applyPmWindowReceiveEvent({ ...reply, request_id: request.request_id + 1 });
+  assert.equal(model.readPmWindowState().windows.pm.taskMutation.status, 'pending');
+  model.applyPmWindowReceiveEvent({ ...reply, result: { ...reply.result, receipt: { ...reply.result.receipt, operation_id: 'other' } } });
+  assert.equal(model.readPmWindowState().windows.pm.taskMutation.status, 'pending');
+  model.markPmTaskMutationUnavailable('pm', request.request_id);
+  model.applyPmWindowReceiveEvent(reply);
+  assert.equal(model.readPmWindowState().windows.pm.taskMutation.status, 'error');
+  assert.equal(model.readPmWindowState().windows.pm.taskDetail.stale, true);
+  assert.equal(model.readPmWindowState().windows.pm.taskDetail.data.status, 'pending', 'never optimistic');
+  assert.equal(model.requestPmTaskCancel('pm', 'Retry'), null);
+  update([], null, { request_tasks: { state: 'error', message: 'The list read failed' } });
+  const reload = model.requestPmTaskDetail('pm', 'one');
+  model.applyPmWindowReceiveEvent(detailReply(reload, { revision: 5 }));
+  const retry = model.requestPmTaskCancel('pm', 'Withdraw after rereading');
+  assert.ok(retry, 'a fresh selected read recovers cancellation without pretending the list recovered');
+  assert.equal(model.readPmWindowState().windows.pm.requestTasksError, 'The list read failed');
+  model.applyPmWindowReceiveEvent({ ...reply, request_id: retry.request_id,
+    result: { ...reply.result, revision: 6, receipt: { ...reply.result.receipt, operation_id: retry.request.operation_id, revision: 6 } } });
+  assert.equal(model.readPmWindowState().windows.pm.taskMutation.status, 'recorded');
+  assert.equal(model.readPmWindowState().windows.pm.taskDetail.stale, true);
+  model.bindPmWindowState('pm', 'replacement');
+  model.applyPmWindowReceiveEvent(reply);
+  assert.equal(model.readPmWindowState().windows.pm.taskMutation, null);
+});
+
+test('Task detail cancellation keeps its reason and chat draft while stale and exposes labelled controls', async () => {
+  const { model, update, root, sent } = fixture();
+  update([], null, { request_tasks: taskOverview([trackedTask('one')]) });
+  const read = model.requestPmTaskDetail('pm', 'one');
+  model.applyPmWindowReceiveEvent(detailReply(read));
+  const reason = root.querySelector('[aria-label="Reason for this task change"]');
+  assert.ok(reason, 'the selected detail exposes a labelled reason field');
+  const cancel = [...root.querySelectorAll('button')].find(node => node.textContent === 'Cancel task');
+  cancel.click();
+  assert.equal(sent.length, 0, 'empty reason cannot submit');
+  reason.value = 'Withdraw this request';
+  reason.dispatchEvent(new root.ownerDocument.defaultView.Event('input'));
+  root.querySelector('.pm-chat__draft').value = 'Keep my chat draft';
+  cancel.click();
+  cancel.click();
+  assert.equal(sent.length, 1);
+  assert.equal(cancel.getAttribute('aria-disabled'), 'true');
+  model.applyPmWindowReceiveEvent({ kind: 'pm_request_task', id: 'pm', request_id: sent[0].request_id,
+    result: { state: 'error', code: 'conflict', message: 'The task changed. Reload details.' } });
+  assert.equal(reason.value, 'Withdraw this request');
+  assert.match(root.querySelector('.pm-chat__task-cancel-status').textContent, /task changed/);
+  assert.equal(root.querySelector('.pm-chat__draft').value, 'Keep my chat draft');
+  update([], null, { request_tasks: { state: 'error', message: 'The list read failed' } });
+  const reload = model.requestPmTaskDetail('pm', 'one');
+  model.applyPmWindowReceiveEvent(detailReply(reload, { revision: 5 }));
+  assert.equal(cancel.getAttribute('aria-disabled'), 'false', 'fresh details are actionable while the list warning remains');
+  update([], null, { request_tasks: { state: 'error', message: 'A new read failed' } });
+  assert.equal(cancel.getAttribute('aria-disabled'), 'true', 'a new error still fences stale details');
+  model.bindPmWindowState('pm', 'replacement');
+  assert.equal(reason.value, '');
+  const css = await readFile(new URL('../styles/components.css', import.meta.url), 'utf8');
+  assert.match(css, /\.pm-chat__task-cancel\s*\{[^}]*var\(--space-/);
+});
 
 test('selected Task reads correlate key, request and Session and retain confirmed stale data', () => {
   const { model, update } = fixture();
@@ -437,7 +581,7 @@ test('Reports has a single scroll body and compact token-based history', async (
 });
 
 test('current card stays above history and distinguishes PM explanation from automatic facts', () => {
-  const { root, model, update } = fixture();
+  const { root, model, view, update } = fixture();
   const card = root.querySelector('[aria-label="PM status"]');
   assert.ok(card, 'current card exists before any PM post');
   assert.match(card.textContent, /No current status reported yet/);
@@ -451,6 +595,7 @@ test('current card stays above history and distinguishes PM explanation from aut
       release_observed_at: '2026-10-13T09:18:00Z', pending_update: '9.117.2', error: null },
   };
   const older = update([report()], null, current);
+  view.receiveHumanAttention(2);
   assert.equal(root.querySelector('.pm-chat__body').firstElementChild, card);
   assert.match(card.querySelector('[aria-label="PM notes"]').textContent, /Waiting.*v9.117.2/s);
   assert.equal(card.querySelector('[aria-label="PM notes"] time').getAttribute('datetime'), current.status.items[0].started_at);
@@ -484,6 +629,20 @@ test('current card marks unknown automatic data instead of claiming an empty fle
   assert.match(facts.textContent, /Release: Unknown/);
 });
 
+// SPEC #5016 HSF (AC-HS1/HS2): Live facts shows the shared needs_human
+// value the status strip reads, never its own count of the raw facts list.
+test('Live facts needs_human reads the shared attention count, not the facts field', () => {
+  const { root, view, update } = fixture();
+  update([], null, { status: null, facts: { source: 'daemon', active_windows: [], queue_head: null,
+    needs_human_count: 5, release: null, release_observed_at: null, pending_update: null, error: null } });
+  const facts = () => root.querySelector('[aria-label="Live facts"]').textContent;
+  assert.match(facts(), /needs_human: Unknown/, 'the raw facts count is not a second definition');
+  view.receiveHumanAttention(1);
+  assert.match(facts(), /needs_human: 1/);
+  view.receiveHumanAttention(null);
+  assert.match(facts(), /needs_human: Unknown/);
+});
+
 test('Reports renders shared Markdown, metadata and copy, with no input or submit surface', async () => {
   const { root, update, copied } = fixture();
   update([report()]);
@@ -494,9 +653,10 @@ test('Reports renders shared Markdown, metadata and copy, with no input or submi
   assert.equal(root.querySelector('pre code').textContent, 'cargo test');
   assert.equal(root.querySelector('article time').getAttribute('datetime'), report().created_at);
   assert.match(root.textContent, /progress/);
-  // Only the Chat composer (FR-CHAT-3) accepts input; Reports and Tasks stay read-only.
+  // Reports remain read-only; Chat and the selected Task cancellation accept input.
   const editable = 'input, textarea, form, [contenteditable], button[type="submit"]';
-  assert.deepEqual([...root.querySelectorAll(editable)].filter(node => !node.closest('.pm-chat__composer')), []);
+  assert.equal(root.querySelectorAll('.pm-chat__body ' + editable.split(', ').join(', .pm-chat__body ')).length, 0);
+  assert.equal([...root.querySelectorAll(editable)].filter(node => !node.closest('.pm-chat__composer, .pm-chat__task-cancel')).length, 0);
   assert.equal(root.querySelectorAll('.pm-chat__composer').length, 1);
   root.querySelector('[aria-label="Copy report"]').click();
   await Promise.resolve();
@@ -800,7 +960,8 @@ test('Reports rejects file-drop input while Execution log keeps the attachment b
   try {
     const pane = document.querySelector('.workspace-window');
     window.__gwtAttachmentUploader = async ({ file }) => { uploaded.push(file.name); return { upload_id: 'fixture' }; };
-    const bridge = createTerminalAttachments({ send: event => sent.push(event),
+    const bridge = createTerminalAttachments({ send: event => { sent.push(event); return "sent"; },
+      captureAttachmentTarget: () => ({ expected_target: { project_key: "project", session_id: "session", host_id: "host", runtime_incarnation: 1 }, connection_epoch: 1 }),
       terminalMap: new Map([['pm', { terminal: { focus() {} } }]]), windowMap: new Map([['pm', pane]]),
       workspaceWindowById: () => ({ preset: 'agent' }), isAgentWindowPreset: preset => preset === 'agent',
       workspaceWindowElement: () => pane });
@@ -855,7 +1016,8 @@ async function clipboardFixture(windowId, run) {
   try {
     const pane = document.querySelector('.workspace-window');
     pane.dataset.id = windowId;
-    const bridge = createTerminalAttachments({ send: event => sent.push(event),
+    const bridge = createTerminalAttachments({ send: event => { sent.push(event); return "sent"; },
+      captureAttachmentTarget: () => ({ expected_target: { project_key: "project", session_id: "session", host_id: "host", runtime_incarnation: 1 }, connection_epoch: 1 }),
       terminalMap: new Map(), windowMap: new Map(), workspaceWindowById: () => ({ preset: 'agent' }),
       isAgentWindowPreset: preset => preset === 'agent', workspaceWindowElement: () => pane });
     const terminalRoot = pane.querySelector('.terminal-root');
@@ -917,7 +1079,8 @@ test('Works full terminals own browser and native file drops and their progress'
     const tile = document.querySelector('.works-full');
     const terminalRoot = tile.querySelector('.terminal-root');
     document.elementFromPoint = () => terminalRoot;
-    const bridge = createTerminalAttachments({ send: message => sent.push(message),
+    const bridge = createTerminalAttachments({ send: message => { sent.push(message); return "sent"; },
+      captureAttachmentTarget: () => ({ expected_target: { project_key: "project", session_id: "session", host_id: "host", runtime_incarnation: 1 }, connection_epoch: 1 }),
       terminalMap: new Map([['agent', { terminalContainer: terminalRoot, terminal: { focus() {} } }]]),
       windowMap: new Map([['agent', cached]]), workspaceWindowById: () => ({ preset: 'agent' }),
       isAgentWindowPreset: preset => preset === 'agent', workspaceWindowElement: () => cached });
@@ -940,6 +1103,326 @@ test('Works full terminals own browser and native file drops and their progress'
   } finally {
     globalThis.window = previous.window;
     globalThis.document = previous.document;
+  }
+});
+
+async function attachmentLifecycleFixture(run) {
+  let source = await readFile(new URL('../terminal-attachments.js', import.meta.url), 'utf8');
+  for (const name of ['terminal-copy-shortcut', 'terminal-context-menu', 'ui-state-store']) {
+    source = source.replace(`"/${name}.js"`, JSON.stringify(new URL(`../${name}.js`, import.meta.url).href));
+  }
+  const { createTerminalAttachments } = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+  const { document, window } = parseHTML('<html><body><div class="workspace-window" data-id="agent"><div class="terminal-root" data-window-id="agent"></div></div></body></html>');
+  const previous = { window: globalThis.window, document: globalThis.document, setTimeout: globalThis.setTimeout };
+  const navigatorDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  const clipboardCleanups = [];
+  Object.assign(globalThis, { window, document });
+  const pane = document.querySelector('.workspace-window'), root = pane.firstElementChild;
+  const sent = [], notices = [], timers = [], uploads = [], dismissed = [];
+  let context = { expected_target: { project_key: 'project', session_id: 'session', host_id: 'host', runtime_incarnation: 1 }, connection_epoch: 1 };
+  let sendResult = 'sent', finishUpload = null;
+  globalThis.setTimeout = (callback, delay, ...args) => {
+    if (delay !== 700) return previous.setTimeout(callback, delay, ...args);
+    timers.push(callback); return timers.length;
+  };
+  window.alert = () => {};
+  window.__gwtAttachmentUploader = ({ file }) => {
+    uploads.push(file.name);
+    return new Promise(resolve => { finishUpload = () => resolve({ upload_id: 'upload', filename: file.name, size: file.size }); });
+  };
+  const terminalMap = new Map([['agent', { terminalContainer: root, terminal: { focus() {} } }]]);
+  const bridge = createTerminalAttachments({ send: message => { sent.push(message); return sendResult; }, terminalMap,
+    windowMap: new Map([['agent', pane]]), workspaceWindowById: () => ({ preset: 'agent' }),
+    isAgentWindowPreset: preset => preset === 'agent', workspaceWindowElement: () => pane,
+    captureAttachmentTarget: () => context, reportAttachmentNotice: notice => notices.push(notice), dismissAttachmentNotice: (...args) => dismissed.push(args) });
+  bridge.installBrowserFileDropBridge();
+  bridge.installTerminalFileDropHandlers('agent', root, { focus() {} });
+  bridge.installTerminalImagePasteHandlers('agent', root, { focus() {} });
+  const flush = () => new Promise(resolve => setImmediate(resolve));
+  const drop = async () => {
+    const event = new window.Event('drop', { bubbles: true, cancelable: true });
+    event.dataTransfer = { types: ['Files'], files: [{ name: 'input.txt', size: 4 }] };
+    root.dispatchEvent(event);
+    await flush();
+  };
+  const paste = async () => {
+    const event = new window.Event('paste', { bubbles: true, cancelable: true });
+    const file = new File(['png'], 'clipboard-image.png', { type: 'image/png' });
+    event.clipboardData = { items: [{ kind: 'file', type: file.type, getAsFile: () => file }] };
+    root.dispatchEvent(event);
+    await flush();
+  };
+  const beginContextPaste = async (stage = 'read') => {
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    const image = new Blob(['png'], { type: 'image/png' });
+    const item = { types: ['image/png'], getType: () => stage === 'getType' ? gate : Promise.resolve(image) };
+    Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { clipboard: {
+      read: () => stage === 'read' ? gate : Promise.resolve([item]), readText: async () => '',
+    } } });
+    const cleanup = bridge.installTerminalContextMenuHandlers('agent', root, { hasSelection: () => false, focus() {}, paste() {} });
+    clipboardCleanups.push(cleanup);
+    [...document.querySelectorAll('.terminal-context-menu button')].find(button => button.textContent === 'Paste')
+      .dispatchEvent(new window.Event('click', { bubbles: true, cancelable: true }));
+    await flush();
+    return { cleanup, release: async () => { release(stage === 'read' ? [item] : image); await flush(); await flush(); } };
+  };
+  const finish = async () => { finishUpload(); await flush(); };
+  const receipt = (phase, extra = {}) => bridge.handleAttachmentProgress({ id: 'agent', operation_id: sent.at(-1)?.operation_id,
+    expected_target: sent.at(-1)?.expected_target, phase, ...extra });
+  try { await run({ bridge, root, pane, terminalMap, sent, notices, timers, uploads, dismissed, drop, paste, beginContextPaste, finish, receipt,
+    target: () => context, replace: value => { context = value; }, sendResult: value => { sendResult = value; } }); }
+  finally {
+    for (const cleanup of clipboardCleanups) cleanup();
+    if (navigatorDescriptor) Object.defineProperty(globalThis, 'navigator', navigatorDescriptor); else delete globalThis.navigator;
+    Object.assign(globalThis, previous);
+  }
+}
+
+test('attachment captures target before upload and refuses a replacement without rebinding', async () => {
+  await attachmentLifecycleFixture(async f => {
+    await f.drop();
+    f.replace({ ...f.target(), expected_target: { ...f.target().expected_target, session_id: 'replacement' } });
+    const replacement = document.createElement('div'); replacement.dataset.windowId = 'agent'; document.body.appendChild(replacement);
+    f.terminalMap.get('agent').terminalContainer = replacement;
+    await f.finish();
+    assert.equal(replacement.querySelector('.attachment-progress') === null, true, 'retirement must not write into the replacement host');
+    assert.equal(f.sent.length, 0);
+    assert.match(f.notices.at(-1).message, /target.*changed/i);
+    assert.equal(f.root.querySelector(".attachment-progress").hidden, true);
+    assert.equal(f.uploads.length, 1);
+  });
+});
+
+test('attachment send outcomes distinguish unavailable, ambiguous, and submitted disconnect without retry', async () => {
+  for (const [result, label] of [['unavailable', /not sent/i], ['outcome_unknown', /Outcome unknown/], ['sent', /Queued/]]) {
+    await attachmentLifecycleFixture(async f => {
+      f.sendResult(result); await f.drop(); await f.finish();
+      assert.match(f.root.textContent, label);
+      assert.deepEqual(f.sent[0].expected_target, f.target().expected_target);
+      if (result === 'sent') {
+        f.bridge.handleAttachmentTransportChange(false);
+        assert.match(f.root.textContent, /Outcome unknown/);
+        f.bridge.handleAttachmentTransportChange(true);
+        f.receipt('attached');
+        assert.match(f.root.textContent, /Outcome unknown/);
+      }
+      assert.equal(f.sent.length, 1);
+    });
+  }
+});
+
+test('attachment accepts only known exact receipts and keeps terminal outcomes monotonic', async () => {
+  await attachmentLifecycleFixture(async f => {
+    f.bridge.handleAttachmentProgress({ id: 'missing', operation_id: 'foreign', phase: 'attached' });
+    assert.equal(f.pane.querySelector('.attachment-progress') === null, true);
+    assert.equal(document.body.querySelector('.attachment-progress') === null, true);
+    await f.drop(); await f.finish();
+    f.receipt('attached', { expected_target: { ...f.target().expected_target, runtime_incarnation: 2 } });
+    assert.match(f.root.textContent, /Queued/);
+    f.receipt('attached'); assert.match(f.root.textContent, /Attached/);
+    f.receipt('queued'); assert.match(f.root.textContent, /Attached/);
+    f.timers.at(-1)();
+    assert.equal(f.root.querySelector('.attachment-progress').hidden, true);
+    f.receipt('queued');
+    assert.equal(f.root.querySelector('.attachment-progress').hidden, true);
+    assert.equal(f.sent.length, 1);
+  });
+});
+
+test('old attachment timers and receipts cannot overwrite a new operation or its moved host', async () => {
+  await attachmentLifecycleFixture(async f => {
+    await f.drop(); await f.finish();
+    const old = f.sent[0]; f.receipt('attached'); const timer = f.timers.at(-1);
+    await f.drop(); await f.finish();
+    f.receipt('attached');
+    const secondTimer = f.timers.at(-1);
+    timer(); assert.equal(f.root.querySelector('.attachment-progress').hidden, false);
+    const moved = document.createElement('div'); moved.dataset.windowId = 'agent'; document.body.appendChild(moved);
+    f.terminalMap.get('agent').terminalContainer = moved;
+    f.bridge.reconcileAttachmentProgress();
+    assert.match(moved.textContent, /Attached/);
+    f.bridge.handleAttachmentProgress({ ...old, phase: 'failed', message: 'old failure' });
+    assert.doesNotMatch(moved.textContent, /old failure/);
+    const movedTimer = f.timers.at(-1);
+    secondTimer(); assert.equal(moved.querySelector('.attachment-progress').hidden, false, 'old host timer cannot hide moved host');
+    movedTimer(); assert.equal(moved.querySelector('.attachment-progress').hidden, true);
+  });
+});
+
+test('missing old-backend metadata and target loss show persistent honest Unknown', async () => {
+  await attachmentLifecycleFixture(async f => {
+    await f.drop(); await f.finish();
+    f.receipt('attached', { expected_target: undefined });
+    assert.match(f.root.textContent, /Outcome unknown/);
+    f.receipt('queued'); assert.match(f.root.textContent, /Outcome unknown/);
+    f.replace(null); f.bridge.reconcileAttachmentProgress();
+    assert.equal(f.root.querySelector('.attachment-progress')?.hidden ?? true, true);
+    assert.match(f.notices.at(-1).message, /Outcome unknown/);
+    assert.equal(f.sent.length, 1);
+  });
+});
+
+test('app attachment socket adapter never queues or replays a refused or ambiguous send', async () => {
+  const source = await readFile(new URL('../app.js', import.meta.url), 'utf8');
+  const definition = source.slice(source.indexOf('      function sendOnSocket('), source.indexOf('      function sendKnowledgeSemanticSearchNow('));
+  const pending = [], hubPending = [], writes = [];
+  const socket = { readyState: 1, send: raw => writes.push(JSON.parse(raw)) };
+  const send = new Function('activeProjectKey', 'socketProjectKey', 'WebSocket', 'isHubNavigationMessage',
+    'hubSocket', 'pendingHubMessages', 'pendingMessages', 'connectionOverlay', `${definition}; return sendOnSocket;`)(
+    () => 'project', 'project', { OPEN: 1 }, () => false, null, hubPending, pending, { reportInputDropped() {} });
+  for (const kind of ['attach_files', 'paste_image_uploaded']) {
+    const message = { kind, id: 'agent', operation_id: 'operation', expected_target: { project_key: 'project' } };
+    assert.equal(send(message, null), 'unavailable');
+    assert.equal(send({ ...message, expected_target: { project_key: 'foreign' } }, socket), 'unavailable');
+    assert.equal(send(message, socket), 'sent');
+    assert.equal(send(message, { readyState: 1, send() { throw new Error('close during send'); } }), 'outcome_unknown');
+  }
+  assert.equal(writes.length, 2);
+  assert.deepEqual(pending, []);
+  assert.deepEqual(hubPending, []);
+});
+
+test('unknown census prevents upload and an old epoch cannot settle a submitted attachment', async () => {
+  await attachmentLifecycleFixture(async f => {
+    f.replace(null); await f.drop();
+    assert.equal(f.uploads.length, 0);
+    assert.equal(f.sent.length, 0);
+    assert.match(f.root.textContent, /not sent/i);
+  });
+  await attachmentLifecycleFixture(async f => {
+    await f.drop(); await f.finish();
+    f.replace({ ...f.target(), connection_epoch: 2 });
+    f.receipt('attached');
+    assert.equal(f.root.querySelector('.attachment-progress').hidden, true);
+    assert.match(f.notices.at(-1).message, /Outcome unknown/);
+    assert.equal(f.sent.length, 1);
+  });
+});
+
+test('same-target temporary unmount retains terminal reason and Failed never auto-hides', async () => {
+  await attachmentLifecycleFixture(async f => {
+    await f.drop(); await f.finish();
+    f.receipt('failed', { message: 'No input was attempted.' });
+    f.receipt('injecting'); assert.match(f.root.textContent, /No input was attempted/);
+    assert.equal(f.timers.length, 0);
+    f.root.remove(); f.bridge.reconcileAttachmentProgress();
+    assert.equal(f.pane.querySelector('.attachment-progress') === null, true, 'detached native host must not fall back to cached chrome');
+    f.pane.appendChild(f.root); f.bridge.reconcileAttachmentProgress();
+    f.pane.remove(); f.bridge.reconcileAttachmentProgress();
+    document.body.appendChild(f.pane); f.bridge.reconcileAttachmentProgress();
+    assert.match(f.root.textContent, /No input was attempted/);
+    assert.equal(f.root.querySelector('.attachment-progress').hidden, false);
+    assert.equal(f.notices.length, 0);
+  });
+});
+
+test('app captures attachment authority from known census and matching catalog Session only', async () => {
+  const source = await readFile(new URL('../app.js', import.meta.url), 'utf8');
+  const start = source.indexOf('      function captureAttachmentTarget(');
+  const definition = source.slice(start, source.indexOf('      const {', start));
+  const row = { window_id: 'agent', session_id: 'session', runtime_incarnation: 3 };
+  let activity = { count: 1, snapshot: { project_key: 'project', host_id: 'host' }, agents: [row] };
+  let data = { preset: 'agent', session_id: 'session' };
+  const capture = new Function('agentActivityModel', 'currentNativeWindow', 'activeProjectKey', 'routeProjectKey',
+    'isAgentWindowPreset', 'socketReceiveDispatcherGeneration', `${definition}; return captureAttachmentTarget;`)(
+    { read: () => activity }, () => data, () => 'project', 'project', preset => preset === 'agent', 7);
+  assert.deepEqual(capture('agent'), { expected_target: { project_key: 'project', session_id: 'session', host_id: 'host', runtime_incarnation: 3 }, connection_epoch: 7 });
+  activity = { ...activity, count: null }; assert.equal(capture('agent'), null);
+  activity = { ...activity, count: 1 }; data = { ...data, session_id: 'replacement' }; assert.equal(capture('agent'), null);
+  data = { ...data, session_id: 'session' }; activity = { ...activity, snapshot: { ...activity.snapshot, host_id: '' } };
+  assert.equal(capture('agent'), null);
+});
+
+
+test('explicit paste with unavailable target and removed host shows one Failed notice without upload or send', async () => {
+  await attachmentLifecycleFixture(async f => {
+    f.replace(null);
+    f.pane.remove();
+    await f.paste();
+    assert.equal(f.notices.length, 1);
+    assert.match(f.notices[0].message, /target unavailable.*not sent/i);
+    assert.equal(f.uploads.length, 0);
+    assert.equal(f.sent.length, 0);
+    assert.equal(document.body.querySelector('.attachment-progress') === null, true);
+    f.bridge.reconcileAttachmentProgress();
+    f.bridge.handleAttachmentProgress({ id: 'agent', operation_id: 'unknown', phase: 'attached' });
+    assert.equal(f.notices.length, 1);
+    assert.equal(document.body.querySelector('.attachment-progress') === null, true);
+  });
+});
+
+
+test('clipboard intent cannot adopt a replacement or retire its existing operation after an await', async () => {
+  for (const initialMissing of [false, true]) {
+    await attachmentLifecycleFixture(async f => {
+      const original = f.target();
+      if (initialMissing) f.replace(null);
+      const paste = await f.beginContextPaste();
+      f.replace({ ...original, expected_target: { ...original.expected_target, session_id: 'replacement' } });
+      await f.drop(); await f.finish();
+      const replacement = f.sent[0], dismissed = f.dismissed.length;
+      assert.match(f.root.textContent, /Queued/);
+      await paste.release();
+      assert.equal(f.uploads.length, 1, 'old intent must not upload against replacement');
+      assert.equal(f.sent.length, 1);
+      assert.equal(f.dismissed.length, dismissed, 'old intent must not dismiss replacement notice');
+      assert.equal(f.notices.length, 1);
+      assert.match(f.notices[0].message, /not sent/i);
+      assert.match(f.root.textContent, /Queued/);
+      f.receipt('attached', { operation_id: replacement.operation_id });
+      assert.match(f.root.textContent, /Attached/, 'replacement controller must still accept its own receipt');
+    });
+  }
+});
+
+test('clipboard getType intent rejects changed incarnation or connection epoch before upload', async () => {
+  for (const change of ['incarnation', 'epoch']) {
+    await attachmentLifecycleFixture(async f => {
+      const original = f.target(), paste = await f.beginContextPaste('getType');
+      f.replace(change === 'epoch' ? { ...original, connection_epoch: 2 }
+        : { ...original, expected_target: { ...original.expected_target, runtime_incarnation: 2 } });
+      await paste.release();
+      assert.equal(f.uploads.length, 0);
+      assert.equal(f.sent.length, 0);
+      assert.equal(f.notices.length, 1);
+      assert.match(f.notices[0].message, /not sent/i);
+      assert.equal(f.root.querySelector('.attachment-progress') === null, true);
+    });
+  }
+});
+
+test('unchanged clipboard intent survives valid host move and old binding disposal', async () => {
+  await attachmentLifecycleFixture(async f => {
+    const original = structuredClone(f.target()), paste = await f.beginContextPaste();
+    paste.cleanup();
+    const moved = document.createElement('div'); moved.dataset.windowId = 'agent'; f.pane.appendChild(moved);
+    f.terminalMap.get('agent').terminalContainer = moved;
+    await paste.release(); await f.finish();
+    assert.equal(f.uploads.length, 1);
+    assert.equal(f.sent.length, 1);
+    assert.deepEqual(f.sent[0].expected_target, original.expected_target);
+    assert.equal(f.notices.length, 0);
+    assert.match(moved.textContent, /Queued/);
+  });
+});
+
+test('context-menu optional beforePaste runs once before clipboard awaits and preserves no-hook callback arity', async () => {
+  const { createTerminalContextMenuController } = await import('../terminal-context-menu.js');
+  for (const withHook of [false, true]) {
+    const { document, window } = parseHTML('<html><body><div id="terminal"></div></body></html>');
+    const sequence = [], context = { captured: null };
+    let args;
+    const controller = createTerminalContextMenuController({ document, window, terminalRoot: document.getElementById('terminal'),
+      ...(withHook ? { beforePaste: () => { sequence.push('capture'); return context; } } : {}),
+      readClipboardItems: async () => { sequence.push('read'); return [{ types: ['image/png'], getType: async () => { sequence.push('getType'); return new Blob(['png']); } }]; },
+      pasteImage: (...values) => { sequence.push('paste'); args = values; } });
+    try {
+      await controller.pasteFromClipboard();
+      assert.deepEqual(sequence, withHook ? ['capture', 'read', 'getType', 'paste'] : ['read', 'getType', 'paste']);
+      assert.equal(args.length, withHook ? 2 : 1);
+      if (withHook) assert.equal(args[1], context);
+    } finally { controller.dispose(); }
   }
 });
 
@@ -1437,6 +1920,22 @@ test('PM decisions waiting are published from the one derivation Home reads', as
   const published = waiting.length;
   view.update(model.readPmWindowState().windows.pm);
   assert.equal(waiting.length, published, 'an unchanged waiting set is not republished');
+});
+
+// SPEC #5016 HSV: unresolved reviews observed by the PM current facts are
+// published once per change; an absent observation is unknown, not zero.
+test('PM current review attention is published from the facts the PM window received', () => {
+  const { reviews, update } = fixture({ tasksDefault: true });
+  update([], null, { facts: { source: 'daemon', active_windows: [] } });
+  assert.equal(reviews.at(-1), null, 'facts without the observation publish unknown');
+  const items = [{ pr_number: 71, issue_numbers: [5016], reason: 'Changes requested' }];
+  update([], null, { facts: { source: 'daemon', active_windows: [], review_attention: items } });
+  assert.deepEqual(reviews.at(-1), items);
+  const published = reviews.length;
+  update([], null, { facts: { source: 'daemon', active_windows: [], review_attention: items } });
+  assert.equal(reviews.length, published, 'an unchanged observation is not republished');
+  update([], null, { facts: { source: 'daemon', active_windows: [], review_attention: [] } });
+  assert.deepEqual(reviews.at(-1), [], 'an observed empty list clears the count');
 });
 
 test('Decide forgets session answers when the PM session changes', () => {

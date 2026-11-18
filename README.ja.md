@@ -146,7 +146,11 @@ Codex の警告が端末に表示されます。[Codex の速度要件](https://
 
   Grok Build は xAI 公式の `grok` command で提供されます。
   `npm install -g @xai-official/grok` でインストールし、初回起動時に認証するか、
-  API-key workflow では `XAI_API_KEY` を設定してください。
+  API-key workflow では `XAI_API_KEY` を設定してください。ホスト起動では、gwt が
+  Grok 公式の `--trust` を付け、対象 Git リポジトリ（main checkout と全 worktree）
+  の hook・MCP/LSP・instructions・skills を許可します。この許可は
+  `trusted_folders.toml` に保存され、同じ trust store と repo key を使う後続の手動起動
+  にも適用されます。CLI 全体の既定設定や他のリポジトリの許可は変更しません。
 - エージェント利用時は必要な API キーを設定すること
   - `ANTHROPIC_API_KEY` または `ANTHROPIC_AUTH_TOKEN`
   - `OPENAI_API_KEY`
@@ -166,11 +170,19 @@ gwt は次の組み込みエージェントに対応しています。Launch Age
 
 Launch Wizard と Agents 設定の Codex モデル一覧は、ローカルの
 `models_cache.json` に追従し、取得できない場合は同梱の一覧を使います。
-一覧から消えた保存済みモデルは変更せず、警告を表示します。7日ごとに一覧と
+一覧から消えた保存済みモデルは変更せず、警告を表示します。最新の一覧が取得できない場合は
+Agents に案内を表示し、**Retry model catalog** で保存値や入力途中の編集を変えずに再読込できます。7日ごとに一覧と
 保存済みプロファイルの差分を確認し、新しい差分だけを PM Reports に1回報告します。
+選択したメンバーの ID は改名後も表示されます。担当履歴には記録された役割と観測した終了時刻を表示し、
+取得できない過去の情報は不明のまま保持します。
 
 **Settings > Supported Agents** では、全対応エージェントの導入状態と
 インストール済みバージョンを確認し、未導入の CLI をインストールできます。
+導入完了時には、検出した CLI の配置先をシェルの PATH に追加する手順を表示します。
+gwt の Installed 表示は、端末側の PATH 設定を確認したことを意味しません。
+`claude` などが見つからない場合は、表示された bash/zsh・fish・Windows 向けの手順で
+設定し、新しい端末でコマンドに `--version` を付けて確認してください。
+gwt がシェルの起動設定ファイルを書き換えることはありません。
 公式配布元の情報で新しいバージョンを確認できた場合は更新操作が表示されます。
 Codex・Grok・OpenCode・OpenClaw は npm、Antigravity は platform manifest を照会します。
 Claude native と Hermes は実効更新チャネルを検証できないため、理由を表示し、
@@ -463,6 +475,10 @@ Cancel は画面を開いたままにします。他のプロジェクトには�
 gwt は PTY をドレインしてから graceful shutdown を実行します。tray 常駐プロセスは
 1 OS-login ユーザーにつき 1 つだけで、二重起動した `gwt` は既存 URL を出して終了します。
 
+### gwtd operations and daemon
+
+この節と[英語版](README.md#gwtd-operations-and-daemon)を operation、daemon の使い方、
+互換性に関する利用者向け説明の正本とします。
 `gwtd` operation は stdin JSON envelope で処理され、gwt のメインウィンドウは起動しません。
 承認が必要な operation では OS のネイティブダイアログが表示されることがあります。
 
@@ -483,6 +499,116 @@ gwtd <<'JSON'
 {"schema_version":1,"operation":"daemon.status","params":{}}
 JSON
 ```
+
+応答は `ok`、`operation`、`exit_code` と従来の人間向け `output` 文字列を維持します。
+JSON object/array のレポートは `data` にも直接入ります。対象には `execution.status`、
+`board.show`、`pr.list`、PM の status operation などが含まれます。`issue.view` は Issue の
+各フィールド、`pr.view` / `pr.current` は PR snapshot を `data` に返します。
+PR が無い `pr.current` は `data:null` です。`pr.checks` と verify 系の既存 data 契約も
+維持します。テキストのみの operation は `data` を省略する場合があります。
+新規の呼び出し側では `output` の解析より `data` を優先してください。
+
+失敗応答には `error_category` と安定した `error_code` を付与します。カテゴリは
+`not_found`（例: `NOT_FOUND_ISSUE`）、`conflict`（`CONFLICT_CONCURRENT_WRITE`）、
+`permission`（`PERMISSION_DENIED`）、`input`（`INPUT_VALIDATION_FAILED`）、
+`internal`（`INTERNAL_INDEX_INTEGRITY`）、`external`（`EXTERNAL_NETWORK`）、
+`operation`（分類情報の無い非ゼロ結果: `OPERATION_FAILED`）です。
+`ISSUE_CACHE_CONFLICT` など既存の固有コードは維持します。型情報で分類し、型情報が
+失われた従来の失敗はメッセージの文言から推測せず fallback を使います。
+`refusal` と復旧フィールドの意味は変わりません。不正 envelope も終了コード 2 の
+JSON 応答を返し、`error_category:"input"`、`INPUT_*` コード、`operation:null` を
+含みます。入力を伏せる intake 診断では、呼び出し側の秘密情報を出力しません。
+
+入れ子の operation も `data` 内では JSON object です。応答を一度デコードすれば、
+`pm.operation.execute` の監査結果は `data`、内側の envelope は `data.after`、
+内側の JSON レポートは `data.after.data` で直接読めます。互換性のため従来の入れ子の
+`output` 文字列も維持します。error code は失敗の分類であり、再試行の許可や
+リモート更新が確定したことの証明ではありません。
+
+[operation catalog](crates/gwt/src/cli/operation_catalog.rs) の `OPERATIONS` は、
+v9.167.1 時点で **36 系統・230 件の canonical operation** と **40 件の alias**
+（受理する表記は合計 270 件）を定義します。系統は最初のドットより前の名前で数え、
+単独の `search` も 1 系統です。canonical 名は小文字で、階層をドット、同一階層の複数語を
+アンダースコアで区切ります（例: `workspace.project_scan`）。alias は明示登録された別名
+だけを受理します。例は `actions.job_logs` の `actions.job-logs`、`pane.close` の
+`pane.stop` です。ハイフンとアンダースコアの任意置換はできません。
+新規スクリプトや案内には canonical 名を使います。catalog 内の
+`catalog_covers_every_dispatched_operation` テストが
+[JSON dispatcher](crates/gwt/src/cli/json_envelope.rs) と受理する表記の一致を検証します。
+件数を更新するときは source checkout で次を実行して再集計します。
+
+```bash
+python3 - <<'PY'
+from pathlib import Path
+import re
+catalog = Path('crates/gwt/src/cli/operation_catalog.rs').read_text()
+names = re.findall(r'name: "([^"]+)"', catalog)
+aliases = re.findall(r'aliases: &\[([^\]]*)\]', catalog)
+alias_count = sum(len(re.findall(r'"[^"]+"', group)) for group in aliases)
+print(len(names), len({name.split('.')[0] for name in names}), alias_count)
+PY
+```
+
+ヘルプには `gwtd --help` / `gwtd --help daemon` を使います。
+`gwtd --help` は全系統を列挙し、各 `gwtd --help <family>` の末尾には
+同じカタログから生成したその系統の全 operation 一覧が付きます。
+通常の operation を argv で渡す `gwtd daemon start` 等は拒否されるため、
+`daemon.start` を envelope で送ります。managed hook は専用 argv transport の
+`gwtd hook event <Event>` / `gwtd hook provider-event <provider> <native-event>` を維持します。
+
+Agent registry の schema 3 だけを読める旧 binary へ戻す場合は、すべての Agent、
+デスクトップ app、daemon を終了してから、**新しい** `gwtd` で次を実行します。
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"agent.registry.restore_schema3","params":{}}
+JSON
+```
+
+移行時の backup へ戻すのではなく、現在の共有 registry と全 project の確定済み prefs を
+schema 3 に書き戻します。Agent の割当が残る場合、Session が稼働中または不在を確認できない場合、
+record の欠落・破損、未知の mirror 内容がある場合は拒否します。Agent の終了と予約解除は
+通常の操作で行い、mirror の競合は `agent.registry.status` / `agent.registry.reconcile` で
+確認・解消してから再実行してください。拒否を回避するために record を削除しないでください。
+registry の置換は原子的で、中断しても完全な schema 4 または完全な schema 3 が残ります。
+record と移行時の `agent-registry.schema3-backup.json` は保持します。成功後は旧 binary を直接
+起動してください。新しいデスクトップ app を起動すると schema 4 に再移行します。
+schema 3 で再実行しても変更はありません。
+
+runtime daemon は macOS/Linux の Unix domain socket と Windows の named pipe に対応します。
+GUI はプロジェクト daemon を監督し、必要に応じて起動・置換するため、通常の GUI 利用で
+手動の `daemon.start` は不要です。standalone daemon を起動する場合、次の操作は呼び出した
+プロセスでサーバーを動かし、終了まで接続したままになります（利用可能な daemon が既に
+あればその旨を返して終了します）。
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"daemon.start","params":{}}
+JSON
+```
+
+endpoint metadata は [`RuntimeScope::endpoint_path`](crates/gwt-core/src/daemon.rs) が定義する
+`~/.gwt/projects/<repo-hash>/runtime/daemon/<worktree-hash>.json` に保存します。
+endpoint の `bind` は Unix socket または Windows pipe を指します。長い Unix socket path は
+短縮される場合があるため、JSON ファイルと同じ場所とは限りません。live endpoint metadata を
+編集・削除しないでください。起動時には停止済み owner の stale descriptor を掃除できますが、
+互換性のない client が live owner の descriptor を削除することはありません。
+
+`gwt` と `gwtd` は同じ配布版を使ってください。互換性は次の境界ごとに判定し、
+全体を通じた version negotiation は行いません。
+
+| 境界 | 受理する版数と挙動 |
+| --- | --- |
+| stdin JSON envelope | `schema_version:1` のみ（省略時も 1）。別 schema 版数と未知の operation は拒否します。 |
+| Daemon IPC | 現在の `DAEMON_PROTOCOL_VERSION` は 4。endpoint と handshake の protocol version、および scope と認証 token の一致が必要です。 |
+| Project `OwnerCommand` transport | client は製品版数 `daemon_version` が一致する endpoint だけを再利用します（前後の空白・先頭の `v` は正規化）。`OwnerRequest` 自体に独立した版数交渉フィールドはありません。 |
+
+GUI supervisor は起動・復旧時に別の製品版数の daemon を認証した上で置き換えます。
+`daemon.status` / `daemon.subscribe` は IPC 契約に従って観測・接続する操作であり、
+その製品版数に基づく置換は行いません。判定の実装は
+[daemon contract](crates/gwt-core/src/daemon.rs)、
+[supervisor](crates/gwt/src/daemon_supervisor.rs)、
+[project runtime client](crates/gwt/src/project_runtime/client.rs) にあります。
 
 `workspace.project_scan` は host endpoint の探索について、cache の利用、列挙した
 件数、経過ミリ秒を返します。消失した root と停止済み host は repository identity の
@@ -710,9 +836,19 @@ Board は各ウィンドウで最大1,000件を保持します。先頭までス
 `Load earlier entries` を選ぶと、古い投稿を再取得できます。過去の履歴を閲覧中は
 `Back to latest entries` で最新の更新へ戻れます。
 
-実装 Agent はプロジェクト単位の永続メンバーとして、出力言語に合う名前を持ちます。
+実装 Agent はこの端末のプロジェクト間で共有する永続メンバーとして、出力言語に合う名前を持ちます。
+同じメンバーが複数プロジェクトを同時に担当できます。各プロジェクト内では1担当とし、端末共通の起動上限も維持します。
+Agents の同じ行に各プロジェクトの担当を表示し、別プロジェクトの担当を選ぶとそのプロジェクトを開きます。
+休止したメンバーも Agents に保存設定・履歴とともに残り、新しい担当は受け付けません。
+休止メンバーの行で **Reactivate** を選ぶと、その人を再び担当可能にできます。
+登録名が重複したときは、既存メンバーの名前とツールを表示します。
+**Show member** で該当行へ移動し、復帰または名前の変更を行えます。
 新しい Issue では空いているメンバーを再利用し、SPEC の続きでは前回の担当が空いていれば優先します。
-新しいメンバー名はプロジェクト内で重複せず、候補が尽きると言語に合う姓で候補を広げます。
+新しいメンバー名は共有名簿内で重複せず、候補が尽きると言語に合う姓で候補を広げます。
+Agents の共有編集欄で、メンバーのツール・モデル・推論・実行先・権限設定を編集できます。実行先と権限はメンバーの指定を優先し、未指定なら各プロジェクトの既存設定を引き継ぎます。Docker service・shell・routing はプロジェクト固有です。ツール変更時は以前のツール固有の設定を消去します。Manage tools からインストール・更新を開けます。Open shell for sign-in でシェルを開き、ツールの通常のサインインを行えます。コマンドは自動実行しません。
+メンバーの保存設定は、保存済みプロファイル候補からの次の NEW 起動に適用します。Launch Agent は現在のフォームと権限プロンプトを省略する既存方針を使い、Auto は tier 設定を使います。実行中の Session と同じ会話の再開は記録済み設定を保持します。
+既存名簿は project runtime 起動時または Agents 読み取り時に移行され、旧バージョンから新形式の設定は編集できません。
+移行元で名前が同じ人物も別メンバーとして保持します。
 復元や再起動でもメンバー ID と名前を維持します。Works、Agents、Fleet、Kanban、Board、
 Issue コメント、PR の担当者表示に名前が現れます。常駐 PM は PM・Works・Agents の各面で、
 割り当てられた名前と PM バッジをあわせて表示します。
@@ -809,10 +945,12 @@ PM 窓の会計は別に表示します。
 名簿のあるプロジェクトでは `issue.monitor.config.set` に `{"max_active":4}` を渡すと有効メンバーを4人へ増減します。
 machine 上限を Auto に戻すには **Agent limit** の隣の **Auto** ボタン、または
 `issue.monitor.config.set` の `{"max_active_mode":"auto"}` を使います。
-名簿のあるプロジェクトでも使え、登録メンバーは維持します。名簿のない旧設定では、
+名簿のあるプロジェクトでも使え、登録メンバーは維持します。
+明示的な Manual 上限・名簿サイズの指定は 256 以下です。`max_active` は従来どおり正数を指定します。
+人数を減らしても登録メンバーは削除せず、256 人を超える既存名簿も読み取りできます。名簿のない旧設定では、
 `{"max_active":4}` を渡すと上限 4 の Manual になります。`issue.monitor.status` は実効上限、
 `max_active_agents_override`（共有の要求値）、`max_active_agents_scope: "machine"`、共有実測値の `agent_capacity` を返します。
-名簿のあるプロジェクトでは `agent_roster_capacity` と `agent_roster_revision` がプロジェクトの人数設定を表します。
+名簿のあるプロジェクトでは `agent_roster_capacity` と `agent_roster_revision` が共有の人数設定を表します。
 `max_active_last_change` は最後の明示的な設定変更の `changed_at` と
 `source`（`gui` / `json_operation`）を返し、自動計測による上限更新ではこの記録を保持します。
 
@@ -992,6 +1130,12 @@ status を再読して変更を再判断し、成功後も読み戻して確認�
 Issueのcloseやcancelだけでは数えません。エージェントによる完了宣言を測るため、
 後からPRが失敗すると着地率は楽観的になります。この指標にPRのマージは不要です。
 
+`issue.monitor.status` の `event_history` には、最新100件の Monitor 通知を古い順に保持します。
+各項目は `id`、RFC3339形式の `recorded_at`、同時刻の通知順を保つ `sequence`、`issue_number`、通知種別の `level`
+（`info`/`warn`/`error`/`done`）、`message` を持ちます。試行ごとの失敗・再試行・人間への確認要求・
+マージ・slot解放などの通知は、GUIでの通知消費後や再起動後も読めます。
+上限を超えると最古の項目から削除します。`last_error` などの最新エラー表示とは独立した履歴です。
+
 ホストの空き容量も同じ snapshot に含まれます。`issue.monitor.status` の
 `disk_space` は worktree と verification coordinator が置かれた volume を列挙し、
 空きが 20 GiB または 5% を下回ると `warning` を載せるため、`verify.run` が
@@ -1085,6 +1229,23 @@ queue に戻す旨をコメントします。未達の基準がすべて `(measu
 **Awaiting measurement** として実測を待ち、コメントにも `awaiting_measurement` を示します。
 測定後に受け入れ基準をチェックすると
 close を再評価でき、**Return to queue** で作業を再開することもできます。
+リリース、main、別ホストでの確認を待つ場合は、残条件に
+`(release-verification)`、`(main-verification)`、`(host-verification)` を
+明示します（角括弧も使用可）。Autonomous が on で残条件がこれらと任意の実測条件だけなら、
+配信済み Issue は **Awaiting verification** (`awaiting_verification`) となり、
+active slot と NeedsHuman に含めず確認を待ちます。確認主体も各条件に記録してください。
+リリース公開後や対象ホストが利用可能になったら **Return to queue**、または理由を付けた
+`issue.monitor.requeue` で確認を起動できます。タグのない実装条件があれば通常の queue を継続します。
+外部確認だけが残る配信の精算後、残条件すべての確認主体を
+`issue.monitor.verification.declare` で登録できます。
+
+```json
+{"schema_version":1,"operation":"issue.monitor.verification.declare","params":{"number":42,"criteria":[{"id":"AC-2","verifier":"PM on release host"}]}}
+```
+
+`issue.monitor.status` の `verification_declaration` に元の条件本文、確認主体、
+宣言日時が残ります。各未達 AC を一度ずつ指定してください。未配信・未精算、実装残件を
+含む条件、空の確認主体は拒否します。この宣言で Autonomous mode は変更しません。
 Autonomous が off の場合は `merge 済み・未達 AC あり` とコメントして
 従来どおり `NeedsHuman` にします。`gwt-spec` Issue は
 全 Phase の tasks が完了したときだけ close します。残りの基準を別 Issue に
@@ -1192,13 +1353,19 @@ project に紐づくブラウザ protocol の `load_pm_request_task` は、1 件
 operation で確認することも有効で、Task 差分が空の receipt を保存する場合があります。
 同じ Update や Complete を再実行しても元の receipt は変わらず、現在の Task は
 後続の変更や再開を反映する場合があります。
-Reopen と Cancel は引き続き receipt の適用時点の Task 状態を返します。
+生 ID を使う Reopen と Cancel は引き続き receipt の適用時点の Task 状態を返します。
+Reopen・Cancel・Complete は、選択 Task の projection から得た `task_key` をトップレベルに
+指定し、`request.task_id` を空にする方法でも呼び出せます。空・不明・混在した selector
+は拒否します。この方法では現在の保存済み Task と revision に元の receipt を添えて
+返すため、再実行時に古い receipt の Task 状態を現在状態として扱いません。再開時の
+ユーザー監査・CAS・未完了＋再評価待ちの規則は同じです。完了した Task は、選択した
+詳細画面からも再開できます。
 応答を失ったら、現在の Task と元の receipt を読み直してください。新しい接続は別の
 actor になるため、旧 operation の再実行は競合になります。現在の Task と receipt 内の
 過去状態は、それぞれの revision を保持します。欠測・読取不能は診断と回復用の参照を
 返します。receipt の参照は記録済みの結果の観測であり、新たな永続書込の成功確認では
-ありません。この transport adapter は利用できますが、Tasks 画面と checkbox 操作は
-引き続き未提供です。
+ありません。Tasks の詳細画面では取消と完了 Task の再開を利用できます。
+Task の編集と完了 checkbox 操作は引き続き未提供です。
 
 選択した native 入力を受け付けるには、登録済み PM が `pm.request_tasks.read` の
 `selector:{kind:"native_turns"}` を読みます。現在の `provider`・`conversation_id` と、
@@ -1513,6 +1680,10 @@ head が変わった場合は再レビューと新しい許可が必要です。
 委任が無い場合は人によるマージが必要です。`pr.list` はマージ提案を繰り返す代わりに、
 外部 fork のため自動化の対象外になり得る理由と代替経路を示します。
 
+auto-merge workflow が起動に失敗した場合、同じ operation で同一リポジトリの Ready PR も
+回復できます。PM には対象 PR 番号と head SHA に限定した許可、成功した CI、既存の review・
+visual check が引き続き必要です。GitHub の branch protection と必須チェックは維持します。
+
 明示的に許可した PR の close、ビルドキャッシュ削除、provider 承認への応答には、PM が
 `pm.operation.execute` を使います。対象は既存の `pr.close` / `worktree.gc_build_artifacts` /
 `pm.message.send` の3種類に限られ、それぞれの既存のチェックを維持します。
@@ -1619,6 +1790,19 @@ SPEC と通常 Issue は同じ検索索引を使い、SPEC は見出しチャン
 Managed hooks は user hook を保持しながら、Agent state、workflow guardrails、
 Board reminders、discussion/plan/build Stop checks、coordination-event summaries
 を追加します。
+
+シェルのファイル操作ガードは、worktree 内または OS の一時ディレクトリ
+（`TMPDIR` / 各 OS の temp、Unix では `/tmp`・`/private/tmp` も対象）配下の
+`mkdir`・`rmdir`・`rm`・`touch`・`cp`・`mv` を許可します。harness の session
+scratchpad や検証ログも含みます。一時ディレクトリそのものへの操作と symlink を
+経由した領域外への操作は拒否します。拒否メッセージには許可ディレクトリと一時ログを
+保全する例を表示します。それ以外の外部成果物は、ツールの出力先を worktree または
+一時 scratchpad に指定するか、アクセスの許可を別途取得してください。
+
+このガードはシェルのファイル操作コマンドを判定するもので、OS の sandbox では
+ありません。リダイレクトと任意の Python / interpreter の I/O は検査対象外です。
+エージェントは書き方によらず同じ許可パスの境界を守り、別の構文で拒否を回避しては
+いけません。
 
 **Settings → Project → Hook Center** では、選択したプロジェクトの hook 設定、
 バイナリの fallback、Codex の探索・信頼状態、任意の profile 出力先を監査できます。
@@ -2016,7 +2200,13 @@ criteria** を開くと、目的と先頭 5 件の完了条件を確認できま
 変更はそのタスクの保存済み差分を含む記録だけを対象とし、全操作の履歴ではありません。
 **Reload details** で再取得できます。更新や読取り失敗時は確認済みの詳細を古い情報と明示して残し、
 **Close details** で元のタスクにフォーカスを戻します。
-このプレビューではタスク編集・自動受付・過去履歴の取込みには対応していません。
+取消する場合は詳細画面に理由を入力し、**Cancel task** を選びます。
+完了したタスクは理由を入力して **Reopen task** を選ぶと、未完了＋PM の再評価待ちに
+戻せます。関連する Issue の再起動は行いません。
+ブラウザーで操作したユーザーと理由を記録し、原依頼と過去の変更は保持します。
+エージェントの停止や Issue・PR の変更は行いません。保存の確認後に状態を更新します。
+競合や応答未確認では最後に確認できた詳細を残すため、再接続して **Reload details** で
+確認してから再操作してください。タスクの編集・完了チェック・自動受付・過去履歴の取込みには対応していません。
 同じツールバーから **Reports** と **Execution log** に切り替えられます。
 
 PM ウィンドウは **Home** で開きます。ツールバーの **Chat** を選ぶ 1 操作で PM との会話を開けます。自分の発言は右、PM の応答は
@@ -2107,23 +2297,48 @@ project 固有の規約を明示的に渡すには、
 - **PM** は独立したレール入口から単一ペインで開け、Works の先頭にも表示します。割り当てられた名前と PM バッジは Agents の先頭にも表示します。
 - **Works** は端末上で稼働する Agent を1人1行で表示し、直近の出力を載せます。**Settings → System → Works output lines** で3〜10行（既定3行）を選べ、読み取り専用の一覧にも即時反映し、再読み込み・アプリ再起動後も保持します。出力は選択・スクロールでき、端末を開きません。出力欄以外の行のクリック・Enter・Space で同じネイティブ端末を開き、**Back to Works** で一覧へ戻ります。矢印で前後の Agent へ移り、Esc などのキーは端末へ渡します。
 - **Agents** の **Team** には固定メンバー、担当履歴と実測集計を、**Past** には過去の実際の担当を表示します。Works の名前から該当メンバーへ、Agents の現在タスクからその Works 端末へ移動できます。
-- **Agents** で表示名を入力して利用ツールを選び、**Register** で登録します。選択した人物の **Display name** はその場で編集すると自動保存され、同じ人物 ID と進行中の作業を保持します。無効な入力は欄に残り、保存失敗や競合は **Retry name** で再試行できます。担当履歴と Board は当時の名前を保持します。 **Saved manual candidate** には選択した人物の手動候補として保存されたモデル・推論・実行環境・権限設定を表示し、自動起動には tier 設定を使用します。 **Saved manual candidate revision** は保存設定の内容を識別します。設定変更で変わり、人物の改名や同じ設定への復帰では同じ値になります。読み取り専用欄へフォーカスすると全文を選択・コピーできます。時系列の番号ではありません。 **Current work** には現在の exact Session の起動時記録を別に表示します。 **Assignment history** には各 Session に記録された名前・ツール・起動モデルを表示します。未取得の値は **—** とし、ツール内でのモデル変更の実測値とは区別します。空名と、前後の空白・大文字小文字の違いを除いた重複名（休止中のメンバーを含む）は登録できません。登録後はそのツールに固定します。**Agents Settings** では登録済みの人物を名前で選び、固定ツールを確認します。候補ごとのモデル・実行環境も設定できます。選択したツールが利用できないときは待機理由を表示し、別ツールへ自動切替しません。既存の候補は起動設定と設定済みの同時実行容量を保って取り込みます。
+- **Agents** で表示名・利用ツールと任意の **Model** / **Reasoning** を選び、**Register** で一緒に保存します。登録だけでは起動候補に追加しません。選択した人物の **Display name** はその場で編集すると自動保存され、同じ人物 ID と進行中の作業を保持します。無効な入力は欄に残り、保存失敗や競合は **Retry name** で再試行できます。担当履歴と Board は当時の名前を保持します。 **Saved manual candidate** には選択した人物の手動候補として保存されたモデル・推論・実行環境・権限設定を表示し、自動起動には tier 設定を使用します。 **Saved manual candidate revision** は保存設定の内容を識別します。設定変更で変わり、人物の改名や同じ設定への復帰では同じ値になります。読み取り専用欄へフォーカスすると全文を選択・コピーできます。時系列の番号ではありません。 **Current work** には現在の exact Session の起動時記録を別に表示します。 **Assignment history** には各 Session に記録された名前・ツール・起動モデルを表示します。未取得の値は **—** とし、ツール内でのモデル変更の実測値とは区別します。空名と、前後の空白・大文字小文字の違いを除いた重複名（休止中のメンバーを含む）は登録できません。登録後のツールも共有編集欄から変更できます。**Agents Settings** では登録済みの人物を名前で選び、保存したツールを確認します。候補ごとの実行環境も設定できます。**Saved implementation settings** では候補プール外も含めた登録メンバーの既定ツール・モデル・推論・Runtime・Permissionsを編集します。Inherit はプロジェクトの既存設定を使います。保存済みプロファイル候補は次の NEW から適用します。Launch Agent は現在のフォームと権限プロンプトを省略する既存方針、Auto は tier 設定を使います。現在の作業と同じ会話の再開は記録済み設定を保持します。**PM eligible** は登録時と人物詳細で指定でき、登録時の既定はオフです。登録だけでは PM に選定しません。有効にした利用可能なメンバーを **Select as Project Manager** で PM に選べます。PM も同じ人物・名前・履歴を Team に保持します。共有編集欄ではプロジェクト PM の保存済みツール・モデル・推論を変更でき、**Agents** の対象プロジェクトを明示した Project Manager 欄で自動開始・ループ間隔・一時停止・再起動を操作し、明示的な再起動で新しい会話に適用します。拒否された保存は内容確認後に **Retry profile** で再試行できます。他プロジェクトの PM は表示されたリンクから対象プロジェクトへ移動して編集します。選択したツールが利用できないときは待機理由を表示し、別ツールへ自動切替しません。既存の候補はプロジェクトごとの実行設定と現在の割当を保って移行します。
 - **Team** でメンバーを選ぶと、詳細の **Next planned issues** に次の担当予定と割当理由を順番に表示します。別のメンバーを選んで **Reassign** で未開始の Issue を移し、競合や応答失敗の後は **Refresh plans** で最新の予定を読み直せます。
 - **Switch to next issue** は現在の作業が静止するまで待ち、エージェントが区切りのよい状態を保存・push してから、同じメンバーで選択した Issue を開始します。静止や保存を確認できなければ現在のタスクを保持します。停止前は **Cancel switch** で取り消せ、次の起動に失敗した場合は **Continue saved work** から保存済みタスクの通常の継続操作へ進めます。Host の再起動では未実行の切替要求を破棄します。
-- **Register** はプロジェクトの希望同時実行数を1人増やします。**Rest member** は1人減らし、現在の作業は完了まで続けます。有効メンバーは最低1人を保ち、端末の安全上限により実際の割当数が少なくなる場合があります。
+- **Register** は共有名簿の有効メンバーを1人増やします。**Rest member** は1人減らし、現在の作業は完了まで続けます。有効メンバーは最低1人を保ち、端末の安全上限により実際の割当数が少なくなる場合があります。
+- 登録済みの PM は `pm.agent.add` JSON operation に `name` と `agent_id` を渡し、共有名簿に有効メンバーを1人追加して ID を取得できます。予定した Issue の起動候補にするには、`issue.monitor.profiles.set` でその ID を指定します。
 - **Split view** では左右の面を独立して選び、**Close split** で選択中の面を残します。Shell は補助端末として開け、メンバー人数や稼働 Agent 数へ含めません。
 
-**Active** は PM を含む、この端末で稼働中の Agent 数です。**Busy**・**Team**・同時実行数は
-実装メンバーだけを数えます。メンバー ID・有効人数・確定した担当予定の再割当は、
+プロジェクトのブラウザタブのタイトル、ステータスバー、Works、Agents の **Running** は、
+同じプロジェクトの Agent ウィンドウ状態から集計します。PM の Agent ウィンドウも対象です。
+シェルは集計対象外です。
+
+| Agent ウィンドウの状態 | 集計先 |
+| --- | --- |
+| Running、Starting | Running |
+| Waiting、Stopped、Interrupted | Block |
+| Error | Block と Error |
+| Idle | Idle |
+
+**Team** は設定済み PM を含む有効な登録メンバー数です。**Busy** は稼働中の実装メンバーを数え、同時実行数から PM ロール保持者を除きます。メンバー ID・有効人数・確定した担当予定の再割当は、
 アプリの再起動後も保持します。
 
 Works には Session に帰属する入力・キャッシュ・出力、直近30分の活動グラフ、
 ブランチと検証の状態を表示します。取得できない値は **—** とし、コンテキスト残量は
 provider の直接報告がある場合だけ表示します。Today はこのプロジェクトの実測会話を集計し、
 アカウント全体の使用量を転用しません。個別 PR 情報は表示しません。
+**Fleet tokens/min** は完了した UTC 5 分間の平均です。現在観測できるプロジェクトの
+稼働 Session を対象に、同じ開始時刻の 1 分バケットを足し合わせて 5 で割ります。
+各 Session の集計途中の 1 分を除き、直近 25 点の移動平均を描画します。
+対象 Session の利用量が未取得・取得不能の場合や、バケットが欠落・未計測
+（`null`）の場合は、該当する点を空白にします。最新点が空白なら **—**、
+5 分間すべてを計測しトークン使用量がゼロなら **0** と表示します。
 Today と Fleet には未取得・部分取得・取得エラー・実測済みの説明を表示します。
-不明な合計は **—**、実測ゼロは **0** として区別します。Cost は Session ごとの USD が
-未対応、Landed PRs は完全な日次マージデータが未接続のため、引き続き取得不能として表示します。
+不明な合計は **—**、実測ゼロは **0** として区別します。Cost と Landed PRs は
+データソースが未接続のため表示しません。
+
+Issues の **Verification slots** はホスト全体の実行中・容量・空き枠を表示します。
+`issue.monitor.status` では同じ観測値を `verification_capacity` から取得できます。
+観測できない場合はゼロではなく **Unavailable** を表示します。
+
+Issues のステータスバーは Monitor の `needs_human_count` から **Needs human** を表示します。
+判断が必要な Issue と障害急増の対象 Issue を重複なく数えます。観測結果が空なら **0** を
+表示します。件数を取得できない場合は `null` となり、ステータスバーの件数表示を省きます。
 
 保存した Session は現在の各面へ復元します。旧端末タブ・grid・Columns 指定は再読み込みや
 再起動後も復活せず、名簿の Team/Past タブは維持します。
@@ -2134,7 +2349,7 @@ Today と Fleet には未取得・部分取得・取得エラー・実測済み�
 状態順に選択し、分割表示を維持します。PM と補助 Shell はスキップします。
 選択したネイティブ端末へ入力でき、一覧へ戻っても Session は動作を続けます。
 名前は1行に固定し、長い作業内容は横スクロールやホバーで全文を読めます。
-Issue と Project Manager の設定項目も、ホバーとキーボードフォーカスで説明を表示します。
+Issue の設定と Agents の Project Manager 欄は、ホバーとキーボードフォーカスで説明を表示します。登録メンバーの手動 Monitor 起動は最新のグローバルな実装既定値を使い、自動起動は選択された tier を使います。通常の手動 Work は起動フォームとツールごとの前回設定を使い、新しい PM は対象プロジェクトの保存済み PM プロファイルを使います。未指定値は各経路の既定値に従い、保存しても実行中・復元済み Session は変わりません。
 
 ## Operator デザイン言語 (SPEC-2356)
 
@@ -2317,6 +2532,10 @@ gwtd <<'JSON'
 JSON
 ```
 
+各プロセス標本の `rss_bytes` は常駐メモリのバイト数で、取得不能時は `null` です。
+RSS は常駐ページを含む値で、生存中の割り当て量ではありません。
+プロセス一覧は macOS と Linux の `ps` で取得します。
+
 `host_cpu` には最新の `fseventsd` プロセス標本と、標本数・採取間隔を表示します。
 macOS では1秒間隔で3回採取し、同じプロセスが全標本で CPU 100% を超えた場合に
 警告します。プロセスや標本を取得できなかった場合は低負荷と断定しません。
@@ -2425,6 +2644,16 @@ python scripts/ci_throughput.py --input target/ci-throughput.json
 ```bash
 python scripts/ci_throughput.py --input scripts/fixtures/ci-throughput-2026-10-08.json
 ```
+
+マージの収集データには、収集時点の branch protection の context / app ID と、
+各最終 head の check run も保存します。`required_checks` は各必須 check のマージ前の
+最新結果、成功した check の所要時間、対応する check suite の最初の job（前提 job を含む）
+から最後の必須 check 完了までの時間を示します。`complete_prs` は success・neutral・skipped、
+`all_success_prs` は全件 success のみを数えます。欠測・未完了は区別して表示し、完全な
+標本には数えません。過去の保護設定を復元するものではありません。従来の保存データも
+再計算できますが、追加した測定値は証跡不足として扱います。
+check 単体の所要時間には依存処理を含みません。集約 check の短い値だけでは、
+配下のテストや coverage 全体が速いことは証明できません。
 
 JSON は PR 作成からマージまでの時間、各 PR の最終 head に対する最新成功
 workflow attempt、マージあたりの base 同期回数、runner 待ち、job ごとの所要時間を

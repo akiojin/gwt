@@ -1209,6 +1209,17 @@ fn status() -> Result<LeaseStatusSnapshot, SpecOpsError> {
     Ok(snapshot)
 }
 
+/// Observe the same pool and legacy holders as `verify.lease.status`, without
+/// entering admission. An unreadable pool remains unknown rather than empty.
+pub fn capacity_snapshot() -> Option<crate::issue_monitor::VerificationCapacity> {
+    let snapshot = status().ok()?;
+    Some(crate::issue_monitor::VerificationCapacity {
+        capacity: snapshot.capacity?,
+        running: snapshot.running,
+        available: snapshot.available,
+    })
+}
+
 /// A representative holder is unsuitable for control and renewal: another
 /// slot can remain active after that representative changes or finishes.
 pub(super) fn holder_for_lease(

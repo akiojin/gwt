@@ -93,6 +93,7 @@ test.describe("Board read receipts (isolated checkout)", () => {
       await testInfo.attach(name, { path, contentType: "image/png" });
     };
     const fixture = await startExactRelaunchFixture(testInfo, {
+      page,
       async prepare({ home, bin, project }) {
         // Normal launch keeps one live agent per branch. Both branches are
         // seeded in the throwaway repository; the user's checkout is untouched.

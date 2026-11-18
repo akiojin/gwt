@@ -7,6 +7,10 @@ run when `GWT_PLAYWRIGHT_BASE_URL` is set.
 
 ## Run
 
+The visual test runner supports Node.js 22.x, the version used by CI.
+Check `node --version` before running the suite. If another version is
+active, put Node.js 22.x first on `PATH` and try again.
+
 ```bash
 # from repo root — runs every spec; specs without GWT_PLAYWRIGHT_BASE_URL
 # skip themselves so the suite is safe to invoke without a running gwt.

@@ -388,6 +388,41 @@ struct PtyInputState {
     /// cleared. Used so PM wake injection can wait instead of splicing a
     /// `[gwt]` prompt into a live TUI composer.
     unsent_user_input: bool,
+    raw_framing: RawInputFraming,
+}
+
+/// Only bracketed-paste framing is retained; this is not a composer model.
+#[derive(Clone, Copy, Default)]
+struct RawInputFraming {
+    paste: bool,
+    prefix: usize,
+}
+
+impl RawInputFraming {
+    fn observe(&mut self, data: &[u8]) -> bool {
+        let mut confirms = false;
+        for &byte in data {
+            let marker = if self.paste {
+                b"\x1b[201~"
+            } else {
+                b"\x1b[200~"
+            };
+            if byte == marker[self.prefix] {
+                self.prefix += 1;
+                if self.prefix == marker.len() {
+                    confirms |= self.paste;
+                    self.paste = !self.paste;
+                    self.prefix = 0;
+                }
+                continue;
+            }
+            self.prefix = usize::from(byte == 0x1b);
+            if !self.paste && matches!(byte, b'\r' | b'\n') {
+                confirms = true;
+            }
+        }
+        confirms
+    }
 }
 
 enum ChildState {
@@ -597,6 +632,15 @@ impl CursorPositionReport {
             col: col.saturating_add(1),
         }
     }
+}
+
+/// Replies to queries recognized by the owner-side terminal parser.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalReply {
+    CursorPosition(CursorPositionReport),
+    PrimaryDeviceAttributes,
+    ForegroundColor,
+    BackgroundColor,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1020,6 +1064,22 @@ impl PtyHandle {
         self.write_ordinary_input(data, true)
     }
 
+    /// Authorize a raw chunk before recording input facts or queueing bytes.
+    /// The flag observes CR/LF outside paste, or a complete paste terminator;
+    /// it does not prove provider consumption. Call `commit` at most once.
+    /// The callback runs without the input-state or physical-writer lock and
+    /// must release its guards before returning, including after `commit`.
+    pub fn write_input_with_acceptance(
+        &self,
+        data: &[u8],
+        accept: impl FnOnce(
+            bool,
+            &mut dyn FnMut() -> Result<(), TerminalError>,
+        ) -> Result<(), TerminalError>,
+    ) -> Result<(), TerminalError> {
+        self.write_ordinary_input_accepting(data, true, true, accept, || Ok(()))
+    }
+
     /// Preserve ordinary input ordering/composer protection without treating
     /// an automated write as human activity.
     pub fn write_machine_input(&self, data: &[u8]) -> Result<(), TerminalError> {
@@ -1035,9 +1095,9 @@ impl PtyHandle {
     /// Protocol replies share the physical writer, but must not wait behind a
     /// prompt reservation whose ACK may itself require this reply. They do not
     /// change ordinary input, composer, human quiet time, or transaction revisions.
-    pub fn write_cursor_position_report(
+    pub fn write_terminal_reply(
         &self,
-        report: CursorPositionReport,
+        reply: TerminalReply,
         current: &AtomicBool,
     ) -> Result<(), TerminalError> {
         let active =
@@ -1061,18 +1121,29 @@ impl PtyHandle {
         let writer = writer.as_mut().ok_or_else(|| TerminalError::PtyIoError {
             details: RELEASED_DESCRIPTORS.into(),
         })?;
-        // The existing gate preanswered only the initial 1;1 native query.
-        // Consume stale eligibility too, but never suppress a progressed query.
-        if self
-            .startup_cursor_report_sent
-            .swap(false, Ordering::AcqRel)
-            && report.row == 1
-            && report.col == 1
-        {
-            return Ok(());
-        }
-        let bytes = format!("\x1b[{};{}R", report.row, report.col);
-        Self::write_with_locked_writer(&mut **writer, bytes.as_bytes(), 0)
+        let cursor;
+        let bytes = match reply {
+            TerminalReply::CursorPosition(report) => {
+                // The Windows start gate preanswered only the initial native
+                // 1;1 query. Color and device replies cannot consume that slot.
+                if self
+                    .startup_cursor_report_sent
+                    .swap(false, Ordering::AcqRel)
+                    && report.row == 1
+                    && report.col == 1
+                {
+                    return Ok(());
+                }
+                cursor = format!("\x1b[{};{}R", report.row, report.col);
+                cursor.as_bytes()
+            }
+            // Match xterm.js and its fixed XTERM_THEME_DARK palette in app.js
+            // (SPEC-2356), which applies in both application themes.
+            TerminalReply::PrimaryDeviceAttributes => b"\x1b[?1;2c",
+            TerminalReply::ForegroundColor => b"\x1b]10;rgb:e8e8/eaea/eded\x1b\\",
+            TerminalReply::BackgroundColor => b"\x1b]11;rgb:0a0a/0d0d/1212\x1b\\",
+        };
+        Self::write_with_locked_writer(&mut **writer, bytes, 0)
     }
 
     fn write_ordinary_input(&self, data: &[u8], human: bool) -> Result<(), TerminalError> {
@@ -1083,6 +1154,20 @@ impl PtyHandle {
         &self,
         data: &[u8],
         human: bool,
+        before_writer: impl FnOnce() -> Result<(), TerminalError>,
+    ) -> Result<(), TerminalError> {
+        self.write_ordinary_input_accepting(data, human, false, |_, commit| commit(), before_writer)
+    }
+
+    fn write_ordinary_input_accepting(
+        &self,
+        data: &[u8],
+        human: bool,
+        authorize: bool,
+        accept: impl FnOnce(
+            bool,
+            &mut dyn FnMut() -> Result<(), TerminalError>,
+        ) -> Result<(), TerminalError>,
         before_writer: impl FnOnce() -> Result<(), TerminalError>,
     ) -> Result<(), TerminalError> {
         let mut state = self
@@ -1117,37 +1202,61 @@ impl PtyHandle {
                 details: "PTY input generation is no longer active".to_string(),
             });
         }
-        if !data.is_empty() {
-            state.ordinary_input_revision = state.ordinary_input_revision.saturating_add(1);
-        }
-        // Escape-only terminal responses must not postpone supervision. The
-        // existing content classifier also covers paste payloads and edits.
-        if human
-            && (chunk_has_prompt_content(data)
-                || data
-                    .iter()
-                    .any(|byte| matches!(byte, b'\r' | b'\n' | 0x03 | 0x15)))
-        {
-            state.last_human_input_at = Some(gwt_core::operation_deadline::now());
-        }
-        state.note_user_input(data);
-        // Register before waiting for I/O so a reservation can flush this
-        // earlier chunk before input accepted by its authorization callback.
+        let revision = state.ordinary_input_revision;
+        let mut framing = state.raw_framing;
+        let confirms = framing.observe(data);
         let pending: Arc<[u8]> = Arc::from(data);
-        state.queued.push_back(Arc::clone(&pending));
-        if state.protected {
-            return Ok(());
-        }
-        // A stalled writer must not pin input_state: snapshots hold Pane while
-        // observing it, and the output reader needs Pane to keep draining the
-        // child's output. Holding both would close an I/O wait cycle.
-        drop(state);
-
         let discard_pending = || {
             if let Ok(mut state) = self.input_state.lock() {
                 state.queued.retain(|entry| !Arc::ptr_eq(entry, &pending));
             }
         };
+        let mut accepted = false;
+        let mut protected = if authorize {
+            false
+        } else {
+            accepted = true;
+            state.accept_ordinary(data, human, framing, &pending)
+        };
+        drop(state);
+        let result = if authorize {
+            accept(confirms, &mut || {
+                let mut state =
+                    self.input_state
+                        .lock()
+                        .map_err(|error| TerminalError::PtyIoError {
+                            details: format!("input state lock poisoned: {error}"),
+                        })?;
+                if accepted
+                    || !self.generation_active.load(Ordering::Acquire)
+                    || state.ordinary_input_revision != revision
+                    || (_order.is_none() && !state.protected)
+                {
+                    return Err(TerminalError::PtyIoError {
+                        details: "ordinary input changed before queue acceptance".into(),
+                    });
+                }
+                protected = state.accept_ordinary(data, human, framing, &pending);
+                accepted = true;
+                Ok(())
+            })
+        } else {
+            Ok(())
+        };
+        if let Err(error) = result {
+            discard_pending();
+            return Err(error);
+        }
+        if !accepted {
+            return Err(TerminalError::PtyIoError {
+                details: "ordinary input was not accepted".into(),
+            });
+        }
+        if protected {
+            return Ok(());
+        }
+        // The acceptance callback has released Session/runtime guards before
+        // waiting for the physical writer. Never hold input_state over I/O.
         if let Err(error) = before_writer() {
             discard_pending();
             return Err(error);
@@ -1816,6 +1925,30 @@ pub fn run_start_gate_from_env() -> Result<i32, TerminalError> {
 }
 
 impl PtyInputState {
+    fn accept_ordinary(
+        &mut self,
+        data: &[u8],
+        human: bool,
+        framing: RawInputFraming,
+        pending: &Arc<[u8]>,
+    ) -> bool {
+        if !data.is_empty() {
+            self.ordinary_input_revision = self.ordinary_input_revision.saturating_add(1);
+        }
+        if human
+            && (chunk_has_prompt_content(data)
+                || data
+                    .iter()
+                    .any(|byte| matches!(byte, b'\r' | b'\n' | 0x03 | 0x15)))
+        {
+            self.last_human_input_at = Some(gwt_core::operation_deadline::now());
+        }
+        self.note_user_input(data);
+        self.raw_framing = framing;
+        self.queued.push_back(Arc::clone(pending));
+        self.protected
+    }
+
     fn human_input_is_quiet(&self, quiet_for: Duration) -> bool {
         self.last_human_input_at.is_none_or(|at| {
             gwt_core::operation_deadline::now()
@@ -3454,6 +3587,77 @@ mod tests {
     }
 
     #[test]
+    fn raw_acceptance_observes_confirmation_and_split_paste_boundaries() {
+        let _pty_guard = lock_pty_test();
+        let handle = Arc::new(PtyHandle::spawn(sleep_config("60")).unwrap());
+        let reservation = handle.reserve_input_transaction().unwrap();
+        for (bytes, expected) in [
+            (b"\x1b[A\x0c".as_slice(), false),
+            (b"\r".as_slice(), true),
+            (b"\n".as_slice(), true),
+            (b"\x1b[20".as_slice(), false),
+            (b"0~first\r\nsecond".as_slice(), false),
+            (b"\x1b[201".as_slice(), false),
+            (b"~".as_slice(), true),
+            (b"\x1b[200~plain\x1b[201~".as_slice(), true),
+            (b"\x1b[B\x03\x15".as_slice(), false),
+        ] {
+            let before = handle.ordinary_input_revision();
+            handle
+                .write_input_with_acceptance(bytes, |confirms, commit| {
+                    assert_eq!(confirms, expected, "chunk: {bytes:?}");
+                    assert_eq!(handle.ordinary_input_revision(), before);
+                    commit()
+                })
+                .unwrap();
+        }
+        drop(reservation);
+    }
+
+    #[test]
+    fn raw_acceptance_rejection_and_revision_race_do_not_queue_the_chunk() {
+        let _pty_guard = lock_pty_test();
+        let handle = Arc::new(PtyHandle::spawn(sleep_config("60")).unwrap());
+        let reservation = handle.reserve_input_transaction().unwrap();
+        let before = handle.ordinary_input_observation().unwrap();
+        assert!(handle
+            .write_input_with_acceptance(b"\x1b[200~", |_, _| {
+                Err(TerminalError::PtyIoError {
+                    details: "refused by owner".into(),
+                })
+            })
+            .is_err());
+        assert_eq!(handle.ordinary_input_observation().unwrap(), before);
+        assert!(handle.input_state.lock().unwrap().queued.is_empty());
+        handle
+            .write_input_with_acceptance(b"\r", |confirms, commit| {
+                assert!(confirms, "rejected framing must not affect later input");
+                commit()
+            })
+            .unwrap();
+        assert!(handle
+            .write_input_with_acceptance(b"lost\r", |_, commit| {
+                handle.write_input(b"newer")?;
+                commit()
+            })
+            .is_err());
+        let state = handle.input_state.lock().unwrap();
+        assert_eq!(state.ordinary_input_revision, 2);
+        assert_eq!(state.queued.len(), 2);
+        assert_eq!(&*state.queued[1], b"newer");
+        drop(state);
+        assert!(
+            handle
+                .write_input_with_acceptance(b"unreserved\r", |_, commit| {
+                    drop(reservation);
+                    commit()
+                })
+                .is_err(),
+            "a released reservation must not bypass ordinary ordering"
+        );
+    }
+
+    #[test]
     fn protected_input_transaction_revision_tracks_each_successful_reservation() {
         let _pty_guard = lock_pty_test();
         let handle = Arc::new(PtyHandle::spawn(sleep_config("2")).expect("spawn sleeper"));
@@ -3493,6 +3697,18 @@ mod tests {
             .lock()
             .unwrap()
             .replace(Box::new(Capture(bytes.clone())));
+        let current = AtomicBool::new(true);
+        for reply in [
+            TerminalReply::PrimaryDeviceAttributes,
+            TerminalReply::ForegroundColor,
+            TerminalReply::BackgroundColor,
+        ] {
+            handle.write_terminal_reply(reply, &current).unwrap();
+        }
+        assert_eq!(
+            std::mem::take(&mut *bytes.lock().unwrap()),
+            b"\x1b[?1;2c\x1b]10;rgb:e8e8/eaea/eded\x1b\\\x1b]11;rgb:0a0a/0d0d/1212\x1b\\"
+        );
         handle.write_input(b"human").unwrap();
         let reservation = handle.reserve_input_transaction().unwrap();
         handle.write_input(b"queued").unwrap();
@@ -3506,11 +3722,9 @@ mod tests {
                 state.queued.clone(),
             )
         };
-        let current = AtomicBool::new(true);
-        let report = CursorPositionReport::from_screen_position(2, 6);
-        handle
-            .write_cursor_position_report(report, &current)
-            .unwrap();
+        let report =
+            TerminalReply::CursorPosition(CursorPositionReport::from_screen_position(2, 6));
+        handle.write_terminal_reply(report, &current).unwrap();
         assert_eq!(&*bytes.lock().unwrap(), b"human\x1b[3;7R");
         {
             let state = handle.input_state.lock().unwrap();
@@ -3535,14 +3749,12 @@ mod tests {
             .store(true, Ordering::Release);
         let initial = pane.process_owner_output(b"\x1b[6nchild output");
         assert_eq!(initial.data, b"\x18child output");
-        assert_eq!(initial.cursor_reports.len(), 1);
+        assert_eq!(initial.replies.len(), 1);
         handle
-            .write_cursor_position_report(initial.cursor_reports[0], &current)
+            .write_terminal_reply(initial.replies[0], &current)
             .unwrap();
         assert_eq!(&*bytes.lock().unwrap(), b"human\x1b[3;7R");
-        handle
-            .write_cursor_position_report(report, &current)
-            .unwrap();
+        handle.write_terminal_reply(report, &current).unwrap();
         assert_eq!(&*bytes.lock().unwrap(), b"human\x1b[3;7R\x1b[3;7R");
 
         // A progressed query must be written even if stale eligibility was
@@ -3551,9 +3763,7 @@ mod tests {
         handle
             .startup_cursor_report_sent
             .store(true, Ordering::Release);
-        handle
-            .write_cursor_position_report(report, &current)
-            .unwrap();
+        handle.write_terminal_reply(report, &current).unwrap();
         let progressed_written = &*bytes.lock().unwrap() == b"human\x1b[3;7R\x1b[3;7R\x1b[3;7R";
         handle
             .startup_cursor_report_sent
@@ -3561,11 +3771,13 @@ mod tests {
         let returned = pane.process_owner_output(b"\x1b[4;8H\x1b[H\x1b[6n");
         assert_eq!(returned.data, b"\x1b[4;8H\x1b[H\x18");
         assert_eq!(
-            returned.cursor_reports,
-            vec![CursorPositionReport::from_screen_position(0, 0)]
+            returned.replies,
+            vec![TerminalReply::CursorPosition(
+                CursorPositionReport::from_screen_position(0, 0)
+            )]
         );
         handle
-            .write_cursor_position_report(returned.cursor_reports[0], &current)
+            .write_terminal_reply(returned.replies[0], &current)
             .unwrap();
         let expected = b"human\x1b[3;7R\x1b[3;7R\x1b[3;7R\x1b[1;1R";
         let returned_written = *bytes.lock().unwrap() == expected;
@@ -3579,15 +3791,11 @@ mod tests {
             .startup_cursor_report_sent
             .store(true, Ordering::Release);
         current.store(false, Ordering::Release);
-        assert!(handle
-            .write_cursor_position_report(report, &current)
-            .is_err());
+        assert!(handle.write_terminal_reply(report, &current).is_err());
         assert!(handle.startup_cursor_report_sent.load(Ordering::Acquire));
         current.store(true, Ordering::Release);
         handle.revoke_input_generation();
-        assert!(handle
-            .write_cursor_position_report(report, &current)
-            .is_err());
+        assert!(handle.write_terminal_reply(report, &current).is_err());
         assert!(handle.startup_cursor_report_sent.load(Ordering::Acquire));
         drop(reservation);
         assert_eq!(&*bytes.lock().unwrap(), expected);
@@ -3664,9 +3872,10 @@ mod tests {
         let current = Arc::new(AtomicBool::new(true));
         let reporting_handle = handle.clone();
         let reporting_current = current.clone();
-        let report = CursorPositionReport::from_screen_position(2, 6);
+        let report =
+            TerminalReply::CursorPosition(CursorPositionReport::from_screen_position(2, 6));
         let reporter = std::thread::spawn(move || {
-            reporting_handle.write_cursor_position_report(report, &reporting_current)
+            reporting_handle.write_terminal_reply(report, &reporting_current)
         });
         assert_eq!(
             // test-hygiene: allow-wall-clock-deadline Bounds actual typed-write entry; the channel proves both generation checks and writer acquisition happened before logical close.
@@ -3700,9 +3909,7 @@ mod tests {
         invalidator.join().expect("invalidation thread");
 
         assert!(handle.write_input(b"late input").is_err());
-        assert!(handle
-            .write_cursor_position_report(report, &current)
-            .is_err());
+        assert!(handle.write_terminal_reply(report, &current).is_err());
     }
 
     #[test]

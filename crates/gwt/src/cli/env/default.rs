@@ -460,7 +460,7 @@ impl CliEnv for DefaultCliEnv {
         );
         if !outcome.is_success() {
             return Err(io::Error::other(format!(
-                "external fork auto-merge failed: {outcome:?}; inspect remote state before retrying. If this scoped route is unavailable, human merge required: repository automation may exclude external forks"
+                "auto-merge failed: {outcome:?}; inspect remote state before retrying. If this scoped route is unavailable, human merge required: repository automation may exclude external forks or fail to start"
             )));
         }
         match pr_status::fetch_pr_auto_merge_remote_state_in_repository(&self.repo_path, &repository, number) {
@@ -965,7 +965,7 @@ mod runtime_factory_tests {
                 generated_outputs: Vec::new(),
                 quarantines: Vec::new(),
                 worktree_fingerprint: String::new(),
-                created_at: chrono::Utc::now(),
+                created_at: gwt_core::timestamp::UtcTimestamp::now(),
                 content_hash: String::new(),
             }),
         )

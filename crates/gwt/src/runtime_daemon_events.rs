@@ -27,6 +27,8 @@ pub const ISSUE_MONITOR_CONTROL_REJECTED_ERROR: &str =
     concat!("issue", " monitor control rejected before commit");
 pub const ISSUE_MONITOR_CONTROL_BUSY_ERROR: &str =
     concat!("issue", " monitor control rejected: admission is full");
+pub(crate) const ISSUE_MONITOR_WAIT_CAP_EXPIRED_ERROR: &str =
+    "Issues control rejected before commit: reason=wait_cap_expired; the original wait deadline has passed or cannot be read";
 pub const ISSUE_MONITOR_CONTROL_SCAN_ALREADY_IN_FLIGHT_ERROR: &str =
     concat!("issue", " monitor control rejected: scan_already_in_flight");
 /// Captured source for the private `agent_failed_from_launch` notification.

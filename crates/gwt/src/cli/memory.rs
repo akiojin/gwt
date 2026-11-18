@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use chrono::{Local, NaiveDate};
+use gwt_core::timestamp::{parse_utc_date, UtcTimestamp};
 use gwt_github::{client::ApiError, SpecOpsError};
 
 use super::{CliEnv, CliParseError};
@@ -109,9 +109,9 @@ fn valid_memory_type(value: &str) -> Result<String, CliParseError> {
 }
 
 fn validate_date(value: &str) -> Result<(), CliParseError> {
-    NaiveDate::parse_from_str(value, "%Y-%m-%d")
+    parse_utc_date(value)
         .map(|_| ())
-        .map_err(|_| CliParseError::InvalidValue {
+        .ok_or(CliParseError::InvalidValue {
             flag: "--date",
             reason: "must be YYYY-MM-DD",
         })
@@ -162,7 +162,7 @@ fn append_memory_entry(repo_root: &Path, add: &MemoryAddCommand) -> std::io::Res
         let date = add
             .date
             .clone()
-            .unwrap_or_else(|| Local::now().format("%Y-%m-%d").to_string());
+            .unwrap_or_else(|| UtcTimestamp::now().local_datetime().date().to_string());
         let entry = format_memory_entry(&date, add);
         let mut file = OpenOptions::new().append(true).open(&path)?;
         file.write_all(entry.as_bytes())

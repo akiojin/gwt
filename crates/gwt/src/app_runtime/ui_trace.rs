@@ -26,7 +26,12 @@ pub(super) fn save_ui_trace_to_log_dir(
         .session_id()
         .map(sanitize_ui_trace_session_id)
         .unwrap_or_else(|| "trace".to_string());
-    let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ");
+    let timestamp = gwt_core::timestamp::UtcTimestamp::now()
+        .utc_datetime()
+        .format(time::macros::format_description!(
+            "[year][month][day]T[hour][minute][second].[subsecond digits:3]Z"
+        ))
+        .expect("format UTC timestamp");
     let path = log_dir.join(format!("ui-trace-{timestamp}-{session_id}.jsonl"));
     let file = std::fs::File::create(&path)
         .map_err(|error| format!("failed to create UI trace artifact: {error}"))?;

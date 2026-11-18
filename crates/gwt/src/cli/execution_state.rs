@@ -36,10 +36,12 @@ use std::{
     time::Duration,
 };
 
-use chrono::{DateTime, Utc};
-use gwt_core::workspace_projection::{
-    ExternalWorkspaceCommitAuthority, ExternalWorkspaceCommitDecision,
-    ExternalWorkspaceCommitRecovery, ExternalWorkspaceCommitResolution,
+use gwt_core::{
+    timestamp::UtcTimestamp,
+    workspace_projection::{
+        ExternalWorkspaceCommitAuthority, ExternalWorkspaceCommitDecision,
+        ExternalWorkspaceCommitRecovery, ExternalWorkspaceCommitResolution,
+    },
 };
 use gwt_github::{client::ApiError, SpecOpsError};
 use serde::{Deserialize, Serialize};
@@ -206,7 +208,7 @@ fn inject_repair_binding_authority_race_if_requested(worktree: &Path) -> io::Res
         return Ok(());
     };
     let context = GenerationTransactionContext::resolve(worktree, owner)?;
-    let now = Utc::now();
+    let now = UtcTimestamp::now();
     let mut record = ExecutionControlRecord {
         owner_kind: owner.kind,
         owner_number: owner.number,
@@ -496,7 +498,7 @@ pub struct OwnershipTransfer {
     pub from_session_id: String,
     pub to_session_id: String,
     pub reason: String,
-    pub transferred_at: DateTime<Utc>,
+    pub transferred_at: UtcTimestamp,
 }
 
 /// One audited recovery of a terminal Blocked execution (FR-196): the
@@ -510,16 +512,16 @@ pub struct ExecutionRecovery {
     pub prior_blocked_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prior_missing_verification: Option<String>,
-    pub blocked_at: DateTime<Utc>,
+    pub blocked_at: UtcTimestamp,
     pub verification_record_id: String,
     pub verification_run_hash: String,
     pub verification_plan_hash: String,
-    pub verification_plan_created_at: DateTime<Utc>,
+    pub verification_plan_created_at: UtcTimestamp,
     pub plan_derived: bool,
     pub worktree_fingerprint: String,
-    pub verification_started_at: DateTime<Utc>,
-    pub verification_created_at: DateTime<Utc>,
-    pub reopened_at: DateTime<Utc>,
+    pub verification_started_at: UtcTimestamp,
+    pub verification_created_at: UtcTimestamp,
+    pub reopened_at: UtcTimestamp,
     /// Hash of the preceding recovery entry, or empty for the first entry.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub previous_recovery_hash: String,
@@ -558,9 +560,9 @@ pub struct ExecutionControlRecord {
     pub blocked_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub missing_verification: Option<String>,
-    pub launched_at: DateTime<Utc>,
+    pub launched_at: UtcTimestamp,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub settled_at: Option<DateTime<Utc>>,
+    pub settled_at: Option<UtcTimestamp>,
     /// Exact integrity-protected verification snapshot that authorized a
     /// Completed transition. Ready handoff must consume this same snapshot;
     /// replacing or deleting the run after completion cannot erase a typed
@@ -611,6 +613,15 @@ pub struct ExecutionOwnerKey {
 impl ExecutionOwnerKey {
     fn storage_key(self) -> String {
         format!("owner-{}", self.number)
+    }
+
+    /// Canonical spelling persisted in Work owner fields.
+    #[must_use]
+    pub fn canonical_work_owner_label(self) -> String {
+        match self.kind {
+            ExecutionOwnerKind::Issue => format!("Issue #{}", self.number),
+            ExecutionOwnerKind::Spec => format!("SPEC-{}", self.number),
+        }
     }
 }
 
@@ -701,7 +712,7 @@ pub struct ExecutionGenerationIdentity {
     pub initial_session_id: String,
     pub worktree_binding_hash: String,
     pub entrypoint: String,
-    pub activated_at: DateTime<Utc>,
+    pub activated_at: UtcTimestamp,
 }
 
 /// Immutable snapshot created at generation activation/import.
@@ -732,7 +743,7 @@ pub struct SuccessorRequest {
     pub session_binding_id: String,
     pub initial_session_id: String,
     pub entrypoint: String,
-    pub requested_at: DateTime<Utc>,
+    pub requested_at: UtcTimestamp,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -2106,7 +2117,7 @@ pub fn reap_startup_defunct_active_generation(
             super::verification_record::archive_untracked_work_events_for_recovery(
                 &context.worktree,
             )?;
-            let recorded_at = Utc::now();
+            let recorded_at = UtcTimestamp::now();
             record.status = ExecutionControlStatus::Blocked;
             record.blocked_reason = Some(reason.to_string());
             record.missing_verification = Some("startup Active holder liveness".to_string());
@@ -2360,8 +2371,8 @@ fn unstarted_launch_refusal(
     session_id: &str,
     record: &ExecutionControlRecord,
 ) -> Option<&'static str> {
-    if Utc::now().signed_duration_since(record.launched_at)
-        < chrono::Duration::minutes(UNSTARTED_LAUNCH_RELEASE_GRACE_MINUTES)
+    if UtcTimestamp::now().signed_duration_since(record.launched_at)
+        < time::Duration::minutes(UNSTARTED_LAUNCH_RELEASE_GRACE_MINUTES)
     {
         return Some("the generation is still inside the launch start-up grace, so a silent holder may yet be coming up");
     }
@@ -2488,7 +2499,7 @@ fn release_launch_generation(
             &current.identity.generation_id,
             &current.identity.session_binding_id,
         );
-        let recorded_at = Utc::now();
+        let recorded_at = UtcTimestamp::now();
         record.status = ExecutionControlStatus::Blocked;
         record.blocked_reason = Some(reason.to_string());
         record.missing_verification = Some(authority.missing_verification().to_string());
@@ -2567,7 +2578,7 @@ pub struct ContinuationAttempt {
     pub predecessor_generation_content_hash: String,
     pub candidate_generation_id: String,
     pub status: ContinuationAttemptStatus,
-    pub recorded_at: DateTime<Utc>,
+    pub recorded_at: UtcTimestamp,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2591,7 +2602,7 @@ pub struct GenerationTakeoverRequest {
     pub from_session_id: String,
     pub to_session_id: String,
     pub reason: String,
-    pub requested_at: DateTime<Utc>,
+    pub requested_at: UtcTimestamp,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -2611,7 +2622,7 @@ pub struct GenerationTakeoverAttempt {
     pub generation_id: String,
     pub predecessor_head_hash: String,
     pub status: GenerationTakeoverAttemptStatus,
-    pub recorded_at: DateTime<Utc>,
+    pub recorded_at: UtcTimestamp,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolution_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2629,7 +2640,7 @@ pub struct GenerationTakeoverAudit {
     pub from_session_id: String,
     pub to_session_id: String,
     pub reason: String,
-    pub observed_at: DateTime<Utc>,
+    pub observed_at: UtcTimestamp,
     pub execution_control_json: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub previous_event_hash: String,
@@ -2650,7 +2661,7 @@ pub struct GenerationLifecycleEvent {
     /// and agent-authored transitions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation_id: Option<String>,
-    pub recorded_at: DateTime<Utc>,
+    pub recorded_at: UtcTimestamp,
     pub execution_control_json: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub previous_event_hash: String,
@@ -2666,7 +2677,7 @@ pub struct ExecutionContinuationValidationAudit {
     pub generation_id: String,
     pub execution_binding: gwt_agent::ExecutionBindingIdentity,
     pub capability_generation: u64,
-    pub recorded_at: DateTime<Utc>,
+    pub recorded_at: UtcTimestamp,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub previous_audit_hash: String,
     pub content_hash: String,
@@ -2779,7 +2790,7 @@ pub enum LegacyActiveDisposition {
     Stale {
         new_session_id: String,
         reason: String,
-        observed_at: DateTime<Utc>,
+        observed_at: UtcTimestamp,
     },
     Unknown,
 }
@@ -2872,7 +2883,7 @@ struct ExecutionRepairAudit {
     workspace_recoveries: Vec<ExternalWorkspaceCommitRecovery>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     binding_target: Option<ExecutionRepairBindingTarget>,
-    repaired_at: DateTime<Utc>,
+    repaired_at: UtcTimestamp,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     previous_audit_hash: String,
     content_hash: String,
@@ -3166,7 +3177,7 @@ pub struct OwnerExecutionDiagnosis {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub generation_entrypoint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub generation_activated_at: Option<DateTime<Utc>>,
+    pub generation_activated_at: Option<UtcTimestamp>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub holder_session_id: Option<String>,
     /// Durable holder state: an `AgentStatus` wire value, or `missing` /
@@ -3327,10 +3338,17 @@ pub fn diagnose_owner(worktree: &Path, owner: ExecutionOwnerKey) -> OwnerExecuti
     diagnosis.generation_id = Some(current.identity.generation_id.clone());
     diagnosis.generation_entrypoint = Some(current.identity.entrypoint.clone());
     diagnosis.generation_activated_at = Some(current.identity.activated_at);
-    let holder_session_id = current.identity.initial_session_id.clone();
+    let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+    let Some(hold) = owner_generation_hold_from_ledger(&sessions_dir, &ledger) else {
+        diagnosis.recommended_recovery = "execution.repair".to_string();
+        diagnosis.recommended_recovery_reason =
+            "The current generation's effective execution projection could not be read."
+                .to_string();
+        return diagnosis;
+    };
+    let holder_session_id = hold.holder_session_id;
     diagnosis.holder_session_id = Some(holder_session_id.clone());
 
-    let sessions_dir = gwt_core::paths::gwt_sessions_dir();
     let holder = match gwt_agent::inspect_session_path(
         &sessions_dir.join(format!("{holder_session_id}.toml")),
     ) {
@@ -5541,9 +5559,10 @@ fn with_current_execution_binding_lease_wait<T>(
     };
 
     with_resolved_generation_owner_lease(&context, |context| {
-        gwt_agent::with_session_lease_wait(
+        gwt_agent::session::with_named_session_lease_wait(
             sessions_dir,
             &expected.session_id,
+            &format!("execution binding {authority:?}"),
             session_wait,
             |session| {
                 let canonical_worktree = match dunce::canonicalize(&session.worktree_path) {
@@ -7042,7 +7061,7 @@ fn invalid_generation_authority_record(hint: &GenerationAuthorityHint) -> Execut
             status: ExecutionControlStatus::Active,
             blocked_reason: None,
             missing_verification: None,
-            launched_at: Utc::now(),
+            launched_at: UtcTimestamp::now(),
             settled_at: None,
             completion_evidence: None,
             transfers: Vec::new(),
@@ -8357,7 +8376,7 @@ pub fn record_rebound_continuation_validation(
                 generation_id: binding.identity.generation_id.clone(),
                 execution_binding: binding.identity.clone(),
                 capability_generation: binding.capability_generation,
-                recorded_at: Utc::now(),
+                recorded_at: UtcTimestamp::now(),
                 previous_audit_hash: String::new(),
                 content_hash: String::new(),
             },
@@ -8740,7 +8759,7 @@ fn abort_generation_takeover_bound_to(
     }
     let mut aborted = latest;
     aborted.status = GenerationTakeoverAttemptStatus::Aborted;
-    aborted.recorded_at = Utc::now();
+    aborted.recorded_at = UtcTimestamp::now();
     aborted.resolution_reason = Some(reason.to_string());
     aborted.activated_binding = None;
     aborted.previous_attempt_hash.clear();
@@ -8861,7 +8880,7 @@ fn activate_generation_takeover_in_context(
     }
     let mut activated = latest;
     activated.status = GenerationTakeoverAttemptStatus::Activated;
-    activated.recorded_at = Utc::now();
+    activated.recorded_at = UtcTimestamp::now();
     activated.resolution_reason = None;
     activated.activated_binding = Some(committed_binding.clone());
     activated.previous_attempt_hash.clear();
@@ -9707,7 +9726,7 @@ pub fn prepare_exact_terminal_active_successor(
                 }
             }
 
-            let recorded_at = Utc::now();
+            let recorded_at = UtcTimestamp::now();
             record.status = ExecutionControlStatus::Blocked;
             record.blocked_reason = Some(reason.to_string());
             record.missing_verification = Some("authenticated SessionStart readiness".to_string());
@@ -9910,7 +9929,7 @@ fn abort_successor_bound_to(
     }
     let mut aborted = latest;
     aborted.status = ContinuationAttemptStatus::Aborted;
-    aborted.recorded_at = Utc::now();
+    aborted.recorded_at = UtcTimestamp::now();
     aborted.reason = Some(reason.to_string());
     aborted.previous_attempt_hash.clear();
     aborted.content_hash.clear();
@@ -10167,7 +10186,7 @@ pub struct BlockingPreparedTransaction {
     pub candidate_session_id: String,
     /// `missing`, `unreadable`, or the durable `AgentStatus` name.
     pub candidate_session_state: String,
-    pub prepared_at: DateTime<Utc>,
+    pub prepared_at: UtcTimestamp,
 }
 
 impl BlockingPreparedTransaction {
@@ -10179,7 +10198,7 @@ impl BlockingPreparedTransaction {
     /// materializing, so a transaction that is still Prepared belongs to one
     /// that never finished and will fence the owner until something clears it.
     #[must_use]
-    pub fn is_stale_at(&self, now: DateTime<Utc>) -> bool {
+    pub fn is_stale_at(&self, now: UtcTimestamp) -> bool {
         now.signed_duration_since(self.prepared_at) >= PREPARED_TRANSACTION_RELEASE_GRACE
     }
 }
@@ -10383,10 +10402,7 @@ fn recover_terminal_workspace_commit(
         if expected.decision == ExternalWorkspaceCommitDecision::Commit {
             validate_generation_activation_owner(context, true)?;
         }
-        let owner_label = match owner.kind {
-            ExecutionOwnerKind::Issue => format!("Issue #{}", owner.number),
-            ExecutionOwnerKind::Spec => format!("SPEC-{}", owner.number),
-        };
+        let owner_label = owner.canonical_work_owner_label();
         let resolution =
             gwt_core::workspace_projection::resolve_workspace_state_external_commit_for_authority(
                 &context.worktree,
@@ -10420,7 +10436,7 @@ fn recover_terminal_workspace_commit(
 /// still Prepared long after it belongs to a launch that is never coming back.
 /// Naming an exact `operation_id` bypasses the wait, because the operator then
 /// releases something they read out of `execution.status` themselves.
-const PREPARED_TRANSACTION_RELEASE_GRACE: chrono::Duration = chrono::Duration::minutes(10);
+const PREPARED_TRANSACTION_RELEASE_GRACE: time::Duration = time::Duration::minutes(10);
 
 fn describe_candidate_session(sessions_dir: &Path, session_id: &str) -> String {
     match gwt_agent::inspect_session_path(&sessions_dir.join(format!("{session_id}.toml"))) {
@@ -10510,7 +10526,7 @@ pub fn release_blocking_prepared_transactions(
     sessions_dir: &Path,
     operation_id: Option<&str>,
     reason: &str,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
 ) -> io::Result<PreparedTransactionReleaseOutcome> {
     if reason.trim().is_empty() {
         return Err(invalid_generation_data(
@@ -10831,7 +10847,7 @@ fn activate_successor_from_ledger_in_context(
 
     let mut activated = latest;
     activated.status = ContinuationAttemptStatus::Activated;
-    activated.recorded_at = Utc::now();
+    activated.recorded_at = UtcTimestamp::now();
     activated.activated_generation = Some(identity.clone());
     activated.reason = None;
     activated.previous_attempt_hash.clear();
@@ -11323,7 +11339,7 @@ fn block_uncommitted_genesis_launch_in_context(
             "failed genesis projection no longer matches the exact Active launch",
         ));
     }
-    let recorded_at = Utc::now();
+    let recorded_at = UtcTimestamp::now();
     record.status = ExecutionControlStatus::Blocked;
     record.blocked_reason = Some(reason.to_string());
     record.missing_verification = Some("genesis launch readiness".to_string());
@@ -11829,9 +11845,9 @@ where
                     record
                         .recoveries
                         .last()
-                        .map_or_else(Utc::now, |recovery| recovery.reopened_at)
+                        .map_or_else(UtcTimestamp::now, |recovery| recovery.reopened_at)
                 } else {
-                    record.settled_at.unwrap_or_else(Utc::now)
+                    record.settled_at.unwrap_or_else(UtcTimestamp::now)
                 };
                 let transition = || {
                     append_lifecycle_event(
@@ -12332,7 +12348,7 @@ fn materialize_at_launch_locked(
                 } else {
                     "launch-takeover".to_string()
                 },
-                transferred_at: Utc::now(),
+                transferred_at: UtcTimestamp::now(),
             });
         }
     }
@@ -12347,7 +12363,7 @@ fn materialize_at_launch_locked(
             status: ExecutionControlStatus::Active,
             blocked_reason: None,
             missing_verification: None,
-            launched_at: Utc::now(),
+            launched_at: UtcTimestamp::now(),
             settled_at: None,
             completion_evidence: None,
             transfers,
@@ -12593,7 +12609,7 @@ fn settle_locked(
             reason
         }
     };
-    record.settled_at = Some(Utc::now());
+    record.settled_at = Some(UtcTimestamp::now());
     let generation_updated = match persist_generation_lifecycle_transition_if_owned(
         worktree,
         &record,
@@ -12850,10 +12866,13 @@ fn evaluate_pr_handoff(
         }
     };
     if caller_authenticated.is_err() {
-        return Err(
-            "PR mutation refused: current execution authority requires the exact durable owning Session and generation binding; relaunch or continue the owning Session before retrying."
-                .to_string(),
-        );
+        return Err(format!(
+            "PR mutation refused: current execution authority requires the exact durable owning Session and generation binding; relaunch or continue the owning Session before retrying.{}",
+            crate::cli::verification_record::current_holder_recovery_guidance(
+                &worktree,
+                session_id.as_deref(),
+            ),
+        ));
     }
     let Some(session_id) = session_id else {
         return Ok(Vec::new());
@@ -13043,7 +13062,7 @@ pub struct ExecutionRepairDiagnosis {
     pub outcome: String,
     pub repair_id: String,
     pub new_generation_id: String,
-    pub repaired_at: DateTime<Utc>,
+    pub repaired_at: UtcTimestamp,
     pub source_kinds: Vec<ExecutionRepairSourceKind>,
 }
 
@@ -13097,7 +13116,7 @@ pub struct BindingRepairOutcomeRecord {
     pub owner: ExecutionOwnerKey,
     pub binding: gwt_agent::SessionExecutionBinding,
     pub outcome: BindingRepairOutcome,
-    pub recorded_at: DateTime<Utc>,
+    pub recorded_at: UtcTimestamp,
     pub content_hash: String,
 }
 
@@ -13114,7 +13133,7 @@ pub struct ExecutionBindingRepairDiagnosis {
     pub host_instance_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub observed_generation_id: Option<String>,
-    pub recorded_at: DateTime<Utc>,
+    pub recorded_at: UtcTimestamp,
     pub matches_current_generation: bool,
     pub validated: bool,
 }
@@ -13133,7 +13152,7 @@ pub fn new_binding_repair_outcome_record(
         owner,
         binding: binding.clone(),
         outcome,
-        recorded_at: Utc::now(),
+        recorded_at: UtcTimestamp::now(),
         content_hash: String::new(),
     }
 }
@@ -15662,10 +15681,10 @@ enum ExecutionReopenPrerequisites {
     Available {
         record: ExecutionControlRecord,
         binding: Option<gwt_agent::ExecutionBindingIdentity>,
-        blocked_at: DateTime<Utc>,
+        blocked_at: UtcTimestamp,
         plan: Box<crate::cli::verification_record::VerificationPlanRecord>,
         verification: Box<crate::cli::verification_record::VerificationRunRecord>,
-        verification_started_at: DateTime<Utc>,
+        verification_started_at: UtcTimestamp,
     },
     Satisfied {
         record: ExecutionControlRecord,
@@ -16691,7 +16710,7 @@ fn repair_corrupt_execution_impl(
                 ));
             }
 
-            let now = Utc::now();
+            let now = UtcTimestamp::now();
             let mut record = ExecutionControlRecord {
                 owner_kind: owner.kind,
                 owner_number: owner.number,
@@ -16768,7 +16787,7 @@ fn repair_corrupt_execution_impl(
                 new_generation_id: generation_id.clone(),
                 workspace_recoveries: workspace_recoveries.clone(),
                 binding_target,
-                repaired_at: Utc::now(),
+                repaired_at: UtcTimestamp::now(),
                 previous_audit_hash: audits
                     .last()
                     .map_or_else(String::new, |entry| entry.content_hash.clone()),
@@ -17631,7 +17650,7 @@ fn run_release_prepared(
     owner: ExecutionOwnerKey,
     operation_id: Option<&str>,
     reason: &str,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let outcome = match release_blocking_prepared_transactions(
@@ -18072,7 +18091,7 @@ fn run_impl<E: CliEnv>(
             *owner,
             operation_id.as_deref(),
             reason,
-            Utc::now(),
+            UtcTimestamp::now(),
             out,
         );
     }
@@ -18940,7 +18959,7 @@ fn run_reopen_locked(
         return Ok(2);
     }
 
-    let reopened_at = Utc::now();
+    let reopened_at = UtcTimestamp::now();
     record.recoveries.push(ExecutionRecovery {
         session_id: session_id.to_string(),
         reason: reason.trim().to_string(),
@@ -19373,7 +19392,7 @@ fn run_adopt_locked(
         from_session_id: record.primary_session_id.clone(),
         to_session_id: session_id.to_string(),
         reason: reason.trim().to_string(),
-        transferred_at: Utc::now(),
+        transferred_at: UtcTimestamp::now(),
     };
     record.transfers.push(transfer.clone());
     record.primary_session_id = session_id.to_string();
@@ -19450,6 +19469,19 @@ fn run_adopt_locked(
 mod tests {
     use super::*;
     use gwt_core::test_support::ScopedEnvVar;
+
+    #[test]
+    fn execution_owner_key_generates_the_canonical_work_owner_label() {
+        for (kind, number, expected) in [
+            (ExecutionOwnerKind::Issue, 3441, "Issue #3441"),
+            (ExecutionOwnerKind::Spec, 2359, "SPEC-2359"),
+        ] {
+            assert_eq!(
+                ExecutionOwnerKey { kind, number }.canonical_work_owner_label(),
+                expected,
+            );
+        }
+    }
 
     #[test]
     fn issue_5644_expired_runtime_scan_cannot_prove_absence() {
@@ -19645,9 +19677,9 @@ mod tests {
         blocked_reason: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         missing_verification: Option<String>,
-        launched_at: DateTime<Utc>,
+        launched_at: UtcTimestamp,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        settled_at: Option<DateTime<Utc>>,
+        settled_at: Option<UtcTimestamp>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         transfers: Vec<OwnershipTransfer>,
         #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -19667,9 +19699,9 @@ mod tests {
         blocked_reason: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         missing_verification: Option<String>,
-        launched_at: DateTime<Utc>,
+        launched_at: UtcTimestamp,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        settled_at: Option<DateTime<Utc>>,
+        settled_at: Option<UtcTimestamp>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         transfers: Vec<OwnershipTransfer>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -19688,7 +19720,7 @@ mod tests {
             status: ExecutionControlStatus::Active,
             blocked_reason: None,
             missing_verification: None,
-            launched_at: Utc::now(),
+            launched_at: UtcTimestamp::now(),
             settled_at: None,
             completion_evidence: None,
             transfers: Vec::new(),
@@ -19708,7 +19740,13 @@ mod tests {
     /// readable across the release that introduced it.
     #[test]
     fn the_permission_mode_decision_stays_out_of_the_record_body_hash() {
-        let without = active_record("sess-4591");
+        let mut without = active_record("sess-4591");
+        without.launched_at = "2026-08-01T00:00:00.007980Z".parse().unwrap();
+        // Preserve the SHA-256 of the previous Chrono-backed JSON projection.
+        assert_eq!(
+            compute_content_hash(&without),
+            "c005b3ef8f82c38a59efd7eb8c8ccdb6f8de73be3bb72b4015cbba5eafbdc5d3"
+        );
         let mut with = without.clone();
         with.permission_decision = Some(gwt_agent::PermissionModeDecision::default());
 
@@ -19726,10 +19764,13 @@ mod tests {
             serde_json::from_slice(&serialize_execution_control(&with).unwrap()).unwrap();
         assert_eq!(stored.permission_decision, with.permission_decision);
         assert!(integrity_ok(&stored));
+        let mut edited = stored;
+        edited.launched_at += time::Duration::nanoseconds(1);
+        assert!(!integrity_ok(&edited));
     }
 
     fn test_recovery(session: &str, index: usize) -> ExecutionRecovery {
-        let now = Utc::now();
+        let now = UtcTimestamp::now();
         ExecutionRecovery {
             session_id: session.to_string(),
             reason: format!("recovery {index}"),
@@ -19759,7 +19800,7 @@ mod tests {
 
     fn with_new_hook_observations(session: &gwt_agent::Session) -> gwt_agent::Session {
         let mut current = session.clone();
-        let observed_at = session.updated_at + chrono::Duration::seconds(1);
+        let observed_at = session.updated_at + time::Duration::seconds(1);
         current.updated_at = observed_at;
         current.last_activity_at = observed_at;
         current.last_hook_event = Some("PreToolUse".to_string());
@@ -19912,7 +19953,7 @@ mod tests {
             session_binding_id: format!("binding-{operation_id}"),
             initial_session_id: format!("session-{operation_id}"),
             entrypoint: "continue-work".to_string(),
-            requested_at: Utc::now(),
+            requested_at: UtcTimestamp::now(),
         }
     }
 
@@ -21146,7 +21187,7 @@ mod tests {
         assert_eq!(blocking.operation_id, leaked.operation_id);
         assert_eq!(blocking.candidate_session_state, "runtime_absent");
 
-        let now = Utc::now();
+        let now = UtcTimestamp::now();
         let held = release_blocking_prepared_transactions(
             dir.path(),
             caller_owner,
@@ -21250,7 +21291,7 @@ mod tests {
             let mut event = gwt_core::workspace_projection::WorkEvent::new(
                 gwt_core::workspace_projection::WorkEventKind::Resume,
                 &work_id,
-                Utc::now(),
+                UtcTimestamp::now(),
             );
             event.owner = Some(format!("SPEC-{}", owner.number));
             event.agent_session_id = Some(request.initial_session_id.clone());
@@ -21319,7 +21360,7 @@ mod tests {
                 &sessions_dir,
                 Some(&request.operation_id),
                 "recover the exact abandoned external transaction",
-                Utc::now(),
+                UtcTimestamp::now(),
             )
             .expect("terminal ledger decision must recover the matching Work transaction");
             assert_eq!(result.status, "external_commit_resolved");
@@ -21345,7 +21386,7 @@ mod tests {
                 &sessions_dir,
                 Some(&request.operation_id),
                 "repeat the exact recovery",
-                Utc::now(),
+                UtcTimestamp::now(),
             )
             .expect("terminal receipt makes repeated recovery safe");
 
@@ -21581,7 +21622,7 @@ mod tests {
             from_session_id: "session-original".to_string(),
             to_session_id: format!("session-{operation_id}"),
             reason: "verified dead pane".to_string(),
-            requested_at: Utc::now(),
+            requested_at: UtcTimestamp::now(),
         }
     }
 
@@ -21661,7 +21702,7 @@ mod tests {
             owner,
             session_id,
             status,
-            chrono::Duration::zero(),
+            time::Duration::ZERO,
         )
     }
 
@@ -21672,7 +21713,7 @@ mod tests {
         owner: ExecutionOwnerKey,
         session_id: &str,
         status: gwt_agent::AgentStatus,
-        age: chrono::Duration,
+        age: time::Duration,
     ) -> (
         StartupActiveGenerationCandidate,
         gwt_agent::SessionExecutionIdentity,
@@ -22318,7 +22359,7 @@ mod tests {
                 runtime_incarnation: 12,
                 child_pid: 13,
                 child_started_at: 14,
-                requested_at: Utc::now().to_rfc3339(),
+                requested_at: UtcTimestamp::now().to_rfc3339(),
             },
         );
         crate::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
@@ -22833,7 +22874,7 @@ mod tests {
                 session_binding_id: uuid::Uuid::new_v4().to_string(),
                 initial_session_id: "revoked-launch-successor".to_string(),
                 entrypoint: "gwt-execute".to_string(),
-                requested_at: Utc::now(),
+                requested_at: UtcTimestamp::now(),
             },
         )
         .expect("prepare a successor on the Active generation");
@@ -22903,7 +22944,7 @@ mod tests {
                 unstarted_owner,
                 unstarted_session,
                 gwt_agent::AgentStatus::Running,
-                chrono::Duration::minutes(UNSTARTED_LAUNCH_RELEASE_GRACE_MINUTES + 1),
+                time::Duration::minutes(UNSTARTED_LAUNCH_RELEASE_GRACE_MINUTES + 1),
             );
         gwt_agent::SessionRuntimeState::for_execution_process(
             gwt_agent::AgentStatus::Running,
@@ -22999,7 +23040,7 @@ mod tests {
                 started_owner,
                 started_session,
                 gwt_agent::AgentStatus::Running,
-                chrono::Duration::minutes(UNSTARTED_LAUNCH_RELEASE_GRACE_MINUTES + 1),
+                time::Duration::minutes(UNSTARTED_LAUNCH_RELEASE_GRACE_MINUTES + 1),
             );
         gwt_agent::SessionRuntimeState::for_execution_process(
             gwt_agent::AgentStatus::Running,
@@ -23231,9 +23272,7 @@ mod tests {
         let sessions_dir = gwt_core::paths::gwt_sessions_dir();
         // A legacy sidecar: no `host_started_at`, written years before this
         // test process (the "Host" its PID namespace now names) started.
-        let written_at = chrono::DateTime::parse_from_rfc3339("2020-01-01T00:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
+        let written_at = UtcTimestamp::parse_rfc3339("2020-01-01T00:00:00Z").unwrap();
         let mut stale = gwt_agent::SessionRuntimeState::for_execution(
             gwt_agent::AgentStatus::Running,
             &identity,
@@ -23263,7 +23302,7 @@ mod tests {
             &identity,
             17,
         );
-        fresh.updated_at = Utc::now();
+        fresh.updated_at = UtcTimestamp::now();
         fresh.last_activity_at = fresh.updated_at;
         fresh
             .save(&gwt_agent::runtime_state_path(&sessions_dir, session_id))
@@ -23878,7 +23917,7 @@ mod tests {
         let mut event = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Done,
             "work-diagnosis-parity",
-            Utc::now(),
+            UtcTimestamp::now(),
         );
         event.agent_session_id = Some(session_id.to_string());
         let journal = gwt_core::workspace_projection::WorkspaceJournalEntry {
@@ -23989,7 +24028,7 @@ mod tests {
                 session_binding_id: "guidance-binding".to_string(),
                 initial_session_id: "guidance-candidate".to_string(),
                 entrypoint: "continue-work".to_string(),
-                requested_at: Utc::now() - chrono::Duration::hours(2),
+                requested_at: UtcTimestamp::now() - time::Duration::hours(2),
             },
         )
         .unwrap();
@@ -24057,7 +24096,7 @@ mod tests {
                 owner,
                 Some(&request.operation_id),
                 "do not release corrupt authority",
-                Utc::now(),
+                UtcTimestamp::now(),
                 &mut output,
             )
             .unwrap(),
@@ -24739,7 +24778,7 @@ mod tests {
             from_session_id: original_identity.session_id.clone(),
             to_session_id: "heartbeat-current".to_string(),
             reason: "same-generation recovery".to_string(),
-            transferred_at: Utc::now(),
+            transferred_at: UtcTimestamp::now(),
         };
         record.primary_session_id = transfer.to_session_id.clone();
         record.transfers.push(transfer.clone());
@@ -25062,7 +25101,7 @@ mod tests {
             &sessions_dir,
             None,
             "check resolved historical Prepared evidence",
-            Utc::now(),
+            UtcTimestamp::now(),
         )
         .unwrap();
         let diagnosis = diagnose(
@@ -25108,7 +25147,7 @@ mod tests {
             from_session_id: takeover_session_id.to_string(),
             to_session_id: "startup-reaper-resolved-takeover-successor".to_string(),
             reason: "test Prepared takeover".to_string(),
-            requested_at: Utc::now(),
+            requested_at: UtcTimestamp::now(),
         };
         prepare_generation_takeover(takeover_worktree.path(), takeover_owner, &takeover_request)
             .unwrap();
@@ -25165,7 +25204,7 @@ mod tests {
         blocked.status = ExecutionControlStatus::Blocked;
         blocked.blocked_reason = Some("fresh launch predecessor".to_string());
         blocked.missing_verification = Some("fresh launch verification".to_string());
-        blocked.settled_at = Some(Utc::now());
+        blocked.settled_at = Some(UtcTimestamp::now());
         save(worktree.path(), &blocked).unwrap();
         ensure_generation_ledger(worktree.path(), owner, LegacyActiveDisposition::Unknown).unwrap();
         let request = successor_request(
@@ -25426,7 +25465,7 @@ mod tests {
         let mut completed = active_record("session-original");
         completed.owner_number = owner.number;
         completed.status = ExecutionControlStatus::Completed;
-        completed.settled_at = Some(Utc::now());
+        completed.settled_at = Some(UtcTimestamp::now());
         save(dir.path(), &completed).unwrap();
         ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Unknown).unwrap();
 
@@ -25472,7 +25511,7 @@ mod tests {
         let mut completed = active_record("session-original");
         completed.owner_number = owner.number;
         completed.status = ExecutionControlStatus::Completed;
-        completed.settled_at = Some(Utc::now());
+        completed.settled_at = Some(UtcTimestamp::now());
         save(predecessor_dir.path(), &completed).unwrap();
         ensure_generation_ledger(
             predecessor_dir.path(),
@@ -25562,7 +25601,7 @@ mod tests {
         let mut completed = active_record("session-original");
         completed.owner_number = owner.number;
         completed.status = ExecutionControlStatus::Completed;
-        completed.settled_at = Some(Utc::now());
+        completed.settled_at = Some(UtcTimestamp::now());
         save(dir.path(), &completed).unwrap();
         ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Unknown).unwrap();
 
@@ -25602,7 +25641,7 @@ mod tests {
         let mut completed = active_record("session-original");
         completed.owner_number = owner.number;
         completed.status = ExecutionControlStatus::Completed;
-        completed.settled_at = Some(Utc::now());
+        completed.settled_at = Some(UtcTimestamp::now());
         save(dir.path(), &completed).unwrap();
         let mirror_projection = fs::read_to_string(state_path(dir.path())).unwrap();
         let trusted_dir = crate::cli::trusted_store::trusted_dir_for_worktree(dir.path()).unwrap();
@@ -25637,7 +25676,7 @@ mod tests {
         blocked.owner_number = owner.number;
         blocked.status = ExecutionControlStatus::Blocked;
         blocked.blocked_reason = Some("recover with execution.reopen".to_string());
-        blocked.settled_at = Some(Utc::now());
+        blocked.settled_at = Some(UtcTimestamp::now());
         save(dir.path(), &blocked).unwrap();
         ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Unknown).unwrap();
 
@@ -25671,7 +25710,7 @@ mod tests {
         blocked.owner_number = owner.number;
         blocked.status = ExecutionControlStatus::Blocked;
         blocked.blocked_reason = Some("legacy terminal blocker".to_string());
-        blocked.settled_at = Some(Utc::now());
+        blocked.settled_at = Some(UtcTimestamp::now());
         save(dir.path(), &blocked).unwrap();
         ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Unknown).unwrap();
         let before = load_generation_ledger(dir.path(), owner)
@@ -25740,7 +25779,7 @@ mod tests {
             blocked.owner_number = owner.number;
             blocked.status = ExecutionControlStatus::Blocked;
             blocked.blocked_reason = Some("terminal predecessor".to_string());
-            blocked.settled_at = Some(Utc::now());
+            blocked.settled_at = Some(UtcTimestamp::now());
             save(dir.path(), &blocked).unwrap();
             ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Unknown).unwrap();
             let request = successor_request(
@@ -25819,7 +25858,7 @@ mod tests {
         blocked.owner_number = owner.number;
         blocked.status = ExecutionControlStatus::Blocked;
         blocked.blocked_reason = Some("terminal predecessor".to_string());
-        blocked.settled_at = Some(Utc::now());
+        blocked.settled_at = Some(UtcTimestamp::now());
         save(dir.path(), &blocked).unwrap();
         ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Unknown).unwrap();
         let request = successor_request(
@@ -25954,7 +25993,7 @@ mod tests {
         blocked.owner_number = owner.number;
         blocked.status = ExecutionControlStatus::Blocked;
         blocked.blocked_reason = Some("terminal predecessor".to_string());
-        blocked.settled_at = Some(Utc::now());
+        blocked.settled_at = Some(UtcTimestamp::now());
         save(dir.path(), &blocked).unwrap();
         ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Unknown).unwrap();
         let request = successor_request(
@@ -26103,7 +26142,7 @@ mod tests {
         blocked.owner_number = owner.number;
         blocked.status = ExecutionControlStatus::Blocked;
         blocked.blocked_reason = Some("terminal predecessor".to_string());
-        blocked.settled_at = Some(Utc::now());
+        blocked.settled_at = Some(UtcTimestamp::now());
         save(dir.path(), &blocked).unwrap();
         ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Unknown).unwrap();
         let request = successor_request(
@@ -26175,7 +26214,7 @@ mod tests {
         blocked.owner_number = owner.number;
         blocked.status = ExecutionControlStatus::Blocked;
         blocked.blocked_reason = Some("legacy terminal blocker".to_string());
-        blocked.settled_at = Some(Utc::now());
+        blocked.settled_at = Some(UtcTimestamp::now());
         save(dir.path(), &blocked).unwrap();
         ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Unknown).unwrap();
         let before = load_generation_ledger(dir.path(), owner)
@@ -26238,7 +26277,7 @@ mod tests {
         let mut completed = active_record("session-original");
         completed.owner_number = owner.number;
         completed.status = ExecutionControlStatus::Completed;
-        completed.settled_at = Some(Utc::now());
+        completed.settled_at = Some(UtcTimestamp::now());
         save(original.path(), &completed).unwrap();
         ensure_generation_ledger(original.path(), owner, LegacyActiveDisposition::Unknown).unwrap();
         let request = successor_request("operation-worktree", "principal-a", "quick-start");
@@ -26264,7 +26303,7 @@ mod tests {
         let mut completed = active_record("session-original");
         completed.owner_number = owner.number;
         completed.status = ExecutionControlStatus::Completed;
-        completed.settled_at = Some(Utc::now());
+        completed.settled_at = Some(UtcTimestamp::now());
         save(dir.path(), &completed).unwrap();
         ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Unknown).unwrap();
 
@@ -26306,7 +26345,7 @@ mod tests {
         let mut completed = active_record("session-original");
         completed.owner_number = owner.number;
         completed.status = ExecutionControlStatus::Completed;
-        completed.settled_at = Some(Utc::now());
+        completed.settled_at = Some(UtcTimestamp::now());
         save(original.path(), &completed).unwrap();
         ensure_generation_ledger(original.path(), owner, LegacyActiveDisposition::Unknown).unwrap();
         let request = successor_request("operation-activated", "principal-a", "quick-start");
@@ -26337,7 +26376,7 @@ mod tests {
         let mut completed = active_record("session-original");
         completed.owner_number = owner.number;
         completed.status = ExecutionControlStatus::Completed;
-        completed.settled_at = Some(Utc::now());
+        completed.settled_at = Some(UtcTimestamp::now());
         save(dir.path(), &completed).unwrap();
         ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Unknown).unwrap();
         let request = successor_request(
@@ -26385,7 +26424,7 @@ mod tests {
         let mut completed = active_record("session-original");
         completed.owner_number = owner.number;
         completed.status = ExecutionControlStatus::Completed;
-        completed.settled_at = Some(Utc::now());
+        completed.settled_at = Some(UtcTimestamp::now());
         save(dir.path(), &completed).unwrap();
         ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Unknown).unwrap();
         let request = successor_request(
@@ -26429,7 +26468,7 @@ mod tests {
         let mut completed = active_record("session-original");
         completed.owner_number = owner.number;
         completed.status = ExecutionControlStatus::Completed;
-        completed.settled_at = Some(Utc::now());
+        completed.settled_at = Some(UtcTimestamp::now());
         save(dir.path(), &completed).unwrap();
         ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Unknown).unwrap();
         let request = successor_request("operation-repair", "principal-a", "quick-start");
@@ -26478,7 +26517,7 @@ mod tests {
             let mut completed = active_record("session-original");
             completed.owner_number = owner.number;
             completed.status = ExecutionControlStatus::Completed;
-            completed.settled_at = Some(Utc::now());
+            completed.settled_at = Some(UtcTimestamp::now());
             save(dir.path(), &completed).unwrap();
             ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Unknown).unwrap();
             let request = successor_request(
@@ -26602,7 +26641,7 @@ mod tests {
         let mut completed = active_record("session-original");
         completed.owner_number = owner.number;
         completed.status = ExecutionControlStatus::Completed;
-        completed.settled_at = Some(Utc::now());
+        completed.settled_at = Some(UtcTimestamp::now());
         save(dir.path(), &completed).unwrap();
 
         set_generation_write_failure(GenerationWriteFailurePoint::AfterLedger);
@@ -26635,7 +26674,7 @@ mod tests {
         let mut completed = active_record("session-original");
         completed.owner_number = owner.number;
         completed.status = ExecutionControlStatus::Completed;
-        completed.settled_at = Some(Utc::now());
+        completed.settled_at = Some(UtcTimestamp::now());
         save(dir.path(), &completed).unwrap();
 
         let error = ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Unknown)
@@ -26665,7 +26704,7 @@ mod tests {
         let mut completed = active_record("session-original");
         completed.owner_number = owner.number;
         completed.status = ExecutionControlStatus::Completed;
-        completed.settled_at = Some(Utc::now());
+        completed.settled_at = Some(UtcTimestamp::now());
         save(dir.path(), &completed).unwrap();
         ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Unknown).unwrap();
         let original_ledger_path = generation_ledger_path(dir.path(), owner).unwrap();
@@ -26722,7 +26761,7 @@ mod tests {
         let mut spec_completed = active_record("session-spec");
         spec_completed.owner_number = spec_owner.number;
         spec_completed.status = ExecutionControlStatus::Completed;
-        spec_completed.settled_at = Some(Utc::now());
+        spec_completed.settled_at = Some(UtcTimestamp::now());
         save(spec_worktree.path(), &spec_completed).unwrap();
         ensure_generation_ledger(
             spec_worktree.path(),
@@ -26760,7 +26799,7 @@ mod tests {
         let mut completed = active_record("session-original");
         completed.owner_number = owner.number;
         completed.status = ExecutionControlStatus::Completed;
-        completed.settled_at = Some(Utc::now());
+        completed.settled_at = Some(UtcTimestamp::now());
         save(dir.path(), &completed).unwrap();
         ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Unknown).unwrap();
         let mut transferred = load(dir.path()).unwrap().unwrap();
@@ -26768,7 +26807,7 @@ mod tests {
             from_session_id: "session-original".to_string(),
             to_session_id: "session-new".to_string(),
             reason: "terminal takeover must fail".to_string(),
-            transferred_at: Utc::now(),
+            transferred_at: UtcTimestamp::now(),
         };
         transferred.primary_session_id = transfer.to_session_id.clone();
         transferred.transfers.push(transfer.clone());
@@ -26806,7 +26845,7 @@ mod tests {
             from_session_id: "session-not-current".to_string(),
             to_session_id: "session-next".to_string(),
             reason: "wrong predecessor".to_string(),
-            transferred_at: Utc::now(),
+            transferred_at: UtcTimestamp::now(),
         };
         wrong_from.primary_session_id = wrong_transfer.to_session_id.clone();
         wrong_from.transfers.push(wrong_transfer.clone());
@@ -26822,7 +26861,7 @@ mod tests {
             from_session_id: "session-original".to_string(),
             to_session_id: "session-next".to_string(),
             reason: "valid predecessor".to_string(),
-            transferred_at: Utc::now(),
+            transferred_at: UtcTimestamp::now(),
         };
         mutated.primary_session_id = transfer.to_session_id.clone();
         mutated.entrypoint = "mutated-during-takeover".to_string();
@@ -26925,7 +26964,7 @@ mod tests {
         let mut completed = active_record("session-original");
         completed.owner_number = owner.number;
         completed.status = ExecutionControlStatus::Completed;
-        completed.settled_at = Some(Utc::now());
+        completed.settled_at = Some(UtcTimestamp::now());
         save(dir.path(), &completed).unwrap();
         let terminal_bytes = crate::cli::trusted_store::read(dir.path(), "execution-control.json")
             .unwrap()
@@ -26983,7 +27022,7 @@ mod tests {
         blocked.status = ExecutionControlStatus::Blocked;
         blocked.blocked_reason = Some("verification dependency unresolved".to_string());
         blocked.missing_verification = Some("derived matrix".to_string());
-        blocked.settled_at = Some(Utc::now());
+        blocked.settled_at = Some(UtcTimestamp::now());
         save(dir.path(), &blocked).unwrap();
         let terminal_bytes = crate::cli::trusted_store::read(dir.path(), "execution-control.json")
             .unwrap()
@@ -27021,7 +27060,7 @@ mod tests {
         let mut completed = active_record("session-original");
         completed.owner_number = owner.number;
         completed.status = ExecutionControlStatus::Completed;
-        completed.settled_at = Some(Utc::now());
+        completed.settled_at = Some(UtcTimestamp::now());
         save(dir.path(), &completed).unwrap();
         let imported =
             ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Unknown).unwrap();
@@ -27084,7 +27123,7 @@ mod tests {
         let mut completed = active_record("session-original");
         completed.owner_number = owner.number;
         completed.status = ExecutionControlStatus::Completed;
-        completed.settled_at = Some(Utc::now());
+        completed.settled_at = Some(UtcTimestamp::now());
         save(dir.path(), &completed).unwrap();
         ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Unknown).unwrap();
 
@@ -27169,7 +27208,7 @@ mod tests {
             from_session_id: "session-original".to_string(),
             to_session_id: "session-successor".to_string(),
             reason: "verified dead pane".to_string(),
-            requested_at: Utc::now(),
+            requested_at: UtcTimestamp::now(),
         };
 
         let prepared = prepare_generation_takeover(dir.path(), owner, &request).unwrap();
@@ -27507,7 +27546,7 @@ mod tests {
             from_session_id: "session-original".to_string(),
             to_session_id: "session-aborted".to_string(),
             reason: "verified dead pane".to_string(),
-            requested_at: Utc::now(),
+            requested_at: UtcTimestamp::now(),
         };
         prepare_generation_takeover(dir.path(), owner, &base_request).unwrap();
         abort_generation_takeover(
@@ -27526,11 +27565,11 @@ mod tests {
         let mut winner = base_request.clone();
         winner.operation_id = "operation-winner".to_string();
         winner.to_session_id = "session-winner".to_string();
-        winner.requested_at = Utc::now();
+        winner.requested_at = UtcTimestamp::now();
         let mut loser = base_request;
         loser.operation_id = "operation-loser".to_string();
         loser.to_session_id = "session-loser".to_string();
-        loser.requested_at = Utc::now();
+        loser.requested_at = UtcTimestamp::now();
         prepare_generation_takeover(dir.path(), owner, &winner).unwrap();
         prepare_generation_takeover(dir.path(), owner, &loser).unwrap();
         activate_generation_takeover(dir.path(), owner, &winner).unwrap();
@@ -27578,7 +27617,7 @@ mod tests {
         let mut completed = active_record("session-original");
         completed.owner_number = owner.number;
         completed.status = ExecutionControlStatus::Completed;
-        completed.settled_at = Some(Utc::now());
+        completed.settled_at = Some(UtcTimestamp::now());
         save(dir.path(), &completed).unwrap();
         ensure_generation_ledger(dir.path(), owner, LegacyActiveDisposition::Unknown).unwrap();
 
@@ -27951,7 +27990,7 @@ mod tests {
         ));
         let mut completed = active.clone();
         completed.status = ExecutionControlStatus::Completed;
-        completed.settled_at = Some(Utc::now());
+        completed.settled_at = Some(UtcTimestamp::now());
         let authority_before = generation_authority_bytes(dir.path(), owner);
         let current = current_owner_execution_binding(dir.path(), owner)
             .unwrap()
@@ -28312,6 +28351,13 @@ mod tests {
         );
         let record = load(dir.path()).unwrap().unwrap();
         assert_eq!(record.primary_session_id, "session-adopting");
+        assert_eq!(
+            diagnose_owner(dir.path(), owner)
+                .holder_session_id
+                .as_deref(),
+            Some("session-adopting"),
+            "owner status must name the effective holder after adoption"
+        );
         assert!(integrity_ok(&record));
         assert_eq!(record.transfers.len(), 1);
         let stop = crate::cli::hook::execution_control_stop_check::handle_with_input(
@@ -28361,7 +28407,7 @@ mod tests {
         let mut completed = active_record("session-original");
         completed.owner_number = owner.number;
         completed.status = ExecutionControlStatus::Completed;
-        completed.settled_at = Some(Utc::now());
+        completed.settled_at = Some(UtcTimestamp::now());
         save(terminal_dir.path(), &completed).unwrap();
         ensure_generation_ledger(terminal_dir.path(), owner, LegacyActiveDisposition::Unknown)
             .unwrap();
@@ -28564,7 +28610,7 @@ mod tests {
             LegacyActiveDisposition::Stale {
                 new_session_id: "session-successor".to_string(),
                 reason: "dead pane takeover".to_string(),
-                observed_at: Utc::now(),
+                observed_at: UtcTimestamp::now(),
             },
         )
         .unwrap();
@@ -28636,7 +28682,7 @@ mod tests {
         let mut completed = active.clone();
         completed.owner_number = old_writer_owner.number;
         completed.status = ExecutionControlStatus::Completed;
-        completed.settled_at = Some(Utc::now());
+        completed.settled_at = Some(UtcTimestamp::now());
         save(old_writer_dir.path(), &completed).unwrap();
         ensure_generation_ledger(
             old_writer_dir.path(),
@@ -28763,7 +28809,7 @@ mod tests {
             from_session_id: "sess-1".to_string(),
             to_session_id: "sess-old-writer".to_string(),
             reason: format!("{RECOVERY_ENVELOPE_PREFIX}legacy-prefix-collision"),
-            transferred_at: Utc::now(),
+            transferred_at: UtcTimestamp::now(),
         });
         pre_recovery.primary_session_id = "sess-old-writer".to_string();
         pre_recovery.content_hash = {
@@ -28849,7 +28895,7 @@ mod tests {
                 from_session_id: "a".to_string(),
                 to_session_id: "b".to_string(),
                 reason: "real transfer".to_string(),
-                transferred_at: Utc::now(),
+                transferred_at: UtcTimestamp::now(),
             },
         );
         fs::write(
@@ -28888,7 +28934,7 @@ mod tests {
         save(dir.path(), &previous).unwrap();
 
         let mut fresh = active_record("sess-2");
-        fresh.launched_at = previous.launched_at + chrono::Duration::nanoseconds(1);
+        fresh.launched_at = previous.launched_at + time::Duration::nanoseconds(1);
         save(dir.path(), &fresh).unwrap();
         let loaded = load(dir.path()).unwrap().unwrap();
         assert!(loaded.recoveries.is_empty());
@@ -29077,7 +29123,7 @@ mod tests {
         // Pre-P9b shape: a settled record living only in the mirror.
         let mut legacy = active_record("sess-old");
         legacy.status = ExecutionControlStatus::Completed;
-        legacy.settled_at = Some(Utc::now());
+        legacy.settled_at = Some(UtcTimestamp::now());
         legacy.content_hash = compute_content_hash(&legacy);
         let serialized = serde_json::to_vec_pretty(&legacy).unwrap();
         gwt_github::cache::write_atomic(&state_path(dir.path()), &serialized).unwrap();
@@ -29394,14 +29440,14 @@ mod tests {
             from_session_id: record.primary_session_id.clone(),
             to_session_id: "sess-2".to_string(),
             reason: "tamper repair".to_string(),
-            transferred_at: Utc::now(),
+            transferred_at: UtcTimestamp::now(),
         });
         record.primary_session_id = "sess-2".to_string();
         let err = save(dir.path(), &record).unwrap_err();
         assert_eq!(err.kind(), ErrorKind::InvalidData);
 
         let mut fresh = active_record("sess-2");
-        fresh.launched_at = record.launched_at + chrono::Duration::nanoseconds(1);
+        fresh.launched_at = record.launched_at + time::Duration::nanoseconds(1);
         save(dir.path(), &fresh).unwrap();
         assert!(integrity_ok(&load(dir.path()).unwrap().unwrap()));
     }
@@ -29663,7 +29709,7 @@ mod tests {
                     active,
                     start_evidence: None,
                     owner_spec,
-                    started_at: Utc::now(),
+                    started_at: UtcTimestamp::now(),
                     phase: Some("verify".to_string()),
                     session_id: session_id.to_string(),
                 },
@@ -29687,7 +29733,7 @@ mod tests {
                 Some(&worktree),
             )
             .expect("canonical fixture Work id");
-            let now = Utc::now();
+            let now = UtcTimestamp::now();
             let mut projection =
                 gwt_core::workspace_projection::WorkspaceProjection::default_for_project(repo);
             projection.id = work_id.clone();
@@ -31138,7 +31184,7 @@ exit 1
                     kind: ExecutionOwnerKind::Spec,
                     number: 3274 + race_index,
                 };
-                let now = Utc::now();
+                let now = UtcTimestamp::now();
                 let mut transitional = active_record(session_id);
                 transitional.owner_number = owner.number;
                 transitional.recoveries.push(ExecutionRecovery {
@@ -31651,7 +31697,7 @@ exit 1
                         generated_outputs: vec!["projection-artifact.json".to_string()],
                         quarantines: Vec::new(),
                         worktree_fingerprint: String::new(),
-                        created_at: Utc::now(),
+                        created_at: UtcTimestamp::now(),
                         content_hash: String::new(),
                     },
                 ),
@@ -32542,7 +32588,7 @@ exit 1
                         pending_delivery: None,
                         obligation_open,
                         status: status.clone(),
-                        updated_at: Utc::now(),
+                        updated_at: UtcTimestamp::now(),
                     },
                 )
                 .unwrap();
@@ -33114,7 +33160,7 @@ exit 1
             let mut event = gwt_core::workspace_projection::WorkEvent::new(
                 gwt_core::workspace_projection::WorkEventKind::Resume,
                 &work_id,
-                Utc::now(),
+                UtcTimestamp::now(),
             );
             event.owner = Some(format!("SPEC-{}", owner.number));
             event.agent_session_id = Some(session.id.clone());
@@ -33196,7 +33242,7 @@ exit 1
                 &sessions,
                 Some(&request.operation_id),
                 "resume repair",
-                Utc::now(),
+                UtcTimestamp::now(),
             )
             .is_err());
             assert_eq!(fs::read(&session_path).unwrap(), changed_bytes);
@@ -33209,7 +33255,7 @@ exit 1
                     &sessions,
                     Some(&request.operation_id),
                     "resume repair",
-                    Utc::now(),
+                    UtcTimestamp::now(),
                 )
                 .is_err(),
                 "the exact external operation remains locked"
@@ -33234,7 +33280,7 @@ exit 1
                     &sessions,
                     Some(&request.operation_id),
                     "finish audited PM repair",
-                    Utc::now(),
+                    UtcTimestamp::now(),
                 )
                 .unwrap();
                 assert_eq!(
@@ -34133,7 +34179,7 @@ exit 1
                     surfaces: Vec::new(),
                     generated_outputs: Vec::new(),
                     quarantines: Vec::new(),
-                    created_at: Utc::now(),
+                    created_at: UtcTimestamp::now(),
                     content_hash: String::new(),
                 }),
             )
@@ -34358,7 +34404,7 @@ exit 1
                 work::canonical_work_id(dir.path(), Some("work/issue-3248"), Some(dir.path()))
                     .unwrap();
             let successor_id = work::successor_work_id(&predecessor_id);
-            let now = Utc::now();
+            let now = UtcTimestamp::now();
             let mut works = work::WorkItemsProjection::empty(now);
             for (work_id, work_owner) in [
                 (&predecessor_id, "SPEC-3248"),
@@ -34592,7 +34638,7 @@ exit 1
                         generated_outputs: vec!["artifacts/report.json".to_string()],
                         quarantines: Vec::new(),
                         worktree_fingerprint: String::new(),
-                        created_at: Utc::now(),
+                        created_at: UtcTimestamp::now(),
                         content_hash: String::new(),
                     },
                 ),
@@ -35033,7 +35079,7 @@ exit 1
             let completed = tempfile::tempdir().unwrap();
             let mut completed_record = active_record("sess-reopen");
             completed_record.status = ExecutionControlStatus::Completed;
-            completed_record.settled_at = Some(Utc::now());
+            completed_record.settled_at = Some(UtcTimestamp::now());
             save(completed.path(), &completed_record).unwrap();
             let (code, out) = run_cmd(
                 completed.path(),
@@ -35107,7 +35153,7 @@ exit 1
                         surfaces: Vec::new(),
                         generated_outputs: Vec::new(),
                         quarantines: Vec::new(),
-                        created_at: Utc::now(),
+                        created_at: UtcTimestamp::now(),
                         content_hash: String::new(),
                     },
                 ),
@@ -35140,7 +35186,7 @@ exit 1
                         surfaces: Vec::new(),
                         generated_outputs: Vec::new(),
                         quarantines: Vec::new(),
-                        created_at: Utc::now(),
+                        created_at: UtcTimestamp::now(),
                         content_hash: String::new(),
                     },
                 ),
@@ -35168,7 +35214,7 @@ exit 1
             let mut plan = crate::cli::verification_record::load_plan(metadata_only.path())
                 .unwrap()
                 .unwrap();
-            plan.created_at += chrono::Duration::seconds(1);
+            plan.created_at += time::Duration::seconds(1);
             crate::cli::verification_record::save_plan(metadata_only.path(), &plan).unwrap();
             let (code, out) = run_cmd(
                 metadata_only.path(),
@@ -35226,7 +35272,7 @@ exit 1
             let mut legacy = active_record("sess-reopen");
             legacy.status = ExecutionControlStatus::Blocked;
             legacy.blocked_reason = Some("legacy block".to_string());
-            legacy.settled_at = Some(Utc::now());
+            legacy.settled_at = Some(UtcTimestamp::now());
             fs::create_dir_all(state_path(hashless_ecr.path()).parent().unwrap()).unwrap();
             fs::write(
                 state_path(hashless_ecr.path()),
@@ -35294,7 +35340,7 @@ exit 1
             let mut run = crate::cli::verification_record::load(prestarted.path())
                 .unwrap()
                 .unwrap();
-            run.started_at = Some(blocked.settled_at.unwrap() - chrono::Duration::seconds(1));
+            run.started_at = Some(blocked.settled_at.unwrap() - time::Duration::seconds(1));
             crate::cli::verification_record::save(prestarted.path(), &run).unwrap();
             let (code, out) = run_cmd(
                 prestarted.path(),
@@ -35343,7 +35389,7 @@ exit 1
                         .unwrap();
                 if let Some(kind) = terminal {
                     let work_id = works.work_items[0].id.clone();
-                    works.apply_event(WorkEvent::new(kind, work_id, Utc::now()));
+                    works.apply_event(WorkEvent::new(kind, work_id, UtcTimestamp::now()));
                     gwt_core::workspace_projection::save_workspace_work_items_projection_to_path(
                         &work_path, &works,
                     )
@@ -35435,7 +35481,7 @@ exit 1
             let result = persist_generation_lifecycle_transition_if_owned_with_session_snapshot_and_before_lease(
                 repo.path(), &record, ExecutionControlStatus::Blocked, "close race", Some(&session), || {
                     gwt_core::workspace_projection::emit_workspace_done_event_if_absent(
-                        repo.path(), &work.work_id, Utc::now(),
+                        repo.path(), &work.work_id, UtcTimestamp::now(),
                     ).unwrap();
                 },
             );
@@ -35589,7 +35635,7 @@ exit 1
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-reopen");
             let dir = tempfile::tempdir().unwrap();
-            let now = Utc::now();
+            let now = UtcTimestamp::now();
             let mut transitional = active_record("sess-reopen");
             transitional.recoveries.push(ExecutionRecovery {
                 session_id: "sess-reopen".to_string(),
@@ -35805,7 +35851,7 @@ exit 1
                     surfaces: Vec::new(),
                     generated_outputs: Vec::new(),
                     quarantines: Vec::new(),
-                    created_at: Utc::now(),
+                    created_at: UtcTimestamp::now(),
                     content_hash: String::new(),
                 }),
             )
@@ -35838,7 +35884,7 @@ exit 1
                     surfaces: Vec::new(),
                     generated_outputs: Vec::new(),
                     quarantines: Vec::new(),
-                    created_at: Utc::now(),
+                    created_at: UtcTimestamp::now(),
                     content_hash: String::new(),
                 }),
             )
@@ -36285,7 +36331,7 @@ exit 1
             // armed obligations either.
             let mut settled = active_record("sess-ob2");
             settled.status = ExecutionControlStatus::Completed;
-            settled.settled_at = Some(Utc::now());
+            settled.settled_at = Some(UtcTimestamp::now());
             save(dir.path(), &settled).unwrap();
             crate::cli::action_obligation::mark_from_prompt(dir.path(), "sess-ob2", "検証して")
                 .unwrap();
@@ -36344,7 +36390,7 @@ exit 1
             // still refused, with the terminal-record handoff.
             let mut settled = active_record("sess-owner");
             settled.status = ExecutionControlStatus::Completed;
-            settled.settled_at = Some(Utc::now());
+            settled.settled_at = Some(UtcTimestamp::now());
             save(dir.path(), &settled).unwrap();
             let (code, out) = run_cmd(dir.path(), ExecutionCommand::Complete).unwrap();
             assert_eq!(code, 2, "{out}");
@@ -36423,7 +36469,7 @@ exit 1
                     surfaces: Vec::new(),
                     generated_outputs: Vec::new(),
                     quarantines: Vec::new(),
-                    created_at: Utc::now(),
+                    created_at: UtcTimestamp::now(),
                     content_hash: String::new(),
                 }),
             )
@@ -36854,7 +36900,7 @@ exit 1
                         surfaces: Vec::new(),
                         generated_outputs: Vec::new(),
                         quarantines: Vec::new(),
-                        created_at: Utc::now(),
+                        created_at: UtcTimestamp::now(),
                         content_hash: String::new(),
                     },
                 ),
@@ -36904,7 +36950,7 @@ exit 1
                         surfaces: Vec::new(),
                         generated_outputs: Vec::new(),
                         quarantines: Vec::new(),
-                        created_at: Utc::now(),
+                        created_at: UtcTimestamp::now(),
                         content_hash: String::new(),
                     },
                 ),
@@ -37865,7 +37911,7 @@ exit 1
                     start_evidence: None,
                     active: true,
                     owner_spec: Some(999),
-                    started_at: Utc::now(),
+                    started_at: UtcTimestamp::now(),
                     phase: None,
                     session_id: "sess-op".to_string(),
                 },
@@ -37889,7 +37935,7 @@ exit 1
                     start_evidence: None,
                     active: true,
                     owner_spec: Some(3248),
-                    started_at: Utc::now(),
+                    started_at: UtcTimestamp::now(),
                     phase: None,
                     session_id: "sess-op".to_string(),
                 },
@@ -37912,7 +37958,7 @@ exit 1
                     start_evidence: None,
                     active: true,
                     owner_spec: Some(3248),
-                    started_at: Utc::now(),
+                    started_at: UtcTimestamp::now(),
                     phase: None,
                     session_id: "sess-op".to_string(),
                 },
@@ -37932,7 +37978,7 @@ exit 1
                         surfaces: Vec::new(),
                         generated_outputs: Vec::new(),
                         quarantines: Vec::new(),
-                        created_at: Utc::now(),
+                        created_at: UtcTimestamp::now(),
                         content_hash: String::new(),
                     },
                 ),
@@ -38124,7 +38170,7 @@ exit 1
                 &gwt_core::paths::gwt_sessions_dir().join("sess-handoff.toml"),
             )
             .unwrap();
-            let now = chrono::Utc::now();
+            let now = UtcTimestamp::now();
             let mut work = gwt_core::workspace_projection::WorkEvent::new(
                 gwt_core::workspace_projection::WorkEventKind::Start,
                 "adopted-delivery-work",
@@ -38673,7 +38719,7 @@ exit 1
                 from_session_id: "sess-old".to_string(),
                 to_session_id: "sess-new".to_string(),
                 reason: "crash recovery of the implementing window".to_string(),
-                transferred_at: Utc::now(),
+                transferred_at: UtcTimestamp::now(),
             };
             record.transfers.push(transfer.clone());
             record.primary_session_id = "sess-new".to_string();
@@ -38944,7 +38990,7 @@ exit 1
                         surfaces: Vec::new(),
                         generated_outputs: Vec::new(),
                         quarantines: Vec::new(),
-                        created_at: Utc::now(),
+                        created_at: UtcTimestamp::now(),
                         content_hash: String::new(),
                     },
                 ),

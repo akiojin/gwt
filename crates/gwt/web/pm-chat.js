@@ -56,7 +56,7 @@ export function createPmWindowModel() {
   function emptyWindow(windowId, sessionId = null) {
     return { windowId, sessionId, revision: 0, terminal: null,
       reportsVersion: null, reports: [], current: null, error: null, loaded: false,
-      requestTasks: null, requestTasksError: null, taskDetail: null, conversation: null, chatSend: null, paneResult: null };
+      requestTasks: null, requestTasksError: null, taskDetail: null, taskMutation: null, conversation: null, chatSend: null, paneResult: null };
   }
   function bindPmWindowState(windowId, sessionId) {
     model.update(state => {
@@ -114,7 +114,19 @@ export function createPmWindowModel() {
           next.taskDetail = { ...next.taskDetail, stale: true };
         }
       } else if (event.kind === 'pm_request_task') {
+        const mutation = previous?.taskMutation;
         const selected = previous?.taskDetail;
+        if (mutation?.status === 'pending' && event.request_id === mutation.requestId) {
+          const result = event.result;
+          const recorded = result?.state === 'ready' && result.receipt?.action === mutation.action
+            && result.receipt.operation_id === mutation.operationId
+            && Number.isSafeInteger(result.receipt.revision) && result.receipt.revision > mutation.revision;
+          if (!recorded && result?.state !== 'error') return state;
+          next = { ...next, taskMutation: { ...mutation, status: recorded ? 'recorded' : 'error',
+            error: recorded ? null : result.message || 'The task change was not confirmed. Reload details before trying again.' },
+            taskDetail: selected?.key === mutation.key ? { ...selected, stale: true } : selected };
+          return { ...state, windows: { ...state.windows, [event.id]: { ...next, revision: next.revision + 1 } }, changedWindowId: event.id };
+        }
         if (!selected || selected.status !== 'loading' || event.request_id !== selected.requestId) return state;
         const result = event.result;
         if (result?.state === 'detail') {
@@ -234,6 +246,29 @@ export function createPmWindowModel() {
         error: 'The read was not confirmed. Reconnect, then reload details.' },
       revision: previous.revision + 1 } }, changedWindowId: windowId }));
   }
+  function requestPmTaskMutation(windowId, reason, action) {
+    const previous = model.read().windows[windowId], selected = previous?.taskDetail;
+    const statuses = action === 'reopen' ? ['completed'] : ['pending', 'in_progress', 'waiting', 'completed'];
+    if (!previous?.sessionId || previous.taskMutation?.status === 'pending' || selected?.status !== 'ready'
+      || selected.stale || !statuses.includes(selected.data?.status)
+      || selected.revision < (previous.requestTasks?.revision || 0) || !String(reason ?? '').trim()) return null;
+    const requestId = ++requestSequence, operationId = `task-${action}-${globalThis.crypto.randomUUID()}`;
+    model.update(state => ({ ...state, windows: { ...state.windows, [windowId]: { ...previous,
+      taskMutation: { action, key: selected.key, requestId, operationId, revision: selected.revision, status: 'pending', error: null },
+      revision: previous.revision + 1 } }, changedWindowId: windowId }));
+    return { kind: action === 'reopen' ? 'reopen_pm_request_task' : 'cancel_pm_request_task', id: windowId, request_id: requestId, task_key: selected.key,
+      request: { operation_id: operationId, expected_revision: selected.revision, reason, task_id: '' } };
+  }
+  function requestPmTaskCancel(windowId, reason) { return requestPmTaskMutation(windowId, reason, 'cancel'); }
+  function requestPmTaskReopen(windowId, reason) { return requestPmTaskMutation(windowId, reason, 'reopen'); }
+  function markPmTaskMutationUnavailable(windowId, requestId) {
+    const previous = model.read().windows[windowId], mutation = previous?.taskMutation;
+    if (mutation?.status !== 'pending' || mutation.requestId !== requestId) return;
+    model.update(state => ({ ...state, windows: { ...state.windows, [windowId]: { ...previous,
+      taskMutation: { ...mutation, status: 'error', error: 'The task change was not confirmed. Reconnect, then reload details before trying again.' },
+      taskDetail: previous.taskDetail?.key === mutation.key ? { ...previous.taskDetail, stale: true } : previous.taskDetail,
+      revision: previous.revision + 1 } }, changedWindowId: windowId }));
+  }
   function removePmWindowState(windowId) {
     requests.delete(windowId);
     model.update(state => {
@@ -243,12 +278,12 @@ export function createPmWindowModel() {
   }
   function readPmWindowState() { return model.read(); }
   function subscribePmWindowState(select, render) { return model.subscribe(select, render); }
-  return { requestPmReports, requestPmConversation, requestPmTaskDetail, markPmTaskDetailUnavailable, requestPmChatSend, markPmChatSendUnavailable, expirePmChatSend, bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, readPmWindowState, subscribePmWindowState };
+  return { requestPmReports, requestPmConversation, requestPmTaskDetail, markPmTaskDetailUnavailable, requestPmTaskCancel, requestPmTaskReopen, markPmTaskMutationUnavailable, requestPmChatSend, markPmChatSendUnavailable, expirePmChatSend, bindPmWindowState, applyPmWindowReceiveEvent, removePmWindowState, readPmWindowState, subscribePmWindowState };
 }
 
 // Read-only report view. The caller owns polling and the unchanged terminal.
-export function createPmChat({ document, root, sessionId, onLogVisibility, onChatVisible = () => {}, onTaskDetail = () => {}, onSend = () => {}, onOpenTerminal = () => false,
-  onViewNotification = () => {}, onDecisionsWaiting = () => {},
+export function createPmChat({ document, root, sessionId, onLogVisibility, onChatVisible = () => {}, onTaskDetail = () => {}, onTaskCancel = () => {}, onTaskReopen = () => {}, onSend = () => {}, onOpenTerminal = () => false,
+  onViewNotification = () => {}, onDecisionsWaiting = () => {}, onReviewAttention = () => {},
   copyText = text => document.defaultView.navigator.clipboard.writeText(text) }) {
   let session = sessionId;
   let disposed = false;
@@ -260,6 +295,9 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   let chatSend = null;
   let draftSend = null;
   let publishedWaiting;
+  let publishedReviews;
+  // SPEC #5016 HSF: the shared needs_human value the status strip reads.
+  let humanAttention = null;
   const taskRows = new Map();
   let digest = '';
   let currentDigest;
@@ -376,7 +414,27 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   const detailNotice = element('p', 'pm-chat__notice');
   detailNotice.setAttribute('aria-live', 'polite');
   const detailContent = element('div', '');
-  taskDetail.append(detailHeading, detailActions, detailNotice, detailContent);
+  const mutationControls = element('div', 'pm-chat__task-cancel');
+  const mutationLabel = element('label', '', 'Reason for this task change');
+  const mutationReason = element('textarea', 'pm-chat__task-cancel-reason');
+  mutationReason.setAttribute('aria-label', 'Reason for this task change');
+  mutationReason.maxLength = 1000;
+  mutationReason.rows = 2;
+  mutationLabel.append(mutationReason);
+  const cancelTask = element('button', '', 'Cancel task');
+  const reopenTask = element('button', '', 'Reopen task');
+  cancelTask.type = reopenTask.type = 'button';
+  const mutationStatus = element('p', 'pm-chat__task-cancel-status');
+  mutationStatus.setAttribute('aria-live', 'polite');
+  mutationControls.append(element('p', 'pm-chat__task-meta', 'Changes tracking only. Reopen requests a fresh PM review. These actions do not stop agents or change Issues or pull requests.'), mutationLabel, cancelTask, reopenTask);
+  taskDetail.append(detailHeading, detailActions, detailNotice, mutationStatus, mutationControls, detailContent);
+  mutationReason.addEventListener('input', () => renderTaskMutation(latestState));
+  cancelTask.addEventListener('click', () => {
+    if (!disposed && cancelTask.getAttribute('aria-disabled') === 'false') onTaskCancel(mutationReason.value);
+  });
+  reopenTask.addEventListener('click', () => {
+    if (!disposed && !reopenTask.hidden && reopenTask.getAttribute('aria-disabled') === 'false') onTaskReopen(mutationReason.value);
+  });
   reloadDetail.addEventListener('click', () => {
     if (!disposed && latestState?.taskDetail && latestState.taskDetail.status !== 'loading') onTaskDetail(latestState.taskDetail.key);
   });
@@ -509,6 +567,11 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
       })) : null,
     });
   }
+  function receiveHumanAttention(count) {
+    if (disposed) return;
+    humanAttention = Number.isFinite(count) ? count : null;
+    renderCurrent(latestState?.current);
+  }
   function receiveLog(groups) {
     if (disposed) return;
     taskLog.receive(groups || []);
@@ -599,6 +662,15 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     if (key === publishedWaiting) return;
     publishedWaiting = key;
     onDecisionsWaiting(ids && { waiting: ids.length, ids });
+  }
+  // SPEC #5016 HSV: unresolved reviews from the PM current facts join the
+  // shared attention model; `null` when this window has not observed them.
+  function publishReviewAttention(facts) {
+    const items = Array.isArray(facts?.review_attention) ? facts.review_attention : null;
+    const key = JSON.stringify(items);
+    if (key === publishedReviews) return;
+    publishedReviews = key;
+    onReviewAttention(items);
   }
   function renderDecisions(state, { items, answered }) {
     taskDecisions.receive({
@@ -727,6 +799,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   }
   function renderTasks(state) {
     renderTaskDetail(state?.taskDetail);
+    renderTaskMutation(state);
     const overview = state?.requestTasks;
     const error = state?.requestTasksError;
     const rows = overview?.state === 'ready' ? overview.tasks : [];
@@ -827,15 +900,16 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   }
   function renderTaskDetail(selected) {
     taskDetail.hidden = !selected;
-    if (!selected) { selectedDetailKey = null; detailData = null; detailContent.replaceChildren(); return; }
+    if (!selected) { selectedDetailKey = null; detailData = null; mutationReason.value = ''; detailContent.replaceChildren(); return; }
     const changedKey = selected.key !== selectedDetailKey;
+    if (changedKey) mutationReason.value = '';
     selectedDetailKey = selected.key;
     detailHeading.textContent = selected.title || 'Selected task details';
     // Retain keyboard focus while the read is pending.
     reloadDetail.setAttribute('aria-disabled', String(selected.status === 'loading'));
     detailNotice.textContent = [selected.status === 'loading' ? 'Loading task details…' : '',
       selected.stale ? 'Showing the last confirmed detail (stale). Reload details after recovering the task store.' : '',
-      selected.error || '', selected.data ? `Selected snapshot revision ${selected.revision}. Preview only; saved data is unchanged.` : ''].filter(Boolean).join(' ');
+      selected.error || '', selected.data ? `Selected snapshot revision ${selected.revision}. Text below is a bounded preview.` : ''].filter(Boolean).join(' ');
     if (detailData !== selected.data) {
       detailData = selected.data;
       const nodes = [];
@@ -863,6 +937,26 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
       detailContent.replaceChildren(...nodes);
     }
     if (changedKey) { taskDetail.scrollTop = 0; detailHeading.focus(); }
+  }
+  function renderTaskMutation(state) {
+    const selected = state?.taskDetail, mutation = state?.taskMutation;
+    const current = mutation?.key === selected?.key ? mutation : null;
+    const actionable = ['pending', 'in_progress', 'waiting', 'completed'].includes(selected?.data?.status);
+    const reopenable = selected?.data?.status === 'completed';
+    if ((!actionable && mutationControls.contains(document.activeElement))
+      || (!reopenable && document.activeElement === reopenTask)) reloadDetail.focus();
+    mutationControls.hidden = !actionable;
+    reopenTask.hidden = !reopenable;
+    const disabled = selected?.status !== 'ready' || selected.stale || mutation?.status === 'pending' || !mutationReason.value.trim();
+    cancelTask.setAttribute('aria-disabled', String(!actionable || disabled));
+    reopenTask.setAttribute('aria-disabled', String(!reopenable || disabled));
+    mutationReason.readOnly = mutation?.status === 'pending';
+    mutationStatus.textContent = mutation?.status === 'pending'
+      ? (current ? (mutation.action === 'reopen' ? 'Reopening task…' : 'Saving cancellation…')
+        : 'Another task change is awaiting confirmation. Reconnect and reload its details if confirmation does not arrive.')
+      : current?.status === 'recorded' ? (current.action === 'reopen' ? 'Reopen recorded. This action requests a fresh PM review.'
+        : `Cancellation recorded.${selected?.data?.status === 'cancelled' && !selected.stale ? ' This task is cancelled.' : ' Reload details to see the current state.'}`)
+      : current?.error || (selected?.data?.status === 'cancelled' ? 'This task is cancelled.' : '');
   }
   function renderChat(conversation) {
     const nextDigest = JSON.stringify(conversation);
@@ -944,7 +1038,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     submitDraft(event);
   }
   function renderCurrent(current) {
-    const nextDigest = JSON.stringify(current ? [current.status, current.facts, current.stale_minutes] : null);
+    const nextDigest = JSON.stringify(current ? [current.status, current.facts, current.stale_minutes, humanAttention] : null);
     if (currentDigest === nextDigest) return;
     currentDigest = nextDigest;
     const authored = element('section', 'pm-chat__current-authored');
@@ -1007,7 +1101,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
       }
       automatic.append(element('p', '', `Active windows: ${(facts.active_windows || []).length}${facts.inventory_incomplete ? ' (incomplete observation)' : ''}`), windows,
         element('p', '', `Queue head: ${facts.queue_head ? issueLabel(facts.queue_head) : facts.source === 'unavailable' ? 'Unknown' : 'None'}`),
-        element('p', '', `needs_human: ${facts.needs_human_count ?? 'Unknown'}`),
+        element('p', '', `needs_human: ${humanAttention ?? 'Unknown'}`),
         element('p', '', `Release: ${facts.release ? `#${facts.release.number} ${facts.release.title}` : facts.release_observed_at ? 'No active PR' : 'Unknown'}`),
         element('p', '', `Pending update: ${facts.pending_update ? `v${facts.pending_update}` : facts.update_known ? 'None' : 'Unknown'}`));
       if (facts.release_observed_at) {
@@ -1030,6 +1124,7 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
     renderComposer(state.chatSend);
     if (transcript.childElementCount) rememberScroll();
     renderCurrent(state.current);
+    publishReviewAttention(state.current?.facts);
     const reports = state.reports;
     const visibleReports = kindSelect.value === 'all' ? reports : reports.filter(report => report.kind === kindSelect.value);
     const nextDigest = JSON.stringify([kindSelect.value, visibleReports]);
@@ -1173,6 +1268,6 @@ export function createPmChat({ document, root, sessionId, onLogVisibility, onCha
   kindSelect.addEventListener('change', filterReports);
   update({ sessionId, revision: 0, reports: [], loaded: false });
   showHome();
-  return { update, setSession, showHome, showDecisions, showProgress, showChat, showTasks, showTaskLog, showReports, receiveLog, dispose,
+  return { update, setSession, showHome, showDecisions, showProgress, showChat, showTasks, showTaskLog, showReports, receiveLog, receiveHumanAttention, dispose,
     isChatVisible: () => !disposed && activeView === 'chat' };
 }

@@ -77,6 +77,7 @@ pub(crate) enum IssueMonitorControlQueueError {
     Rejected,
     ConfigConflict,
     WaitNotLaunched,
+    WaitCapExpired,
     ScanAlreadyInFlight,
     Busy,
 }
@@ -93,6 +94,7 @@ impl IssueMonitorControlQueueError {
             Self::WaitNotLaunched => {
                 "Issues control rejected before commit: reason=not_launched; no durable launch owns this issue; inspect issue.monitor.status and declare the wait from the actual launch context"
             }
+            Self::WaitCapExpired => crate::runtime_daemon_events::ISSUE_MONITOR_WAIT_CAP_EXPIRED_ERROR,
             Self::ScanAlreadyInFlight => crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_SCAN_ALREADY_IN_FLIGHT_ERROR,
             Self::Busy => crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_BUSY_ERROR,
         }
@@ -289,7 +291,13 @@ impl BroadcastHub {
     pub(crate) fn take_issue_monitor_control_receiver(
         &self,
     ) -> Option<mpsc::Receiver<IssueMonitorControlRequest>> {
-        if *self.issue_monitor_controls.state.borrow() != IssueMonitorControlState::Starting {
+        // Issue #7483: a startup that only ran out of budget keeps the
+        // receiver, so its background retry can still open the lane. A
+        // terminal block dropped the receiver and stays blocked.
+        if !matches!(
+            *self.issue_monitor_controls.state.borrow(),
+            IssueMonitorControlState::Starting | IssueMonitorControlState::RecoveryBlocked
+        ) {
             return None;
         }
         let receiver = self
@@ -313,6 +321,31 @@ impl BroadcastHub {
         self.issue_monitor_controls
             .state
             .send_replace(IssueMonitorControlState::RecoveryBlocked);
+    }
+
+    /// Refuse controls while authority recovery keeps retrying (Issue #7483).
+    /// Unlike the terminal block this retains the receiver, so the worker can
+    /// still claim it once a later attempt establishes authority.
+    pub(crate) fn mark_issue_monitor_control_recovery_retrying(&self) {
+        self.issue_monitor_controls
+            .state
+            .send_replace(IssueMonitorControlState::RecoveryBlocked);
+    }
+
+    /// Wait until the worker has claimed the control lane.
+    #[cfg(all(test, unix))]
+    pub(crate) async fn wait_for_issue_monitor_control_ready(&self) -> bool {
+        let mut state = self.issue_monitor_controls.state.subscribe();
+        loop {
+            match *state.borrow_and_update() {
+                IssueMonitorControlState::Ready => return true,
+                IssueMonitorControlState::Closed => return false,
+                IssueMonitorControlState::Starting | IssueMonitorControlState::RecoveryBlocked => {}
+            }
+            if state.changed().await.is_err() {
+                return false;
+            }
+        }
     }
 
     pub(crate) fn close_issue_monitor_controls(&self) {

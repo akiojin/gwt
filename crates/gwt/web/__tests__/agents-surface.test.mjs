@@ -3,20 +3,27 @@ import assert from "node:assert/strict";
 import { parseHTML } from "linkedom";
 import { readFileSync } from "node:fs";
 import { createUiStateStore } from "../ui-state-store.js";
+import { createPmSettingsPanel } from "../pm-settings-panel.js";
+import { installSettingsOpenHandler } from "../settings-surface.js";
 import { createAgentsSurface } from "../agents-surface.js";
-import { createAgentRosterModel } from "../agent-activity-model.js";
+import { createAgentRosterModel, createMemberTuningModel } from "../agent-activity-model.js";
 
 const source = readFileSync(new URL("../agents-surface.js", import.meta.url), "utf8");
 const styles = readFileSync(new URL("../styles/works-agents.css", import.meta.url), "utf8");
+
+test("mobile Agents checkboxes override the shared form's last-child minimum", () => {
+  assert.match(styles, /@media \(max-width: 600px\)\s*\{[^}]*:root\[data-theme\] \.agents-surface input\.settings-checkbox\s*\{[^}]*min-width:\s*44px;[^}]*min-height:\s*44px;/);
+});
+
 const members = [
   { member_id: "m1", name: "One", enabled: true, assignment: { session_id: "s1" }, provider: "Codex", model: "GPT-6", created_at: "2026-10-20T00:00:00Z", issue_count: 3, landed_count: 2, active_seconds: 7200, tokens: 5000, history: [
-    { session_id: "s0", name: "Recorded author", provider: "claude", model: "recorded-model", issue_number: 4000, title: "Earlier", result: "landed", started_at: "2026-10-20T00:00:00Z", ended_at: "2026-10-20T02:00:00Z" },
+    { session_id: "s0", role: "pm", name: "Recorded author", provider: "claude", model: "recorded-model", issue_number: 4000, title: "Earlier", result: "landed", started_at: "2026-10-20T00:00:00Z", ended_at: "2026-10-20T02:00:00Z" },
     { session_id: "s2", issue_number: 4600, title: "Later", result: null, started_at: "2026-10-22T00:00:00Z", ended_at: "2026-10-22T02:00:00Z" },
   ] },
   { member_id: "m2", name: "Two", enabled: true, provider: null, model: null, created_at: null, issue_count: null, landed_count: null, active_seconds: null, tokens: null, history: [] },
 ];
 const current = { window_id: "one", session_id: "s1", runtime_incarnation: 4, issue_number: 4777, is_pm: false };
-async function fixture({ onOpenWork = () => {}, onContinueSavedWork = () => {}, isContinuePending, schedule, switching, executionModel } = {}) {
+async function fixture({ onOpenWork = () => {}, onNavigateProject = () => {}, onContinueSavedWork = () => {}, isContinuePending, schedule, switching, executionModel, tuningController, pmSettingsPanel, onReloadProfile = null, storage, unknownRoster = false } = {}) {
   const { document, window } = parseHTML("<main></main>");
   // linkedom does not track focus; keep that browser state local to this fixture.
   let activeElement = null;
@@ -26,19 +33,20 @@ async function fixture({ onOpenWork = () => {}, onContinueSavedWork = () => {}, 
   const frames = new Set(); const options = { scheduleFrame: fn => { frames.add(fn); return () => frames.delete(fn); } };
   const renamed = [], rosterController = createAgentRosterModel("project", { ...options, onRename: request => renamed.push(request) });
   const rosterModel = rosterController.model;
-  rosterController.applyAgentRosterSnapshot({ project_key: "project", members: members.map(member => ({ ...member, agent_member_id: member.member_id })), revision: 3, capacity: 2, recommended_capacity: 6, past_contributors: [{ name: "Earlier author", kind: "implementation", issue_numbers: [4000], first_posted_at: "2026-10-20T00:00:00Z", last_posted_at: "2026-10-20T01:00:00Z", post_count: 4 }] });
+  rosterController.applyAgentRosterSnapshot({ project_key: "project", members: members.map(member => ({ ...member, agent_member_id: member.member_id })), revision: 3, revision_decimal: "3", capacity: 2, recommended_capacity: 6, past_contributors: [{ name: "Earlier author", kind: "implementation", issue_numbers: [4000], first_posted_at: "2026-10-20T00:00:00Z", last_posted_at: "2026-10-20T01:00:00Z", post_count: 4 }] });
   const scheduleModel = schedule ? createUiStateStore(schedule, options) : undefined;
   const switchModel = switching ? createUiStateStore(switching, options) : undefined;
   const activityModel = createUiStateStore({ agents: [current], count: 1 }, options);
   const windowCatalogModel = createUiStateStore({ catalog: { runtimeStates: {}, version: 1, appState: { active_tab_id: "p", tabs: [{ id: "p", workspace: { windows: [{ id: "one", session_id: "s1", agent_member_id: "m1", dynamic_title: "Current issue", status: "running" }] } }] } } }, options);
   const supportedAgentsModel = createUiStateStore({ agents: [{ id: "codex", name: "Codex" }, { id: "claude", name: "Claude Code" }] }, options);
   const customAgentsModel = createUiStateStore({ catalog: { loaded: true, agents: [{ id: "custom-cli", display_name: "Custom CLI" }] } }, options);
-  const opened = [], rested = [], added = [], reassigned = [], refreshed = [], switched = [], saved = [], continued = [];
-  const surface = createAgentsSurface({ document, executionModel, projectTitle: "Alpha", rosterModel, activityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel, scheduleModel, switchModel, onRenameMember: rosterController.editAgentMemberName, onRetryName: rosterController.retryAgentMemberName, isContinuePending, onContinueSavedWork: workId => { continued.push(workId); onContinueSavedWork(workId); }, onSwitch: action => { switched.push(action); switchModel.update(state => ({ ...state, pending: action })); }, onOpenSavedWork: intent => saved.push(intent), onReassign: action => reassigned.push(action), onRefreshSchedule: () => refreshed.push(true), onAddMember: (tool, name) => { added.push({ tool, name }); rosterModel.update(state => ({ ...state, error: null })); }, onRestMember: id => rested.push(id), onOpenWork: assignment => { opened.push(assignment); onOpenWork(assignment); } });
+  const opened = [], rested = [], activated = [], added = [], reassigned = [], refreshed = [], switched = [], saved = [], continued = [];
+  if (unknownRoster) rosterModel.update(state => ({ ...state, revision: null, members: [] }));
+  const surface = createAgentsSurface({ document, storage, executionModel, projectTitle: "Alpha", rosterModel, tuningController, pmSettingsPanel, onReloadProfile, activityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel, scheduleModel, switchModel, onNavigateProject, onRenameMember: rosterController.editAgentMemberName, onRetryName: rosterController.retryAgentMemberName, isContinuePending, onContinueSavedWork: workId => { continued.push(workId); onContinueSavedWork(workId); }, onSwitch: action => { switched.push(action); switchModel.update(state => ({ ...state, pending: action })); }, onOpenSavedWork: intent => saved.push(intent), onReassign: action => reassigned.push(action), onRefreshSchedule: () => refreshed.push(true), onAddMember: (tool, name, pm_eligible, tuning) => { added.push({ tool, name, pm_eligible, ...(tuning ? { tuning } : {}) }); rosterModel.update(state => ({ ...state, error: null })); }, onRestMember: id => rested.push(id), onActivateMember: id => activated.push(id), onOpenWork: assignment => { opened.push(assignment); onOpenWork(assignment); } });
   for (const node of surface.element.querySelectorAll("select, input")) node.focus = () => { activeElement = node; };
   document.querySelector("main").append(surface.element);
   const flush = () => { for (const fn of [...frames]) { frames.delete(fn); fn(); } };
-  return { surface, document, window, frames, flush, rosterModel, rosterController, renamed, supportedAgentsModel, customAgentsModel, activityModel, windowCatalogModel, scheduleModel, opened, rested, added, reassigned, refreshed, switchModel, switched, saved, continued };
+  return { surface, document, window, frames, flush, rosterModel, rosterController, renamed, supportedAgentsModel, customAgentsModel, activityModel, windowCatalogModel, scheduleModel, opened, rested, activated, added, reassigned, refreshed, switchModel, switched, saved, continued };
 }
 
 test("Agents autosaves inline names while retaining native input, focus, invalid drafts and per-member selection drafts", async () => {
@@ -105,7 +113,7 @@ test("Project window titles follow current member names only for an exact assign
   const data = { preset: "agent", session_id: "s1", agent_name: "Historical name", dynamic_title: "Current issue" };
   assert.equal(title(data), "Maple — Current issue");
   assert.equal(title({ ...data, session_id: "s2", agent_member_id: "m1" }), "Historical name — Current issue");
-  assert.equal(title({ ...data, is_pm: true }), "Historical name");
+  assert.equal(title({ ...data, is_pm: true }), "Project Manager · Historical name — Starting");
   assert.equal(data.agent_name, "Historical name", "current display never mutates Session or window history");
   const renderKeyFunctions = ["appendRenderKeyPart", "appendWindowPlacementRenderKey", "workspaceWindowsRenderKey"]
     .map(name => app.match(new RegExp(`      function ${name}\\([^]*?\\n      \\}`))[0]).join("\n");
@@ -161,6 +169,8 @@ test("Agents identifies the exact PM before the implementation pool without addi
 
 test("Agents keeps Team and Past tabs, capacity, member details, four real aggregates and reverse history", async () => {
   const f = await fixture();
+  assert.equal(f.surface.element.querySelector('.roster-member-id')?.textContent, 'Member ID: m1');
+  assert.equal(f.surface.element.querySelector('.roster-current-role')?.textContent, 'Role: —');
   assert.deepEqual([...f.surface.element.querySelectorAll('[role="tab"]')].map(tab => tab.textContent), ["Team", "Past"]);
   assert.equal(f.surface.element.querySelector(".roster-count").textContent, "2");
   assert.match(f.surface.element.querySelector(".roster-capacity").textContent, /Recommended.*6/);
@@ -178,7 +188,7 @@ test("Agents keeps Team and Past tabs, capacity, member details, four real aggre
   f.rosterModel.update(state => ({ ...state, members: state.members.map(member => member.member_id !== "m1" ? member : { ...member,
     saved_manual_profile: { agent_id: "codex", model: "saved-model", reasoning: "high", runtime_target: "Docker", docker_service: "worker", skip_permissions: false },
     saved_manual_revision: `manual-profile-v1:${"a".repeat(64)}`,
-    history: [...member.history, { session_id: "s1", name: "Launch author", provider: "codex", model: "launch-model" }],
+    history: [...member.history, { session_id: "s1", role: "implementation", name: "Launch author", provider: "codex", model: "launch-model" }],
   }) })); f.flush();
   assert.match(f.surface.element.querySelector(".roster-saved-settings").textContent, /Model: saved-model.*Reasoning: high.*Runtime: Docker.*worker.*Permissions: Ask/s);
   assert.equal(f.surface.element.querySelector(".roster-saved-revision input"), revisionInput, "revision readout retains the keyboard target");
@@ -186,6 +196,8 @@ test("Agents keeps Team and Past tabs, capacity, member details, four real aggre
   assert.ok(f.surface.element.querySelector(".roster-saved-settings").previousElementSibling.classList.contains("roster-stats"), "refresh preserves aggregates before saved settings");
   assert.match(revisionInput.title, /Same settings.*same revision/);
   assert.equal(f.surface.element.querySelector(".roster-current-config").textContent, "Recorded name: Launch author · Tool: codex · Recorded model: launch-model");
+  assert.equal(f.surface.element.querySelector('.roster-current-role').textContent, 'Role: Implementation');
+  assert.deepEqual([...f.surface.element.querySelectorAll('.roster-history-role')].map(node => node.textContent), ['Role: —', 'Role: Project Manager']);
   const history = [...f.surface.element.querySelectorAll(".roster-history li")];
   assert.match(history[0].textContent, /Now.*#4777.*Current issue/s);
   assert.match(history[1].textContent, /Later/); assert.match(history[2].textContent, /Earlier/);
@@ -422,7 +434,7 @@ test("Agents add and rest actions target a member and Past shows measured contri
   name.value = "Maple"; name.dispatchEvent(new f.window.Event("input"));
   f.surface.element.querySelector('[data-action="add"]').click();
   f.surface.element.querySelector('.roster-detail [data-action="rest"]').click();
-  assert.deepEqual(f.added, [{ tool: "codex", name: "Maple" }]); assert.deepEqual(f.rested, ["m1"]);
+  assert.deepEqual(f.added, [{ tool: "codex", name: "Maple", pm_eligible: false }]); assert.deepEqual(f.rested, ["m1"]);
   f.surface.element.querySelector('[data-tab="past"]').click();
   assert.equal(f.surface.element.querySelector(".roster-team").hidden, true);
   assert.match(f.surface.element.querySelector(".roster-past").textContent, /Earlier author.*Implementation.*#4000.*2026-10-20.*4/s);
@@ -450,7 +462,7 @@ test("Agents batches shared updates, keeps stable member selection, and releases
 });
 
 
-test("a resting busy member remains reachable from Works until its exact assignment ends", async () => {
+test("resting members stay registered after work ends and across unavailable activity and readback", async () => {
   let workSurface;
   const f = await fixture({ onOpenWork: assignment => workSurface.openWork(assignment) });
   f.surface.selectMember("m2");
@@ -466,14 +478,92 @@ test("a resting busy member remains reachable from Works until its exact assignm
   workSurface.element.querySelector(".work-member").click();
   assert.equal(f.surface.element.querySelector('.roster-row[data-member-id="m1"]')?.getAttribute("aria-selected"), "true");
   assert.equal(f.surface.element.querySelector(".roster-count").textContent, "1");
+  assert.equal(f.surface.element.querySelector(".roster-capacity-value").textContent, "1");
   assert.match(f.surface.element.querySelector('.roster-row[data-member-id="m1"]').textContent, /Resting.*Finishing/);
-  assert.equal(f.surface.element.querySelector('.roster-row[data-member-id="rested-idle"]'), null);
+  const rested = f.surface.element.querySelector('.roster-row[data-member-id="rested-idle"]');
+  assert.ok(rested, "a canonical resting member remains registered without a live assignment");
+  assert.equal(rested.querySelector(".roster-state").textContent, "Resting");
+  assert.match(rested.querySelector(".roster-purpose").textContent, /Not selected for new work/);
+  assert.match(f.surface.element.querySelector(".roster-capacity-note").textContent, /Registered 3/);
+  assert.deepEqual([...f.surface.element.querySelectorAll(".roster-row")].map(row => row.dataset.memberId), ["m1", "m2", "rested-idle"]);
   assert.equal(f.surface.element.querySelector('.roster-detail [data-action="rest"]').disabled, true);
   f.surface.element.querySelector(".roster-now button").click();
   assert.deepEqual(f.opened, [current]); assert.equal(workSurface.isVisible("one"), true);
   f.activityModel.update(() => ({ agents: [], count: 0 })); f.flush();
-  assert.equal(f.surface.element.querySelector('.roster-row[data-member-id="m1"]'), null);
+  assert.equal(f.surface.element.querySelector('.roster-row[data-member-id="m1"] .roster-state').textContent, "Resting");
+  assert.equal(f.surface.element.querySelector('.roster-row[data-member-id="m1"]').getAttribute("aria-selected"), "true");
+  assert.match(f.surface.element.querySelector(".roster-detail").textContent, /Recorded author/);
+  f.surface.selectMember("rested-idle");
+  f.activityModel.update(() => ({ agents: [], count: null })); f.flush();
+  const saved = f.rosterModel.read();
+  f.rosterController.applyAgentRosterSnapshot({ ...saved, project_key: "project", revision: 4,
+    members: saved.members.map(member => ({ ...member, agent_member_id: member.member_id })) }); f.flush();
+  assert.equal(f.surface.element.querySelector('.roster-row[data-member-id="rested-idle"]'), rested);
+  assert.equal(rested.getAttribute("aria-selected"), "true");
+  assert.equal(f.surface.element.querySelector(".roster-count").textContent, "1");
+  assert.match(f.surface.element.querySelector(".roster-capacity-note").textContent, /Busy —/);
+  assert.deepEqual(f.rested, []); assert.deepEqual(f.added, []);
   workSurface.dispose(); f.surface.dispose();
+});
+
+
+test("Agents restores the selected resting member without writes during unknown hydration", async () => {
+  const values = new Map(), writes = [];
+  const storage = { get: key => values.get(key), set: (key, value) => { values.set(key, value); writes.push(value); }, delete: key => { values.delete(key); writes.push(null); } };
+  const first = await fixture({ storage });
+  first.rosterModel.update(state => ({ ...state, members: state.members.map(member => member.member_id === "m2" ? { ...member, enabled: false } : member) })); first.flush();
+  first.surface.selectMember("m2");
+  const known = first.rosterModel.read(); first.surface.dispose();
+  const restored = await fixture({ storage, unknownRoster: true });
+  const beforeHydration = [...writes];
+  restored.windowCatalogModel.update(state => ({ catalog: { ...state.catalog, version: 2 } })); restored.flush();
+  assert.deepEqual(writes, beforeHydration, "unknown roster must not discard the selection");
+  restored.rosterModel.update(() => known); restored.flush();
+  assert.equal(restored.surface.element.querySelector('[data-member-id="m2"]').getAttribute("aria-selected"), "true");
+  assert.equal(restored.surface.element.querySelector('.roster-detail h3').textContent, "Two");
+  assert.deepEqual(restored.rested, []); assert.deepEqual(restored.added, []);
+  const preview = restored.document.createElement("aside"); restored.surface.setPreviewHost(preview);
+  preview.querySelector('[data-member-id="m1"]').click();
+  assert.deepEqual(writes, beforeHydration, "read-only preview cannot change selection");
+  restored.rosterModel.update(state => ({ ...state, revision: 4, members: [state.members[0]] })); restored.flush();
+  assert.equal(restored.surface.element.querySelector('[data-member-id="m1"]').getAttribute("aria-selected"), "true");
+  assert.equal(writes.at(-1), "m1", "known removal saves the existing fallback");
+  restored.rosterModel.update(state => ({ ...state, revision: 5, members: [] })); restored.flush();
+  assert.equal(writes.at(-1), null, "a known empty roster clears the stale preference");
+  restored.surface.dispose();
+});
+
+test("resting registration collisions identify the member and reactivate only the chosen row", async () => {
+  const f = await fixture();
+  f.rosterModel.update(state => ({ ...state, members: [
+    ...state.members,
+    { member_id: "rest-first", name: "Earlier", agent_id: "claude", enabled: false, history: [] },
+    { member_id: "rest-target", name: "Maple", agent_id: "codex", enabled: false, history: [] },
+  ] })); f.flush();
+  const input = f.surface.element.querySelector('[aria-label="Name for new member"]');
+  input.value = " MAPLE "; input.dispatchEvent(new f.window.Event("input"));
+  const error = f.surface.element.querySelector("#roster-registration-error");
+  assert.match(error.textContent, /Maple.*codex.*resting/i);
+  assert.equal(f.surface.element.querySelector('[data-action="add"]').disabled, true);
+  error.querySelector("button").click();
+  const row = f.surface.element.querySelector('[data-member-id="rest-target"]');
+  assert.equal(row.getAttribute("aria-selected"), "true");
+  assert.equal(f.document.activeElement, row);
+  assert.deepEqual(f.activated, []); assert.deepEqual(f.added, []);
+  const activate = row.querySelector('[data-action="activate"]');
+  activate.click();
+  assert.deepEqual(f.activated, ["rest-target"]);
+  f.rosterModel.update(state => ({ ...state, pending_roster: { request_id: "activate", action: { kind: "activate" } } })); f.flush();
+  assert.equal(activate.disabled, true); activate.click();
+  assert.deepEqual(f.activated, ["rest-target"]);
+  f.rosterModel.update(state => ({ ...state, pending_roster: null, members: state.members.map(member => member.member_id === "rest-target" ? { ...member, enabled: true } : member) })); f.flush();
+  assert.equal(activate.hidden, true); activate.click();
+  assert.deepEqual(f.activated, ["rest-target"]);
+  assert.equal(f.rosterModel.read().members.find(member => member.member_id === "rest-first").enabled, false);
+  f.rosterModel.update(state => ({ ...state, members: state.members.filter(member => member.member_id !== "rest-target") })); f.flush();
+  activate.click();
+  assert.deepEqual(f.activated, ["rest-target"], "a detached old control cannot reactivate a removed identity");
+  f.surface.dispose();
 });
 
 
@@ -489,6 +579,35 @@ test("an observation timestamp alone preserves roster detail, controls and selec
   assert.ok(f.surface.element.querySelector(".roster-now button") === currentControl);
   assert.ok(f.surface.element.querySelector('.roster-row[data-member-id="m1"]') === row);
   assert.equal(row.getAttribute("aria-selected"), "true");
+  f.surface.dispose();
+});
+
+test("one member row shows both project assignments without granting foreign terminal access", async () => {
+  const navigated = [], f = await fixture({ onNavigateProject: key => navigated.push(key) });
+  const summaries = [
+    { project_key: "project", project_name: "Alpha", session_id: "s1", issue_number: 4777, state: "Recorded Running" },
+    { project_key: "project-b", project_name: "Beta", session_id: "foreign", issue_number: null, state: "Recorded Waiting" },
+  ];
+  f.rosterModel.update(state => ({ ...state, members: state.members.map(member =>
+    member.member_id === "m1" ? { ...member, active_assignments: summaries } : member) })); f.flush();
+  const row = f.surface.element.querySelector('.roster-row[data-member-id="m1"]');
+  const local = row.querySelector('[data-assignment-project="project"]');
+  const foreign = row.querySelector('[data-assignment-project="project-b"]');
+  assert.equal(local?.textContent, "Alpha · #4777 · Recorded Running");
+  assert.equal(foreign?.textContent, "Beta · No issue · Recorded Waiting");
+  assert.equal(f.surface.element.querySelectorAll('.roster-row[data-member-id="m1"]').length, 1);
+  assert.equal(row.querySelectorAll(".roster-purpose").length, 1, "the local current-work control stays distinct");
+  foreign.click();
+  assert.deepEqual(navigated, ["project-b"]);
+  assert.deepEqual(f.opened, [], "foreign summary only navigates to its own project");
+  local.click();
+  assert.deepEqual(f.opened, [current], "local input still requires the exact current census");
+  const preview = f.document.createElement("aside"); f.surface.setPreviewHost(preview);
+  assert.equal(preview.querySelector('[data-assignment-project="project-b"]').disabled, true);
+  f.rosterModel.update(state => ({ ...state, members: state.members.map(member =>
+    member.member_id === "m1" ? { ...member, active_assignments: summaries.slice(1) } : member) })); f.flush();
+  assert.equal(row.querySelectorAll("[data-assignment-project]").length, 1);
+  assert.equal(row.querySelector('[data-assignment-project="project-b"]').textContent, "Beta · No issue · Recorded Waiting");
   f.surface.dispose();
 });
 
@@ -608,12 +727,78 @@ test("Agents continues only server-eligible saved work through the existing corr
 });
 
 
+test("registration selects catalog tuning without sending until Register and retains rejected drafts", async () => {
+  let reloads = 0;
+  const f = await fixture({ onReloadProfile: () => { reloads += 1; } });
+  f.rosterModel.update(state => ({ ...state, tuning_choices: { agents: [{ id: "codex", models: [{ value: "catalog-model", reasoning_options: [{ value: "high" }] }] }] } })); f.flush();
+  const host = f.surface.element;
+  const name = host.querySelector('[aria-label="Name for new member"]');
+  const model = host.querySelector('[aria-label="Model for new member"]');
+  const reasoning = host.querySelector('[aria-label="Reasoning for new member"]');
+  assert.ok(model && reasoning, "registration exposes model and reasoning inputs");
+  assert.equal(model.className, "settings-input");
+  assert.equal(model.parentElement.querySelector('option[value="catalog-model"]').value, "catalog-model");
+  name.value = "Maple"; name.dispatchEvent(new f.window.Event("input"));
+  model.value = "  catalog-model  "; model.dispatchEvent(new f.window.Event("input"));
+  reasoning.value = " high "; reasoning.dispatchEvent(new f.window.Event("input"));
+  assert.equal(reasoning.parentElement.querySelector('option[value="high"]').value, "high");
+  name.dispatchEvent(new f.window.Event("compositionstart"));
+  f.supportedAgentsModel.update(state => ({ agents: state.agents.filter(agent => agent.id !== "codex") })); f.flush();
+  assert.equal(model.value, "", "fallback to another tool clears the previous tool's tuning");
+  assert.equal(reasoning.value, "");
+  assert.equal(host.querySelector('[data-action="add"]').disabled, true, "tool fallback preserves name composition");
+  name.dispatchEvent(new f.window.Event("compositionend"));
+  f.supportedAgentsModel.update(() => ({ agents: [{ id: "codex", name: "Codex" }, { id: "claude", name: "Claude Code" }] })); f.flush();
+  host.querySelector('[aria-label="Tool for new member"] option[value="codex"]').selected = true;
+  host.querySelector('[aria-label="Tool for new member"]').dispatchEvent(new f.window.Event("change"));
+  model.value = "  catalog-model  "; model.dispatchEvent(new f.window.Event("input"));
+  reasoning.value = " high "; reasoning.dispatchEvent(new f.window.Event("input"));
+  assert.equal(f.added.length, 0);
+  reasoning.dispatchEvent(new f.window.Event("compositionstart"));
+  host.querySelector('[data-action="add"]').click();
+  assert.equal(f.added.length, 0, "Register never sends an unfinished IME value");
+  reasoning.dispatchEvent(new f.window.Event("compositionend"));
+  host.querySelector('[data-action="add"]').click();
+  assert.deepEqual(f.added, [{ tool: "codex", name: "Maple", pm_eligible: false, tuning: { model: "catalog-model", reasoning: "high" } }]);
+  model.focus();
+  f.rosterModel.update(state => ({ ...state, error: "Unsupported reasoning; review and retry", tuning_choices: { agents: [] } })); f.flush();
+  assert.equal(model.value, "  catalog-model  "); assert.equal(reasoning.value, " high ");
+  assert.equal(host.querySelector('[aria-label="Model for new member"]'), model);
+  assert.equal(f.document.activeElement, model);
+  f.rosterModel.update(state => ({ ...state, tuning_choices: { agents: [{ id: "codex", model_catalog_warning: "Catalog unavailable. Retry without losing your draft.", models: [] }] } })); f.flush();
+  assert.match(host.querySelector('[data-registration-catalog-status]').textContent, /Catalog unavailable/);
+  const retry = host.querySelector('[data-action="retry-registration-catalog"]');
+  assert.equal(retry.hidden, false); retry.click(); assert.equal(reloads, 1);
+  assert.equal(f.added.length, 1, "catalog Retry is only a read");
+  assert.equal(model.value, "  catalog-model  ");
+  f.rosterModel.update(state => ({ ...state, tuning_choices: { agents: [{ id: "codex", models: [{ value: "recovered-model" }] }] } })); f.flush();
+  assert.equal(retry.hidden, true); assert.equal(model.value, "  catalog-model  ");
+  assert.equal(model.parentElement.querySelector('option[value="recovered-model"]').value, "recovered-model");
+  f.supportedAgentsModel.update(() => ({ agents: [] })); f.customAgentsModel.update(() => ({ catalog: { loaded: false, agents: [] } })); f.flush();
+  assert.equal(model.value, "  catalog-model  ");
+  f.supportedAgentsModel.update(() => ({ agents: [{ id: "claude", name: "Claude Code" }, { id: "codex", name: "Codex" }] }));
+  f.customAgentsModel.update(() => ({ catalog: { loaded: true, agents: [] } })); f.flush();
+  assert.equal(host.querySelector('[aria-label="Tool for new member"]').value, "codex");
+  assert.equal(model.value, "  catalog-model  ", "same tool after unavailable catalog retains tuning");
+  const tool = host.querySelector('[aria-label="Tool for new member"]');
+  tool.querySelector('[value="claude"]').selected = true; tool.dispatchEvent(new f.window.Event("change"));
+  assert.equal(model.value, ""); assert.equal(reasoning.value, "");
+  const preview = f.document.createElement("aside"); f.surface.setPreviewHost(preview);
+  assert.equal(preview.querySelector('[aria-label="Model for new member"]').disabled, true);
+  assert.equal(preview.querySelector('[aria-label="Reasoning for new member"]').disabled, true);
+  const app = readFileSync(new URL("../app.js", import.meta.url), "utf8");
+  assert.match(app, /kind: "add", agent_id: agentId, name, pm_eligible: pmEligible, \.\.\.tuning/);
+  f.surface.dispose();
+});
+
 test("Agents registers an explicit name with its selected catalog tool and preserves rejected drafts", async () => {
   const f = await fixture();
   const select = f.surface.element.querySelector('[aria-label="Tool for new member"]');
   const name = f.surface.element.querySelector('[aria-label="Name for new member"]');
   assert.ok(name, "registration exposes an accessible display name field");
   assert.equal(name.classList.contains("settings-input"), true, "registration reuses the tokenized shared input primitive");
+  const eligible = f.surface.element.querySelector('[aria-label="PM eligible for new member"]');
+  assert.ok(eligible, "registration exposes the eligibility draft"); assert.equal(eligible.checked, false);
   const register = f.surface.element.querySelector('[data-action="add"]');
   const input = value => { name.value = value; name.dispatchEvent(new f.window.Event("input")); };
   assert.equal(register.disabled, true, "empty names cannot register");
@@ -624,7 +809,7 @@ test("Agents registers an explicit name with its selected catalog tool and prese
   assert.deepEqual([...select.options].map(option => option.value), ["codex", "claude", "custom-cli"]);
   select.querySelector('[value="custom-cli"]').selected = true;
   register.click();
-  assert.deepEqual(f.added, [{ tool: "custom-cli", name: "Maple" }]);
+  assert.deepEqual(f.added, [{ tool: "custom-cli", name: "Maple", pm_eligible: false }]);
   f.rosterModel.update(state => ({ ...state, error: "Agent roster changed; reload before retrying" })); f.flush();
   assert.equal(name.value, "  Maple  ", "backend rejection retains the draft");
   name.focus(); f.rosterModel.update(state => ({ ...state, revision: state.revision + 1, error: null })); f.flush();
@@ -639,11 +824,194 @@ test("Agents registers an explicit name with its selected catalog tool and prese
     members: [...state.members, { member_id: "other-writer", name: "Maple", enabled: true }] })); f.flush();
   assert.equal(name.value, "  Maple  ", "a later read must not mistake another writer's member for the rejected registration");
   f.rosterModel.update(state => ({ ...state, error: "Agent roster changed; reload before retrying" })); f.flush();
-  input("Cedar"); register.click();
+  input("Cedar"); eligible.checked = true; register.click();
+  assert.equal(f.added.at(-1).pm_eligible, true);
+  f.rosterModel.update(state => ({ ...state, error: "Refused" })); f.flush();
+  assert.equal(eligible.checked, true, "rejection retains checked eligibility");
+  register.click();
   f.activityModel.update(state => ({ ...state, count: 2 })); f.flush();
   f.rosterModel.update(state => ({ ...state, revision: state.revision + 1, error: null,
     members: [...state.members, { member_id: "retry", name: "Cedar", enabled: true }] })); f.flush();
   assert.equal(name.value, "", "retry success clears the submitted draft after unrelated activity redraw");
+});
+
+test("configured PM remains a selectable named member with lossless roster revision and role controls", async () => {
+  const f = await fixture();
+  f.rosterController.applyAgentRosterSnapshot({ project_key: 'project', revision_decimal: '18446744073709551614', members: [{ ...members[0], agent_member_id: 'm1', is_pm: true, pm_project_key: 'project', pm_eligible: true, assignment: { role: 'pm' } }], capacity: 0 });
+  f.flush();
+  assert.equal(f.surface.element.querySelectorAll('.roster-row').length, 1);
+  assert.equal(f.surface.selectMember('m1'), true);
+  assert.equal(f.surface.element.querySelector('[aria-label="Display name"]').disabled, false);
+  assert.equal(f.surface.element.querySelector('[data-action="rest"]').disabled, true);
+  assert.equal(f.surface.element.querySelector('[data-action="pm-eligible"]').checked, true);
+  assert.equal(f.surface.element.querySelector('[data-action="pm-eligible"]').disabled, true);
+  assert.match(f.surface.element.querySelector('.roster-row').textContent, /Project Manager/);
+});
+
+test("project app shares one tuning controller and routes role receipts without reconnect replay", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  assert.equal((app.match(/= createMemberTuningModel\(routeProjectKey/g) || []).length, 1);
+  assert.match(app, /case "pm_status":\s*tuningController\.applyPmTuningStatus\(event\)/);
+  assert.match(app, /case "pm_launch_profile_result":\s*tuningController\.applyPmTuningResult\(event\)/);
+  assert.match(app, /tuningController\.applyRosterTuningSnapshot\(event\.roster, event\.request_id, \{ accepted \}\)/);
+  assert.match(app, /tuningController\.applyRosterTuningError\(event\)/);
+  assert.match(app, /tuningController\.disconnectTuning\(\)/);
+  assert.match(app, /if \(!beginAgentRosterRequest\(request\)\) return;/);
+  assert.match(app, /message\.kind === "set_pm_launch_profile"/);
+  assert.match(app, /project_key: routeProjectKey, request_id: createLaunchOperationId\("roster"\)/);
+});
+
+test("a deconfigured retained PM may Rest for future admission without freeing its assignment", async () => {
+  const f = await fixture();
+  const assignment = { role: 'pm', session_id: 'old-pm' };
+  f.rosterModel.update(state => ({ ...state, members: state.members.map(member => member.member_id === 'm1' ? { ...member, pm_project_key: null, assignment } : { ...member, pm_project_key: 'project', pm_eligible: true }) })); f.flush();
+  assert.doesNotMatch(f.surface.element.querySelector('[data-action="select-pm"]').textContent, /Configured Project Manager/);
+  const rest = f.surface.element.querySelector('.roster-detail [data-action="rest"]');
+  assert.equal(rest.disabled, false); rest.click();
+  assert.deepEqual(f.rested, ['m1']);
+  assert.deepEqual(f.rosterModel.read().members[0].assignment, assignment);
+  assert.match(f.surface.element.querySelector('.roster-row[data-member-id="m1"]').textContent, /retained|Finishing/);
+});
+
+
+test("shared PM availability disables Agents edits and Retry until a fresh canonical reload", async () => {
+  const sent = [], c = createMemberTuningModel("project", { onSave: request => sent.push(request) });
+  c.setPmMember("m1");
+  const snapshot = { project_key: "project", role: "pm", member_id: "m1", agent_id: "codex", revision: "known", model: "saved" };
+  c.applyTuningSnapshot(snapshot);
+  const f = await fixture({ tuningController: c });
+  f.rosterModel.update(state => ({ ...state, members: state.members.map(member => member.member_id === "m1" ? { ...member, pm_project_key: "project" } : member) })); f.flush();
+  c.editTuning("pm", "m1", { model: "draft" });
+  c.applyTuningError({ project_key: "project", role: "pm", member_id: "m1", request_id: sent[0].request_id, message: "Refused" });
+  const panel = createPmSettingsPanel({ document: f.document, projectKey: "project" });
+  const receiveStatus = status => { c.applyPmTuningStatus(status); panel.applyStatus(status); };
+  receiveStatus({ project_key: "project", available: false }); f.surface.sync();
+  const input = f.surface.element.querySelector('[data-member-tuning-field="model"]');
+  assert.equal(input.value, "draft"); assert.equal(input.disabled, true);
+  assert.equal(f.surface.element.querySelector('[data-action="retry-tuning"]').disabled, true);
+  c.editTuning("pm", "m1", { model: "unsafe" }); c.retryTuning("pm", "m1");
+  assert.equal(sent.length, 1); assert.equal(c.model.read().targets["pm:m1"].draft.model, "draft");
+  receiveStatus({ project_key: "project", available: true, configured_member_id: "m1", profile_revision: "fresh", configured_agent_id: "codex", configured_model: "saved" }); f.surface.sync();
+  assert.equal(input.disabled, false); assert.equal(input.value, "draft");
+});
+
+
+test("ordinary roster rejection receipts show current role/registration diagnostics without replaying stale errors", async () => {
+  const f = await fixture({ schedule: planned(), switching: switchingState() });
+  const begin = (kind, request_id, rest = {}) => f.rosterController.beginAgentRosterRequest({ kind: "agent_roster", project_key: "project", request_id, action: { kind, ...rest }, expected_revision: f.rosterModel.read().revision });
+  const rosterSnapshot = (revision, error = null) => ({ project_key: "project", revision, members: f.rosterModel.read().members.map(member => ({ ...member, agent_member_id: member.member_id })), error });
+  const name = f.surface.element.querySelector('[aria-label="Name for new member"]'); name.value = "New member"; name.dispatchEvent(new f.window.Event("input"));
+  const eligible = f.surface.element.querySelector('[aria-label="PM eligible for new member"]'); eligible.checked = true;
+  assert.equal(begin("activate", "activate-current", { member_id: "m2" }), true);
+  assert.equal(begin("add", "add-current", { name: "New member", agent_id: "codex", pm_eligible: true }), true);
+  f.rosterController.applyAgentRosterError({ project_key: "project", request_id: "add-current", message: "Roster changed. Reload before retrying registration." }); f.flush();
+  assert.match(f.surface.element.querySelector('.roster-error').textContent, /Reload before retrying registration/);
+  assert.equal(name.value, "New member"); assert.equal(eligible.checked, true);
+  begin("select_pm", "select-current", { member_id: "m2" });
+  f.rosterController.applyAgentRosterSnapshot(rosterSnapshot(4, "Member is selected in an implementation pool; remove it before selecting PM."), "select-current"); f.flush();
+  assert.match(f.surface.element.querySelector('.roster-error').textContent, /implementation pool/);
+  assert.equal(f.rosterModel.read().members[1].pm_project_key, undefined);
+  begin("read", "recovery-read");
+  f.rosterController.applyAgentRosterSnapshot(rosterSnapshot(4), "recovery-read"); f.flush();
+  assert.equal(f.rosterModel.read().error, null, "fresh matching Reload clears the refusal");
+  f.scheduleModel.update(state => ({ ...state, snapshot: { ...state.snapshot, roster_revision: 4 } })); f.flush();
+  assert.equal(f.surface.element.querySelector('[data-action="switch-next"]').disabled, false, "fresh Reload recovers the existing roster.error-dependent switch path");
+  assert.equal(name.value, "New member"); assert.equal(eligible.checked, true);
+  f.surface.selectMember("m2");
+  const memberEligible = f.surface.element.querySelector('[data-action="pm-eligible"]');
+  begin("set_pm_eligibility", "delayed-current", { member_id: "m2", eligible: true });
+  f.flush();
+  assert.equal(memberEligible.checked, true, "pending eligibility survives a redraw");
+  assert.notEqual(f.rosterModel.read().members[1].pm_eligible, true, "pending display does not change canonical eligibility");
+  assert.equal(f.surface.element.querySelector('[data-action="select-pm"]').disabled, true, "PM selection waits for canonical approval");
+  begin("read", "parallel-read");
+  f.rosterController.applyAgentRosterSnapshot(rosterSnapshot(6), "parallel-read");
+  f.flush(); assert.equal(memberEligible.checked, true, "parallel read preserves the pending intent");
+  assert.equal(f.rosterModel.read().pending_roster.request_id, "delayed-current", "Read never consumes the mutation");
+  f.rosterController.applyAgentRosterSnapshot(rosterSnapshot(5, "Eligibility refused: configured member cannot change."), "delayed-current"); f.flush();
+  assert.equal(f.rosterModel.read().revision, 6, "old response does not hydrate old canonical");
+  assert.equal(f.rosterModel.read().pending_roster, null);
+  assert.equal(memberEligible.checked, false, "correlated refusal restores canonical eligibility");
+  assert.match(f.rosterModel.read().error, /Eligibility refused/);
+  begin("read", "superseded-read"); begin("read", "current-read");
+  f.rosterController.applyAgentRosterSnapshot(rosterSnapshot(6), "superseded-read");
+  assert.match(f.rosterModel.read().error, /Eligibility refused/, "superseded Read cannot clear the banner");
+  f.rosterController.applyAgentRosterSnapshot(rosterSnapshot(6), "current-read");
+  assert.equal(f.rosterModel.read().error, null);
+  begin("rest", "rest-current", { member_id: "m2" });
+  f.rosterController.applyAgentRosterUsage([], "/project");
+  assert.equal(f.rosterModel.read().error, null, "usage refresh cannot revive the prior operation rejection");
+  f.rosterController.applyAgentRosterSnapshot(rosterSnapshot(7), "rest-current"); f.flush();
+  assert.equal(f.rosterModel.read().error, null);
+  f.rosterController.applyAgentRosterError({ project_key: "project", request_id: "select-current", message: "Old role rejection" });
+  f.rosterController.applyAgentRosterSnapshot(rosterSnapshot(4, "Old snapshot rejection"), "add-current");
+  f.rosterController.applyAgentRosterError({ project_key: "project", request_id: "unrelated-name", message: "Old name rejection" });
+  f.rosterController.applyAgentRosterError({ project_key: "project", request_id: "unrelated-tuning", message: "Old tuning rejection" }); f.flush();
+  assert.equal(f.rosterModel.read().error, null); assert.equal(f.surface.element.querySelector('.roster-error').hidden, true);
+  begin("read", "read-before-next-failure");
+  begin("select_pm", "next-current", { member_id: "m2" });
+  f.rosterController.applyAgentRosterError({ project_key: "project", request_id: "next-current", message: "New current refusal" });
+  f.rosterController.applyAgentRosterSnapshot(rosterSnapshot(7), "read-before-next-failure");
+  assert.equal(f.rosterModel.read().error, "New current refusal", "older Read cannot clear a newer operation refusal");
+  begin("read", "current-recovery");
+  f.rosterController.applyAgentRosterSnapshot({ ...rosterSnapshot(8), project_key: "foreign" }, "current-recovery");
+  f.rosterController.applyAgentRosterSnapshot(rosterSnapshot(6), "current-recovery");
+  assert.equal(f.rosterModel.read().error, "New current refusal", "foreign/old Reads cannot recover the current banner");
+});
+
+test("Agents owns a stable project operations host and readonly preview", async () => {
+  let mount, unmount;
+  const panel = { mount: host => { mount = host; host.innerHTML = '<button>Pause</button>'; }, unmount: host => { unmount = host; } };
+  const f = await fixture({ pmSettingsPanel: panel });
+  const host = f.surface.element.querySelector('[data-role="pm-project-operations"]');
+  assert.equal(host, mount); const input = f.surface.element.querySelector('[aria-label="Display name"]');
+  const preview = f.document.createElement("aside"); f.surface.setPreviewHost(preview);
+  assert.equal(preview.querySelector('[data-role="pm-project-operations"] button').disabled, true);
+  f.surface.selectMember("m2"); f.surface.selectMember("m1");
+  assert.equal(f.surface.element.querySelector('[data-role="pm-project-operations"]'), host);
+  assert.equal(f.surface.element.querySelector('[aria-label="Display name"]'), input);
+  f.surface.dispose(); assert.equal(unmount, host);
+});
+
+test("PM navigation retains its member through initial roster hydration and respects explicit selection", async () => {
+  const writes = [], storage = { get: () => "m1", set: (_, value) => writes.push(value), delete() {} };
+  const f = await fixture({ storage }), loaded = f.rosterModel.read();
+  f.rosterModel.update(state => ({ ...state, revision: null, members: [] })); f.flush();
+  f.surface.element.querySelector('[data-tab="past"]').click();
+  f.surface.openPmSettings("m2");
+  assert.equal(writes.at(-1), "m2", "explicit PM navigation replaces the saved selection");
+  f.windowCatalogModel.update(state => ({ catalog: { ...state.catalog, version: 2 } })); f.flush();
+  f.rosterModel.update(() => loaded); f.flush();
+  assert.equal(f.surface.element.querySelector(".roster-team").hidden, false);
+  assert.equal(f.surface.element.querySelector('[aria-label="Display name"]').value, "Two");
+  f.rosterModel.update(state => ({ ...state, revision: null, members: [state.members[0]] })); f.flush();
+  f.surface.openPmSettings("m2");
+  assert.equal(f.surface.selectMember("m1"), true);
+  f.rosterModel.update(() => loaded); f.flush();
+  assert.equal(f.surface.element.querySelector('[aria-label="Display name"]').value, "One");
+  f.surface.openPmSettings("missing");
+  assert.equal(f.surface.element.querySelector('[aria-label="Display name"]').value, "One");
+  f.surface.dispose();
+});
+
+test("PM entries reveal Team from Past with known and unknown members", async () => {
+  const f = await fixture(), sent = [];
+  const gear = f.document.createElement("button"); gear.id = "op-pm-settings-button"; f.document.body.append(gear);
+  const panel = createPmSettingsPanel({ document: f.document, projectKey: "project", send: message => sent.push(message), onOpenAgents: id => f.surface.openPmSettings(id) });
+  panel.bindEntryPoints({ document: f.document });
+  installSettingsOpenHandler({ document: f.document, settingsWindowBodies: new Set(), onOpenAgents: () => panel.openAgents(), focusOrSpawnPreset: () => assert.fail("no settings window"), setPendingTarget: () => assert.fail("no pending tab") });
+  const past = f.surface.element.querySelector('[data-tab="past"]'), team = f.surface.element.querySelector('.roster-team');
+  const name = f.surface.element.querySelector('[aria-label="Display name"]');
+  name.dispatchEvent(new f.window.Event("compositionstart")); name.value = "unfinished"; name.dispatchEvent(new f.window.Event("input"));
+  past.click(); assert.equal(team.hidden, true); gear.click(); assert.equal(team.hidden, false);
+  assert.equal(f.surface.element.querySelector('[aria-label="Display name"]'), name); assert.equal(name.value, "unfinished");
+  panel.applyStatus({ project_key: "project", available: true, paused: false, auto_start: true, loop_interval_secs: 60, configured_member_id: "m2" });
+  past.click(); f.document.dispatchEvent(new f.window.CustomEvent("op:command", { detail: { id: "pm-settings" } }));
+  assert.equal(team.hidden, false); assert.equal(f.surface.element.querySelector('[aria-label="Display name"]').value, "Two");
+  panel.applyStatus({ project_key: "project", available: true, paused: false, auto_start: true, loop_interval_secs: 60, configured_member_id: "not-in-roster" });
+  past.click(); gear.click(); assert.equal(team.hidden, false); assert.equal(f.surface.element.querySelector('[aria-label="Display name"]').value, "Two");
+  past.click(); f.document.dispatchEvent(new f.window.CustomEvent("settings:open", { detail: { target: "project-manager" } }));
+  assert.equal(team.hidden, false); assert.deepEqual(sent, []); f.surface.dispose();
 });
 
 

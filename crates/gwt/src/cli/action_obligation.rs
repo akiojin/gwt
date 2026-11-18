@@ -31,7 +31,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use chrono::{DateTime, Utc};
+use gwt_core::timestamp::UtcTimestamp;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -69,7 +69,7 @@ impl ObligationKind {
 pub struct ObligationSettlement {
     /// The canonical operation (or `deferred: <reason>`) that settled it.
     pub evidence: String,
-    pub settled_at: DateTime<Utc>,
+    pub settled_at: UtcTimestamp,
 }
 
 /// One typed obligation created by a producing prompt.
@@ -78,7 +78,7 @@ pub struct ActionObligation {
     pub kind: ObligationKind,
     /// sha256 (16 hex) of the prompt — digests only, never raw text.
     pub prompt_digest: String,
-    pub created_at: DateTime<Utc>,
+    pub created_at: UtcTimestamp,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settled: Option<ObligationSettlement>,
 }
@@ -106,7 +106,7 @@ pub enum ObligationRevivalOutcome {
 pub struct ObligationRevivalRecord {
     pub session_id: String,
     pub result: ObligationRevivalOutcome,
-    pub recorded_at: DateTime<Utc>,
+    pub recorded_at: UtcTimestamp,
     pub content_hash: String,
 }
 
@@ -148,7 +148,7 @@ fn save_revival_record(
     let mut record = ObligationRevivalRecord {
         session_id: session_id.to_string(),
         result: result.clone(),
-        recorded_at: Utc::now(),
+        recorded_at: gwt_core::timestamp::UtcTimestamp::now(),
         content_hash: String::new(),
     };
     record.content_hash = revival_record_hash(&record);
@@ -480,7 +480,7 @@ fn mark_locked(
     state.obligations.push(ActionObligation {
         kind,
         prompt_digest: digest,
-        created_at: Utc::now(),
+        created_at: gwt_core::timestamp::UtcTimestamp::now(),
         settled: None,
     });
     save(worktree, &state)
@@ -543,7 +543,7 @@ pub(crate) fn prepare_delivered_settlement(
         if obligation.settled.is_none() {
             obligation.settled = Some(ObligationSettlement {
                 evidence: evidence.to_string(),
-                settled_at: Utc::now(),
+                settled_at: gwt_core::timestamp::UtcTimestamp::now(),
             });
             changed = true;
         }
@@ -572,7 +572,7 @@ pub fn settle_kinds_best_effort(
             if entry.settled.is_none() && kinds.contains(&entry.kind) {
                 entry.settled = Some(ObligationSettlement {
                     evidence: evidence.to_string(),
-                    settled_at: Utc::now(),
+                    settled_at: gwt_core::timestamp::UtcTimestamp::now(),
                 });
                 changed = true;
             }
@@ -1007,7 +1007,7 @@ mod tests {
                 .expect("load execution during classification race")
                 .expect("execution exists during classification race");
             execution.status = crate::cli::execution_state::ExecutionControlStatus::Completed;
-            execution.settled_at = Some(Utc::now());
+            execution.settled_at = Some(gwt_core::timestamp::UtcTimestamp::now());
             crate::cli::execution_state::save(&transitioning_worktree, &execution)
                 .expect("complete flat execution while the prompt writer owns the lease");
         });

@@ -1,5 +1,7 @@
 //! Work launch publication and successor transitions owned by project runtimes.
 
+use gwt_core::timestamp::UtcTimestamp;
+
 use crate as gwt;
 use crate::launch_runtime::intake_hook_config_is_disposable;
 use crate::launch_runtime::same_worktree_path;
@@ -145,7 +147,7 @@ pub fn save_shell_work_projection(
     branch: Option<String>,
     live_session_ids: &std::collections::HashSet<String>,
 ) -> Result<(), String> {
-    let now = chrono::Utc::now();
+    let now = UtcTimestamp::now();
     gwt_core::workspace_projection::mutate_workspace_projection(project_root, |projection| {
         projection.retain_live_agents_keep_shells(live_session_ids.iter().map(String::as_str), now);
         let summary = gwt_core::workspace_projection::WorkspaceAgentSummary::shell_work(
@@ -164,7 +166,7 @@ pub fn save_shell_work_projection(
 
 pub fn active_agent_summary_from_session(
     session: &ActiveAgentSession,
-    updated_at: chrono::DateTime<chrono::Utc>,
+    updated_at: UtcTimestamp,
 ) -> gwt_core::workspace_projection::WorkspaceAgentSummary {
     gwt_core::workspace_projection::WorkspaceAgentSummary {
         session_id: session.session_id.clone(),
@@ -195,7 +197,7 @@ pub fn non_empty_workspace_text(value: Option<&str>) -> Option<String> {
 
 fn unassigned_agent_summary_from_session(
     session: &ActiveAgentSession,
-    updated_at: chrono::DateTime<chrono::Utc>,
+    updated_at: UtcTimestamp,
 ) -> gwt_core::workspace_projection::WorkspaceAgentSummary {
     let mut summary = active_agent_summary_from_session(session, updated_at);
     summary.affiliation_status =
@@ -221,7 +223,7 @@ pub struct WorkspaceLaunchTransition<'a> {
     pub resume_context: Option<&'a WorkspaceResumeContext>,
     pub kind: WorkspaceLaunchProjectionKind,
     pub live_session_ids: &'a std::collections::HashSet<String>,
-    pub now: chrono::DateTime<chrono::Utc>,
+    pub now: UtcTimestamp,
 }
 
 impl WorkspaceLaunchTransition<'_> {
@@ -233,22 +235,20 @@ impl WorkspaceLaunchTransition<'_> {
                     .and_then(|context| non_empty_workspace_text(context.owner.as_deref()))
             })
             .or_else(|| {
-                self.linked_issue_number
-                    .map(|number| format!("Issue #{number}"))
+                self.linked_issue_number.map(|number| {
+                    crate::cli::execution_state::ExecutionOwnerKey {
+                        kind: crate::cli::execution_state::ExecutionOwnerKind::Issue,
+                        number,
+                    }
+                    .canonical_work_owner_label()
+                })
             })
     }
 }
 
 /// Canonical Work owner label for a trusted execution owner key.
 pub fn workspace_owner_label(owner: crate::cli::execution_state::ExecutionOwnerKey) -> String {
-    match owner.kind {
-        crate::cli::execution_state::ExecutionOwnerKind::Spec => {
-            format!("SPEC-{}", owner.number)
-        }
-        crate::cli::execution_state::ExecutionOwnerKind::Issue => {
-            format!("Issue #{}", owner.number)
-        }
-    }
+    owner.canonical_work_owner_label()
 }
 
 impl WorkspaceLaunchProjectionKind {
@@ -285,7 +285,7 @@ pub fn save_workspace_launch_projection(
             project_root,
             &session.worktree_path,
             |projection, work_items, _work_items_persisted| {
-                let now = chrono::Utc::now();
+                let now = UtcTimestamp::now();
                 // A worker's launch-time snapshot cannot prove another concurrent
                 // launch is dead. Keep all persisted agents until the GUI requests
                 // a projection refresh with its current live-session registry.
@@ -510,7 +510,7 @@ pub fn invalid_successor_supersession_event(
     container: gwt_core::workspace_projection::WorkspaceExecutionContainerRef,
     authority: SuccessorSupersessionAuthority<'_>,
     live_session_ids: &std::collections::HashSet<String>,
-    now: chrono::DateTime<chrono::Utc>,
+    now: UtcTimestamp,
 ) -> gwt_core::error::Result<gwt_core::workspace_projection::WorkEvent> {
     use gwt_core::workspace_projection::{
         can_upgrade_work_owner, canonical_work_id, successor_work_id, WorkEvent, WorkEventKind,
@@ -612,7 +612,7 @@ pub fn invalid_successor_supersession_event(
         .max()
         .expect("occupied Work timestamp");
     let after_history = latest
-        .checked_add_signed(chrono::Duration::nanoseconds(1))
+        .checked_add(time::Duration::nanoseconds(1))
         .ok_or_else(|| refuse("history timestamp has no safe successor instant"))?;
     let mut event = WorkEvent::new(WorkEventKind::Discard, &occupied.id, now.max(after_history));
     event.id = format!("superseded-{}", occupied.id);
@@ -758,7 +758,7 @@ fn workspace_work_event_from_launch_projection(
     projection: &gwt_core::workspace_projection::WorkspaceProjection,
     session: &ActiveAgentSession,
     kind: gwt_core::workspace_projection::WorkEventKind,
-    updated_at: chrono::DateTime<chrono::Utc>,
+    updated_at: UtcTimestamp,
 ) -> gwt_core::workspace_projection::WorkEvent {
     let mut event =
         gwt_core::workspace_projection::WorkEvent::new(kind, projection.id.clone(), updated_at);
@@ -800,7 +800,7 @@ pub fn save_start_work_workspace_projection(
             gwt_core::workspace_projection::mutate_workspace_projection(
                 project_root,
                 |projection| {
-                    let now = chrono::Utc::now();
+                    let now = UtcTimestamp::now();
                     projection.register_unassigned_agent(unassigned_agent_summary_from_session(
                         session, now,
                     ));
@@ -918,7 +918,7 @@ pub fn finalize_ephemeral_worktree_for_project(
 pub fn paused_work_record_task(
     project_root: &Path,
     session: &ActiveAgentSession,
-    updated_at: chrono::DateTime<chrono::Utc>,
+    updated_at: UtcTimestamp,
 ) -> Option<Box<dyn FnOnce() + Send + 'static>> {
     let session_id = session.session_id.trim();
     if session_id.is_empty() {

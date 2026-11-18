@@ -16,6 +16,7 @@ test.describe("PM startup responsiveness (isolated checkout)", () => {
 
   test("broken project Git configuration shows one diagnosis and recovers after repair", async ({ page }, info) => {
     const fixture = await startExactRelaunchFixture(info, {
+      page,
       async prepare({ home, bin, project, env }) {
         env.LANG = "en_US.UTF-8";
         env.LC_ALL = "en_US.UTF-8";
@@ -78,6 +79,7 @@ test.describe("PM startup responsiveness (isolated checkout)", () => {
       env: childEnv, encoding: "utf8", timeout: 30_000,
     }).trim();
     const fixture = await startExactRelaunchFixture(info, {
+      page,
       async prepare({ home, bin, project, env }) {
         env.LANG = "en_US.UTF-8";
         env.LC_ALL = "en_US.UTF-8";

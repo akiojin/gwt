@@ -1,7 +1,5 @@
 use super::*;
 #[cfg(unix)]
-use chrono::Datelike;
-
 #[test]
 fn codex_capacity_resume_uses_the_existing_owner_deadline_loop() {
     let owner = include_str!("../../project_runtime/owner.rs");
@@ -31,6 +29,13 @@ fn policy_owner_config(
         .base_branch(selected.base_branch.unwrap())
         .build();
     config.command = temp.join("policy-provider").display().to_string();
+    if config.agent_id == gwt_agent::AgentId::Codex {
+        let codex_home = temp.join(".codex");
+        fs::create_dir_all(&codex_home).unwrap();
+        config
+            .env_vars
+            .insert("CODEX_HOME".into(), codex_home.display().to_string());
+    }
     config.linked_issue_number = Some(issue);
     config.explicit_follow_up = true;
     config.launch_route = gwt_agent::LaunchRoute::Autonomous;
@@ -51,6 +56,7 @@ fn policy_owner_fixture(
     fs::create_dir_all(&project).unwrap();
     init_repo_with_initial_commit(&project);
     seed_owner_fixture_roster(&project, 8);
+    configure_owner_fixture_tools(&project, &[provider.command()]);
     gwt::mutate_issue_monitor_prefs(
         &gwt::issue_monitor_prefs_path_for_repo_path(&project),
         |prefs| {
@@ -85,7 +91,7 @@ fn policy_owner_hook(
         .map(|root| root.display().to_string());
     event.branch = Some(session.branch.clone());
     event.agent_session_id = None;
-    event.occurred_at = Utc::now().to_rfc3339();
+    event.occurred_at = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
     owner_fixture_block_on(async {
         assert_eq!(
             pane.runtime_hook(&event).await.unwrap(),
@@ -149,7 +155,7 @@ fn policy_owner_screen(
     owner_fixture_block_on(owner.observe_runtime_policy(
         &pane.id,
         pane.incarnation,
-        Utc::now(),
+        gwt_core::timestamp::UtcTimestamp::now(),
         Instant::now(),
     ))
     .unwrap();
@@ -657,7 +663,7 @@ fn agent_activity_abandons_a_pending_quota_candidate() {
         .process_bytes(format!("\x1b[2J\x1b[H{CLAUDE_USAGE_LIMIT_SCREEN}").as_bytes());
     // The existing observation seam supplies policy time; the host's deadline
     // loop cannot race the synthetic settle interval ahead of the tool hook.
-    let first_seen = Utc::now() + chrono::Duration::hours(1);
+    let first_seen = gwt_core::timestamp::UtcTimestamp::now() + time::Duration::hours(1);
     owner_fixture_block_on(owner.observe_runtime_policy(
         &pane.id,
         pane.incarnation,
@@ -677,7 +683,7 @@ fn agent_activity_abandons_a_pending_quota_candidate() {
     owner_fixture_block_on(owner.observe_runtime_policy(
         &pane.id,
         pane.incarnation,
-        first_seen + chrono::Duration::minutes(5),
+        first_seen + time::Duration::minutes(5),
         Instant::now(),
     ))
     .unwrap();
@@ -826,7 +832,7 @@ fn the_usage_snapshot_tick_promotes_a_settled_candidate() {
         .lock()
         .unwrap()
         .process_bytes(format!("\x1b[2J\x1b[H{CLAUDE_USAGE_LIMIT_SCREEN}").as_bytes());
-    let first_seen = Utc::now() + chrono::Duration::hours(1);
+    let first_seen = gwt_core::timestamp::UtcTimestamp::now() + time::Duration::hours(1);
     owner_fixture_block_on(owner.observe_runtime_policy(
         &pane.id,
         pane.incarnation,
@@ -855,7 +861,7 @@ fn the_usage_snapshot_tick_promotes_a_settled_candidate() {
     owner_fixture_block_on(owner.observe_runtime_policy(
         &pane.id,
         pane.incarnation,
-        first_seen + chrono::Duration::minutes(5),
+        first_seen + time::Duration::minutes(5),
         Instant::now(),
     ))
     .unwrap();
@@ -968,7 +974,7 @@ fn a_real_pty_rendering_the_notice_puts_its_pane_into_waiting() {
     owner_fixture_block_on(owner.observe_runtime_policy(
         &pane.id,
         pane.incarnation,
-        Utc::now(),
+        gwt_core::timestamp::UtcTimestamp::now(),
         Instant::now(),
     ))
     .unwrap();
@@ -985,7 +991,7 @@ fn a_real_pty_rendering_the_notice_puts_its_pane_into_waiting() {
     owner_fixture_block_on(owner.observe_runtime_policy(
         &pane.id,
         pane.incarnation,
-        Utc::now(),
+        gwt_core::timestamp::UtcTimestamp::now(),
         Instant::now(),
     ))
     .unwrap();
@@ -998,7 +1004,7 @@ fn a_real_pty_rendering_the_notice_puts_its_pane_into_waiting() {
         .policy
         .quota_candidate_since
         .expect("actual owner observed the complete notice")
-        + chrono::Duration::seconds(300);
+        + time::Duration::seconds(300);
     owner_fixture_block_on(owner.observe_runtime_policy(
         &pane.id,
         pane.incarnation,
@@ -1026,19 +1032,22 @@ fn a_real_pty_rendering_the_notice_puts_its_pane_into_waiting() {
         panic!("expected provider usage limit hold, got {hold:?}");
     };
     assert_eq!(provider, "claude");
-    let local = settled.with_timezone(&chrono::Local);
+    let local = settled.local_datetime();
     let expected_reset = [local.year(), local.year() + 1]
         .into_iter()
         .map(|year| {
-            chrono::Local
-                .with_ymd_and_hms(year, 8, 20, 6, 0, 0)
-                .earliest()
+            time::Date::from_calendar_date(year, time::Month::August, 20)
                 .unwrap()
+                .with_hms(6, 0, 0)
+                .unwrap()
+                .assume_offset(local.offset())
         })
         .find(|reset| reset > &local)
-        .unwrap()
-        .with_timezone(&chrono::Utc)
-        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        .unwrap();
+    let expected_reset =
+        gwt_core::timestamp::UtcTimestamp::from_unix_seconds(expected_reset.unix_timestamp())
+            .unwrap()
+            .to_rfc3339_seconds();
     assert_eq!(
         resets_at.as_deref(),
         Some(expected_reset.as_str()),
@@ -1194,7 +1203,7 @@ fn app_runtime_active_work_projection_filters_stale_saved_agents_when_no_agent_i
             affiliation_status:
                 gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Assigned,
             workspace_id: None,
-            updated_at: chrono::Utc::now(),
+            updated_at: gwt_core::timestamp::UtcTimestamp::now(),
         });
     gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
         .expect("save stale projection");
@@ -1240,7 +1249,7 @@ fn app_runtime_active_work_projection_resets_stale_current_identity_when_no_agen
         pr_url: None,
         pr_created_at: None,
         created_by_start_work: true,
-        created_at: chrono::Utc::now(),
+        created_at: gwt_core::timestamp::UtcTimestamp::now(),
     });
     projection
         .agents
@@ -1260,7 +1269,7 @@ fn app_runtime_active_work_projection_resets_stale_current_identity_when_no_agen
             affiliation_status:
                 gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Assigned,
             workspace_id: None,
-            updated_at: chrono::Utc::now(),
+            updated_at: gwt_core::timestamp::UtcTimestamp::now(),
         });
     gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
         .expect("save stale projection");
@@ -1316,7 +1325,7 @@ fn app_runtime_active_work_projection_filters_stale_agent_when_window_id_is_reus
             affiliation_status:
                 gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Assigned,
             workspace_id: None,
-            updated_at: chrono::Utc::now(),
+            updated_at: gwt_core::timestamp::UtcTimestamp::now(),
         });
     gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
         .expect("save stale projection");
@@ -1708,7 +1717,8 @@ fn app_runtime_list_resumable_agents_uses_workspace_branch_ledger_candidates() {
 
     let work_id = gwt_core::workspace_projection::canonical_work_id(&repo, Some(branch), None)
         .expect("canonical work id");
-    let updated_at = Utc.with_ymd_and_hms(2026, 6, 17, 9, 0, 0).unwrap();
+    let updated_at =
+        gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 6, 17, 9, 0, 0).unwrap();
     let work_item = gwt_core::workspace_projection::WorkItem {
         id: work_id.clone(),
         title: branch.to_string(),
@@ -2084,7 +2094,8 @@ fn app_runtime_latest_branch_resume_picks_newest_resumable_session() {
     let mut older = gwt_agent::Session::new(&repo, "work/manual-resume", gwt_agent::AgentId::Codex);
     older.id = "session-older".to_string();
     older.agent_session_id = Some("native-older".to_string());
-    older.last_activity_at = Utc.with_ymd_and_hms(2026, 5, 21, 9, 0, 0).unwrap();
+    older.last_activity_at =
+        gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 5, 21, 9, 0, 0).unwrap();
     older.updated_at = older.last_activity_at;
     older.created_at = older.last_activity_at;
     older.save(&sessions_dir).expect("save older session");
@@ -2092,7 +2103,8 @@ fn app_runtime_latest_branch_resume_picks_newest_resumable_session() {
     let mut newer = gwt_agent::Session::new(&repo, "work/manual-resume", gwt_agent::AgentId::Codex);
     newer.id = "session-newer".to_string();
     newer.agent_session_id = Some("native-newer".to_string());
-    newer.last_activity_at = Utc.with_ymd_and_hms(2026, 5, 21, 10, 0, 0).unwrap();
+    newer.last_activity_at =
+        gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 5, 21, 10, 0, 0).unwrap();
     newer.updated_at = newer.last_activity_at;
     newer.created_at = newer.last_activity_at;
     newer.save(&sessions_dir).expect("save newer session");
@@ -2101,7 +2113,8 @@ fn app_runtime_latest_branch_resume_picks_newest_resumable_session() {
         gwt_agent::Session::new(&repo, "work/manual-resume", gwt_agent::AgentId::Codex);
     metadata_only.id = "session-metadata-only".to_string();
     metadata_only.agent_session_id = None;
-    metadata_only.last_activity_at = Utc.with_ymd_and_hms(2026, 5, 21, 11, 0, 0).unwrap();
+    metadata_only.last_activity_at =
+        gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 5, 21, 11, 0, 0).unwrap();
     metadata_only.updated_at = metadata_only.last_activity_at;
     metadata_only.created_at = metadata_only.last_activity_at;
     metadata_only
@@ -2183,7 +2196,8 @@ fn app_runtime_open_launch_wizard_shows_only_latest_resume_and_focus_methods() {
             gwt_agent::Session::new(&repo, "work/manual-resume", gwt_agent::AgentId::Codex);
         session.id = session_id.to_string();
         session.agent_session_id = Some(native_session_id.to_string());
-        session.last_activity_at = Utc.with_ymd_and_hms(2026, 5, 21, hour, 0, 0).unwrap();
+        session.last_activity_at =
+            gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 5, 21, hour, 0, 0).unwrap();
         session.updated_at = session.last_activity_at;
         session.created_at = session.last_activity_at;
         session.save(&sessions_dir).expect("save session");
@@ -2193,7 +2207,8 @@ fn app_runtime_open_launch_wizard_shows_only_latest_resume_and_focus_methods() {
             gwt_agent::Session::new(&repo, "work/manual-resume", gwt_agent::AgentId::Codex);
         session.id = session_id.to_string();
         session.agent_session_id = None;
-        session.last_activity_at = Utc.with_ymd_and_hms(2026, 5, 21, hour, 0, 0).unwrap();
+        session.last_activity_at =
+            gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 5, 21, hour, 0, 0).unwrap();
         session.updated_at = session.last_activity_at;
         session.created_at = session.last_activity_at;
         session
@@ -2532,7 +2547,7 @@ fn app_runtime_bootstrap_resumes_unclosed_window_despite_stopped_status() {
     // Status drifted to Stopped (would fail the candidate gate on the orphan
     // path) but the window is recent.
     session.update_status(gwt_agent::AgentStatus::Stopped);
-    session.last_activity_at = chrono::Utc::now() - chrono::Duration::hours(2);
+    session.last_activity_at = gwt_core::timestamp::UtcTimestamp::now() - time::Duration::hours(2);
     session
         .save(&runtime.sessions_dir)
         .expect("save stopped session");
@@ -2618,7 +2633,7 @@ fn app_runtime_bootstrap_does_not_resume_an_unclosed_window_past_the_freshness_b
     session.record_completed_stop();
     session.restore_window_on_startup = true;
     session.update_status(gwt_agent::AgentStatus::Stopped);
-    session.last_activity_at = chrono::Utc::now() - chrono::Duration::hours(30);
+    session.last_activity_at = gwt_core::timestamp::UtcTimestamp::now() - time::Duration::hours(30);
     session
         .save(&runtime.sessions_dir)
         .expect("save stale stopped session");
@@ -3238,7 +3253,7 @@ fn startup_reaper_reaps_stale_owner_but_preserves_selected_restore_holder() {
                 vec![gwt_core::workspace_projection::WorkEvent::new(
                     gwt_core::workspace_projection::WorkEventKind::Done,
                     work.id.clone(),
-                    Utc::now(),
+                    gwt_core::timestamp::UtcTimestamp::now(),
                 )],
             ))
         },
@@ -3608,7 +3623,7 @@ fn work_events_ingest_tick_lists_worktrees_once() {
     let mut seed = gwt_core::workspace_projection::WorkEvent::new(
         gwt_core::workspace_projection::WorkEventKind::Start,
         "work-session-ingest-tick",
-        chrono::Utc::now(),
+        gwt_core::timestamp::UtcTimestamp::now(),
     );
     seed.status_category = Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Active);
     seed.title = Some("existing tick work".to_string());

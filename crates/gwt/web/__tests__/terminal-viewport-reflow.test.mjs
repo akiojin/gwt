@@ -14,6 +14,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { parseHTML } from "linkedom";
 import * as terminalViewportReflow from "../terminal-viewport-reflow.js";
+import { createTerminalWheelScrollController } from "../terminal-wheel-scroll.js";
 
 import {
   applyVisibilityTransition,
@@ -376,6 +377,31 @@ test("snapshot replacement follows the tail and preserves history through overla
   history.terminal.buffer.active = { viewportY: 0, baseY: 200 };
   history.terminal.completeNextWrite();
   assert.equal(history.terminal.buffer.active.viewportY, 25, 'latest-wins snapshots retain the original reading position');
+});
+
+test("a wheel scroll during an asynchronous snapshot replaces its earlier tail intent", () => {
+  const harness = snapshotWriteHarness();
+  const { terminal, coordinator } = harness;
+  let wheel;
+  terminal.modes = { mouseTrackingMode: "any" };
+  terminal.scrollLines = (lines) => { terminal.buffer.active.viewportY += lines; };
+  const controller = createTerminalWheelScrollController({
+    terminalRoot: { addEventListener(type, handler) { if (type === "wheel") wheel = handler; }, removeEventListener() {} },
+    terminal,
+    isWindowsHost: () => false,
+    onUserScroll: () => coordinator.recordUserScroll?.(),
+  });
+  terminal.buffer.active = { viewportY: 100, baseY: 100 };
+  harness.receiveSnapshot("replacement");
+  terminal.completeNextWrite();
+  // xterm has parsed some snapshot rows, but its completion callback has not run.
+  terminal.buffer.active = { viewportY: 150, baseY: 150 };
+  wheel({ deltaY: -96, preventDefault() {}, stopPropagation() {} });
+  assert.equal(terminal.buffer.active.viewportY, 147);
+  terminal.buffer.active = { viewportY: 160, baseY: 160 };
+  terminal.completeNextWrite();
+  assert.equal(terminal.buffer.active.viewportY, 147, "snapshot completion must retain the user's newer position");
+  controller.dispose();
 });
 
 test("snapshot coordinator callbacks are no-ops after terminal runtime teardown", () => {
@@ -1513,6 +1539,29 @@ test("runTerminalActivationSequence renders before fit and emits geometry (T-199
   assert.equal(result.rows, 24);
 });
 
+test("activation fit retains tail intent without moving a history reader", () => {
+  for (const atBottom of [true, false]) {
+    const buffer = { viewportY: atBottom ? 124 : 20, baseY: 124 };
+    const terminal = {
+      cols: 45, rows: 21, buffer: { active: buffer },
+      refresh() {},
+      scrollToBottom() { buffer.viewportY = buffer.baseY; },
+    };
+    const runtime = { terminal, fitAddon: { fit() {
+      terminal.cols = 43;
+      terminal.rows = 20;
+      buffer.baseY = 132;
+      buffer.viewportY = atBottom ? 131 : 20;
+    } } };
+    const result = runTerminalActivationSequence({ runtime, shouldFocus: false,
+      sendGeometry() {
+        assert.equal(buffer.viewportY, atBottom ? 132 : 20,
+          "restore the prior tail before the native redraw can begin");
+      } });
+    assert.equal(result.gridChanged, true);
+  }
+});
+
 test("runTerminalActivationSequence honours shouldFocus / shouldPersistGeometry flags (T-199)", () => {
   const callOrder = [];
   const parent = {
@@ -2342,6 +2391,16 @@ test("app.js wires the reflow controller for resize, transition, and predicate",
     /runTerminalFitRequest\(\{[\s\S]*?persist,[\s\S]*?canFit:[\s\S]*?markPending:[\s\S]*?clearPending:[\s\S]*?viewportRefreshPending = false[\s\S]*?activate:[\s\S]*?runTerminalActivationSequence\(\{/,
     "fitTerminal must settle pending state after persisted hidden, failed, and successful fits",
   );
+  assert.ok(/allowFastPath:\s*true/.test(fitTerminalSource)
+    && /syncGeometryOnGridChange:\s*true/.test(fitTerminalSource)
+    && /pendingOutputCount:/.test(fitTerminalSource)
+    && /hasPendingRefresh:/.test(fitTerminalSource),
+  "ordinary fit must use the tested same-grid path with pending-work and geometry guards");
+  const worksLayoutSource = appSource.slice(appSource.indexOf("onLayout: () => {"),
+    appSource.indexOf("worksSurface.element.hidden = true"));
+  assert.ok(!/scheduleTerminalFit\(id,\s*true\)/.test(worksLayoutSource)
+    && /viewportRefreshPending\s*===\s*true/.test(worksLayoutSource),
+  "Works activation must reserve forced geometry for pending authoritative refresh");
   assert.doesNotMatch(
     fitTerminalSource,
     /sendGeometry\(windowId,\s*runtime\.terminal\.cols,\s*runtime\.terminal\.rows\)/,

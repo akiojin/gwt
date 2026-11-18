@@ -6,7 +6,6 @@ use std::{
     process::Stdio,
 };
 
-use chrono::Utc;
 use gwt_agent::{AgentId, Session};
 use gwt_core::process::hidden_command;
 use gwt_core::{
@@ -542,7 +541,7 @@ fn auto_feedback_real_worker_has_no_consent_auth_process_or_raw_sinks() {
             gwt_core::feedback::auto_report::SafeAutoReport::current(
                 gwt_core::feedback::auto_report::KnownOperation::HookHealth,
             ),
-            Utc::now(),
+            gwt_core::timestamp::UtcTimestamp::now(),
         )
         .unwrap();
     assert!(fresh);
@@ -1000,7 +999,7 @@ fn gwtd_no_args_dispatches_stdin_json_envelope() {
     let current_path = state_dir.join("current.json");
     let works_path = state_dir.join("works.json");
     let tracked_events_path = project_root.join(".gwt/work/events.jsonl");
-    let now = Utc::now();
+    let now = gwt_core::timestamp::UtcTimestamp::now();
     let mut projection = WorkspaceProjection::default_for_project(&project_root);
     projection.agents.push(WorkspaceAgentSummary {
         session_id: session_id.to_string(),

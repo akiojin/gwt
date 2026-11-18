@@ -431,7 +431,9 @@ impl DaemonEndpoint {
             pid,
             bind,
             auth_token,
-            updated_at_unix_ms: chrono::Utc::now().timestamp_millis(),
+            updated_at_unix_ms: time::OffsetDateTime::now_utc()
+                .unix_timestamp_nanos()
+                .div_euclid(1_000_000) as i64,
             project_transport_url: None,
         }
     }

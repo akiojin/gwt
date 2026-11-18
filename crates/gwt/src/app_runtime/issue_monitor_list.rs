@@ -113,6 +113,7 @@ impl AppRuntime {
             -> Result<Option<serde_json::Value>, IssueMonitorControlPublishError>,
     ) -> Result<Option<ListSnapshot>, IssueMonitorControlPublishError> {
         let normalized_root = knowledge::normalized_snapshot_project_root(project_root);
+        let verification_capacity = gwt::cli::verification_lease::capacity_snapshot();
         if let Some(value) = read_status(project_root)? {
             let status =
                 serde_json::from_value::<gwt::IssueMonitorAgentStatus>(value).map_err(|error| {
@@ -121,10 +122,13 @@ impl AppRuntime {
                     ))
                 })?;
             // Older live daemons supply their projection through subscriber frames.
-            return Ok(status.gui_status.map(|status| ListSnapshot {
-                normalized_root,
-                status: Box::new(status),
-                inbox: None,
+            return Ok(status.gui_status.map(|mut status| {
+                status.verification_capacity = verification_capacity;
+                ListSnapshot {
+                    normalized_root,
+                    status: Box::new(status),
+                    inbox: None,
+                }
             }));
         }
         let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
@@ -150,6 +154,7 @@ impl AppRuntime {
             monitor.record_scan_error(&now, error);
         }
         let mut status = monitor.status_view();
+        status.verification_capacity = verification_capacity;
         Self::apply_issue_monitor_launch_profile_status_from_cache(
             &mut status,
             Some(project_root),

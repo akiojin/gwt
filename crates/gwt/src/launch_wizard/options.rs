@@ -285,11 +285,56 @@ pub(super) fn codex_reasoning_options_for_model(model: &str) -> Vec<ReasoningDis
                 .any(|effort| effort == option.stored_value),
             None => CODEX_FALLBACK_EFFORTS.contains(&option.stored_value),
         })
+        .filter(|option| {
+            gwt_agent::codex_reasoning_effort(Some(model), Some(option.stored_value))
+                == Some(option.stored_value)
+        })
         .map(|option| ReasoningDisplayOption {
             is_default: option.stored_value == default_effort,
             ..*option
         })
         .collect()
+}
+
+pub(super) fn reasoning_options_for_agent_model(
+    agent_id: &str,
+    model: &str,
+    ultracode_supported: bool,
+) -> Vec<ReasoningDisplayOption> {
+    match agent_id {
+        "codex" => codex_reasoning_options_for_model(model),
+        "grok" => GROK_REASONING_OPTIONS.to_vec(),
+        "claude" if is_claude_opus_tier_model(model) => {
+            let mut options = CLAUDE_OPUS_REASONING_OPTIONS.to_vec();
+            if !ultracode_supported {
+                options.retain(|option| option.stored_value != "ultracode");
+            }
+            options
+        }
+        "claude" if model == "sonnet" => CLAUDE_SONNET_REASONING_OPTIONS.to_vec(),
+        _ => Vec::new(),
+    }
+}
+
+/// Project missing saved tuning through the same defaults as a fresh wizard.
+pub(crate) fn default_launch_tuning(
+    agent_id: &str,
+    saved_model: Option<&str>,
+) -> (Option<String>, Option<String>) {
+    let models = current_model_options(agent_id);
+    let model = saved_model.unwrap_or_else(|| models.first().map(String::as_str).unwrap_or(""));
+    // Ultracode is an explicit, non-default capability; default resolution
+    // must neither select it nor infer the installed tool's capability.
+    let options = reasoning_options_for_agent_model(agent_id, model, false);
+    let reasoning = options
+        .iter()
+        .find(|option| option.is_default)
+        .or_else(|| options.first())
+        .map(|option| option.stored_value.to_string());
+    (
+        is_explicit_model_selection(model).then(|| model.to_string()),
+        reasoning,
+    )
 }
 
 pub(super) const EXECUTION_MODE_OPTIONS: [ExecutionModeOption; 3] = [
@@ -1044,8 +1089,8 @@ pub(super) fn no_detected_agent_setup_view() -> super::LaunchWizardAgentSetupVie
 }
 
 pub(super) fn agent_id_from_key(agent_id: &str) -> gwt_agent::AgentId {
-    gwt_agent::builtin_agent_descriptor_for_command(agent_id)
-        .map(|descriptor| descriptor.id.clone())
+    gwt_agent::resolve_agent_id(agent_id)
+        .filter(|resolved| !matches!(resolved, gwt_agent::AgentId::Custom(_)))
         .unwrap_or_else(|| gwt_agent::AgentId::Custom(agent_id.to_string()))
 }
 
@@ -1721,6 +1766,13 @@ mod tests {
         assert_eq!(agent_id_from_key("opencode"), gwt_agent::AgentId::OpenCode);
         assert_eq!(agent_id_from_key("openclaw"), gwt_agent::AgentId::OpenClaw);
         assert_eq!(agent_id_from_key("hermes"), gwt_agent::AgentId::Hermes);
+        for builtin_alias in ["codex", "Codex", "CODEX"] {
+            assert_eq!(agent_id_from_key(builtin_alias), gwt_agent::AgentId::Codex);
+        }
+        assert_eq!(
+            agent_id_from_key("ReviewBot"),
+            gwt_agent::AgentId::Custom("ReviewBot".to_string())
+        );
         assert_eq!(
             agent_id_from_key("custom"),
             gwt_agent::AgentId::Custom("custom".to_string())
@@ -1822,6 +1874,37 @@ mod tests {
         // (gpt-reserve / codex-auto-review).
     }
 
+    // Issue #3986 AC-2 / AC-5: every model the wizard can launch must resolve
+    // a context window in `gwt_core::usage::model_context`, so adding a row to
+    // this catalog without a matching family entry fails here instead of
+    // silently dropping the context-left estimate. The Claude "Default (...)"
+    // row is not a model name (it launches without `--model`), so only
+    // explicit selections are walked.
+    #[test]
+    fn every_catalog_model_resolves_a_context_limit() {
+        let mut walked = 0usize;
+        let mut missing = Vec::new();
+        for agent in ["claude", "codex"] {
+            for model in current_model_options(agent) {
+                if !is_explicit_model_selection(&model) {
+                    continue;
+                }
+                walked += 1;
+                if gwt_core::usage::model_context::context_limit(&model).is_none() {
+                    missing.push(format!("{agent}:{model}"));
+                }
+            }
+        }
+        assert!(
+            walked > 0,
+            "catalog walk must cover explicit model selections"
+        );
+        assert!(
+            missing.is_empty(),
+            "catalog models without a context_limit entry: {missing:?}"
+        );
+    }
+
     fn codex_capability_row(model: &str) -> (Vec<&'static str>, &'static str) {
         let options = codex_reasoning_options_for_model(model);
         let values: Vec<&'static str> = options.iter().map(|option| option.stored_value).collect();
@@ -1835,11 +1918,10 @@ mod tests {
 
     // SPEC-1921 US-20 / FR-122 + FR-123 + Issue #3962 AC-3: reasoning rows and
     // the initial stop derive from the selected model's capability row. The
-    // expectations below mirror the CLI's own effort picker
-    // (`supported_reasoning_levels` / `default_reasoning_level`), so Astra /
-    // Sol / Terra expose six stops through Ultra, Luna five through Max, and
-    // gpt-5.5 four through Extra high. gpt-6.1-sol and gpt-5.6-sol default
-    // to Low; every other visible model defaults to Medium.
+    // expectations below combine the catalog's effort picker with native
+    // lowering: Sol / Terra expose six stops through Ultra, Astra / Luna five
+    // through Max, and retired gpt-5.5 four through Extra high. gpt-6.1-sol,
+    // gpt-6.1-terra and gpt-5.6-sol default to Low; the other rows use Medium.
     #[test]
     fn codex_reasoning_capability_rows_follow_model() {
         const SIX: [&str; 6] = ["low", "medium", "high", "xhigh", "max", "ultra"];
@@ -1849,7 +1931,7 @@ mod tests {
         assert_eq!(codex_capability_row("gpt-6.1-sol"), (SIX.to_vec(), "low"));
         assert_eq!(
             codex_capability_row("gpt-6-astra"),
-            (SIX.to_vec(), "medium")
+            (FIVE.to_vec(), "medium")
         );
         assert_eq!(codex_capability_row("gpt-5.6-sol"), (SIX.to_vec(), "low"));
         assert_eq!(

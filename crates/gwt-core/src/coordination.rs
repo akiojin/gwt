@@ -22,7 +22,6 @@ use std::{
     time::Duration,
 };
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -31,6 +30,7 @@ use crate::{
     board_escalation::{BoardEscalation, BoardEscalationStore, ESCALATIONS_FILE_NAME},
     config::BareProjectConfig,
     paths::gwt_project_dir_for_repo_path,
+    timestamp::UtcTimestamp,
     GwtError, Result,
 };
 
@@ -460,8 +460,8 @@ pub struct BoardEntry {
     /// a thread would silently retire the request it was discussing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resolves_entry_ids: Vec<String>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: UtcTimestamp,
+    pub updated_at: UtcTimestamp,
     #[serde(default)]
     pub related_topics: Vec<String>,
     #[serde(default)]
@@ -612,7 +612,7 @@ impl BoardEntry {
         related_topics: Vec<String>,
         related_owners: Vec<String>,
     ) -> Self {
-        let now = Utc::now();
+        let now = UtcTimestamp::now();
         Self {
             id: Uuid::new_v4().to_string(),
             author_kind,
@@ -1127,7 +1127,7 @@ pub struct BoardProjection {
     pub newest_entry_id: Option<String>,
     #[serde(default)]
     pub total_entries: usize,
-    pub updated_at: DateTime<Utc>,
+    pub updated_at: UtcTimestamp,
 }
 
 impl Default for BoardProjection {
@@ -1138,7 +1138,7 @@ impl Default for BoardProjection {
             oldest_entry_id: None,
             newest_entry_id: None,
             total_entries: 0,
-            updated_at: Utc::now(),
+            updated_at: UtcTimestamp::now(),
         }
     }
 }
@@ -1158,7 +1158,7 @@ pub struct BoardHistoryPage {
 pub struct PromptBoardRead {
     pub recent_entries: Vec<BoardEntry>,
     pub has_recent_own_status: bool,
-    pub latest_own_status_at: Option<DateTime<Utc>>,
+    pub latest_own_status_at: Option<UtcTimestamp>,
     /// An append was still in flight. Keep both prompt cursors so its row is
     /// retried even when its timestamp predates this successful partial read.
     pub retry_from_previous_cursor: bool,
@@ -1175,22 +1175,22 @@ pub struct PromptBoardCursor {
 }
 
 pub struct PromptBoardReadRequest<'a> {
-    pub diff_since: DateTime<Utc>,
+    pub diff_since: UtcTimestamp,
     pub cursor: Option<&'a PromptBoardCursor>,
     pub scope: &'a BoardAudienceScope,
     pub status_author: &'a str,
     pub status_kind: &'a BoardEntryKind,
-    pub status_since: DateTime<Utc>,
+    pub status_since: UtcTimestamp,
 }
 
 impl PromptBoardRead {
     pub fn from_scoped_history(
         history: Vec<BoardEntry>,
-        diff_since: DateTime<Utc>,
+        diff_since: UtcTimestamp,
         scope: &BoardAudienceScope,
         status_author: &str,
         status_kind: &BoardEntryKind,
-        status_since: DateTime<Utc>,
+        status_since: UtcTimestamp,
     ) -> Self {
         Self::from_history(
             history,
@@ -1204,10 +1204,10 @@ impl PromptBoardRead {
 
     pub fn from_channel_history(
         history: Vec<BoardEntry>,
-        diff_since: DateTime<Utc>,
+        diff_since: UtcTimestamp,
         status_author: &str,
         status_kind: &BoardEntryKind,
-        status_since: DateTime<Utc>,
+        status_since: UtcTimestamp,
     ) -> Self {
         Self::from_history(
             history,
@@ -1221,11 +1221,11 @@ impl PromptBoardRead {
 
     fn from_history(
         history: Vec<BoardEntry>,
-        diff_since: DateTime<Utc>,
+        diff_since: UtcTimestamp,
         scope: Option<&BoardAudienceScope>,
         status_author: &str,
         status_kind: &BoardEntryKind,
-        status_since: DateTime<Utc>,
+        status_since: UtcTimestamp,
     ) -> Self {
         let latest_own_status_at = history
             .iter()
@@ -1255,7 +1255,7 @@ struct EventSegmentManifest {
     active_segment: String,
     #[serde(default)]
     segments: Vec<EventSegmentMeta>,
-    updated_at: DateTime<Utc>,
+    updated_at: UtcTimestamp,
 }
 
 struct PreparedCoordinationRoot {
@@ -1277,11 +1277,11 @@ struct EventSegmentMeta {
     #[serde(default)]
     bytes: u64,
     #[serde(default)]
-    first_created_at: Option<DateTime<Utc>>,
+    first_created_at: Option<UtcTimestamp>,
     #[serde(default)]
-    last_created_at: Option<DateTime<Utc>>,
+    last_created_at: Option<UtcTimestamp>,
     #[serde(default)]
-    max_updated_at: Option<DateTime<Utc>>,
+    max_updated_at: Option<UtcTimestamp>,
     #[serde(default)]
     first_entry_id: Option<String>,
     #[serde(default)]
@@ -1524,8 +1524,8 @@ pub fn load_open_escalations_for_owner(
 /// important row in the file.
 const RESOLVED_ESCALATION_RETENTION_DAYS: i64 = 30;
 
-fn resolved_escalation_cutoff() -> DateTime<Utc> {
-    Utc::now() - chrono::Duration::days(RESOLVED_ESCALATION_RETENTION_DAYS)
+fn resolved_escalation_cutoff() -> UtcTimestamp {
+    UtcTimestamp::now() - time::Duration::days(RESOLVED_ESCALATION_RETENTION_DAYS)
 }
 
 fn rebuild_escalation_store_in_memory(worktree_root: &Path) -> Result<BoardEscalationStore> {
@@ -1959,7 +1959,7 @@ fn append_event_after_legacy_import_locked_outcome(
                     projection.entries.first().map(|entry| entry.id.clone());
                 projection.newest_entry_id =
                     projection.entries.last().map(|entry| entry.id.clone());
-                projection.updated_at = Utc::now();
+                projection.updated_at = UtcTimestamp::now();
             }
         }
         let snapshot = if imported_legacy || projection_needs_rebuild(&projection, &manifest) {
@@ -2025,7 +2025,7 @@ pub fn rebuild_snapshot_from_events(event_path: &Path) -> Result<CoordinationSna
 
     board_entries.sort_by_key(|entry| entry.created_at);
 
-    let now = Utc::now();
+    let now = UtcTimestamp::now();
 
     Ok(CoordinationSnapshot {
         board: build_hot_projection(board_entries, now),
@@ -2040,14 +2040,11 @@ pub fn rebuild_snapshot_from_segments(worktree_root: &Path) -> Result<Coordinati
 fn rebuild_snapshot_from_segments_root(coordination_root: &Path) -> Result<CoordinationSnapshot> {
     let entries = load_board_entries_from_segments_root(coordination_root)?;
     Ok(CoordinationSnapshot {
-        board: build_hot_projection(entries, Utc::now()),
+        board: build_hot_projection(entries, UtcTimestamp::now()),
     })
 }
 
-fn build_hot_projection(
-    mut entries: Vec<BoardEntry>,
-    updated_at: DateTime<Utc>,
-) -> BoardProjection {
+fn build_hot_projection(mut entries: Vec<BoardEntry>, updated_at: UtcTimestamp) -> BoardProjection {
     for entry in &mut entries {
         entry.normalize_audience();
         entry.normalize_recovery_origin();
@@ -2088,7 +2085,10 @@ pub fn load_snapshot_for_scope(
     ensure_repo_local_files(worktree_root)?;
     let entries = load_board_entries_from_segments_root(&coordination_dir(worktree_root))?;
     Ok(CoordinationSnapshot {
-        board: build_hot_projection(filter_board_entries_for_scope(entries, scope), Utc::now()),
+        board: build_hot_projection(
+            filter_board_entries_for_scope(entries, scope),
+            UtcTimestamp::now(),
+        ),
     })
 }
 
@@ -2386,7 +2386,7 @@ fn initial_event_manifest() -> EventSegmentManifest {
             first_entry_id: None,
             last_entry_id: None,
         }],
-        updated_at: Utc::now(),
+        updated_at: UtcTimestamp::now(),
     }
 }
 
@@ -2495,7 +2495,7 @@ fn rebuild_event_manifest_from_segments(coordination_root: &Path) -> Result<Even
         version: EVENT_MANIFEST_VERSION,
         active_segment,
         segments,
-        updated_at: Utc::now(),
+        updated_at: UtcTimestamp::now(),
     })
 }
 
@@ -2739,7 +2739,7 @@ fn append_event_to_segments_root_outcome(
         event,
         event_bytes.len() as u64,
     );
-    manifest.updated_at = Utc::now();
+    manifest.updated_at = UtcTimestamp::now();
     Ok(match write_event_manifest(coordination_root, &manifest) {
         Ok(()) => EventAppendOutcome::ManifestUpdated(manifest),
         Err(error) => EventAppendOutcome::CommittedWithoutManifest {
@@ -3420,7 +3420,7 @@ fn write_events_to_path(path: &Path, events: &[CoordinationEvent]) -> Result<()>
     replace_path_with_temp(path, &tmp_path)
 }
 
-fn coordination_event_timestamp(event: &CoordinationEvent) -> DateTime<Utc> {
+fn coordination_event_timestamp(event: &CoordinationEvent) -> UtcTimestamp {
     match event {
         CoordinationEvent::MessageAppended { entry } => entry.created_at,
     }
@@ -3580,15 +3580,15 @@ fn json_error(err: serde_json::Error) -> GwtError {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RemindersState {
     #[serde(default)]
-    pub last_injected_at: Option<DateTime<Utc>>,
+    pub last_injected_at: Option<UtcTimestamp>,
     #[serde(default)]
     pub board_log_cursor: Option<PromptBoardCursor>,
     #[serde(default)]
-    pub last_own_status_checked_at: Option<DateTime<Utc>>,
+    pub last_own_status_checked_at: Option<UtcTimestamp>,
     #[serde(default)]
-    pub last_own_status_at: Option<DateTime<Utc>>,
+    pub last_own_status_at: Option<UtcTimestamp>,
     #[serde(default)]
-    pub last_reminded_kind: HashMap<String, DateTime<Utc>>,
+    pub last_reminded_kind: HashMap<String, UtcTimestamp>,
     /// SPEC-2359 Phase U-9 (FR-178): the `title_summary` value observed
     /// on the most recent UserPromptSubmit. Used to detect stale titles
     /// after the agent has set a non-empty value but has not updated it
@@ -3613,7 +3613,7 @@ pub struct RemindersState {
     /// timestamp so it does not fire on every UserPromptSubmit turn. `None`
     /// until the reminder fires for the first time.
     #[serde(default)]
-    pub last_memory_reminded_at: Option<DateTime<Utc>>,
+    pub last_memory_reminded_at: Option<UtcTimestamp>,
     /// SPEC-3075 follow-up: last observed cumulative progress summary. Used by
     /// the hook reminder to detect when the detail summary is missing or stale
     /// while short status/focus fields continue to change.
@@ -3730,7 +3730,7 @@ pub fn write_reminders_state_for_repo_hash(
 
 /// Return Board entries whose `updated_at` is strictly later than `since`,
 /// sorted chronologically (same ordering as the projection).
-pub fn load_entries_since(worktree_root: &Path, since: DateTime<Utc>) -> Result<Vec<BoardEntry>> {
+pub fn load_entries_since(worktree_root: &Path, since: UtcTimestamp) -> Result<Vec<BoardEntry>> {
     ensure_repo_local_files(worktree_root)?;
     let coordination_root = coordination_dir(worktree_root);
     let manifest = load_event_manifest_from_dir(&coordination_root)?;
@@ -3745,7 +3745,7 @@ pub fn load_entries_since(worktree_root: &Path, since: DateTime<Utc>) -> Result<
 
 fn load_entries_since_from_prepared(
     prepared: &PreparedCoordinationRoot,
-    since: DateTime<Utc>,
+    since: UtcTimestamp,
 ) -> Result<Vec<BoardEntry>> {
     #[cfg(test)]
     PROMPT_BOARD_READ_TEST_COUNTERS.with(|counters| {
@@ -3775,7 +3775,7 @@ fn load_entries_since_from_prepared(
 
 pub fn load_entries_since_for_scope(
     worktree_root: &Path,
-    since: DateTime<Utc>,
+    since: UtcTimestamp,
     scope: &BoardAudienceScope,
 ) -> Result<Vec<BoardEntry>> {
     let entries = load_entries_since(worktree_root, since)?;
@@ -3789,9 +3789,9 @@ pub fn has_recent_post_by(
     worktree_root: &Path,
     author: &str,
     kind: &BoardEntryKind,
-    within: chrono::Duration,
+    within: time::Duration,
 ) -> Result<bool> {
-    let threshold = Utc::now() - within;
+    let threshold = UtcTimestamp::now() - within;
     Ok(load_entries_since(worktree_root, threshold)?
         .iter()
         .any(|entry| entry.author == author && entry.kind == *kind && entry.updated_at > threshold))
@@ -3799,11 +3799,11 @@ pub fn has_recent_post_by(
 
 pub fn load_prompt_reminder(
     worktree_root: &Path,
-    diff_since: DateTime<Utc>,
+    diff_since: UtcTimestamp,
     scope: &BoardAudienceScope,
     status_author: &str,
     status_kind: &BoardEntryKind,
-    status_since: DateTime<Utc>,
+    status_since: UtcTimestamp,
 ) -> Result<PromptBoardRead> {
     let prepared = prepare_coordination_read_root(worktree_root)?;
     load_prompt_reminder_from_prepared(
@@ -3819,11 +3819,11 @@ pub fn load_prompt_reminder(
 pub fn load_prompt_reminder_for_repo_hash(
     worktree_root: &Path,
     repo_hash: Option<&str>,
-    diff_since: DateTime<Utc>,
+    diff_since: UtcTimestamp,
     scope: &BoardAudienceScope,
     status_author: &str,
     status_kind: &BoardEntryKind,
-    status_since: DateTime<Utc>,
+    status_since: UtcTimestamp,
 ) -> Result<PromptBoardRead> {
     let prepared = migrated_project_coordination_root(worktree_root, repo_hash)
         .map(prepare_coordination_read_root_at)
@@ -3850,11 +3850,11 @@ pub fn load_prompt_reminder_for_repo_hash(
 
 fn load_prompt_reminder_from_prepared(
     prepared: &PreparedCoordinationRoot,
-    diff_since: DateTime<Utc>,
+    diff_since: UtcTimestamp,
     scope: &BoardAudienceScope,
     status_author: &str,
     status_kind: &BoardEntryKind,
-    status_since: DateTime<Utc>,
+    status_since: UtcTimestamp,
 ) -> Result<PromptBoardRead> {
     let history_since = diff_since.min(status_since);
     let history = load_entries_since_from_prepared(prepared, history_since)?;
@@ -4219,13 +4219,13 @@ pub trait BoardProvider {
     fn load_entries_since(
         &self,
         worktree_root: &Path,
-        since: DateTime<Utc>,
+        since: UtcTimestamp,
     ) -> Result<Vec<BoardEntry>>;
     /// Load entries updated strictly after `since`, filtered to a scope.
     fn load_entries_since_for_scope(
         &self,
         worktree_root: &Path,
-        since: DateTime<Utc>,
+        since: UtcTimestamp,
         scope: &BoardAudienceScope,
     ) -> Result<Vec<BoardEntry>>;
     /// Whether `author` posted a message of `kind` within `within`.
@@ -4234,16 +4234,16 @@ pub trait BoardProvider {
         worktree_root: &Path,
         author: &str,
         kind: &BoardEntryKind,
-        within: chrono::Duration,
+        within: time::Duration,
     ) -> Result<bool>;
     fn load_prompt_reminder(
         &self,
         worktree_root: &Path,
-        diff_since: DateTime<Utc>,
+        diff_since: UtcTimestamp,
         scope: &BoardAudienceScope,
         status_author: &str,
         status_kind: &BoardEntryKind,
-        status_since: DateTime<Utc>,
+        status_since: UtcTimestamp,
     ) -> Result<PromptBoardRead> {
         let history_since = diff_since.min(status_since);
         let history = self.load_entries_since(worktree_root, history_since)?;
@@ -4373,7 +4373,7 @@ impl BoardProvider for LocalProvider {
     fn load_entries_since(
         &self,
         worktree_root: &Path,
-        since: DateTime<Utc>,
+        since: UtcTimestamp,
     ) -> Result<Vec<BoardEntry>> {
         load_entries_since(worktree_root, since)
     }
@@ -4381,7 +4381,7 @@ impl BoardProvider for LocalProvider {
     fn load_entries_since_for_scope(
         &self,
         worktree_root: &Path,
-        since: DateTime<Utc>,
+        since: UtcTimestamp,
         scope: &BoardAudienceScope,
     ) -> Result<Vec<BoardEntry>> {
         load_entries_since_for_scope(worktree_root, since, scope)
@@ -4392,7 +4392,7 @@ impl BoardProvider for LocalProvider {
         worktree_root: &Path,
         author: &str,
         kind: &BoardEntryKind,
-        within: chrono::Duration,
+        within: time::Duration,
     ) -> Result<bool> {
         has_recent_post_by(worktree_root, author, kind, within)
     }
@@ -4400,11 +4400,11 @@ impl BoardProvider for LocalProvider {
     fn load_prompt_reminder(
         &self,
         worktree_root: &Path,
-        diff_since: DateTime<Utc>,
+        diff_since: UtcTimestamp,
         scope: &BoardAudienceScope,
         status_author: &str,
         status_kind: &BoardEntryKind,
-        status_since: DateTime<Utc>,
+        status_since: UtcTimestamp,
     ) -> Result<PromptBoardRead> {
         load_prompt_reminder(
             worktree_root,
@@ -4466,8 +4466,6 @@ impl BoardProvider for LocalProvider {
 #[cfg(test)]
 mod tests {
     use std::{path::Path, str::FromStr, sync::Arc, thread};
-
-    use chrono::TimeZone;
 
     use super::*;
     use crate::paths::gwt_project_dir_for_repo_path;
@@ -4564,7 +4562,7 @@ mod tests {
         .with_origin_worktree_form(BoardWorktreeForm::BranchBacked)
         .with_origin_recovery_id("recovery-1");
         entry.id = "recovery-entry-1".to_string();
-        entry.created_at = Utc.with_ymd_and_hms(2026, 8, 9, 0, 0, 0).unwrap();
+        entry.created_at = "2026-08-09T00:00:00Z".parse::<UtcTimestamp>().unwrap();
         entry.updated_at = entry.created_at;
         entry
     }
@@ -4660,8 +4658,8 @@ mod tests {
 
         let mut generated_only = entry.clone();
         generated_only.id = "another-id".to_string();
-        generated_only.created_at += chrono::Duration::hours(1);
-        generated_only.updated_at += chrono::Duration::hours(2);
+        generated_only.created_at += time::Duration::hours(1);
+        generated_only.updated_at += time::Duration::hours(2);
         generated_only.body_html = Some("<p>derived</p>".to_string());
         generated_only.audience = vec![" workspace-1 ".to_string(), "workspace-1".to_string()];
         assert_eq!(
@@ -4705,8 +4703,8 @@ mod tests {
         assert_eq!(appended.refresh_error, None);
 
         let mut replay = entry.clone();
-        replay.created_at += chrono::Duration::days(1);
-        replay.updated_at += chrono::Duration::days(1);
+        replay.created_at += time::Duration::days(1);
+        replay.updated_at += time::Duration::days(1);
         replay.body_html = Some("<p>not persisted</p>".to_string());
         replay.audience = vec![" workspace-1 ".to_string(), "workspace-1".to_string()];
         let replayed = post_entry_exact(dir.path(), replay).unwrap();
@@ -5484,7 +5482,7 @@ mod tests {
         );
         provider.post_entry(dir.path(), reply).unwrap();
 
-        let since = Utc.timestamp_opt(0, 0).unwrap();
+        let since = UtcTimestamp::UNIX_EPOCH;
         assert_eq!(
             provider.load_entries_since(dir.path(), since).unwrap(),
             load_entries_since(dir.path(), since).unwrap(),
@@ -5501,14 +5499,14 @@ mod tests {
                     dir.path(),
                     "You",
                     &BoardEntryKind::Status,
-                    chrono::Duration::hours(1)
+                    time::Duration::hours(1)
                 )
                 .unwrap(),
             has_recent_post_by(
                 dir.path(),
                 "You",
                 &BoardEntryKind::Status,
-                chrono::Duration::hours(1)
+                time::Duration::hours(1)
             )
             .unwrap(),
         );
@@ -6208,7 +6206,7 @@ mod tests {
             vec![],
         );
         first.id = "entry-1".to_string();
-        first.created_at = Utc.with_ymd_and_hms(2026, 5, 4, 0, 0, 0).unwrap();
+        first.created_at = "2026-05-04T00:00:00Z".parse::<UtcTimestamp>().unwrap();
         first.updated_at = first.created_at;
         let mut second = BoardEntry::new(
             AuthorKind::Agent,
@@ -6221,7 +6219,7 @@ mod tests {
             vec![],
         );
         second.id = "entry-2".to_string();
-        second.created_at = Utc.with_ymd_and_hms(2026, 5, 4, 0, 1, 0).unwrap();
+        second.created_at = "2026-05-04T00:01:00Z".parse::<UtcTimestamp>().unwrap();
         second.updated_at = second.created_at;
         write_events(
             &events_path,
@@ -6396,8 +6394,8 @@ mod tests {
                 vec![],
             );
             entry.id = format!("entry-{idx}");
-            entry.created_at = Utc.with_ymd_and_hms(2026, 5, 4, 0, 0, 0).unwrap()
-                + chrono::Duration::seconds(idx as i64);
+            entry.created_at = "2026-05-04T00:00:00Z".parse::<UtcTimestamp>().unwrap()
+                + time::Duration::seconds(idx as i64);
             entry.updated_at = entry.created_at;
             events.push(CoordinationEvent::MessageAppended { entry });
         }
@@ -6432,8 +6430,8 @@ mod tests {
                 vec![],
             );
             entry.id = format!("entry-{idx}");
-            entry.created_at = Utc.with_ymd_and_hms(2026, 5, 4, 0, 0, 0).unwrap()
-                + chrono::Duration::seconds(idx as i64);
+            entry.created_at = "2026-05-04T00:00:00Z".parse::<UtcTimestamp>().unwrap()
+                + time::Duration::seconds(idx as i64);
             entry.updated_at = entry.created_at;
             events.push(CoordinationEvent::MessageAppended { entry });
         }
@@ -6474,8 +6472,8 @@ mod tests {
                 vec![],
             );
             entry.id = format!("entry-{idx}");
-            entry.created_at =
-                Utc.with_ymd_and_hms(2026, 5, 4, 0, 0, 0).unwrap() + chrono::Duration::seconds(idx);
+            entry.created_at = "2026-05-04T00:00:00Z".parse::<UtcTimestamp>().unwrap()
+                + time::Duration::seconds(idx);
             entry.updated_at = entry.created_at;
             append_event_to_segments(
                 dir.path(),
@@ -6511,8 +6509,8 @@ mod tests {
                 vec![],
             );
             entry.id = format!("entry-{idx}");
-            entry.created_at =
-                Utc.with_ymd_and_hms(2026, 5, 4, 0, 0, 0).unwrap() + chrono::Duration::seconds(idx);
+            entry.created_at = "2026-05-04T00:00:00Z".parse::<UtcTimestamp>().unwrap()
+                + time::Duration::seconds(idx);
             entry.updated_at = entry.created_at;
             append_event_to_segments(
                 dir.path(),
@@ -6557,8 +6555,8 @@ mod tests {
                 vec![],
             );
             entry.id = format!("entry-{idx}");
-            entry.created_at =
-                Utc.with_ymd_and_hms(2026, 5, 4, 0, 0, 0).unwrap() + chrono::Duration::seconds(idx);
+            entry.created_at = "2026-05-04T00:00:00Z".parse::<UtcTimestamp>().unwrap()
+                + time::Duration::seconds(idx);
             entry.updated_at = entry.created_at;
             post_entry(dir.path(), entry).unwrap();
         }
@@ -6581,7 +6579,7 @@ mod tests {
             vec![],
         );
         appended.id = "entry-3".to_string();
-        appended.created_at = Utc.with_ymd_and_hms(2026, 5, 4, 0, 0, 3).unwrap();
+        appended.created_at = "2026-05-04T00:00:03Z".parse::<UtcTimestamp>().unwrap();
         appended.updated_at = appended.created_at;
 
         let snapshot = post_entry(dir.path(), appended).unwrap();
@@ -6614,7 +6612,7 @@ mod tests {
             vec![],
         );
         first.id = "entry-segmented".to_string();
-        first.created_at = Utc.with_ymd_and_hms(2026, 5, 4, 0, 0, 0).unwrap();
+        first.created_at = "2026-05-04T00:00:00Z".parse::<UtcTimestamp>().unwrap();
         first.updated_at = first.created_at;
         post_entry(dir.path(), first).unwrap();
 
@@ -6629,7 +6627,7 @@ mod tests {
             vec![],
         );
         late_legacy.id = "entry-late-legacy".to_string();
-        late_legacy.created_at = Utc.with_ymd_and_hms(2026, 5, 4, 0, 1, 0).unwrap();
+        late_legacy.created_at = "2026-05-04T00:01:00Z".parse::<UtcTimestamp>().unwrap();
         late_legacy.updated_at = late_legacy.created_at;
         write_events(
             &coordination_events_path(dir.path()),
@@ -6639,7 +6637,7 @@ mod tests {
         );
         write_atomic_json(
             &coordination_board_projection_path(dir.path()),
-            &build_hot_projection(vec![late_legacy], Utc::now()),
+            &build_hot_projection(vec![late_legacy], UtcTimestamp::now()),
         )
         .unwrap();
 
@@ -6654,7 +6652,7 @@ mod tests {
             vec![],
         );
         new_entry.id = "entry-new".to_string();
-        new_entry.created_at = Utc.with_ymd_and_hms(2026, 5, 4, 0, 2, 0).unwrap();
+        new_entry.created_at = "2026-05-04T00:02:00Z".parse::<UtcTimestamp>().unwrap();
         new_entry.updated_at = new_entry.created_at;
 
         let snapshot = post_entry(dir.path(), new_entry).unwrap();
@@ -6687,7 +6685,7 @@ mod tests {
             vec![],
         );
         segmented.id = "entry-segmented".to_string();
-        segmented.created_at = Utc.with_ymd_and_hms(2026, 5, 4, 0, 0, 0).unwrap();
+        segmented.created_at = "2026-05-04T00:00:00Z".parse::<UtcTimestamp>().unwrap();
         segmented.updated_at = segmented.created_at;
         post_entry(dir.path(), segmented).unwrap();
 
@@ -6702,7 +6700,7 @@ mod tests {
             vec![],
         );
         late_legacy.id = "entry-late-legacy".to_string();
-        late_legacy.created_at = Utc.with_ymd_and_hms(2026, 5, 4, 0, 1, 0).unwrap();
+        late_legacy.created_at = "2026-05-04T00:01:00Z".parse::<UtcTimestamp>().unwrap();
         late_legacy.updated_at = late_legacy.created_at;
         write_events(
             &coordination_events_path(dir.path()),
@@ -6712,7 +6710,7 @@ mod tests {
         );
         write_atomic_json(
             &coordination_board_projection_path(dir.path()),
-            &build_hot_projection(vec![late_legacy], Utc::now()),
+            &build_hot_projection(vec![late_legacy], UtcTimestamp::now()),
         )
         .unwrap();
 
@@ -6746,7 +6744,7 @@ mod tests {
             vec![],
         );
         newer_segmented.id = "entry-newer-segmented".to_string();
-        newer_segmented.created_at = Utc.with_ymd_and_hms(2026, 5, 4, 0, 2, 0).unwrap();
+        newer_segmented.created_at = "2026-05-04T00:02:00Z".parse::<UtcTimestamp>().unwrap();
         newer_segmented.updated_at = newer_segmented.created_at;
         post_entry(dir.path(), newer_segmented).unwrap();
 
@@ -6761,7 +6759,7 @@ mod tests {
             vec![],
         );
         older_legacy.id = "entry-older-legacy".to_string();
-        older_legacy.created_at = Utc.with_ymd_and_hms(2026, 5, 4, 0, 1, 0).unwrap();
+        older_legacy.created_at = "2026-05-04T00:01:00Z".parse::<UtcTimestamp>().unwrap();
         older_legacy.updated_at = older_legacy.created_at;
         write_events(
             &coordination_events_path(dir.path()),
@@ -6771,7 +6769,7 @@ mod tests {
         );
         write_atomic_json(
             &coordination_board_projection_path(dir.path()),
-            &build_hot_projection(vec![older_legacy], Utc::now()),
+            &build_hot_projection(vec![older_legacy], UtcTimestamp::now()),
         )
         .unwrap();
 
@@ -6821,8 +6819,8 @@ mod tests {
                 vec![],
             );
             entry.id = format!("entry-{idx}");
-            entry.created_at =
-                Utc.with_ymd_and_hms(2026, 5, 4, 0, 0, 0).unwrap() + chrono::Duration::seconds(idx);
+            entry.created_at = "2026-05-04T00:00:00Z".parse::<UtcTimestamp>().unwrap()
+                + time::Duration::seconds(idx);
             entry.updated_at = entry.created_at;
             post_entry(dir.path(), entry).unwrap();
         }
@@ -6976,7 +6974,7 @@ mod tests {
             vec![],
             vec![],
         );
-        first.created_at = Utc.with_ymd_and_hms(2026, 4, 14, 0, 0, 0).unwrap();
+        first.created_at = "2026-04-14T00:00:00Z".parse::<UtcTimestamp>().unwrap();
         first.updated_at = first.created_at;
 
         let mut second = BoardEntry::new(
@@ -6989,7 +6987,7 @@ mod tests {
             vec![],
             vec![],
         );
-        second.created_at = Utc.with_ymd_and_hms(2026, 4, 14, 0, 1, 0).unwrap();
+        second.created_at = "2026-04-14T00:01:00Z".parse::<UtcTimestamp>().unwrap();
         second.updated_at = second.created_at;
 
         write_events(
@@ -7038,7 +7036,7 @@ mod tests {
             vec![],
             vec![],
         );
-        entry.created_at = Utc.with_ymd_and_hms(2026, 4, 14, 1, 0, 0).unwrap();
+        entry.created_at = "2026-04-14T01:00:00Z".parse::<UtcTimestamp>().unwrap();
         entry.updated_at = entry.created_at;
 
         write_legacy_board_post(&legacy_dir.join(EVENTS_FILE_NAME), &entry);
@@ -7246,7 +7244,7 @@ mod tests {
                 version: EVENT_MANIFEST_VERSION,
                 active_segment: segment_file,
                 segments: vec![segment],
-                updated_at: Utc::now(),
+                updated_at: UtcTimestamp::now(),
             },
         )
         .unwrap();
@@ -7257,7 +7255,7 @@ mod tests {
     fn prompt_board_tail_reads_rollover_without_repair_and_retries_partial_append() {
         let dir = tempfile::tempdir().unwrap();
         let root = legacy_coordination_dir(dir.path());
-        let base = Utc.with_ymd_and_hms(2026, 10, 14, 0, 0, 0).unwrap();
+        let base = "2026-10-14T00:00:00Z".parse::<UtcTimestamp>().unwrap();
         let make_event = |index| {
             let mut entry = BoardEntry::new(
                 AuthorKind::Agent,
@@ -7270,7 +7268,7 @@ mod tests {
                 vec![],
             );
             entry.id = format!("entry-{index}");
-            entry.created_at = base + chrono::Duration::seconds(index);
+            entry.created_at = base + time::Duration::seconds(index);
             entry.updated_at = entry.created_at;
             CoordinationEvent::MessageAppended { entry }
         };
@@ -7327,7 +7325,7 @@ mod tests {
         );
         assert_eq!(
             complete.latest_own_status_at,
-            Some(base + chrono::Duration::seconds(3))
+            Some(base + time::Duration::seconds(3))
         );
         assert_eq!(std::fs::read(&manifest).unwrap(), b"broken manifest");
     }
@@ -7336,7 +7334,7 @@ mod tests {
     fn prompt_board_tail_bounds_reads_with_twelve_thousand_entries() {
         let dir = tempfile::tempdir().unwrap();
         let root = legacy_coordination_dir(dir.path());
-        let base = Utc.with_ymd_and_hms(2026, 10, 14, 0, 0, 0).unwrap();
+        let base = "2026-10-14T00:00:00Z".parse::<UtcTimestamp>().unwrap();
         let events = (0..12_000)
             .map(|index| {
                 let mut entry = BoardEntry::new(
@@ -7350,7 +7348,7 @@ mod tests {
                     vec![],
                 );
                 entry.id = format!("fixture-{index}");
-                entry.created_at = base + chrono::Duration::seconds(index);
+                entry.created_at = base + time::Duration::seconds(index);
                 entry.updated_at = entry.created_at;
                 CoordinationEvent::MessageAppended { entry }
             })
@@ -7388,9 +7386,9 @@ mod tests {
     fn prompt_board_read_materializes_large_history_once_for_every_local_scope() {
         let dir = tempfile::tempdir().unwrap();
         let coordination_root = legacy_coordination_dir(dir.path());
-        let base = Utc.with_ymd_and_hms(2026, 7, 24, 0, 0, 0).unwrap();
+        let base = "2026-07-24T00:00:00Z".parse::<UtcTimestamp>().unwrap();
         let status_since = base;
-        let diff_since = base + chrono::Duration::seconds(400);
+        let diff_since = base + time::Duration::seconds(400);
         let large_payload = "x".repeat(9 * 1024);
         let mut events = Vec::with_capacity(HOT_PROJECTION_ENTRY_LIMIT + 1);
 
@@ -7406,7 +7404,7 @@ mod tests {
         )
         .with_audience(vec!["workspace-other"]);
         target.id = "target-status".to_string();
-        target.created_at = base + chrono::Duration::seconds(1);
+        target.created_at = base + time::Duration::seconds(1);
         target.updated_at = target.created_at;
         events.push(CoordinationEvent::MessageAppended { entry: target });
 
@@ -7422,7 +7420,7 @@ mod tests {
                 vec![],
             );
             entry.id = format!("entry-{index:04}");
-            entry.created_at = base + chrono::Duration::seconds(index as i64);
+            entry.created_at = base + time::Duration::seconds(index as i64);
             entry.updated_at = entry.created_at;
             entry.audience = match index % 3 {
                 0 => Vec::new(),
@@ -7481,7 +7479,7 @@ mod tests {
     fn prompt_board_read_checks_the_operation_deadline_while_decoding_a_segment() {
         let dir = tempfile::tempdir().unwrap();
         let coordination_root = legacy_coordination_dir(dir.path());
-        let base = Utc.with_ymd_and_hms(2026, 8, 29, 0, 0, 0).unwrap();
+        let base = "2026-08-29T00:00:00Z".parse::<UtcTimestamp>().unwrap();
         let mut entry = BoardEntry::new(
             AuthorKind::Agent,
             "Codex",
@@ -7504,11 +7502,11 @@ mod tests {
 
         let error = load_prompt_reminder(
             dir.path(),
-            DateTime::<Utc>::from_timestamp(0, 0).unwrap(),
+            UtcTimestamp::UNIX_EPOCH,
             &BoardAudienceScope::All,
             "Codex",
             &BoardEntryKind::Status,
-            DateTime::<Utc>::from_timestamp(0, 0).unwrap(),
+            UtcTimestamp::UNIX_EPOCH,
         )
         .expect_err("an expired Board deadline must stop segment decoding");
 
@@ -7519,7 +7517,7 @@ mod tests {
     fn prompt_board_read_uses_one_segment_snapshot_even_when_hot_projection_exists() {
         let dir = tempfile::tempdir().unwrap();
         let coordination_root = legacy_coordination_dir(dir.path());
-        let base = Utc.with_ymd_and_hms(2026, 7, 24, 0, 0, 0).unwrap();
+        let base = "2026-07-24T00:00:00Z".parse::<UtcTimestamp>().unwrap();
         let mut entries = Vec::new();
         for index in 1..=3 {
             let mut entry = BoardEntry::new(
@@ -7533,7 +7531,7 @@ mod tests {
                 vec![],
             );
             entry.id = format!("entry-{index}");
-            entry.created_at = base + chrono::Duration::seconds(index);
+            entry.created_at = base + time::Duration::seconds(index);
             entry.updated_at = entry.created_at;
             entries.push(entry);
         }
@@ -7545,14 +7543,14 @@ mod tests {
         write_prompt_board_fixture(&coordination_root, &events);
         write_atomic_json(
             &coordination_root.join(BOARD_PROJECTION_FILE_NAME),
-            &build_hot_projection(entries, base + chrono::Duration::seconds(4)),
+            &build_hot_projection(entries, base + time::Duration::seconds(4)),
         )
         .unwrap();
         reset_prompt_board_read_test_counters();
 
         let read = load_prompt_reminder(
             dir.path(),
-            base + chrono::Duration::seconds(10),
+            base + time::Duration::seconds(10),
             &BoardAudienceScope::All,
             "Codex",
             &BoardEntryKind::Status,
@@ -7564,7 +7562,7 @@ mod tests {
         assert!(read.has_recent_own_status);
         assert_eq!(
             read.latest_own_status_at,
-            Some(base + chrono::Duration::seconds(3))
+            Some(base + time::Duration::seconds(3))
         );
         let counters = prompt_board_read_test_counters();
         assert_eq!(counters.history_materializations, 1);
@@ -7589,11 +7587,11 @@ mod tests {
 
         let _ = load_prompt_reminder(
             &repo,
-            DateTime::<Utc>::from_timestamp(0, 0).unwrap(),
+            UtcTimestamp::UNIX_EPOCH,
             &BoardAudienceScope::All,
             "Codex",
             &BoardEntryKind::Status,
-            DateTime::<Utc>::from_timestamp(0, 0).unwrap(),
+            UtcTimestamp::UNIX_EPOCH,
         )
         .unwrap();
 
@@ -7630,11 +7628,11 @@ mod tests {
         let _ = load_prompt_reminder_for_repo_hash(
             &repo,
             Some(repo_hash),
-            DateTime::<Utc>::from_timestamp(0, 0).unwrap(),
+            UtcTimestamp::UNIX_EPOCH,
             &BoardAudienceScope::All,
             "Codex",
             &BoardEntryKind::Status,
-            DateTime::<Utc>::from_timestamp(0, 0).unwrap(),
+            UtcTimestamp::UNIX_EPOCH,
         )
         .unwrap();
 
@@ -7667,7 +7665,7 @@ mod tests {
             .and_then(|value| value.to_str())
             .unwrap();
         let expected = RemindersState {
-            last_injected_at: DateTime::<Utc>::from_timestamp(42, 0),
+            last_injected_at: UtcTimestamp::from_unix_seconds(42),
             ..RemindersState::default()
         };
         reset_prompt_board_read_test_counters();
@@ -7717,7 +7715,7 @@ mod tests {
         );
         ensure_repo_local_files(&repo).unwrap();
         let expected = RemindersState {
-            last_injected_at: DateTime::<Utc>::from_timestamp(42, 0),
+            last_injected_at: UtcTimestamp::from_unix_seconds(42),
             ..RemindersState::default()
         };
         write_reminders_state(&repo, "session-1", &expected).unwrap();
@@ -7732,7 +7730,7 @@ mod tests {
             vec![],
         );
         post_entry(&repo, entry.clone()).unwrap();
-        let since = DateTime::<Utc>::from_timestamp(0, 0).unwrap();
+        let since = UtcTimestamp::UNIX_EPOCH;
         let board = load_prompt_reminder_for_repo_hash(
             &repo,
             Some(stale_hash.as_str()),
@@ -7767,7 +7765,7 @@ mod tests {
             "a nested bare repository must not inherit the outer repository scope",
         );
         let updated = RemindersState {
-            last_injected_at: Some(Utc::now()),
+            last_injected_at: Some(UtcTimestamp::now()),
             ..expected
         };
         write_reminders_state_for_repo_hash(
@@ -7962,7 +7960,7 @@ mod tests {
         let scope = BoardAudienceScope::Workspace("workspace-a".to_string());
         for total in [500_usize, 2_000, 5_000] {
             let dir = tempfile::tempdir().unwrap();
-            let base = Utc::now() - chrono::Duration::hours(2);
+            let base = UtcTimestamp::now() - time::Duration::hours(2);
             let events = (0..total)
                 .map(|idx| {
                     let audience = if idx % 2 == 0 {
@@ -7971,7 +7969,7 @@ mod tests {
                         "workspace-b"
                     };
                     let mut entry = scoped_seed_entry(format!("seed {idx}"), audience);
-                    entry.created_at = base + chrono::Duration::milliseconds(idx as i64);
+                    entry.created_at = base + time::Duration::milliseconds(idx as i64);
                     entry.updated_at = entry.created_at;
                     CoordinationEvent::MessageAppended { entry }
                 })
@@ -8032,7 +8030,7 @@ mod tests {
         assert_eq!(refresh, ScopedBoardRefresh::Rebuilt);
 
         let mut backdated = scoped_seed_entry("backdated".to_string(), "workspace-a");
-        backdated.created_at = Utc::now() - chrono::Duration::days(30);
+        backdated.created_at = UtcTimestamp::now() - time::Duration::days(30);
         backdated.updated_at = backdated.created_at;
         post_entry(dir.path(), backdated).unwrap();
         let (next, refresh) = refresh_scoped_board_view(dir.path(), &scope_a, Some(view)).unwrap();
@@ -8055,7 +8053,7 @@ mod tests {
             vec![],
             vec![],
         );
-        old_entry.created_at = chrono::Utc.with_ymd_and_hms(2026, 4, 14, 0, 0, 0).unwrap();
+        old_entry.created_at = "2026-04-14T00:00:00Z".parse::<UtcTimestamp>().unwrap();
         old_entry.updated_at = old_entry.created_at;
         post_entry(dir.path(), old_entry).unwrap();
 
@@ -8069,11 +8067,11 @@ mod tests {
             vec![],
             vec![],
         );
-        new_entry.created_at = chrono::Utc.with_ymd_and_hms(2026, 4, 20, 0, 0, 0).unwrap();
+        new_entry.created_at = "2026-04-20T00:00:00Z".parse::<UtcTimestamp>().unwrap();
         new_entry.updated_at = new_entry.created_at;
         post_entry(dir.path(), new_entry).unwrap();
 
-        let since = chrono::Utc.with_ymd_and_hms(2026, 4, 15, 0, 0, 0).unwrap();
+        let since = "2026-04-15T00:00:00Z".parse::<UtcTimestamp>().unwrap();
         let entries = load_entries_since(dir.path(), since).unwrap();
 
         assert_eq!(entries.len(), 1);
@@ -8094,7 +8092,7 @@ mod tests {
             vec![],
             vec![],
         );
-        new_entry.created_at = chrono::Utc.with_ymd_and_hms(2026, 4, 20, 0, 0, 0).unwrap();
+        new_entry.created_at = "2026-04-20T00:00:00Z".parse::<UtcTimestamp>().unwrap();
         new_entry.updated_at = new_entry.created_at;
         post_entry(dir.path(), new_entry).unwrap();
 
@@ -8108,11 +8106,11 @@ mod tests {
             vec![],
             vec![],
         );
-        old_entry.created_at = chrono::Utc.with_ymd_and_hms(2026, 4, 10, 0, 0, 0).unwrap();
+        old_entry.created_at = "2026-04-10T00:00:00Z".parse::<UtcTimestamp>().unwrap();
         old_entry.updated_at = old_entry.created_at;
         post_entry(dir.path(), old_entry).unwrap();
 
-        let since = chrono::Utc.with_ymd_and_hms(2026, 4, 15, 0, 0, 0).unwrap();
+        let since = "2026-04-15T00:00:00Z".parse::<UtcTimestamp>().unwrap();
         let entries = load_entries_since(dir.path(), since).unwrap();
 
         assert_eq!(entries.len(), 1);
@@ -8135,7 +8133,7 @@ mod tests {
             vec![],
             vec![],
         );
-        newer_entry.created_at = chrono::Utc.with_ymd_and_hms(2026, 4, 20, 0, 0, 0).unwrap();
+        newer_entry.created_at = "2026-04-20T00:00:00Z".parse::<UtcTimestamp>().unwrap();
         newer_entry.updated_at = newer_entry.created_at;
 
         let mut older_entry = BoardEntry::new(
@@ -8148,7 +8146,7 @@ mod tests {
             vec![],
             vec![],
         );
-        older_entry.created_at = chrono::Utc.with_ymd_and_hms(2026, 4, 10, 0, 0, 0).unwrap();
+        older_entry.created_at = "2026-04-10T00:00:00Z".parse::<UtcTimestamp>().unwrap();
         older_entry.updated_at = older_entry.created_at;
 
         write_events(
@@ -8169,11 +8167,11 @@ mod tests {
                 "entries": 2,
                 "bytes": bytes,
                 "first_created_at": newer_entry.created_at,
-                "last_created_at": chrono::Utc.with_ymd_and_hms(2026, 4, 10, 0, 0, 0).unwrap(),
+                "last_created_at": "2026-04-10T00:00:00Z".parse::<UtcTimestamp>().unwrap(),
                 "first_entry_id": newer_entry.id,
                 "last_entry_id": "legacy-old"
             }],
-            "updated_at": chrono::Utc.with_ymd_and_hms(2026, 4, 20, 0, 0, 1).unwrap()
+            "updated_at": "2026-04-20T00:00:01Z".parse::<UtcTimestamp>().unwrap()
         });
         std::fs::write(
             coordination_events_manifest_path(dir.path()),
@@ -8181,7 +8179,7 @@ mod tests {
         )
         .unwrap();
 
-        let since = chrono::Utc.with_ymd_and_hms(2026, 4, 15, 0, 0, 0).unwrap();
+        let since = "2026-04-15T00:00:00Z".parse::<UtcTimestamp>().unwrap();
         let entries = load_entries_since(dir.path(), since).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].body, "newer pre-upgrade post");
@@ -8211,7 +8209,7 @@ mod tests {
             vec![],
             vec![],
         );
-        new_entry.created_at = chrono::Utc.with_ymd_and_hms(2026, 4, 20, 0, 0, 0).unwrap();
+        new_entry.created_at = "2026-04-20T00:00:00Z".parse::<UtcTimestamp>().unwrap();
         new_entry.updated_at = new_entry.created_at;
 
         let mut old_entry = BoardEntry::new(
@@ -8224,7 +8222,7 @@ mod tests {
             vec![],
             vec![],
         );
-        old_entry.created_at = chrono::Utc.with_ymd_and_hms(2026, 4, 10, 0, 0, 0).unwrap();
+        old_entry.created_at = "2026-04-10T00:00:00Z".parse::<UtcTimestamp>().unwrap();
         old_entry.updated_at = old_entry.created_at;
 
         write_events(
@@ -8245,11 +8243,11 @@ mod tests {
                 "entries": 2,
                 "bytes": bytes,
                 "first_created_at": new_entry.created_at,
-                "last_created_at": chrono::Utc.with_ymd_and_hms(2026, 4, 10, 0, 0, 0).unwrap(),
+                "last_created_at": "2026-04-10T00:00:00Z".parse::<UtcTimestamp>().unwrap(),
                 "first_entry_id": new_entry.id,
                 "last_entry_id": "legacy-old"
             }],
-            "updated_at": chrono::Utc.with_ymd_and_hms(2026, 4, 20, 0, 0, 1).unwrap()
+            "updated_at": "2026-04-20T00:00:01Z".parse::<UtcTimestamp>().unwrap()
         });
         std::fs::write(
             coordination_events_manifest_path(dir.path()),
@@ -8267,11 +8265,11 @@ mod tests {
             vec![],
             vec![],
         );
-        skewed_append.created_at = chrono::Utc.with_ymd_and_hms(2026, 4, 1, 0, 0, 0).unwrap();
+        skewed_append.created_at = "2026-04-01T00:00:00Z".parse::<UtcTimestamp>().unwrap();
         skewed_append.updated_at = skewed_append.created_at;
         post_entry(dir.path(), skewed_append).unwrap();
 
-        let since = chrono::Utc.with_ymd_and_hms(2026, 4, 15, 0, 0, 0).unwrap();
+        let since = "2026-04-15T00:00:00Z".parse::<UtcTimestamp>().unwrap();
         let entries = load_entries_since(dir.path(), since).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].body, "newer pre-upgrade post");
@@ -8287,8 +8285,8 @@ mod tests {
     fn has_recent_post_by_respects_within_window() {
         let dir = tempfile::tempdir().unwrap();
 
-        let now = chrono::Utc::now();
-        let recent = now - chrono::Duration::minutes(5);
+        let now = UtcTimestamp::now();
+        let recent = now - time::Duration::minutes(5);
         let mut entry = BoardEntry::new(
             AuthorKind::Agent,
             "Codex",
@@ -8307,7 +8305,7 @@ mod tests {
             dir.path(),
             "Codex",
             &BoardEntryKind::Status,
-            chrono::Duration::minutes(10)
+            time::Duration::minutes(10)
         )
         .unwrap());
 
@@ -8315,7 +8313,7 @@ mod tests {
             dir.path(),
             "Codex",
             &BoardEntryKind::Status,
-            chrono::Duration::minutes(1)
+            time::Duration::minutes(1)
         )
         .unwrap());
 
@@ -8323,7 +8321,7 @@ mod tests {
             dir.path(),
             "Claude",
             &BoardEntryKind::Status,
-            chrono::Duration::minutes(10)
+            time::Duration::minutes(10)
         )
         .unwrap());
 
@@ -8331,7 +8329,7 @@ mod tests {
             dir.path(),
             "Codex",
             &BoardEntryKind::Decision,
-            chrono::Duration::minutes(10)
+            time::Duration::minutes(10)
         )
         .unwrap());
     }
@@ -8340,7 +8338,7 @@ mod tests {
     fn has_recent_post_by_checks_segment_history_beyond_hot_projection() {
         let dir = tempfile::tempdir().unwrap();
 
-        let base = chrono::Utc::now() - chrono::Duration::minutes(1);
+        let base = UtcTimestamp::now() - time::Duration::minutes(1);
         let mut events = Vec::with_capacity(HOT_PROJECTION_ENTRY_LIMIT + 1);
         let mut target = BoardEntry::new(
             AuthorKind::Agent,
@@ -8368,7 +8366,7 @@ mod tests {
                 vec![],
                 vec![],
             );
-            entry.created_at = base + chrono::Duration::seconds(offset as i64);
+            entry.created_at = base + time::Duration::seconds(offset as i64);
             entry.updated_at = entry.created_at;
             events.push(CoordinationEvent::MessageAppended { entry });
         }
@@ -8386,7 +8384,7 @@ mod tests {
             dir.path(),
             "Codex",
             &BoardEntryKind::Status,
-            chrono::Duration::minutes(10)
+            time::Duration::minutes(10)
         )
         .unwrap());
     }
@@ -8394,7 +8392,7 @@ mod tests {
     #[test]
     fn synthetic_100000_entry_smoke_keeps_hot_paths_bounded() {
         let dir = tempfile::tempdir().unwrap();
-        let base = chrono::Utc.with_ymd_and_hms(2026, 5, 10, 0, 0, 0).unwrap();
+        let base = "2026-05-10T00:00:00Z".parse::<UtcTimestamp>().unwrap();
         let coordination_root = coordination_dir(dir.path());
         let segments_dir = coordination_events_segments_dir_from_root(&coordination_root);
         std::fs::create_dir_all(&segments_dir).unwrap();
@@ -8416,7 +8414,7 @@ mod tests {
             version: EVENT_MANIFEST_VERSION,
             active_segment: segment_file_name(1),
             segments: Vec::new(),
-            updated_at: chrono::Utc::now(),
+            updated_at: UtcTimestamp::now(),
         };
         let mut segment_index = 1;
         let mut current_meta = empty_segment(segment_index);
@@ -8437,7 +8435,7 @@ mod tests {
             )
             .with_origin_session_id(format!("sess-{}", idx % 8));
             entry.id = format!("entry-{idx:06}");
-            entry.created_at = base + chrono::Duration::seconds(idx as i64);
+            entry.created_at = base + time::Duration::seconds(idx as i64);
             entry.updated_at = entry.created_at;
 
             let event = CoordinationEvent::MessageAppended { entry };
@@ -8459,7 +8457,7 @@ mod tests {
         current_file.flush().unwrap();
         manifest.active_segment = current_meta.file.clone();
         manifest.segments.push(current_meta);
-        manifest.updated_at = chrono::Utc::now();
+        manifest.updated_at = UtcTimestamp::now();
         write_event_manifest(&coordination_root, &manifest).unwrap();
 
         let snapshot = rebuild_snapshot_from_segments(dir.path()).unwrap();
@@ -8497,7 +8495,7 @@ mod tests {
         )
         .with_origin_session_id("sess-after");
         appended.id = "entry-100000".to_string();
-        appended.created_at = base + chrono::Duration::seconds(100_000);
+        appended.created_at = base + time::Duration::seconds(100_000);
         appended.updated_at = appended.created_at;
 
         let after = post_entry(dir.path(), appended).unwrap();
@@ -8506,7 +8504,7 @@ mod tests {
         assert_eq!(after.board.newest_entry_id.as_deref(), Some("entry-100000"));
 
         let recent =
-            load_entries_since(dir.path(), base + chrono::Duration::seconds(99_990)).unwrap();
+            load_entries_since(dir.path(), base + time::Duration::seconds(99_990)).unwrap();
         assert_eq!(recent.len(), 10);
         assert_eq!(recent.first().unwrap().id, "entry-099991");
         assert_eq!(recent.last().unwrap().id, "entry-100000");
@@ -8514,7 +8512,7 @@ mod tests {
             dir.path(),
             "Codex",
             &BoardEntryKind::Status,
-            chrono::Duration::days(365)
+            time::Duration::days(365)
         )
         .unwrap());
     }
@@ -8528,7 +8526,7 @@ mod tests {
         assert!(empty.last_injected_at.is_none());
         assert!(empty.last_reminded_kind.is_empty());
 
-        let now = chrono::Utc::now();
+        let now = UtcTimestamp::now();
         let state = RemindersState {
             last_injected_at: Some(now),
             last_reminded_kind: HashMap::from([("status".to_string(), now)]),
@@ -9045,19 +9043,19 @@ mod tests {
     fn the_index_forgets_old_resolved_rows_but_never_an_open_one() {
         let dir = tempfile::tempdir().unwrap();
         let mut stale = escalation_entry(BoardEntryKind::Blocked, "2338", "事象: 古い blocker");
-        stale.created_at = Utc::now() - chrono::Duration::days(120);
+        stale.created_at = UtcTimestamp::now() - time::Duration::days(120);
         stale.updated_at = stale.created_at;
         let stale_id = stale.id.clone();
         post_entry(dir.path(), stale).unwrap();
 
         let mut resolution = escalation_entry(BoardEntryKind::Decision, "2338", "解消済み");
-        resolution.created_at = Utc::now() - chrono::Duration::days(119);
+        resolution.created_at = UtcTimestamp::now() - time::Duration::days(119);
         resolution.updated_at = resolution.created_at;
         resolution.resolves_entry_ids = vec![stale_id.clone()];
         post_entry(dir.path(), resolution).unwrap();
 
         let mut fresh = escalation_entry(BoardEntryKind::Blocked, "3645", "事象: 未解決");
-        fresh.created_at = Utc::now() - chrono::Duration::days(200);
+        fresh.created_at = UtcTimestamp::now() - time::Duration::days(200);
         fresh.updated_at = fresh.created_at;
         post_entry(dir.path(), fresh).unwrap();
 
@@ -9208,7 +9206,7 @@ mod tests {
         post_entry_deterministic(dir.path(), identified_entry("intent-2", "same intent")).unwrap();
 
         let mut replay = identified_entry("intent-2", "same intent");
-        replay.created_at = Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap();
+        replay.created_at = "2030-01-01T00:00:00Z".parse::<UtcTimestamp>().unwrap();
         replay.updated_at = replay.created_at;
 
         let outcome = post_entry_deterministic(dir.path(), replay).unwrap();
@@ -9304,14 +9302,14 @@ mod tests {
             fn load_entries_since(
                 &self,
                 worktree_root: &Path,
-                since: DateTime<Utc>,
+                since: UtcTimestamp,
             ) -> Result<Vec<BoardEntry>> {
                 LocalProvider.load_entries_since(worktree_root, since)
             }
             fn load_entries_since_for_scope(
                 &self,
                 worktree_root: &Path,
-                since: DateTime<Utc>,
+                since: UtcTimestamp,
                 scope: &BoardAudienceScope,
             ) -> Result<Vec<BoardEntry>> {
                 LocalProvider.load_entries_since_for_scope(worktree_root, since, scope)
@@ -9321,7 +9319,7 @@ mod tests {
                 worktree_root: &Path,
                 author: &str,
                 kind: &BoardEntryKind,
-                within: chrono::Duration,
+                within: time::Duration,
             ) -> Result<bool> {
                 LocalProvider.has_recent_post_by(worktree_root, author, kind, within)
             }

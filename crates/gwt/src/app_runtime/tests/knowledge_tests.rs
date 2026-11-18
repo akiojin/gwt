@@ -311,7 +311,8 @@ fn select_knowledge_bridge_entry_is_cache_backed_detail_only() {
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
     let window_id = combined_window_id("tab-1", "issue-1");
 
-    let seeded_at = Utc.with_ymd_and_hms(2026, 6, 20, 9, 5, 0).unwrap();
+    let seeded_at =
+        gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 6, 20, 9, 5, 0).unwrap();
     let work_id = gwt_core::workspace_projection::canonical_work_id(
         &repo,
         Some("work/issue-42"),
@@ -378,7 +379,7 @@ fn select_knowledge_bridge_entry_is_cache_backed_detail_only() {
     let mut second_event = gwt_core::workspace_projection::WorkEvent::new(
         gwt_core::workspace_projection::WorkEventKind::Start,
         second_id,
-        Utc.with_ymd_and_hms(2026, 6, 20, 9, 30, 0).unwrap(),
+        gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 6, 20, 9, 30, 0).unwrap(),
     );
     second_event.title = Some("Issue #42 second related work".to_string());
     second_event.owner = Some("Issue #42".to_string());

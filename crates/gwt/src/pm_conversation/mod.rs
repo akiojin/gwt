@@ -562,6 +562,38 @@ fn scan_records(
 }
 
 pub(crate) fn internal_prompt(text: &str) -> bool {
+    if single_internal_prompt(text) {
+        return true;
+    }
+    let mut remaining = text.trim();
+    while !remaining.is_empty() {
+        // Native providers join text blocks with newlines. Consume only
+        // complete notifications; any human text leaves the whole turn human.
+        // Task envelopes can span lines; all other generated notifications
+        // occupy one line. Include any text on the closing tag's line.
+        let body_end = if remaining.starts_with("<task-notification>") {
+            let Some(end) = remaining.find("</task-notification>") else {
+                return false;
+            };
+            end + "</task-notification>".len()
+        } else {
+            0
+        };
+        let end = remaining[body_end..]
+            .find('\n')
+            .map_or(remaining.len(), |end| body_end + end);
+        if !single_internal_prompt(&remaining[..end]) {
+            return false;
+        }
+        if end == remaining.len() {
+            return true;
+        }
+        remaining = remaining[end..].trim_start();
+    }
+    false
+}
+
+fn single_internal_prompt(text: &str) -> bool {
     use crate::pm_registry::{
         PM_AGENT_IDLE_WAKE_PREFIX, PM_CYCLE_REPORTING_CLAUSE, PM_ESCALATION_PROMPT_PREFIX,
         PM_GWTD_EXECUTION_WAKE_CLAUSE, PM_PERIODIC_WAKE_INSTRUCTION, PM_STEERING_WAKE_CLAUSE,

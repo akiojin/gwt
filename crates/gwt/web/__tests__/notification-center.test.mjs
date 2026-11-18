@@ -247,6 +247,20 @@ test("identical notices aggregate into one row with an occurrence count, latest 
   assert.equal(snapshot.rows[0].count, 98, "the renderer cannot mutate an earlier snapshot");
 });
 
+test("Issue #7520: a caller identity aggregates notices whose text varies, and the row shows the latest text", () => {
+  const { center } = setup();
+  const notice = { kind: "issue-monitor", level: "warn", title: "Issues", issueNumber: 7520, identity: "steering: same reason" };
+  const first = center.record({ ...notice, message: "requested (1): same reason" });
+  assert.ok(center.record({ ...notice, message: "requested (2): same reason" }) === first);
+  assert.equal(center.count(), 1);
+  assert.equal(first.querySelector(".notification-center__count").textContent, "×2");
+  assert.match(first.textContent, /requested \(2\): same reason/, "the latest occurrence text is shown");
+  center.record({ ...notice, level: "info", message: "requested (2): same reason" });
+  center.record({ ...notice, issueNumber: 7521, message: "requested (2): same reason" });
+  center.record({ ...notice, identity: "steering: other reason", message: "requested (3): other reason" });
+  assert.equal(center.count(), 4, "level, Issue and identity still separate rows");
+});
+
 test("a recurrence that brings the first jump-to makes the aggregated row operable", () => {
   const { document, center } = setup();
   const jumps = [];
