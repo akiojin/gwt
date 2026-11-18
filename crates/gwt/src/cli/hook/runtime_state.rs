@@ -554,7 +554,20 @@ impl HookCompletionContext {
                 {
                     return Ok(None);
                 }
-                let _writer = gwt_agent::session::runtime_writer_lease(&self.runtime_path)?;
+                let _writer = match gwt_agent::session::runtime_writer_lease(&self.runtime_path) {
+                    Err(error)
+                        if error.kind() == io::ErrorKind::TimedOut
+                            && require_pending
+                            && self
+                                .observation
+                                .as_ref()
+                                .is_some_and(|event| event.event == "UserPromptSubmit") =>
+                    {
+                        tracing::warn!(session_id = %self.session_id, %error, "prompt runtime publication skipped");
+                        return Ok(None);
+                    }
+                    lease => lease?,
+                };
                 let _publication =
                     gwt_agent::session::runtime_publication_lease(&self.runtime_path)?;
                 let runtime = match SessionRuntimeState::load(&self.runtime_path) {
@@ -702,6 +715,16 @@ impl HookCompletionContext {
     /// Keep the existing Session -> writer -> publication lock order. An
     /// unavailable observation leaves the previous pair unchanged.
     pub(crate) fn record(self, outcome: gwt_agent::session::HookCompletionOutcome) {
+        // A prompt can return Board context after runtime publication times out.
+        // Its protocol output must not advance the runtime completion receipt.
+        if !self.runtime_was_published()
+            && self
+                .observation
+                .as_ref()
+                .is_some_and(|event| event.event == "UserPromptSubmit")
+        {
+            return;
+        }
         #[cfg(any(test, feature = "test-gh-guard"))]
         if self.exact.is_some() && self.begin_succeeded.get() && self.pending_bound.get() {
             let hook = completion_test_hooks()
