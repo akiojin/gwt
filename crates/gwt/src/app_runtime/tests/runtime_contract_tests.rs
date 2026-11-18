@@ -909,8 +909,12 @@ fn resumed_agent_window_accepts_terminal_input_and_attachment_staging() {
     );
     assert!(drain_browser_owner_input(&mut runtime).is_empty());
     assert!(probe.pty.ordinary_input_revision().unwrap() > before);
-    let queued =
-        runtime.pane_send_input_to_window_events("client-1".into(), &window_id, "pane input\r");
+    let queued = runtime.pane_send_input_to_window_events(
+        "client-1".into(),
+        &window_id,
+        "pane input\r",
+        None,
+    );
     assert!(queued.is_empty(), "pane input waits for its real owner ACK");
     let pane_send_events = drain_browser_owner_input(&mut runtime);
     assert!(
@@ -919,13 +923,59 @@ fn resumed_agent_window_accepts_terminal_input_and_attachment_staging() {
             .any(|event| matches!(&event.event, BackendEvent::PaneSendResult { ok: true, .. })),
         "pane.write into the actual resumed agent must succeed: {pane_send_events:?}"
     );
-    let attachment_events =
-        runtime.paste_image_events(&window_id, "AQ==", "image/png", Some("pasted.png"));
+    let uploaded_path = temp.path().join("resumed-image-upload");
+    fs::write(&uploaded_path, [1_u8]).unwrap();
+    runtime
+        .attachment_uploads
+        .insert(
+            "resumed-image-upload".into(),
+            UploadedAttachment {
+                path: uploaded_path,
+                filename: "pasted.png".into(),
+                mime_type: Some("image/png".into()),
+                size: 1,
+            },
+        )
+        .unwrap();
+    let event = super::work_projection_tests::qualified_attachment_event(
+        &runtime,
+        &window_id,
+        serde_json::json!({
+            "kind":"paste_image_uploaded", "id":window_id, "operation_id":"resumed-attachment",
+            "upload_id":"resumed-image-upload", "mime_type":"image/png", "filename":"pasted.png", "size":1
+        }),
+    );
+    let attachment_before = probe.pty.ordinary_input_revision().unwrap();
+    let attachment_events = runtime.handle_frontend_event("client-1".into(), event);
     assert!(
-        attachment_events.is_empty(),
+        attachment_events.iter().any(|event| matches!(
+            event.event,
+            BackendEvent::AttachmentProgress {
+                phase: AttachmentProgressPhase::Queued,
+                ..
+            }
+        )),
         "restored attachment staging must not be denied: {attachment_events:?}"
     );
-    assert!(drain_browser_owner_input(&mut runtime).is_empty());
+    let completed = super::work_projection_tests::drain_attachment_work(&mut runtime);
+    assert!(
+        completed.iter().any(|event| matches!(
+            event.event,
+            BackendEvent::AttachmentProgress {
+                phase: AttachmentProgressPhase::Attached,
+                ..
+            }
+        )),
+        "the resumed owner must acknowledge its physical attachment write: {completed:?}"
+    );
+    assert_eq!(
+        probe.pty.ordinary_input_revision().unwrap(),
+        attachment_before + 1
+    );
+    assert!(
+        probe.pty.has_unsent_user_input(),
+        "attachment never appends CR"
+    );
     assert!(
         worktree.join(".gwt/drop-files").exists(),
         "attachment bytes are staged in the actual resumed worktree"
@@ -990,7 +1040,7 @@ fn browser_terminal_input_ignores_unrelated_acks_and_discards_a_failed_tail() {
     let (mut runtime, _probe, id) = owner_browser_input_fixture(temp.path());
     for client in ["first", "second", "third"] {
         assert!(runtime
-            .pane_send_input_to_window_events(client.into(), &id, client)
+            .pane_send_input_to_window_events(client.into(), &id, client, None)
             .is_empty());
     }
     let context = runtime.test_context();
@@ -1006,9 +1056,11 @@ fn browser_terminal_input_ignores_unrelated_acks_and_discards_a_failed_tail() {
             incarnation,
             kind: RemoteRuntimeCommandKind::Input {
                 reply_client: input_command_id.map(|_| "first".into()),
+                request_id: None,
             },
             approval_resolution_started: false,
             input_command_id,
+            attachment_outcome: None,
             result,
         };
     for unrelated in [None, Some(uuid::Uuid::new_v4())] {
@@ -1048,7 +1100,7 @@ fn browser_terminal_input_discards_the_tail_when_next_worker_cannot_start() {
     let _home = ScopedGwtHome::set(temp.path());
     let (mut runtime, _probe, id) = owner_browser_input_fixture(temp.path());
     for client in ["first", "second", "third"] {
-        runtime.pane_send_input_to_window_events(client.into(), &id, client);
+        runtime.pane_send_input_to_window_events(client.into(), &id, client, None);
     }
     let (connection_id, token) = runtime.runtimes[&id].input_in_flight.unwrap();
     let completion = RemoteRuntimeCommandCompletion {
@@ -1059,9 +1111,11 @@ fn browser_terminal_input_discards_the_tail_when_next_worker_cannot_start() {
         incarnation: runtime.runtimes[&id].incarnation,
         kind: RemoteRuntimeCommandKind::Input {
             reply_client: Some("first".into()),
+            request_id: None,
         },
         approval_resolution_started: false,
         input_command_id: Some(token),
+        attachment_outcome: None,
         result: Ok(Some(gwt::project_runtime::events::OwnerInputObservation {
             revision: 1,
             has_unsent_user_input: false,
@@ -1092,7 +1146,7 @@ fn browser_terminal_input_discards_unwritten_tail_on_owner_connection_loss() {
     let _home = ScopedGwtHome::set(temp.path());
     let (mut runtime, _probe, id) = owner_browser_input_fixture(temp.path());
     for client in ["first", "second", "third"] {
-        runtime.pane_send_input_to_window_events(client.into(), &id, client);
+        runtime.pane_send_input_to_window_events(client.into(), &id, client, None);
     }
     let (connection_id, token) = runtime.runtimes[&id].input_in_flight.unwrap();
     let old_completion = RemoteRuntimeCommandCompletion {
@@ -1103,8 +1157,10 @@ fn browser_terminal_input_discards_unwritten_tail_on_owner_connection_loss() {
         incarnation: runtime.runtimes[&id].incarnation,
         kind: RemoteRuntimeCommandKind::Input {
             reply_client: Some("first".into()),
+            request_id: None,
         },
         approval_resolution_started: false,
+        attachment_outcome: None,
         input_command_id: Some(token),
         result: Ok(None),
     };
@@ -1114,6 +1170,7 @@ fn browser_terminal_input_discards_unwritten_tail_on_owner_connection_loss() {
         2,
         None,
         gwt::protocol::ProjectOwnerHealthView {
+            recovery_id: None,
             project_key: context.project_key.to_string(),
             state: gwt::protocol::ProjectOwnerHealthState::Degraded,
             detail: Some("fixture connection loss".into()),
@@ -1155,8 +1212,12 @@ fn browser_terminal_final_ack_reconciles_a_newer_input_observation() {
         identity: runtime.runtimes[&id].owner_identity.clone(),
         id: id.clone(),
         incarnation: runtime.runtimes[&id].incarnation,
-        kind: RemoteRuntimeCommandKind::Input { reply_client: None },
+        kind: RemoteRuntimeCommandKind::Input {
+            reply_client: None,
+            request_id: None,
+        },
         approval_resolution_started: false,
+        attachment_outcome: None,
         input_command_id,
         result: Ok(Some(gwt::project_runtime::events::OwnerInputObservation {
             revision,
@@ -1179,7 +1240,7 @@ fn browser_pane_close_reports_pending_send_outcomes_once() {
     let _home = ScopedGwtHome::set(temp.path());
     let (mut runtime, _probe, id) = owner_browser_input_fixture(temp.path());
     for client in ["first", "second"] {
-        runtime.pane_send_input_to_window_events(client.into(), &id, client);
+        runtime.pane_send_input_to_window_events(client.into(), &id, client, None);
     }
     runtime.queue_window_close_finalizer(&id, None, None, false, None, None);
     let AppEventProxy::Stub(events) = &runtime.proxy else {
@@ -1207,6 +1268,50 @@ fn browser_pane_close_reports_pending_send_outcomes_once() {
 }
 
 #[test]
+fn browser_pane_send_correlates_success_refusal_and_uncertain_input() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, probe, id) = owner_browser_input_fixture(temp.path());
+    let session = probe.session.as_ref().unwrap().id.clone();
+    let request = |session_id: &str, request_id: u64| {
+        serde_json::from_value(serde_json::json!({
+            "kind": "pane_send_input", "session_id": session_id,
+            "text": "hello", "request_id": request_id
+        }))
+        .unwrap()
+    };
+    assert!(runtime
+        .handle_frontend_event("origin".into(), request(&session, 17))
+        .is_empty());
+    let events = drain_browser_owner_input(&mut runtime);
+    assert_eq!(
+        serde_json::to_value(&events[0].event).unwrap()["request_id"],
+        17
+    );
+    let refused = runtime.handle_frontend_event("origin".into(), request("missing", 18));
+    let wire = serde_json::to_value(&refused[0].event).unwrap();
+    assert_eq!(wire["ok"], false);
+    assert_eq!(wire["request_id"], 18);
+    assert!(wire["window_id"].is_null());
+    assert!(runtime
+        .handle_frontend_event("origin".into(), request(&session, 19))
+        .is_empty());
+    assert!(runtime
+        .handle_frontend_event("origin".into(), request(&session, 20))
+        .is_empty());
+    let discarded = runtime.discard_pending_remote_input(&id, "owner disconnected");
+    let wire = serde_json::to_value(&discarded[0].event).unwrap();
+    assert_eq!(wire["ok"], false);
+    assert_eq!(wire["request_id"], 19);
+    assert!(wire["error"].as_str().unwrap().contains("uncertain"));
+    assert_eq!(discarded.len(), 2);
+    assert_eq!(
+        serde_json::to_value(&discarded[1].event).unwrap()["request_id"],
+        20
+    );
+}
+
+#[test]
 fn browser_pane_send_input_requires_the_session_owning_project() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
@@ -1214,14 +1319,28 @@ fn browser_pane_send_input_requires_the_session_owning_project() {
     let session_id = &probe.session.as_ref().unwrap().id;
     let b = runtime.test_context().project_key;
     let a = gwt_core::paths::resolve_project_scope(&temp.path().join("foreign")).hash;
-    let refused =
-        runtime.pane_send_input_for_project_events("client-a".into(), &a, session_id, "foreign");
+    let refused = runtime.pane_send_input_for_project_events(
+        "client-a".into(),
+        &a,
+        session_id,
+        "foreign",
+        Some(71),
+    );
     assert!(matches!(
         &refused[0].event,
-        BackendEvent::PaneSendResult { ok: false, .. }
+        BackendEvent::PaneSendResult {
+            ok: false,
+            request_id: Some(71),
+            ..
+        }
     ));
-    let accepted =
-        runtime.pane_send_input_for_project_events("client-b".into(), &b, session_id, "own");
+    let accepted = runtime.pane_send_input_for_project_events(
+        "client-b".into(),
+        &b,
+        session_id,
+        "own",
+        Some(72),
+    );
     assert!(
         accepted.is_empty(),
         "own input is queued to the actual owner"
@@ -1229,7 +1348,11 @@ fn browser_pane_send_input_requires_the_session_owning_project() {
     let accepted = drain_browser_owner_input(&mut runtime);
     assert!(matches!(
         &accepted[0].event,
-        BackendEvent::PaneSendResult { ok: true, .. }
+        BackendEvent::PaneSendResult {
+            ok: true,
+            request_id: Some(72),
+            ..
+        }
     ));
 }
 
@@ -1362,10 +1485,22 @@ fn deregistering_pty_writer_can_finish_while_a_reserved_submit_is_settling() {
 
 #[test]
 fn terminal_agent_error_invalidates_input_even_when_pane_is_kept_for_diagnostics() {
+    retained_diagnostic_contract(false);
+}
+
+#[test]
+fn explicit_restart_drains_retained_diagnostic_before_exact_restore() {
+    retained_diagnostic_contract(true);
+}
+
+fn retained_diagnostic_contract(restart: bool) {
     use gwt::project_runtime::{
         events::{OwnerCommand, OwnerEvent},
         test_support::ProjectOwnerHarness,
     };
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
@@ -1385,6 +1520,16 @@ fn terminal_agent_error_invalidates_input_even_when_pane_is_kept_for_diagnostics
         ],
     );
     seed_owner_fixture_roster(&repo, 1);
+    configure_owner_fixture_tools(&repo, &["pane-contract-fixture"]);
+    if restart {
+        gwt_agent::save_stored_custom_agents_to_path(
+            &gwt_core::paths::gwt_config_path(),
+            &[gwt_agent::StoredCustomAgent::new(
+                super::pane_control_tests::control_custom_agent(),
+            )],
+        )
+        .expect("persist the actual Custom provider used by saved-Session restart");
+    }
     let owner = owner_fixture_block_on(ProjectOwnerHarness::start(&repo)).unwrap();
     let mut config = super::pane_control_tests::control_launch_config(&repo, 42);
     config.pending_initial_prompt =
@@ -1477,6 +1622,30 @@ fn terminal_agent_error_invalidates_input_even_when_pane_is_kept_for_diagnostics
     );
     let prompt_path = &prompt_paths[0];
     let session = probe.session.as_ref().unwrap();
+    if restart {
+        let hook = serde_json::json!({
+            "hook_event_name": "SessionStart",
+            "session_id": "retained-diagnostic-native",
+            "cwd": session.worktree_path,
+        })
+        .to_string();
+        probe.with_agent_environment(|| {
+            gwt::daemon_runtime::handle_runtime_state("SessionStart", &hook).unwrap();
+            gwt::daemon_runtime::handle_forward_for_event("SessionStart", &hook).unwrap();
+        });
+        let learned = gwt_agent::Session::load(
+            &gwt_core::paths::gwt_sessions_dir().join(format!("{}.toml", session.id)),
+        )
+        .unwrap();
+        assert_eq!(
+            learned.exact_resume_session_id(),
+            Some("retained-diagnostic-native")
+        );
+        assert!(learned
+            .session_history
+            .iter()
+            .any(|entry| entry.agent_session_id == "retained-diagnostic-native"));
+    }
     let mut idle = runtime_hook_state_for_event("Idle", "Stop", &session.id);
     idle.project_root = Some(repo.display().to_string());
     idle.branch = Some(session.branch.clone());
@@ -1567,6 +1736,65 @@ fn terminal_agent_error_invalidates_input_even_when_pane_is_kept_for_diagnostics
     assert!(generation
         .write_input(b"late input after confirmed exit")
         .is_err());
+    if restart {
+        gui.sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let (spawner, tasks) = BlockingTaskSpawner::queued();
+        gui.blocking_tasks = spawner;
+        let source =
+            gwt_agent::Session::load(&gui.sessions_dir.join(format!("{}.toml", session.id)))
+                .unwrap();
+        assert_eq!(
+            source.exact_resume_session_id(),
+            Some("retained-diagnostic-native")
+        );
+        gui.restart_window_events(&gui_id);
+        assert!(
+            gui.active_agent_sessions.contains_key(&gui_id),
+            "routing must keep the old source reserved until the exact Closed ACK"
+        );
+        assert!(
+            gui.pending_launch_completions.contains_key(&gui_id),
+            "a confirmed retained diagnostic must reach the existing owner launch adapter"
+        );
+        let events = drain_owner_launch_fixtures(&mut gui, &tasks);
+        assert!(
+            gui.runtimes.contains_key(&gui_id),
+            "actual restore receipts: {events:?}"
+        );
+        let projection = &gui.runtimes[&gui_id];
+        assert_eq!(projection.owner_identity, identity);
+        let successor =
+            owner_fixture_block_on(owner.probe(&projection.owner_pane_id, projection.incarnation))
+                .expect("the captured owner owns the exact replacement projection");
+        assert!(
+            successor.incarnation > probe.incarnation,
+            "actual restore receipts: {events:?}"
+        );
+        assert_eq!(
+            successor
+                .session
+                .as_ref()
+                .unwrap()
+                .exact_resume_session_id(),
+            source.exact_resume_session_id()
+        );
+        assert_eq!(
+            successor.session.as_ref().unwrap().agent_member_id,
+            source.agent_member_id
+        );
+        assert!(probe.pty.tree_exit_confirmed());
+        assert!(owner_fixture_block_on(owner.probe(&probe.id, probe.incarnation)).is_err());
+        assert!(generation.write_input(b"late input after restart").is_err());
+        assert!(successor.pty.try_wait().unwrap().is_none());
+        owner_fixture_block_on(owner.command(OwnerCommand::Close {
+            id: successor.id.clone(),
+            incarnation: successor.incarnation,
+        }))
+        .expect("close the exact successor through its captured physical owner");
+        assert!(successor.pty.tree_exit_confirmed());
+        owner_fixture_block_on(owner.shutdown());
+        return;
+    }
     owner_fixture_block_on(owner.command(OwnerCommand::Close {
         id: probe.id.clone(),
         incarnation: probe.incarnation,

@@ -44,7 +44,7 @@ test.describe("Issue #5542 hook transport", () => {
       const workload = runFile("python", [join(root!, "docs/perf/issue-5542/measure.py"),
         "--binary", join(root!, `target/issue-5542-after${suffix}`),
         "--receiver", join(root!, `target/issue-5542-receiver${suffix}`),
-        "--output", output, "--seconds", "10", "--workers", "12", "--modes", "current"],
+        "--output", output, "--seconds", "10", "--workers", "12", "--modes", "current", "journal"],
         { cwd: root, windowsHide: true, timeout: 60_000 }).finally(() => { finished = true; });
       // Pacing keeps this liveness check separate from the 500-event foreground stress gate.
       let responses = 0;
@@ -65,11 +65,13 @@ test.describe("Issue #5542 hook transport", () => {
       expect(summary.workers).toBe(12);
       expect(summary.modes.current.samples).toBeGreaterThanOrEqual(12);
       expect(summary.modes.current.failures).toBe(0);
+      expect(summary.modes.journal.samples).toBeGreaterThanOrEqual(12);
+      expect(summary.modes.journal.failures).toBe(0);
       expect(responses).toBeGreaterThan(0);
       expect(errors).toEqual([]);
       await info.attach(`${theme}-transport`, { path: summaryPath, contentType: "application/json" });
       await page.screenshot({ path: info.outputPath(`${theme}-checkout.png`) });
-      console.log(`${theme}: ${summary.modes.current.samples} delivered, GUI responses=${responses}, errors=0`);
+      console.log(`${theme}: transport=${summary.modes.current.samples}, journal/ACK=${summary.modes.journal.samples}, GUI responses=${responses}, errors=0`);
     });
   });
 });

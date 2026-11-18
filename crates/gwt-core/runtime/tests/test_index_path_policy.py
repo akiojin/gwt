@@ -22,13 +22,15 @@ class IndexPathPolicyTests(unittest.TestCase):
             (app / "view.generated").write_text("ignored\n", encoding="utf-8")
             (app / "view.rs").write_text("fn view() {}\n", encoding="utf-8")
 
-            rels = {
-                path.relative_to(root).as_posix()
-                for path in runner.collect_files(root)
+            collected = {
+                "legacy": {path.relative_to(root).as_posix() for path in runner.collect_files(root)},
+                "strict": {relative for relative, _ in runner._collect_file_index_v2_files_strict(root)},
             }
 
-            self.assertIn("packages/app/view.rs", rels)
-            self.assertNotIn("packages/app/view.generated", rels)
+            for collector, rels in collected.items():
+                with self.subTest(collector=collector):
+                    self.assertIn("packages/app/view.rs", rels)
+                    self.assertNotIn("packages/app/view.generated", rels)
 
     def test_collect_files_honors_git_info_exclude(self):
         if shutil.which("git") is None:

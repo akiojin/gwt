@@ -175,6 +175,7 @@ function reconcileKnowledgeList(host, entries, options) {
 const MONITOR_STATE_VIEWS = Object.freeze({
   queued: Object.freeze({ label: "Queued", tone: "idle" }),
   awaiting_measurement: Object.freeze({ label: "Awaiting measurement", tone: "idle" }),
+  awaiting_verification: Object.freeze({ label: "Awaiting verification", tone: "idle" }),
   not_ready: Object.freeze({ label: "Not ready", tone: "needs-input" }),
   source_excluded: Object.freeze({ label: "Needs triage", tone: "needs-input" }),
   launching: Object.freeze({ label: "Launching", tone: "active" }),
@@ -309,7 +310,7 @@ const ISSUE_ROW_LAUNCH_NOW_STATES = new Set(["queued", "launch_failed", "agent_f
 // queue *without* starting an agent had no control at all and meant hand-editing
 // issue-monitor.json. Offered only where such a hold exists, so the button never
 // promises a change that cannot happen.
-const ISSUE_ROW_REQUEUE_STATES = new Set(["launch_failed", "agent_failed", "awaiting_measurement"]);
+const ISSUE_ROW_REQUEUE_STATES = new Set(["launch_failed", "agent_failed", "awaiting_measurement", "awaiting_verification"]);
 const ISSUE_ROW_WORK_LANE_VIEWS = Object.freeze({
   closed: Object.freeze({ label: "Done", tone: "done" }),
   remote: Object.freeze({ label: "Remote", tone: "remote" }),
@@ -364,7 +365,7 @@ export function issueQueueColumn(entry, work = null, localLive = false) {
   if (issueStopReason(entry) !== null) return "backlog";
   // Reservations, window status and historical Work activity are not child
   // liveness evidence. Keep their existing action/authority rules separate.
-  if (["needs_human", "awaiting_measurement", "blocked_by_claim", "launch_failed", "agent_failed"].includes(entry.monitor_state)) return "backlog";
+  if (["needs_human", "awaiting_measurement", "awaiting_verification", "blocked_by_claim", "launch_failed", "agent_failed"].includes(entry.monitor_state)) return "backlog";
   if (work?.status_category === "blocked") return "backlog";
   return isIssueInTerminalQueue(entry) ? "queued" : "backlog";
 }
@@ -426,8 +427,12 @@ function issueRowSecondaryItems({ entry, work, attention, primary, localLive = n
     attention?.lane === "needs_attention" ? String(attention.reason || "").trim() : "";
   const cleanupPending = (issueEntryStateKey(entry) === "closed" || ["merged", "released"].includes(entry?.monitor_state)) &&
     issueQueueColumn(entry, work, localLive) === "active";
+  const canonicalHuman = entry?.monitor_state === "needs_human" && Object.hasOwn(entry, "human_attention");
+  const steeringReason = entry?.steering_attention?.reason
+    ? entry?.readiness_diagnosis || failureReason || exclusion || entry.steering_attention.reason : "";
   const reason = cleanupPending ? "Session cleanup pending"
-    : stopReason ?? (entry?.readiness_diagnosis || failureReason || exclusion || attentionReason);
+    : stopReason ?? (canonicalHuman ? entry.human_attention?.reason || ""
+      : steeringReason || entry?.review_attention?.reason || entry?.readiness_diagnosis || failureReason || exclusion || attentionReason);
   if (reason) {
     items.push({ kind: "reason", key: "reason", label: reason });
   }
@@ -490,6 +495,7 @@ function issueRowActionOrder({ entry, work, attention, inlineWindow, surfaceWind
         order: ["launch-now", "configure-issue", "queue-remove", "move-up", "move-down", ...workActions],
       };
     case "awaiting_measurement":
+    case "awaiting_verification":
       return { order: ["requeue-issue", "configure-issue", ...workActions] };
     case "launch_failed":
     case "agent_failed":
@@ -1030,12 +1036,13 @@ export function createKnowledgeKanbanSurface({
         const meanings = {
           "monitor:queued": "This issue is queued for the monitor to launch when capacity is available.",
           "monitor:awaiting_measurement": "Only measurement evidence remains after the merged work. Update the acceptance criteria when observations finish, or return the issue to the queue if implementation work remains.",
+          "monitor:awaiting_verification": "Only release, main or another host verification remains after the merged work. Update the acceptance criteria after verification, or explicitly return the issue to the queue when verification can run.",
           "monitor:not_ready": "This issue does not yet meet the monitor's launch requirements, such as a usable plan and tasks.",
           "monitor:source_excluded": "This issue requires source trust triage before automatic launches.",
           "monitor:launching": "The monitor is starting an agent for this issue.",
           "monitor:launched": "The monitor launched an agent for this issue.",
           "monitor:merged": "The current execution is complete; the GitHub issue may remain open until release.",
-          "monitor:released": "The monitor observed this issue closed on GitHub.",
+          "monitor:released": "This execution was released after completion or confirmed delivery. The GitHub issue may remain open.",
           "monitor:launch_failed": "The monitor could not start an agent for this issue.",
           "monitor:agent_failed": "The launched agent did not complete this issue successfully.",
           "monitor:blocked_by_claim": "Another agent holds the execution claim, so the monitor will not launch duplicate work.",
@@ -1183,7 +1190,19 @@ export function createKnowledgeKanbanSurface({
           ]).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))));
       }
       let issueWorkAssociationKey = workAssociationKey(getActiveWorkProjection?.());
-      const issueMonitorModel = createUiStateStore({ inboxByIssue: {}, status: {
+      function issueMonitorCounts(status = {}) {
+        const count = value => Number.isInteger(value) && value >= 0 ? value : 0;
+        return { queue: count(status.queue_len), active: count(status.active_count),
+          maxActive: count(status.max_active_agents ?? 1) };
+      }
+
+      const issueMonitorModel = createUiStateStore({ inboxByIssue: {}, inboxObserved: false, counts: issueMonitorCounts(),
+        humanAttention: { count: null, summary: "", byIssue: {} },
+        steeringAttention: { count: null, summary: "", byIssue: {} },
+        reviewAttention: { count: null, summary: "", byIssue: {} },
+        pmDecisionAttention: { count: null, summary: "", byWindow: {} },
+        prReviewAttention: { count: null, summary: "", byIssue: {}, byWindow: {} },
+        decisionAttention: { count: null, summary: "" }, status: {
         enabled: false,
         state: "disabled",
         queue_len: 0,
@@ -1281,6 +1300,7 @@ export function createKnowledgeKanbanSurface({
       // #5321: current backend failures remain red; history stays in the bell.
       function issueMonitorPillView(state) {
         const status = issueMonitorModel.read().status;
+        const counts = issueMonitorModel.read().counts;
         if (state === "disabled") return { label: "Stopped", tone: "idle" };
         if (state === "github_budget_hold") return { label: "Limited · GitHub", tone: "idle" };
         if (state === "error") return { label: "⚠ Error", tone: "blocked" };
@@ -1288,10 +1308,10 @@ export function createKnowledgeKanbanSurface({
           return { label: "Waiting · Hold", tone: "idle" };
         }
         if (status.agent_blackout) return { label: "⚠ Error", tone: "blocked" };
-        if (Number(status.active_count) >= Number(status.max_active_agents) && Number(status.queue_len) > 0) {
+        if (counts.active >= counts.maxActive && counts.queue > 0) {
           return { label: "Waiting · Full", tone: "idle" };
         }
-        if (!Number(status.active_count) && !Number(status.queue_len)) {
+        if (!counts.active && !counts.queue) {
           return { label: "Waiting · Empty", tone: "idle" };
         }
         return { label: "Running", tone: "active" };
@@ -1385,10 +1405,8 @@ export function createKnowledgeKanbanSurface({
       function renderIssueMonitorControls(element, windowId) {
         const bar = element?.querySelector(".knowledge-monitor-bar");
         if (!bar) return;
-        const maxActive = Math.max(
-          0,
-          Number.parseInt(String(issueMonitorModel.read().status.max_active_agents ?? 1), 10) || 0,
-        );
+        const counts = issueMonitorModel.read().counts;
+        const maxActive = counts.maxActive;
         renderIssueMonitorCapacity(bar);
         const quotaHold = normalizedIssueMonitorQuotaHold(issueMonitorModel.read().status);
         const state = effectiveIssueMonitorState(issueMonitorModel.read().status, quotaHold);
@@ -1412,6 +1430,7 @@ export function createKnowledgeKanbanSurface({
             errorKey ? "Details in notifications" : state === "quota_hold"
               ? `Provider ${quotaHold.provider} | Reset ${quotaHold.reset_at}` : "",
             issueMonitorGitHubBudgetText(issueMonitorModel.read().status),
+            issueMonitorModel.read().decisionAttention.summary,
           ].filter(Boolean).join(" | ");
 
           explainIssueControl(pill, `Issues status: ${view.label}. ${pill.title || "The monitor checks the launch queue for eligible issues."}`);
@@ -1421,17 +1440,28 @@ export function createKnowledgeKanbanSurface({
           const activity = agentActivityModel?.read();
           active.textContent = activity?.count == null ? "Active —"
             : `Active ${activity.count} · ${activity.issueCount} ${activity.issueCount === 1 ? "issue" : "issues"} · PM ${activity.pmCount}`;
-          explainIssueControl(active, `Live agents on this terminal, including PM. ${activity?.count == null ? "Runtime observation pending." : `Observed ${activity.snapshot.observed_at}.`} Issues agent capacity: ${issueMonitorModel.read().status.active_count || 0}/${maxActive}.`);
+          explainIssueControl(active, `Live agents on this terminal, including PM. ${activity?.count == null ? "Runtime observation pending." : `Observed ${activity.snapshot.observed_at}.`} Issues agent capacity: ${counts.active}/${maxActive}.`);
         }
         const queue = bar.querySelector('[data-metric="queue"]');
         if (queue) {
-          queue.textContent = `Queue ${issueMonitorModel.read().status.queue_len || 0}`;
+          queue.textContent = `Queue ${counts.queue}`;
           queue.title = issueMonitorModel.read().status.total_candidates
             ? `Total ${issueMonitorModel.read().status.total_candidates}`
             : "";
           explainIssueControl(queue, `Issues waiting in the launch queue. ${queue.title}`.trim());
         }
         const status = issueMonitorModel.read().status;
+        const verification = bar.querySelector('[data-metric="verification"]');
+        if (verification) {
+          const slots = status.verification_capacity;
+          const measured = slots && [slots.capacity, slots.running, slots.available]
+            .every(value => Number.isInteger(value) && value >= 0);
+          verification.textContent = measured
+            ? `${slots.running} of ${slots.capacity} · ${slots.available} available` : "Unavailable";
+          explainIssueControl(verification, measured
+            ? `Host verification slots: ${slots.running} running, ${slots.available} available, capacity ${slots.capacity}. Shared across projects.`
+            : "Host verification capacity is unavailable.");
+        }
         const setupGuidance = element.querySelector('[data-role="monitor-setup-guidance"]');
         if (setupGuidance) {
           setupGuidance.hidden = !(status.enabled === false && status.active_count === 0
@@ -1440,7 +1470,7 @@ export function createKnowledgeKanbanSurface({
             : "Agent not started: no saved Agent settings. Save Agent settings, then select Start.";
         }
         const capacity = bar.querySelector('[data-metric="capacity"]');
-        if (capacity) capacity.textContent = `${status.active_count || 0} of ${maxActive}`;
+        if (capacity) capacity.textContent = `${counts.active} of ${maxActive}`;
         const backlog = bar.querySelector('[data-metric="backlog"]');
         if (backlog) backlog.textContent = String(status.unqueued_open_count ?? "—");
         const scan = bar.querySelector('[data-metric="last-scan"]');
@@ -1508,32 +1538,146 @@ export function createKnowledgeKanbanSurface({
 
       }
 
+      // SPEC #5016 AC-HS1/HS2: the one place that combines the components.
+      // An Issue in several components counts once; views read only this value.
+      // PM decisions belong to a PM window, not an Issue, so they add to the
+      // Issue union instead of joining it.
+      function withDecisionAttention(model) {
+        const issueParts = [model.humanAttention, model.reviewAttention, model.steeringAttention,
+          model.prReviewAttention]
+          .filter(part => part?.count != null);
+        const decisions = model.pmDecisionAttention?.count != null ? model.pmDecisionAttention : null;
+        const parts = decisions ? [...issueParts, decisions] : issueParts;
+        if (!parts.length) return { ...model, decisionAttention: { count: null, summary: "" } };
+        const human = model.humanAttention;
+        // A status snapshot can include escalation IDs absent from the Inbox.
+        // Without those IDs the union cannot deduplicate other attention sources.
+        const count = human.count != null && human.count !== Object.keys(human.byIssue).length
+          ? null : new Set(issueParts.flatMap(part => Object.keys(part.byIssue || {}))).size + (decisions?.count ?? 0);
+        return { ...model, decisionAttention: { count,
+          summary: [count == null ? "" : `Awaiting attention ${count}`, ...parts.map(part => part.summary)].filter(Boolean).join(" | ") } };
+      }
+
+      // SPEC #5016 HSK: pm-chat publishes the unanswered decisions of one PM
+      // window from its single derivation; `null` (not loaded, or closed)
+      // removes that window from the count.
+      function applyPmDecisions(windowId, decisions) {
+        issueMonitorModel.update(model => {
+          const byWindow = { ...model.pmDecisionAttention.byWindow };
+          if (Array.isArray(decisions?.ids)) byWindow[windowId] = [...decisions.ids];
+          else delete byWindow[windowId];
+          const windows = Object.values(byWindow);
+          const count = windows.length ? windows.reduce((sum, ids) => sum + ids.length, 0) : null;
+          return withDecisionAttention({ ...model, pmDecisionAttention: { count, byWindow,
+            summary: count == null ? "" : `PM decisions ${count}` } });
+        });
+      }
+
+      // SPEC #5016 HSV: a PM window publishes the unresolved reviews its
+      // current facts observed; `null` (not loaded, or closed) removes it.
+      // A PR without an Issue is its own entry in the Issue union.
+      function applyPmReviewAttention(windowId, items) {
+        issueMonitorModel.update(model => {
+          const byWindow = { ...model.prReviewAttention.byWindow };
+          if (Array.isArray(items)) byWindow[windowId] = items.map(item => ({ ...item }));
+          else delete byWindow[windowId];
+          const windows = Object.values(byWindow);
+          const byIssue = {};
+          for (const item of windows.flat()) {
+            const numbers = Array.isArray(item.issue_numbers) ? item.issue_numbers : [];
+            const keys = numbers.length ? numbers.map(String) : [`pr-${item.pr_number}`];
+            for (const key of keys) byIssue[key] ??= { reason: String(item.reason || "").trim() || "Review unresolved" };
+          }
+          const count = windows.length ? Object.keys(byIssue).length : null;
+          return withDecisionAttention({ ...model, prReviewAttention: { count, byIssue, byWindow,
+            summary: count == null ? "" : `Unresolved reviews ${count}` } });
+        });
+      }
+
+      function withMonitorAttention(model) {
+        const { byIssue } = model.humanAttention;
+        const count = model.status.needs_human_count === undefined && model.inboxObserved
+          ? Object.keys(byIssue).length : model.status.needs_human_count ?? null;
+        return withDecisionAttention(withMonitorHolds({ ...model,
+          humanAttention: { count, summary: count == null ? "" : `Needs human ${count}`, byIssue } }));
+      }
+
+      function withMonitorHolds(model) {
+        const records = model.status.autonomous_issues;
+        if (!Array.isArray(records) || !model.inboxObserved) return model;
+        // Dispatch holds include automatic capacity/retry waits, not just
+        // human decisions. Join the two current snapshots once for every view.
+        const current = Object.fromEntries(records.filter(record => Number.isFinite(record?.issue_number))
+          .map(record => [record.issue_number, record]));
+        const byIssue = Object.fromEntries(Object.values(current).filter(record => {
+          const live = model.inboxByIssue[record.issue_number];
+          return live && issueEntryStateKey(live.issue) === "open"
+            && !["needs_human", "merged", "released", "awaiting_measurement", "awaiting_verification", "launch_failed", "agent_failed"].includes(live.state)
+            && !record.needs_human && ["implementing", "reviewing"].includes(record.phase)
+            && record.review_dispatch_hold;
+        }).map(record => [record.issue_number, {
+          reason: String(record.review_dispatch_hold.reason || "").trim() || "Review dispatch pending",
+        }]));
+        const count = Object.keys(byIssue).length;
+        // Steering can concern exhausted failed attempts as well as live
+        // launches. Its renewal count is not the number of waiting Issues.
+        const steeringByIssue = Object.fromEntries(Object.values(current).filter(record => {
+          const live = model.inboxByIssue[record.issue_number];
+          return live && issueEntryStateKey(live.issue) === "open"
+            && !["needs_human", "merged", "released", "awaiting_measurement", "awaiting_verification"].includes(live.state)
+            && !record.needs_human && ["idle", "implementing", "reviewing", "delivering"].includes(record.phase)
+            && record.steering;
+        }).map(record => [record.issue_number, {
+          reason: String(record.steering.reason || "").trim() || "PM steering requested",
+        }]));
+        const steeringCount = Object.keys(steeringByIssue).length;
+        return { ...model, reviewAttention: { count, summary: `Review holds ${count}`, byIssue },
+          steeringAttention: { count: steeringCount, summary: `PM steering ${steeringCount}`, byIssue: steeringByIssue } };
+      }
+
       function applyIssueMonitorStatus(nextStatus) {
-        issueMonitorModel.update(model => ({ ...model, status: {
-          ...model.status,
-          ...(nextStatus || {}),
-          max_active_agents_override: nextStatus?.max_active_agents_override ?? null,
-          agent_roster_capacity: nextStatus?.agent_roster_capacity ?? null,
-          agent_capacity: nextStatus?.agent_capacity ?? null,
-          quota_hold: normalizedIssueMonitorQuotaHold(nextStatus),
-          github_budget: nextStatus?.github_budget ?? null,
-          // Issue #4366 AC-6b: omitted once the hold clears, so it must not
-          // survive from the previous status the way merged fields do.
-          effective_launch_profile: nextStatus?.effective_launch_profile ?? null,
-          // Empty facts are omitted on the wire; never retain an older snapshot.
-          tier_facts: Array.isArray(nextStatus?.tier_facts) ? nextStatus.tier_facts : [],
-          tier_config_token: nextStatus?.tier_config_token ?? null,
-          // Issue #3628: omitted (skip_serializing_if) once the fleet recovers.
-          agent_blackout: nextStatus?.agent_blackout ?? null,
-          update_drain: nextStatus?.update_drain ?? null,
-        }}));
+        issueMonitorModel.update(model => {
+          const needsHumanCount = nextStatus?.needs_human_count;
+          const status = {
+            ...model.status,
+            ...(nextStatus || {}),
+            max_active_agents_override: nextStatus?.max_active_agents_override ?? null,
+            agent_roster_capacity: nextStatus?.agent_roster_capacity ?? null,
+            agent_capacity: nextStatus?.agent_capacity ?? null,
+            verification_capacity: nextStatus?.verification_capacity ?? null,
+            needs_human_count: needsHumanCount === undefined || (Number.isSafeInteger(needsHumanCount) && needsHumanCount >= 0)
+              ? needsHumanCount : null,
+            quota_hold: normalizedIssueMonitorQuotaHold(nextStatus),
+            github_budget: nextStatus?.github_budget ?? null,
+            // Issue #4366 AC-6b: omitted once the hold clears, so it must not
+            // survive from the previous status the way merged fields do.
+            effective_launch_profile: nextStatus?.effective_launch_profile ?? null,
+            // Empty facts are omitted on the wire; never retain an older snapshot.
+            tier_facts: Array.isArray(nextStatus?.tier_facts) ? nextStatus.tier_facts : [],
+            tier_config_token: nextStatus?.tier_config_token ?? null,
+            // Issue #3628: omitted (skip_serializing_if) once the fleet recovers.
+            agent_blackout: nextStatus?.agent_blackout ?? null,
+            update_drain: nextStatus?.update_drain ?? null,
+            autonomous_issues: Array.isArray(nextStatus?.autonomous_issues) ? nextStatus.autonomous_issues : [],
+          };
+          return withMonitorAttention({ ...model, status, counts: issueMonitorCounts(status) });
+        });
       }
 
       function applyIssueMonitorInbox(items) {
         const inboxByIssue = Object.fromEntries((Array.isArray(items) ? items : [])
           .filter(item => Number.isFinite(item?.issue?.number))
           .map(item => [item.issue.number, item]));
-        issueMonitorModel.update(model => ({ ...model, inboxByIssue }));
+        // SPEC #5016 AC-HS1/HS2: project reasons from the deduplicated Inbox.
+        // A deliberate stop is Held, not a pending human decision.
+        const byIssue = Object.fromEntries(Object.values(inboxByIssue)
+          .filter(item => item.state === "needs_human" && issueEntryStateKey(item.issue) === "open"
+            && issueStopReason({ monitor_state: item.state, error_message: item.error_message }) === null)
+          .map(item => [item.issue.number, {
+            reason: String(item.error_message || "").trim() || "Human decision required",
+          }]));
+        issueMonitorModel.update(model => withMonitorAttention({ ...model, inboxByIssue, inboxObserved: true,
+          humanAttention: { ...model.humanAttention, byIssue } }));
       }
 
       function applyIssueMonitorQueueResult(event) {
@@ -3411,7 +3555,17 @@ export function createKnowledgeKanbanSurface({
 
       function queueProjectedEntry(entry) {
         const live = issueMonitorModel.read().inboxByIssue[entry.number];
-        if (live) entry = { ...entry, state: live.issue.state ?? entry.state, monitor_state: live.state,
+        // Cache-only rows retain their Work attention until the live inbox
+        // arrives; a cached descriptor is never an authoritative observation.
+        entry = { ...entry };
+        delete entry.human_attention;
+        delete entry.review_attention;
+        delete entry.steering_attention;
+        if (live) entry = { ...entry, review_attention:
+          issueMonitorModel.read().reviewAttention.byIssue[entry.number] ?? null, human_attention:
+          issueMonitorModel.read().humanAttention.byIssue[entry.number] ?? null,
+          steering_attention: issueMonitorModel.read().steeringAttention.byIssue[entry.number] ?? null,
+          state: live.issue.state ?? entry.state, monitor_state: live.state,
           exclusion_reason: live.exclusion_reason ?? null, blocked_by_owner: live.blocked_by_owner ?? null };
         const diagnosis = live?.error_message;
         entry = { ...entry, error_message: typeof diagnosis === "string" ? diagnosis : null,
@@ -4470,6 +4624,14 @@ export function createKnowledgeKanbanSurface({
         pill.dataset.stateKey = row.primary.key;
         explainIssueControl(pill, issueStateExplanation(row.primary, entry), `detail-state-${number}`);
         status.appendChild(pill);
+        if (entry.human_attention || entry.review_attention || entry.steering_attention) {
+          const reason = row.secondary.find(item => item.key === "reason");
+          if (reason) {
+            const node = createNode("span", "knowledge-row-secondary-item", reason.label);
+            node.dataset.key = "reason";
+            status.appendChild(node);
+          }
+        }
         if (work?.pr_number) {
           const prState = String(work.pr_state || "").trim();
           const pr = createNode(
@@ -5456,7 +5618,7 @@ export function createKnowledgeKanbanSurface({
                     <div class="issue-monitor-stat"><span class="issue-monitor-stat-label">Agent slots</span><span class="issue-monitor-stat-value"><span class="knowledge-monitor-metric" data-metric="capacity">0 of 1</span><span class="knowledge-monitor-metric issue-monitor-census" data-metric="active">Active —</span></span></div>
                     <div class="issue-monitor-stat"><span class="issue-monitor-stat-label">Queued</span><span class="knowledge-monitor-metric" data-metric="queue">Queue 0</span></div>
                     <div class="issue-monitor-stat"><span class="issue-monitor-stat-label">Backlog</span><span class="knowledge-monitor-metric" data-metric="backlog">—</span></div>
-                    <div class="issue-monitor-stat"><span class="issue-monitor-stat-label">Verification slots</span><span class="knowledge-monitor-metric" data-metric="verification" title="The Issues does not report host verification capacity.">Not reported</span></div>
+                    <div class="issue-monitor-stat"><span class="issue-monitor-stat-label">Verification slots</span><span class="knowledge-monitor-metric" data-metric="verification">Unavailable</span></div>
                     <div class="issue-monitor-stat"><span class="issue-monitor-stat-label">Last scan</span><span class="knowledge-monitor-metric" data-metric="last-scan">Not yet</span></div>
                   </div>
                   <div class="knowledge-monitor-controls" role="group" aria-label="Issues controls">
@@ -6149,6 +6311,8 @@ export function createKnowledgeKanbanSurface({
         applyIssueMonitorStatus,
         applyRepositoryLabels,
         applyIssueMonitorInbox,
+        applyPmDecisions,
+        applyPmReviewAttention,
         applyIssueMonitorQueueResult,
         scheduleIssueMonitorProjectionRefresh,
         handleKnowledgeTransportChange,

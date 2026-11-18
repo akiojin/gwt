@@ -64,6 +64,11 @@ fn coordination_guidance_is_identical_for_all_session_kinds() {
 
     let intake = materialize_and_read(true);
     let execution = materialize_and_read(false);
+    assert!(
+        execution.contains("The parent owns final Work delivery")
+            && execution.contains("Do not call `workspace.*`, `execution.*`, `build.*`, or `pr.*`"),
+        "managed launch materialization must preserve the delegated helper authority boundary"
+    );
     assert_eq!(
         intake, execution,
         "guidance must be identical for every session kind (single guidance, FR-004)"

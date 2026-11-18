@@ -11,7 +11,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use chrono::Utc;
+use crate::timestamp::UtcTimestamp;
 use fs2::FileExt;
 use tracing_appender::non_blocking::{NonBlocking, WorkerGuard};
 
@@ -28,13 +28,13 @@ const MAX_LOG_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// The writer and consumers both use UTC so they always choose the same
 /// daily filename, including near a local midnight boundary.
 pub fn current_log_file(log_dir: &Path) -> PathBuf {
-    let today = Utc::now().date_naive();
+    let today = UtcTimestamp::now().utc_date();
     log_dir.join(format!("{LOG_FILE_BASENAME}.{today}"))
 }
 
 /// Return the path for the log file of a specific UTC date. Used by
 /// the file watcher when a date rollover is observed.
-pub fn log_file_for_date(log_dir: &Path, date: chrono::NaiveDate) -> PathBuf {
+pub fn log_file_for_date(log_dir: &Path, date: time::Date) -> PathBuf {
     log_dir.join(format!("{LOG_FILE_BASENAME}.{date}"))
 }
 
@@ -335,7 +335,7 @@ impl ProjectLogRouter {
                     // Bound open attempts and diagnostics to one per registered store.
                     sink.failed = true;
                     let diagnostic = serde_json::json!({
-                        "timestamp": Utc::now().to_rfc3339(),
+                        "timestamp": UtcTimestamp::now().to_rfc3339(),
                         "level": "WARN",
                         "target": "gwt_core::logging",
                         "fields": {

@@ -10,13 +10,13 @@ isolated temporary directories. `verify.lease.status` lists capacity,
 running/available slots, every holder's ETA, and the shared FIFO queue.
 
 ```text
-agent → /gwt:gwt-verify [--mode quick|full|pre-pr] [--headed] [--skip-user-check]
+agent → /gwt:gwt-verify [--mode full|pre-pr] [--headed] [--skip-user-check]
   ↓
 gwt-verify
   1. Establish baseline:
        git diff --name-only $(git merge-base HEAD origin/develop)..HEAD
-     (fall back to origin/main when origin/develop is absent). For
-     `--mode quick` also include `git diff --name-only` (working tree).
+     (fall back to origin/main when origin/develop is absent). Also include
+     `git diff --name-only` for working-tree changes.
   2. Classify each path into an abstract surface using
      [references/surface-taxonomy.md](surface-taxonomy.md).
   3. Discover the project's test runners from its manifests using

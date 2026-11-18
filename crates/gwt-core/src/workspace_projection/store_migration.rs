@@ -31,7 +31,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -44,6 +43,7 @@ use crate::{
         compute_path_hash, detect_repo_identity, linked_worktree_roots,
         resolve_repository_common_dir, RepoHash,
     },
+    timestamp::UtcTimestamp,
     work_events_intake::rebuild_work_events_contents_locked,
     workspace_projection::load_workspace_work_items_from_path,
 };
@@ -164,7 +164,7 @@ pub struct IssuedConsolidationPlan {
     pub manifest_hash: String,
     pub canonical_hash: String,
     pub project_root: PathBuf,
-    pub issued_at: DateTime<Utc>,
+    pub issued_at: UtcTimestamp,
     /// The Session that reviewed the plan, when the issuer had one. An apply
     /// from a different Session is refused.
     pub issued_by_session: Option<String>,
@@ -175,7 +175,7 @@ pub struct IssuedConsolidationPlan {
 pub struct QuarantineManifest {
     pub version: u32,
     pub canonical_hash: String,
-    pub quarantined_at: DateTime<Utc>,
+    pub quarantined_at: UtcTimestamp,
     pub source: OrphanedStore,
 }
 
@@ -339,7 +339,7 @@ pub fn issue_store_consolidation_plan(
         manifest_hash: plan.manifest_hash.clone(),
         canonical_hash: plan.canonical_hash.as_str().to_string(),
         project_root: plan.project_root.clone(),
-        issued_at: Utc::now(),
+        issued_at: UtcTimestamp::now(),
         issued_by_session: issued_by_session
             .map(str::trim)
             .filter(|session| !session.is_empty())
@@ -632,7 +632,7 @@ fn quarantine_store(
     let manifest = QuarantineManifest {
         version: QUARANTINE_MANIFEST_VERSION,
         canonical_hash: plan.canonical_hash.as_str().to_string(),
-        quarantined_at: Utc::now(),
+        quarantined_at: UtcTimestamp::now(),
         source: orphan.clone(),
     };
     let encoded = serde_json::to_vec_pretty(&manifest).map_err(|error| {

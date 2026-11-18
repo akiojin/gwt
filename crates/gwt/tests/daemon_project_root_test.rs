@@ -67,7 +67,14 @@ impl Fixture {
     }
 
     fn gwtd(&self) -> Command {
-        let mut command = hidden_command(env!("CARGO_BIN_EXE_gwtd"));
+        // Integration tests use Cargo's binary. The explicit socket example uses
+        // only the real front door selected from this build's artifact manifest.
+        let executable = option_env!("CARGO_BIN_EXE_gwtd")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("GWT_TEST_GWTD_EXE").map(PathBuf::from))
+            .expect("the current build's real gwtd artifact");
+        assert!(executable.is_absolute(), "gwtd artifact must be absolute");
+        let mut command = hidden_command(executable);
         // The surrounding managed session must not redirect the child to the
         // developer checkout's real runtime or coordination state.
         for key in [
@@ -343,7 +350,7 @@ fn handle_connection(
         return Ok(());
     };
     match frame {
-        ClientFrame::Subscribe { channels } if channels == ["issue_monitor"] => {
+        ClientFrame::Subscribe { channels, .. } if channels == ["issue_monitor"] => {
             subscriptions.fetch_add(1, Ordering::AcqRel);
             write_json_line(&mut stream, &DaemonFrame::Ack)?;
             write_json_line(

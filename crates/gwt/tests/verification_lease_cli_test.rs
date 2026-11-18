@@ -415,7 +415,9 @@ fn refresh_fixture_reservation(
     reservation: &mut gwt_core::index_coordinator::HeavyReservation,
     arrival: (u64, u64),
 ) {
-    let now = chrono::Utc::now().timestamp_millis().max(0) as u64;
+    let now = gwt_core::timestamp::UtcTimestamp::now()
+        .timestamp_millis()
+        .max(0) as u64;
     assert!(
         now < reservation.expires_at_ms,
         "a fixture waiter must still be alive before renewal"

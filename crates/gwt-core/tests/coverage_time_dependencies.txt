@@ -82,7 +82,6 @@ crates/gwt-github/src/client/fake.rs|resolution_deadline_uses_one_absolute_expir
 crates/gwt-github/src/client/http.rs|corpus_generation_rejects_an_expired_absolute_deadline|letdeadline=ResolutionDeadline::at(std::time::Instant::now()-Duration::from_millis(1),Duration::from_secs(1),)|1
 crates/gwt-github/src/client/http.rs|delayed_loopback_request|Ok((stream,_))=>breakstream,Err(error)iferror.kind()==std::io::ErrorKind::WouldBlock&&Instant::now()<accept_deadline=>|1
 crates/gwt-github/src/client/http.rs|delayed_loopback_request|letaccept_deadline=Instant::now()+Duration::from_secs(2)|1
-crates/gwt-github/src/client/http.rs|reqwest_execute_rejects_expired_scoped_deadline_before_submission|let_deadline=gwt_core::operation_deadline::ScopedOperationDeadline::enter(Instant::now()-Duration::from_millis(1),)|1
 crates/gwt-github/src/client/http.rs|reqwest_execute_stops_delayed_loopback_response_at_scoped_deadline|assert!(elapsed<Duration::from_millis(750),)|1
 crates/gwt-github/src/client/http.rs|reqwest_execute_with_deadline_uses_earlier_scoped_deadline|assert!(elapsed<Duration::from_millis(750),)|1
 crates/gwt-github/tests/http_client_test.rs|accept_loopback_with_timeout|Ok((stream,_))=>returnstream,Err(error)iferror.kind()==ErrorKind::WouldBlock&&Instant::now()<deadline=>|1
@@ -237,7 +236,6 @@ crates/gwt/src/app_runtime/tests/terminal_lifecycle_tests.rs|spawn_work_merge_st
 crates/gwt/src/app_runtime/tests/terminal_lifecycle_tests.rs|spawn_work_merge_status_scan_treats_gwt_runtime_writes_as_clean|wait_for_recorded_event(,&events,|events||1
 crates/gwt/src/app_runtime/tests/terminal_lifecycle_tests.rs|startup_orphan_intake_prune_dispatch_returns_before_inspection_finishes|assert_eq!(started_rx.recv_timeout(Duration::from_secs(1)).expect(),repo)|1
 crates/gwt/src/app_runtime/tests/terminal_lifecycle_tests.rs|stop_window_runtime_records_paused_work_off_the_event_loop|assert!(stop_call<Duration::from_secs(2),)|1
-crates/gwt/src/app_runtime/tests/work_projection_tests.rs|file_attachment_operation_dispatches_failed_progress_without_prompt_on_stage_failure|wait_for_recorded_event(,&recorded_events,|events||1
 crates/gwt/src/app_runtime/tests/workspace_resume_tests.rs|workspace_cleanup_failure_does_not_emit_done_work_item|wait_for_recorded_event(,&events,|events||1
 crates/gwt/src/board_read_receipts.rs|issue_3713_corrupt_receipt_and_expired_prompt_budget_warn_without_false_zero_or_denial|let_deadline=gwt_core::operation_deadline::ScopedOperationDeadline::enter(std::time::Instant::now()-std::time::Duration::from_secs(1),)|1
 crates/gwt/src/board_read_receipts.rs|issue_3713_pm_prompt_child_inherits_deadline_and_preserves_completed_results|letdeadline=Instant::now()+std::time::Duration::from_secs(5)|1
@@ -527,7 +525,6 @@ crates/gwt/src/project_index_bootstrap.rs|rebuild_for_same_cell_is_coalesced_whi
 crates/gwt/src/project_runtime.rs|physical_spawn_completes_without_gui_runtime|assert!(std::time::Instant::now()<deadline,)|1
 crates/gwt/src/project_runtime.rs|physical_spawn_completes_without_gui_runtime|letdeadline=std::time::Instant::now()+std::time::Duration::from_secs(5)|1
 crates/gwt/src/project_transport.rs|authenticated_http_and_websocket_dispatch_without_gui|assert!(matches!(tokio::time::timeout(std::time::Duration::from_secs(5),received.recv()).await.unwrap(),Some(TransportEvent::AgentFrontend|1
-crates/gwt/src/project_transport.rs|authenticated_http_and_websocket_dispatch_without_gui|assert!(matches!(tokio::time::timeout(std::time::Duration::from_secs(5),received.recv()).await.unwrap(),Some(TransportEvent::RuntimeHook(_))))|1
 crates/gwt/src/project_transport.rs|client_hub_dispatch_releases_lock_before_serializing_and_sending|letdispatch_paused=dispatch_paused_rx.recv_timeout(Duration::from_secs(5))|1
 crates/gwt/src/project_transport.rs|client_hub_dispatch_releases_lock_before_serializing_and_sending|letregistered=register_done_rx.recv_timeout(Duration::from_secs(5))|1
 crates/gwt/src/runtime_gc.rs|namespace_gc_runs_at_startup_periodically_and_stops_with_owner|assert!(matches!(events.recv_timeout(Duration::from_secs(30)),Err(mpsc::RecvTimeoutError::Disconnected)))|1
@@ -574,7 +571,6 @@ crates/gwt/tests/index_search_batch_test.rs|wait_for_process_exit|assert!(starte
 crates/gwt/tests/index_search_batch_test.rs|wait_for_rebuild_invocations|assert!(started.elapsed()<deadline,)|1
 crates/gwt/tests/issue_monitor_stop_ipc_test.rs|hung_daemon_control_publish_is_bounded_and_outcome_unknown|assert!(elapsed<Duration::from_secs(5),)|1
 crates/gwt/tests/managed_assets_test.rs|materializing_one_worktree_does_not_wait_on_a_sibling_worktrees_asset_lock|letdeadline=gwt_core::operation_deadline::ScopedOperationDeadline::enter(Instant::now()+Duration::from_secs(20),)|1
-crates/gwt/tests/migration_e2e_test.rs|t104_e2e_failure_injected_during_bareify_rolls_back_to_original_layout|assert!(elapsed<=Duration::from_secs(30),)|1
 crates/gwt/tests/open_cli_integration.rs|drop|letdeadline=Instant::now()+Duration::from_secs(10)|1
 crates/gwt/tests/open_cli_integration.rs|drop|whileInstant::now()<deadline|1
 crates/gwt/tests/open_cli_integration.rs|lock_payload|Ok(payload)=>breakpayload,Err(error)iferror.is_eof()&&Instant::now()<deadline=>|1
@@ -628,10 +624,10 @@ crates/gwt/tests/verification_admission_cli_test.rs|measure_two_worktree_continu
 crates/gwt/tests/verification_admission_cli_test.rs|measure_two_worktree_continuation|letdeadline=Instant::now()+Duration::from_secs(30)|1
 crates/gwt/tests/verification_admission_cli_test.rs|spawn_sibling_heavy|ifchild.try_wait().unwrap().is_some()||Instant::now()>=deadline|1
 crates/gwt/tests/verification_admission_cli_test.rs|spawn_sibling_heavy|letdeadline=Instant::now()+Duration::from_secs(30)|1
-crates/gwt/tests/verification_admission_cli_test.rs|start_command|assert!(Instant::now()<deadline,)|1
-crates/gwt/tests/verification_admission_cli_test.rs|start_command|letdeadline=Instant::now()+Duration::from_secs(30)|1
 crates/gwt/tests/verification_admission_cli_test.rs|wait_for_attempt|assert!(Instant::now()<deadline,)|1
 crates/gwt/tests/verification_admission_cli_test.rs|wait_for_attempt|letdeadline=Instant::now()+Duration::from_secs(30)|1
+crates/gwt/tests/verification_admission_cli_test.rs|wait_until_ready|assert!(Instant::now()<deadline,)|1
+crates/gwt/tests/verification_admission_cli_test.rs|wait_until_ready|letdeadline=Instant::now()+Duration::from_secs(30)|1
 crates/gwt/tests/verification_command_admission_test.rs|canonical_four_matrix_throughput_probe|ifInstant::now()>=next_target_sample|1
 crates/gwt/tests/verification_command_admission_test.rs|canonical_four_matrix_throughput_probe|next_target_sample=Instant::now()+Duration::from_secs(5)|1
 crates/gwt/tests/verification_command_admission_test.rs|derived_matrices_overlap_light_commands_and_serialize_heavy_commands|assert!(Instant::now()<deadline,)|1

@@ -5,7 +5,7 @@ Output to stdout in the following shape (Markdown):
 ```text
 ## Verification Report
 
-Mode: <quick|full|pre-pr>
+Mode: <full|pre-pr>
 Launch mode: autonomous | interactive
 Baseline: merge-base HEAD..origin/develop (<N> commits, <M> files)
 Changed surfaces: <abstract surface list>

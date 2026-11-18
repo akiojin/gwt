@@ -326,7 +326,7 @@ class IndexHealthTests(unittest.TestCase):
             self.assertFalse(search["ok"])
             self.assertEqual(search.get("error_code"), "INDEX_UNHEALTHY")
 
-    def test_index_specs_full_rebuild_retries_after_corrupt_store_open_failure(self):
+    def test_index_specs_full_rebuild_preserves_shared_pool_on_open_failure(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "repo"
             root.mkdir()
@@ -334,28 +334,38 @@ class IndexHealthTests(unittest.TestCase):
             cache_root = Path(tmp) / ".gwt" / "cache" / "issues" / self.REPO_HASH
             self._write_cached_spec(cache_root)
 
-            original_make = runner._make_chroma_collection
             calls = {"count": 0}
 
-            def flaky_make(db_path, collection_name):
+            def failed_make(db_path, collection_name):
                 calls["count"] += 1
-                if calls["count"] == 1:
-                    raise RuntimeError("corrupt hnsw")
-                return original_make(db_path, collection_name)
+                raise RuntimeError("unconfirmed store open failure")
 
             with mock.patch.dict(os.environ, {"HOME": tmp}, clear=False):
-                with mock.patch.object(runner, "_make_chroma_collection", flaky_make):
-                    result = runner.action_index_specs_v2(
-                        project_root=str(root),
-                        repo_hash=self.REPO_HASH,
-                        worktree_hash=None,
-                        mode="full",
-                        db_root=db_root,
-                    )
+                args = dict(project_root=str(root), repo_hash=self.REPO_HASH,
+                            worktree_hash=None, mode="full", db_root=db_root)
+                initial = runner.action_index_specs_v2(**args)
+                self.assertTrue(initial["ok"], initial)
+                db_path = runner.resolve_db_path(self.REPO_HASH, None, "issues", db_root)
+                pointer = runner.active_pointer_path(db_path).read_bytes()
+                pool = runner._issue_record_pool(db_path)
 
-            self.assertTrue(result["ok"], result)
-            self.assertGreater(result["indexed"], 0)
-            self.assertGreaterEqual(calls["count"], 2)
+                with mock.patch.object(runner, "_make_chroma_collection", failed_make):
+                    result = runner.action_index_specs_v2(**args)
+                self.assertFalse(result["ok"], result)
+                self.assertEqual(result["error_code"], "BUILD_FAILED")
+                self.assertEqual(calls["count"], 1)
+                self.assertEqual(runner.active_pointer_path(db_path).read_bytes(), pointer)
+                self.assertTrue((pool / "chroma.sqlite3").is_file())
+                self.assertEqual(list(pool.parent.glob(".store.quarantine-*")), [])
+
+                retry = runner.action_index_specs_v2(**args)
+                self.assertEqual(retry["error_code"], "REPAIR_STOPPED", retry)
+                repaired = runner.action_index_issues_v2(
+                    repo_hash=self.REPO_HASH, project_root=str(root),
+                    db_root=db_root, repair=True,
+                )
+                self.assertTrue(repaired["ok"], repaired)
+                self.assertEqual(repaired["newly_embedded"], 0, repaired)
 
 
 if __name__ == "__main__":

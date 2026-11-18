@@ -87,6 +87,20 @@ fn playwright_config_does_not_claim_unused_visual_snapshots() {
 }
 
 #[test]
+fn playwright_config_opens_headed_chromium_off_screen_without_minimizing() {
+    let config = read("crates/gwt/playwright/playwright.config.ts");
+
+    assert!(
+        config.contains("launchOptions") && config.contains("--window-position=-32000,-32000"),
+        "headed Chromium must open off screen so verify.run does not steal focus (#6977)"
+    );
+    assert!(
+        !config.contains("--start-minimized"),
+        "a minimized window reports document.visibilityState hidden and breaks focus specs (#6977)"
+    );
+}
+
+#[test]
 fn frontend_ci_runs_the_project_open_browser_spec() {
     let workflow = read(".github/workflows/test.yml");
     let runner = read("scripts/run-visual-tests.sh");

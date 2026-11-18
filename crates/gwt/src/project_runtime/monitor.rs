@@ -1,5 +1,6 @@
 //! Monitor commits made by the fixed project's physical owner.
 use super::launch_payload::LaunchFeedbackContext;
+use crate::monitor_duplicate_runtime::HeldMonitorPromptSession;
 use crate::runtime_daemon_events::{
     IssueMonitorAgentFailureSource, IssueMonitorControlPublishError,
 };
@@ -330,7 +331,8 @@ pub(crate) fn reject_preflight_launch(
                             claim.snapshot_tabs.clone(),
                         );
                     }
-                    let status = observed.agent_status_at(&chrono::Utc::now().to_rfc3339());
+                    let status = observed
+                        .agent_status_at(&gwt_core::timestamp::UtcTimestamp::now().to_rfc3339());
                     let unissued = prefs
                         .pending_launch_deliveries
                         .iter()
@@ -455,7 +457,7 @@ pub(crate) fn reject_preflight_launch(
                     );
                     let prepared = monitor.prepare_autonomous_handoff_delivery(
                         issue,
-                        &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                        &gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds(),
                     );
                     *prefs = monitor.prefs();
                     Ok(prepared)
@@ -788,7 +790,7 @@ impl MonitorLaunch {
     pub fn heartbeat(&self, at: Option<&str>, source_event: Option<&str>) -> Result<(), String> {
         self.check_current()?;
         publish(&self.root,json!({"heartbeat":{
-            "issue_number":self.issue()?, "at":at.map(str::to_string).unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
+            "issue_number":self.issue()?, "at":at.map(str::to_string).unwrap_or_else(|| gwt_core::timestamp::UtcTimestamp::now().to_rfc3339()),
             "agent_id":self.agent_id, "source_event":source_event,
         }})).map_err(|error| error.to_string())
     }
@@ -822,6 +824,31 @@ impl MonitorLaunch {
             payload
         };
         publish(&self.root, payload).map_err(|error| error.to_string())
+    }
+
+    /// Retire an exited diagnostic only after this exact launch's failure
+    /// committed an automatic retry. Publishing alone is not a close receipt.
+    pub(crate) fn terminal_failure_retry(
+        &self,
+        detail: &str,
+        failure: Option<&crate::IssueMonitorFailure>,
+    ) -> Result<Option<u64>, String> {
+        let before = self.read_monitor();
+        let publication = self.failure(detail, failure, true);
+        let before = before?;
+        let exact_source = self
+            .source
+            .as_ref()
+            .is_some_and(|source| source.matches(&before, &self.id));
+        let previous_version = before.prefs().failure_release_version;
+        let after = self.read_monitor()?;
+        let issue = self.issue()?;
+        if exact_source
+            && automatic_retry_committed(&after.prefs(), issue, previous_version, detail)
+        {
+            return Ok(Some(issue));
+        }
+        publication.map(|()| None)
     }
 
     /// A failed worker has proved that no physical candidate remains. Only
@@ -858,7 +885,7 @@ impl MonitorLaunch {
         if let Some(attempt) = self.feedback.issue_monitor_autonomous_handoff.as_ref() {
             let issue = self.issue()?;
             let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&self.root);
-            let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds();
             let (_, committed) = crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
                 // Zero identifies the no-pane preflight rejection. Captured
                 // failed runtimes may compensate after their writer is revoked.
@@ -1181,29 +1208,225 @@ impl MonitorLaunch {
     }
 }
 
+fn automatic_retry_committed(
+    prefs: &crate::IssueMonitorPrefs,
+    issue: u64,
+    previous_version: u64,
+    detail: &str,
+) -> bool {
+    prefs.autonomous_mode
+        && prefs.autonomous_records.iter().any(|record| {
+            record.issue_number == issue && record.phase != crate::AutonomousPhase::NeedsHuman
+        })
+        && prefs.requeue_audit.iter().any(|release| {
+            release.issue_number == issue
+                && release.release_version > previous_version
+                && !release.operator_requested
+                && release.reason == detail
+                && release.retry_record.is_some()
+        })
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+
+    #[test]
+    fn terminal_retry_close_requires_a_new_matching_automatic_audit() {
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                autonomous_mode: true,
+                ..Default::default()
+            },
+        );
+        let detail = "Process exited with status 1";
+        monitor.record_autonomous_failure(4131, detail, "2026-11-11T02:16:12Z");
+        let mut prefs = monitor.prefs();
+        assert!(automatic_retry_committed(&prefs, 4131, 0, detail));
+        assert!(!automatic_retry_committed(&prefs, 4131, 1, detail));
+        assert!(!automatic_retry_committed(
+            &prefs,
+            4131,
+            0,
+            "another failure"
+        ));
+        prefs.requeue_audit[0].operator_requested = true;
+        assert!(!automatic_retry_committed(&prefs, 4131, 0, detail));
+        prefs.requeue_audit[0].operator_requested = false;
+        prefs.autonomous_records[0].phase = crate::AutonomousPhase::NeedsHuman;
+        assert!(!automatic_retry_committed(&prefs, 4131, 0, detail));
+    }
+}
+
 const MONITOR_STARTUP_TIMEOUT_PREFIX: &str = "Issues startup timed out after ";
+
+#[cfg(test)]
+mod startup_diagnosis_tests {
+    use super::monitor_startup_failure_detail;
+
+    #[test]
+    fn grok_unsubmitted_composer_and_hook_rejection_are_distinct() {
+        let composer = monitor_startup_failure_detail(
+            7183,
+            Some("Grok Build\n╭────────────────────╮\n  ❯ $gwt-execute #7183\n╰────────────────────╯\nShift+Tab mode"),
+        );
+        assert!(
+            composer.contains("initial prompt was not submitted"),
+            "{composer}"
+        );
+        let rejected = monitor_startup_failure_detail(
+            7183,
+            Some("Grok Build\nUserPromptSubmit hook blocked: project policy denied this prompt\n│ ❯ │"),
+        );
+        assert!(
+            rejected.contains("initial prompt rejected by hook"),
+            "{rejected}"
+        );
+        assert!(rejected.contains("project policy denied this prompt"));
+    }
+
+    /// Issue #7465: a failed managed hook means gwt can never observe the
+    /// initial prompt, so the diagnosis names the hook failure and is
+    /// reported without waiting for the 180s timeout.
+    #[test]
+    fn issue_7465_grok_managed_hook_failure_is_an_immediate_startup_failure() {
+        let screen = "Grok Build\n♦ pre_tool_use hook (project/settings.local) failed, ignored: exit code 1: ParserError: ;\n│ ❯ │";
+        assert!(super::startup_hook_failure_line(screen).is_some());
+        let detail = monitor_startup_failure_detail(7465, Some(screen));
+        assert!(
+            detail.starts_with("Issues startup failed: managed hook failed"),
+            "{detail}"
+        );
+        assert!(detail.contains("ParserError"), "{detail}");
+        assert!(gwt_agent::is_transient_launch_failure(&detail), "{detail}");
+        // A policy denial is the hook working, not failing.
+        assert!(super::startup_hook_failure_line(
+            "PreToolUse:Bash hook error: Agent Workspace identity is required"
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn grok_startup_reports_authentication_and_confirmation_evidence() {
+        let auth =
+            monitor_startup_failure_detail(7183, Some("Sign in to Grok\nEnter your API key"));
+        assert!(auth.contains("authentication required"), "{auth}");
+        let confirmation = monitor_startup_failure_detail(
+            7183,
+            Some("Do you trust the contents of this directory?\nYes, proceed\nNo, quit"),
+        );
+        assert!(
+            confirmation.contains("confirmation required"),
+            "{confirmation}"
+        );
+    }
+
+    #[test]
+    fn ordinary_banner_and_codex_diagnostics_keep_their_meaning() {
+        let banner = monitor_startup_failure_detail(
+            7183,
+            Some("Grok Build\nRead Terms and Privacy Policy.\n│ ❯ │"),
+        );
+        assert!(!banner.contains("confirmation required"), "{banner}");
+        assert!(banner.contains("no initial prompt submission or tool activity"));
+        let history = monitor_startup_failure_detail(
+            7183,
+            Some("❯ $gwt-execute #7183\nPreToolUse hook denied: tool not allowed\n╭────╮\n  ❯\n╰────╯"),
+        );
+        assert!(
+            history.contains("no initial prompt submission or tool activity"),
+            "{history}"
+        );
+        let codex = monitor_startup_failure_detail(
+            7183,
+            Some("› $gwt-execute #7183\nError: startup failed"),
+        );
+        assert!(codex.contains("initial prompt was not submitted"));
+        assert!(codex.contains("last output: Error: startup failed"));
+    }
+}
+
+/// A provider line reporting that a configured hook itself failed to run, as
+/// Grok prints it (`pre_tool_use hook (project/settings.local) failed,
+/// ignored: exit code 1: ...`). Policy denials are the hook working and do
+/// not match.
+pub(crate) fn startup_hook_failure_line(screen: &str) -> Option<&str> {
+    screen.lines().rev().find(|line| {
+        let lower = line.to_ascii_lowercase();
+        lower.contains(" hook (") && lower.contains(") failed")
+    })
+}
+
 pub fn monitor_startup_failure_detail(issue: u64, screen: Option<&str>) -> String {
     let screen = screen.unwrap_or_default();
+    // Issue #7465: gwt observes the initial prompt only through its managed
+    // hooks, so a failing hook would otherwise end in the 180s timeout.
+    if let Some(line) = startup_hook_failure_line(screen) {
+        return format!(
+            "Issues startup failed: managed hook failed before the initial prompt; last output: {}; {}",
+            line.trim().chars().take(800).collect::<String>(),
+            gwt_agent::TRANSIENT_LAUNCH_RETRY_HINT
+        );
+    }
     let owner = format!("#{issue}");
+    let mut in_prompt_box = false;
     let unsubmitted = screen.lines().any(|line| {
-        let Some(composer) = line.trim_start().strip_prefix('›') else {
+        let line = line.trim_start();
+        if line.starts_with('╭') || line.starts_with('╰') {
+            in_prompt_box = line.starts_with('╭');
+            return false;
+        }
+        let Some(composer) = line.strip_prefix('›').or_else(|| {
+            // Grok's composer is inside a rounded box, while submitted
+            // conversation history also uses ❯ outside that box.
+            in_prompt_box
+                .then_some(line.trim_start_matches('│').trim_start())?
+                .strip_prefix('❯')
+        }) else {
             return false;
         };
         let mut words = composer.split_whitespace();
         words.next() == Some("$gwt-execute") && words.next() == Some(owner.as_str())
     });
-    let observation = if unsubmitted {
+    let blocked_hook = screen.lines().rev().find(|line| {
+        let lower = line.to_ascii_lowercase();
+        (lower.contains("userpromptsubmit") || lower.trim_start().starts_with("prompt "))
+            && lower.contains("hook")
+            && ["blocked", "rejected", "denied"]
+                .iter()
+                .any(|word| lower.contains(word))
+    });
+    let authentication = screen.lines().rev().find(|line| {
+        let lower = line.trim().to_ascii_lowercase();
+        lower.starts_with("sign in to grok") || lower.starts_with("enter your api key")
+    });
+    let confirmation = screen.lines().rev().find(|line| {
+        line.trim()
+            .to_ascii_lowercase()
+            .starts_with("do you trust ")
+    });
+    let observation = if blocked_hook.is_some() {
+        "initial prompt rejected by hook"
+    } else if authentication.is_some() {
+        "authentication required before initial prompt can start"
+    } else if confirmation.is_some() {
+        "confirmation required: folder trust must be granted before initial prompt can start"
+    } else if unsubmitted {
         "initial prompt was not submitted"
     } else {
         "no initial prompt submission or tool activity"
     };
-    let error = screen
-        .lines()
-        .find(|line| {
-            let lower = line.to_ascii_lowercase();
-            lower.contains("could not read windows sandbox configuration")
-                || lower.contains("error")
-                || lower.contains("failed")
+    let error = blocked_hook
+        .or(authentication)
+        .or(confirmation)
+        .or_else(|| {
+            screen.lines().find(|line| {
+                let lower = line.to_ascii_lowercase();
+                lower.contains("could not read windows sandbox configuration")
+                    || lower.contains("error")
+                    || lower.contains("failed")
+            })
         })
         .map(|line| {
             format!(
@@ -1228,7 +1451,7 @@ pub fn prepare_issue_monitor_handoff_delivery(
     materializer_id: &str,
     bind_existing_session: bool,
 ) -> Result<Option<crate::AutonomousHandoffDeliveryPreparation>, String> {
-    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds();
     let preparation =
         crate::prepare_autonomous_handoff_delivery_from_prefs(prefs_path, issue_number, &now)
             .map_err(|error| format!("failed to prepare the autonomous answer: {error}"))?;
@@ -1365,6 +1588,10 @@ pub(crate) fn deliver_existing_answer(
     let write = || -> Result<(), String> {
         launch.check_current()?;
         let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)?;
+        let held_session = match identity.as_ref() {
+            Some(identity) => HeldMonitorPromptSession::Bound(identity),
+            None => HeldMonitorPromptSession::Unbound(&session),
+        };
         let commit = || -> Result<(), String> {
             launch.check_current()?;
             if let Some(binding) = &session.execution_binding {
@@ -1377,11 +1604,17 @@ pub(crate) fn deliver_existing_answer(
                     );
                 }
             }
-            super::agent_dispatch::write_current_pane_input(&writers, &launch.id, &writer, &prompt)
+            super::agent_dispatch::write_current_pane_input(
+                &writers,
+                &launch.id,
+                &writer,
+                &prompt,
+                Some(held_session),
+            )
         };
-        if let Some(identity) = identity {
+        if let Some(identity) = identity.as_ref() {
             crate::cli::execution_state::with_current_active_session_execution_identity_lease(
-                &sessions, &identity, commit,
+                &sessions, identity, commit,
             )
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "autonomous answer producing Session changed".to_string())?
@@ -1403,7 +1636,7 @@ pub(crate) fn deliver_existing_answer(
         }
     };
     if let Err(error) = write() {
-        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds();
         let marker = crate::mark_autonomous_handoff_delivery_ambiguous_from_prefs(
             &prefs_path,
             &attempt.handoff_id,

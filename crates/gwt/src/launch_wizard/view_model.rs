@@ -22,8 +22,24 @@ impl LaunchWizardState {
         &self,
         profiles: &[crate::IssueMonitorLaunchProfile],
     ) -> IssueMonitorProfileChoices {
-        let agents = self
-            .detected_agents
+        IssueMonitorProfileChoices {
+            agents: self.issue_monitor_agent_choices(profiles),
+            docker_services: self.docker_service_options(),
+            default_docker_service: self
+                .context
+                .docker_context
+                .as_ref()
+                .and_then(|context| context.suggested_service.clone()),
+            windows_shell_supported: cfg!(windows),
+        }
+    }
+
+    /// Pure input assistance; no launch, Monitor or Docker discovery.
+    pub fn issue_monitor_agent_choices(
+        &self,
+        profiles: &[crate::IssueMonitorLaunchProfile],
+    ) -> Vec<IssueMonitorAgentChoices> {
+        self.detected_agents
             .iter()
             .map(|agent| {
                 let mut state = self.clone();
@@ -75,6 +91,9 @@ impl LaunchWizardState {
                     id: agent.id.clone(),
                     name: agent.name.clone(),
                     is_custom: agent.custom_agent.is_some(),
+                    model_catalog_warning: (agent.id == "codex"
+                        && super::codex_models::cached_rows().is_none())
+                    .then(|| "The live Codex model catalog is unavailable. Saved values are kept; built-in suggestions remain available. Retry after Codex refreshes its catalog.".to_string()),
                     supports_model_input: !models.is_empty()
                         || state.current_agent_supports_freetext_model(),
                     models,
@@ -99,17 +118,7 @@ impl LaunchWizardState {
                     session_modes,
                 }
             })
-            .collect();
-        IssueMonitorProfileChoices {
-            agents,
-            docker_services: self.docker_service_options(),
-            default_docker_service: self
-                .context
-                .docker_context
-                .as_ref()
-                .and_then(|context| context.suggested_service.clone()),
-            windows_shell_supported: cfg!(windows),
-        }
+            .collect()
     }
 
     pub fn view(&self) -> LaunchWizardView {
@@ -189,7 +198,9 @@ impl LaunchWizardState {
                 && show_runtime_confirmation,
             show_execution_mode: false,
             show_skip_permissions: false,
-            show_fast_mode: false,
+            show_fast_mode: show_manual_setup && self.effective_agent_id() == "claude",
+            show_codex_speed: show_manual_setup && self.agent_is_codex(),
+            codex_speed: self.codex_speed,
             show_hermes_options,
             hermes_needs_setup: show_hermes_options && self.agent_needs_configuration("hermes"),
             show_opencode_options,
@@ -599,7 +610,12 @@ impl LaunchWizardState {
                 },
             });
         }
-        if self.current_agent_supports_fast_mode() {
+        if self.agent_is_codex() {
+            summary.push(LaunchWizardSummaryView {
+                label: "Speed".to_string(),
+                value: format!("{:?}", self.codex_speed),
+            });
+        } else if self.current_agent_supports_fast_mode() {
             summary.push(LaunchWizardSummaryView {
                 label: "Fast mode".to_string(),
                 value: if self.fast_mode_enabled_for_current_agent() {
@@ -935,12 +951,60 @@ impl LaunchWizardState {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{TimeZone, Utc};
+
     use tempfile::tempdir;
 
     use super::super::profiles::load_launch_sessions;
     use super::super::test_support::*;
     use super::*;
+
+    #[test]
+    fn saved_agent_choices_report_catalog_read_recovery_without_changing_values() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("models_cache.json");
+        let _catalog = super::super::codex_models::test_override::set(path.clone());
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            sample_agent_options(),
+            Vec::new(),
+        );
+        state.model = "private-model".into();
+        state.reasoning = "high".into();
+        let choices = || serde_json::to_value(state.issue_monitor_agent_choices(&[])).unwrap();
+        for malformed in [None, Some("{broken")] {
+            if let Some(body) = malformed {
+                std::fs::write(&path, body).unwrap();
+            }
+            let wire = choices();
+            let codex = wire
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["id"] == "codex")
+                .unwrap();
+            assert!(codex["model_catalog_warning"].is_string());
+            assert!(!codex["models"].as_array().unwrap().is_empty());
+            let claude = wire
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["id"] == "claude")
+                .unwrap();
+            assert!(claude["model_catalog_warning"].is_null());
+        }
+        std::fs::write(&path, r#"{"models":[]}"#).unwrap();
+        let wire = choices();
+        let codex = wire
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == "codex")
+            .unwrap();
+        assert!(codex["model_catalog_warning"].is_null());
+        assert!(codex["models"].as_array().unwrap().is_empty());
+        assert_eq!(state.model, "private-model");
+        assert_eq!(state.reasoning, "high");
+    }
 
     fn grok_manual_state() -> LaunchWizardState {
         let mut agents = sample_agent_options();
@@ -1308,7 +1372,7 @@ mod tests {
             "feature/old",
             Path::new("/tmp/old-repo"),
             gwt_agent::AgentId::Codex,
-            Utc.with_ymd_and_hms(2026, 6, 13, 9, 0, 0).unwrap(),
+            gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 6, 13, 9, 0, 0).unwrap(),
             None,
         );
         codex.session_mode = gwt_agent::SessionMode::Continue;
@@ -1593,6 +1657,7 @@ mod tests {
             session_mode: gwt_agent::SessionMode::Normal,
             skip_permissions: true,
             fast_mode: false,
+            codex_speed: Default::default(),
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             docker_service: None,
             docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -1673,6 +1738,7 @@ mod tests {
                 live_window_id: None,
                 skip_permissions: true,
                 codex_fast_mode: true,
+                codex_speed: Default::default(),
                 runtime_target: gwt_agent::LaunchRuntimeTarget::Docker,
                 docker_service: Some("gwt".to_string()),
                 docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Restart,
@@ -1711,6 +1777,7 @@ mod tests {
                 live_window_id: None,
                 skip_permissions: true,
                 codex_fast_mode: true,
+                codex_speed: Default::default(),
                 runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
                 docker_service: None,
                 docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -1771,11 +1838,44 @@ mod tests {
                 live_window_id: None,
                 skip_permissions: true,
                 codex_fast_mode: true,
+                codex_speed: Default::default(),
                 runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
                 docker_service: None,
                 docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             }],
         );
+
+        let mut unrelated_context = state.context.clone();
+        unrelated_context.live_sessions[0].session_id = "another-codex-session".into();
+        let mut resume = LaunchWizardState::open_with(
+            unrelated_context,
+            sample_agent_options(),
+            state.quick_start_entries.clone(),
+        );
+        assert_eq!(
+            resume.view().quick_start_entries[0]
+                .reuse_action_label
+                .as_deref(),
+            Some("Resume")
+        );
+        resume.apply(LaunchWizardAction::ApplyQuickStart {
+            index: 0,
+            mode: QuickStartLaunchMode::Resume,
+        });
+        match resume.completion.as_ref() {
+            Some(LaunchWizardCompletion::Launch(request)) => match request.as_ref() {
+                LaunchWizardLaunchRequest::Agent(config) => {
+                    assert_eq!(config.session_mode, gwt_agent::SessionMode::Resume);
+                    assert_eq!(config.resume_session_id.as_deref(), Some("resume-1"));
+                    assert_eq!(
+                        config.predecessor_session_id.as_deref(),
+                        Some("gwt-session-1")
+                    );
+                }
+                other => panic!("expected exact Resume launch, got {other:?}"),
+            },
+            other => panic!("another same-provider window must not replace Resume: {other:?}"),
+        }
 
         let view = state.view();
         assert_eq!(
@@ -1845,6 +1945,7 @@ mod tests {
                 live_window_id: None,
                 skip_permissions: true,
                 codex_fast_mode: true,
+                codex_speed: Default::default(),
                 runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
                 docker_service: None,
                 docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -1886,6 +1987,7 @@ mod tests {
                 live_window_id: None,
                 skip_permissions: true,
                 codex_fast_mode: true,
+                codex_speed: Default::default(),
                 runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
                 docker_service: None,
                 docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -1963,7 +2065,7 @@ mod tests {
         assert!(view
             .launch_summary
             .iter()
-            .any(|item| item.label == "Fast mode" && item.value == "off"));
+            .any(|item| item.label == "Speed" && item.value == "Off"));
     }
 
     #[test]
@@ -2256,6 +2358,7 @@ mod tests {
                 live_window_id: None,
                 skip_permissions: true,
                 codex_fast_mode: false,
+                codex_speed: Default::default(),
                 runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
                 docker_service: None,
                 docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -2815,7 +2918,7 @@ mod tests {
             "feature/gui",
             &worktree,
             gwt_agent::AgentId::Codex,
-            Utc.with_ymd_and_hms(2026, 4, 14, 11, 0, 0).unwrap(),
+            gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 4, 14, 11, 0, 0).unwrap(),
             "agent-session",
         );
 
@@ -3115,6 +3218,7 @@ mod tests {
             session_mode: gwt_agent::SessionMode::Normal,
             skip_permissions: false,
             fast_mode: false,
+            codex_speed: Default::default(),
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             docker_service: None,
             docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,

@@ -14,7 +14,7 @@ use std::{
     path::Path,
 };
 
-use chrono::{DateTime, Utc};
+use gwt_core::timestamp::UtcTimestamp;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -68,14 +68,14 @@ pub(crate) fn monitor_list_cache_ttl_secs() -> i64 {
 #[derive(Serialize, Deserialize)]
 struct CachedListResponse {
     key: String,
-    fetched_at: DateTime<Utc>,
+    fetched_at: UtcTimestamp,
     stdout: String,
 }
 
 pub(crate) fn cached_list_response_with(
     cache_dir: &Path,
     key: &str,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
     fetch: impl FnOnce() -> Result<String, String>,
 ) -> Result<String, String> {
     cached_list_response_at_with(cache_dir, key, now, monitor_list_cache_ttl_secs(), fetch)
@@ -87,10 +87,10 @@ pub(crate) fn cached_list_response_with(
 pub fn cached_list_response_at_with(
     cache_dir: &Path,
     key: &str,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
     ttl_secs: i64,
     fetch: impl FnOnce() -> Result<String, String>,
-) -> Result<(DateTime<Utc>, String), String> {
+) -> Result<(UtcTimestamp, String), String> {
     // A short common lock prevents cleanup from deleting a concurrently
     // refreshed page. Never hold it across the live fetch.
     if let Some(_lock) = list_cache_lock(cache_dir) {
@@ -101,7 +101,7 @@ pub fn cached_list_response_at_with(
         .ok()
         .and_then(|bytes| serde_json::from_slice::<CachedListResponse>(&bytes).ok())
     {
-        let age = now.signed_duration_since(cached.fetched_at).num_seconds();
+        let age = now.whole_seconds_since(cached.fetched_at);
         if cached.key == key && (0..ttl_secs).contains(&age) && valid_list_response(&cached.stdout)
         {
             return Ok((cached.fetched_at, cached.stdout));
@@ -159,14 +159,14 @@ fn list_cache_lock(cache_dir: &Path) -> Option<ListCacheLock> {
 
 /// Called only under the same lock as publication. Unrecognized files and
 /// unreadable entries stay untouched; cleanup failures never affect reads.
-fn reclaim_expired_list_pages(cache_dir: &Path, now: DateTime<Utc>) {
+fn reclaim_expired_list_pages(cache_dir: &Path, now: UtcTimestamp) {
     // Readers tolerate extra fields for compatibility; reclamation must not
     // assume that a future format has the same expiry contract.
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     struct KnownPage {
         key: String,
-        fetched_at: DateTime<Utc>,
+        fetched_at: UtcTimestamp,
         stdout: String,
     }
 
@@ -185,8 +185,7 @@ fn reclaim_expired_list_pages(cache_dir: &Path, now: DateTime<Utc>) {
             continue;
         };
         if entry.file_name() == std::ffi::OsStr::new(&list_cache_file_name(&cached.key))
-            && now.signed_duration_since(cached.fetched_at).num_seconds()
-                >= LIST_CACHE_RETENTION_SECS
+            && now.whole_seconds_since(cached.fetched_at) >= LIST_CACHE_RETENTION_SECS
             && valid_list_response(&cached.stdout)
         {
             let _ = std::fs::remove_file(path);
@@ -430,12 +429,15 @@ fn text(row: &Value, keys: &[&str]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use crate::shift_test_timestamp;
+    use time::Duration;
+
     use super::*;
 
     fn write_cached_page(
         cache_dir: &Path,
         key: &str,
-        fetched_at: DateTime<Utc>,
+        fetched_at: UtcTimestamp,
     ) -> std::path::PathBuf {
         let mut hasher = DefaultHasher::new();
         key.hash(&mut hasher);
@@ -451,15 +453,38 @@ mod tests {
     }
 
     #[test]
+    fn cached_page_keeps_legacy_rfc3339_bytes_and_reuses_the_acquisition() {
+        let cache = tempfile::tempdir().unwrap();
+        let fetched_at = UtcTimestamp::parse_rfc3339("2026-11-18T15:00:00.00798+09:00").unwrap();
+        let first =
+            cached_list_response_at_with(cache.path(), "page", fetched_at, 60, || Ok("[]".into()))
+                .unwrap();
+        assert_eq!(first, (fetched_at, String::from("[]")));
+        let bytes = std::fs::read(cache.path().join(list_cache_file_name("page"))).unwrap();
+        assert_eq!(
+            bytes,
+            br#"{"key":"page","fetched_at":"2026-11-18T06:00:00.007980Z","stdout":"[]"}"#
+        );
+
+        let reused = cached_list_response_at_with(
+            cache.path(),
+            "page",
+            shift_test_timestamp(fetched_at, Duration::seconds(1)),
+            60,
+            || panic!("the legacy cached page is still fresh"),
+        )
+        .unwrap();
+        assert_eq!(reused, first);
+    }
+
+    #[test]
     fn shorter_reader_preserves_periodic_pages_for_their_freshness_window() {
         let cache = tempfile::tempdir().unwrap();
-        let start = DateTime::parse_from_rfc3339("2026-11-10T00:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
+        let start = UtcTimestamp::parse_rfc3339("2026-11-10T00:00:00Z").unwrap();
         let mut monitor_calls = 0;
         let mut ordinary_calls = 0;
         for tick in 0..20 {
-            let now = start + chrono::Duration::seconds(tick * 30);
+            let now = shift_test_timestamp(start, Duration::seconds(tick * 30));
             cached_list_response_at_with(cache.path(), "ordinary", now, 120, || {
                 ordinary_calls += 1;
                 Ok("[]".into())
@@ -478,13 +503,15 @@ mod tests {
     #[test]
     fn issue_5738_reclaims_only_expired_known_cache_pages_on_a_cache_hit() {
         let cache = tempfile::tempdir().unwrap();
-        let now = DateTime::parse_from_rfc3339("2026-10-19T00:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
-        let expired_at = now - chrono::Duration::seconds(LIST_CACHE_RETENTION_SECS);
+        let now = UtcTimestamp::parse_rfc3339("2026-10-19T00:00:00Z").unwrap();
+        let expired_at = shift_test_timestamp(now, -Duration::seconds(LIST_CACHE_RETENTION_SECS));
         let expired = write_cached_page(cache.path(), "issues?since=old-cursor", expired_at);
         let fresh = write_cached_page(cache.path(), "issues?since=current-cursor", now);
-        let future = write_cached_page(cache.path(), "future", now + chrono::Duration::seconds(1));
+        let future = write_cached_page(
+            cache.path(),
+            "future",
+            shift_test_timestamp(now, Duration::seconds(1)),
+        );
         let unrelated = cache.path().join("unrelated.json");
         std::fs::copy(&expired, &unrelated).unwrap();
         let mismatch = write_cached_page(cache.path(), "wrong-key", expired_at);
@@ -542,11 +569,11 @@ mod tests {
     #[test]
     fn issue_5738_contended_cleanup_preserves_fetch_results_and_skips_publication() {
         let cache = tempfile::tempdir().unwrap();
-        let now = Utc::now();
+        let now = UtcTimestamp::now();
         let expired = write_cached_page(
             cache.path(),
             "old-cursor",
-            now - chrono::Duration::seconds(LIST_CACHE_RETENTION_SECS),
+            shift_test_timestamp(now, -Duration::seconds(LIST_CACHE_RETENTION_SECS)),
         );
         let new_page = write_cached_page(cache.path(), "new-cursor", now);
         std::fs::remove_file(&new_page).unwrap();
@@ -570,14 +597,12 @@ mod tests {
     #[test]
     fn issue_5730_failed_refresh_pages_keep_their_original_freshness() {
         let cache = tempfile::tempdir().unwrap();
-        let start = chrono::DateTime::parse_from_rfc3339("2026-10-18T00:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
+        let start = UtcTimestamp::parse_rfc3339("2026-10-18T00:00:00Z").unwrap();
         let mut calls = 0;
         // Two readers retry the same ten-page refresh every 30 seconds after
         // downstream work fails. Nine continuation pages caused `https:` spend.
         for tick in 0..120 {
-            let now = start + chrono::Duration::seconds(tick * 30);
+            let now = shift_test_timestamp(start, Duration::seconds(tick * 30));
             for _reader in 0..2 {
                 for page in 1..=10 {
                     let (fetched_at, _) = cached_list_response_at_with(
@@ -593,7 +618,7 @@ mod tests {
                     .unwrap();
                     assert_eq!(
                         fetched_at,
-                        start + chrono::Duration::seconds(tick / 30 * 900)
+                        shift_test_timestamp(start, Duration::seconds(tick / 30 * 900))
                     );
                 }
             }
@@ -607,7 +632,7 @@ mod tests {
         let failure = cached_list_response_at_with(
             cache.path(),
             "page-1",
-            start + chrono::Duration::seconds(3600),
+            shift_test_timestamp(start, Duration::seconds(3600)),
             900,
             || Err("live failure".into()),
         );
@@ -637,14 +662,12 @@ mod tests {
 
     #[test]
     fn issue_5603_unchanged_lists_halve_hourly_rest_consumption() {
-        let start = chrono::DateTime::parse_from_rfc3339("2026-10-16T00:00:00Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc);
+        let start = UtcTimestamp::parse_rfc3339("2026-10-16T00:00:00Z").unwrap();
         for implementing in [false, true] {
             let cache = tempfile::tempdir().unwrap();
             let mut calls = 0;
             for tick in 0..120 {
-                let now = start + chrono::Duration::seconds(tick * 30);
+                let now = shift_test_timestamp(start, Duration::seconds(tick * 30));
                 for key in ["general-issues", "closed-pulls"]
                     .into_iter()
                     .chain(implementing.then_some("open-pulls"))
@@ -670,7 +693,7 @@ mod tests {
                 cached_list_response_with(
                     cache.path(),
                     "https://api.github.com/repos/o/r/issues?per_page=100&page=2",
-                    start + chrono::Duration::seconds(tick * 30),
+                    shift_test_timestamp(start, Duration::seconds(tick * 30)),
                     || {
                         continuation_calls += 1;
                         Ok("HTTP/2.0 200 OK\n\r\n[]".into())
@@ -686,7 +709,7 @@ mod tests {
     #[test]
     fn issue_5603_expired_list_cache_does_not_hide_a_failed_refresh() {
         let cache = tempfile::tempdir().unwrap();
-        let now = chrono::Utc::now();
+        let now = UtcTimestamp::now();
         cached_list_response_with(cache.path(), "issues", now, || Ok("[]".into())).unwrap();
         let fresh = cached_list_response_with(cache.path(), "issues", now, || {
             Err("cache should answer".to_string())
@@ -695,7 +718,7 @@ mod tests {
         let expired = cached_list_response_with(
             cache.path(),
             "issues",
-            now + chrono::Duration::seconds(LIST_CACHE_TTL_SECS),
+            shift_test_timestamp(now, Duration::seconds(LIST_CACHE_TTL_SECS)),
             || Err("live read failed".to_string()),
         );
         assert_eq!(expired.unwrap_err(), "live read failed");
@@ -704,7 +727,7 @@ mod tests {
     #[test]
     fn issue_5603_invalid_http_response_never_enters_list_cache() {
         let cache = tempfile::tempdir().unwrap();
-        let now = chrono::Utc::now();
+        let now = UtcTimestamp::now();
         let mut calls = 0;
         for _ in 0..2 {
             cached_list_response_with(cache.path(), "issues", now, || {

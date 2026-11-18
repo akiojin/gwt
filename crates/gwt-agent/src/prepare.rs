@@ -531,9 +531,8 @@ where
     launch_env
         .with_project_root(&worktree_path)
         .apply_to_config(&mut config);
-    refresh_worktree_assets(&worktree_path)?;
-
     resolve_host_runner_health_checked_with_probe(&mut config, probe_host_runner)?;
+    refresh_worktree_assets(&worktree_path)?;
 
     install_launch_gwt_bin_env_with_lookup(
         &mut config.env_vars,
@@ -632,7 +631,9 @@ fn normalize_launch_config_working_dir(config: &mut LaunchConfig) {
             "GWT_PROJECT_ROOT".to_string(),
             normalized.display().to_string(),
         );
-    }
+    } // Issue #3910: intake and new-branch launches only learn their worktree
+      // here, after the argument builders ran without one.
+    config.apply_worktree_config_env();
 }
 
 fn set_worktree_launch_path(
@@ -4127,10 +4128,19 @@ fi
             .build();
         config.command = direct.display().to_string();
 
+        let mut refreshed_assets = false;
         let started = std::time::Instant::now();
-        let result = prepare_agent_launch(&worktree, &sessions_dir, config, None, |_path| Ok(()));
+        let result = prepare_agent_launch(&worktree, &sessions_dir, config, None, |_path| {
+            refreshed_assets = true;
+            Ok(())
+        });
 
         assert!(result.is_err(), "hanging direct runner must fail closed");
+        assert!(!refreshed_assets, "failed probe must not refresh assets");
+        assert!(
+            !sessions_dir.exists(),
+            "failed probe must not persist a Session"
+        );
         assert!(
             started.elapsed() < DIRECT_RUNNER_PROBE_TIMEOUT + std::time::Duration::from_secs(5),
             "direct runner health must honor the probe deadline: {:?}",

@@ -61,6 +61,26 @@ test("Hub metadata remains fixed despite aggregate and name input", () => {
   assert.deepEqual(sent, []);
   assert.equal(document.querySelector('link[rel="icon"]').getAttribute("href"), "data:,");
 });
+test("unchanged metadata skips frames while acknowledgements and shared counts advance", () => {
+  const { document, sent, frames, flush, controller } = setup();
+  document.hasFocus = () => true;
+  const aggregate = { running_count: 2, block_count: 1, error_count: 1, unread: true };
+  controller.update({ ...aggregate, revision: 1 });
+  flush();
+  for (const revision of [2, 3]) {
+    controller.update({ ...aggregate, idle_count: revision, error_count: revision, revision });
+  }
+  assert.equal(frames.length, 0, "revision, idle and positive error counts do not change metadata");
+  assert.deepEqual(sent.map(event => event.revision), [1, 2, 3], "every accepted unread revision is acknowledged synchronously");
+  assert.deepEqual(controller.summary.read(), { running: 2, block: 1, idle: 3, error: 3 });
+  controller.update({ ...aggregate, error_count: 0, revision: 4 });
+  assert.equal(frames.length, 1, "clearing errors changes the semantic favicon");
+  flush();
+  assert.equal(document.querySelector('link[rel="icon"]').dataset.state, "blocked");
+  controller.update({ ...aggregate, error_count: 0, unread: false, revision: 5 });
+  flush();
+  assert.equal(document.title, "Project — RUN 2 · BLOCK 1 — gwt");
+});
 test("metadata uses Operator tokens without literal palette colors", () => {
   const source = readFileSync(new URL("../project-page-metadata.js", import.meta.url), "utf8");
   assert.doesNotMatch(source, /#[0-9a-f]{3,8}\b|rgba?\(/i);

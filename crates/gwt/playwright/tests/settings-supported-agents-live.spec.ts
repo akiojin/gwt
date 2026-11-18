@@ -219,7 +219,7 @@ test.describe.serial("Supported Agents Settings (isolated live backend)", () => 
     await row.getByRole("button", { name: "Install OpenCode", exact: true }).click();
     const failure = await maintenance(page, after, "opencode", false);
     expect(failure.message).toMatch(/permission denied/i);
-    await expect(row.getByRole("alert")).toContainText(/permissions.*retry/i);
+    await expect(panel.locator('[data-agent-maintenance-id="opencode"]')).toContainText(/permissions.*retry/i);
     await expect(row).toContainText("Not installed");
     expect(await installs()).toHaveLength(1);
     after = await cursor(page);
@@ -325,7 +325,7 @@ test.describe.serial("Supported Agents Settings (isolated live backend)", () => 
     const result = await maintenance(page, after, "grok", true);
     expect(result.before_version).toContain("1.0.0");
     expect(result.after_version).toContain("2.0.0");
-    await expect(row.getByRole("status")).toContainText(/1\.0\.0.*2\.0\.0/);
+    await expect(panel.locator('[data-agent-maintenance-id="grok"]')).toContainText(/1\.0\.0.*2\.0\.0/);
     const next = await cursor(page);
     await sendLiveGwtEvent(page, { kind: "list_supported_agents" });
     const updated = (await catalog(page, next)).agents.find((agent: any) => agent.id === "grok");

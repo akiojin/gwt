@@ -44,7 +44,6 @@ pub fn handle_with_input(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{TimeZone, Utc};
     use gwt_core::skill_state::{save, SkillState};
 
     fn active_state(session: &str, phase: &str) -> SkillState {
@@ -52,7 +51,7 @@ mod tests {
             start_evidence: None,
             active: true,
             owner_spec: Some(2784),
-            started_at: Utc.with_ymd_and_hms(2026, 5, 20, 9, 0, 0).unwrap(),
+            started_at: "2026-05-20T09:00:00Z".parse().unwrap(),
             phase: Some(phase.to_string()),
             session_id: session.to_string(),
         }

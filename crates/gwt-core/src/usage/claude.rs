@@ -10,7 +10,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, Utc};
+use crate::timestamp::UtcTimestamp;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -38,7 +38,7 @@ pub struct ClaudeCreds {
     pub account_label: Option<String>,
 }
 
-fn claude_window(obj: &Value, kind: WindowKind, _now: DateTime<Utc>) -> Option<UsageWindow> {
+fn claude_window(obj: &Value, kind: WindowKind, _now: UtcTimestamp) -> Option<UsageWindow> {
     if obj.is_null() {
         return None;
     }
@@ -46,14 +46,13 @@ fn claude_window(obj: &Value, kind: WindowKind, _now: DateTime<Utc>) -> Option<U
     let reset = obj
         .get("resets_at")
         .and_then(Value::as_str)
-        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-        .map(|d| d.with_timezone(&Utc));
+        .and_then(UtcTimestamp::parse_rfc3339);
     Some(UsageWindow::new(kind, util, reset))
 }
 
 /// Parse the `/api/oauth/usage` JSON body into account windows. Missing/`null`
 /// sub-windows (e.g. `seven_day_opus`) are skipped.
-pub fn parse_oauth_usage(body: &str, now: DateTime<Utc>) -> Option<ClaudeAccount> {
+pub fn parse_oauth_usage(body: &str, now: UtcTimestamp) -> Option<ClaudeAccount> {
     let v: Value = serde_json::from_str(body).ok()?;
     let mut windows = Vec::new();
     for (key, kind) in [
@@ -284,7 +283,7 @@ pub fn map_status_to_state(status: u16) -> UsageState {
 pub async fn fetch_claude_account(
     creds: &ClaudeCreds,
     user_agent: &str,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
 ) -> ProviderUsage {
     let plan = creds.subscription_type.clone();
     let account_label = creds.account_label.clone();
@@ -312,6 +311,7 @@ pub async fn fetch_claude_account(
                     account_label,
                     plan,
                     extra_usage: acc.extra_usage,
+                    credits: None,
                     windows: acc.windows,
                     limit_reached: acc.limit_reached,
                     state: UsageState::Ok,
@@ -323,6 +323,7 @@ pub async fn fetch_claude_account(
                     account_label,
                     plan,
                     extra_usage: None,
+                    credits: None,
                     windows: Vec::new(),
                     limit_reached: false,
                     state: UsageState::Unavailable {
@@ -338,6 +339,7 @@ pub async fn fetch_claude_account(
             account_label,
             plan,
             extra_usage: None,
+            credits: None,
             windows: Vec::new(),
             limit_reached: false,
             state: map_status_to_state(r.status().as_u16()),
@@ -349,6 +351,7 @@ pub async fn fetch_claude_account(
             account_label,
             plan,
             extra_usage: None,
+            credits: None,
             windows: Vec::new(),
             limit_reached: false,
             state: UsageState::Unavailable {
@@ -665,8 +668,8 @@ mod tests {
         assert!(!acc.limit_reached);
     }
 
-    fn now() -> DateTime<Utc> {
-        DateTime::from_timestamp(1_780_000_000, 0).unwrap()
+    fn now() -> UtcTimestamp {
+        UtcTimestamp::from_timestamp(1_780_000_000, 0).unwrap()
     }
 
     #[test]

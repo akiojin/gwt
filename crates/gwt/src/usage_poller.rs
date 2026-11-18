@@ -19,9 +19,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
 use gwt_agent::{AgentId, AgentStatus};
 use gwt_config::{usage_config::UsageConfig, Settings};
+use gwt_core::timestamp::UtcTimestamp;
 use gwt_core::usage::{
     cache::UsageCache,
     claude, codex,
@@ -29,6 +29,7 @@ use gwt_core::usage::{
     ProviderConsumption, ProviderUsage, SessionUsage, UsageProvider, UsageSnapshot, UsageState,
     WindowKind,
 };
+use time::Duration as SignedDuration;
 use tokio::sync::Notify;
 use tokio::time::{interval, MissedTickBehavior};
 
@@ -88,7 +89,7 @@ async fn run(
         if !clients.has_clients() {
             continue;
         }
-        let now = Utc::now();
+        let now = UtcTimestamp::now();
         let roots = project_roots
             .read()
             .map(|roots| roots.clone())
@@ -151,9 +152,9 @@ fn account_usage_changed(
 fn reconcile_project_accounts(
     project_roots: &[PathBuf],
     accounts: &[ProviderUsage],
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
 ) {
-    let timestamp = now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let timestamp = now.to_rfc3339_millis();
     let prefs_paths = project_roots
         .iter()
         .map(|root| gwt::issue_monitor_prefs_path_for_repo_path(root))
@@ -191,7 +192,7 @@ fn reconcile_project_accounts(
 /// `issue.monitor.status` reads them. The status bar was the only place these
 /// readings went, so a JSON reader could not see the usage a hold sat beside.
 /// A failed write costs that reader one tick, never the poll itself.
-fn publish_accounts(accounts: &[ProviderUsage], now: DateTime<Utc>) {
+fn publish_accounts(accounts: &[ProviderUsage], now: UtcTimestamp) {
     let path = gwt_core::usage::snapshot_store::provider_usage_snapshot_path();
     if let Err(error) =
         gwt_core::usage::snapshot_store::write_provider_usage_snapshot(&path, accounts, now)
@@ -213,13 +214,13 @@ struct Poller {
     transcripts: UsageCache,
     codex_account_id: Option<String>,
     codex_auth_observed: bool,
-    codex_authenticated_at: Option<DateTime<Utc>>,
+    codex_authenticated_at: Option<UtcTimestamp>,
     claude_account_id: Option<String>,
     cached_claude: Option<ProviderUsage>,
-    last_claude_fetch: Option<DateTime<Utc>>,
+    last_claude_fetch: Option<UtcTimestamp>,
     cached_user_agent: Option<String>,
     cached_consumption: Vec<ProviderConsumption>,
-    last_consumption_at: Option<DateTime<Utc>>,
+    last_consumption_at: Option<UtcTimestamp>,
 }
 
 impl Poller {
@@ -228,7 +229,7 @@ impl Poller {
     /// HTTP futures still use the shared runtime.
     async fn poll_in_background(
         mut self,
-        now: DateTime<Utc>,
+        now: UtcTimestamp,
         force: bool,
         project_roots: Vec<PathBuf>,
     ) -> Result<(Self, UsageSnapshot), tokio::task::JoinError> {
@@ -242,7 +243,7 @@ impl Poller {
         .await
     }
 
-    async fn poll_once(&mut self, now: DateTime<Utc>, force: bool) -> UsageSnapshot {
+    async fn poll_once(&mut self, now: UtcTimestamp, force: bool) -> UsageSnapshot {
         #[cfg(test)]
         {
             self.collection_thread = Some(std::thread::current().id());
@@ -271,15 +272,14 @@ impl Poller {
         &mut self,
         config: &UsageConfig,
         accounts: &[ProviderUsage],
-        now: DateTime<Utc>,
+        now: UtcTimestamp,
         force: bool,
     ) -> Vec<ProviderConsumption> {
         let due = force
             || match self.last_consumption_at {
                 None => true,
                 Some(at) => {
-                    now.signed_duration_since(at)
-                        >= chrono::Duration::seconds(CONSUMPTION_CACHE_SECS)
+                    now.signed_duration_since(at) >= SignedDuration::seconds(CONSUMPTION_CACHE_SECS)
                 }
             };
         if !due {
@@ -303,7 +303,7 @@ impl Poller {
         out
     }
 
-    fn codex_account(&mut self, config: &UsageConfig, now: DateTime<Utc>) -> ProviderUsage {
+    fn codex_account(&mut self, config: &UsageConfig, now: UtcTimestamp) -> ProviderUsage {
         if !config.codex_enabled {
             return ProviderUsage::degraded(UsageProvider::Codex, UsageState::Disabled);
         }
@@ -346,7 +346,7 @@ impl Poller {
     async fn claude_account(
         &mut self,
         config: &UsageConfig,
-        now: DateTime<Utc>,
+        now: UtcTimestamp,
         force: bool,
     ) -> ProviderUsage {
         if !config.claude_account_enabled {
@@ -426,7 +426,7 @@ impl Poller {
 /// display. "Good" = the cached value carries windows or credits.
 fn serve_cached_or(
     cached: &Option<ProviderUsage>,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
     fallback: ProviderUsage,
 ) -> ProviderUsage {
     match cached {
@@ -444,7 +444,7 @@ fn serve_cached_or(
 /// the attempted refresh already proved the displayed value is no longer fresh.
 fn serve_stale_cached_or(
     cached: &Option<ProviderUsage>,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
     fallback: ProviderUsage,
 ) -> ProviderUsage {
     match cached {
@@ -467,15 +467,15 @@ fn serve_stale_cached_or(
 fn week_start_for(
     accounts: &[ProviderUsage],
     provider: UsageProvider,
-    now: DateTime<Utc>,
-) -> DateTime<Utc> {
+    now: UtcTimestamp,
+) -> UtcTimestamp {
     accounts
         .iter()
         .find(|a| a.provider == provider)
         .and_then(|a| a.windows.iter().find(|w| w.kind == WindowKind::Weekly))
         .and_then(|w| w.resets_at)
-        .map(|reset| reset - chrono::Duration::days(7))
-        .unwrap_or_else(|| now - chrono::Duration::days(7))
+        .map(|reset| reset - SignedDuration::days(7))
+        .unwrap_or_else(|| now - SignedDuration::days(7))
 }
 
 /// Map a gwt agent id to a usage provider (only Codex / Claude Code are in
@@ -500,7 +500,7 @@ fn is_active_status(status: AgentStatus) -> bool {
 }
 
 fn collect_sessions(config: &UsageConfig, cache: &mut UsageCache) -> Vec<SessionUsage> {
-    collect_sessions_with_clock(config, cache, Utc::now)
+    collect_sessions_with_clock(config, cache, UtcTimestamp::now)
 }
 
 /// Read only conversations referenced by the gwt ledger. Historical rows keep
@@ -511,7 +511,7 @@ fn collect_sessions(config: &UsageConfig, cache: &mut UsageCache) -> Vec<Session
 fn collect_sessions_at(
     config: &UsageConfig,
     cache: &mut UsageCache,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
 ) -> Vec<SessionUsage> {
     collect_sessions_with_clock(config, cache, || now)
 }
@@ -519,7 +519,7 @@ fn collect_sessions_at(
 fn collect_sessions_with_clock(
     config: &UsageConfig,
     cache: &mut UsageCache,
-    clock: impl FnOnce() -> DateTime<Utc>,
+    clock: impl FnOnce() -> UtcTimestamp,
 ) -> Vec<SessionUsage> {
     #[derive(PartialEq, Eq)]
     enum ConversationOwner {
@@ -736,10 +736,8 @@ mod tests {
         let claude_home = home.path().join("claude");
         let _codex = gwt_core::test_support::ScopedEnvVar::set("CODEX_HOME", &codex_home);
         let _claude = gwt_core::test_support::ScopedEnvVar::set("CLAUDE_CONFIG_DIR", &claude_home);
-        let observed = DateTime::parse_from_rfc3339("2026-10-28T00:30:01Z")
-            .unwrap()
-            .to_utc();
-        let event = |provider, at: DateTime<Utc>| {
+        let observed = UtcTimestamp::parse_rfc3339("2026-10-28T00:30:01Z").unwrap();
+        let event = |provider, at: UtcTimestamp| {
             let value = match provider {
                 UsageProvider::Codex => serde_json::json!({"timestamp": at, "payload": {
                 "type": "token_count", "info": {
@@ -780,7 +778,7 @@ mod tests {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(
                 path,
-                event(*provider, observed - chrono::Duration::seconds(1)),
+                event(*provider, observed - SignedDuration::seconds(1)),
             )
             .unwrap();
         }
@@ -797,7 +795,7 @@ mod tests {
                     .append(true)
                     .open(path)
                     .unwrap()
-                    .write_all(event(*provider, observed + chrono::Duration::minutes(1)).as_bytes())
+                    .write_all(event(*provider, observed + SignedDuration::minutes(1)).as_bytes())
                     .unwrap();
             }
             observed
@@ -814,7 +812,7 @@ mod tests {
             assert_eq!(telemetry.today_tokens, Some(12));
             assert_eq!(
                 telemetry.minute_buckets.last().unwrap().started_at,
-                observed - chrono::Duration::seconds(1)
+                observed - SignedDuration::seconds(1)
             );
             assert_eq!(telemetry.minute_buckets.last().unwrap().tokens, Some(12));
         }
@@ -823,11 +821,7 @@ mod tests {
         assert!(future
             .iter()
             .all(|row| row.telemetry.as_ref().unwrap().quality == "partial"));
-        let next = collect_sessions_at(
-            &config,
-            &mut cache,
-            observed + chrono::Duration::seconds(61),
-        );
+        let next = collect_sessions_at(&config, &mut cache, observed + SignedDuration::seconds(61));
         assert!(next
             .iter()
             .all(|row| row.telemetry.as_ref().unwrap().today_tokens == Some(24)));
@@ -863,7 +857,7 @@ mod tests {
         }
         current.save(&sessions_dir).unwrap();
         let mut predecessor = make_session("current", "member-a", AgentStatus::Stopped);
-        predecessor.created_at = current.created_at - chrono::Duration::seconds(1);
+        predecessor.created_at = current.created_at - SignedDuration::seconds(1);
         predecessor.save(&sessions_dir).unwrap();
         for session in [
             make_session("ambiguous", "member-b", AgentStatus::Stopped),
@@ -962,7 +956,7 @@ mod tests {
             session.project_state_root = Some(project.clone());
             session.agent_session_id = Some(sid.to_owned());
             session.status = status;
-            session.created_at = now() + chrono::Duration::seconds(age);
+            session.created_at = now() + SignedDuration::seconds(age);
             session.updated_at = session.created_at;
             session
         };
@@ -1081,7 +1075,7 @@ mod tests {
             &mut previous,
             std::slice::from_ref(&account)
         ));
-        account.fetched_at = Some(now() + chrono::Duration::seconds(30));
+        account.fetched_at = Some(now() + SignedDuration::seconds(30));
         assert!(!account_usage_changed(
             &mut previous,
             std::slice::from_ref(&account)
@@ -1107,7 +1101,7 @@ mod tests {
             &mut previous,
             std::slice::from_ref(&account)
         ));
-        account.windows[0].resets_at = Some(now() + chrono::Duration::days(7));
+        account.windows[0].resets_at = Some(now() + SignedDuration::days(7));
         assert!(account_usage_changed(&mut previous, &[account]));
     }
 
@@ -1161,8 +1155,8 @@ mod tests {
         assert_eq!(poller.transcripts.bytes_read(), 0);
     }
 
-    fn now() -> DateTime<Utc> {
-        DateTime::from_timestamp(1_780_000_000, 0).unwrap()
+    fn now() -> UtcTimestamp {
+        UtcTimestamp::from_timestamp(1_780_000_000, 0).unwrap()
     }
 
     #[test]
@@ -1195,6 +1189,7 @@ mod tests {
             account_label: Some("claude@example.com".into()),
             plan: Some("max".into()),
             extra_usage: None,
+            credits: None,
             windows: vec![gwt_core::usage::UsageWindow::new(
                 WindowKind::FiveHour,
                 19.0,
@@ -1314,7 +1309,7 @@ mod tests {
         let mut poller = Poller {
             codex_auth_observed: true,
             codex_account_id: codex::read_auth_account_identity(home.path()),
-            codex_authenticated_at: Some(now() - chrono::Duration::seconds(1)),
+            codex_authenticated_at: Some(now() - SignedDuration::seconds(1)),
             ..Default::default()
         };
         let config = UsageConfig {
@@ -1453,7 +1448,7 @@ mod tests {
 
     fn account_with_weekly_reset(
         provider: UsageProvider,
-        reset: Option<DateTime<Utc>>,
+        reset: Option<UtcTimestamp>,
     ) -> ProviderUsage {
         let kind = if reset.is_some() {
             WindowKind::Weekly
@@ -1466,6 +1461,7 @@ mod tests {
             account_label: None,
             plan: None,
             extra_usage: None,
+            credits: None,
             windows: vec![gwt_core::usage::UsageWindow::new(kind, 10.0, reset)],
             limit_reached: false,
             state: UsageState::Ok,
@@ -1475,10 +1471,10 @@ mod tests {
 
     #[test]
     fn week_start_uses_weekly_reset_minus_seven_days() {
-        let reset = now() + chrono::Duration::days(2);
+        let reset = now() + SignedDuration::days(2);
         let accounts = vec![account_with_weekly_reset(UsageProvider::Codex, Some(reset))];
         let ws = week_start_for(&accounts, UsageProvider::Codex, now());
-        assert_eq!(ws, reset - chrono::Duration::days(7));
+        assert_eq!(ws, reset - SignedDuration::days(7));
     }
 
     #[test]
@@ -1486,11 +1482,11 @@ mod tests {
         // Provider absent from the snapshot → rolling 7-day fallback.
         let accounts = vec![account_with_weekly_reset(UsageProvider::Codex, Some(now()))];
         let fb = week_start_for(&accounts, UsageProvider::ClaudeCode, now());
-        assert_eq!(fb, now() - chrono::Duration::days(7));
+        assert_eq!(fb, now() - SignedDuration::days(7));
         // Provider present but with no Weekly window → same fallback.
         let no_weekly = vec![account_with_weekly_reset(UsageProvider::Codex, None)];
         let fb2 = week_start_for(&no_weekly, UsageProvider::Codex, now());
-        assert_eq!(fb2, now() - chrono::Duration::days(7));
+        assert_eq!(fb2, now() - SignedDuration::days(7));
     }
 
     #[test]

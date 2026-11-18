@@ -194,6 +194,10 @@ pub enum IssueCommand {
         reason: Option<String>,
         issue_numbers: Vec<u64>,
     },
+    MonitorQueueAdopt {
+        project_root: Option<std::path::PathBuf>,
+        terminal: String,
+    },
     MonitorQueueList {
         project_root: Option<std::path::PathBuf>,
         terminal: Option<String>,
@@ -343,6 +347,12 @@ pub enum IssueCommand {
         number: u64,
         reason: String,
         force: bool,
+    },
+    /// Record who verifies each remaining external criterion of a settled delivery.
+    MonitorVerificationDeclare {
+        project_root: Option<std::path::PathBuf>,
+        number: u64,
+        criteria: Vec<(String, String)>,
     },
     /// Issue #3923 AC-1: every provider-wide quota hold in force, with the
     /// evidence it was formed from.

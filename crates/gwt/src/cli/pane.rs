@@ -436,7 +436,7 @@ fn read_pane_health(project_root: &Path, requested_id: Option<&str>) -> Result<S
         })
         .collect();
     serde_json::to_string(
-        &json!({"schema_version":1,"observed_at":chrono::Utc::now().to_rfc3339(),"panes":panes}),
+        &json!({"schema_version":1,"observed_at":gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),"panes":panes}),
     )
     .map(|value| format!("{value}\n"))
     .map_err(|error| error.to_string())
@@ -1066,7 +1066,7 @@ async fn read_pane_snapshot_with_timeout(
 
 pub(super) fn parse_recovery_bounds(after: &str, before: &str) -> Result<(i64, i64), String> {
     let parse = |value: &str| {
-        chrono::DateTime::parse_from_rfc3339(value)
+        gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(value)
             .map(|time| time.timestamp())
             .map_err(|_| {
                 "pane.recover requires RFC3339 started_after and started_before".to_string()
@@ -1113,7 +1113,7 @@ fn plan_pane_recovery(
                     .filter(|window| window.session_id.as_deref() == Some(&session.session_id))
                     .count()
                     != 1
-                || chrono::DateTime::parse_from_rfc3339(&session.started_at)
+                || gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(&session.started_at)
                     .ok()
                     .map(|started| started.timestamp())
                     .is_none_or(|started| started < after || started > before)
@@ -2302,7 +2302,10 @@ fn resolve_pm_send_target<'a>(
 fn pm_window_has_exact_prompt_ack(window: &PersistedWindowState) -> bool {
     matches!(window.preset, WindowPreset::Claude | WindowPreset::Codex)
         || (window.preset == WindowPreset::Agent
-            && matches!(window.agent_id.as_deref(), Some("claude" | "codex")))
+            && matches!(
+                window.agent_id.as_deref(),
+                Some("claude" | "codex" | "grok")
+            ))
 }
 
 fn status_label(status: WindowState) -> &'static str {
@@ -2369,6 +2372,7 @@ mod tests {
             runtime_started_at_ms: None,
             surface_owner: None,
             is_pm: false,
+            pm_activity: None,
         }
     }
 
@@ -2446,9 +2450,7 @@ mod tests {
         runtime.host_started_at = Some(started);
         runtime.child_pid = Some(pid);
         runtime.child_started_at = Some(started);
-        runtime.last_activity_at = chrono::DateTime::parse_from_rfc3339("2000-01-01T00:00:00Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc);
+        runtime.last_activity_at = "2000-01-01T00:00:00Z".parse().unwrap();
         runtime.save(&runtime_path).unwrap();
         let mut workspace = crate::persistence::empty_workspace_state();
         let mut pane = window("agent-health", WindowPreset::Codex, Some("codex"));
@@ -2586,7 +2588,8 @@ mod tests {
     fn recovery_plan_selects_only_the_restore_burst_and_prioritizes_missing_worktrees() {
         use crate::session_inventory::SessionObservation;
         use gwt_agent::SessionLaunchOrigin;
-        let after = chrono::DateTime::parse_from_rfc3339("2026-09-14T05:00:00Z").unwrap();
+        let after =
+            gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339("2026-09-14T05:00:00Z").unwrap();
         let mut windows = Vec::new();
         let sessions = [
             ("restored", SessionLaunchOrigin::AutomaticRestore, true, 10),
@@ -2612,7 +2615,7 @@ mod tests {
                 host_pid: 1,
                 child_pid: 2,
                 child_started_at: (after.timestamp() + offset) as u64,
-                started_at: (after + chrono::Duration::seconds(offset)).to_rfc3339(),
+                started_at: (after + time::Duration::seconds(offset)).to_rfc3339(),
                 launch_origin: origin,
                 launch_entrypoint: None,
                 restore_source_session_id: Some("source".to_string()),
@@ -3342,6 +3345,19 @@ mod tests {
                 .id,
             "tab-1::agent-2"
         );
+    }
+
+    #[test]
+    fn issue_3706_grok_is_an_exact_prompt_ack_target() {
+        let mut grok = window("tab-1::grok", WindowPreset::Agent, Some("grok"));
+        grok.session_id = Some("grok-session".into());
+        assert!(resolve_pm_send_target(std::slice::from_ref(&grok), "grok").is_ok());
+
+        grok.status = WindowState::Stopped;
+        assert!(resolve_pm_send_target(std::slice::from_ref(&grok), "grok").is_err());
+        grok.status = WindowState::Running;
+        grok.agent_id = Some("unknown".into());
+        assert!(resolve_pm_send_target(&[grok], "grok").is_err());
     }
 
     #[test]

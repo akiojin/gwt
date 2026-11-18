@@ -119,7 +119,7 @@ fn startup_and_frontend_ready_coalesce_one_canonical_base_without_direct_runner_
         issues_dir.join("meta.json"),
         serde_json::json!({
             "schema_version": 1,
-            "last_full_refresh": (chrono::Utc::now() - chrono::Duration::minutes(20)).to_rfc3339(),
+            "last_full_refresh": (gwt_core::timestamp::UtcTimestamp::now() - time::Duration::minutes(20)).to_rfc3339(),
             "ttl_minutes": 15,
             "source_cache_fingerprint": "stale",
             "source_document_count": 1,

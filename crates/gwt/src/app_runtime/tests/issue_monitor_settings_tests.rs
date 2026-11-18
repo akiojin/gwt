@@ -380,7 +380,7 @@ fn issue_5646_explicit_wait_uses_the_existing_manual_drain_without_restarting() 
         version: "99.0.0".into(),
         asset_url: "https://example.invalid/update".into(),
         payload: gwt_core::update::PreparedPayload::PortableBinary { path: payload },
-        downloaded_at: chrono::Utc::now().to_rfc3339(),
+        downloaded_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
         origin: gwt_core::update::PendingUpdateOrigin::ManualLater,
         auto_apply_deferred: true,
     })
@@ -425,7 +425,7 @@ fn issue_5646_failed_wait_keeps_apply_deferred_and_reports_the_failure() {
         version: "99.0.0".into(),
         asset_url: "https://example.invalid/update".into(),
         payload: gwt_core::update::PreparedPayload::PortableBinary { path: payload },
-        downloaded_at: chrono::Utc::now().to_rfc3339(),
+        downloaded_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
         origin: gwt_core::update::PendingUpdateOrigin::ManualLater,
         auto_apply_deferred: false,
     })
@@ -1225,6 +1225,98 @@ fn app_runtime_issue_monitor_agent_settings_sets_are_added_reordered_and_saved_i
 }
 
 #[test]
+fn app_runtime_add_settings_set_preserves_unused_same_tool_member_core() {
+    let _lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo(&repo);
+    let (mut runtime, recorded, _) = open_agent_settings_sets(
+        temp.path(),
+        &repo,
+        vec![
+            pool_profile("codex"),
+            pool_profile("claude"),
+            pool_profile("grok"),
+        ],
+    );
+    let sessions = temp.path().join("sessions");
+    let roster = gwt::agent_names::mutate_project_roster(
+        &repo,
+        &sessions,
+        gwt::agent_names::AgentRosterAction::Add {
+            model: None,
+            reasoning: None,
+            pm_eligible: false,
+            name: None,
+            agent_id: Some("codex".into()),
+        },
+        None,
+    )
+    .unwrap();
+    let id = roster.members.last().unwrap().agent_member_id.clone();
+    let path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let mut b = pool_profile("codex");
+    b.agent_member_id = Some(id.clone());
+    b.model = Some("distinct-model".into());
+    b.reasoning = Some("high".into());
+    b.version = Some("distinct-version".into());
+    b.fast_mode = true;
+    gwt::try_mutate_issue_monitor_prefs(&path, |prefs| {
+        let mut pool = prefs.launch_profile_pool();
+        pool.push(b.clone());
+        prefs.set_launch_profile_pool(pool);
+        Ok(())
+    })
+    .unwrap();
+    gwt::try_mutate_issue_monitor_prefs(&path, |prefs| {
+        let mut pool = prefs.launch_profile_pool();
+        pool.retain(|p| p.agent_member_id.as_deref() != Some(&id));
+        prefs.set_launch_profile_pool(pool);
+        Ok(())
+    })
+    .unwrap();
+    let core_revision = gwt::agent_registry::SessionMemberSnapshot::load()
+        .unwrap()
+        .implementation_core(&id)
+        .unwrap()
+        .1;
+    let tuning = serde_json::from_value(serde_json::json!({
+        "member_id": id, "model": b.model, "reasoning": b.reasoning,
+        "runtime_target": "Docker", "skip_permissions": false,
+        "expected_core_revision": core_revision,
+    }))
+    .unwrap();
+    assert!(gwt::agent_registry::set_member_tuning(&tuning)
+        .error
+        .is_none());
+    runtime.handle_frontend_event(
+        "client-1".into(),
+        FrontendEvent::IssueMonitorConfigureProfile,
+    );
+    let events = runtime.handle_launch_wizard_action(
+        &runtime.test_context(),
+        LaunchWizardAction::AddAgentSettingsSet,
+    );
+    let view = agent_settings_view(&events);
+    assert_eq!(view.selected_agent_member_id.as_deref(), Some(id.as_str()));
+    assert!(!view.skip_permissions);
+    let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(Instant::now());
+    save_agent_settings_sets(&mut runtime, &recorded);
+    let prefs = gwt::load_issue_monitor_prefs(&path).unwrap();
+    let saved = gwt::agent_registry::member_profile(&prefs, &id).unwrap();
+    assert_eq!(
+        (saved.model, saved.reasoning, saved.version, saved.fast_mode),
+        (b.model, b.reasoning, b.version, b.fast_mode)
+    );
+    assert_eq!(saved.runtime_target, gwt_agent::LaunchRuntimeTarget::Docker);
+    assert!(!saved.skip_permissions);
+}
+
+#[test]
 fn app_runtime_issue_monitor_agent_settings_keeps_a_runtime_the_form_was_not_asked_about() {
     // Issue #4911 AC-5: the form only asks where a set runs in its Runtime
     // step and reads Host before that, so leaving a set for another one must
@@ -1575,8 +1667,10 @@ fn app_runtime_issue_monitor_start_without_saved_profile_opens_global_settings_b
     );
     let mut expected = before_start;
     expected.agent_roster = after_start.agent_roster.clone();
+    expected.schema_version = 2;
     assert_eq!(
-        after_start, expected,
+        serde_json::to_value(&after_start).unwrap(),
+        serde_json::to_value(&expected).unwrap(),
         "settings-open only registers people; queue, profiles, claims and deliveries are unchanged"
     );
 }
@@ -2019,7 +2113,7 @@ fn app_runtime_issue_monitor_profile_save_switches_the_head_to_a_second_provider
     seeded.launch_auto = true;
     seeded.launch_tiers = vec![vec![pool_profile("openclaw")], vec![pool_profile("codex")]];
     let mut monitor = test_monitor_with_prefs(gwt::IssueMonitorConfig::default(), seeded);
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
     monitor.terminal_queue_push(&[3165], "operator", &now);
     monitor.record_candidate(gwt::IssueMonitorIssue {
         author_login: None,
@@ -2106,7 +2200,7 @@ fn app_runtime_issue_monitor_profile_save_compensates_unowned_unsupported_delive
     fs::create_dir_all(&repo).unwrap();
     init_repo_with_initial_commit(&repo);
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
     let mut monitor = test_monitor(gwt::IssueMonitorConfig::default());
     monitor.set_launch_profile_pool(vec![pool_profile("codex")]);
     monitor.terminal_queue_push(&[3165], "operator", &now);
@@ -2618,6 +2712,9 @@ fn app_runtime_selected_member_keeps_its_model_when_pool_order_changes() {
         &repo,
         &sessions,
         gwt::agent_names::AgentRosterAction::Add {
+            model: None,
+            reasoning: None,
+            pm_eligible: false,
             name: None,
             agent_id: Some("codex".into()),
         },
@@ -2942,7 +3039,7 @@ fn app_runtime_agent_window_initial_title_falls_back_to_projection_owner() {
         pr_url: None,
         pr_created_at: None,
         created_by_start_work: true,
-        created_at: chrono::Utc::now(),
+        created_at: gwt_core::timestamp::UtcTimestamp::now(),
     });
     gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
         .expect("save projection");
@@ -2989,7 +3086,7 @@ fn app_runtime_agent_window_initial_title_ignores_projection_owner_for_other_bra
         pr_url: None,
         pr_created_at: None,
         created_by_start_work: true,
-        created_at: chrono::Utc::now(),
+        created_at: gwt_core::timestamp::UtcTimestamp::now(),
     });
     gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
         .expect("save projection");

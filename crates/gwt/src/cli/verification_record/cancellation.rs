@@ -5,7 +5,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use gwt_core::index_coordinator::{IndexCoordinator, TargetKey};
+use gwt_core::{
+    index_coordinator::{IndexCoordinator, TargetKey},
+    timestamp::UtcTimestamp,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -13,6 +16,7 @@ use super::{interruption, VerificationCallerAuthority};
 use crate::cli::trusted_store;
 
 const ADMISSION_INTERRUPTED: &str = "external termination during admission wait: runner pipe closed before admission; rerun required";
+const DEFERRAL_CLEANUP: &str = "admission deadline reached; completing deferral cleanup";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -39,7 +43,7 @@ pub(super) struct AttemptRecord {
     external_termination: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     external_terminations: Option<u8>,
-    created_at: chrono::DateTime<chrono::Utc>,
+    created_at: UtcTimestamp,
     watchdog_token_hash: String,
     runner_pid: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -101,6 +105,15 @@ impl Attempt {
                 save(&self.worktree, &mut record)?;
             }
             Ok(())
+        })
+    }
+    pub fn mark_deferral_cleanup(&self) -> io::Result<()> {
+        trusted_store::with_write_lease(&self.worktree, || {
+            self.ensure_active()?;
+            let mut record = required(&self.worktree, &self.id)?;
+            record.status = AttemptStatus::Running;
+            record.reason = Some(DEFERRAL_CLEANUP.to_string());
+            save(&self.worktree, &mut record)
         })
     }
     /// Caller already owns the trusted write lease, shared with the VRR commit.
@@ -290,7 +303,7 @@ pub(super) fn begin_for_caller(
             record_id: None,
             external_termination: false,
             external_terminations: None,
-            created_at: chrono::Utc::now(),
+            created_at: UtcTimestamp::now(),
             watchdog_token_hash: digest(token.as_bytes()),
             runner_pid: std::process::id(),
             runner_started_at: crate::process::host_process_start_time(std::process::id()),
@@ -545,13 +558,16 @@ fn settle_watchdog_with_coordinator(
         ) {
             return Ok(());
         }
-        let waiting_for_admission = record.status == AttemptStatus::Waiting;
+        // Cleanup is active work, but an interrupted cleanup can still use
+        // the same resume path as a runner that died before admission.
+        let before_admission = record.status == AttemptStatus::Waiting
+            || record.reason.as_deref() == Some(DEFERRAL_CLEANUP);
         interrupt(
             worktree,
             &mut record,
             if normal_return {
                 "verification runner returned without a terminal result; rerun required"
-            } else if waiting_for_admission {
+            } else if before_admission {
                 ADMISSION_INTERRUPTED
             } else {
                 "external termination: runner pipe closed before a terminal result; signal unknown; rerun required"
@@ -635,8 +651,14 @@ mod tests {
                 .is_none(),
             "an old companion must not wake a newer attempt"
         );
+        successor.mark_deferral_cleanup().unwrap();
         settle_watchdog_with_coordinator(repo.path(), successor.id(), "new", false, &coordinator)
             .unwrap();
+        assert_eq!(
+            admission_resume_candidate(repo.path(), successor.id(), "new", "mine").unwrap(),
+            Some(commands),
+            "runner death during deferral cleanup must also resume"
+        );
         cancel_for_caller(
             repo.path(),
             "mine",

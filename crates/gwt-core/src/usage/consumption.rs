@@ -18,7 +18,10 @@ use std::fs;
 use std::path::Path;
 use std::time::{Duration as StdDuration, SystemTime};
 
-use chrono::{DateTime, Duration, Local, NaiveDate, Utc};
+use time::{Date, Duration};
+
+use super::local_time_at;
+use crate::timestamp::UtcTimestamp;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -96,19 +99,17 @@ pub struct ProviderConsumption {
 }
 
 impl ProviderConsumption {
-    pub fn empty(provider: UsageProvider, now: DateTime<Utc>) -> Self {
+    pub fn empty(provider: UsageProvider, now: UtcTimestamp) -> Self {
         aggregate(provider, Vec::new(), now, now)
     }
 }
 
 /// A single timestamped consumption delta.
-pub type ConsumptionEvent = (DateTime<Utc>, ConsumptionBreakdown);
+pub type ConsumptionEvent = (UtcTimestamp, ConsumptionBreakdown);
 
-fn parse_ts(value: Option<&Value>) -> Option<DateTime<Utc>> {
+fn parse_ts(value: Option<&Value>) -> Option<UtcTimestamp> {
     let text = value?.as_str()?;
-    DateTime::parse_from_rfc3339(text)
-        .ok()
-        .map(|dt| dt.with_timezone(&Utc))
+    UtcTimestamp::parse_rfc3339(text)
 }
 
 /// Extract consumption events from Codex rollout JSONL. `input` excludes the
@@ -222,9 +223,9 @@ pub fn parse_claude_events(jsonl: &str) -> Vec<ConsumptionEvent> {
 pub fn session_telemetry(
     provider: UsageProvider,
     events: &[ConsumptionEvent],
-    observed_at: Option<DateTime<Utc>>,
+    observed_at: Option<UtcTimestamp>,
     incomplete: bool,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
 ) -> SessionTelemetry {
     let first = events.iter().map(|(at, _)| *at).min();
     let complete = !incomplete
@@ -234,7 +235,7 @@ pub fn session_telemetry(
                 && (provider == UsageProvider::Codex
                     || (tokens.cache_read.is_some() && tokens.cache_creation.is_some()))
         });
-    let minute = DateTime::from_timestamp(now.timestamp().div_euclid(60) * 60, 0)
+    let minute = UtcTimestamp::from_timestamp(now.timestamp().div_euclid(60) * 60, 0)
         .expect("rounding a valid timestamp to a minute stays in range");
     let mut minute_buckets = (0..30)
         .rev()
@@ -248,16 +249,16 @@ pub fn session_telemetry(
             }
         })
         .collect::<Vec<_>>();
-    let today_date = now.with_timezone(&Local).date_naive();
+    let today_date = local_time_at(now.timestamp()).date();
     let mut today = ConsumptionBreakdown::default();
     if complete {
         for (at, breakdown) in events {
-            if at.with_timezone(&Local).date_naive() == today_date {
+            if local_time_at(at.timestamp()).date() == today_date {
                 today.add(breakdown);
             }
             let oldest = minute_buckets[0].started_at;
             if *at >= oldest && *at < minute + Duration::minutes(1) {
-                let index = at.signed_duration_since(oldest).num_seconds();
+                let index = at.signed_duration_since(oldest).whole_seconds();
                 if let Some(tokens) = &mut minute_buckets[index as usize / 60].tokens {
                     *tokens += breakdown.total();
                 }
@@ -287,16 +288,16 @@ pub fn session_telemetry(
 pub fn aggregate(
     provider: UsageProvider,
     events: Vec<ConsumptionEvent>,
-    week_start: DateTime<Utc>,
-    now: DateTime<Utc>,
+    week_start: UtcTimestamp,
+    now: UtcTimestamp,
 ) -> ProviderConsumption {
-    let today_date = now.with_timezone(&Local).date_naive();
+    let today_date = local_time_at(now.timestamp()).date();
     let mut today = ConsumptionBreakdown::default();
     let mut this_week = ConsumptionBreakdown::default();
-    let mut by_day: HashMap<NaiveDate, ConsumptionBreakdown> = HashMap::new();
+    let mut by_day: HashMap<Date, ConsumptionBreakdown> = HashMap::new();
 
     for (ts, breakdown) in &events {
-        let local_date = ts.with_timezone(&Local).date_naive();
+        let local_date = local_time_at(ts.timestamp()).date();
         if local_date == today_date {
             today.add(breakdown);
         }
@@ -310,7 +311,7 @@ pub fn aggregate(
     for offset in (0..CHART_DAYS).rev() {
         let date = today_date - Duration::days(offset);
         days.push(DayConsumption {
-            date: date.format("%Y-%m-%d").to_string(),
+            date: date.to_string(),
             breakdown: by_day.get(&date).copied().unwrap_or_default(),
         });
     }
@@ -323,7 +324,7 @@ pub fn aggregate(
     }
 }
 
-fn scan_cutoff(now: DateTime<Utc>) -> SystemTime {
+fn scan_cutoff(now: UtcTimestamp) -> SystemTime {
     let secs = (RANGE_DAYS as u64) * 24 * 60 * 60;
     // Anchor to wall-clock SystemTime; `now` is only used for date math.
     let _ = now;
@@ -335,8 +336,8 @@ fn scan_cutoff(now: DateTime<Utc>) -> SystemTime {
 /// Read Codex consumption from recent rollouts under `home`.
 pub fn read_codex_consumption(
     home: &Path,
-    week_start: DateTime<Utc>,
-    now: DateTime<Utc>,
+    week_start: UtcTimestamp,
+    now: UtcTimestamp,
 ) -> ProviderConsumption {
     let paths = codex::rollouts_modified_since(home, scan_cutoff(now), MAX_FILES);
     let mut events = Vec::new();
@@ -351,8 +352,8 @@ pub fn read_codex_consumption(
 /// Read Claude consumption from recent transcripts under `home`.
 pub fn read_claude_consumption(
     home: &Path,
-    week_start: DateTime<Utc>,
-    now: DateTime<Utc>,
+    week_start: UtcTimestamp,
+    now: UtcTimestamp,
 ) -> ProviderConsumption {
     let paths = claude::transcripts_modified_since(home, scan_cutoff(now), MAX_FILES);
     let mut events = Vec::new();
@@ -368,8 +369,8 @@ pub fn read_claude_consumption(
 mod tests {
     use super::*;
 
-    fn ts(s: &str) -> DateTime<Utc> {
-        DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
+    fn ts(s: &str) -> UtcTimestamp {
+        UtcTimestamp::parse_rfc3339(s).unwrap()
     }
 
     #[test]
@@ -422,11 +423,8 @@ mod tests {
         assert_eq!(pc.provider, UsageProvider::Codex);
         // 7-day series present, oldest first, ending today.
         assert_eq!(pc.days.len(), CHART_DAYS as usize);
-        let today_local = now.with_timezone(&Local).date_naive();
-        assert_eq!(
-            pc.days.last().unwrap().date,
-            today_local.format("%Y-%m-%d").to_string()
-        );
+        let today_local = local_time_at(now.timestamp()).date();
+        assert_eq!(pc.days.last().unwrap().date, today_local.to_string());
         // The pre-week event must not be in this_week.
         assert!(pc.this_week.total() < b(99, 9, 900).total() + 1000);
         assert_eq!(pc.this_week.input, 30); // 10 + 20 (both >= week_start)

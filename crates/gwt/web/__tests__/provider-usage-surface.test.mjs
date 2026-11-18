@@ -11,12 +11,18 @@ const componentsCss = readFileSync(resolve(here, "../styles/components.css"), "u
 test("Usage severity styles use Operator tokens without raw color fallbacks", () => {
   assert.match(
     componentsCss,
-    /\.op-status-strip__cell--usage\s*\{[^}]*flex:\s*0 0 23ch;[^}]*inline-size:\s*23ch;[^}]*white-space:\s*nowrap;[^}]*overflow:\s*hidden;/s,
+    /\.op-status-strip__cell--usage\s*\{[^}]*flex-wrap:\s*wrap;[^}]*overflow:\s*visible;/s,
   );
   assert.match(
     componentsCss,
     /\.op-usage-sum\s*\{[^}]*inline-size:\s*7ch;/s,
   );
+  assert.match(componentsCss, /\.op-usage-sum--models\s*\{[^}]*flex-wrap:\s*wrap;[^}]*inline-size:\s*auto;/s);
+  assert.match(componentsCss, /\.op-usage-model\s*\{[^}]*white-space:\s*nowrap;/s);
+  assert.doesNotMatch(componentsCss.match(/\.op-status-strip\s*\{([^}]*)\}/s)[1], /flex-wrap:/,
+    "without Usage, preserve the existing status-strip layout");
+  assert.match(componentsCss, /#app:has\(#op-strip-usage:not\(\[hidden\]\)\)\s*\{[^}]*--usage-strip-row-size:\s*auto;/s);
+  assert.match(componentsCss, /\.op-status-strip:has\(> #op-strip-usage:not\(\[hidden\]\)\)\s*\{[^}]*flex-wrap:\s*wrap;/s);
   assert.match(
     componentsCss,
     /\.op-usage-more\s*\{[^}]*color:\s*var\(--color-status-strip-fg\);/s,
@@ -41,6 +47,86 @@ test("Usage severity styles use Operator tokens without raw color fallbacks", ()
     componentsCss,
     /\.op-usage-bar__fill\[data-severity="danger"\]\s*\{[^}]*background:\s*var\(--color-state-blocked\);/s,
   );
+});
+
+test("Claude keeps both named weekly models visible independently of session focus", async () => {
+  const { applyProviderUsage } = await importOperatorShell();
+  const { document } = parseHTML("<button id='op-strip-usage'></button>");
+  const account = { provider: "claude_code", state: { kind: "ok" }, windows: [
+    { kind: "five_hour", used_percent: 100 },
+    { kind: "opus_weekly", used_percent: 70 },
+    { kind: "fable_weekly", used_percent: 20 },
+  ] };
+  const strip = document.getElementById("op-strip-usage");
+  for (const model of ["fable", "opus", "codex"]) {
+    applyProviderUsage(document, { accounts: [account], sessions: [{ model, active: true }] });
+    assert.deepEqual([...strip.querySelectorAll("[data-window-kind]")].map(el => el.textContent),
+      ["Fable weekly 20%", "Opus weekly 70%"]);
+    assert.equal(strip.querySelectorAll("[data-provider]").length, 1);
+    assert.equal(strip.querySelector("[data-provider]").dataset.severity, "danger");
+    assert.match(strip.getAttribute("aria-label"), /shared quota 100% danger/);
+  }
+  account.windows[1].used_percent = 80;
+  applyProviderUsage(document, { accounts: [account] });
+  assert.equal(strip.querySelector('[data-window-kind="fable_weekly"]').textContent, "Fable weekly 20%");
+  assert.equal(strip.querySelector('[data-window-kind="opus_weekly"]').textContent, "Opus weekly 80%");
+  assert.equal(strip.querySelector('[data-window-kind="opus_weekly"]').dataset.severity, "warning");
+});
+
+test("Claude model summaries distinguish zero, missing, degraded and stale values", async () => {
+  const { applyProviderUsage } = await importOperatorShell();
+  const { document } = parseHTML("<button id='op-strip-usage'></button>");
+  const strip = document.getElementById("op-strip-usage");
+  const account = { provider: "claude_code", state: { kind: "ok" }, windows: [
+    { kind: "weekly", used_percent: 95 },
+    { kind: "fable_weekly", used_percent: 0 },
+  ] };
+  for (const invalid of [undefined, null, "", "unknown"]) {
+    account.windows[2] = { kind: "opus_weekly", used_percent: invalid };
+    applyProviderUsage(document, { accounts: [account] });
+    assert.equal(strip.querySelector('[data-window-kind="fable_weekly"]').textContent, "Fable weekly 0%");
+    assert.equal(strip.querySelector('[data-window-kind="opus_weekly"]').textContent, "Opus weekly —");
+    assert.match(strip.getAttribute("aria-label"), /Opus weekly not provided/);
+  }
+  account.windows = [{ kind: "opus_weekly", used_percent: 0 }];
+  applyProviderUsage(document, { accounts: [account] });
+  assert.match(strip.textContent, /Fable weekly —.*Opus weekly 0%/);
+  for (const [kind, value] of [["disabled", "off"], ["no_data", "—"], ["unavailable", "n/a"]]) {
+    account.state = { kind, reason: "connection failed" };
+    applyProviderUsage(document, { accounts: [account] });
+    assert.equal(strip.querySelector('[data-window-kind="opus_weekly"]').textContent, `Opus weekly ${value}`);
+    if (kind === "unavailable") assert.match(strip.getAttribute("aria-label"), /connection failed/);
+  }
+  account.state = { kind: "stale", age_secs: 420 };
+  applyProviderUsage(document, { accounts: [account] });
+  assert.match(strip.textContent, /Opus weekly 0%.*stale/);
+  assert.match(strip.getAttribute("aria-label"), /stale 7m/);
+  account.state = { kind: "unknown" };
+  account.windows.push({ kind: "weekly", used_percent: 20 });
+  applyProviderUsage(document, { accounts: [account] });
+  assert.equal(strip.querySelector('[data-window-kind="opus_weekly"]').dataset.severity, undefined);
+  assert.equal(strip.querySelector('[data-provider]').dataset.severity, undefined);
+  assert.doesNotMatch(strip.getAttribute("aria-label"), /normal|20%/);
+});
+
+test("Three-provider selection retains both Claude models and their own severity", async () => {
+  const { applyProviderUsage } = await importOperatorShell();
+  const { document } = parseHTML("<button id='op-strip-usage'></button>");
+  for (const [value, severity] of [[79, "normal"], [80, "warning"], [94, "warning"], [95, "danger"]]) {
+    applyProviderUsage(document, { accounts: [
+      { provider: "codex", state: { kind: "ok" }, windows: [{ kind: "weekly", used_percent: 20 }] },
+      { provider: "claude_code", state: { kind: "ok" }, windows: [
+        { kind: "five_hour", used_percent: 99 },
+        { kind: "fable_weekly", used_percent: value },
+        { kind: "opus_weekly", used_percent: 0 },
+      ] },
+      { provider: "custom", state: { kind: "ok" }, windows: [{ kind: "weekly", used_percent: 30 }] },
+    ] });
+    assert.equal(document.querySelector('[data-provider]').dataset.provider, "claude_code");
+    assert.equal(document.querySelectorAll('[data-window-kind]').length, 2);
+    assert.equal(document.querySelector('[data-window-kind="fable_weekly"]').dataset.severity, severity);
+    assert.equal(document.querySelector('.op-usage-more').textContent, "+2");
+  }
 });
 
 test("Status strip labels each provider and removes symbol-only usage shorthand", async () => {
@@ -72,9 +158,72 @@ test("Status strip labels each provider and removes symbol-only usage shorthand"
   );
   assert.equal(
     strip.querySelector('[data-provider="claude_code"]').textContent.trim(),
-    "CC 29%",
+    "CC Fable weekly — Opus weekly —",
   );
   assert.doesNotMatch(strip.textContent, /[⬡◇]/);
+});
+
+test("Codex full subscription distinguishes available credits from exhausted credits", async () => {
+  const { applyProviderUsage } = await importOperatorShell();
+  const { document } = parseHTML("<button id='op-strip-usage'></button>");
+  const account = { provider: "codex", state: { kind: "ok" }, limit_reached: false,
+    windows: [{ kind: "weekly", used_percent: 100 }],
+    credits: { has_credits: true, unlimited: false, balance: 37669.9 } };
+  const strip = document.getElementById("op-strip-usage");
+  applyProviderUsage(document, { accounts: [account] });
+  assert.match(strip.textContent, /CX.*Using credits.*37,669\.9/);
+  assert.doesNotMatch(strip.getAttribute("aria-label"), /limit reached/);
+  assert.equal(strip.querySelector("[data-provider]").dataset.limit, undefined);
+  assert.match(componentsCss, /\.op-usage-sum--credits\s*\{[^}]*inline-size:\s*auto;/s);
+  assert.match(componentsCss, /\.op-usage-sum--credits\s*\{[^}]*white-space:\s*normal;/s);
+  account.credits.has_credits = false;
+  applyProviderUsage(document, { accounts: [account] });
+  assert.match(strip.getAttribute("aria-label"), /limit reached/);
+  assert.equal(strip.querySelector("[data-provider]").dataset.limit, "true");
+  delete account.credits;
+  applyProviderUsage(document, { accounts: [account] });
+  assert.equal(strip.querySelector("[data-provider]").textContent, "CX 100%");
+  assert.equal(strip.querySelector("[data-provider]").dataset.limit, undefined);
+});
+
+test("Codex popover derives credit pace only from distinct same-account observations", async () => {
+  const { createProviderUsageSurface } = await import(pathToFileURL(resolve(here, "../provider-usage-surface.js")).href);
+  const { document, window } = parseHTML("<html><body><div id='usage-anchor'></div></body></html>");
+  const previous = { document: globalThis.document, window: globalThis.window,
+    CustomEvent: globalThis.CustomEvent, requestAnimationFrame: globalThis.requestAnimationFrame };
+  Object.assign(globalThis, { document, window, CustomEvent: window.CustomEvent,
+    requestAnimationFrame: callback => callback() });
+  window.innerWidth = 1200;
+  window.innerHeight = 800;
+  try {
+    const surface = createProviderUsageSurface({ send() {}, renderWorkspaceWindows() {} });
+    const update = (balance, fetched_at, account_id = "account-a", state = { kind: "ok" }) => {
+      surface.applyProviderUsageUi({ accounts: [{ provider: "codex", account_id, fetched_at, state,
+        limit_reached: false, windows: [{ kind: "weekly", used_percent: 100 }],
+        credits: { has_credits: true, unlimited: false, balance } }], sessions: [], consumption: [] });
+    };
+    update(100, "2031-01-02T10:00:00Z");
+    const anchor = document.getElementById("usage-anchor");
+    anchor.getBoundingClientRect = () => ({ left: 24, top: 640 });
+    window.__gwtShowUsageHover(anchor);
+    const card = () => document.querySelector('.op-usage-card[data-provider="codex"]');
+    assert.match(card().textContent, /Using credits.*100 credits/);
+    assert.doesNotMatch(card().textContent, /\/hour|Limit reached/);
+    update(90, "2031-01-02T10:30:00Z");
+    assert.match(card().textContent, /90 credits.*20 credits\/hour/);
+    update(90, "2031-01-02T10:30:00Z", "account-a", { kind: "stale", age_secs: 420 });
+    assert.match(card().textContent, /stale 7m/);
+    assert.match(card().textContent, /20 credits\/hour/);
+    update(80, "2031-01-02T11:00:00Z", "account-b");
+    assert.doesNotMatch(card().textContent, /\/hour/);
+    update(120, "2031-01-02T11:30:00Z", "account-b");
+    assert.doesNotMatch(card().textContent, /\/hour/);
+    update(null, "2031-01-02T12:00:00Z", "account-b");
+    assert.match(card().textContent, /— credits/);
+    assert.doesNotMatch(card().textContent, /\/hour/);
+  } finally {
+    Object.assign(globalThis, previous);
+  }
 });
 
 test("Status strip summarizes the provider window nearest its limit", async () => {
@@ -139,13 +288,13 @@ test("Claude status summary uses shared windows while Codex keeps all windows", 
   const cases = [
     {
       windows: [...modelWindows, { kind: "five_hour", used_percent: 29 }, { kind: "weekly", used_percent: 12 }],
-      value: "CC 29%", severity: "normal",
+      value: "CC Fable weekly 100% Opus weekly 100%", severity: "normal",
     },
     {
       windows: [...modelWindows, { kind: "five_hour", used_percent: 12 }, { kind: "weekly", used_percent: 96 }],
-      value: "CC 96%", severity: "danger",
+      value: "CC Fable weekly 100% Opus weekly 100%", severity: "danger",
     },
-    { windows: modelWindows, value: "CC —", severity: undefined },
+    { windows: modelWindows, value: "CC Fable weekly 100% Opus weekly 100%", severity: undefined },
   ];
   for (const { windows, value, severity } of cases) {
     applyProviderUsage(document, { accounts: [{ ...account, windows }] });
@@ -468,11 +617,11 @@ test("Status strip compacts three providers while keeping the full accessible su
   assert.equal(strip.querySelector(".op-usage-more").textContent, "+2");
   assert.equal(
     strip.getAttribute("aria-label"),
-    "Provider usage: Codex 40% normal, Claude Code 70% normal, CU 95% danger",
+    "Provider usage: Codex 40% normal, Claude Code, Fable weekly not provided, Opus weekly not provided, shared quota 70% normal, CU 95% danger",
   );
   assert.equal(
     strip.title,
-    "Provider usage: Codex 40% normal, Claude Code 70% normal, CU 95% danger",
+    "Provider usage: Codex 40% normal, Claude Code, Fable weekly not provided, Opus weekly not provided, shared quota 70% normal, CU 95% danger",
   );
 });
 
@@ -791,7 +940,7 @@ test("Claude usage popover labels Fable weekly with its reported usage and reset
   try {
     const surface = createProviderUsageSurface({ send() {}, renderWorkspaceWindows() {} });
     const resetsAt = "2031-01-02T03:04:05Z";
-    surface.applyProviderUsageUi({ accounts: [{ provider: "claude_code", state: { kind: "ok" },
+    surface.applyProviderUsageUi({ accounts: [{ provider: "claude_code", state: { kind: "ok" }, limit_reached: true,
       windows: [{ kind: "fable_weekly", used_percent: 0, resets_at: resetsAt }] }],
       consumption: [], sessions: [] });
     const anchor = document.getElementById("usage-anchor");
@@ -802,10 +951,18 @@ test("Claude usage popover labels Fable weekly with its reported usage and reset
     assert.equal(row.querySelector(".op-usage-win__lbl").textContent, "Fable weekly");
     assert.equal(row.querySelector(".op-usage-win__pct").textContent, "0%");
     assert.equal(row.querySelector(".op-usage-bar__fill").style.width, "0%");
+    assert.equal(row.querySelector(".op-usage-bar__fill").dataset.severity, "normal");
+    assert.equal(document.querySelector(".op-usage-card__limit").textContent, "Limit reached");
     assert.equal(row.querySelector(".op-usage-win__reset").textContent,
       `↻ ${new Date(resetsAt).toLocaleString(undefined, {
         month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit",
       })}`);
+    surface.applyProviderUsageUi({ accounts: [{ provider: "claude_code", state: { kind: "stale", age_secs: 420 },
+      windows: [{ kind: "fable_weekly", used_percent: null },
+        { kind: "opus_weekly", used_percent: "invalid" }] }], sessions: [], consumption: [] });
+    assert.deepEqual([...document.querySelectorAll(".op-usage-win__pct")].map(el => el.textContent), ["—", "—"]);
+    assert.equal(document.querySelectorAll(".op-usage-bar").length, 0);
+    assert.match(document.querySelector(".op-usage-card").textContent, /stale 7m/);
   } finally {
     Object.assign(globalThis, previous);
   }

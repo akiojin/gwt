@@ -27,6 +27,8 @@ pub const ISSUE_MONITOR_CONTROL_REJECTED_ERROR: &str =
     concat!("issue", " monitor control rejected before commit");
 pub const ISSUE_MONITOR_CONTROL_BUSY_ERROR: &str =
     concat!("issue", " monitor control rejected: admission is full");
+pub(crate) const ISSUE_MONITOR_WAIT_CAP_EXPIRED_ERROR: &str =
+    "Issues control rejected before commit: reason=wait_cap_expired; the original wait deadline has passed or cannot be read";
 pub const ISSUE_MONITOR_CONTROL_SCAN_ALREADY_IN_FLIGHT_ERROR: &str =
     concat!("issue", " monitor control rejected: scan_already_in_flight");
 /// Captured source for the private `agent_failed_from_launch` notification.
@@ -533,6 +535,7 @@ mod tests {
             source_event: Some("Stop".to_string()),
             gwt_session_id: Some("session-1".to_string()),
             continuation_readiness_nonce: None,
+            native_prompt_id: None,
             agent_session_id: Some("agent-1".to_string()),
             project_root: Some("/tmp/project".to_string()),
             branch: Some("work/runtime".to_string()),
@@ -562,6 +565,7 @@ mod tests {
             source_event: Some("SessionStart".to_string()),
             gwt_session_id: Some("session-private".to_string()),
             continuation_readiness_nonce: Some("continue-ready-private".to_string()),
+            native_prompt_id: None,
             agent_session_id: Some("provider-session".to_string()),
             project_root: Some("/tmp/project".to_string()),
             branch: Some("work/issue-2359".to_string()),
@@ -591,6 +595,7 @@ mod tests {
             source_event: Some("PreToolUse".to_string()),
             gwt_session_id: Some("session-private".to_string()),
             continuation_readiness_nonce: Some("continue-ready-private".to_string()),
+            native_prompt_id: None,
             agent_session_id: Some("provider-session".to_string()),
             project_root: Some("/tmp/project".to_string()),
             branch: Some("work/issue-3480".to_string()),

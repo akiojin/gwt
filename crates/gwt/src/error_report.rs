@@ -7,8 +7,9 @@
 use std::collections::BTreeMap;
 use std::sync::{mpsc, OnceLock};
 
-use chrono::Duration;
 use gwt_core::error_ledger::{ErrorKind, ErrorRecord, ErrorTarget};
+use sha2::{Digest as _, Sha256};
+use time::Duration;
 
 use crate::protocol::BackendEvent;
 
@@ -51,11 +52,35 @@ fn report_error_with_publish(
     append_record(record, publish)
 }
 
-fn append_record(record: ErrorRecord, publish: bool) -> Option<ErrorRecord> {
+fn append_record(mut record: ErrorRecord, publish: bool) -> Option<ErrorRecord> {
+    let finalizer_timeout = (record.kind == ErrorKind::LaunchFailure)
+        .then(|| {
+            crate::project_runtime::workspace::workspace_finalizer_timeout_operation_id(
+                &record.message,
+            )
+        })
+        .flatten();
+    if let Some(operation_id) = finalizer_timeout {
+        // One physical external operation can reach the owner, GUI and cached
+        // delivery paths. Keep its first diagnostic across retries and restarts.
+        record.id = format!(
+            "workspace-finalizer-timeout:{}",
+            hex::encode(Sha256::digest(operation_id.as_bytes()))
+        );
+        record
+            .context
+            .insert("workspace_operation_id".into(), operation_id.into());
+    }
+    let once = finalizer_timeout.is_some();
     if recently_recorded(&record) {
         return None;
     }
-    match gwt_core::error_ledger::record(record) {
+    let result = if once {
+        gwt_core::error_ledger::record_once(record)
+    } else {
+        gwt_core::error_ledger::record(record)
+    };
+    match result {
         Ok(recorded) => {
             if publish {
                 publish_recorded(&recorded, recorded.target.project_root.as_deref());
@@ -217,11 +242,19 @@ pub(crate) fn flush_backend_errors() {
 fn recently_recorded(record: &ErrorRecord) -> bool {
     // GUI errors can wait in the reporter queue; compare their event times,
     // so processing delay cannot turn one repeated error into several rows.
-    let since = record.recorded_at - Duration::seconds(5);
-    gwt_core::error_ledger::list_since(Some(since))
+    let finalizer_timeout = record.kind == ErrorKind::LaunchFailure
+        && crate::project_runtime::workspace::workspace_finalizer_timeout_operation_id(
+            &record.message,
+        )
+        .is_some();
+    let since = (!finalizer_timeout).then_some(record.recorded_at - Duration::seconds(5));
+    gwt_core::error_ledger::list_since(since)
         .ok()
         .is_some_and(|rows| {
             rows.iter().any(|row| {
+                if finalizer_timeout {
+                    return row.id == record.id;
+                }
                 row.kind == record.kind
                     && row.message == record.message
                     && row.scope == record.scope
@@ -260,8 +293,8 @@ fn publish_recorded(record: &ErrorRecord, project_root: Option<&str>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
     use gwt_core::test_support::ScopedGwtHome;
+    use gwt_core::timestamp::UtcTimestamp;
 
     fn isolated_home() -> (tempfile::TempDir, ScopedGwtHome) {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -343,7 +376,7 @@ mod tests {
     fn queued_duplicate_errors_keep_their_event_time_deduplication_window() {
         let (_dir, _home) = isolated_home();
         let mut record = ErrorRecord::new_host(ErrorKind::LaunchFailure, "delayed backend error");
-        record.recorded_at = Utc::now() - Duration::seconds(60);
+        record.recorded_at = UtcTimestamp::now() - Duration::seconds(60);
         assert!(append_record(record.clone(), false).is_some());
         assert!(append_record(record, false).is_none());
         assert_eq!(gwt_core::error_ledger::list_since(None).unwrap().len(), 1);
@@ -367,5 +400,46 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn issue_6996_finalizer_timeout_records_once_across_launch_and_cached_toast_replays() {
+        let (_dir, _home) = isolated_home();
+        let message = "workspace finalizer fresh-launch-6996 timed out after 120000ms while publishing launch Work; live external commit did not finish before operation deadline";
+        let mut first = ErrorRecord::new(
+            ErrorKind::LaunchFailure,
+            message,
+            ErrorTarget {
+                project_root: Some("/project-6996".into()),
+                window_id: Some("pane-6996".into()),
+                issue: Some(6996),
+                ..ErrorTarget::default()
+            },
+        );
+        first.recorded_at = UtcTimestamp::now() - Duration::minutes(10);
+        append_record(first, false).unwrap();
+        let launch_failed = BackendEvent::IssueMonitorLaunchFailed {
+            issue_number: 6996,
+            message: message.into(),
+        };
+        append_record(backend_event_record(&launch_failed, None).unwrap(), false);
+        let toast = BackendEvent::IssueMonitorToast {
+            notification_transition: None,
+            notification_transition_id: None,
+            level: "error".into(),
+            message: message.replace("120000ms", "240000ms"),
+            issue_number: Some(6996),
+        };
+        let origin = ErrorOrigin::Project("/project-6996".into());
+        append_record(backend_event_record(&toast, Some(&origin)).unwrap(), false);
+        let rows = gwt_core::error_ledger::list_since(None).unwrap();
+        assert_eq!(
+            rows.len(),
+            1,
+            "one expired operation across all reporting paths"
+        );
+        assert_eq!(rows[0].target.window_id.as_deref(), Some("pane-6996"));
+        assert!(rows[0].message.contains("fresh-launch-6996"));
+        assert!(rows[0].message.contains("120000ms"));
     }
 }

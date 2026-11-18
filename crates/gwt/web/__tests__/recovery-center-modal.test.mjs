@@ -128,8 +128,8 @@ test("rejected action shows its handle and reason without opening Board", () => 
 
 test("Recovery Center CSS references defined Operator tokens", () => {
   const components = readFileSync(resolve(here, "..", "styles", "components.css"), "utf8");
-  const recoveryCss = components.split("/* SPEC-1921 Phase 80 — read-only durable delivery Recovery Center. */")[1];
-  assert.ok(recoveryCss, "Recovery Center styles must be present");
+  const recoveryCss = components.match(/\/\* SPEC-1921 Phase 80 — read-only durable delivery Recovery Center\. \*\/([\s\S]*?)\/\* \/SPEC-1921 Phase 80 \*\//)?.[1];
+  assert.ok(recoveryCss?.trim(), "Recovery Center styles must have nonempty start/end boundaries");
   const tokenSources = ["tokens.css", "typography.css"]
     .map((file) => readFileSync(resolve(here, "..", "styles", file), "utf8"))
     .join("\n");

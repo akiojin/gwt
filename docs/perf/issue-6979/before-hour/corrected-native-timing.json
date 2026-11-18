@@ -1,0 +1,193 @@
+{
+  "kind": "read-only timing boundary correction; original summary/analysis/log unchanged",
+  "window": {
+    "started_at_ms": 1794430431531,
+    "completed_at_ms": 1794434038325
+  },
+  "native_events_sha256": "3219e022a591ccf2a5ac220008d924fac2efbfdd5c9ebeb21a951a78939f2b4a",
+  "original_analysis_native_dispatch_max_ms_means": "frontend request receive_to_complete_ms only",
+  "request_receive_to_complete_max_ms": 113,
+  "completed_event_loop_max_ms": 491,
+  "completed_event_loop_overruns_100ms": 656,
+  "watchdog_warning_count": 500,
+  "watchdog_by_event": {
+    "IssueMonitorDaemonInbox": 494,
+    "IssueMonitorListPrepared": 6
+  },
+  "completed_by_event": {
+    "ActiveWorkProjectionPrepared": {
+      "count": 1,
+      "max_ms": 0,
+      "p95_ms": 0,
+      "overruns_100ms": 0
+    },
+    "AgentRoster": {
+      "count": 2,
+      "max_ms": 0,
+      "p95_ms": 0,
+      "overruns_100ms": 0
+    },
+    "BrowserDisconnected": {
+      "count": 6,
+      "max_ms": 0,
+      "p95_ms": 0,
+      "overruns_100ms": 0
+    },
+    "FrontendReady": {
+      "count": 4,
+      "max_ms": 32,
+      "p95_ms": 32,
+      "overruns_100ms": 0
+    },
+    "GetSystemSettings": {
+      "count": 1,
+      "max_ms": 0,
+      "p95_ms": 0,
+      "overruns_100ms": 0
+    },
+    "IssueMonitorCapacityChanged": {
+      "count": 573,
+      "max_ms": 5,
+      "p95_ms": 4,
+      "overruns_100ms": 0
+    },
+    "IssueMonitorClaimRenewalTick": {
+      "count": 12,
+      "max_ms": 0,
+      "p95_ms": 0,
+      "overruns_100ms": 0
+    },
+    "IssueMonitorDaemonInbox": {
+      "count": 1225,
+      "max_ms": 491,
+      "p95_ms": 144,
+      "overruns_100ms": 649
+    },
+    "IssueMonitorDaemonStatus": {
+      "count": 1225,
+      "max_ms": 10,
+      "p95_ms": 5,
+      "overruns_100ms": 0
+    },
+    "IssueMonitorListPrepared": {
+      "count": 1674,
+      "max_ms": 142,
+      "p95_ms": 4,
+      "overruns_100ms": 7
+    },
+    "IssueMonitorScheduledScanComplete": {
+      "count": 60,
+      "max_ms": 0,
+      "p95_ms": 0,
+      "overruns_100ms": 0
+    },
+    "IssueMonitorScheduledScanPrepared": {
+      "count": 60,
+      "max_ms": 1,
+      "p95_ms": 1,
+      "overruns_100ms": 0
+    },
+    "IssueMonitorScheduledTick": {
+      "count": 60,
+      "max_ms": 7,
+      "p95_ms": 4,
+      "overruns_100ms": 0
+    },
+    "ListIssueMonitor": {
+      "count": 1674,
+      "max_ms": 2,
+      "p95_ms": 0,
+      "overruns_100ms": 0
+    },
+    "LogEntry": {
+      "count": 4010,
+      "max_ms": 0,
+      "p95_ms": 0,
+      "overruns_100ms": 0
+    },
+    "MainEventsCleared": {
+      "count": 7765,
+      "max_ms": 0,
+      "p95_ms": 0,
+      "overruns_100ms": 0
+    },
+    "NewEvents": {
+      "count": 7765,
+      "max_ms": 15,
+      "p95_ms": 0,
+      "overruns_100ms": 0
+    },
+    "OrphanDaemonsObserved": {
+      "count": 3,
+      "max_ms": 2,
+      "p95_ms": 2,
+      "overruns_100ms": 0
+    },
+    "PreparedActiveWorkDispatch": {
+      "count": 1,
+      "max_ms": 0,
+      "p95_ms": 0,
+      "overruns_100ms": 0
+    },
+    "ProjectClientAttention": {
+      "count": 4,
+      "max_ms": 0,
+      "p95_ms": 0,
+      "overruns_100ms": 0
+    },
+    "ProjectDispatch": {
+      "count": 3,
+      "max_ms": 0,
+      "p95_ms": 0,
+      "overruns_100ms": 0
+    },
+    "ProjectViewReady": {
+      "count": 1,
+      "max_ms": 40,
+      "p95_ms": 40,
+      "overruns_100ms": 0
+    },
+    "RedrawEventsCleared": {
+      "count": 7765,
+      "max_ms": 0,
+      "p95_ms": 0,
+      "overruns_100ms": 0
+    },
+    "RuntimeDaemonEnsureTick": {
+      "count": 120,
+      "max_ms": 1,
+      "p95_ms": 1,
+      "overruns_100ms": 0
+    },
+    "SaveUiTrace": {
+      "count": 60,
+      "max_ms": 11,
+      "p95_ms": 8,
+      "overruns_100ms": 0
+    },
+    "StartupAutoResumeReady": {
+      "count": 1,
+      "max_ms": 0,
+      "p95_ms": 0,
+      "overruns_100ms": 0
+    },
+    "StartupFirstFrame": {
+      "count": 1,
+      "max_ms": 0,
+      "p95_ms": 0,
+      "overruns_100ms": 0
+    },
+    "TerminalConvergenceTick": {
+      "count": 240,
+      "max_ms": 0,
+      "p95_ms": 0,
+      "overruns_100ms": 0
+    },
+    "UpdateDrainObserved": {
+      "count": 240,
+      "max_ms": 0,
+      "p95_ms": 0,
+      "overruns_100ms": 0
+    }
+  }
+}

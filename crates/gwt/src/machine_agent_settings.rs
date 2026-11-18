@@ -326,6 +326,7 @@ fn save(stored: &StoredPolicy) -> io::Result<()> {
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct LegacyPrefs {
+    schema_version: Option<u32>,
     max_active_agents: Option<usize>,
     max_active_agents_mode: Option<IssueMonitorMaxActiveMode>,
     max_active_last_change: Option<serde_json::Value>,
@@ -357,9 +358,10 @@ fn legacy_policy() -> io::Result<Policy> {
             .max_active_last_change
             .as_ref()
             .and_then(|change| change.get("changed_at")?.as_str())
-            .and_then(|changed_at| chrono::DateTime::parse_from_rfc3339(changed_at).ok())
-            .map(|time| time.with_timezone(&chrono::Utc))
-            .unwrap_or_else(|| chrono::DateTime::<chrono::Utc>::from(modified));
+            .and_then(|changed_at| {
+                gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(changed_at).ok()
+            })
+            .unwrap_or_else(|| gwt_core::timestamp::UtcTimestamp::from(modified));
         let rank = (mode == IssueMonitorMaxActiveMode::Auto, changed_at, path);
         if selected.as_ref().is_none_or(|(current, _)| rank > *current) {
             selected = Some((
@@ -389,7 +391,8 @@ fn legacy_project(path: &Path) -> io::Result<Option<(LegacyPrefs, SystemTime)>> 
         Err(error) if error.kind() == io::ErrorKind::NotFound => return read_legacy(&committed),
         Err(error) => return Err(error),
     };
-    match serde_json::from_str(&content) {
+    match serde_json::from_str::<LegacyPrefs>(&content) {
+        Ok(prefs) if prefs.schema_version.is_some_and(|schema| schema != 1) => Ok(None),
         Ok(prefs) => Ok(Some((prefs, fs::metadata(path)?.modified()?))),
         Err(error) => read_legacy(&committed)?
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, error))
@@ -403,8 +406,11 @@ fn read_legacy(path: &Path) -> io::Result<Option<(LegacyPrefs, SystemTime)>> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),
     };
-    let prefs = serde_json::from_str(&content)
+    let prefs: LegacyPrefs = serde_json::from_str(&content)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    if prefs.schema_version.is_some_and(|schema| schema != 1) {
+        return Ok(None);
+    }
     Ok(Some((prefs, fs::metadata(path)?.modified()?)))
 }
 
@@ -488,9 +494,10 @@ mod tests {
                     "max_active_last_change": change
                 }),
             );
-            let start = chrono::DateTime::parse_from_rfc3339("2025-01-01T00:00:00Z")
-                .unwrap()
-                .timestamp() as u64;
+            let start =
+                gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339("2025-01-01T00:00:00Z")
+                    .unwrap()
+                    .timestamp() as u64;
             fs::File::options()
                 .write(true)
                 .open(path)

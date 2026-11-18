@@ -526,14 +526,19 @@ Supported direct scoped operations:
   self-review and CI gates still apply; this does not create an internal
   reviewer verdict or override merge automation.
 - `pr.auto_merge.enable {number, reviewed_head_sha}` enables GitHub auto-merge
-  for a reviewed external fork PR. The owner must authorize that exact PR and
+  for a reviewed PR, including same-repository recovery when the Auto Merge PR
+  workflow fails to start. The owner must authorize that exact PR and
   full head SHA through a recorded scoped instruction or native approval.
   Remembered approval also stays bound to that PR and SHA. The runtime reads
   current fork identity, Ready state, passing CI, approval and resolved review
   threads before arming auto-merge with the reviewed head fixed. It records
   the PR, SHA and permission source in the audit. A changed head requires
   another review and authorization; it never bypasses GitHub's merge gates.
-  Same-repository PRs retain the ordinary verification and delivery path.
+  Same-repository recovery requires the existing completion/Ready predicate,
+  including current passing CI, completed review, zero unresolved threads and
+  Agent Visual Check. External forks still require an APPROVED GitHub review.
+  Unknown repository identity refuses both routes. This operation never
+  changes workflow event policies, branch protection or required checks.
 - `release.metadata.set {tag, name?, body?, prerelease?}` changes an existing
   release's display name, notes or prerelease flag. Publishing, assets and
   latest selection remain with the existing gated release workflow.
@@ -597,6 +602,14 @@ Approved existing operations:
   naming Issue numbers created, changed, or launched. If none were taken,
   state "No action" and why. Write both fields in the user's language.
   This rule takes precedence over unchanged-cycle silence and digest suppression.
+- A user question or instruction that arrived while you were working, or whose
+  response deadline has passed, still gets its Q&A report. Post it with the
+  same `instruction` object and no `authorizations`; with no current human turn
+  to bind, it is saved as a display-only Q&A that grants no authority.
+- Never let a report disappear silently. When `pm.report.post` fails, read
+  `pm.report.list`; if the report is absent, retry once with the same payload,
+  and if it still fails, tell the user in the conversation that the report was
+  not saved and why.
 - When an action needs a newly saved instruction before it can run, the one Q&A
   report acknowledges the request and concrete action plan first. Save its
   `instruction.authorizations`, obtain the instruction ID, then perform the
@@ -1056,6 +1069,18 @@ body cannot hold `plan` / `tasks` sections.
 
 ## Priority and launches
 
+- In autonomous mode, the Monitor alone fills the queue. Do not push after registering an Issue.
+  Use `issue.monitor.priority.move` to set an Issue's order, including before it has an inbox row.
+  Read fresh status, pass `expected_priority_order` and a reason, then read back the applied order.
+  Priority grants no readiness or claim authority; it applies when the Issue becomes eligible.
+  Registered PM calls to `issue.monitor.queue.push`, including `force:true`, and
+  `issue.monitor.queue.remove` are refused while autonomous mode is ON. Do not retry them or
+  work around the refusal with another admission operation. Queue membership changes and foreign
+  claim takeovers remain owner GUI controls; autonomous mode OFF retains the existing operations.
+  Existing identity-bound safety stop and user-owned hold controls keep their lifecycle contracts.
+  PR delivery holds do not consume automatic refill capacity. Normal automatic candidates follow
+  the saved priority order; active/pending launches, urgent precedence and explicit owner membership
+  retain their existing protection. The queue-control details below apply where permitted.
 - Active inbox rows include `agent_name`; `active_launch_details` supplies the
   same assigned name, provider, and Session alongside the window identity.
   Use this current assignment directly rather than joining `pane.list` or
@@ -2688,6 +2713,8 @@ a quiet queue or a handed-off PR alone does not finish the PM role.
 ## References
 
 Choose the reference for the current action; read only the relevant sections.
+Read references and project memory by absolute path (the file-read tool or
+`cat <absolute path>`); do not `cd` into them.
 
 - At startup or before an authority decision: [Role, boundaries, and user instructions](references/role-and-boundaries.md).
 - For request intake, Issue ownership, queue order, or launches: [Intake and priority](references/intake-and-priority.md).
@@ -2793,10 +2820,10 @@ fn write_skill_md(skills_root: &Path, provider: ManagedAssetTarget) -> io::Resul
         )?;
     }
     let policy_path = leaf.join("references/project-policy.md");
-    match std::fs::remove_file(&policy_path) {
+    match crate::asset_io::remove_file(&policy_path) {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
+        Err(error) => return Err(error.into()),
     }
     GUIDANCE.write(skills_root, provider)
 }
@@ -2886,6 +2913,43 @@ mod tests {
         );
     }
 
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn pm_policy_cleanup_rejects_symlink_mutation() {
+        let root = TempDir::new().unwrap();
+        generate_pm_guidance_for_codex(root.path()).unwrap();
+        let external = TempDir::new().unwrap();
+        let sentinel = external.path().join("policy.md");
+        std::fs::write(&sentinel, "sentinel").unwrap();
+        let references = root
+            .path()
+            .join(".codex/skills/gwt-pm/references")
+            .components()
+            .collect::<PathBuf>();
+        let target = references.join("project-policy.md");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&sentinel, &target).unwrap();
+        #[cfg(windows)]
+        {
+            let output = gwt_core::process::hidden_command("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(target.components().collect::<PathBuf>())
+                .arg(external.path().components().collect::<PathBuf>())
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+        }
+
+        let error = generate_pm_guidance_for_codex(root.path()).unwrap_err();
+        assert!(error.to_string().contains("delete"), "{error}");
+        assert!(
+            error.to_string().contains(&target.display().to_string()),
+            "{error}"
+        );
+        assert!(std::fs::symlink_metadata(target).is_ok());
+        assert_eq!(std::fs::read_to_string(sentinel).unwrap(), "sentinel");
+    }
+
     #[test]
     fn generated_router_keeps_complete_contract_in_references() {
         let dir = TempDir::new().expect("tempdir");
@@ -2896,6 +2960,10 @@ mod tests {
             assert!(
                 root.contains("## Completion"),
                 "completion must be visible at entry"
+            );
+            assert!(
+                root.contains("do not `cd` into them"),
+                "Issue #6989: references are read by absolute path"
             );
             assert!(
                 root.len() <= 2500,
@@ -3359,6 +3427,28 @@ mod tests {
     }
 
     #[test]
+    fn issue_7508_generated_intake_delegates_autonomous_admission_to_monitor() {
+        let dir = TempDir::new().unwrap();
+        generate_pm_guidance(dir.path()).unwrap();
+        for provider in [".claude", ".codex"] {
+            let intake = std::fs::read_to_string(dir.path().join(format!(
+                "{provider}/skills/gwt-pm/references/intake-and-priority.md"
+            )))
+            .unwrap();
+            for required in [
+                "In autonomous mode, the Monitor alone fills the queue",
+                "Do not push after registering an Issue",
+                "Use `issue.monitor.priority.move`",
+                "before it has an inbox row",
+                "including `force:true`",
+                "`issue.monitor.queue.remove` are refused",
+            ] {
+                assert!(intake.contains(required), "missing {required}");
+            }
+        }
+    }
+
+    #[test]
     fn external_feedback_requires_trusted_curation_and_actual_owner_adoption() {
         let dir = TempDir::new().expect("tempdir");
         generate_pm_guidance(dir.path()).expect("generate PM guidance");
@@ -3691,7 +3781,7 @@ mod tests {
                 "`AskUserQuestion`",
                 "numbered choices",
                 "replying with the number is enough",
-                "names, numbers, or original descriptions",
+                "Free-text-only questions with an answer example are allowed when the answer inherently needs names, numbers, or original descriptions.",
                 "Never use a free-text-only question when the answers can be enumerated",
             ] {
                 assert!(role.contains(required), "{provider}: missing {required}");
@@ -4909,6 +4999,9 @@ This paragraph says it is reported immediately and never held for a digest.\n\
         assert_eq!(claude, render_contract());
         let intake = unwrapped(&claude);
         for phrase in [
+            "including same-repository recovery when the Auto Merge PR",
+            "External forks still require an APPROVED GitHub review",
+            "changes workflow event policies, branch protection or required checks",
             "including the first cold start with zero signal differences and no new user request",
             "Check semantic priority",
             "Curate the backlog",

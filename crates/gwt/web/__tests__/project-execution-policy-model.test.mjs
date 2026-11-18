@@ -65,6 +65,22 @@ test('actual view readiness waits for visible render and binds the received chal
   readiness.visible(); assert.equal(sent.length, 1);
   readiness.rendered(); assert.equal(sent.at(-1).nonce, 'next');
 });
+test('issue 7665: a view that stayed open re-registers after a host restart even while its tab is hidden', () => {
+  const sent = [], frames = [], document = { visibilityState: 'visible' };
+  const readiness = createProjectViewReadiness({ document, projectKey: key, viewId: 'view-a',
+    send: event => sent.push(event), scheduleFrame: callback => frames.push(callback) });
+  readiness.challenge({ project_key: key, generation: 2, nonce: 'first' }); readiness.rendered();
+  frames.shift()(); assert.equal(sent.length, 1);
+  // The updated host restarts while this tab is in the background: no frame is delivered there.
+  document.visibilityState = 'hidden'; readiness.connectionLost();
+  readiness.challenge({ project_key: key, generation: 9, nonce: 'restarted' }); readiness.rendered();
+  assert.equal(frames.length, 0);
+  assert.deepEqual(sent.at(-1), { kind: 'project_view_ready', generation: 9, nonce: 'restarted', view_id: 'view-a' });
+  // An explicit Close ends that open; a hidden page cannot reopen the Project by reconnecting.
+  readiness.closed(); readiness.connectionLost();
+  readiness.challenge({ project_key: key, generation: 10, nonce: 'after-close' }); readiness.rendered();
+  assert.equal(sent.length, 2);
+});
 test('a fresh connection accepts a restarted backend incarnation without losing the last-known display', () => {
   const policy = createProjectExecutionPolicyModel(key); policy.applyStatus(status({ generation: 8 }));
   policy.connectionLost(); policy.applyStatus(status({ generation: 1, revision: 5, effective_state: 'waiting' }));

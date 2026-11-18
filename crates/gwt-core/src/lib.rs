@@ -46,6 +46,7 @@ pub mod runtime;
 pub mod skill_state;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
+pub mod timestamp;
 pub mod update;
 pub mod usage;
 pub mod user_instruction;

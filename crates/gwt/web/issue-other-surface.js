@@ -4,11 +4,33 @@ import { createUiStateStore } from "./ui-state-store.js";
 export function createActiveWorkProjectionModel() {
   const model = createUiStateStore(null);
   function applyActiveWorkProjectionReceiveEvent(event) {
-    model.update(state => ({
-      projection: event.kind === "active_work_projection_patch"
+    model.update(state => {
+      const projection = event.kind === "active_work_projection_patch"
         ? mergeActiveWorkProjectionPatch(state?.projection, event.projection || null)
-        : event.projection || null,
-    }));
+        : event.projection || null;
+      if (!projection) return { projection: null };
+      // Derive after merging: both views read one immutable classification,
+      // including fields that their display normalization does not retain.
+      const derive = item => ({ ...item,
+        attention: deriveWorkspaceAttention({ ...item, ...workspaceAttentionFields(item) }) });
+      const derived = { ...derive(projection),
+        ...Object.fromEntries(["active_works", "works", "workspaces", "work_items", "journal_entries"]
+          .filter(key => Array.isArray(projection[key]))
+          // A patch retains owned, frozen history; do not re-derive it.
+          .map(key => [key, projection[key] === state?.projection?.[key]
+            ? projection[key] : projection[key].map(derive)])),
+      };
+      // Only current Workspace membership is evidence. Patches retain history
+      // and synthesize an empty active_works even when that input was missing.
+      const items = Array.isArray(event.projection?.active_works)
+        ? Object.values(Object.fromEntries(derived.active_works.filter(item => item.id).map(item => [item.id, item])))
+          .filter(item => item.attention.lane === "needs_attention")
+          .map(item => ({ id: item.id, label: compactText(item.work_summary || item.title || item.branch, item.id),
+            reason: item.attention.reason })) : null;
+      return { projection: { ...derived, attentionSummary: { count: items?.length ?? null, items: items || [],
+        summary: items ? [`Workspaces needing attention ${items.length}`,
+          ...items.map(item => `${item.label}: ${item.reason}`)].join("\n") : "" } } };
+    });
   }
   return { model, applyActiveWorkProjectionReceiveEvent };
 }
@@ -61,6 +83,21 @@ function explicitAttentionReason(item) {
 }
 
 export function attentionForWorkspace(item) {
+  // Synthetic remote rows and legacy callers have no received snapshot.
+  return item?.attention ?? deriveWorkspaceAttention(item);
+}
+
+function workspaceAttentionFields(item, fallback = {}) {
+  // Keep the existing display defaults for legacy snapshots. Lifecycle state
+  // is distinct from lifecycle_stage and defaults to an Active Work badge.
+  return {
+    summary: compactText(item?.summary || item?.status_text || item?.intent),
+    status_text: compactText(item?.status_text || item?.summary),
+    lifecycle_state: item?.lifecycle_state || fallback.lifecycle_state || "active",
+  };
+}
+
+function deriveWorkspaceAttention(item) {
   const lifecycle = attentionText(item?.lifecycle_state || "");
   const status = attentionText(item?.status_category || "");
   if (
@@ -401,23 +438,17 @@ export function createIssueOtherSurface({
       id,
       title: workspaceTitle(item),
       intent: compactText(item?.intent),
-      summary: compactText(item?.summary || item?.status_text || item?.intent),
+      ...workspaceAttentionFields(item, fallback),
+      attention: item?.attention,
       progress_summary: compactText(item?.progress_summary),
       // SPEC-3075: backend-derived "what work was running" purpose summary
       // (agent title-summary surfaced). Primary rail label; branch is the sub.
       work_summary: compactText(item?.work_summary),
       owner: compactText(item?.owner || fallback.owner),
       status_category: item?.status_category || fallback.status_category || "idle",
-      status_text: compactText(item?.status_text || item?.summary),
       next_action: compactText(item?.next_action),
       blocked_reason: compactText(item?.blocked_reason),
       lifecycle_stage: item?.lifecycle_stage || fallback.lifecycle_stage || "",
-      // SPEC-2359 Phase W-12 (FR-349/FR-351): agent-session Work lifecycle
-      // state (active / paused / done / discarded). Distinct from the U-6
-      // status-derived `lifecycle_stage`. Defaults to "active" so legacy
-      // projections without the field keep rendering an Active Work badge.
-      lifecycle_state:
-        item?.lifecycle_state || fallback.lifecycle_state || "active",
       closed_at: item?.closed_at || fallback.closed_at || null,
       branch: compactText(item?.branch || primaryContainer.branch || fallback.branch),
       worktree_path: compactText(

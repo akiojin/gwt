@@ -1,0 +1,21 @@
+{
+  "profile": "before",
+  "started_at_ms": 1794430431531,
+  "stopped_at_ms": 1794434046699,
+  "requested_seconds": 3600,
+  "source_events": 13,
+  "durable_monitor_scans": 120,
+  "background_index_disabled": true,
+  "claim_records": 0,
+  "native_dispatch_records": 37182,
+  "scan_refresh_overlap_count": 1642,
+  "ui_refresh_overlap_count": 2072,
+  "ui_scan_refresh_overlap_count": 485,
+  "writer_instrumentation_proven": false,
+  "native_dispatch_diagnostic_ms": 30,
+  "native_watchdog_ms": 100,
+  "quiet_period_ms": 30000,
+  "physical_os_writes": "unmeasured",
+  "failure": "RuntimeError: native frontend dispatch reached the hundred-millisecond watchdog boundary",
+  "owned_gui_stopped": true
+}

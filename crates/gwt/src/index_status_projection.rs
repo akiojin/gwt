@@ -202,8 +202,18 @@ fn issues_status(repo_dir: &Path, issue_cache_root: &Path) -> Value {
     let db_path = repo_dir.join("issues");
     let meta_path = db_path.join("meta.json");
     let meta = read_json(&meta_path).unwrap_or(Value::Null);
-    let exists =
-        active_store(&db_path).join(CHROMA_STORE_FILENAME).is_file() || meta_path.is_file();
+    let pointer_path = generations_root(&db_path).join(ACTIVE_POINTER_FILENAME);
+    let pointer = read_json(&pointer_path);
+    let requires_record_contract = pointer_path.is_file()
+        && pointer.as_ref().is_none_or(|pointer| {
+            pointer.get("schema_version").and_then(Value::as_u64) != Some(1)
+                || pointer.get("writer_protocol").is_some()
+        });
+    let exists = if requires_record_contract {
+        gwt_core::index::runtime::issue_store_exists(repo_dir)
+    } else {
+        active_store(&db_path).join(CHROMA_STORE_FILENAME).is_file() || meta_path.is_file()
+    };
     let document_count = meta
         .get("document_count")
         .and_then(Value::as_u64)
@@ -212,6 +222,30 @@ fn issues_status(repo_dir: &Path, issue_cache_root: &Path) -> Value {
     let source = crate::issue_cache::issue_cache_source_fingerprint(issue_cache_root)
         .ok()
         .flatten();
+    let pooled_source_changed = requires_record_contract
+        && (source.as_ref().is_some_and(|source| {
+            meta.get("issue_cache_fingerprint").and_then(Value::as_str)
+                != Some(source.fingerprint.as_str())
+        }) || match meta.get("source_cache_revision") {
+            Some(expected) => {
+                let expected = expected
+                    .as_str()
+                    .and_then(|revision| uuid::Uuid::parse_str(revision).ok());
+                let actual = fs::read_to_string(issue_cache_root.join("source-revision"))
+                    .ok()
+                    .and_then(|revision| uuid::Uuid::parse_str(&revision).ok());
+                expected.is_none() || expected != actual
+            }
+            None => meta
+                .get("source_content_fingerprint")
+                .and_then(Value::as_str)
+                .is_none_or(|expected| {
+                    crate::index_worker::legacy_issue_source_snapshot(issue_cache_root)
+                        .ok()
+                        .as_deref()
+                        != Some(expected)
+                }),
+        });
     let mut reason = if !exists {
         "collection_missing"
     } else if meta.is_null() {
@@ -221,7 +255,21 @@ fn issues_status(repo_dir: &Path, issue_cache_root: &Path) -> Value {
     } else {
         "ready"
     };
-    if let Some(source) = &source {
+    if requires_record_contract {
+        // One cached SPEC can expand into several unified records. Compare
+        // record counts to membership and raw source hashes to their own domain.
+        if reason == "ready" {
+            if pointer
+                .as_ref()
+                .and_then(|pointer| pointer["document_count"].as_u64())
+                != Some(document_count)
+            {
+                reason = "count_mismatch";
+            } else if pooled_source_changed {
+                reason = "source_cache_changed";
+            }
+        }
+    } else if let Some(source) = &source {
         if source.document_count > 0 && document_count != source.document_count as u64 {
             reason = "count_mismatch";
         } else if source.document_count > 0
@@ -250,12 +298,18 @@ fn issues_status(repo_dir: &Path, issue_cache_root: &Path) -> Value {
         }
     }
     if let Some(repair) = read_json(&db_path.join("repair.json")) {
-        let source_fingerprint = source
-            .as_ref()
-            .map(|source| source.fingerprint.clone())
-            .unwrap_or_else(|| canonical_json_sha256(&json!([])));
-        let fingerprint_matches =
-            repair.get("fingerprint").and_then(Value::as_str) == Some(source_fingerprint.as_str());
+        let fingerprint_matches = if requires_record_contract {
+            !pooled_source_changed
+                && source.is_some()
+                && indexed_fingerprint.is_some()
+                && repair.get("fingerprint").and_then(Value::as_str) == indexed_fingerprint
+        } else {
+            let source_fingerprint = source
+                .as_ref()
+                .map(|source| source.fingerprint.clone())
+                .unwrap_or_else(|| canonical_json_sha256(&json!([])));
+            repair.get("fingerprint").and_then(Value::as_str) == Some(source_fingerprint.as_str())
+        };
         let incomplete =
             repair.get("last_error").and_then(Value::as_str) == Some("BUILD_INCOMPLETE");
         if incomplete {
@@ -659,6 +713,168 @@ fn verify_closure(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn issues_record_pool_projection_requires_supported_exact_membership() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        let cache = repo.join("cache");
+        let issue = cache.join("7");
+        let generation = repo.join("issues.gen/gen-1-1");
+        let store = repo.join("issues.gen/record-stores/issues-records-v1/store");
+        fs::create_dir_all(&generation).unwrap();
+        fs::create_dir_all(&store).unwrap();
+        fs::create_dir_all(repo.join("issues")).unwrap();
+        fs::create_dir_all(&issue).unwrap();
+        fs::write(
+            issue.join("meta.json"),
+            json!({"title":"Chunked SPEC", "state":"open", "labels":["gwt-spec"]}).to_string(),
+        )
+        .unwrap();
+        fs::write(issue.join("body.md"), "SPEC wrapper").unwrap();
+        let section = issue.join("sections/spec.md");
+        fs::create_dir_all(section.parent().unwrap()).unwrap();
+        fs::write(&section, "# Requirements\noriginal section").unwrap();
+        let source = crate::issue_cache::issue_cache_source_fingerprint(&cache)
+            .unwrap()
+            .unwrap();
+        let revision = "00000000-0000-0000-0000-000000000001";
+        fs::write(cache.join("source-revision"), revision).unwrap();
+        let mut meta = json!({
+            "document_count": 2,
+            "source_cache_fingerprint": "c".repeat(64),
+            "issue_cache_fingerprint": source.fingerprint,
+            "source_cache_revision": revision,
+        });
+        assert_eq!(source.document_count, 1);
+        assert_ne!(
+            meta["source_cache_fingerprint"],
+            meta["issue_cache_fingerprint"]
+        );
+        let meta_path = repo.join("issues/meta.json");
+        fs::write(&meta_path, meta.to_string()).unwrap();
+        fs::write(store.join("chroma.sqlite3"), b"fixture").unwrap();
+        let members = json!({"spec-7:chunk-0": "a".repeat(64), "spec-7:chunk-1": "b".repeat(64)});
+        let digest = canonical_json_sha256(&members);
+        let mut membership = json!({
+            "schema_version": 1,
+            "writer_protocol": "issues-records-v1",
+            "record_layout": "issue-spec-chunks-v1",
+            "members": members,
+            "members_digest": digest,
+        });
+        let mut pointer = json!({
+            "schema_version": 2,
+            "writer_protocol": "issues-records-v1",
+            "scope": "issues",
+            "generation": "gen-1-1",
+            "document_count": 2,
+            "membership_digest": digest,
+        });
+        let membership_path = generation.join("membership.json");
+        let pointer_path = repo.join("issues.gen/active.json");
+        fs::write(&membership_path, membership.to_string()).unwrap();
+        fs::write(&pointer_path, pointer.to_string()).unwrap();
+        assert_eq!(issues_status(repo, &repo.join("cache"))["reason"], "ready");
+
+        meta["document_count"] = json!(3);
+        fs::write(&meta_path, meta.to_string()).unwrap();
+        assert_eq!(issues_status(repo, &cache)["reason"], "count_mismatch");
+        meta["document_count"] = json!(2);
+        fs::write(&meta_path, meta.to_string()).unwrap();
+        fs::write(
+            cache.join("source-revision"),
+            "00000000-0000-0000-0000-000000000002",
+        )
+        .unwrap();
+        assert_eq!(
+            issues_status(repo, &cache)["reason"],
+            "source_cache_changed"
+        );
+        fs::write(cache.join("source-revision"), revision).unwrap();
+        fs::write(issue.join("body.md"), "changed wrapper").unwrap();
+        assert_eq!(
+            issues_status(repo, &cache)["reason"],
+            "source_cache_changed"
+        );
+        fs::write(issue.join("body.md"), "SPEC wrapper").unwrap();
+
+        let repair_path = repo.join("issues/repair.json");
+        fs::write(
+            &repair_path,
+            json!({"fingerprint":meta["source_cache_fingerprint"], "failures":1,
+                   "last_error":"BUILD_FAILED", "mode":"full"})
+            .to_string(),
+        )
+        .unwrap();
+        assert!(issues_status(repo, &cache)["reason"]
+            .as_str()
+            .unwrap()
+            .starts_with("repair_stopped:"));
+        fs::write(issue.join("body.md"), "changed wrapper").unwrap();
+        assert_eq!(
+            issues_status(repo, &cache)["reason"],
+            "source_cache_changed"
+        );
+        fs::write(issue.join("body.md"), "SPEC wrapper").unwrap();
+        fs::remove_file(repair_path).unwrap();
+
+        fs::remove_file(cache.join("source-revision")).unwrap();
+        meta.as_object_mut()
+            .unwrap()
+            .remove("source_cache_revision");
+        meta["source_content_fingerprint"] =
+            json!(crate::index_worker::legacy_issue_source_snapshot(&cache).unwrap());
+        fs::write(&meta_path, meta.to_string()).unwrap();
+        assert_eq!(issues_status(repo, &cache)["reason"], "ready");
+        fs::write(&section, "# Requirements\nchanged section").unwrap();
+        assert_eq!(
+            crate::issue_cache::issue_cache_source_fingerprint(&cache)
+                .unwrap()
+                .unwrap()
+                .fingerprint,
+            source.fingerprint
+        );
+        assert_eq!(
+            issues_status(repo, &cache)["reason"],
+            "source_cache_changed"
+        );
+        fs::write(&section, "# Requirements\noriginal section").unwrap();
+        let repair_path = repo.join("issues/repair.json");
+        fs::write(
+            &repair_path,
+            json!({"fingerprint":meta["source_cache_fingerprint"], "failures":1,
+                   "last_error":"BUILD_FAILED", "mode":"full"})
+            .to_string(),
+        )
+        .unwrap();
+        assert!(issues_status(repo, &cache)["reason"]
+            .as_str()
+            .unwrap()
+            .starts_with("repair_stopped:"));
+        fs::write(&section, "# Requirements\nchanged section").unwrap();
+        assert_eq!(
+            issues_status(repo, &cache)["reason"],
+            "source_cache_changed"
+        );
+        fs::remove_file(repair_path).unwrap();
+        fs::write(&section, "# Requirements\noriginal section").unwrap();
+
+        fs::remove_file(store.join("chroma.sqlite3")).unwrap();
+        assert_eq!(
+            issues_status(repo, &repo.join("cache"))["reason"],
+            "collection_missing"
+        );
+        fs::write(store.join("chroma.sqlite3"), b"fixture").unwrap();
+        membership["members_digest"] = json!("b".repeat(64));
+        fs::write(&membership_path, membership.to_string()).unwrap();
+        assert_eq!(issues_status(repo, &repo.join("cache"))["healthy"], false);
+        membership["members_digest"] = json!(digest);
+        fs::write(&membership_path, membership.to_string()).unwrap();
+        pointer["writer_protocol"] = json!("future-issues-records");
+        fs::write(&pointer_path, pointer.to_string()).unwrap();
+        assert_eq!(issues_status(repo, &repo.join("cache"))["healthy"], false);
+    }
 
     #[test]
     fn successful_issue_rebuild_stays_ready_for_crlf_cache_body() {

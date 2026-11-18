@@ -1,33 +1,55 @@
+import { FLEET_RATE_POINTS, FLEET_RATE_WINDOW_MINUTES } from "./agent-activity-model.js";
+
 const finite = value => typeof value === "number" && Number.isFinite(value);
 const number = value => finite(value) ? new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(value) : "—";
 const seconds = value => finite(value) ? `${Math.floor(value / 3600)}h ${Math.floor(value % 3600 / 60)}m` : "—";
 const stateFor = status => ({ running: "running", starting: "running", waiting: "waiting", idle: "idle", ready: "idle", stopped: "stopped", exited: "stopped", error: "error", interrupted: "interrupted" })[status] || "unknown";
 const labelFor = state => state.charAt(0).toUpperCase() + state.slice(1);
 
-// Live activity owns membership; a separately arriving catalog only enriches
-// the row and authorizes access to its exact session's local terminal.
-function currentWorks(catalog, activity, roster) {
+// Live activity owns active membership. Explicitly stopped catalog windows
+// remain readable without granting the former runtime input authority.
+function currentWorks(catalog, activity, roster, projectKey, entries) {
   const app = catalog.appState, members = roster.members || [];
-  const windows = (app.tabs || []).filter(tab => !activity.snapshot?.project_key
-    || tab.project_key === activity.snapshot.project_key).flatMap(tab => tab.workspace?.windows || []);
+  const windows = (app.tabs || []).filter(tab => !(projectKey ?? activity.snapshot?.project_key)
+    || tab.project_key === (projectKey ?? activity.snapshot.project_key)).flatMap(tab => tab.workspace?.windows || []);
   const order = work => {
     if (work.member) return members.indexOf(work.member);
     const index = windows.findIndex(data => data.id === work.data.id);
     return members.length + (index < 0 ? windows.length : index);
   };
-  return (activity.agents || []).map(assignment => {
+  const live = activity.agents || [];
+  const works = live.map(assignment => {
     const matched = windows.find(data => data.id === assignment.window_id
       && data.session_id === assignment.session_id && data.preset !== "shell");
     const data = matched || { id: assignment.window_id };
     const member = assignment.is_pm ? null : members.find(member => member.assignment?.session_id === assignment.session_id);
-    return { data, assignment, member, ready: !!matched,
+    return { data, assignment, member, projectKey: projectKey ?? activity.snapshot?.project_key, hostId: activity.snapshot?.host_id, ready: !!matched,
       state: matched ? stateFor(catalog.runtimeStates[data.id] ?? data.status) : "unknown" };
-  }).sort((a, b) => Number(!!b.assignment.is_pm) - Number(!!a.assignment.is_pm) || order(a) - order(b));
+  });
+  for (const data of windows) {
+    if (live.some(assignment => assignment.window_id === data.id)
+      || !data.session_id || data.persist !== false
+      || !(data.agent_id || ["agent", "claude", "codex"].includes(data.preset))
+      || data.preset === "shell"
+      || stateFor(catalog.runtimeStates[data.id] ?? data.status) !== "stopped") continue;
+    const previous = entries?.get(data.id)?.work;
+    const hostId = activity.snapshot?.host_id ?? previous?.hostId;
+    const assignment = previous?.assignment.session_id === data.session_id
+      && previous.hostId === hostId && finite(data.runtime_started_at_ms)
+      && previous.data.runtime_started_at_ms === data.runtime_started_at_ms
+      ? previous.assignment
+      : { window_id: data.id, session_id: data.session_id,
+        issue_number: data.linked_issue_number, is_pm: !!data.is_pm };
+    const member = assignment.is_pm ? null : members.find(member => member.assignment?.session_id === assignment.session_id);
+    works.push({ data, assignment, member, projectKey: projectKey ?? activity.snapshot?.project_key,
+      hostId, ready: true, state: "stopped", retained: true });
+  }
+  return works.sort((a, b) => Number(!!b.assignment.is_pm) - Number(!!a.assignment.is_pm) || order(a) - order(b));
 }
 
 const sparkStates = new WeakMap();
-function drawSpark(document, svg, input, maximum) {
-  const values = Array.from({ length: 30 }, (_, index) => finite(input?.[index]) ? Math.max(0, input[index]) : null);
+function drawSpark(document, svg, input, maximum, minutes = 30, label = "Tokens per minute") {
+  const values = Array.from({ length: minutes }, (_, index) => finite(input?.[index]) ? Math.max(0, input[index]) : null);
   const known = values.filter(finite);
   const max = Math.max(1, maximum || 0, ...known);
   const previous = sparkStates.get(svg);
@@ -36,7 +58,7 @@ function drawSpark(document, svg, input, maximum) {
   svg.setAttribute("viewBox", "0 0 300 56");
   svg.setAttribute("preserveAspectRatio", "none");
   svg.setAttribute("role", "img");
-  svg.setAttribute("aria-label", `Tokens per minute, last 30 minutes: ${known.length} measured minutes, ${30 - known.length} unavailable`);
+  svg.setAttribute("aria-label", `${label}, last ${minutes} minutes: ${known.length} measured minutes, ${minutes - known.length} unavailable`);
   svg.dataset.knownCount = String(known.length);
   let points = [];
   const append = () => {
@@ -48,32 +70,35 @@ function drawSpark(document, svg, input, maximum) {
   };
   values.forEach((value, index) => {
     if (value === null) { append(); return; }
-    points.push(`${(index * 300 / 29).toFixed(1)},${(53 - value * 49 / max).toFixed(1)}`);
+    const x = (index * 300 / (minutes - 1)).toFixed(1), y = (53 - value * 49 / max).toFixed(1);
+    points.push(`${x},${y}`);
     const dot = document.createElementNS("http://www.w3.org/2000/svg", "circle");
-    dot.setAttribute("cx", (index * 300 / 29).toFixed(1));
-    dot.setAttribute("cy", (53 - value * 49 / max).toFixed(1)); dot.setAttribute("r", "1.5");
+    dot.setAttribute("cx", x);
+    dot.setAttribute("cy", y); dot.setAttribute("r", "1.5");
     svg.append(dot);
   });
   append();
   sparkStates.set(svg, { values, maximum: max });
 }
 
-export function createWorksSurface({ document, windowCatalogModel, activityModel, rosterModel, windowDisplayTitle, systemSettingsModel,
-  mountTerminal, mountPreview, onLayout = () => {}, onFocus = () => {}, onSelectMember = () => {}, getTelemetry = () => null }) {
+const summaryCells = [["running", "RUNNING"], ["block", "BLOCK"], ["idle", "IDLE"], ["error", "ERROR"]];
+
+export function createWorksSurface({ projectKey, document, windowCatalogModel, activityModel, rosterModel, windowDisplayTitle, systemSettingsModel,
+  summaryModel, workProjectionModel, mountTerminal, mountPreview, onRevokeTerminal = () => {}, onReleaseTerminal = () => {}, onLayout = () => {}, onFocus = () => {}, onSelectMember = () => {}, getTelemetry = () => null }) {
   const element = document.createElement("section");
   element.className = "works-surface"; element.setAttribute("aria-label", "Works");
   element.innerHTML = `<div class="works-overview"><header class="works-heading"><h2>Works</h2><div class="works-counts">
-    ${["running", "waiting", "idle", "error"].map(state => `<span>${state.toUpperCase()} <b data-count="${state}">—</b></span>`).join("")}</div><span class="works-active"></span></header>
-    <div class="works-today">Today · Tokens <b data-metric="today-total">—</b> · Input <b data-metric="today-input">—</b> · Cache <b data-metric="today-cache">—</b> · Output <b data-metric="today-output">—</b> · Cost <b data-metric="today-cost">—</b> · Landed PRs <b data-metric="today-landed">—</b>
-      <small class="works-availability" data-availability="today"></small><small class="works-availability works-source-note"></small></div>
-    <div class="works-fleet"><div>Fleet tokens/min <b data-metric="fleet-now">—</b><small>Last 30 minutes</small></div><svg></svg><small class="works-availability" data-availability="fleet"></small></div>
+    ${summaryCells.map(([key, label]) => `<span>${label} <b data-count="${key}">—</b></span>`).join("")}</div></header>
+    <div class="works-today">Today · Tokens <b data-metric="today-total">—</b> · Input <b data-metric="today-input">—</b> · Cache <b data-metric="today-cache">—</b> · Output <b data-metric="today-output">—</b>
+      <small class="works-availability" data-availability="today"></small></div>
+    <div class="works-fleet"><div>Fleet tokens/min <b data-metric="fleet-now">—</b><small>${FLEET_RATE_WINDOW_MINUTES}-minute average · Last ${FLEET_RATE_POINTS} completed minutes</small></div><svg></svg><small class="works-availability" data-availability="fleet"></small></div>
     <div class="works-list" role="list" aria-label="Current agent works"></div><p class="works-empty">No local agents are active.</p></div>
     <section class="works-full" aria-label="Work terminal" hidden><header class="works-full-header"><button type="button" data-action="back">← Back to Works</button>
       <span class="works-full-name"></span><span class="works-full-meta"></span><span class="works-full-usage"></span>
       <button type="button" data-action="previous" aria-label="Previous work">↑</button><button type="button" data-action="next" aria-label="Next work">↓</button></header><div class="works-terminal-host"></div></section>`;
   const overview = element.querySelector(".works-overview"), list = element.querySelector(".works-list"), full = element.querySelector(".works-full");
   const entries = new Map();
-  let selected = null, previewElement = null, previewCleanups = [], disposed = false;
+  let selected = null, previewElement = null, previewEntries = [], disposed = false;
   let renderedCatalog, renderedActivity, renderedRoster;
   const previewLines = () => systemSettingsModel?.read().worksPreviewLines ?? 3;
   const isPresented = () => element.isConnected && !element.hidden;
@@ -103,10 +128,11 @@ export function createWorksSurface({ document, windowCatalogModel, activityModel
       host.append(badge);
     } else if (!work.assignment.is_pm) badge?.remove();
   }
+  const targetFor = work => ({ ...work.assignment, projectKey: work.projectKey, hostId: work.hostId });
   function park(entry, rehost = false) {
     const moved = entry.terminal.parentElement !== entry.cache;
     if (moved) entry.cache.append(entry.terminal);
-    if (exactWork(entry.work.assignment) && isPresented() && (moved || rehost)) mountTerminal(entry.work.data.id, entry.terminal, { readOnly: true });
+    if (exactWork(targetFor(entry.work)) && isPresented() && (moved || rehost)) mountTerminal(entry.work.data.id, entry.terminal, { readOnly: true, identity: targetFor(entry.work) });
   }
   function back(restore = true) {
     const previous = selected; selected = null; full.hidden = true; overview.hidden = false;
@@ -114,33 +140,35 @@ export function createWorksSurface({ document, windowCatalogModel, activityModel
     if (restore) entries.get(previous?.window_id)?.row.focus({ preventScroll: true });
     syncPreview(); onLayout();
   }
-  function exactWork(target) {
+  function exactWork(target, catalog = windowCatalogModel.read().catalog) {
     const requested = typeof target === "string" ? { window_id: target } : target;
     if (!requested?.window_id) return null;
-    return currentWorks(windowCatalogModel.read().catalog, activityModel.read(), rosterModel.read()).find(work =>
-      work.ready && work.assignment.window_id === requested.window_id &&
+    return currentWorks(catalog, activityModel.read(), rosterModel.read(), projectKey, entries).find(work =>
+      work.ready && (!projectKey || activityModel.read().snapshot?.project_key === projectKey) &&
+      (requested.hostId === undefined || requested.hostId === work.hostId) &&
+      work.assignment.window_id === requested.window_id &&
       (!requested.session_id || requested.session_id === work.assignment.session_id) &&
       (requested.runtime_incarnation === undefined || requested.runtime_incarnation === work.assignment.runtime_incarnation));
   }
   function showFull(work, rehost = true) {
-    selected = work.assignment; overview.hidden = true; full.hidden = false;
+    selected = { ...work.assignment, hostId: work.hostId, root: entries.get(work.data.id).terminal }; overview.hidden = true; full.hidden = false;
     const entry = entries.get(work.data.id);
     for (const other of entries.values()) if (other !== entry) park(other);
     const host = full.querySelector(".works-terminal-host");
     if (entry.terminal.parentElement !== host) host.append(entry.terminal);
     setName(full.querySelector(".works-full-name"), work);
     const t = telemetryFor(work);
-    const available = work.data.session_id && ["running", "waiting", "idle"].includes(work.state);
+    const available = work.ready && work.data.session_id && ["running", "waiting", "idle"].includes(work.state);
     full.querySelector(".works-full-meta").textContent = `${work.assignment.is_pm ? "PM" : work.assignment.issue_number ? `#${work.assignment.issue_number}` : "—"} · ${purposeFor(work)} · ${labelFor(work.state)} · ${seconds(t.elapsed_seconds)} · ${providerFor(work)} / ${work.member?.model || t.model || "—"} · ${available ? "Interactive" : "Input unavailable"}`;
     full.querySelector(".works-full-usage").textContent = `${number(t.input_tokens)} input / ${number(t.cache_tokens)} cache / ${number(t.output_tokens)} output · Context ${finite(t.context_remaining_percent) ? `${t.context_remaining_percent}%` : "—"}`;
     // Attachment progress may remain after another surface moves the native xterm.
-    if ((rehost || !entry.terminal.querySelector(".xterm")) && isPresented()) mountTerminal(work.data.id, entry.terminal, { readOnly: false });
+    if ((rehost || !entry.terminal.querySelector(".xterm")) && work.ready && isPresented()) { mountTerminal(work.data.id, entry.terminal, { readOnly: work.retained === true, identity: targetFor(work) }); entry.revoked = false; }
   }
   function openWork(target) {
     if (disposed) return false;
     render(false);
     const work = exactWork(target);
-    if (!work) { back(false); return false; }
+    if (!work) return false;
     showFull(work); syncPreview(); onLayout(); onFocus(work.data.id); return true;
   }
   function createEntry(work) {
@@ -156,12 +184,12 @@ export function createWorksSurface({ document, windowCatalogModel, activityModel
     terminal.dataset.windowId = work.data.id;
     terminal.addEventListener("focusin", () => onFocus(work.data.id));
     terminal.addEventListener("pointerdown", () => onFocus(work.data.id));
-    row.addEventListener("click", event => { if (!event.target.closest("button, a, .work-tail")) openWork(entries.get(work.data.id).work.assignment); });
+    row.addEventListener("click", event => { if (!event.target.closest("button, a, .work-tail")) openWork(targetFor(entries.get(work.data.id).work)); });
     row.addEventListener("keydown", event => {
       if (event.target !== row || !["Enter", " "].includes(event.key)) return;
-      event.preventDefault(); openWork(entries.get(work.data.id).work.assignment);
+      event.preventDefault(); openWork(targetFor(entries.get(work.data.id).work));
     });
-    row.querySelector(".work-open").addEventListener("click", () => openWork(entries.get(work.data.id).work.assignment));
+    row.querySelector(".work-open").addEventListener("click", () => openWork(targetFor(entries.get(work.data.id).work)));
     list.append(row);
     return { row, terminal, cache, work, cleanup: null, previewMounted: false };
   }
@@ -187,36 +215,124 @@ export function createWorksSurface({ document, windowCatalogModel, activityModel
   function syncPreview() {
     if (!previewElement) return;
     previewElement.style.setProperty("--works-preview-lines", String(previewLines()));
-    for (const cleanup of previewCleanups) cleanup?.(); previewCleanups = [];
-    previewElement.replaceChildren();
-    const note = document.createElement("p"); note.className = "surface-readonly-note"; note.textContent = "Read-only preview · Select this pane to interact"; previewElement.append(note);
+    const previous = previewEntries; previewEntries = [];
+    const contents = document.createDocumentFragment();
+    const retainOutput = (work, container, options) => {
+      const key = JSON.stringify([work.projectKey ?? "", work.hostId ?? "", work.assignment.window_id,
+        work.assignment.session_id, work.assignment.runtime_incarnation, selected ? "full" : "list", options?.tailLines ?? null]);
+      // An unavailable terminal returns a no-op mount; retry it when its
+      // actual output container becomes available, even for the same identity.
+      const entry = previous.find(entry => entry.key === key && entry.container.firstElementChild)
+        || (exactWork(targetFor(work)) ? { key, container, cleanup: mountPreview(work.assignment.window_id, container, options) } : { key, container });
+      previewEntries.push(entry);
+      return entry.container;
+    };
+    const note = document.createElement("p"); note.className = "surface-readonly-note"; note.textContent = "Read-only preview · Select this pane to interact"; contents.append(note);
     if (selected) {
-      if (!exactWork(selected)) return;
-      const heading = full.querySelector(".works-full-header").cloneNode(true);
-      for (const button of heading.querySelectorAll("button")) { button.disabled = true; button.tabIndex = -1; }
-      const output = document.createElement("div"); output.className = "works-preview-output";
-      previewElement.append(heading, output);
-      previewCleanups.push(mountPreview(selected.window_id, output));
+      const work = displayedWork(selected);
+      if (work) {
+        const heading = full.querySelector(".works-full-header").cloneNode(true);
+        for (const button of heading.querySelectorAll("button")) { button.disabled = true; button.tabIndex = -1; }
+        const output = document.createElement("div"); output.className = "works-preview-output";
+        contents.append(heading, retainOutput(work, output));
+      }
     } else {
       const clone = overview.cloneNode(true);
       for (const cache of clone.querySelectorAll(".work-runtime-cache")) cache.remove();
       for (const button of clone.querySelectorAll("button")) { button.disabled = true; button.tabIndex = -1; }
       for (const row of clone.querySelectorAll(".work-row")) {
         row.tabIndex = -1; const tail = row.querySelector(".work-tail"); tail.replaceChildren();
-        if (!exactWork(entries.get(row.dataset.windowId)?.work.assignment)) continue;
-        previewCleanups.push(mountPreview(row.dataset.windowId, tail, { tailLines: previewLines() }));
+        const previousWork = entries.get(row.dataset.windowId)?.work;
+        const work = previousWork && displayedWork(targetFor(previousWork));
+        if (!work) continue;
+        tail.replaceWith(retainOutput(work, tail, { tailLines: previewLines() }));
       }
-      previewElement.append(clone);
+      contents.append(clone);
     }
+    previewElement.replaceChildren(contents);
+    for (const entry of previous) if (!previewEntries.includes(entry)) entry.cleanup?.();
     previewElement.dataset.catalogVersion = element.dataset.catalogVersion;
   }
   function setPreviewHost(host) {
     if (previewElement?.parentElement === host) return;
-    for (const cleanup of previewCleanups) cleanup?.(); previewCleanups = [];
+    for (const entry of previewEntries) entry.cleanup?.(); previewEntries = [];
     previewElement?.remove(); previewElement = null;
     if (!host || disposed) return;
     previewElement = document.createElement("section"); previewElement.className = "works-surface works-surface--preview";
     previewElement.setAttribute("aria-label", "Works read-only preview"); host.append(previewElement); syncPreview();
+  }
+  function sameIdentity(left, right) {
+    return left.assignment.window_id === right.assignment.window_id
+      && left.assignment.session_id === right.assignment.session_id
+      && left.assignment.runtime_incarnation === right.assignment.runtime_incarnation
+      && left.hostId === right.hostId && left.projectKey === right.projectKey
+      && left.catalogConflict === right.catalogConflict;
+  }
+  function displayWorks(catalog, activity, roster) {
+    const live = currentWorks(catalog, activity, roster, projectKey, entries);
+    const snapshot = activity.snapshot;
+    const tabs = catalog.appState.tabs || [];
+    const foreign = (projectKey && snapshot && snapshot.project_key !== projectKey)
+      || (projectKey && tabs.length && !tabs.some(tab => tab.project_key === projectKey));
+    const unknown = activity.count === null;
+    const result = [...live];
+    for (const entry of entries.values()) {
+      const previous = entry.work;
+      const current = live.find(work => work.assignment.window_id === previous.assignment.window_id);
+      const windows = tabs.filter(tab => !projectKey || tab.project_key === projectKey).flatMap(tab => tab.workspace?.windows || []);
+      const conflict = windows.some(data => data.id === previous.data.id
+        && (data.session_id !== previous.assignment.session_id || data.preset === "shell"));
+      if (foreign || conflict) {
+        if (current && (foreign || !current.ready || current.assignment.session_id === previous.assignment.session_id)) {
+          result[result.indexOf(current)] = { ...current, catalogConflict: foreign ? "foreign-project" : JSON.stringify(windows.filter(data => data.id === previous.data.id).map(data => [data.session_id, data.preset])) };
+        }
+        continue;
+      }
+      if (snapshot?.host_id && snapshot.host_id !== previous.hostId) continue;
+      if (current && !sameIdentity(current, previous)) continue;
+      if ((!current && unknown) || (current && !current.ready)) {
+        const retained = { ...previous, ready: false, state: "unknown" };
+        if (current) result[result.indexOf(current)] = retained; else result.push(retained);
+      }
+    }
+    return result;
+  }
+  function displayedWork(target) {
+    if (!target) return null;
+    return displayWorks(windowCatalogModel.read().catalog, activityModel.read(), rosterModel.read()).find(work =>
+      work.assignment.window_id === target.window_id && work.assignment.session_id === target.session_id
+      && work.assignment.runtime_incarnation === target.runtime_incarnation
+      && (target.hostId === undefined || target.hostId === work.hostId));
+  }
+  function incomingCatalog(state) {
+    return { ...windowCatalogModel.read().catalog, appState: state };
+  }
+  function retainedEntry(entry, catalog) {
+    return displayWorks(catalog, activityModel.read(), rosterModel.read()).some(work => sameIdentity(work, entry.work));
+  }
+  function releaseEntry(entry, cause) {
+    onReleaseTerminal(entry.work.data.id, entry.terminal, targetFor(entry.work), cause);
+  }
+  function prepareWorkspaceReconciliation(state) {
+    if (disposed) return;
+    const catalog = incomingCatalog(state);
+    for (const entry of entries.values()) {
+      const authorized = exactWork(targetFor(entry.work), catalog);
+      if (!authorized || authorized.retained) {
+        entry.revoked = true;
+        onRevokeTerminal(entry.work.data.id, entry.terminal, targetFor(entry.work));
+      }
+      if (!retainedEntry(entry, catalog)) releaseEntry(entry, "identity-ended");
+    }
+  }
+  function reconcileNativeAuthority() {
+    prepareWorkspaceReconciliation(windowCatalogModel.read().catalog.appState);
+  }
+  // SPEC #5016 AC-HS1: the heading renders the server aggregate summary that
+  // the tab title and status strip read; the listed rows never recount it.
+  function renderSummary() {
+    const summary = summaryModel?.read();
+    for (const [key] of summaryCells) element.querySelector(`[data-count="${key}"]`).textContent = summary ? String(summary[key]) : "—";
   }
   function render(rehost) {
     if (disposed) return;
@@ -226,9 +342,10 @@ export function createWorksSurface({ document, windowCatalogModel, activityModel
     const linesChanged = element.style.getPropertyValue("--works-preview-lines") !== String(lines);
     element.style.setProperty("--works-preview-lines", String(lines));
     const catalog = windowCatalogModel.read().catalog, activity = activityModel.read(), roster = rosterModel.read();
-    const works = currentWorks(catalog, activity, roster), ids = new Set(works.map(work => work.data.id));
+    const works = displayWorks(catalog, activity, roster), ids = new Set(works.map(work => work.data.id));
     let changed = false;
-    for (const [id, entry] of entries) if (!ids.has(id) || !works.some(work => work.data.id === id && work.assignment.session_id === entry.work.assignment.session_id && work.assignment.runtime_incarnation === entry.work.assignment.runtime_incarnation)) {
+    for (const [id, entry] of entries) if (!ids.has(id) || !works.some(work => work.data.id === id && sameIdentity(work, entry.work))) {
+      releaseEntry(entry, "identity-ended");
       entry.cleanup?.(); entry.row.remove(); entry.cache.remove(); entry.terminal.remove(); entries.delete(id); changed = true;
     }
     const telemetry = getTelemetry() || {}, today = telemetry.today || {};
@@ -239,26 +356,28 @@ export function createWorksSurface({ document, windowCatalogModel, activityModel
       updateEntry(entry, work, maximum);
       if (list.children[index] !== entry.row) list.insertBefore(entry.row, list.children[index] || null);
     });
-    for (const state of ["running", "waiting", "idle", "error"]) element.querySelector(`[data-count="${state}"]`).textContent = activity.count === null ? "—" : String(works.filter(work => work.state === state || (state === "error" && work.state === "interrupted")).length);
-    element.querySelector(".works-active").textContent = `Active ${number(activity.count)}`;
-    for (const [key, value] of Object.entries({ total: finite(today.input_tokens) && finite(today.output_tokens) ? number(today.input_tokens + today.output_tokens) : "—", input: number(today.input_tokens), cache: number(today.cache_tokens), output: number(today.output_tokens), cost: finite(today.cost_usd) ? `$${today.cost_usd.toFixed(2)}` : "—", landed: number(today.landed_pr_count) })) element.querySelector(`[data-metric="today-${key}"]`).textContent = value;
+    renderSummary();
+    for (const [key, value] of Object.entries({ total: finite(today.input_tokens) && finite(today.output_tokens) ? number(today.input_tokens + today.output_tokens) : "—", input: number(today.input_tokens), cache: number(today.cache_tokens), output: number(today.output_tokens) })) element.querySelector(`[data-metric="today-${key}"]`).textContent = value;
     for (const key of ["today", "fleet"]) {
       const note = element.querySelector(`[data-availability="${key}"]`);
       const status = telemetry.availability?.[key];
       note.dataset.state = status?.state || "no_data";
       note.textContent = status?.detail || "No data: session measurements are not available yet.";
     }
-    const sourceNote = element.querySelector(".works-source-note");
-    sourceNote.textContent = [!finite(today.cost_usd) && "Cost unavailable: per-session USD is not supported.",
-      !finite(today.landed_pr_count) && "Landed PRs unavailable: daily merge data is not connected."].filter(Boolean).join(" ");
-    sourceNote.hidden = !sourceNote.textContent;
     element.querySelector('[data-metric="fleet-now"]').textContent = number(telemetry.fleet_tokens_per_minute?.at(-1));
-    drawSpark(document, element.querySelector(".works-fleet svg"), telemetry.fleet_tokens_per_minute);
+    drawSpark(document, element.querySelector(".works-fleet svg"), telemetry.fleet_tokens_per_minute, undefined,
+      FLEET_RATE_POINTS, `Fleet tokens per minute, ${FLEET_RATE_WINDOW_MINUTES}-minute average`);
     element.querySelector(".works-empty").textContent = activity.count === null ? "Local agent activity is unavailable." : "No local agents are active.";
     element.querySelector(".works-empty").hidden = works.length > 0;
     element.dataset.catalogVersion = String(catalog.version);
-    if (selected) { const work = exactWork(selected); if (work) showFull(work, rehost); else back(false); }
-    for (const entry of entries.values()) if (!entry.work.ready || linesChanged) {
+    if (selected) {
+      const entry = entries.get(selected.window_id);
+      const work = entry && entry.terminal === selected.root && entry.work.assignment.session_id === selected.session_id
+        && entry.work.assignment.runtime_incarnation === selected.runtime_incarnation
+        && entry.work.hostId === selected.hostId ? entry.work : null;
+      if (work) showFull(work, rehost || entry.revoked); else back(false);
+    }
+    for (const entry of entries.values()) if (linesChanged) {
       entry.cleanup?.(); entry.cleanup = null; entry.previewMounted = false;
     }
     if (isPresented()) for (const entry of entries.values()) {
@@ -275,20 +394,30 @@ export function createWorksSurface({ document, windowCatalogModel, activityModel
   }
   element.querySelector('[data-action="back"]').addEventListener("click", () => back());
   for (const [action, delta] of [["previous", -1], ["next", 1]]) element.querySelector(`[data-action="${action}"]`).addEventListener("click", () => {
-    const works = currentWorks(windowCatalogModel.read().catalog, activityModel.read(), rosterModel.read()).filter(work => work.ready);
+    if (!exactWork(selected)) return;
+    const works = currentWorks(windowCatalogModel.read().catalog, activityModel.read(), rosterModel.read(), projectKey, entries).filter(work => work.ready);
     const index = works.findIndex(work => work.assignment.window_id === selected?.window_id && work.assignment.session_id === selected?.session_id && work.assignment.runtime_incarnation === selected?.runtime_incarnation);
-    if (index < 0 || !works.length) { back(false); return; }
+    if (index < 0 || !works.length) return;
     openWork(works[(index + delta + works.length) % works.length].assignment);
   });
   render(false);
   const unsubscribers = [
+    windowCatalogModel.subscribe(state => state.catalog, reconcileNativeAuthority),
+    activityModel.subscribe(state => state, reconcileNativeAuthority),
     windowCatalogModel.subscribeFrame(state => state.catalog, value => { if (value !== renderedCatalog) render(false); }),
     activityModel.subscribeFrame(state => state, value => { if (value !== renderedActivity) render(false); }),
     rosterModel.subscribeFrame(state => state, value => { if (value !== renderedRoster) render(false); }),
     systemSettingsModel?.subscribeFrame(state => state.worksPreviewLines, () => render(false)),
+    summaryModel?.subscribeFrame(state => state, () => { if (!disposed) renderSummary(); }),
+    workProjectionModel?.subscribeFrame(state => state?.projection?.attentionSummary?.summary ?? "", summary => {
+      element.querySelector('[data-count="block"]').parentElement.title = summary;
+    }),
   ];
-  return { element, sync: (rehost = true) => render(rehost), openWork, reveal: openWork, showList: () => back(false), setPreviewHost,
+  return { element, prepareWorkspaceReconciliation,
+    nativeIdentity: (id, root) => { const entry = entries.get(id); return entry?.terminal === root ? targetFor(entry.work) : null; },
+    retainsNativeRoot: (id, root, state) => { const entry = entries.get(id); return !!entry && entry.terminal === root && retainedEntry(entry, incomingCatalog(state)); },
+    sync: (rehost = true) => render(rehost), openWork, reveal: openWork, showList: () => back(false), setPreviewHost,
     contains: id => !!exactWork(id), isVisible: id => !element.hidden && !!exactWork(id),
-    dispose() { if (disposed) return; for (const unsubscribe of unsubscribers) unsubscribe?.(); setPreviewHost(null); for (const entry of entries.values()) entry.cleanup?.(); entries.clear(); disposed = true; },
+    dispose() { if (disposed) return; for (const unsubscribe of unsubscribers) unsubscribe?.(); setPreviewHost(null); for (const entry of entries.values()) { releaseEntry(entry, "unload"); entry.cleanup?.(); } entries.clear(); disposed = true; },
   };
 }

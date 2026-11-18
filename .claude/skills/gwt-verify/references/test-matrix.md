@@ -96,9 +96,8 @@ non-user-facing(internal refactor, no rendered behavior change)` and skips
 
 | Mode | Behavior |
 |---|---|
-| `quick` | Run the narrowest representative command per matched surface (e.g. `cargo test -p <single crate>`, `pnpm test:frontend-unit` only — skip bundle/smoke). Skip Playwright entirely unless the working tree explicitly carries a `.spec.ts` change under `crates/gwt/playwright/tests/**`. User Verification is `skipped(quick-mode)`. |
 | `full` | Run the full matched list per surface, including `pnpm test:visual` headless when the Browser column is non-empty. User Verification is optional unless the owner explicitly requests it. |
-| `pre-pr` | `full` plus release-flow tests whenever any release-system file is in the baseline diff. Visual regression is always included if any UI surface changed (no `quick` fallback). User Verification is optional unless the owner explicitly requests it. |
+| `pre-pr` | Use the approved CI-backed subset described in `contract-modes.md`, or fall back to `full`. Retain acceptance tests and checks absent from required CI, including release-flow tests for release-system changes and visual checks for UI changes. User Verification is optional unless the owner explicitly requests it. |
 | `--headed` | When a matched command would invoke Playwright, run it with `pnpm test:visual --headed` so Chromium starts headed. Default is headless to match CI. |
 
 ### Non-Goals (gwt repo)
@@ -122,7 +121,7 @@ AGENTS.md / README that:
 3. Marks the User Check tier per surface (Required / Recommended /
    Skipped).
 4. Describes mode-specific subsets if the project benefits from
-   `quick` vs `full` vs `pre-pr` narrowing.
+   `full` vs `pre-pr` narrowing.
 
 The skill follows the project's matrix when present; otherwise it
 relies on `surface-taxonomy.md` + `runner-detection.md` as the

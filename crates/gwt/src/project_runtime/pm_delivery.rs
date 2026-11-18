@@ -118,7 +118,7 @@ pub(crate) fn finish_pm_lifecycle(
             PmLifecycleCause::Deregister => (None, false),
             PmLifecycleCause::Crash => {
                 let mut desired = expected.clone();
-                let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds();
                 let respawn = pm_registry::apply_pm_crash_backoff(&mut desired, &now);
                 (Some(desired), respawn)
             }
@@ -917,8 +917,9 @@ pub(crate) fn deliver_pm_wake(
                 let body = prompt.trim_end_matches('\r');
                 let body_sha256 = pm_registry::pm_delivery_prompt_sha256(body);
                 let prepared = pm_registry::PmDeliveryReceipt {
+                    grok_prompt: None,
                     operation_id: operation_id.to_string(),
-                    recorded_at: chrono::Utc::now().to_rfc3339(),
+                    recorded_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
                     status: pm_registry::PmDeliveryReceiptStatus::Prepared,
                     principal_session_id: format!("gwt-wake:{operation_id}"),
                     target_window_id: id.to_string(),
@@ -1090,7 +1091,7 @@ pub(crate) fn deliver_pm_wake(
         }
         // Reuse the canonical paste/reservation/submit implementation and its
         // actual-commit current-generation fence; no GUI physical writer exists.
-        super::agent_dispatch::write_current_pane_input(writers, id, entry, &prompt)?;
+        super::agent_dispatch::write_current_pane_input(writers, id, entry, &prompt, None)?;
         if delivery.idle {
             let loop_path = pm_registry::pm_loop_state_path_for_repo_path(root);
             let current =
@@ -1100,7 +1101,7 @@ pub(crate) fn deliver_pm_wake(
                     &loop_path,
                     &pm_registry::PmLoopState {
                         last_wake_at: Some(
-                            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                            gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds(),
                         ),
                         last_wake_id: current.last_wake_id,
                         last_user_prompt_at: current.last_user_prompt_at,
@@ -1262,24 +1263,86 @@ pub fn has_open_board_escalations(project_root: &Path) -> bool {
 
 pub fn pm_status_from_launch_prefs(
     sessions_dir: &Path,
+    project_root: &Path,
     prefs: &pm_registry::PmPrefs,
     running: Option<&PmRegistration>,
 ) -> BackendEvent {
-    let configured = prefs.settings.launch_profile_or_default();
+    let fresh = crate::agent_registry::pm_profile_status_snapshot(project_root);
+    let reliable = fresh.is_ok();
+    let prefs = fresh.as_ref().map(|(prefs, _)| prefs).unwrap_or(prefs);
+    let key = gwt_core::paths::project_scope_hash(project_root);
+    let snapshot = fresh.as_ref().ok().map(|(_, snapshot)| snapshot);
+    let configured_member = snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.configured_pm_member(&key).ok().flatten());
+    // An async Read may outlive its registration. Retain only the exact captured
+    // registration still saved now; never infer a successor's running identity.
+    let running = running
+        .filter(|registration| reliable && prefs.registration.as_ref() == Some(*registration));
+    let running_session = running.and_then(|registration| {
+        gwt_agent::Session::load(&sessions_dir.join(format!("{}.toml", registration.session_id)))
+            .ok()
+    });
+    let configured = reliable.then(|| prefs.settings.launch_profile_or_default());
     let loop_interval_secs = prefs.settings.loop_interval_secs_clamped();
-    let running_profile =
-        running.map(|registration| pm_running_profile_at(sessions_dir, registration));
-    let agent_options = pm_agent_options(&configured.agent_id);
+    let running_profile = running.map(|registration| {
+        running_session
+            .as_ref()
+            .map(|session| {
+                PmLaunchProfile {
+                    agent_id: session.agent_id.command().to_string(),
+                    model: session.model.clone(),
+                    reasoning: session.reasoning_level.clone(),
+                    version: session.tool_version.clone(),
+                    codex_speed: Some(session.codex_speed()),
+                    fast_mode: Some(session.fast_mode_enabled()),
+                }
+                .normalized()
+            })
+            .unwrap_or_else(|| PmLaunchProfile {
+                agent_id: registration.agent_id.clone(),
+                ..Default::default()
+            })
+    });
+    let agent_options = configured
+        .as_ref()
+        .map(|profile| pm_agent_options(&profile.agent_id))
+        .unwrap_or_default();
     BackendEvent::PmStatus {
-        available: true,
+        project_key: key.to_string(),
+        configured_member_id: configured_member
+            .as_ref()
+            .map(|member| member.agent_member_id.clone()),
+        configured_member_name: configured_member.as_ref().map(|member| member.name.clone()),
+        running_member_id: running_session.as_ref().and_then(|session| {
+            snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.resolve_session(session).ok().flatten())
+        }),
+        running_session_id: running.map(|registration| registration.session_id.clone()),
+        roster_revision_decimal: snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.project_snapshot(&key).ok())
+            .and_then(|prefs| prefs.agent_roster.map(|roster| roster.revision.to_string())),
+        profile_revision: reliable.then(|| pm_registry::pm_profile_revision(prefs)),
+        available: reliable,
         auto_start: prefs.settings.auto_start,
         paused: prefs.settings.paused,
         loop_interval_secs,
         loop_interval_secs_decimal: loop_interval_secs.to_string(),
         agent_options,
-        configured_agent_id: configured.agent_id,
-        configured_model: configured.model,
-        configured_reasoning: configured.reasoning,
+        configured_agent_id: configured
+            .as_ref()
+            .map(|profile| profile.agent_id.clone())
+            .unwrap_or_default(),
+        configured_model: configured
+            .as_ref()
+            .and_then(|profile| profile.model.clone()),
+        configured_reasoning: configured
+            .as_ref()
+            .and_then(|profile| profile.reasoning.clone()),
+        configured_codex_speed: configured.as_ref().and_then(|profile| profile.codex_speed),
+        configured_fast_mode: configured.as_ref().and_then(|profile| profile.fast_mode),
         running_agent_id: running_profile
             .as_ref()
             .map(|profile| profile.agent_id.clone()),
@@ -1295,30 +1358,9 @@ pub fn pm_status_from_launch_prefs(
         start_block: running_profile
             .is_none()
             .then(|| prefs.start_block.clone())
-            .flatten(),
+            .flatten()
+            .map(Box::new),
     }
-}
-
-/// Resolve the launch identity of the conversation that is running now.
-/// The registration deliberately stays small; the durable Session already
-/// owns agent/model/reasoning. Legacy or temporarily unreadable Session
-/// records retain the registered agent and expose unknown tuning.
-fn pm_running_profile_at(sessions_dir: &Path, registration: &PmRegistration) -> PmLaunchProfile {
-    let session_path = sessions_dir.join(format!("{}.toml", registration.session_id));
-    gwt_agent::Session::load(&session_path)
-        .map(|session| {
-            PmLaunchProfile {
-                agent_id: session.agent_id.command().to_string(),
-                model: session.model,
-                reasoning: session.reasoning_level,
-                version: session.tool_version,
-            }
-            .normalized()
-        })
-        .unwrap_or_else(|_| PmLaunchProfile {
-            agent_id: registration.agent_id.clone(),
-            ..PmLaunchProfile::default()
-        })
 }
 
 /// Selectable PM agents: the ones that can resolve `$gwt-pm`, narrowed to
@@ -1667,8 +1709,9 @@ pub(crate) fn deliver_board_notification(
     let body_sha256 = pm_registry::pm_delivery_prompt_sha256(&body);
     let prompt = format!("{body} [gwt-delivery:{operation_id}:{body_sha256}]\r");
     let prepared = pm_registry::PmDeliveryReceipt {
+        grok_prompt: None,
         operation_id: operation_id.clone(),
-        recorded_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        recorded_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds(),
         status: pm_registry::PmDeliveryReceiptStatus::Prepared,
         principal_session_id: format!("gwt-board:{}", notification.entry_id),
         target_window_id: window_id.clone(),
@@ -1710,27 +1753,36 @@ pub(crate) fn deliver_board_notification(
             |bytes| {
                 reservation
                     .write_input_authorized(bytes, |commit| {
-                        let current = writers.read().map_err(|error| {
-                            gwt_terminal::TerminalError::PtyIoError {
-                                details: error.to_string(),
-                            }
-                        })?;
-                        if !current.get(&window_id).is_some_and(|entry| {
-                            Arc::ptr_eq(entry, &expected) && entry.current.load(Ordering::Acquire)
-                        }) {
-                            lost = true;
-                            return Err(gwt_terminal::TerminalError::PtyIoError {
-                                details: "Board notification target generation changed".into(),
-                            });
-                        }
-                        if Instant::now() >= deadline {
-                            return Err(gwt_terminal::TerminalError::PtyIoError {
-                                details: "Board notification delivery deadline expired".into(),
-                            });
-                        }
-                        reservation.with_unchanged_ordinary_input(ordinary_revision, || {
-                            commit(&mut || attempted = true)
-                        })
+                        super::agent_dispatch::with_current_monitor_prompt_input(
+                            &expected,
+                            None,
+                            || {
+                                let current = writers.read().map_err(|error| {
+                                    gwt_terminal::TerminalError::PtyIoError {
+                                        details: error.to_string(),
+                                    }
+                                })?;
+                                if !current.get(&window_id).is_some_and(|entry| {
+                                    Arc::ptr_eq(entry, &expected)
+                                        && entry.current.load(Ordering::Acquire)
+                                }) {
+                                    lost = true;
+                                    return Err(gwt_terminal::TerminalError::PtyIoError {
+                                        details: "Board notification target generation changed"
+                                            .into(),
+                                    });
+                                }
+                                if Instant::now() >= deadline {
+                                    return Err(gwt_terminal::TerminalError::PtyIoError {
+                                        details: "Board notification delivery deadline expired"
+                                            .into(),
+                                    });
+                                }
+                                reservation.with_unchanged_ordinary_input(ordinary_revision, || {
+                                    commit(&mut || attempted = true)
+                                })
+                            },
+                        )
                     })
                     .map_err(|error| error.to_string())
             },

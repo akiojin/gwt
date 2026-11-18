@@ -122,6 +122,7 @@ pub enum AgentFrontendRequest {
     },
     SendInput {
         text: String,
+        request_id: Option<u64>,
     },
     PmSendInput {
         operation_id: String,
@@ -1569,6 +1570,20 @@ impl AgentCapabilityRegistry {
         Self::grant_is_current_in_state(&state, grant)
     }
 
+    /// Observational hooks may cross readiness promotion of the same binding.
+    /// This never grants producing authority or follows a different generation.
+    pub fn hook_grant_is_current(&self, grant: &AgentCapabilityGrant) -> bool {
+        let Some(current) = self.refresh_grant(grant) else {
+            return false;
+        };
+        current.principal == grant.principal
+            || matches!(
+                (&grant.principal.execution_authority, &current.principal.execution_authority),
+                (AgentExecutionAuthority::Prepared(before), AgentExecutionAuthority::Active(after))
+                    if before == after
+            )
+    }
+
     /// Accept an operation from the exact current grant and return its
     /// authenticated principal without carrying the registry lock into the
     /// operation itself.
@@ -1874,6 +1889,10 @@ impl AgentCapabilityIssuer {
         self.registry.grant_is_current(grant)
     }
 
+    pub fn hook_grant_is_current(&self, grant: &AgentCapabilityGrant) -> bool {
+        self.registry.hook_grant_is_current(grant)
+    }
+
     pub fn accept_current_grant(
         &self,
         grant: &AgentCapabilityGrant,
@@ -2144,6 +2163,7 @@ mod tests {
             super::AgentExecutionAuthorityKind::Prepared
         );
 
+        assert!(registry.hook_grant_is_current(&prepared_grant));
         registry
             .promote_prepared(&token, &binding)
             .expect("promote exact Prepared authority");
@@ -2164,6 +2184,8 @@ mod tests {
             "a queued pre-promotion snapshot must not dispatch as Active"
         );
         assert!(registry.grant_is_current(&refreshed));
+        assert!(registry.hook_grant_is_current(&prepared_grant));
+        assert!(registry.hook_grant_is_current(&refreshed));
 
         let mut mismatched = binding;
         mismatched.identity.ledger_head_hash.push_str("-mismatch");
@@ -2423,6 +2445,7 @@ mod tests {
             super::AgentExecutionAuthorityKind::Active
         );
         assert!(!registry.grant_is_current(&inspection));
+        assert!(!registry.hook_grant_is_current(&inspection));
         assert!(registry.grant_is_current(&refreshed));
 
         let mut mismatched = binding;
@@ -2455,6 +2478,7 @@ mod tests {
             token.clone(),
             registry.authenticate(&token).expect("authenticate bearer"),
         );
+        assert!(registry.hook_grant_is_current(&stale));
         let mut successor = predecessor;
         successor.identity.generation_id = "generation-successor".to_string();
         successor.identity.binding_id = "binding-successor".to_string();
@@ -2468,6 +2492,7 @@ mod tests {
         registry
             .promote_continuation(&stale, &successor)
             .expect("validated continuation may replace Active authority");
+        assert!(!registry.hook_grant_is_current(&stale));
         let current = registry
             .refresh_grant(&stale)
             .expect("same current bearer refreshes after continuation");
@@ -2476,10 +2501,17 @@ mod tests {
             Some(&successor)
         );
 
+        assert!(registry.hook_grant_is_current(&current));
         let rotated = registry
             .issue_bound(project.path(), "session-continuation", successor.clone())
             .expect("rotate bearer");
         assert_ne!(rotated, token);
+        assert!(!registry.hook_grant_is_current(&current));
+        let latest =
+            AgentCapabilityGrant::new(rotated.clone(), registry.authenticate(&rotated).unwrap());
+        assert!(registry.hook_grant_is_current(&latest));
+        assert!(registry.revoke_token(&rotated));
+        assert!(!registry.hook_grant_is_current(&latest));
         assert!(registry.promote_continuation(&stale, &successor).is_err());
     }
 

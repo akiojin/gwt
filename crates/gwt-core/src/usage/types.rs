@@ -9,7 +9,7 @@
 //! All percentages are clamped to `[0, 100]`. Reset instants are optional
 //! because upstream payloads do not always include them.
 
-use chrono::{DateTime, Utc};
+use crate::timestamp::UtcTimestamp;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -107,7 +107,7 @@ pub fn clamp_percent(value: f32) -> f32 {
 pub struct UsageWindow {
     pub kind: WindowKind,
     pub used_percent: f32,
-    pub resets_at: Option<DateTime<Utc>>,
+    pub resets_at: Option<UtcTimestamp>,
     /// Actual window length as reported upstream, when known. Lets the UI show
     /// the real length (and label `Unknown` windows) instead of inferring it
     /// from `kind`.
@@ -117,7 +117,7 @@ pub struct UsageWindow {
 
 impl UsageWindow {
     /// Build a window, clamping `used_percent` into `[0, 100]`.
-    pub fn new(kind: WindowKind, used_percent: f32, resets_at: Option<DateTime<Utc>>) -> Self {
+    pub fn new(kind: WindowKind, used_percent: f32, resets_at: Option<UtcTimestamp>) -> Self {
         Self {
             kind,
             used_percent: clamp_percent(used_percent),
@@ -162,6 +162,15 @@ pub struct ExtraUsage {
     pub disabled_reason: Option<String>,
 }
 
+/// Optional Codex credits, expressed in the provider's reported units.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CodexCredits {
+    pub has_credits: bool,
+    #[serde(default)]
+    pub unlimited: bool,
+    pub balance: Option<f64>,
+}
+
 /// Account-level usage for one provider (shared pool).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderUsage {
@@ -175,9 +184,11 @@ pub struct ProviderUsage {
     pub windows: Vec<UsageWindow>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_usage: Option<ExtraUsage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credits: Option<CodexCredits>,
     pub limit_reached: bool,
     pub state: UsageState,
-    pub fetched_at: Option<DateTime<Utc>>,
+    pub fetched_at: Option<UtcTimestamp>,
 }
 
 impl ProviderUsage {
@@ -190,6 +201,7 @@ impl ProviderUsage {
             plan: None,
             windows: Vec::new(),
             extra_usage: None,
+            credits: None,
             limit_reached: false,
             state,
             fetched_at: None,
@@ -200,7 +212,7 @@ impl ProviderUsage {
 /// One timestamped minute of a conversation's token activity.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MinuteTokenBucket {
-    pub started_at: DateTime<Utc>,
+    pub started_at: UtcTimestamp,
     /// Unknown coverage is null; an observed minute without tokens is zero.
     pub tokens: Option<u64>,
 }
@@ -210,7 +222,7 @@ pub struct MinuteTokenBucket {
 pub struct SessionTelemetry {
     pub source: String,
     pub quality: String,
-    pub observed_at: Option<DateTime<Utc>>,
+    pub observed_at: Option<UtcTimestamp>,
     pub today_tokens: Option<u64>,
     /// Includes cached input for both providers. Total is input plus output.
     pub today_input_tokens: Option<u64>,
@@ -398,6 +410,25 @@ mod tests {
     }
 
     #[test]
+    fn codex_credits_survive_serde_and_old_snapshots_still_load() {
+        let mut account = serde_json::json!({
+            "provider":"codex", "plan":null, "windows":[],
+            "limit_reached":false, "state":{"kind":"ok"}, "fetched_at":null
+        });
+        let legacy: ProviderUsage = serde_json::from_value(account.clone()).unwrap();
+        assert!(serde_json::to_value(legacy)
+            .unwrap()
+            .get("credits")
+            .is_none());
+        let credits = serde_json::json!({
+            "has_credits":true, "unlimited":false, "balance":37669.9
+        });
+        account["credits"] = credits.clone();
+        let parsed: ProviderUsage = serde_json::from_value(account).unwrap();
+        assert_eq!(serde_json::to_value(parsed).unwrap()["credits"], credits);
+    }
+
+    #[test]
     fn snapshot_roundtrips() {
         let snap = UsageSnapshot {
             accounts: vec![ProviderUsage {
@@ -406,10 +437,15 @@ mod tests {
                 account_label: Some("codex@example.com".into()),
                 plan: Some("pro".into()),
                 extra_usage: None,
-                windows: vec![UsageWindow::new(WindowKind::FiveHour, 12.0, None)],
+                credits: None,
+                windows: vec![UsageWindow::new(
+                    WindowKind::FiveHour,
+                    12.0,
+                    Some("2026-11-18T02:00:00.012Z".parse().unwrap()),
+                )],
                 limit_reached: false,
                 state: UsageState::Ok,
-                fetched_at: None,
+                fetched_at: Some("2026-11-17T22:30:00.123456789Z".parse().unwrap()),
             }],
             sessions: vec![SessionUsage {
                 session_id: "s1".into(),
@@ -439,6 +475,14 @@ mod tests {
         let round: UsageSnapshot = serde_json::from_str(&json).unwrap();
         assert_eq!(snap, round);
         let mut legacy = serde_json::to_value(&snap).unwrap();
+        assert_eq!(
+            legacy["accounts"][0]["fetched_at"],
+            "2026-11-17T22:30:00.123456789Z"
+        );
+        assert_eq!(
+            legacy["accounts"][0]["windows"][0]["resets_at"],
+            "2026-11-18T02:00:00.012Z"
+        );
         let session = legacy["sessions"][0].as_object_mut().unwrap();
         for key in [
             "cache_read_tokens",

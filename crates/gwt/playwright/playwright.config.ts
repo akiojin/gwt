@@ -18,6 +18,10 @@ export default defineConfig({
     baseURL: process.env.GWT_PLAYWRIGHT_BASE_URL ?? "http://127.0.0.1:0/",
     trace: "on-first-retry",
     colorScheme: "dark",
+    // verify.run always adds --headed; open the window off screen so it does
+    // not cover or steal focus from the developer's work (#6977). Do not start it
+    // minimized: a minimized page reports visibilityState "hidden".
+    launchOptions: { args: ["--window-position=-32000,-32000"] },
   },
   projects: [
     {

@@ -482,9 +482,11 @@ mod tests {
             managed_hooks: vec![make_hook("pre-commit", "old-lint", true)],
             user_hooks: vec![make_hook("post-merge", "notify", false)],
         };
-        std::fs::write(&hooks_file, serde_json::to_string(&initial).unwrap()).unwrap();
-        backup_hooks(&hooks_file).unwrap();
-        std::fs::remove_file(hooks_file.with_extension("json.bak")).unwrap();
+        std::fs::write(
+            dir.path().join("hooks.json.20261117T184312007Z.bak"),
+            serde_json::to_string(&initial).unwrap(),
+        )
+        .unwrap();
         std::fs::write(&hooks_file, "").unwrap();
 
         let managed = vec![make_hook("pre-commit", "new-lint", true)];
@@ -521,7 +523,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn merge_hooks_safe_preserves_symlink_target() {
+    fn merge_hooks_safe_rejects_symlink_target() {
         use std::os::unix::fs::symlink;
 
         let dir = tempfile::tempdir().unwrap();
@@ -540,7 +542,12 @@ mod tests {
         symlink(&target, &link).unwrap();
 
         let managed = vec![make_hook("pre-commit", "new-lint", true)];
-        merge_hooks_safe(&link, &managed).unwrap();
+        let error = merge_hooks_safe(&link, &managed).unwrap_err();
+        assert!(error.to_string().contains("write"), "{error}");
+        assert!(
+            error.to_string().contains(&link.display().to_string()),
+            "{error}"
+        );
 
         assert!(std::fs::symlink_metadata(&link)
             .unwrap()
@@ -548,7 +555,7 @@ mod tests {
             .is_symlink());
         let cfg: HooksConfig =
             serde_json::from_str(&std::fs::read_to_string(&target).unwrap()).unwrap();
-        assert_eq!(cfg.managed_hooks[0].command, "new-lint");
+        assert_eq!(cfg.managed_hooks[0].command, "old-lint");
         assert_eq!(cfg.user_hooks, initial.user_hooks);
     }
 
@@ -2362,10 +2369,8 @@ mod tests {
             );
             // Modes.
             assert!(
-                content.contains("--mode quick")
-                    && content.contains("--mode full")
-                    && content.contains("--mode pre-pr"),
-                "{relative} must document the quick / full / pre-pr modes"
+                content.contains("--mode full") && content.contains("--mode pre-pr"),
+                "{relative} must document the full / pre-pr modes"
             );
             // FR-123: Diff baseline.
             assert!(
@@ -2396,6 +2401,27 @@ mod tests {
                     content.contains(phrase),
                     "{provider} pre-pr guidance is missing {phrase}"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn materialized_verification_guidance_only_advertises_supported_modes() {
+        let materialized = tempfile::tempdir().unwrap();
+        distribute_to_worktree(materialized.path()).unwrap();
+        for provider in [".claude", ".codex"] {
+            for reference in ["contract-modes.md", "execution.md", "test-matrix.md"] {
+                let path = materialized
+                    .path()
+                    .join(provider)
+                    .join("skills/gwt-verify/references")
+                    .join(reference);
+                let content = std::fs::read_to_string(path).unwrap();
+                assert!(
+                    !content.contains("quick"),
+                    "{provider}/{reference} advertises unsupported quick mode"
+                );
+                assert!(content.contains("full") && content.contains("pre-pr"));
             }
         }
     }

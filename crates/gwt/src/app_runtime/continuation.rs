@@ -21,6 +21,7 @@ pub(super) use gwt::project_runtime::launch_finalization::{
     compensate_terminalized_genesis_workspace_projection,
     resolve_split_workspace_state_external_commit,
 };
+#[cfg(test)]
 pub(super) use gwt::session_launch::durable_launch_recovery_exists;
 #[cfg(all(test, unix))]
 pub(super) use gwt::session_launch::recovery::set_durable_launch_recovery_directory_sync_test_hook;

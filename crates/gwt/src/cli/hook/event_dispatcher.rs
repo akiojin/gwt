@@ -70,6 +70,7 @@ fn handle_with_observation(
         IntentBoundaryEvent::from_name(event).is_some()
             && super::is_resident_pm_session(worktree_root, current_session)
     });
+    pm_loop_stop_check::handle_grok_delivery_acceptance(worktree_root, event, input);
     let result = match event {
         "SessionStart" => handle_session_start(event, input, worktree_root, completion),
         "UserPromptSubmit" => {
@@ -216,36 +217,41 @@ fn handle_user_prompt_submit(
     is_pm: bool,
     completion: Option<&super::runtime_state::HookCompletionContext>,
 ) -> Result<HookOutput, HookError> {
-    // PM reporting has its own settlement path; ordinary producing obligations
-    // deliberately remain unarmed in this window.
-    let reporting_started = Instant::now();
-    let reporting = super::pm_reporting::handle_user_prompt_submit(worktree_root, input);
-    diagnostics::record_handler_duration(
-        event,
-        "pm-reporting-prompt",
-        reporting_started.elapsed(),
-        if reporting.is_ok() { "ok" } else { "error" },
-    );
-    reporting?;
-    // Start the three bookkeeping writes together. The exact delivery ACK must
-    // precede the live RuntimeState notice: the Host uses it to release retained
-    // input even while paused. Other writes overlap RuntimeState and Board work;
-    // timing records retain their historical handler order.
+    // Start the bookkeeping together before the live RuntimeState notice.
+    // Grok records only pre-turn correlation here; its matching
+    // PreToolUse/Stop later commits the ACK before that event's notice.
     let event_deadline = gwt_core::operation_deadline::current();
     #[cfg(test)]
     let operation_clock = gwt_core::operation_deadline::ScopedOperationClock::current();
+    #[cfg(test)]
+    let bookkeeping_gate = tests::bookkeeping_gate();
     std::thread::scope(|scope| {
-        let pm_delivery_ack = scope.spawn(|| {
+        // PM reporting has its own settlement path; ordinary producing
+        // obligations deliberately remain unarmed in this window. Its turn
+        // receipt is a durable fsync sidecar, so it must not spend the
+        // aggregate deadline before RuntimeState publishes (Issue #7270).
+        let pm_reporting = scope.spawn(|| {
             #[cfg(test)]
-            let _clock =
-                operation_clock.map(gwt_core::operation_deadline::ScopedOperationClock::set);
-            let _deadline =
-                event_deadline.map(gwt_core::operation_deadline::ScopedOperationDeadline::enter);
+            tests::wait_bookkeeping_gate(bookkeeping_gate.as_ref());
             let started = Instant::now();
-            pm_loop_stop_check::handle_delivery_acknowledgement(worktree_root, input);
-            started.elapsed()
+            let result = super::pm_reporting::handle_user_prompt_submit(worktree_root, input);
+            (started.elapsed(), result)
         });
+        let join_pm_reporting = || {
+            let (duration, result) = pm_reporting
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+            diagnostics::record_handler_duration(
+                event,
+                "pm-reporting-prompt",
+                duration,
+                if result.is_ok() { "ok" } else { "error" },
+            );
+            result
+        };
         let action_obligation = scope.spawn(|| {
+            #[cfg(test)]
+            tests::wait_bookkeeping_gate(bookkeeping_gate.as_ref());
             #[cfg(test)]
             let _clock =
                 operation_clock.map(gwt_core::operation_deadline::ScopedOperationClock::set);
@@ -256,6 +262,8 @@ fn handle_user_prompt_submit(
             started.elapsed()
         });
         let pm_loop_reset = scope.spawn(|| {
+            #[cfg(test)]
+            tests::wait_bookkeeping_gate(bookkeeping_gate.as_ref());
             #[cfg(test)]
             let _clock =
                 operation_clock.map(gwt_core::operation_deadline::ScopedOperationClock::set);
@@ -270,14 +278,21 @@ fn handle_user_prompt_submit(
             (started.elapsed(), result)
         });
 
+        // The exact delivery ACK must precede the live RuntimeState notice, so
+        // run it on this thread. Spawning it only to join it at once let a
+        // loaded host spend the aggregate deadline scheduling that thread
+        // before RuntimeState could start (Issue #7142).
         #[cfg(test)]
         tests::release_ack_join_lock();
-        let pm_delivery_ack_duration = pm_delivery_ack
-            .join()
-            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        let ack_started = Instant::now();
+        pm_loop_stop_check::handle_delivery_acknowledgement(worktree_root, input);
+        let pm_delivery_ack_duration = ack_started.elapsed();
         let prepared_session = run_step(event, "runtime-state", || {
             crate::daemon_runtime::handle_runtime_state_owned(event, input, completion)
         });
+        let prepared_session = join_pm_reporting()
+            .map_err(HookError::from)
+            .and(prepared_session);
         diagnostics::record_handler_duration(
             event,
             "pm-delivery-ack",
@@ -492,7 +507,7 @@ fn handle_autonomous_answer_receipt(worktree_root: &Path, input: &str) -> Result
             .expect("validated repository identity"),
         project_state_root: current_project_state_root.to_string_lossy().into_owned(),
     };
-    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds();
     crate::issue_monitor::acknowledge_autonomous_handoff_user_prompt_submit_from_prefs(
         &prefs_path,
         &source.id,
@@ -977,10 +992,55 @@ mod tests {
         };
     }
 
+    /// Issue #7142: a gate that holds every spawned bookkeeping thread until
+    /// the live RuntimeState notice arrives, modelling a loaded host that
+    /// schedules those threads late. The critical path must not wait for them.
+    #[derive(Default)]
+    pub(super) struct BookkeepingGate {
+        state: std::sync::Mutex<(bool, bool)>,
+        changed: std::sync::Condvar,
+    }
+
+    impl BookkeepingGate {
+        fn open(&self) {
+            self.state.lock().unwrap().0 = true;
+            self.changed.notify_all();
+        }
+
+        fn starved_the_live_notice(&self) -> bool {
+            self.state.lock().unwrap().1
+        }
+    }
+
+    thread_local! {
+        static BOOKKEEPING_GATE: std::cell::RefCell<Option<std::sync::Arc<BookkeepingGate>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    pub(super) fn bookkeeping_gate() -> Option<std::sync::Arc<BookkeepingGate>> {
+        BOOKKEEPING_GATE.with(|gate| gate.borrow().clone())
+    }
+
+    pub(super) fn wait_bookkeeping_gate(gate: Option<&std::sync::Arc<BookkeepingGate>>) {
+        let Some(gate) = gate else {
+            return;
+        };
+        let state = gate.state.lock().unwrap();
+        let (mut state, wait) = gate
+            .changed
+            .wait_timeout_while(state, Duration::from_secs(10), |(open, _)| !*open)
+            .unwrap();
+        if wait.timed_out() {
+            // The live notice never came while this thread was held back.
+            *state = (true, true);
+            gate.changed.notify_all();
+        }
+    }
+
     pub(super) fn release_ack_join_lock() {
         ACK_JOIN_LOCK.with(|lock| {
             if let Some(file) = lock.borrow_mut().take() {
-                fs2::FileExt::unlock(&file).expect("release the delayed ACK before joining it");
+                fs2::FileExt::unlock(&file).expect("release the held receipt lock before the ACK");
             }
         });
     }
@@ -1139,6 +1199,7 @@ mod tests {
         pm_registry::prepare_pm_delivery_receipt(
             &receipt_path,
             &PmDeliveryReceipt {
+                grok_prompt: None,
                 operation_id: operation_id.into(),
                 recorded_at: "2026-10-26T00:00:00Z".into(),
                 status: PmDeliveryReceiptStatus::Prepared,
@@ -1159,6 +1220,9 @@ mod tests {
             .unwrap();
         fs2::FileExt::lock_exclusive(&lock).unwrap();
         ACK_JOIN_LOCK.with(|held| assert!(held.borrow_mut().replace(lock).is_none()));
+        let gate = std::sync::Arc::new(BookkeepingGate::default());
+        BOOKKEEPING_GATE.with(|held| assert!(held.borrow_mut().replace(gate.clone()).is_none()));
+        let live_gate = gate.clone();
 
         let runtime = Runtime::new().unwrap();
         let listener = runtime
@@ -1171,6 +1235,7 @@ mod tests {
             axum::routing::post(move |Json(event): Json<crate::RuntimeHookEvent>| {
                 let path = receipt_path.clone();
                 let calls = calls.clone();
+                live_gate.open();
                 async move {
                     // Observe at the real receiver without acquiring the ACK's lock.
                     let raw = std::fs::read_to_string(path).unwrap();
@@ -1223,7 +1288,12 @@ mod tests {
         );
         shutdown.send(()).unwrap();
         runtime.block_on(server).unwrap();
+        BOOKKEEPING_GATE.with(|held| held.borrow_mut().take());
         result.unwrap();
+        assert!(
+            !gate.starved_the_live_notice(),
+            "the live RuntimeState notice must not wait for a spawned bookkeeping thread",
+        );
         assert_eq!(
             pm_registry::pm_delivery_receipt_for_operation(
                 &pm_registry::pm_delivery_receipts_path_for_repo_path(&repo),
@@ -1242,6 +1312,157 @@ mod tests {
                 PmDeliveryReceiptStatus::Verified,
             )
         );
+    }
+
+    /// Issue #7270: the PM turn receipt is a durable fsync sidecar. On a slow
+    /// Windows disk it consumed the whole 200ms prompt deadline before the
+    /// RuntimeState publication could start, so the PM never showed Running.
+    #[test]
+    fn pm_reporting_receipt_does_not_delay_the_live_runtime_notice() {
+        use gwt_core::deadline_budget::{ScopedDeadlineBudget, HANG_GUARD};
+        use gwt_core::test_support::ScopedGwtHome;
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _gwt_home = ScopedGwtHome::set(home.path());
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let worktree = crate::pm_registry::pm_worktree_path_for_repo_path(home.path());
+        std::fs::create_dir_all(&worktree).unwrap();
+        init_git_repo(&worktree);
+        let mut session = Session::new(&worktree, "pm/worktree", AgentId::Codex);
+        session.agent_session_id = Some("native-pm-reporting".into());
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        session.save(&sessions).unwrap();
+        register_pm(&worktree, &session.id);
+        let _session = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session.id);
+        let _runtime_path = ScopedEnvVar::set(
+            GWT_SESSION_RUNTIME_PATH_ENV,
+            gwt_agent::runtime_state_path(&sessions, &session.id),
+        );
+        let _codex_thread = ScopedEnvVar::unset("CODEX_THREAD_ID");
+        let _provider = crate::board_provider::test_provider_override::force_prompt_provider(
+            Rc::new(gwt_core::coordination::LocalProvider),
+        );
+        let gate = std::sync::Arc::new(BookkeepingGate::default());
+        BOOKKEEPING_GATE.with(|held| assert!(held.borrow_mut().replace(gate.clone()).is_none()));
+        let live_gate = gate.clone();
+
+        let runtime = Runtime::new().unwrap();
+        let listener = runtime
+            .block_on(TcpListener::bind(("127.0.0.1", 0)))
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let (calls, received) = mpsc::channel();
+        let app = Router::new().route(
+            "/internal/hook-live",
+            axum::routing::post(move |Json(event): Json<crate::RuntimeHookEvent>| {
+                live_gate.open();
+                calls.send(event.source_event).unwrap();
+                async { axum::http::StatusCode::OK }
+            }),
+        );
+        let (shutdown, shutdown_rx) = oneshot::channel();
+        let server = runtime.spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .unwrap();
+        });
+        let _forward_url = ScopedEnvVar::set(
+            gwt_agent::GWT_HOOK_FORWARD_URL_ENV,
+            format!("http://{address}/internal/hook-live"),
+        );
+        let _forward_token = ScopedEnvVar::set(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV, "test-token");
+        let _live_budget = ScopedDeadlineBudget::hang_guard(
+            &crate::daemon_runtime::USER_PROMPT_SUBMIT_HOOK_LIVE_BUDGET,
+        );
+        let _attempt_budget =
+            ScopedDeadlineBudget::hang_guard(&crate::daemon_runtime::HOOK_LIVE_ATTEMPT_BUDGET);
+        let input = serde_json::json!({
+            "prompt": "review the fleet",
+            "session_id": session.agent_session_id,
+            "cwd": worktree,
+        })
+        .to_string();
+        let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(Instant::now());
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            // test-hygiene: allow-wall-clock-deadline the clock is pinned above; this hang guard never orders the receipt and live publication.
+            Instant::now() + HANG_GUARD,
+        );
+        let completion =
+            super::super::runtime_state::begin_hook_event(&worktree, "UserPromptSubmit", &input);
+        let result = handle_user_prompt_submit(
+            "UserPromptSubmit",
+            &input,
+            &worktree,
+            false,
+            completion.as_ref(),
+        );
+        shutdown.send(()).unwrap();
+        runtime.block_on(server).unwrap();
+        BOOKKEEPING_GATE.with(|held| held.borrow_mut().take());
+        result.unwrap();
+        assert!(
+            !gate.starved_the_live_notice(),
+            "the live RuntimeState notice must not wait for the PM turn receipt",
+        );
+        assert_eq!(
+            received.try_recv().unwrap(),
+            Some("UserPromptSubmit".into())
+        );
+        assert!(
+            super::super::pm_reporting::capture_qa_turn(&worktree)
+                .unwrap()
+                .is_some(),
+            "the PM turn receipt must still be written before the hook returns",
+        );
+    }
+
+    #[test]
+    fn user_prompt_submit_keeps_board_context_when_runtime_writer_deadline_expires() {
+        use gwt_agent::session::{runtime_writer_lease, HookCompletionOutcome};
+        use gwt_core::operation_deadline::{ScopedOperationClock, ScopedOperationDeadline};
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        super::super::health::browser_preflight_tests::with_source(|input, _, runtime_path, _| {
+            let worktree = &input.worktree_root;
+            let _forward = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+            let _provider = crate::board_provider::test_provider_override::force_prompt_provider(
+                Rc::new(gwt_core::coordination::LocalProvider),
+            );
+            let event = "UserPromptSubmit";
+            let completion = super::super::runtime_state::begin_hook_event(worktree, event, "{}")
+                .expect("capture the pending prompt");
+            let state = gwt_agent::SessionRuntimeState::load(runtime_path).unwrap();
+            assert_eq!(state.current_hook_event.unwrap().event, event);
+            let pending = std::fs::read(runtime_path).unwrap();
+            let writer = runtime_writer_lease(runtime_path).unwrap();
+            let output = {
+                // Advance the operation clock to the aggregate deadline
+                // while another writer holds the sidecar lease.
+                let deadline = Instant::now();
+                let _clock = ScopedOperationClock::set(deadline);
+                let _deadline = ScopedOperationDeadline::enter(deadline);
+                handle_user_prompt_submit(event, "{}", worktree, false, Some(&completion))
+            };
+            assert_eq!(std::fs::read(runtime_path).unwrap(), pending);
+            assert!(!completion.runtime_was_published());
+
+            drop(writer);
+            let result = output.expect("runtime writer deadline must leave the prompt usable");
+            assert!(matches!(result, HookOutput::HookSpecificAdditionalContext {
+                    event: IntentBoundaryEvent::UserPromptSubmit, text
+                } if text.contains("# Board Post Reminder")));
+            completion.record(HookCompletionOutcome::Normal);
+            assert_eq!(std::fs::read(runtime_path).unwrap(), pending);
+        });
     }
 
     #[test]
@@ -1847,7 +2068,7 @@ mod tests {
             vec![],
             vec![],
         );
-        entry.created_at = chrono::Utc::now() - chrono::Duration::hours(1);
+        entry.created_at = gwt_core::timestamp::UtcTimestamp::now() - time::Duration::hours(1);
         entry.updated_at = entry.created_at;
         gwt_core::coordination::post_entry(&worktree, entry).expect("seed 4 MiB Board history");
 
@@ -2299,7 +2520,7 @@ mod tests {
                 timeout_seconds: 900,
                 unavailable: None,
             },
-            chrono::Utc::now(),
+            gwt_core::timestamp::UtcTimestamp::now(),
         )
         .unwrap();
         let event = IntentBoundaryEvent::UserPromptSubmit;
@@ -2557,7 +2778,7 @@ mod tests {
             from_session_id: session_id.clone(),
             to_session_id: "replacement-session".to_string(),
             reason: "test stale predecessor".to_string(),
-            requested_at: chrono::Utc::now(),
+            requested_at: gwt_core::timestamp::UtcTimestamp::now(),
         };
         crate::cli::execution_state::prepare_generation_takeover(worktree.path(), owner, &takeover)
             .unwrap();

@@ -1,0 +1,43 @@
+{
+  "prepared_home": {
+    "profile": "before",
+    "project": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\project",
+    "repo_hash": "99a8660247f5bc49",
+    "binary_sha256": "2f0bb8151d08fb83baab183b29d03d160b163371f99a184fdea02ef71e905dc5",
+    "gwtd_sha256": "139ccb73e58f5ab19cbbcfecc6e03b33eaa5872c860ba7493db0ce3eb659469b"
+  },
+  "frozen_provenance_sha256": "396b43c1bd6646ba8d7576eb863680abaccdf3ac41d98944adce5af7dc34e560",
+  "runtime_manifest": {
+    "index_path_policy": {
+      "path": "index_path_policy.json",
+      "sha256_16": "7d1c393e6133a5b0",
+      "versioned_path": "runners/index_path_policy.json"
+    },
+    "requirements": {
+      "path": "project_index_requirements.txt",
+      "sha256_16": "eac269738a090205"
+    },
+    "runner": {
+      "path": "runners/chroma_index_runner-47e9ae016d66b7ab.py",
+      "sha256_16": "47e9ae016d66b7ab"
+    },
+    "schema_version": 1,
+    "venv": {
+      "path": "venvs/chroma-venv-eac269738a090205"
+    }
+  },
+  "profile": "before",
+  "requested_seconds": 3600,
+  "background_index_disabled": true,
+  "background_worker_warmup_requested": false,
+  "startup_settle_requested": true,
+  "frozen_monitor_bundle": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\frozen-monitor\\launch-base.json",
+  "premeasurement_monitor_roundtrip_requested": true,
+  "scan_trigger_semantics": "30s periodic only; historical runner has no native broker Running epoch",
+  "coordinator_root": "E:\\gwt\\work\\issue-6979\\.gwt\\6979-soak\\before-hour2-home\\.gwt\\runtime\\index-coordinator",
+  "trace_issue": 1001,
+  "trace_file": "crates/gwt/src/index_worker.rs",
+  "fake_embedding": false,
+  "model_cache_offline": "C:\\Users\\AkioJinsenji\u79e6\u6cc9\u5bfa\u7ae0\u592b\\.cache\\huggingface",
+  "physical_os_writes": "unmeasured"
+}

@@ -1,6 +1,7 @@
 //! Coordinator Host credential registry and offline administration (Issue #6476).
 //!
-//! No listener, device approval or PTY authority lives here. The storage module
+//! Explicit server startup serves a default-deny TLS listener; device approval
+//! and PTY authority remain separate. The storage module
 //! holds a separate registry lock, saves candidate secrets to
 //! private files first, atomically persists the registry second, and reloads
 //! before reporting success. Preparing a candidate is not successful issuance.
@@ -11,6 +12,13 @@ pub mod storage;
 
 pub mod admin;
 
+mod browser_route;
+mod config;
+pub use config::{ConfigError, CoordinatorConfig, CoordinatorLimits, TlsError};
+mod host_route;
+pub mod listener;
+pub mod server;
+
 use gwt_core::repo_hash::ProjectKey;
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
@@ -18,6 +26,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use subtle::ConstantTimeEq;
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 const MAX_REGISTRY_BYTES: usize = 128 * 1024;
 const MAX_RECORDS: usize = 256;
@@ -48,11 +57,25 @@ pub struct CredentialIdentity {
     pub generation: Uuid,
 }
 
+/// Decodes a 32-byte hex secret straight from the borrowed input, so no owned
+/// copy is left unwiped. An escaped JSON string cannot be borrowed and is refused.
+pub(crate) fn borrowed_hex_secret<'de, D>(deserializer: D) -> Result<Zeroizing<[u8; 32]>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let hex_secret = <&'de str>::deserialize(deserializer)?;
+    let mut secret = Zeroizing::new([0u8; 32]);
+    hex::decode_to_slice(hex_secret, &mut *secret).map_err(serde::de::Error::custom)?;
+    Ok(secret)
+}
+
 /// Deliberately has no Debug, Clone or Serialize implementation. The future
 /// private-file writer must explicitly borrow the bearer, never log it.
+/// The owned bearer is wiped on drop; stack copies left by moves of the array
+/// are outside this guarantee.
 pub struct HostCredential {
     identity: CredentialIdentity,
-    secret: [u8; 32],
+    secret: Zeroizing<[u8; 32]>,
 }
 
 impl HostCredential {
@@ -270,10 +293,11 @@ impl CoordinatorRegistry {
         if next.records.len() >= MAX_RECORDS {
             return Err(CredentialError::Capacity);
         }
-        let mut secret = [0; 32];
+        let mut secret = Zeroizing::new([0; 32]);
         SystemRandom::new()
-            .fill(&mut secret)
+            .fill(&mut *secret)
             .map_err(|_| CredentialError::Unavailable)?;
+        let digest = Sha256::digest(secret.as_slice()).into();
         let credential = HostCredential {
             identity: CredentialIdentity {
                 host_id,
@@ -288,7 +312,7 @@ impl CoordinatorRegistry {
             issued_at: now,
             expires_at,
             revoked: false,
-            digest: Sha256::digest(secret).into(),
+            digest,
         });
         Ok(PreparedCredentialUpdate {
             snapshot: encode(&next)?,
@@ -399,6 +423,14 @@ mod tests {
             original.prepare_issue(Uuid::new_v4(), &[project()], 100, 100),
             Err(CredentialError::InvalidRegistry)
         ));
+    }
+
+    fn zeroizes_on_drop<T: zeroize::ZeroizeOnDrop>(_: &T) {}
+
+    #[test]
+    fn issued_host_credential_secret_is_zeroize_on_drop() {
+        let candidate = issue(&mut CoordinatorRegistry::empty(100));
+        zeroizes_on_drop(&candidate.credential().secret);
     }
 
     #[test]

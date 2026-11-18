@@ -1851,6 +1851,33 @@ export function createLaunchWizardSurface({
               );
               grid.appendChild(fallback);
             }
+            if (launchWizard.selected_agent_id === "codex" && launchWizard.show_codex_speed) {
+              const speed = appendChoiceOrSelectField(
+                grid,
+                "Speed",
+                [
+                  { value: "off", label: "Off" },
+                  { value: "fast", label: "Fast" },
+                  { value: "ultrafast", label: "Ultrafast" },
+                ],
+                launchWizard.codex_speed || "off",
+                (value) => sendWizardAction({ kind: "set_codex_speed", speed: value }),
+              );
+              speed.appendChild(createNode(
+                "div",
+                "launch-field-help",
+                "Ultrafast requires GPT-6 Astra or GPT-6.1 Sol and Pro $500 or an eligible Enterprise / Edu plan with workspace access. Codex warns and omits unsupported tiers; check its launch output if the requested speed is unavailable.",
+              ));
+            }
+            if (launchWizard.selected_agent_id === "claude" && launchWizard.show_fast_mode) {
+              appendToggleField(
+                grid,
+                "Fast mode",
+                "Use Claude Code Fast mode",
+                launchWizard.fast_mode,
+                (enabled) => sendWizardAction({ kind: "set_fast_mode", enabled }),
+              );
+            }
             if (launchWizard.show_reasoning) {
               const reasoningLabel = launchWizard.selected_agent_id === "grok"
                 ? "Effort"

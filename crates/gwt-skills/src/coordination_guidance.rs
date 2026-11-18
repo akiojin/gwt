@@ -142,6 +142,18 @@ Investigation-First discussion and approval contract.
 Permission, safety, and verification gates still apply, as do existing
 lifecycle ownership and recovery requirements.
 
+## Delegated helpers
+
+For a delegated helper or subagent sharing the parent's gwt Session:
+Return results to the parent through your delegation channel.
+Do not call `workspace.*`, `execution.*`, `build.*`, or `pr.*`.
+Do not commit or push. Report progress, blockers, and completion to the parent;
+finishing your subtask does not finish the parent's Work or execution.
+The parent owns final Work delivery, lifecycle transitions, PR operations,
+and commit/push. The Board/Work and terminal delivery instructions below apply
+to the parent, not to helpers sharing its Session. An inherited `GWT_SESSION_ID`
+does not grant a helper authority to mutate the parent's state.
+
 ## Board (coordination history)
 
 When you cross a reasoning milestone (phase change, alternative chosen,
@@ -664,6 +676,18 @@ implementation / verification / PR / settlement の次工程へ進みます。
 （security/credentials、外部副作用、真の scope conflict）だけです。
 既存 permission / delivery gate は維持し、一時的な admission / CI 待ちは
 `issue.monitor.wait` で active のまま宣言し、条件が満たされたら再開します。
+
+## Delegated helpers
+
+For a delegated helper or subagent sharing the parent's gwt Session:
+Return results to the parent through your delegation channel.
+Do not call `workspace.*`, `execution.*`, `build.*`, or `pr.*`.
+Do not commit or push. Report progress, blockers, and completion to the parent;
+finishing your subtask does not finish the parent's Work or execution.
+The parent owns final Work delivery, lifecycle transitions, PR operations,
+and commit/push. The Board/Work and terminal delivery instructions below apply
+to the parent, not to helpers sharing its Session. An inherited `GWT_SESSION_ID`
+does not grant a helper authority to mutate the parent's state.
 
 ## Board (coordination history)
 
@@ -1527,6 +1551,28 @@ mod tests {
             assert!(
                 render_contract().contains(phrase),
                 "generated guidance: {phrase}"
+            );
+        }
+    }
+
+    #[test]
+    fn delegated_helpers_return_results_without_parent_delivery_mutations() {
+        for body in [SKILL_BODY_EN, SKILL_BODY_JA, &render_contract()] {
+            for phrase in [
+                "## Delegated helpers",
+                "Return results to the parent",
+                "Do not call `workspace.*`, `execution.*`, `build.*`, or `pr.*`",
+                "Do not commit or push",
+                "The parent owns final Work delivery",
+            ] {
+                assert!(
+                    body.contains(phrase),
+                    "missing delegated helper boundary: {phrase}"
+                );
+            }
+            assert!(
+                body.find("## Delegated helpers") < body.find("## Board"),
+                "delegation scope must be established before mandatory Board/Work actions"
             );
         }
     }

@@ -40,7 +40,7 @@ pub(super) fn spawn_owner(root: &Path, id: &str) -> io::Result<()> {
         Uuid::new_v4(),
         clock,
     );
-    let owner = bootstrap::spawn_private(root, &descriptor, None)?;
+    let owner = bootstrap::spawn_private(root, &descriptor, None, None)?;
     // Ack loss/child exit is not cancellation, failure-before-spawn, or Sent.
     // Never launch a fallback or kill an owner whose acceptance is unobserved.
     let _ = owner.wait_for_ack();
@@ -152,19 +152,26 @@ fn supervise(root: PathBuf, received: ReceivedBootstrap) -> io::Result<()> {
         Err(_) => return settle_without_spawn(root, id, attempt, clock),
     };
     let sender_descriptor = descriptor.sender(identity);
-    let mut sender =
-        match bootstrap::spawn_private(&root, &sender_descriptor, Some(owner.as_handle())) {
-            Ok(sender) => sender,
-            Err(_) => {
-                // A failed native spawn can follow creation of a suspended child.
-                // No exact exit observation came back: never invent sender0.
-                return settle_unknown_start(root, id, attempt, clock);
-            }
-        };
-    let started = job
-        .assign_suspended_handle(sender.child.process_handle())
-        .is_ok()
-        && sender.child.resume().is_ok();
+    // The sender is born inside the kill-on-close Job, so an owner killed
+    // before resume cannot leave a suspended sender behind (Issue #6953).
+    let spawned = match job.job_handle() {
+        Some(job) => bootstrap::spawn_private(
+            &root,
+            &sender_descriptor,
+            Some(owner.as_handle()),
+            Some(job),
+        ),
+        None => Err(failure()),
+    };
+    let mut sender = match spawned {
+        Ok(sender) => sender,
+        Err(_) => {
+            // A failed native spawn can follow creation of a suspended child.
+            // No exact exit observation came back: never invent sender0.
+            return settle_unknown_start(root, id, attempt, clock);
+        }
+    };
+    let started = sender.child.resume().is_ok();
     let mut stopping = !started;
     let mut exit_confirmed = false;
     let mut cleanup_confirmed = false;

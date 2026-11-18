@@ -19,9 +19,9 @@ on:
 # Issue #5059: workflow-level cancellation happens before any Git comparison,
 # so it cannot distinguish a product push from base-only synchronization. Give
 # each run its own group, then bound each workload to one running/one pending
-# job per PR below. A proven product push replaces running jobs (#4119); a
-# base sync replaces only pending jobs and lets running work finish.
-# Workloads preserve running work for unknown history.
+# job per PR below. A proven product push replaces running jobs (#4119), as
+# does a metadata-only push whose active predecessors have the same source.
+# A changed base tree or unknown history preserves running work (#5059).
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-${{ github.run_id }}
   cancel-in-progress: true
@@ -29,16 +29,33 @@ concurrency:
 jobs:
   source-sync:
     name: Classify CI synchronization
-    runs-on: ubuntu-latest
+    # The lightweight gate needs only Git, Python and gh, all in ubuntu-slim.
+    # Keep compilation jobs on their existing runners; concurrency is shared.
+    runs-on: ubuntu-slim
     timeout-minutes: 5
     permissions:
       contents: read
       actions: read
+      # The changed-file classifier reads the pull request's files.
+      pull-requests: read
     concurrency:
       group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-source-sync
       cancel-in-progress: true
+    # Issue #5170: this is the only gate job. A separate classification job
+    # waited for its own runner and enqueued the jobs reading it behind the
+    # rest of the run, which put the long ones at the queue's tail.
     outputs:
       base_only: ${{ steps.relation.outputs.base_only }}
+      cancel_running: ${{ steps.relation.outputs.cancel_running }}
+      docs_only: ${{ steps.classify.outputs.docs_only }}
+      # SPEC #4551 T-055: the cargo test targets the PR touched, as
+      # `<crate>|test|<name>` / `<crate>|lib|` tokens, so the flake job repeats
+      # only those. Crate granularity does not fit: measured on this runner
+      # class, one `cargo test --workspace --all-features` takes 11m23s, so 20
+      # runs of a changed `gwt` alone would blow any step budget. The SPEC's own
+      # cost model is per target ("#4550 は 54 テスト 0.53 秒で、20 回でも 11 秒").
+      flake_targets: ${{ steps.classify.outputs.flake_targets }}
+      quit_subscriber_changed: ${{ steps.classify.outputs.quit_subscriber_changed }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -57,44 +74,24 @@ jobs:
       - name: Distinguish base synchronization from PR changes
         id: relation
         run: python3 scripts/ci_sync_relation.py --event-file "$GITHUB_EVENT_PATH" --runs-file "$RUNNER_TEMP/ci-runs.json" > "$RUNNER_TEMP/ci-source-relation.json"
-
-  # Issue #4119 AC-2: classify the PR's files once so jobs a documentation edit
-  # cannot affect skip instead of queueing a Windows runner. Only jobs that are
-  # NOT a develop required status check may depend on this job: GitHub reports
-  # a skipped job as Success to branch protection, so gating a required check
-  # here would let a PR merge without running it. The gated jobs condition on
-  # `!cancelled() && needs.changes.outputs.docs_only != 'true'`, so a failed
-  # classification (API error) falls open to running them. Both properties are
-  # pinned by crates/gwt/tests/ci_concurrency_contract_test.rs.
-  changes:
-    name: Classify changed files
-    concurrency:
-      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-changes
-      cancel-in-progress: true
-    runs-on: ubuntu-latest
-    outputs:
-      docs_only: ${{ steps.classify.outputs.docs_only }}
-      # SPEC #4551 T-055: the cargo test targets the PR touched, as
-      # `<crate>|test|<name>` / `<crate>|lib|` tokens, so the flake job repeats
-      # only those. Crate granularity does not fit: measured on this runner
-      # class, one `cargo test --workspace --all-features` takes 11m23s, so 20
-      # runs of a changed `gwt` alone would blow any step budget. The SPEC's own
-      # cost model is per target ("#4550 は 54 テスト 0.53 秒で、20 回でも 11 秒").
-      flake_targets: ${{ steps.classify.outputs.flake_targets }}
-    steps:
-      # Source mapping reads Cargo registrations and harnesses for each event.
-      # A merge group also needs history for its changed-file diff. `blob:none`
-      # keeps that full-history fetch to commits and trees.
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-          filter: blob:none
+      # Issue #4119 AC-2: classify the PR's files once so jobs a documentation edit
+      # cannot affect skip instead of queueing a Windows runner. Only jobs that are
+      # NOT a develop required status check may condition on `docs_only`: GitHub
+      # reports a skipped job as Success to branch protection, so gating a
+      # required check here would let a PR merge without running it. The gated jobs condition on
+      # `!cancelled() && needs.source-sync.outputs.docs_only != 'true'`, so a failed
+      # classification (API error) falls open to running them. Both properties are
+      # pinned by crates/gwt/tests/ci_concurrency_contract_test.rs.
       - name: Classify changed files
         id: classify
+        # Independent of the history comparison above: a failed comparison
+        # must not drop the path filter or the flake target selection.
+        if: ${{ !cancelled() }}
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
           MERGE_GROUP_BASE: ${{ github.event.merge_group.base_sha }}
           MERGE_GROUP_HEAD: ${{ github.event.merge_group.head_sha }}
           PUSH_BASE: ${{ github.event.before }}
@@ -105,7 +102,17 @@ jobs:
           elif [ "$GITHUB_EVENT_NAME" = push ]; then
             files=$(git diff --name-only --no-renames "$PUSH_BASE" "$PUSH_HEAD")
           else
-            files=$(gh api "repos/$REPO/pulls/$PR_NUMBER/files" --paginate --jq '.[].filename')
+            # Issue #5170: GitHub's PR listing keeps the base tip from when the
+            # PR was opened, so a head that later merged a newer base reports
+            # those delivered files as its own (PR #7413: 491 files for 3).
+            # The merge commit under test has the current base tip as first
+            # parent. Trust it only for this exact head; else keep the listing.
+            files=""
+            if [ "$(git rev-list --parents -n 1 HEAD | wc -w)" -eq 3 ] &&
+              [ "$(git rev-parse --verify --quiet 'HEAD^2')" = "$PR_HEAD" ]; then
+              files=$(git diff --name-only --no-renames 'HEAD^1...HEAD^2') || files=""
+            fi
+            [ -n "$files" ] || files=$(gh api "repos/$REPO/pulls/$PR_NUMBER/files" --paginate --jq '.[].filename')
           fi
           # Documentation is Markdown anywhere plus docs/. Markdown the binaries
           # embed is code: CHANGELOG.md (include_str! in gwt-core) and
@@ -158,6 +165,11 @@ jobs:
           echo "flake_targets=$flake_targets"
           echo "docs_only=$docs_only" >>"$GITHUB_OUTPUT"
           echo "flake_targets=$flake_targets" >>"$GITHUB_OUTPUT"
+          if grep -Fxq 'crates/gwt/src/daemon_subscriber.rs' <<<"$files"; then
+            echo "quit_subscriber_changed=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "quit_subscriber_changed=false" >>"$GITHUB_OUTPUT"
+          fi
 
   test:
     name: Test (Rust workspace ${{ matrix.shard }}/6)
@@ -171,12 +183,12 @@ jobs:
         shard: [1, 2, 3, 4, 5, 6]
     concurrency:
       group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-${{ matrix.shard }}-test
-      cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
+      cancel-in-progress: ${{ needs.source-sync.outputs.cancel_running == 'true' }}
     runs-on: ubuntu-latest
     # Issue #4055 / #4191: the step budgets below are the operative limits;
     # this cap only bounds the job as a whole and must cover their sum
-    # including nextest installation, doctests and the timeout regression.
-    timeout-minutes: 110
+    # including nextest installation, doctests and the live browser check.
+    timeout-minutes: 155
     steps:
       - uses: actions/checkout@v7
       # Issue #4191 AC-2: restoring the .deb archive before the install means a
@@ -236,13 +248,23 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/develop' }}
           shared-key: linux-workspace
         continue-on-error: true
-      # Separate compilation from execution in the Actions step timings. This
-      # unpartitioned list is the original --workspace --all-features test set.
-      - name: Build and inventory workspace tests
+      # Issue #7572: give compilation its own step and reuse its binary
+      # metadata for the unpartitioned inventory. The ci profile bounds
+      # each --list subprocess during inventory and before the partitioned run.
+      # Omit workspace line tables only after cache restore. Keep all test
+      # Cargo steps on this profile so later steps do not rebuild it.
+      - name: Build workspace test binaries
+        env:
+          CARGO_PROFILE_TEST_DEBUG: "0"
         run: |
           mkdir -p target/workspace-test-evidence
-          cargo nextest list --workspace --all-features --message-format json > target/workspace-test-evidence/inventory.json
+          cargo nextest list --workspace --all-features --list-type binaries-only --message-format json > target/workspace-test-evidence/binaries.json
         timeout-minutes: 25
+      - name: Inventory workspace tests
+        env:
+          CARGO_PROFILE_TEST_DEBUG: "0"
+        run: cargo nextest list --profile ci --binaries-metadata target/workspace-test-evidence/binaries.json --message-format json > target/workspace-test-evidence/inventory.json
+        timeout-minutes: 3
       # Issue #4055: 21 green runs measured this step at 500–725s (p95 ~660s)
       # and a slow runner crossed the old 15-minute cap with every suite ok
       # (run 34063577896: gwt lib 231s + gwt bin 318s, 2.5x the usual). The
@@ -250,6 +272,8 @@ jobs:
       # turn a green suite into a timeout. Pinned by
       # crates/gwt/tests/ci_test_budget_contract_test.rs.
       - name: Run tests
+        env:
+          CARGO_PROFILE_TEST_DEBUG: "0"
         run: cargo nextest run --workspace --all-features --test-threads=1 --profile ci --partition slice:${{ matrix.shard }}/6
         timeout-minutes: 25
       # SPEC #4551 T-050 / AC-5: mechanism (C) -- a child the suite never
@@ -265,6 +289,8 @@ jobs:
       # nextest isolates normal tests; doctests retain rustdoc's own harness.
       - name: Run doctests
         if: matrix.shard == 1
+        env:
+          CARGO_PROFILE_TEST_DEBUG: "0"
         run: cargo test --workspace --all-features --doc
         timeout-minutes: 5
       # Issue #4134 AC-4: four tests cost 226s here and 3.9s on macOS for the
@@ -279,9 +305,48 @@ jobs:
       # Issue #4535 AC-6: `project_restore_integration` joins this step because
       # it spawns the same real binary and therefore needs the same display and
       # session bus. One `gwt` lifetime, so the step budget is unchanged.
+      # Keep the workspace feature graph used by preparation; narrowing to gwt
+      # disables gwt-docker/test-support and recompiles the dependent binaries.
       - name: Run real-binary front-door tests (Xvfb)
         if: matrix.shard == 1
-        run: dbus-run-session -- xvfb-run -a cargo test -p gwt --all-features --test stable_server_port --test project_restore_integration --test open_cli_integration -- --ignored --test-threads=1 --nocapture
+        env:
+          CARGO_PROFILE_TEST_DEBUG: "0"
+        run: dbus-run-session -- xvfb-run -a cargo test --workspace --all-features --test stable_server_port --test project_restore_integration --test open_cli_integration -- --ignored --test-threads=1 --nocapture
+        timeout-minutes: 10
+      # Issue #7610: reuse the display dependencies from the front-door tests.
+      # Keep the live suite opt-in and select the hold regression explicitly to
+      # bound PR latency. cargo test leaves binaries armed with test-gh-guard,
+      # so restore the ordinary checkout binaries before the browser uses them.
+      # The spec's other tests stay out of required CI: Issue #7451 runs in the
+      # Windows agent launch job, 25 switch proofs need an isolated Linux root
+      # process namespace (GWT_PLAYWRIGHT_SWITCH_POSITIVE), and the remaining
+      # 14 are unmeasured on this runner, so a flake there would stop every PR.
+      - name: Build checkout binaries for the live Issues regression
+        if: matrix.shard == 1
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
+        run: cargo build -p gwt --bin gwt --bin gwtd
+        timeout-minutes: 15
+      - uses: actions/setup-node@v7
+        if: matrix.shard == 1
+        with:
+          node-version: 22
+        timeout-minutes: 5
+      - name: Install Chromium for the live Issues regression
+        if: matrix.shard == 1
+        run: bash scripts/install-playwright-browsers.sh all
+        timeout-minutes: 18
+      - name: Verify Issues operator hold in both themes
+        if: matrix.shard == 1
+        env:
+          GWT_PLAYWRIGHT_QUEUE_LAUNCH: "1"
+          GWT_HEADED_E2E_REPORT: ${{ runner.temp }}/linux-operator-hold-headed.json
+        run: |
+          dbus-run-session -- xvfb-run -a bash scripts/run-visual-tests.sh issue-queue-launch-live.spec.ts \
+            --grep 'T94418 operator hold survives ordinary exit until explicit requeue$' \
+            --project=chromium-dark --project=chromium-light --workers=1 --retries=0 --headed --trace=on \
+            --reporter="line,$GITHUB_WORKSPACE/crates/gwt/src/cli/verification_record/headed_e2e_reporter.cjs"
+          node -e 'const assert = require("node:assert/strict"); const report = require(process.argv[1]); for (const [key, expected] of Object.entries({chromium_dark_passed: 1, chromium_light_passed: 1, failed: 0, status: "passed"})) assert.equal(report[key], expected, key);' "$GWT_HEADED_E2E_REPORT"
         timeout-minutes: 10
       - name: Voice accuracy regression (optional local dataset)
         if: matrix.shard == 1
@@ -314,7 +379,7 @@ jobs:
     needs: source-sync
     concurrency:
       group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-test-linux-infrastructure
-      cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
+      cancel-in-progress: ${{ needs.source-sync.outputs.cancel_running == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -348,20 +413,35 @@ jobs:
           shared-key: linux-workspace
         continue-on-error: true
       - name: Build infrastructure regression artifacts
-        run: cargo test -p gwt --all-features --lib --test cli_contracts --no-run
+        # Keep preparation, guarded restoration and stress builds on the same
+        # profile. Omit line tables only here, after the ordinary cache restore.
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
+        # The timeout fixture has its own temporary target and spends most of
+        # its time parked. Join both results before the guarded artifact tests.
+        run: |
+          cargo test -p gwt --all-features --lib --test cli_contracts --no-run &
+          build_pid=$!
+          timeout_status=0
+          node scripts/test-nextest-timeout.mjs || timeout_status=$?
+          build_status=0
+          wait "$build_pid" || build_status=$?
+          if [ "$build_status" -ne 0 ]; then exit "$build_status"; fi
+          exit "$timeout_status"
         timeout-minutes: 25
-      - name: Verify per-test timeout and suite continuation
-        run: node scripts/test-nextest-timeout.mjs
-        timeout-minutes: 5
       # Issue #4317: the script arms the guarded artifact itself and drives
       # refusal -> `cargo build -p gwt --bin gwtd` -> successful GitHub read,
       # which is the recovery verify.run now appends to its own matrix.
       - name: Run gwtd verification artifact regression
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
         run: python3 scripts/test-gwtd-verification-artifact.py
         timeout-minutes: 10
       # Issue #4346: repeat the exact lock check with three concurrent cargo
       # workers held until completion; reject zero tests and worker failures.
       - name: Run managed asset lock concurrency regression
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
         run: python3 scripts/test-managed-assets-lock-stress.py
         timeout-minutes: 10
       - name: Check tests left real HOME project stores unchanged
@@ -374,8 +454,9 @@ jobs:
     name: Test (Rust)
     concurrency:
       group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-test-rust-required
-      cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
-    runs-on: ubuntu-latest
+      cancel-in-progress: ${{ needs.source-sync.outputs.cancel_running == 'true' }}
+    # Result and inventory aggregation needs only Bash, Git and Python.
+    runs-on: ubuntu-slim
     needs: [test, test-linux-infrastructure, source-sync]
     if: ${{ !cancelled() }}
     steps:
@@ -414,9 +495,9 @@ jobs:
     name: Flake detection (changed test targets)
     concurrency:
       group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-flake-detection
-      cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
-    needs: [changes, source-sync]
-    if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.flake_targets != '' }}
+      cancel-in-progress: ${{ needs.source-sync.outputs.cancel_running == 'true' }}
+    needs: source-sync
+    if: ${{ !cancelled() && needs.source-sync.outputs.docs_only != 'true' && needs.source-sync.outputs.flake_targets != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -462,7 +543,7 @@ jobs:
           # these after cache restore: dependencies already use debug=false.
           CARGO_PROFILE_DEV_DEBUG: "0"
           CARGO_PROFILE_TEST_DEBUG: "0"
-          GWT_FLAKE_TARGETS: ${{ needs.changes.outputs.flake_targets }}
+          GWT_FLAKE_TARGETS: ${{ needs.source-sync.outputs.flake_targets }}
           GWT_FLAKE_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
           GWT_FLAKE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
           GWT_FLAKE_BUDGET_SECS: "220"
@@ -488,8 +569,10 @@ jobs:
     needs: source-sync
     concurrency:
       group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-test-python-runner
-      cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
+      cancel-in-progress: ${{ needs.source-sync.outputs.cancel_running == 'true' }}
     runs-on: ubuntu-latest
+    outputs:
+      e5_failed: ${{ steps.home-guard.outcome == 'failure' || steps.hf-cache.outcome == 'failure' || steps.assets.outcome == 'failure' || steps.home-check.outcome == 'failure' }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -498,72 +581,70 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.99.1
       - name: Check CI source classification and paired evidence
         run: python -m unittest discover -s scripts -p 'test_ci_*.py'
+      # Both suites use the same requirements. Install once at the real
+      # runner's content-addressed path, leaving the fake suite's HOME intact.
       - name: Install runtime deps
+        id: runtime
+        if: ${{ !cancelled() }}
         run: |
-          python -m pip install --upgrade pip
-          pip install -r crates/gwt-core/runtime/project_index_requirements.txt
-          pip install pytest
+          runtime_home="$(mktemp -d /tmp/gwt-e5-home.XXXXXX)"
+          requirements_hash="$(sha256sum crates/gwt-core/runtime/project_index_requirements.txt | cut -d ' ' -f1 | cut -c1-16)"
+          venv="$runtime_home/.gwt/runtime/venvs/chroma-venv-${requirements_hash}"
+          python -m venv "$venv"
+          "$venv/bin/python" -m pip install --upgrade pip
+          # This runner has no GPU; avoid PyPI torch's unused CUDA dependencies.
+          "$venv/bin/python" -m pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
+          "$venv/bin/python" -m pip install --no-cache-dir -r crates/gwt-core/runtime/project_index_requirements.txt
+          "$venv/bin/python" -m pip install --no-cache-dir pytest
+          "$venv/bin/python" -m pip check
+          "$venv/bin/python" -c "import torch; print('torch:', torch.__version__, 'CUDA:', torch.version.cuda); assert torch.version.cuda is None"
+          echo "home=$runtime_home" >> "$GITHUB_OUTPUT"
+          echo "venv=$venv" >> "$GITHUB_OUTPUT"
+          echo "cargo_home=${CARGO_HOME:-$HOME/.cargo}" >> "$GITHUB_OUTPUT"
+          echo "rustup_home=${RUSTUP_HOME:-$HOME/.rustup}" >> "$GITHUB_OUTPUT"
+          echo "hf_home=${HF_HOME:-$HOME/.cache/huggingface}" >> "$GITHUB_OUTPUT"
       - name: Run Phase 8 runner tests
+        if: ${{ !cancelled() && steps.runtime.outcome == 'success' }}
         env:
           GWT_INDEX_FAKE_EMBEDDING: "1"
-        run: pytest -q crates/gwt-core/runtime/tests crates/gwt-core/runtime/test_chroma_index_runner.py
+        run: '"${{ steps.runtime.outputs.venv }}/bin/python" -m pytest -q crates/gwt-core/runtime/tests crates/gwt-core/runtime/test_chroma_index_runner.py'
         timeout-minutes: 10
-
-  test-index-e2e:
-    name: Test (e5 e2e, optional)
-    needs: source-sync
-    concurrency:
-      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-test-index-e2e
-      cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
-    runs-on: ubuntu-latest
-    if: ${{ github.event.pull_request.draft == false }}
-    steps:
-      - uses: actions/checkout@v7
+      # Keep real-model work optional and independent of the fake test result.
+      # Sharing its runner removes one allocation and a second dependency install.
       - name: Snapshot real HOME project stores
         id: home-guard
+        if: ${{ !cancelled() && github.event.pull_request.draft == false && steps.runtime.outcome == 'success' }}
+        continue-on-error: true
         run: python scripts/ci_home_guard.py snapshot "${{ runner.temp }}/ci-home-projects-before.json"
-      - uses: dtolnay/rust-toolchain@1.99.1
-      - uses: Swatinem/rust-cache@v2
+      - name: Restore real-model Rust dependencies
+        if: ${{ !cancelled() && github.event.pull_request.draft == false && steps.runtime.outcome == 'success' && steps.home-guard.outcome == 'success' }}
+        uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/develop' }}
           shared-key: linux-workspace
         continue-on-error: true
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.11"
       - name: Cache HuggingFace model (e5-base)
+        id: hf-cache
+        if: ${{ !cancelled() && github.event.pull_request.draft == false && steps.runtime.outcome == 'success' && steps.home-guard.outcome == 'success' }}
         uses: actions/cache@v6
+        continue-on-error: true
         with:
           path: ~/.cache/huggingface
           key: hf-cache-multilingual-e5-base-v1
       - name: Bootstrap gwt runtime assets
-        id: runtime
+        id: assets
+        if: ${{ !cancelled() && github.event.pull_request.draft == false && steps.runtime.outcome == 'success' && steps.home-guard.outcome == 'success' && steps.hf-cache.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          RUNTIME_HOME: ${{ steps.runtime.outputs.home }}
         run: |
-          df -h "$HOME" "$RUNNER_TEMP"
-          # Cargo tests only accept temporary HOME paths. Keep toolchains and
-          # the restored model cache at their original absolute locations.
-          echo "cargo_home=${CARGO_HOME:-$HOME/.cargo}" >> "$GITHUB_OUTPUT"
-          echo "rustup_home=${RUSTUP_HOME:-$HOME/.rustup}" >> "$GITHUB_OUTPUT"
-          echo "hf_home=${HF_HOME:-$HOME/.cache/huggingface}" >> "$GITHUB_OUTPUT"
-          runtime_home="$(mktemp -d /tmp/gwt-e5-home.XXXXXX)"
-          echo "home=$runtime_home" >> "$GITHUB_OUTPUT"
-          runtime_dir="$runtime_home/.gwt/runtime"
+          runtime_dir="$RUNTIME_HOME/.gwt/runtime"
           runner_hash="$(sha256sum crates/gwt-core/runtime/chroma_index_runner.py | cut -d ' ' -f1 | cut -c1-16)"
-          requirements_hash="$(sha256sum crates/gwt-core/runtime/project_index_requirements.txt | cut -d ' ' -f1 | cut -c1-16)"
-          venv="$runtime_dir/venvs/chroma-venv-${requirements_hash}"
-          mkdir -p "$runtime_dir/runners" "$runtime_dir/venvs"
+          mkdir -p "$runtime_dir/runners"
           cp crates/gwt-core/runtime/chroma_index_runner.py "$runtime_dir/runners/chroma_index_runner-${runner_hash}.py"
           cp crates/gwt-core/runtime/index_path_policy.json "$runtime_dir/runners/"
-          python -m venv "$venv"
-          "$venv/bin/python" -m pip install --no-cache-dir --upgrade pip
-          # This runner has no GPU; PyPI torch otherwise pulls in the CUDA stack.
-          "$venv/bin/python" -m pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
-          "$venv/bin/python" -m pip install --no-cache-dir -r crates/gwt-core/runtime/project_index_requirements.txt
-          "$venv/bin/python" -m pip check
-          "$venv/bin/python" -c "import torch; print('torch:', torch.__version__, 'CUDA:', torch.version.cuda); assert torch.version.cuda is None"
-          du -sh "$venv"
-          df -h "$runtime_home" "$RUNNER_TEMP"
       - name: Run ignored e2e tests with real e5 model
+        if: ${{ !cancelled() && github.event.pull_request.draft == false && steps.runtime.outcome == 'success' && steps.assets.outcome == 'success' }}
         env:
           HOME: ${{ steps.runtime.outputs.home }}
           USERPROFILE: ${{ steps.runtime.outputs.home }}
@@ -575,8 +656,24 @@ jobs:
         timeout-minutes: 30
         continue-on-error: true
       - name: Check tests left real HOME project stores unchanged
-        if: ${{ !cancelled() && steps.home-guard.outcome == 'success' }}
+        id: home-check
+        if: ${{ !cancelled() && github.event.pull_request.draft == false && steps.runtime.outcome == 'success' && steps.home-guard.outcome == 'success' }}
+        continue-on-error: true
         run: python scripts/ci_home_guard.py check "${{ runner.temp }}/ci-home-projects-before.json"
+
+  # Preserve the old optional job's failure/notification signal without
+  # allocating a second runner when its shared preparation succeeds.
+  test-index-e2e:
+    name: Test (e5 e2e, optional)
+    needs: [source-sync, test-python-runner]
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-test-index-e2e
+      cancel-in-progress: ${{ needs.source-sync.outputs.cancel_running == 'true' }}
+    runs-on: ubuntu-slim
+    if: ${{ !cancelled() && needs.test-python-runner.outputs.e5_failed == 'true' }}
+    steps:
+      - name: Report real-model preparation failure
+        run: exit 1
 
   # Issue #5565: compile one core feature set, then share the same harnesses.
   test-windows-core-build:
@@ -585,7 +682,7 @@ jobs:
     needs: source-sync
     concurrency:
       group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-test-windows-core-build
-      cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
+      cancel-in-progress: ${{ needs.source-sync.outputs.cancel_running == 'true' }}
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
@@ -603,6 +700,9 @@ jobs:
           shared-key: windows-workspace
         continue-on-error: true
       - name: Build the complete core suite once
+        # Omit CI line tables; keep the same profile for the doctests below.
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
         run: node scripts/ci-windows-tests.mjs build core
         timeout-minutes: 20
       - name: Record the complete core test inventory
@@ -622,6 +722,8 @@ jobs:
       # cargo --no-run does not compile doctests. Keep all five original passes.
       - name: Run core doctests five times
         shell: pwsh
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
         run: |
           1..5 | ForEach-Object {
             cargo test -p gwt-core --all-features --doc
@@ -639,7 +741,7 @@ jobs:
     needs: [source-sync, test-windows-core-build]
     concurrency:
       group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-${{ matrix.run }}-test-windows-core-stability
-      cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
+      cancel-in-progress: ${{ needs.source-sync.outputs.cancel_running == 'true' }}
     runs-on: windows-latest
     timeout-minutes: 60
     strategy:
@@ -683,7 +785,7 @@ jobs:
     needs: [source-sync, test-windows-core-build]
     concurrency:
       group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-test-windows-index-stability
-      cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
+      cancel-in-progress: ${{ needs.source-sync.outputs.cancel_running == 'true' }}
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
@@ -725,7 +827,7 @@ jobs:
     name: Test (Windows regressions)
     concurrency:
       group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-test-windows-rust
-      cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
+      cancel-in-progress: ${{ needs.source-sync.outputs.cancel_running == 'true' }}
     needs: source-sync
     if: ${{ !cancelled() }}
     runs-on: windows-latest
@@ -833,29 +935,49 @@ jobs:
       - name: Run agent process resolver caller contracts
         run: 'node scripts/ci-windows-tests.mjs run-runtime gwt test runtime_tests agent_process_resolution_contract_test::'
         timeout-minutes: 15
-      - name: Run Windows verification driver relink regression
+      - name: Run Windows cmd probe and verification driver regressions
         # Issue #5466 AC-4: all ten passes retain their real-artifact assertions.
         # Each process has private fixture HOME/project/target directories.
+        # The cmd probe writes only its own artifacts; overlap its build/wait
+        # with the five drivers. Its former 15m cap shares this step's 20m cap.
         run: |
-          $jobs = 1..5 | ForEach-Object {
-            Start-Job -ArgumentList (Get-Location).Path,$_ -ScriptBlock {
-              param($repo, $worker)
+          $jobs = @()
+          try {
+            $jobs += Start-Job -ArgumentList (Get-Location).Path -ScriptBlock {
+              param($repo)
+              $ErrorActionPreference = 'Stop'
               Set-Location $repo
-              for ($attempt = 1; $attempt -le 2; $attempt++) {
-                Write-Host "Windows verification driver worker $worker attempt $attempt of 2"
-                node scripts/ci-windows-tests.mjs run-runtime gwt test cli_contracts verification_driver_cli_test:: -- --test-threads=1
-                if ($LASTEXITCODE -ne 0) { throw "driver worker $worker failed ($LASTEXITCODE)" }
+              $env:CARGO_PROFILE_DEV_DEBUG = '0'
+              python crates/gwt-core/tests/fixtures/run_windows_cmd_runner_probe.py
+              if ($LASTEXITCODE -ne 0) { throw "cmd probe failed ($LASTEXITCODE)" }
+            }
+            1..5 | ForEach-Object {
+              $jobs += Start-Job -ArgumentList (Get-Location).Path,$_ -ScriptBlock {
+                param($repo, $worker)
+                $ErrorActionPreference = 'Stop'
+                Set-Location $repo
+                for ($attempt = 1; $attempt -le 2; $attempt++) {
+                  Write-Host "Windows verification driver worker $worker attempt $attempt of 2"
+                  node scripts/ci-windows-tests.mjs run-runtime gwt test cli_contracts verification_driver_cli_test:: -- --test-threads=1
+                  if ($LASTEXITCODE -ne 0) { throw "driver worker $worker failed ($LASTEXITCODE)" }
+                }
               }
             }
-          }
-          try {
             $results = $jobs | Wait-Job
             $results | Receive-Job -ErrorAction Continue
             if (@($results | Where-Object State -ne Completed).Count -ne 0) { exit 1 }
           } finally {
+            $jobs | Wait-Job | Out-Null
             $jobs | Remove-Job -Force
           }
         timeout-minutes: 20
+      - name: Preserve Windows cmd consumer provenance
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-cmd-consumer-provenance
+          path: target/issue6474-probe/green.json
+          if-no-files-found: error
       - name: Run release asset contract tests
         run: node scripts/test_release_assets.cjs
         timeout-minutes: 15
@@ -877,7 +999,7 @@ jobs:
     name: Test (Windows library regressions)
     concurrency:
       group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-test-windows-rust-lib
-      cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
+      cancel-in-progress: ${{ needs.source-sync.outputs.cancel_running == 'true' }}
     needs: source-sync
     if: ${{ !cancelled() }}
     runs-on: windows-latest
@@ -927,7 +1049,7 @@ jobs:
         shell: bash
         run: |
           node scripts/ci-windows-tests.mjs run-lib gwt lib gwt cli::feedback -- --test-threads=1 --nocapture | tee "$RUNNER_TEMP/feedback-ownership.log"
-          grep -Fq 'test result: ok. 38 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/feedback-ownership.log"
+          grep -Fq 'test result: ok. 40 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/feedback-ownership.log"
       - name: Run native fleet orphan process handle contracts
         shell: bash
         run: |
@@ -955,6 +1077,12 @@ jobs:
       - name: Run Windows PTY resolver adapter tests
         run: node scripts/ci-windows-tests.mjs run-lib gwt-terminal lib gwt_terminal pty::windows_spawn::tests -- --test-threads=1
         timeout-minutes: 15
+      - name: Run raw monitor input ConPTY regressions
+        shell: bash
+        run: |
+          node scripts/ci-windows-tests.mjs run-lib gwt lib gwt cli::hook::runtime_state::tests::raw_monitor_input_ -- --nocapture | tee "$RUNNER_TEMP/raw-monitor-hook.log"
+          grep -Fq 'test result: ok. 2 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/raw-monitor-hook.log"
+        timeout-minutes: 5
       - name: Run inherited Claude session environment regressions
         run: node scripts/ci-windows-tests.mjs run-lib gwt-agent lib gwt_agent claude_child_session_marker -- --test-threads=1
         timeout-minutes: 15
@@ -971,6 +1099,14 @@ jobs:
           node scripts/ci-windows-tests.mjs run-lib gwt lib gwt cli::pane::tests::pane_websocket_request_carries_the_agent_capability_in_authorization -- --exact --test-threads=1
           node scripts/ci-windows-tests.mjs run-lib gwt lib gwt cli::pane::tests::issue_monitor_scan_client_ -- --test-threads=1
         timeout-minutes: 15
+      # Issue #7451: shared admission never treats an unknown or expired
+      # observation of live workers as a free slot.
+      - name: Run shared machine admission unknown and stale observation contracts
+        shell: bash
+        run: |
+          node scripts/ci-windows-tests.mjs run-lib gwt lib gwt machine_agent_admission::tests::uncertain_manual_observation_refuses_but_auto_preserves_existing_admission -- --exact --test-threads=1
+          node scripts/ci-windows-tests.mjs run-lib gwt lib gwt session_inventory::tests::issue_5644_expired_inventory_is_uncertain_instead_of_empty -- --exact --test-threads=1
+        timeout-minutes: 10
       - name: Run Windows runtime daemon named-pipe transport contracts
         shell: bash
         run: |
@@ -982,6 +1118,17 @@ jobs:
           node scripts/ci-windows-tests.mjs run-lib gwt lib gwt process::tests -- --test-threads=1
           node scripts/ci-windows-tests.mjs run-lib gwt-core lib gwt_core daemon_pipe_name -- --test-threads=1
         timeout-minutes: 20
+      - name: Repeat pending-endpoint Quit regression on Windows
+        if: ${{ needs.source-sync.outputs.quit_subscriber_changed != 'false' }}
+        shell: bash
+        run: |
+          for (( run = 1; run <= 50; run++ )); do
+            echo "Pending-endpoint Quit run $run/50"
+            node scripts/ci-windows-tests.mjs run-lib gwt lib gwt daemon_subscriber::project_owner_tests::explicit_quit_retries_an_endpoint_published_during_delivery -- --exact --test-threads=1 |
+              tee "$RUNNER_TEMP/pending-endpoint-quit.log"
+            grep -Fq 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/pending-endpoint-quit.log"
+          done
+        timeout-minutes: 5
       # Issue #4746: Windows uses the in-process verification runner, and
       # reclaiming an exited workload's stalled driver needs native taskkill.
       - name: Run Windows verification completion and reclaim regressions
@@ -1010,7 +1157,7 @@ jobs:
     name: Windows warm prompt latency
     concurrency:
       group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-test-windows-warm
-      cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
+      cancel-in-progress: ${{ needs.source-sync.outputs.cancel_running == 'true' }}
     needs: source-sync
     if: ${{ !cancelled() }}
     runs-on: windows-latest
@@ -1030,6 +1177,9 @@ jobs:
         continue-on-error: true
       # This feature set and isolated measurement do not depend on regressions.
       - name: Build warm latency target once
+        # Omit this test artifact's line tables after restoring the shared cache.
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
         run: node scripts/ci-windows-tests.mjs build warm
         timeout-minutes: 30
       # Issue #3777: measure the warm 250ms acceptance contract without other
@@ -1048,10 +1198,11 @@ jobs:
     name: Test (Rust, Windows)
     concurrency:
       group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-test-windows-required
-      cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
+      cancel-in-progress: ${{ needs.source-sync.outputs.cancel_running == 'true' }}
     needs: [test-windows-core-stability, test-windows-index-stability, test-windows-rust, test-windows-rust-lib, test-windows-warm, source-sync]
     if: ${{ always() }}
-    runs-on: ubuntu-latest
+    # This job only evaluates the completed Windows results.
+    runs-on: ubuntu-slim
     steps:
       - name: Require all five core stability runs and Windows regressions
         shell: bash
@@ -1073,9 +1224,9 @@ jobs:
     name: Test (Windows agent launch)
     concurrency:
       group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-test-windows-agent-launch-e2e
-      cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
-    needs: [changes, source-sync]
-    if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' }}
+      cancel-in-progress: ${{ needs.source-sync.outputs.cancel_running == 'true' }}
+    needs: source-sync
+    if: ${{ !cancelled() && needs.source-sync.outputs.docs_only != 'true' }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -1093,11 +1244,24 @@ jobs:
         continue-on-error: true
       # Build once, then exercise both installed provider commands through
       # the same direct probe, Session persistence, and ConPTY launch routes.
-      - name: Build the deterministic Windows agent launch E2E
+      # The integration build also emits gwt and gwtd for the cold restart;
+      # a preceding cargo build repeats work with a different feature graph.
+      - name: Build Windows agent launch E2E and cold restart binaries
         # Test inherits dev; keep assertions/features while omitting CI line tables.
         env:
           CARGO_PROFILE_DEV_DEBUG: "0"
-        run: cargo test -p gwt --test windows_agent_launch_e2e --no-run
+        # Browser download and Cargo use separate caches. Join both before tests.
+        # The installer keeps its bounded retries within this preparation cap.
+        shell: bash
+        run: |
+          bash scripts/install-playwright-browsers.sh browsers &
+          browser_pid=$!
+          build_status=0
+          cargo test -p gwt --test windows_agent_launch_e2e --no-run || build_status=$?
+          browser_status=0
+          wait "$browser_pid" || browser_status=$?
+          if [ "$build_status" -ne 0 ]; then exit "$build_status"; fi
+          exit "$browser_status"
         timeout-minutes: 30
       # Issue #4644 AC-5: the non-ignored contract tests in this cfg(windows)
       # target (e.g. the Hub bootstrap reply classifier) are compiled nowhere
@@ -1113,14 +1277,28 @@ jobs:
         env:
           GWT_WINDOWS_AGENT_E2E_CREDENTIAL_FREE: "1"
           CARGO_PROFILE_DEV_DEBUG: "0"
+          GWT_FLAKE_TARGETS: ${{ needs.source-sync.outputs.flake_targets }}
         run: |
           status=0
+          restore_runs=1
+          # Exercise 20 real cold restores when the target changes, without
+          # repeating the rest of the installed-provider matrix.
+          if [[ " $GWT_FLAKE_TARGETS " == *" gwt|test|windows_agent_launch_e2e "* ]]; then
+            restore_runs=10
+          fi
           providers=(codex claude)
           pids=()
           # Fixtures isolate HOME, npm state, registry/server ports, and sessions.
           for provider in codex claude; do
-            GWT_WINDOWS_AGENT_PROVIDER="$provider" \
-              cargo test -p gwt --test windows_agent_launch_e2e -- --ignored --test-threads=1 --nocapture > "$RUNNER_TEMP/windows-agent-${provider}.log" 2>&1 &
+            (
+              export GWT_WINDOWS_AGENT_PROVIDER="$provider"
+              cargo test -p gwt --test windows_agent_launch_e2e -- --ignored --test-threads=1 --nocapture || exit $?
+              for ((attempt=2; attempt<=restore_runs; attempt++)); do
+                echo "Windows startup restore $provider $attempt/$restore_runs"
+                cargo test -p gwt --test windows_agent_launch_e2e -- --ignored --test-threads=1 --nocapture \
+                  --exact windows_startup_restored_provider_tree_closes_through_public_gui || exit $?
+              done
+            ) > "$RUNNER_TEMP/windows-agent-${provider}.log" 2>&1 &
             pids+=("$!")
           done
           # Keep both outcomes and the existing provider-specific diagnostics.
@@ -1128,7 +1306,13 @@ jobs:
             provider="${providers[$index]}"
             echo "::group::windows installed agent launch E2E ${provider}"
             if wait "${pids[$index]}"; then
-              echo "ok ${provider}/installed"
+              observed=$(grep -cF 'Windows startup restore acceptance:' "$RUNNER_TEMP/windows-agent-${provider}.log" || true)
+              if [ "$observed" -eq "$restore_runs" ]; then
+                echo "ok ${provider}/installed"
+              else
+                echo "::error::Expected $restore_runs startup restore receipts for $provider, got $observed"
+                status=1
+              fi
             else
               echo "::error::windows agent launch E2E failed for ${provider}/installed"
               status=1
@@ -1138,6 +1322,52 @@ jobs:
           done
           exit "$status"
         timeout-minutes: 60
+      # Tests and the example enable test-only features. Restore the ordinary
+      # checkout binaries last so the browser exercises the production path.
+      - name: Build checkout binaries for Windows cold restart
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
+        run: |
+          cargo build -p gwt --example exact_relaunch_capacity
+          cargo build -p gwt --bin gwt --bin gwtd
+        timeout-minutes: 30
+      - name: Verify Windows Works cold restart in both themes
+        shell: bash
+        env:
+          GWT_PLAYWRIGHT_EXACT_RELAUNCH: "1"
+          GWT_HEADED_E2E_REPORT: ${{ runner.temp }}/windows-works-headed.json
+        run: |
+          bash scripts/run-visual-tests.sh exact-relaunch-live.spec.ts \
+            --grep 'Works shows the real PM and four implementation children after reload' \
+            --project=chromium-dark --project=chromium-light --workers=1 --retries=0 --headed --trace=on \
+            --reporter="line,$GITHUB_WORKSPACE/crates/gwt/src/cli/verification_record/headed_e2e_reporter.cjs"
+          node -e 'const assert = require("node:assert/strict"); const report = require(process.argv[1]); for (const [key, expected] of Object.entries({chromium_dark_passed: 1, chromium_light_passed: 1, failed: 0, status: "passed"})) assert.equal(report[key], expected, key);' "$GWT_HEADED_E2E_REPORT"
+        timeout-minutes: 20
+      # Issue #7451: two projects under one HOME share the machine limit on a
+      # native ConPTY host. The slot returns, the other project is admitted,
+      # and the original owner resumes; neither may exceed the limit.
+      - name: Verify shared machine slot return across two projects in both themes
+        shell: bash
+        env:
+          GWT_PLAYWRIGHT_QUEUE_LAUNCH: "1"
+          GWT_HEADED_E2E_REPORT: ${{ runner.temp }}/windows-shared-pool-headed.json
+        run: |
+          bash scripts/run-visual-tests.sh issue-queue-launch-live.spec.ts \
+            --grep 'Issue #7451 shared HOME returns one machine slot' \
+            --project=chromium-dark --project=chromium-light --workers=1 --retries=0 --headed --trace=on \
+            --reporter="line,$GITHUB_WORKSPACE/crates/gwt/src/cli/verification_record/headed_e2e_reporter.cjs"
+          node -e 'const assert = require("node:assert/strict"); const report = require(process.argv[1]); for (const [key, expected] of Object.entries({chromium_dark_passed: 1, chromium_light_passed: 1, failed: 0, status: "passed"})) assert.equal(report[key], expected, key);' "$GWT_HEADED_E2E_REPORT"
+        timeout-minutes: 30
+      - name: Retain Windows cold restart evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-works-cold-restart
+          path: |
+            crates/gwt/playwright/test-results/
+            ${{ runner.temp }}/windows-works-headed.json*
+            ${{ runner.temp }}/windows-shared-pool-headed.json*
+          if-no-files-found: warn
       - name: Check tests left real HOME project stores unchanged
         if: ${{ !cancelled() && steps.home-guard.outcome == 'success' }}
         run: python scripts/ci_home_guard.py check "${{ runner.temp }}/ci-home-projects-before.json"
@@ -1146,9 +1376,9 @@ jobs:
     name: Test (Frontend + WebView E2E)
     concurrency:
       group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-test-frontend
-      cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
-    needs: [changes, source-sync]
-    if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' }}
+      cancel-in-progress: ${{ needs.source-sync.outputs.cancel_running == 'true' }}
+    needs: source-sync
+    if: ${{ !cancelled() && needs.source-sync.outputs.docs_only != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -1164,6 +1394,7 @@ jobs:
         run: |
           bash scripts/check-frontend-build.sh
           node --test crates/gwt/web-react/__tests__/use-store-selector.test.mjs scripts/check-frontend-build.test.mjs
+          node --experimental-loader ./crates/gwt/web-react/__tests__/jsx-loader.mjs --test crates/gwt/web-react/__tests__/task-home.test.mjs
         timeout-minutes: 5
       - name: Run frontend unit tests
         env:
@@ -1172,7 +1403,7 @@ jobs:
           if [ -n "$GWT_PULL_RENDER_BASE_SHA" ]; then
             git fetch --no-tags --depth=1 origin "$GWT_PULL_RENDER_BASE_SHA"
           fi
-          bash scripts/run-frontend-unit-tests.sh --test-concurrency=1
+          bash scripts/run-frontend-unit-tests.sh --test-concurrency=2
         timeout-minutes: 10
       - name: Run frontend smoke tests
         run: bash scripts/run-frontend-smoke-tests.sh
@@ -1189,15 +1420,17 @@ jobs:
             --mount "type=bind,source=$GITHUB_WORKSPACE,target=/workspace" \
             --workdir /workspace --env CI=true \
             "mcr.microsoft.com/playwright:v${version}-noble" \
-            bash scripts/run-visual-tests.sh
-        timeout-minutes: 15
+            bash scripts/run-visual-tests.sh --workers=2
+        # The full serial suite measured 14.7m before image/bootstrap overhead.
+        # Retain all cases and retries with finite execution headroom.
+        timeout-minutes: 25
 
   report-post-merge-failure:
-    needs: [source-sync, changes, test, test-linux-infrastructure, test-rust-required, flake-detection, test-python-runner, test-index-e2e, test-windows-core-build, test-windows-core-stability, test-windows-index-stability, test-windows-rust, test-windows-rust-lib, test-windows-warm, test-windows-required, test-windows-agent-launch-e2e, test-frontend]
+    needs: [source-sync, test, test-linux-infrastructure, test-rust-required, flake-detection, test-python-runner, test-index-e2e, test-windows-core-build, test-windows-core-stability, test-windows-index-stability, test-windows-rust, test-windows-rust-lib, test-windows-warm, test-windows-required, test-windows-agent-launch-e2e, test-frontend]
     if: ${{ github.event_name == 'push' && failure() }}
     concurrency:
       group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}-report-post-merge-failure
-      cancel-in-progress: ${{ needs.source-sync.outputs.base_only == 'false' }}
+      cancel-in-progress: ${{ needs.source-sync.outputs.cancel_running == 'true' }}
     permissions:
       issues: write
     uses: ./.github/workflows/post-merge-ci.yml

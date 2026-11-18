@@ -12,7 +12,6 @@ use std::{
     time::Duration,
 };
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -28,6 +27,7 @@ use crate::{
         gwt_workspace_work_events_path_for_repo_path, gwt_workspace_work_items_path_for_repo_path,
         resolve_current_worktree_root,
     },
+    timestamp::UtcTimestamp,
 };
 
 use super::identity::{canonical_work_branch_identity, canonical_worktree_identity};
@@ -1078,10 +1078,38 @@ pub fn resolve_legacy_workspace_state_external_commit_for_work_event_root(
     operation_id: &str,
     decision: ExternalWorkspaceCommitDecision,
 ) -> Result<ExternalWorkspaceCommitResolution> {
+    resolve_legacy_external_workspace_commit(
+        project_state_root,
+        work_event_root,
+        operation_id,
+        decision,
+        None,
+    )
+}
+
+fn resolve_legacy_external_workspace_commit(
+    project_state_root: &Path,
+    work_event_root: &Path,
+    operation_id: &str,
+    decision: ExternalWorkspaceCommitDecision,
+    expected_recovery: Option<&ExternalWorkspaceCommitRecovery>,
+) -> Result<ExternalWorkspaceCommitResolution> {
     validate_external_workspace_operation_id(operation_id)?;
     let (current_path, work_items_path) =
         split_root_workspace_state_paths(project_state_root, work_event_root);
     let legacy_work_items_path = gwt_workspace_work_items_path_for_repo_path(work_event_root);
+    if let Some(expected) = expected_recovery {
+        if expected.current_path != current_path
+            || expected.work_items_path != legacy_work_items_path
+            || expected.project_state_root.as_deref() != Some(project_state_root)
+            || legacy_work_items_path == work_items_path
+            || !session_bound_paths_match(Some(&expected.worktree_path), Some(work_event_root))?
+        {
+            return Err(GwtError::Other(
+                "external workspace recovery legacy path pair changed".into(),
+            ));
+        }
+    }
     if legacy_work_items_path == work_items_path {
         return resolve_workspace_state_external_commit_at(
             &current_path,
@@ -1098,13 +1126,15 @@ pub fn resolve_legacy_workspace_state_external_commit_for_work_event_root(
     else {
         return Ok(ExternalWorkspaceCommitResolution::Busy);
     };
-    resolve_workspace_state_external_commit_at_locked_with_commit_hook(
+    resolve_workspace_state_external_commit_at_locked_with_commit_hook_and_authority(
         &current_path,
         &legacy_work_items_path,
         operation_id,
         decision,
         std::slice::from_ref(&work_items_path),
         Some(&work_items_path),
+        None,
+        expected_recovery,
         |transaction| {
             merge_committed_legacy_worktree_events_locked(
                 &current_path,
@@ -1149,7 +1179,7 @@ fn merge_committed_legacy_worktree_events_locked(
         None => legacy
             .clone()
             .or_else(|| transaction.and_then(|pending| pending.work_items.clone()))
-            .unwrap_or_else(|| WorkItemsProjection::empty(Utc::now())),
+            .unwrap_or_else(|| WorkItemsProjection::empty(UtcTimestamp::now())),
     };
     let projection = match transaction {
         Some(pending) => pending.projection.clone(),
@@ -1175,6 +1205,13 @@ fn merge_committed_legacy_worktree_events_locked(
             .cmp(&right.updated_at)
             .then_with(|| left.id.cmp(&right.id))
     });
+    if candidates.iter().any(WorkEvent::is_successor_supersession) {
+        let source = transaction
+            .and_then(|pending| pending.work_items.as_ref())
+            .or(legacy.as_ref())
+            .ok_or_else(|| GwtError::Other("legacy supersession source is missing".into()))?;
+        order_legacy_supersession_candidates(&mut candidates, source, work_event_root)?;
+    }
 
     let mut candidate_ids = HashMap::<String, WorkEvent>::new();
     let mut changed = canonical_was_missing;
@@ -1310,6 +1347,45 @@ fn merge_committed_legacy_worktree_events_locked(
                 )));
             }
         }
+        if event.is_successor_supersession() {
+            let source = transaction
+                .and_then(|pending| pending.work_items.as_ref())
+                .or(legacy.as_ref())
+                .ok_or_else(|| GwtError::Other("legacy supersession source is missing".into()))?;
+            validate_legacy_supersession_authority(
+                &canonical,
+                source,
+                target,
+                &event,
+                work_event_root,
+            )?;
+            changed |= materialize_legacy_supersession_ancestors(
+                &mut canonical,
+                source,
+                &event,
+                work_event_root,
+            )?;
+            if let Some(snapshot) = seed_snapshot {
+                validate_legacy_reconciliation_snapshot_insert(
+                    &canonical,
+                    &snapshot,
+                    "legacy supersession target recovery",
+                )?;
+                canonical.work_items.push(snapshot);
+                changed = true;
+            }
+            if !event_already_applied {
+                if canonical.apply_event(event.clone())
+                    == WorkEventApplyOutcome::RejectedSessionConflict
+                {
+                    return Err(GwtError::Other(
+                        "legacy supersession could not be reconciled".into(),
+                    ));
+                }
+                changed = true;
+            }
+            continue;
+        }
         let Some(session_id) = event.agent_session_id.as_deref() else {
             if strict_exact_transaction {
                 return Err(GwtError::Other(format!(
@@ -1385,6 +1461,11 @@ fn merge_committed_legacy_worktree_events_locked(
             false,
         )?;
         if let Some(snapshot) = seed_snapshot {
+            validate_legacy_reconciliation_snapshot_insert(
+                &canonical,
+                &snapshot,
+                "legacy external Workspace target recovery",
+            )?;
             canonical.work_items.push(snapshot);
             changed = true;
         }
@@ -1420,7 +1501,7 @@ fn merge_committed_legacy_worktree_events_locked(
             "legacy external Workspace migration",
             true,
         )?;
-        validate_session_bound_work_authority_uniqueness(
+        validate_legacy_reconciliation_authority_uniqueness(
             &canonical,
             &event.work_item_id,
             session_id,
@@ -1518,6 +1599,349 @@ fn validate_legacy_reconciliation_snapshot_target(
         }
     }
     Ok(())
+}
+
+/// Importing a whole snapshot also imports its historical event identities and
+/// authoritative Session refs, beyond the one event being reconciled.
+fn validate_legacy_reconciliation_snapshot_insert(
+    canonical: &WorkItemsProjection,
+    snapshot: &WorkItem,
+    context: &str,
+) -> Result<()> {
+    for event in &snapshot.events {
+        unique_legacy_reconciliation_event(canonical, event, context)?;
+    }
+    if snapshot.agents.iter().any(|agent| {
+        canonical.work_items.iter().any(|other| {
+            other.id != snapshot.id
+                && other
+                    .agents
+                    .iter()
+                    .any(|existing| existing.session_id == agent.session_id)
+        })
+    }) {
+        return Err(GwtError::Other(format!(
+            "{context} Session is attached to multiple Works"
+        )));
+    }
+    Ok(())
+}
+
+/// Fresh activation emits parent-to-child structural audits and Start at the
+/// same instant. Receipts retain no event order, so recover that order from the
+/// existing canonical lineage selector rather than UUIDs or source row order.
+fn order_legacy_supersession_candidates(
+    candidates: &mut [WorkEvent],
+    source: &WorkItemsProjection,
+    work_event_root: &Path,
+) -> Result<()> {
+    let mut ordered_scopes = HashSet::new();
+    for audit in candidates
+        .iter()
+        .filter(|event| event.is_successor_supersession())
+        .cloned()
+        .collect::<Vec<_>>()
+    {
+        let Some(container) = audit.execution_container.as_ref() else {
+            continue;
+        };
+        let Some(scope) = canonical_work_id(
+            work_event_root,
+            container.branch.as_deref(),
+            container.worktree_path.as_deref(),
+        ) else {
+            continue;
+        };
+        if !ordered_scopes.insert((audit.updated_at, scope.clone())) {
+            continue;
+        }
+        let mut ancestry = Vec::new();
+        current_canonical_work_item(source, work_event_root, &scope, None, Some(&mut ancestry))?;
+        validate_legacy_successor_edges(source, &ancestry, "legacy supersession event order")?;
+        let mut ordered = candidates
+            .iter()
+            .enumerate()
+            .filter(|(_, event)| {
+                event.updated_at == audit.updated_at
+                    && (event.is_successor_supersession() || event.kind == WorkEventKind::Start)
+                    && event.execution_container.as_ref().is_some_and(|container| {
+                        canonical_work_id(
+                            work_event_root,
+                            container.branch.as_deref(),
+                            container.worktree_path.as_deref(),
+                        )
+                        .as_deref()
+                            == Some(scope.as_str())
+                    })
+            })
+            .filter_map(|(index, event)| {
+                ancestry
+                    .iter()
+                    .position(|(child, parent)| {
+                        child == &event.work_item_id
+                            && event.related_work_item_id.as_deref() == Some(parent.as_str())
+                    })
+                    .map(|rank| (index, rank, event.clone()))
+            })
+            .collect::<Vec<_>>();
+        let indices = ordered
+            .iter()
+            .map(|(index, _, _)| *index)
+            .collect::<Vec<_>>();
+        ordered.sort_by_key(|(_, rank, _)| *rank);
+        for (index, (_, _, event)) in indices.into_iter().zip(ordered) {
+            candidates[index] = event;
+        }
+    }
+    Ok(())
+}
+
+/// A committed structural audit retires historical occupancy without assigning
+/// its launch Session to that history. The resolver has already validated the
+/// exact operation/receipt and holds the canonical and legacy state locks.
+fn validate_legacy_supersession_authority(
+    canonical: &WorkItemsProjection,
+    source: &WorkItemsProjection,
+    target: &WorkItem,
+    event: &WorkEvent,
+    work_event_root: &Path,
+) -> Result<()> {
+    let invalid = || {
+        GwtError::Other(format!(
+            "legacy supersession {} has conflicting structural lineage authority",
+            event.id,
+        ))
+    };
+    if !event.is_successor_supersession() {
+        return Err(invalid());
+    }
+    let parent_id = event.related_work_item_id.as_deref().ok_or_else(invalid)?;
+    let source_target =
+        unique_legacy_reconciliation_target(source, &event.work_item_id, "supersession source")?
+            .ok_or_else(invalid)?;
+    let source_parent =
+        unique_legacy_reconciliation_target(source, parent_id, "supersession source")?
+            .ok_or_else(invalid)?;
+    let canonical_parent =
+        unique_legacy_reconciliation_target(canonical, parent_id, "canonical WorkItems")?;
+    validate_legacy_reconciliation_snapshot_target(source, source_target, "supersession source")?;
+    validate_legacy_reconciliation_snapshot_target(source, source_parent, "supersession source")?;
+    let owners_match = |left: &WorkItem, right: &WorkItem| {
+        left.owner == right.owner
+            || can_upgrade_work_owner(left.owner.as_deref(), right.owner.as_deref())
+            || can_upgrade_work_owner(right.owner.as_deref(), left.owner.as_deref())
+    };
+    if !source_parent.is_terminal()
+        || !source_target.is_terminal()
+        || !unique_legacy_reconciliation_event(source, event, "supersession source")?
+        || !owners_match(target, source_target)
+        || canonical_parent
+            .is_some_and(|parent| !parent.is_terminal() || !owners_match(parent, source_parent))
+    {
+        return Err(invalid());
+    }
+    let container = event.execution_container.as_ref().ok_or_else(invalid)?;
+    if !session_bound_paths_match(container.worktree_path.as_deref(), Some(work_event_root))? {
+        return Err(invalid());
+    }
+    let scope = canonical_work_id(
+        work_event_root,
+        container.branch.as_deref(),
+        Some(work_event_root),
+    )
+    .ok_or_else(invalid)?;
+    let container_matches = |container: &WorkspaceExecutionContainerRef| {
+        canonical_work_id(
+            work_event_root,
+            container.branch.as_deref(),
+            container.worktree_path.as_deref(),
+        )
+        .as_deref()
+            == Some(scope.as_str())
+    };
+    if workspace_group_key_for_item(work_event_root, source_parent) != scope
+        && !source_parent
+            .events
+            .iter()
+            .filter_map(|event| event.execution_container.as_ref())
+            .any(container_matches)
+    {
+        return Err(invalid());
+    }
+    for item in [
+        Some(target),
+        Some(source_target),
+        Some(source_parent),
+        canonical_parent,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if item
+            .execution_containers
+            .iter()
+            .chain(
+                item.events
+                    .iter()
+                    .filter_map(|event| event.execution_container.as_ref()),
+            )
+            .chain(
+                item.duplicate_event_containers
+                    .values()
+                    .flatten()
+                    .filter_map(|provenance| provenance.container()),
+            )
+            .any(|container| !container_matches(container))
+        {
+            return Err(invalid());
+        }
+    }
+    for item in [target, source_target] {
+        if item
+            .related_work_item_ids
+            .iter()
+            .map(String::as_str)
+            .chain(
+                item.events
+                    .iter()
+                    .filter_map(|event| event.related_work_item_id.as_deref()),
+            )
+            .chain(
+                item.duplicate_event_containers
+                    .values()
+                    .flatten()
+                    .filter_map(|provenance| provenance.event())
+                    .filter_map(|event| event.related_work_item_id.as_deref()),
+            )
+            .any(|parent| parent != parent_id)
+        {
+            return Err(invalid());
+        }
+    }
+    Ok(())
+}
+
+/// Recover only the independently stored terminal prefix needed by this
+/// audit. Existing canonical history remains authoritative and is not replaced.
+fn materialize_legacy_supersession_ancestors(
+    canonical: &mut WorkItemsProjection,
+    source: &WorkItemsProjection,
+    event: &WorkEvent,
+    work_event_root: &Path,
+) -> Result<bool> {
+    let context = "legacy supersession predecessor recovery";
+    let invalid = || {
+        GwtError::Other(format!(
+            "{context} has conflicting source/canonical lineage"
+        ))
+    };
+    let parent = event.related_work_item_id.as_deref().ok_or_else(invalid)?;
+    let container = event.execution_container.as_ref().ok_or_else(invalid)?;
+    let scope = canonical_work_id(
+        work_event_root,
+        container.branch.as_deref(),
+        Some(work_event_root),
+    )
+    .ok_or_else(invalid)?;
+    // Removing the audit's child bounds this existing selector to the prefix;
+    // it does not remove anything from either durable projection.
+    let mut source_prefix = source.clone();
+    source_prefix
+        .work_items
+        .retain(|item| item.id != event.work_item_id);
+    let mut source_edges = Vec::new();
+    let selected = current_canonical_work_item(
+        &source_prefix,
+        work_event_root,
+        &scope,
+        None,
+        Some(&mut source_edges),
+    )?;
+    if !selected.is_some_and(|item| item.id == parent)
+        && !source_edges.iter().any(|(child, _)| child == parent)
+    {
+        return Err(invalid());
+    }
+    validate_legacy_successor_edges(&source_prefix, &source_edges, context)?;
+    let ids = source_edges
+        .iter()
+        .flat_map(|(child, parent)| [child.as_str(), parent.as_str()])
+        .chain(std::iter::once(parent))
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut merged = canonical.clone();
+    let mut changed = false;
+    for id in ids {
+        let snapshot = unique_legacy_reconciliation_target(&source_prefix, id, context)?
+            .ok_or_else(invalid)?;
+        validate_legacy_reconciliation_snapshot_target(&source_prefix, snapshot, context)?;
+        let existing = unique_legacy_reconciliation_target(canonical, id, context)?;
+        if !snapshot.is_terminal()
+            || existing.is_some_and(|item| {
+                !item.is_terminal()
+                    || !(item.owner == snapshot.owner
+                        || can_upgrade_work_owner(item.owner.as_deref(), snapshot.owner.as_deref())
+                        || can_upgrade_work_owner(snapshot.owner.as_deref(), item.owner.as_deref()))
+            })
+        {
+            return Err(invalid());
+        }
+        for item in [Some(snapshot), existing].into_iter().flatten() {
+            if item
+                .execution_containers
+                .iter()
+                .chain(
+                    item.events
+                        .iter()
+                        .filter_map(|event| event.execution_container.as_ref()),
+                )
+                .chain(
+                    item.duplicate_event_containers
+                        .values()
+                        .flatten()
+                        .filter_map(|provenance| provenance.container()),
+                )
+                .any(|container| {
+                    canonical_work_id(
+                        work_event_root,
+                        container.branch.as_deref(),
+                        container.worktree_path.as_deref(),
+                    )
+                    .as_deref()
+                        != Some(scope.as_str())
+                })
+            {
+                return Err(invalid());
+            }
+        }
+        if existing.is_none() {
+            validate_legacy_reconciliation_snapshot_insert(&merged, snapshot, context)?;
+            merged.work_items.push(snapshot.clone());
+            changed = true;
+        }
+    }
+    let mut merged_edges = Vec::new();
+    let selected = current_canonical_work_item(
+        &merged,
+        work_event_root,
+        &scope,
+        None,
+        Some(&mut merged_edges),
+    )?;
+    if !selected.is_some_and(|item| item.id == parent)
+        && !merged_edges
+            .iter()
+            .any(|(child, ancestor)| child == parent || ancestor == parent)
+    {
+        return Err(invalid());
+    }
+    if source_edges.iter().any(|edge| !merged_edges.contains(edge)) {
+        return Err(invalid());
+    }
+    validate_legacy_successor_edges(&merged, &source_edges, context)?;
+    if changed {
+        *canonical = merged;
+    }
+    Ok(changed)
 }
 
 fn validate_legacy_reconciliation_target_local_authority(
@@ -1639,7 +2063,7 @@ fn validate_legacy_reconciliation_assigned_targets(
             context,
             true,
         )?;
-        validate_session_bound_work_authority_uniqueness(
+        validate_legacy_reconciliation_authority_uniqueness(
             work_items,
             work_id,
             session_id,
@@ -1647,6 +2071,98 @@ fn validate_legacy_reconciliation_assigned_targets(
             work_event_root,
             context,
         )?;
+    }
+    Ok(())
+}
+
+/// Keep the strict competing-authority check, excluding only the terminal
+/// ancestry already proven by the normal canonical successor selector.
+fn validate_legacy_reconciliation_authority_uniqueness(
+    work_items: &WorkItemsProjection,
+    target_work_id: &str,
+    session_id: &str,
+    branch_identity: &str,
+    worktree_identity: &Path,
+    context: &str,
+) -> Result<()> {
+    let mut ancestry = Vec::new();
+    let target = unique_legacy_reconciliation_target(work_items, target_work_id, context)?;
+    let current = canonical_work_id(
+        worktree_identity,
+        Some(branch_identity),
+        Some(worktree_identity),
+    )
+    .and_then(|scope| {
+        current_canonical_work_item(
+            work_items,
+            worktree_identity,
+            &scope,
+            target.and_then(|target| target.owner.as_deref()),
+            Some(&mut ancestry),
+        )
+        .ok()
+        .flatten()
+    });
+    let audited = ancestry.iter().any(|(id, _)| {
+        work_items
+            .work_items
+            .iter()
+            .find(|item| &item.id == id)
+            .is_some_and(|item| item.events.iter().any(WorkEvent::is_successor_supersession))
+    });
+    let competing = if current.is_some_and(|current| current.id == target_work_id) && audited {
+        validate_legacy_successor_edges(work_items, &ancestry, context)?;
+        let mut competing = work_items.clone();
+        competing.work_items.retain(|item| {
+            !ancestry.iter().any(|(_, parent)| parent == &item.id)
+                || item
+                    .agents
+                    .iter()
+                    .any(|agent| agent.session_id == session_id)
+        });
+        Some(competing)
+    } else {
+        None
+    };
+    validate_session_bound_work_authority_uniqueness(
+        competing.as_ref().unwrap_or(work_items),
+        target_work_id,
+        session_id,
+        branch_identity,
+        worktree_identity,
+        context,
+    )
+}
+
+fn validate_legacy_successor_edges(
+    work_items: &WorkItemsProjection,
+    ancestry: &[(String, String)],
+    context: &str,
+) -> Result<()> {
+    for (child, parent) in ancestry {
+        let child = unique_legacy_reconciliation_target(work_items, child, context)?
+            .ok_or_else(|| GwtError::Other(format!("{context} successor is missing")))?;
+        let parent_item = unique_legacy_reconciliation_target(work_items, parent, context)?
+            .ok_or_else(|| GwtError::Other(format!("{context} predecessor is missing")))?;
+        if !parent_item.is_terminal()
+            || child.related_work_item_ids.iter().any(|id| id != parent)
+            || child
+                .events
+                .iter()
+                .filter_map(|event| event.related_work_item_id.as_deref())
+                .any(|id| id != parent)
+            || child
+                .duplicate_event_containers
+                .values()
+                .flatten()
+                .filter_map(|provenance| provenance.event())
+                .filter_map(|event| event.related_work_item_id.as_deref())
+                .any(|id| id != parent)
+        {
+            return Err(GwtError::Other(format!(
+                "{context} successor lineage is contradictory"
+            )));
+        }
     }
     Ok(())
 }
@@ -1773,7 +2289,7 @@ fn load_split_root_workspace_state_for_preflight_locked(
     Ok((
         projection,
         WorkItemsProjection {
-            updated_at: Utc::now(),
+            updated_at: UtcTimestamp::now(),
             work_items: Vec::new(),
         },
         false,
@@ -1989,6 +2505,27 @@ pub enum ExternalWorkspaceCommitResolution {
     Rejected,
     Busy,
     Missing,
+}
+
+/// Exact staged launch publication retained by an independent recovery audit.
+/// An undecided snapshot does not itself authorize cancellation: its caller
+/// must first commit the durable authority that supersedes this launch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalWorkspaceCommitRecovery {
+    pub operation_id: String,
+    pub transaction_id: String,
+    pub transaction_payload_hash: String,
+    pub current_path: PathBuf,
+    pub work_items_path: PathBuf,
+    /// Canonical fold destination for a validated pre-split path pair.
+    /// Ordinary canonical snapshots retain their original serialized form.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_state_root: Option<PathBuf>,
+    pub owner: String,
+    pub session_id: String,
+    pub worktree_path: PathBuf,
+    pub work_id: String,
+    pub resolution: Option<ExternalWorkspaceCommitResolution>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2799,7 +3336,7 @@ pub fn update_workspace_projection_with_journal_for_work_event_root(
             &journal_path,
             project_state_root,
         )?;
-        let entry = projection.apply_update(update, Utc::now());
+        let entry = projection.apply_update(update, UtcTimestamp::now());
         let event =
             workspace_work_event_from_journal_entry_for_root(&projection, &entry, work_event_root);
         if work_items.apply_event(event.clone()) == WorkEventApplyOutcome::RejectedSessionConflict {
@@ -2922,6 +3459,26 @@ pub fn update_workspace_projection_with_journal_for_resolved_work_target(
     revalidate: impl FnOnce(&WorkspaceProjection, &WorkItemsProjection) -> Result<()>,
     before_persist: impl FnOnce(&mut WorkEvent, &mut WorkspaceJournalEntry) -> Result<()>,
 ) -> Result<WorkspaceJournalEntry> {
+    update_workspace_projection_with_journal_for_resolved_work_target_with_provenance(
+        target,
+        update,
+        tracked_event_policy,
+        None,
+        revalidate,
+        before_persist,
+    )
+}
+
+/// Attach trusted close provenance before the transaction is staged, preserving
+/// the pre-persist callback's restriction to recovered event/journal identities.
+pub fn update_workspace_projection_with_journal_for_resolved_work_target_with_provenance(
+    target: &SessionBoundWorkspaceMutationTarget,
+    update: WorkspaceProjectionUpdate,
+    tracked_event_policy: TrackedWorkEventPolicy,
+    provenance: Option<WorkTerminalProvenance>,
+    revalidate: impl FnOnce(&WorkspaceProjection, &WorkItemsProjection) -> Result<()>,
+    before_persist: impl FnOnce(&mut WorkEvent, &mut WorkspaceJournalEntry) -> Result<()>,
+) -> Result<WorkspaceJournalEntry> {
     validate_session_bound_target_shape(target, &update)?;
 
     let current_path = gwt_workspace_projection_path_for_repo_path(&target.project_state_root);
@@ -2995,7 +3552,7 @@ pub fn update_workspace_projection_with_journal_for_resolved_work_target(
         )?;
         revalidate(&projection, &work_items)?;
 
-        let updated_at = Utc::now();
+        let updated_at = UtcTimestamp::now();
         let mut entry = apply_sparse_update_to_locked_projection(
             &mut projection,
             target,
@@ -3011,6 +3568,11 @@ pub fn update_workspace_projection_with_journal_for_resolved_work_target(
             locked.execution_container,
             updated_at,
         );
+        if matches!(event.kind, WorkEventKind::Done | WorkEventKind::Discard) {
+            if let Some(provenance) = provenance {
+                provenance.apply_to(&mut event);
+            }
+        }
         let event_before_identity_recovery = event.clone();
         let entry_before_identity_recovery = entry.clone();
         before_persist(&mut event, &mut entry)?;
@@ -3075,7 +3637,7 @@ pub fn update_workspace_projection_with_journal_for_resolved_work_target(
 pub fn emit_workspace_terminal_event_for_resolved_work_target(
     target: &SessionBoundWorkspaceTerminalTarget,
     close_kind: WorkCloseKind,
-    updated_at: DateTime<Utc>,
+    updated_at: UtcTimestamp,
     revalidate: impl FnOnce(&WorkspaceProjection, &WorkItemsProjection) -> Result<()>,
 ) -> Result<WorkspaceTerminalEventOutcome> {
     emit_workspace_terminal_event_for_resolved_work_target_inner(
@@ -3083,6 +3645,25 @@ pub fn emit_workspace_terminal_event_for_resolved_work_target(
         close_kind,
         updated_at,
         WorkspaceTerminalTargetSelection::LatestAssigned,
+        None,
+        revalidate,
+    )
+}
+
+/// Session-bound close with nonsecret authority evidence stored on its event.
+pub fn emit_workspace_terminal_event_for_resolved_work_target_with_provenance(
+    target: &SessionBoundWorkspaceTerminalTarget,
+    close_kind: WorkCloseKind,
+    updated_at: UtcTimestamp,
+    provenance: WorkTerminalProvenance,
+    revalidate: impl FnOnce(&WorkspaceProjection, &WorkItemsProjection) -> Result<()>,
+) -> Result<WorkspaceTerminalEventOutcome> {
+    emit_workspace_terminal_event_for_resolved_work_target_inner(
+        target,
+        close_kind,
+        updated_at,
+        WorkspaceTerminalTargetSelection::LatestAssigned,
+        Some(provenance),
         revalidate,
     )
 }
@@ -3181,7 +3762,7 @@ pub fn emit_workspace_terminal_event_for_exact_resolved_work_target(
     expected_work_id: &str,
     close_kind: WorkCloseKind,
     policy: ExactWorkspaceTerminalPolicy,
-    updated_at: DateTime<Utc>,
+    updated_at: UtcTimestamp,
     revalidate: impl FnOnce(&WorkspaceProjection, &WorkItemsProjection) -> Result<()>,
 ) -> Result<WorkspaceTerminalEventOutcome> {
     if expected_work_id.trim().is_empty() {
@@ -3197,6 +3778,35 @@ pub fn emit_workspace_terminal_event_for_exact_resolved_work_target(
             work_id: expected_work_id,
             policy,
         },
+        None,
+        revalidate,
+    )
+}
+
+/// Exact-Work variant retaining provenance on the original accepted close.
+pub fn emit_workspace_terminal_event_for_exact_resolved_work_target_with_provenance(
+    target: &SessionBoundWorkspaceTerminalTarget,
+    expected_work_id: &str,
+    close_kind: WorkCloseKind,
+    policy: ExactWorkspaceTerminalPolicy,
+    updated_at: UtcTimestamp,
+    provenance: WorkTerminalProvenance,
+    revalidate: impl FnOnce(&WorkspaceProjection, &WorkItemsProjection) -> Result<()>,
+) -> Result<WorkspaceTerminalEventOutcome> {
+    if expected_work_id.trim().is_empty() {
+        return Err(GwtError::Other(
+            "exact Work terminalization received an empty Work id".to_string(),
+        ));
+    }
+    emit_workspace_terminal_event_for_resolved_work_target_inner(
+        target,
+        close_kind,
+        updated_at,
+        WorkspaceTerminalTargetSelection::Exact {
+            work_id: expected_work_id,
+            policy,
+        },
+        Some(provenance),
         revalidate,
     )
 }
@@ -3213,8 +3823,9 @@ enum WorkspaceTerminalTargetSelection<'a> {
 fn emit_workspace_terminal_event_for_resolved_work_target_inner(
     target: &SessionBoundWorkspaceTerminalTarget,
     close_kind: WorkCloseKind,
-    updated_at: DateTime<Utc>,
+    updated_at: UtcTimestamp,
     selection: WorkspaceTerminalTargetSelection<'_>,
+    provenance: Option<WorkTerminalProvenance>,
     revalidate: impl FnOnce(&WorkspaceProjection, &WorkItemsProjection) -> Result<()>,
 ) -> Result<WorkspaceTerminalEventOutcome> {
     validate_session_bound_target_identity_shape(target)?;
@@ -3352,6 +3963,9 @@ fn emit_workspace_terminal_event_for_resolved_work_target_inner(
             }
         };
         event.agent_session_id = Some(target.session_id.clone());
+        if let Some(provenance) = provenance {
+            provenance.apply_to(&mut event);
+        }
         emit_workspace_terminal_event_outcome_locked(
             &work_items_path,
             &events_path,
@@ -3965,7 +4579,7 @@ fn apply_sparse_update_to_locked_projection(
     target: &SessionBoundWorkspaceMutationTarget,
     update: &WorkspaceProjectionUpdate,
     target_owner: Option<String>,
-    updated_at: DateTime<Utc>,
+    updated_at: UtcTimestamp,
 ) -> WorkspaceJournalEntry {
     if projection.id == target.work_id {
         let mut projection_update = update.clone();
@@ -4020,7 +4634,7 @@ fn session_bound_work_event(
     update: &WorkspaceProjectionUpdate,
     target_owner: Option<String>,
     execution_container: WorkspaceExecutionContainerRef,
-    updated_at: DateTime<Utc>,
+    updated_at: UtcTimestamp,
 ) -> WorkEvent {
     let kind = match update.status_category {
         Some(WorkspaceStatusCategory::Done) => WorkEventKind::Done,
@@ -4057,7 +4671,13 @@ pub fn mark_workspace_agent_stopped(
     window_id: Option<&str>,
 ) -> Result<bool> {
     let current_path = gwt_workspace_projection_path_for_repo_path(repo_path);
-    mark_workspace_agent_stopped_at(&current_path, repo_path, session_id, window_id, Utc::now())
+    mark_workspace_agent_stopped_at(
+        &current_path,
+        repo_path,
+        session_id,
+        window_id,
+        UtcTimestamp::now(),
+    )
 }
 
 pub fn load_workspace_projection_from_path(path: &Path) -> Result<Option<WorkspaceProjection>> {
@@ -4330,9 +4950,21 @@ impl WorkItemsIntakeSnapshot {
         if dry_run {
             return self.check_container_repair_snapshot();
         }
+        self.commit_repair_with_preflight(prepared, || Ok(()))
+    }
+
+    /// The caller's authority check observes the same final locked snapshot
+    /// that will be published. Unlike ordinary intake this never recovers a
+    /// pending lifecycle transaction while repairing derived state.
+    pub(crate) fn commit_repair_with_preflight(
+        &self,
+        prepared: Option<&PreparedWorkItemsPublication>,
+        before_publication: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
         let works_path = &self.files[0].0;
         with_workspace_work_items_locks(std::slice::from_ref(works_path), || {
             self.check_container_repair_snapshot()?;
+            before_publication()?;
             if let Some(prepared) = prepared {
                 publish_work_items_with_close_proofs(works_path, prepared)?;
             }
@@ -5493,6 +6125,7 @@ pub fn resolve_workspace_state_external_commit_for_authority(
         &[],
         None,
         Some(authority),
+        None,
         |_| Ok(()),
     )
 }
@@ -5579,7 +6212,15 @@ pub fn workspace_state_transaction_is_pending_at(
     current_path: &Path,
     work_items_path: &Path,
 ) -> Result<bool> {
-    let base_lock_targets = vec![
+    Ok(pending_workspace_state_transaction_at(current_path, work_items_path, None)?.is_some())
+}
+
+fn pending_workspace_state_transaction_at(
+    current_path: &Path,
+    work_items_path: &Path,
+    legacy_work_items_path: Option<&Path>,
+) -> Result<Option<PendingWorkspaceStateTransaction>> {
+    let mut base_lock_targets = vec![
         current_path.with_file_name("works.json"),
         work_items_path.to_path_buf(),
     ];
@@ -5587,12 +6228,226 @@ pub fn workspace_state_transaction_is_pending_at(
         pending_workspace_state_transaction_path(current_path),
         pending_workspace_state_transaction_path_for_work_items(work_items_path),
     ];
+    if let Some(legacy) = legacy_work_items_path {
+        base_lock_targets.push(legacy.to_path_buf());
+        marker_paths.push(pending_workspace_state_transaction_path_for_work_items(
+            legacy,
+        ));
+    }
     marker_paths.extend(discover_pending_workspace_state_transaction_coordinators(
         &base_lock_targets,
     )?);
     marker_paths.sort();
     marker_paths.dedup();
-    Ok(find_pending_workspace_state_transaction(&marker_paths)?.is_some())
+    find_pending_workspace_state_transaction(&marker_paths)
+}
+
+/// Snapshot an exact canonical external launch without creating locks or
+/// recovering its markers. Split-root coordinator copies are validated too.
+pub fn inspect_workspace_state_external_commit_recovery(
+    repo_path: &Path,
+) -> Result<Option<ExternalWorkspaceCommitRecovery>> {
+    inspect_workspace_state_external_commit_recovery_for_work_event_root(repo_path, repo_path)
+}
+
+/// Inspect canonical or pre-split publication paths for a Session's validated
+/// Project State and exact work-event roots, retaining the actual staged pair.
+pub fn inspect_workspace_state_external_commit_recovery_for_work_event_root(
+    project_state_root: &Path,
+    work_event_root: &Path,
+) -> Result<Option<ExternalWorkspaceCommitRecovery>> {
+    let (current_path, work_items_path) =
+        split_root_workspace_state_paths(project_state_root, work_event_root);
+    let legacy_work_items_path = gwt_workspace_work_items_path_for_repo_path(work_event_root);
+    ensure_supported_workspace_layout(&current_path)?;
+    ensure_supported_workspace_layout(&work_items_path)?;
+    let Some(transaction) = pending_workspace_state_transaction_at(
+        &current_path,
+        &work_items_path,
+        Some(&legacy_work_items_path),
+    )?
+    else {
+        return Ok(None);
+    };
+    let pair_mismatch = || match transaction.external_commit.as_ref() {
+        Some(external) => GwtError::ExternalWorkspacePathPairMismatch {
+            operation_id: external.operation_id.clone(),
+        },
+        None => GwtError::Other(
+            "external workspace recovery path pair does not match its project".into(),
+        ),
+    };
+    if transaction.current_path != current_path
+        || (transaction.work_items_path != work_items_path
+            && transaction.work_items_path != legacy_work_items_path)
+    {
+        return Err(pair_mismatch());
+    }
+    let mut recovery = external_workspace_commit_recovery(&transaction)?;
+    if transaction.work_items_path != work_items_path {
+        ensure_supported_workspace_layout(&legacy_work_items_path)?;
+        if !session_bound_paths_match(Some(&recovery.worktree_path), Some(work_event_root))? {
+            return Err(pair_mismatch());
+        }
+        recovery.project_state_root = Some(project_state_root.to_path_buf());
+    }
+    Ok(Some(recovery))
+}
+
+fn external_workspace_commit_recovery(
+    transaction: &PendingWorkspaceStateTransaction,
+) -> Result<ExternalWorkspaceCommitRecovery> {
+    let invalid =
+        || GwtError::Other("external workspace recovery has ambiguous launch authority".into());
+    let external = transaction.external_commit.as_ref().ok_or_else(invalid)?;
+    let mut launches = transaction
+        .events
+        .iter()
+        .filter(|event| matches!(event.kind, WorkEventKind::Start | WorkEventKind::Resume));
+    let launch = launches.next().ok_or_else(invalid)?;
+    if launches.next().is_some() {
+        return Err(invalid());
+    }
+    let owner = launch
+        .owner
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(invalid)?;
+    let session_id = launch
+        .agent_session_id
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(invalid)?;
+    let worktree_path = launch
+        .execution_container
+        .as_ref()
+        .and_then(|container| container.worktree_path.as_ref())
+        .filter(|path| !path.as_os_str().is_empty())
+        .ok_or_else(invalid)?;
+    if launch.work_item_id.trim().is_empty() {
+        return Err(invalid());
+    }
+    for event in &transaction.events {
+        if std::ptr::eq(event, launch) {
+            continue;
+        }
+        if !event.is_successor_supersession()
+            || !session_bound_paths_match(
+                event
+                    .execution_container
+                    .as_ref()
+                    .and_then(|container| container.worktree_path.as_deref()),
+                Some(worktree_path),
+            )?
+        {
+            return Err(invalid());
+        }
+    }
+    let receipt = load_external_workspace_commit_receipt(
+        &transaction.current_path,
+        &transaction.work_items_path,
+        &external.operation_id,
+    )?;
+    if let Some(receipt) = &receipt {
+        validate_external_workspace_receipt_transaction(receipt, transaction)?;
+        if external.phase == ExternalWorkspaceCommitPhase::Committed
+            && receipt.resolution == ExternalWorkspaceCommitResolution::Rejected
+        {
+            return Err(GwtError::Other(
+                "committed external workspace marker has a rejected receipt".into(),
+            ));
+        }
+    }
+    Ok(ExternalWorkspaceCommitRecovery {
+        operation_id: external.operation_id.clone(),
+        transaction_id: transaction
+            .transaction_id
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(invalid)?,
+        transaction_payload_hash: external_workspace_transaction_payload_hash(transaction)?,
+        current_path: transaction.current_path.clone(),
+        work_items_path: transaction.work_items_path.clone(),
+        project_state_root: None,
+        owner: owner.clone(),
+        session_id: session_id.clone(),
+        worktree_path: worktree_path.clone(),
+        work_id: launch.work_item_id.clone(),
+        resolution: if external.phase == ExternalWorkspaceCommitPhase::Committed {
+            Some(ExternalWorkspaceCommitResolution::Committed)
+        } else {
+            receipt.map(|receipt| receipt.resolution)
+        },
+    })
+}
+
+/// Finish the exact audited publication, preserving every durable terminal
+/// decision. An independently superseded, undecided launch is rejected.
+/// Payload and scope are revalidated under the normal publication locks.
+pub fn resolve_workspace_state_external_commit_recovery(
+    recovery: &ExternalWorkspaceCommitRecovery,
+) -> Result<ExternalWorkspaceCommitResolution> {
+    validate_external_workspace_operation_id(&recovery.operation_id)?;
+    let decision = match recovery.resolution {
+        Some(ExternalWorkspaceCommitResolution::Committed) => {
+            ExternalWorkspaceCommitDecision::Commit
+        }
+        None | Some(ExternalWorkspaceCommitResolution::Rejected) => {
+            ExternalWorkspaceCommitDecision::Reject
+        }
+        Some(
+            ExternalWorkspaceCommitResolution::Busy | ExternalWorkspaceCommitResolution::Missing,
+        ) => {
+            return Err(GwtError::Other(
+                "external workspace recovery requires a terminal decision".into(),
+            ));
+        }
+    };
+    if let Some(project_state_root) = recovery.project_state_root.as_deref() {
+        return resolve_legacy_external_workspace_commit(
+            project_state_root,
+            &recovery.worktree_path,
+            &recovery.operation_id,
+            decision,
+            Some(recovery),
+        );
+    }
+    let Some(_operation_lock) = try_acquire_external_workspace_operation_lock(
+        &recovery.current_path,
+        &recovery.work_items_path,
+        &recovery.operation_id,
+    )?
+    else {
+        return Ok(ExternalWorkspaceCommitResolution::Busy);
+    };
+    resolve_workspace_state_external_commit_at_locked_with_commit_hook_and_authority(
+        &recovery.current_path,
+        &recovery.work_items_path,
+        &recovery.operation_id,
+        decision,
+        &[],
+        None,
+        None,
+        Some(recovery),
+        |_| Ok(()),
+    )
+}
+
+fn validate_external_workspace_recovery_receipt(
+    receipt: &ExternalWorkspaceCommitReceipt,
+    expected: &ExternalWorkspaceCommitRecovery,
+) -> Result<()> {
+    if receipt.operation_id != expected.operation_id
+        || receipt.current_path != expected.current_path
+        || receipt.work_items_path != expected.work_items_path
+        || receipt.transaction_id != expected.transaction_id
+        || receipt.transaction_payload_hash != expected.transaction_payload_hash
+    {
+        return Err(GwtError::Other(
+            "external workspace recovery receipt does not match its audited transaction".into(),
+        ));
+    }
+    Ok(())
 }
 
 pub fn resolve_workspace_state_external_commit_at(
@@ -5649,6 +6504,7 @@ fn resolve_workspace_state_external_commit_at_locked_with_commit_hook(
         additional_lock_targets,
         reconciliation_work_items_path,
         None,
+        None,
         on_committed,
     )
 }
@@ -5662,6 +6518,7 @@ fn resolve_workspace_state_external_commit_at_locked_with_commit_hook_and_author
     additional_lock_targets: &[PathBuf],
     reconciliation_work_items_path: Option<&Path>,
     authority: Option<&ExternalWorkspaceCommitAuthority<'_>>,
+    expected_recovery: Option<&ExternalWorkspaceCommitRecovery>,
     mut on_committed: impl FnMut(Option<&PendingWorkspaceStateTransaction>) -> Result<()>,
 ) -> Result<ExternalWorkspaceCommitResolution> {
     ensure_supported_workspace_layout(current_path)?;
@@ -5717,6 +6574,9 @@ fn resolve_workspace_state_external_commit_at_locked_with_commit_hook_and_author
                     operation_id,
                 )? {
                     Some(receipt) if receipt.resolution == requested_resolution => {
+                        if let Some(expected) = expected_recovery {
+                            validate_external_workspace_recovery_receipt(&receipt, expected)?;
+                        }
                         if receipt.resolution == ExternalWorkspaceCommitResolution::Committed {
                             on_committed(None)?;
                         }
@@ -5726,6 +6586,9 @@ fn resolve_workspace_state_external_commit_at_locked_with_commit_hook_and_author
                         "external workspace operation {operation_id} was already resolved as {:?}",
                         receipt.resolution
                     ))),
+                    None if expected_recovery.is_some() => Err(GwtError::Other(
+                        "external workspace recovery transaction disappeared without a matching receipt".into(),
+                    )),
                     None => Ok(Some(ExternalWorkspaceCommitResolution::Missing)),
                 };
             };
@@ -5765,6 +6628,29 @@ fn resolve_workspace_state_external_commit_at_locked_with_commit_hook_and_author
             }
             if let Some(authority) = authority {
                 validate_external_workspace_commit_authority(&transaction, authority)?;
+            }
+            if let Some(expected) = expected_recovery {
+                let mut observed = external_workspace_commit_recovery(&transaction)?;
+                if observed
+                    .resolution
+                    .is_some_and(|decision| decision != requested_resolution)
+                    || (expected.resolution.is_some() && observed.resolution.is_none())
+                {
+                    return Err(GwtError::Other(
+                        "external workspace recovery terminal decision changed".into(),
+                    ));
+                }
+                // A prior cancellation may have persisted its Reject receipt
+                // before marker cleanup. The original undecided audit may retry.
+                observed.resolution = expected.resolution;
+                // Legacy routing was validated before taking the operation
+                // lock; the exact marker pair is checked again above.
+                observed.project_state_root = expected.project_state_root.clone();
+                if observed != *expected {
+                    return Err(GwtError::Other(
+                        "external workspace recovery payload or launch authority changed".into(),
+                    ));
+                }
             }
             if decision == ExternalWorkspaceCommitDecision::Commit {
                 let pending_reconciliation = transaction
@@ -6239,6 +7125,15 @@ fn record_workspace_pr_metadata_for_execution_at(
                 continue;
             }
             for existing in &item.execution_containers {
+                // Portable event paths have source-root provenance, not reader-CWD
+                // authority. Only an absolute anchor can receive Session metadata.
+                if !existing
+                    .worktree_path
+                    .as_deref()
+                    .is_some_and(Path::is_absolute)
+                {
+                    continue;
+                }
                 if canonical_session_bound_branch(existing.branch.as_deref().unwrap_or_default())
                     == canonical_session_bound_branch(
                         container.branch.as_deref().unwrap_or_default(),
@@ -6253,18 +7148,6 @@ fn record_workspace_pr_metadata_for_execution_at(
             }
         }
         let [(index, existing)] = matches.as_slice() else {
-            if let Some((index, _)) = matches.first() {
-                if matches.iter().all(|(candidate, _)| candidate == index)
-                    && matches.iter().any(|(_, container)| {
-                        container.worktree_path.as_deref() == Some(Path::new("."))
-                    })
-                {
-                    return Err(GwtError::Other(format!(
-                        "PR metadata target Work {} has ambiguous container aliases; inspect workspace.work_repair params.work_id=\"{}\" (dry-run by default; params.dry_run=false applies accepted-source repair)",
-                        projection.work_items[*index].id, projection.work_items[*index].id
-                    )));
-                }
-            }
             return Err(refusal());
         };
         let item = &projection.work_items[*index];
@@ -6275,7 +7158,7 @@ fn record_workspace_pr_metadata_for_execution_at(
         if **existing == updated {
             return Ok(None);
         }
-        let mut event = WorkEvent::new(WorkEventKind::Pr, item.id.clone(), Utc::now());
+        let mut event = WorkEvent::new(WorkEventKind::Pr, item.id.clone(), UtcTimestamp::now());
         event.agent_session_id = Some(session_id.to_string());
         event.status_category = Some(item.status_category);
         event.execution_container = Some(updated);
@@ -6306,7 +7189,7 @@ fn record_workspace_work_events_to_store(
         let initial_updated_at = events
             .first()
             .map(|event| event.updated_at)
-            .unwrap_or_else(Utc::now);
+            .unwrap_or_else(UtcTimestamp::now);
         let mut projection = load_workspace_work_items_from_path(work_items_path)?
             .unwrap_or_else(|| WorkItemsProjection::empty(initial_updated_at));
         persist_workspace_work_events_to_store_locked(
@@ -6336,7 +7219,7 @@ pub fn record_workspace_work_events_paths(
         let initial_updated_at = events
             .first()
             .map(|event| event.updated_at)
-            .unwrap_or_else(Utc::now);
+            .unwrap_or_else(UtcTimestamp::now);
         let mut projection = load_workspace_work_items_from_path(work_items_path)?
             .unwrap_or_else(|| WorkItemsProjection::empty(initial_updated_at));
         persist_workspace_work_events_locked(
@@ -6356,8 +7239,8 @@ pub fn record_workspace_work_events_paths(
 fn superseded_pause_cutoffs(
     projection: &WorkItemsProjection,
     events: &[WorkEvent],
-) -> HashMap<String, DateTime<Utc>> {
-    let mut cutoffs: HashMap<String, DateTime<Utc>> = HashMap::new();
+) -> HashMap<String, UtcTimestamp> {
+    let mut cutoffs: HashMap<String, UtcTimestamp> = HashMap::new();
     for pause in events
         .iter()
         .filter(|event| event.kind == WorkEventKind::Pause)
@@ -6388,7 +7271,7 @@ fn superseded_pause_cutoffs(
 /// batch) must still fold into the stored projection (PR #3787 review).
 fn event_belongs_to_superseded_pause(
     event: &WorkEvent,
-    cutoffs: &HashMap<String, DateTime<Utc>>,
+    cutoffs: &HashMap<String, UtcTimestamp>,
 ) -> bool {
     let Some(cutoff) = cutoffs.get(&event.work_item_id) else {
         return false;
@@ -6526,7 +7409,7 @@ pub fn record_workspace_backfill_event_paths(
     work_id: &str,
     branch: &str,
     worktree_path: &Path,
-    updated_at: DateTime<Utc>,
+    updated_at: UtcTimestamp,
 ) -> Result<()> {
     let event = workspace_backfill_event(work_id, branch, worktree_path, updated_at);
     record_workspace_work_event_paths(work_items_path, events_path, event)
@@ -6536,7 +7419,7 @@ fn workspace_backfill_event(
     work_id: &str,
     branch: &str,
     worktree_path: &Path,
-    updated_at: DateTime<Utc>,
+    updated_at: UtcTimestamp,
 ) -> WorkEvent {
     let mut event = WorkEvent::new(WorkEventKind::Backfill, work_id, updated_at);
     event.title = Some(branch.to_string());
@@ -6580,7 +7463,7 @@ pub fn current_work_id_for_launch(
         return Ok(None);
     };
     Ok(Some(
-        current_canonical_work_item(projection, project_root, &canonical_id, launch_owner)?
+        current_canonical_work_item(projection, project_root, &canonical_id, launch_owner, None)?
             .map(|item| item.id.clone())
             .unwrap_or(canonical_id),
     ))
@@ -6591,6 +7474,7 @@ fn current_canonical_work_item<'a>(
     project_root: &Path,
     canonical_id: &str,
     launch_owner: Option<&str>,
+    mut ancestry: Option<&mut Vec<(String, String)>>,
 ) -> Result<Option<&'a WorkItem>> {
     let Some(mut current) = projection
         .work_items
@@ -6707,6 +7591,9 @@ fn current_canonical_work_item<'a>(
         {
             break;
         }
+        if let Some(ancestry) = ancestry.as_mut() {
+            ancestry.push((successor.id.clone(), current.id.clone()));
+        }
         current = successor;
         if launch_owner.is_some() || successor.owner.is_some() || owner_anchor.is_none() {
             authoritative = successor;
@@ -6732,7 +7619,7 @@ pub fn find_work_item_for_container<'a>(
     let branch = branch.map(str::trim).filter(|value| !value.is_empty());
     let canonical_id = canonical_work_id(project_root, branch, worktree_path);
     if let Some(current) = canonical_id.as_deref().and_then(|id| {
-        current_canonical_work_item(projection, project_root, id, None)
+        current_canonical_work_item(projection, project_root, id, None, None)
             .ok()
             .flatten()
     }) {
@@ -6764,6 +7651,7 @@ pub fn find_work_item_for_container<'a>(
         project_root,
         &workspace_group_key_for_item(project_root, matched),
         None,
+        None,
     )
     .ok()
     .flatten()
@@ -6780,7 +7668,7 @@ pub fn reconcile_worktree_work_items_paths(
     work_items_path: &Path,
     project_root: &Path,
     sources: &[WorktreeReconcileSource],
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
 ) -> Result<usize> {
     let projection = load_workspace_work_items_from_path(work_items_path)?
         .unwrap_or_else(|| WorkItemsProjection::empty(now));
@@ -6808,7 +7696,7 @@ pub fn reconcile_worktree_work_items_paths(
             .or_else(|| {
                 fs::metadata(&source.worktree_path)
                     .and_then(|metadata| metadata.modified())
-                    .map(DateTime::<Utc>::from)
+                    .map(UtcTimestamp::from)
                     .ok()
             })
             .unwrap_or(now)
@@ -6821,7 +7709,7 @@ pub fn reconcile_worktree_work_items_paths(
 
 /// HEAD committer time of a git worktree (`git log -1 --format=%ct`).
 /// Returns `None` for non-repositories or unborn branches.
-fn worktree_head_commit_time(worktree_path: &Path) -> Option<DateTime<Utc>> {
+fn worktree_head_commit_time(worktree_path: &Path) -> Option<UtcTimestamp> {
     let output = crate::process::hidden_command("git")
         .arg("-C")
         .arg(worktree_path)
@@ -6835,7 +7723,7 @@ fn worktree_head_commit_time(worktree_path: &Path) -> Option<DateTime<Utc>> {
         .trim()
         .parse()
         .ok()?;
-    DateTime::<Utc>::from_timestamp(seconds, 0)
+    UtcTimestamp::from_unix_seconds(seconds)
 }
 
 /// SPEC-2359 Phase W-16 (FR-393): decompose legacy mega-items. The pre-W-12
@@ -6913,7 +7801,7 @@ fn decompose_legacy_multi_branch_work_items_paths_locked(
     for event in pending_events {
         projection.apply_event(event);
     }
-    projection.updated_at = chrono::Utc::now();
+    projection.updated_at = UtcTimestamp::now();
     save_workspace_work_items_projection_to_path(work_items_path, &projection)?;
     Ok(decomposed)
 }
@@ -6932,7 +7820,7 @@ pub fn decompose_legacy_multi_branch_work_items(repo_path: &Path) -> Result<usiz
 pub fn reconcile_worktree_work_items(
     repo_path: &Path,
     sources: &[WorktreeReconcileSource],
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
 ) -> Result<usize> {
     let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
     reconcile_worktree_work_items_paths(&work_items_path, repo_path, sources, now)
@@ -7015,7 +7903,7 @@ fn bleed_identity_pair(event: &WorkEvent) -> Option<(String, String)> {
 pub fn repair_resume_owner_bleed_paths(
     work_items_path: &Path,
     current_projection_path: &Path,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
 ) -> Result<ResumeOwnerBleedRepairReport> {
     with_workspace_current_and_work_items_lock(current_projection_path, work_items_path, || {
         repair_resume_owner_bleed_paths_locked(work_items_path, current_projection_path, now)
@@ -7025,7 +7913,7 @@ pub fn repair_resume_owner_bleed_paths(
 fn repair_resume_owner_bleed_paths_locked(
     work_items_path: &Path,
     current_projection_path: &Path,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
 ) -> Result<ResumeOwnerBleedRepairReport> {
     use std::collections::HashSet;
 
@@ -7180,7 +8068,7 @@ fn repair_resume_owner_bleed_paths_locked(
 /// the canonical home-projection paths.
 pub fn repair_resume_owner_bleed_for_repo(
     repo_path: &Path,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
 ) -> Result<ResumeOwnerBleedRepairReport> {
     let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
     let current_path = gwt_workspace_projection_path_for_repo_path(repo_path);
@@ -7206,7 +8094,7 @@ pub fn record_workspace_work_paused_event_paths(
     board_refs: &[String],
     execution_container: Option<WorkspaceExecutionContainerRef>,
     agent_session_id: Option<&str>,
-    updated_at: DateTime<Utc>,
+    updated_at: UtcTimestamp,
 ) -> Result<()> {
     let mut event = WorkEvent::new(WorkEventKind::Pause, work_item_id, updated_at);
     event.title = non_empty_clone(title);
@@ -7245,7 +8133,7 @@ pub fn record_workspace_work_paused_event(
     board_refs: &[String],
     execution_container: Option<WorkspaceExecutionContainerRef>,
     agent_session_id: Option<&str>,
-    updated_at: DateTime<Utc>,
+    updated_at: UtcTimestamp,
 ) -> Result<()> {
     let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
     let events_path = gwt_workspace_work_events_closed_path_for_repo_path(repo_path);
@@ -7273,7 +8161,7 @@ pub fn emit_workspace_done_event_if_absent_paths(
     work_items_path: &Path,
     events_path: &Path,
     work_item_id: &str,
-    updated_at: DateTime<Utc>,
+    updated_at: UtcTimestamp,
 ) -> Result<bool> {
     let mut event = WorkEvent::new(WorkEventKind::Done, work_item_id, updated_at);
     event.status_category = Some(WorkspaceStatusCategory::Done);
@@ -7288,7 +8176,7 @@ pub fn emit_workspace_done_event_if_absent_paths(
 pub fn emit_workspace_done_event_if_absent(
     repo_path: &Path,
     work_item_id: &str,
-    updated_at: DateTime<Utc>,
+    updated_at: UtcTimestamp,
 ) -> Result<bool> {
     emit_workspace_done_event_if_absent_paths(
         &gwt_workspace_work_items_path_for_repo_path(repo_path),
@@ -7308,7 +8196,7 @@ pub fn emit_workspace_discard_event_if_absent_paths(
     work_items_path: &Path,
     events_path: &Path,
     work_item_id: &str,
-    updated_at: DateTime<Utc>,
+    updated_at: UtcTimestamp,
 ) -> Result<bool> {
     let event = WorkEvent::new(WorkEventKind::Discard, work_item_id, updated_at);
     emit_workspace_terminal_event_if_absent_paths(work_items_path, events_path, event)
@@ -7322,7 +8210,7 @@ pub fn emit_workspace_discard_event_if_absent_paths(
 pub fn emit_workspace_discard_event_if_absent(
     repo_path: &Path,
     work_item_id: &str,
-    updated_at: DateTime<Utc>,
+    updated_at: UtcTimestamp,
 ) -> Result<bool> {
     emit_workspace_discard_event_if_absent_paths(
         &gwt_workspace_work_items_path_for_repo_path(repo_path),
@@ -7342,7 +8230,7 @@ pub fn emit_workspace_done_event_for_session_paths(
     events_path: &Path,
     session_id: &str,
     legacy_work_item_id: &str,
-    updated_at: DateTime<Utc>,
+    updated_at: UtcTimestamp,
 ) -> Result<bool> {
     Ok(matches!(
         emit_workspace_done_event_for_session_outcome_paths(
@@ -7364,7 +8252,7 @@ pub fn emit_workspace_done_event_for_session_outcome_paths(
     events_path: &Path,
     session_id: &str,
     legacy_work_item_id: &str,
-    updated_at: DateTime<Utc>,
+    updated_at: UtcTimestamp,
 ) -> Result<WorkspaceTerminalEventOutcome> {
     let mut event = WorkEvent::new(WorkEventKind::Done, legacy_work_item_id, updated_at);
     event.status_category = Some(WorkspaceStatusCategory::Done);
@@ -7385,7 +8273,7 @@ pub fn emit_workspace_discard_event_for_session_paths(
     events_path: &Path,
     session_id: &str,
     legacy_work_item_id: &str,
-    updated_at: DateTime<Utc>,
+    updated_at: UtcTimestamp,
 ) -> Result<bool> {
     Ok(matches!(
         emit_workspace_discard_event_for_session_outcome_paths(
@@ -7407,7 +8295,7 @@ pub fn emit_workspace_discard_event_for_session_outcome_paths(
     events_path: &Path,
     session_id: &str,
     legacy_work_item_id: &str,
-    updated_at: DateTime<Utc>,
+    updated_at: UtcTimestamp,
 ) -> Result<WorkspaceTerminalEventOutcome> {
     let event = WorkEvent::new(WorkEventKind::Discard, legacy_work_item_id, updated_at);
     emit_workspace_terminal_event_for_session_paths(
@@ -7425,7 +8313,7 @@ pub fn emit_workspace_done_event_for_session(
     work_event_root: &Path,
     session_id: &str,
     legacy_work_item_id: &str,
-    updated_at: DateTime<Utc>,
+    updated_at: UtcTimestamp,
 ) -> Result<bool> {
     Ok(matches!(
         emit_workspace_done_event_for_session_outcome(
@@ -7444,7 +8332,7 @@ pub fn emit_workspace_done_event_for_session_outcome(
     _work_event_root: &Path,
     session_id: &str,
     legacy_work_item_id: &str,
-    updated_at: DateTime<Utc>,
+    updated_at: UtcTimestamp,
 ) -> Result<WorkspaceTerminalEventOutcome> {
     let current_path = gwt_workspace_projection_path_for_repo_path(project_state_root);
     let work_items_path = gwt_workspace_work_items_path_for_repo_path(project_state_root);
@@ -7463,7 +8351,7 @@ pub fn emit_workspace_discard_event_for_session(
     work_event_root: &Path,
     session_id: &str,
     legacy_work_item_id: &str,
-    updated_at: DateTime<Utc>,
+    updated_at: UtcTimestamp,
 ) -> Result<bool> {
     Ok(matches!(
         emit_workspace_discard_event_for_session_outcome(
@@ -7482,7 +8370,7 @@ pub fn emit_workspace_discard_event_for_session_outcome(
     _work_event_root: &Path,
     session_id: &str,
     legacy_work_item_id: &str,
-    updated_at: DateTime<Utc>,
+    updated_at: UtcTimestamp,
 ) -> Result<WorkspaceTerminalEventOutcome> {
     let current_path = gwt_workspace_projection_path_for_repo_path(project_state_root);
     let work_items_path = gwt_workspace_work_items_path_for_repo_path(project_state_root);
@@ -7493,6 +8381,34 @@ pub fn emit_workspace_discard_event_for_session_outcome(
         session_id,
         legacy_work_item_id,
         updated_at,
+    )
+}
+
+/// Legacy target selection with additive, nonsecret terminal provenance.
+pub fn emit_workspace_terminal_event_for_session_with_provenance(
+    project_state_root: &Path,
+    session_id: &str,
+    legacy_work_item_id: &str,
+    close_kind: WorkCloseKind,
+    updated_at: UtcTimestamp,
+    provenance: WorkTerminalProvenance,
+) -> Result<WorkspaceTerminalEventOutcome> {
+    let kind = match close_kind {
+        WorkCloseKind::Done => WorkEventKind::Done,
+        WorkCloseKind::Discarded => WorkEventKind::Discard,
+    };
+    let mut event = WorkEvent::new(kind, legacy_work_item_id, updated_at);
+    if kind == WorkEventKind::Done {
+        event.status_category = Some(WorkspaceStatusCategory::Done);
+    }
+    provenance.apply_to(&mut event);
+    emit_workspace_terminal_event_for_session_paths(
+        &gwt_workspace_projection_path_for_repo_path(project_state_root),
+        &gwt_workspace_work_items_path_for_repo_path(project_state_root),
+        &gwt_workspace_work_events_closed_path_for_repo_path(project_state_root),
+        session_id,
+        legacy_work_item_id,
+        event,
     )
 }
 
@@ -7731,7 +8647,7 @@ pub fn retroactive_auto_done_scan_paths(
     current_path: &Path,
     work_items_path: &Path,
     events_path: &Path,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
 ) -> Result<usize> {
     let mut emitted = 0;
 
@@ -7798,7 +8714,7 @@ pub enum WorkItemsRebuildOutcome {
 struct WorkItemsRebuildMarker {
     version: u32,
     #[serde(default)]
-    migrated_at: Option<DateTime<Utc>>,
+    migrated_at: Option<UtcTimestamp>,
 }
 
 /// SPEC-2359 US-37: Rebuild `work_items.json` by replaying every event in
@@ -7837,12 +8753,12 @@ fn rebuild_work_items_from_event_records(
     let initial_updated_at = events
         .first()
         .map(|event| event.updated_at)
-        .unwrap_or_else(chrono::Utc::now);
+        .unwrap_or_else(UtcTimestamp::now);
     let mut projection = WorkItemsProjection::empty(initial_updated_at);
     for event in events {
         projection.apply_event(event);
     }
-    projection.updated_at = chrono::Utc::now();
+    projection.updated_at = UtcTimestamp::now();
     save_workspace_work_items_projection_after_rebuild(work_items_path, &projection)?;
     write_rebuild_marker(marker_path)?;
     Ok(WorkItemsRebuildOutcome::Applied)
@@ -7941,7 +8857,7 @@ fn rebuild_marker_at_or_above(path: &Path, required: u32) -> Result<bool> {
 fn write_rebuild_marker(path: &Path) -> Result<()> {
     let marker = WorkItemsRebuildMarker {
         version: WORK_ITEMS_REBUILD_VERSION,
-        migrated_at: Some(chrono::Utc::now()),
+        migrated_at: Some(UtcTimestamp::now()),
     };
     let body = serde_json::to_vec_pretty(&marker)
         .map_err(|error| GwtError::Other(format!("work items migration marker: {error}")))?;
@@ -7956,7 +8872,7 @@ fn write_rebuild_marker(path: &Path) -> Result<()> {
 /// [`retroactive_auto_done_scan_paths`].
 /// SPEC-2359 Phase W-15 (FR-384): the emitted Done events are close-kind, so
 /// they go to the home close log, never to the git-tracked repo-local log.
-pub fn retroactive_auto_done_scan(repo_path: &Path, now: DateTime<Utc>) -> Result<usize> {
+pub fn retroactive_auto_done_scan(repo_path: &Path, now: UtcTimestamp) -> Result<usize> {
     let current_path = gwt_workspace_projection_path_for_repo_path(repo_path);
     let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
     let events_path = gwt_workspace_work_events_closed_path_for_repo_path(repo_path);
@@ -8004,7 +8920,7 @@ pub fn emit_workspace_done_event_for_branch_paths(
     work_items_path: &Path,
     events_path: &Path,
     branch: &str,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
 ) -> Result<bool> {
     let Some(projection) = load_workspace_projection_from_path(current_path)? else {
         return Ok(false);
@@ -8026,7 +8942,7 @@ pub fn emit_workspace_done_event_for_branch_paths(
 pub fn emit_workspace_done_event_for_branch(
     repo_path: &Path,
     branch: &str,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
 ) -> Result<bool> {
     emit_workspace_done_event_for_branch_paths(
         &gwt_workspace_projection_path_for_repo_path(repo_path),
@@ -8089,7 +9005,7 @@ pub fn update_workspace_projection_with_journal_paths(
         journal_path,
         project_root,
         update,
-        Utc::now(),
+        UtcTimestamp::now(),
     )
 }
 
@@ -8098,7 +9014,7 @@ pub fn update_workspace_projection_with_journal_paths_at(
     journal_path: &Path,
     project_root: &Path,
     update: WorkspaceProjectionUpdate,
-    updated_at: DateTime<Utc>,
+    updated_at: UtcTimestamp,
 ) -> Result<WorkspaceJournalEntry> {
     let work_items_path = current_path.with_file_name("works.json");
     with_workspace_current_and_work_items_lock(current_path, &work_items_path, || {
@@ -8133,7 +9049,7 @@ pub fn mark_workspace_agent_stopped_at(
     project_root: &Path,
     session_id: &str,
     window_id: Option<&str>,
-    updated_at: DateTime<Utc>,
+    updated_at: UtcTimestamp,
 ) -> Result<bool> {
     let work_items_path = current_path.with_file_name("works.json");
     with_workspace_work_items_lock(&work_items_path, || {
@@ -8699,7 +9615,7 @@ fn read_machine_local_workspace_work_events_from_path(path: &Path) -> Result<Vec
 
 // Confirm-only authority readback must validate the writer-owned ledger
 // without repairing its tail or otherwise changing durable bytes.
-fn read_machine_local_workspace_work_events_from_path_read_only(
+pub fn read_machine_local_workspace_work_events_from_path_read_only(
     path: &Path,
 ) -> Result<Vec<WorkEvent>> {
     let content = match fs::read(path) {
@@ -8718,7 +9634,7 @@ fn read_machine_local_workspace_work_events_from_path_read_only(
         .collect()
 }
 
-fn machine_local_close_event_matches_projected_lifecycle(
+pub(crate) fn machine_local_close_event_matches_projected_lifecycle(
     durable: &WorkEvent,
     projected: &WorkEvent,
 ) -> bool {
@@ -8803,7 +9719,10 @@ fn has_compacted_machine_local_closes(
             .map_err(|error| GwtError::Other(format!("machine-local close event json: {error}")))?;
         if matches!(
             event.kind,
-            WorkEventKind::Pause | WorkEventKind::Done | WorkEventKind::Discard
+            WorkEventKind::Pause
+                | WorkEventKind::Done
+                | WorkEventKind::Discard
+                | WorkEventKind::Update
         ) && inline_ids
             .get(event.work_item_id.as_str())
             .is_some_and(|ids| !ids.contains(event.id.as_str()))
@@ -8899,9 +9818,14 @@ fn collect_projected_close_events(
             }
         }
         for event in &item.events {
+            // Board-reference Updates share the local lifecycle log. Preserve
+            // their accepted identities before inline compaction drops them.
             if matches!(
                 event.kind,
-                WorkEventKind::Pause | WorkEventKind::Done | WorkEventKind::Discard
+                WorkEventKind::Pause
+                    | WorkEventKind::Done
+                    | WorkEventKind::Discard
+                    | WorkEventKind::Update
             ) {
                 accepted
                     .entry(item.id.clone())
@@ -9162,7 +10086,7 @@ pub fn workspace_work_event_shard_matches(repo_path: &Path, event: &WorkEvent) -
 fn receipt_source_proof_refuses_redirected_bucket() {
     let repo = tempfile::tempdir().unwrap();
     let events = gwt_repo_local_work_events_dir(repo.path());
-    let event = WorkEvent::new(WorkEventKind::Update, "receipt-work", Utc::now());
+    let event = WorkEvent::new(WorkEventKind::Update, "receipt-work", UtcTimestamp::now());
     write_workspace_work_event_shards_to_dir(&events, std::slice::from_ref(&event)).unwrap();
     assert!(workspace_work_event_shard_matches(repo.path(), &event).unwrap());
     let shard = gwt_work_event_shard_path(&events, &event.id);
@@ -9497,7 +10421,7 @@ fn synthesize_workspace_work_items_from_legacy_paths(
         .as_ref()
         .map(|projection| projection.updated_at)
         .or_else(|| journal_entries.last().map(|entry| entry.updated_at))
-        .unwrap_or_else(Utc::now);
+        .unwrap_or_else(UtcTimestamp::now);
     let Some(item) = synthesize_workspace_work_item_from_legacy(
         projection.as_ref(),
         &journal_entries,
@@ -9577,7 +10501,7 @@ fn synthesize_workspace_work_item_from_legacy(
     let created_at = first_entry
         .map(|entry| entry.updated_at)
         .or_else(|| projection.map(|projection| projection.updated_at))
-        .unwrap_or_else(Utc::now);
+        .unwrap_or_else(UtcTimestamp::now);
     let updated_at = projection
         .map(|projection| projection.updated_at)
         .or_else(|| last_entry.map(|entry| entry.updated_at))
@@ -10057,7 +10981,10 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     {
         let mut file = fs::File::create(&tmp)?;
         file.write_all(bytes)?;
-        sync_file(&file, path)?;
+        match path.parent() {
+            Some(_) => sync_file_before_rename(&file, path)?,
+            None => sync_file(&file, path)?,
+        }
     }
     fs::rename(&tmp, path)?;
     if let Some(parent) = path.parent() {
@@ -10102,6 +11029,29 @@ fn sync_file(file: &fs::File, _path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Syncs a temp file that is about to be renamed into the same directory.
+///
+/// On macOS `F_BARRIERFSYNC` orders the data before the rename, and the
+/// caller's following directory `sync_all` (`F_FULLFSYNC`) flushes the drive
+/// cache, so the write is still durable when `write_atomic` returns. Other
+/// platforms, and any barrier failure, keep the full file sync.
+fn sync_file_before_rename(file: &fs::File, _path: &Path) -> Result<()> {
+    #[cfg(test)]
+    if tests::skip_test_sync(tests::SyncCall::FileBeforeRename(_path.to_path_buf())) {
+        return Ok(());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::fd::AsRawFd;
+        // SAFETY: fcntl only reads the open descriptor owned by `file`.
+        if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_BARRIERFSYNC) } != -1 {
+            return Ok(());
+        }
+    }
+    file.sync_all()?;
+    Ok(())
+}
+
 fn sync_directory(_path: &Path) -> Result<()> {
     #[cfg(test)]
     if tests::skip_test_sync(tests::SyncCall::Directory(_path.to_path_buf())) {
@@ -10126,7 +11076,7 @@ fn sync_directory(_path: &Path) -> Result<()> {
 pub fn workspace_projection_stale_reason(
     projection: &WorkspaceProjection,
     config: &WorkspaceRetentionConfig,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
 ) -> Option<StaleReason> {
     let mut reasons: Vec<StaleReason> = Vec::with_capacity(3);
 
@@ -10154,7 +11104,7 @@ pub fn workspace_projection_stale_reason(
         reasons.push(StaleReason::PrClosed);
     }
 
-    let threshold = chrono::Duration::days(config.archive_after_days as i64);
+    let threshold = time::Duration::days(config.archive_after_days as i64);
     if now.signed_duration_since(projection.updated_at) > threshold {
         reasons.push(StaleReason::TimeThreshold);
     }
@@ -10209,7 +11159,7 @@ pub struct ClassifiedProjection {
     pub project_root: PathBuf,
     pub workspace_dir: PathBuf,
     pub lifecycle_stage: WorkspaceLifecycleStage,
-    pub updated_at: DateTime<Utc>,
+    pub updated_at: UtcTimestamp,
     pub stale_reason: Option<StaleReason>,
     pub action: PruneAction,
 }
@@ -10232,7 +11182,7 @@ pub struct PruneSummary {
 pub fn classify_workspace_projections<F>(
     scan_root: &Path,
     config: &WorkspaceRetentionConfig,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
     is_active_session: F,
 ) -> Result<Vec<ClassifiedProjection>>
 where
@@ -10274,7 +11224,7 @@ where
             match projection.lifecycle_stage {
                 WorkspaceLifecycleStage::Archived => {
                     let elapsed = now.signed_duration_since(projection.updated_at);
-                    let threshold = chrono::Duration::days(config.delete_after_archive_days as i64);
+                    let threshold = time::Duration::days(config.delete_after_archive_days as i64);
                     if elapsed > threshold {
                         PruneAction::Delete
                     } else {
@@ -10378,7 +11328,7 @@ pub fn apply_prune_plan(plan: &[ClassifiedProjection], dry_run: bool) -> Result<
                             load_workspace_projection_from_path(&current_json)?
                         {
                             projection.lifecycle_stage = WorkspaceLifecycleStage::Archived;
-                            projection.updated_at = Utc::now();
+                            projection.updated_at = UtcTimestamp::now();
                             save_workspace_projection_to_path_unlocked(&current_json, &projection)?;
                         }
                         Ok(())

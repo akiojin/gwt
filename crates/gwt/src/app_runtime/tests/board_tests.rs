@@ -106,7 +106,7 @@ fn board_notice_owner_fixture(
     let mut idle = runtime_hook_state_for_event("idle", "Stop", &session.id);
     idle.project_root = Some(repo.display().to_string());
     idle.branch = Some(session.branch.clone());
-    idle.occurred_at = chrono::Utc::now().to_rfc3339();
+    idle.occurred_at = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
     owner.transport_event(gwt::project_transport::TransportEvent::RuntimeHook(idle));
     owner_fixture_block_on(owner.command(OwnerCommand::Health)).unwrap();
     let snapshot = serde_json::from_value(
@@ -472,9 +472,10 @@ fn board_refresh_measure_single_post() {
             vec![],
             vec![],
         );
-        entry.created_at = Utc::now() - chrono::Duration::hours(1) + chrono::Duration::seconds(n);
+        entry.created_at = gwt_core::timestamp::UtcTimestamp::now() - time::Duration::hours(1)
+            + time::Duration::seconds(n);
         // Use a deterministic past ordering so live posts come after the fixture.
-        entry.created_at -= chrono::Duration::hours(4);
+        entry.created_at -= time::Duration::hours(4);
         entry.updated_at = entry.created_at;
         serde_json::to_writer(
             &mut file,
@@ -625,7 +626,7 @@ fn app_runtime_load_board_defaults_to_current_workspace_audience() {
             affiliation_status:
                 gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Assigned,
             workspace_id: Some("workspace-current".to_string()),
-            updated_at: chrono::Utc::now(),
+            updated_at: gwt_core::timestamp::UtcTimestamp::now(),
         });
     gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
         .expect("save projection");
@@ -723,7 +724,7 @@ fn app_runtime_load_board_history_replies_with_older_page() {
             vec![],
         );
         entry.id = format!("entry-{idx}");
-        entry.created_at = chrono::Utc::now() + chrono::Duration::seconds(idx);
+        entry.created_at = gwt_core::timestamp::UtcTimestamp::now() + time::Duration::seconds(idx);
         entry.updated_at = entry.created_at;
         post_entry(&repo, entry).expect("seed board entry");
     }
@@ -1323,7 +1324,7 @@ fn app_runtime_load_knowledge_bridge_projects_related_issue_work_sessions() {
     session.linked_issue_number = Some(3096);
     session.save(&runtime.sessions_dir).expect("save session");
 
-    let now = Utc.with_ymd_and_hms(2026, 6, 20, 9, 5, 0).unwrap();
+    let now = gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 6, 20, 9, 5, 0).unwrap();
     let work_id = gwt_core::workspace_projection::canonical_work_id(
         &repo,
         Some("work/issue-3096"),
@@ -1424,7 +1425,8 @@ fn app_runtime_load_knowledge_bridge_marks_session_only_stopped_related_session_
     let (runtime, recorded_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
 
-    let stopped_at = Utc.with_ymd_and_hms(2026, 6, 20, 9, 5, 0).unwrap();
+    let stopped_at =
+        gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 6, 20, 9, 5, 0).unwrap();
     let mut session =
         gwt_agent::Session::new(&worktree, "work/issue-3133", gwt_agent::AgentId::Codex);
     session.id = "session-issue-3133-stopped".to_string();
@@ -1500,8 +1502,8 @@ fn app_runtime_load_knowledge_bridge_dedupes_related_issue_sessions_by_conversat
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
 
     let conversation_id = "conv-issue-3133";
-    let old_at = Utc.with_ymd_and_hms(2026, 6, 20, 9, 0, 0).unwrap();
-    let new_at = Utc.with_ymd_and_hms(2026, 6, 20, 9, 5, 0).unwrap();
+    let old_at = gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 6, 20, 9, 0, 0).unwrap();
+    let new_at = gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 6, 20, 9, 5, 0).unwrap();
 
     let mut stale_session =
         gwt_agent::Session::new(&worktree, "work/issue-3133", gwt_agent::AgentId::Codex);
@@ -1630,10 +1632,14 @@ fn app_runtime_load_knowledge_bridge_collapses_related_issue_session_actions_to_
     let (runtime, recorded_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
 
-    let stale_at = Utc.with_ymd_and_hms(2026, 6, 20, 9, 0, 0).unwrap();
-    let past_at = Utc.with_ymd_and_hms(2026, 6, 20, 9, 1, 0).unwrap();
-    let live_at = Utc.with_ymd_and_hms(2026, 6, 20, 9, 5, 0).unwrap();
-    let empty_agent_at = Utc.with_ymd_and_hms(2026, 6, 20, 9, 6, 0).unwrap();
+    let stale_at =
+        gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 6, 20, 9, 0, 0).unwrap();
+    let past_at =
+        gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 6, 20, 9, 1, 0).unwrap();
+    let live_at =
+        gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 6, 20, 9, 5, 0).unwrap();
+    let empty_agent_at =
+        gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 6, 20, 9, 6, 0).unwrap();
 
     for (id, conversation_id, status, timestamp) in [
         (
@@ -1801,7 +1807,8 @@ fn app_runtime_load_knowledge_bridge_ignores_ambiguous_branch_only_related_work(
     let (runtime, recorded_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
 
-    let live_at = Utc.with_ymd_and_hms(2026, 6, 20, 9, 5, 0).unwrap();
+    let live_at =
+        gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 6, 20, 9, 5, 0).unwrap();
     let mut session = gwt_agent::Session::new(
         &issue_worktree,
         "work/issue-3133",
@@ -1849,12 +1856,12 @@ fn app_runtime_load_knowledge_bridge_ignores_ambiguous_branch_only_related_work(
         (
             "develop",
             develop_worktree.as_path(),
-            Utc.with_ymd_and_hms(2026, 6, 20, 9, 6, 0).unwrap(),
+            gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 6, 20, 9, 6, 0).unwrap(),
         ),
         (
             "work/issue-3133",
             issue_worktree.as_path(),
-            Utc.with_ymd_and_hms(2026, 6, 20, 9, 7, 0).unwrap(),
+            gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 6, 20, 9, 7, 0).unwrap(),
         ),
     ] {
         let mut event = gwt_core::workspace_projection::WorkEvent::new(

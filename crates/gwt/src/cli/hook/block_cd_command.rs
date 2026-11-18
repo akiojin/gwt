@@ -45,7 +45,7 @@ pub fn handle() -> Result<HookOutput, HookError> {
     let Some(event) = HookEvent::read_from_stdin()? else {
         return Ok(HookOutput::Silent);
     };
-    let root = crate::cli::hook::worktree::detect_worktree_root();
+    let root = crate::cli::hook::worktree::detect_cd_boundary();
     evaluate(&event, &root)
 }
 

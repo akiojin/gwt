@@ -1,0 +1,38 @@
+{
+  "kind": "design-mock-only",
+  "headed": true,
+  "browser": "157.0.8103.51",
+  "viewport": "1440x1080",
+  "results": [
+    {
+      "theme": "dark",
+      "result": "PASS",
+      "checks": [
+        "four views",
+        "create task preview",
+        "decision preview",
+        "no-decision state",
+        "stale state",
+        "before/after",
+        "no horizontal overflow"
+      ]
+    },
+    {
+      "theme": "light",
+      "result": "PASS",
+      "checks": [
+        "four views",
+        "create task preview",
+        "decision preview",
+        "no-decision state",
+        "stale state",
+        "before/after",
+        "no horizontal overflow"
+      ]
+    }
+  ],
+  "console_and_page_errors": [],
+  "external_requests": [],
+  "product_acceptance": "not measured",
+  "user_verification": "n/a (autonomous)"
+}

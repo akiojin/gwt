@@ -936,6 +936,77 @@ mod tests {
     }
 
     #[test]
+    fn unbound_human_answers_are_saved_as_display_only_qa_without_authority() {
+        // Issue #6950: a question that arrives mid-work or after its response
+        // deadline has no current human turn. Its answer must still reach
+        // Reports, but it must never mint instruction authority.
+        let _env = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "pm-session");
+        let worktree = fixture(home.path());
+        let _native = native_human_fixture(home.path(), &worktree, "状況は？");
+        let repo = home.path().join("repo");
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        let post = |original: &str, authorize: bool| {
+            let mut instruction = instruction_capture();
+            instruction.original = original.into();
+            if authorize {
+                instruction.authorizations = vec![gwt_core::pm_authorization::OperationIntent {
+                    operation: "update.settings.set".into(),
+                    params: serde_json::json!({"auto_apply_updates":true}),
+                }];
+            }
+            crate::cli::pm::PmCommand::ReportPost {
+                project_root: None,
+                kind: gwt_core::pm_report::PmReportKind::Qa,
+                question: Some(original.into()),
+                body: "回答しました".into(),
+                instruction: Some(instruction),
+            }
+        };
+        // Expired request: no recorded human turn at all.
+        crate::cli::pm::run(
+            &mut env,
+            post("期限切れの依頼は？", false),
+            &mut String::new(),
+        )
+        .unwrap();
+        // Mid-work question: the current turn belongs to another prompt.
+        handle_user_prompt_submit(&worktree, r#"{"prompt":"状況は？"}"#).unwrap();
+        let mut output = String::new();
+        crate::cli::pm::run(&mut env, post("作業中の質問は？", false), &mut output).unwrap();
+        let saved: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(saved["report"]["kind"], "qa");
+        assert!(saved.get("instruction").is_none());
+        assert!(
+            crate::cli::pm::run(&mut env, post("作業中の承認は？", true), &mut String::new())
+                .is_err(),
+            "an unbound answer never carries authorizations"
+        );
+        let questions: Vec<_> = gwt_core::pm_report::load_reports(&repo)
+            .unwrap()
+            .into_iter()
+            .filter(|report| report.kind == gwt_core::pm_report::PmReportKind::Qa)
+            .filter_map(|report| report.question)
+            .collect();
+        assert_eq!(questions, ["期限切れの依頼は？", "作業中の質問は？"]);
+        assert!(gwt_core::user_instruction::load(&repo).unwrap().is_empty());
+        assert!(
+            matches!(
+                handle_stop(&worktree, Some("pm-session")),
+                HookOutput::StopBlock { .. }
+            ),
+            "an unbound answer does not settle the current human turn"
+        );
+    }
+
+    #[test]
     fn human_qa_response_loss_retries_one_joined_capture_after_acknowledgement() {
         let _env = gwt_core::test_support::env_lock()
             .lock()
@@ -1057,15 +1128,28 @@ mod tests {
         );
         let notification = "<task-notification>\n<task-id>background-1</task-id>\n<tool-use-id>tool-1</tool-use-id>\n<output-file>/tmp/result</output-file>\n<status>completed</status>\n<summary>Background task completed</summary>\n</task-notification>";
         let extended_notification = notification.replace("</task-notification>", "<note>Read the result</note>\n<result>Done</result>\n<usage><tool_uses>1</tool_uses></usage>\n</task-notification>");
+        let combined = format!("{portable_tick}\n{notification}\n$gwt-pm");
+        let protected = crate::pm_registry::protected_pm_delivery_prompt(
+            "00000000-0000-4000-8000-000000000001",
+            "Board update",
+        )
+        .unwrap();
+        let combined_protected = format!("{protected}\r\n\r\n{portable_tick}");
         for prompt in [
             "$gwt-pm",
             tick.as_str(),
             portable_tick.as_str(),
             notification,
             extended_notification.as_str(),
+            combined.as_str(),
+            combined_protected.as_str(),
         ] {
             handle_user_prompt_submit(&worktree, &serde_json::json!({"prompt":prompt}).to_string())
                 .unwrap();
+            assert!(
+                capture_qa_turn(&worktree).unwrap().is_none(),
+                "automatic notification must not arm QA: {prompt}"
+            );
             assert_eq!(
                 handle_stop(&worktree, Some("pm-session")),
                 HookOutput::Silent
@@ -1084,6 +1168,10 @@ mod tests {
             format!("Explain this notification: {notification}"),
             format!("{notification}\n何が完了しましたか？"),
             format!("{notification}\nこの二つの通知を比較してください\n{notification}"),
+            format!("この通知を説明してください\n{combined}"),
+            format!("{combined}\nこの通知を説明してください"),
+            format!("{portable_tick}\nこの通知を説明してください\n{notification}"),
+            format!("{notification} 説明してください\n$gwt-pm"),
         ] {
             let _native = native_human_fixture(home.path(), &worktree, &prompt);
             handle_user_prompt_submit(&worktree, &serde_json::json!({"prompt":prompt}).to_string())
@@ -1139,8 +1227,12 @@ mod tests {
             instruction: (kind == gwt_core::pm_report::PmReportKind::Qa).then(instruction_capture),
         };
         handle_user_prompt_submit(&worktree, r#"{"prompt":"状況は？"}"#).unwrap();
-        for (question, original) in [("$gwt-pm", "状況は？"), ("定期指示の照合", "$gwt-pm")]
-        {
+        for (question, original) in [
+            ("$gwt-pm", "状況は？"),
+            ("定期指示の照合", "$gwt-pm"),
+            ("$gwt-pm\n$gwt-pm", "状況は？"),
+            ("定期指示の照合", "$gwt-pm\n$gwt-pm"),
+        ] {
             let mut instruction = instruction_capture();
             instruction.original = original.into();
             let result = crate::cli::pm::run(

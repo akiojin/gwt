@@ -486,7 +486,10 @@ pub fn repository_local_origin(repo_root: &Path) -> Option<String> {
     parse_origin_url_from_git_config(&fs::read_to_string(common.join("config")).ok()?)
 }
 
-pub(crate) fn resolve_git_dir(repo_root: &Path) -> Option<PathBuf> {
+/// Git directory of a worktree or bare repository, read from the filesystem
+/// without starting Git. For a linked worktree this is its own per-worktree
+/// directory, not the shared common directory.
+pub fn resolve_git_dir(repo_root: &Path) -> Option<PathBuf> {
     let dot_git = repo_root.join(".git");
     if dot_git.is_dir() {
         return Some(dot_git);

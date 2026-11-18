@@ -90,6 +90,7 @@ select_changed_tests() {
 import os
 import pathlib
 import re
+import shlex
 import subprocess
 import sys
 
@@ -101,13 +102,49 @@ crate, kind, target = entry.split("|")
 # CI may test a synthetic merge containing newer base commits. Select only
 # the owner's changes, while retaining the merged checkout for test execution.
 head = os.environ.get("GWT_FLAKE_HEAD_SHA") or "HEAD"
+
+
+def git_words(*args):
+    return subprocess.run(["git", *args], capture_output=True, text=True).stdout.split()
+
+
+# A pull request event names the base tip from when the PR was opened. A head
+# that later merged a newer base would report those delivered changes as its
+# own (PR #7413: 95 files instead of 3, two full library runs). The merge
+# commit CI tests has the current base tip as first parent; use it only when
+# its second parent is this exact head, otherwise keep the event base.
+tested = git_words("rev-list", "--parents", "-n", "1", "HEAD")
+if len(tested) == 3 and [tested[2]] == git_words("rev-parse", "--verify", "--quiet", f"{head}^{{commit}}"):
+    base = tested[1]
 changed = subprocess.check_output(
     ["git", "diff", "--name-only", "--no-renames", "-z", f"{base}...{head}"],
     text=True,
 ).split("\0")
-tests = sorted({line.removesuffix(": test") for line in
-                pathlib.Path(listing).read_text().splitlines()
+listing_text = pathlib.Path(listing).read_text()
+tests = sorted({line.removesuffix(": test") for line in listing_text.splitlines()
                 if line.endswith(": test")})
+
+
+def compiled_library_sources():
+    # Cargo identifies this exact libtest executable. Its matching rustc
+    # dep-info proves source ownership without a hand-maintained bin list.
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", listing_text)
+    headers = re.findall(r"^\s*Running unittests (.+) \((.+)\)$", plain, re.MULTILINE)
+    if len(headers) != 1:
+        return None
+    source, executable = headers[0]
+    try:
+        rule = pathlib.Path(executable).with_suffix(".d").read_text().splitlines()[0]
+        # Unusual make quoting must fall back, never silently drop a source.
+        if any(char in rule for char in "\"'$") or rule.endswith("\\"):
+            return None
+        paths = {pathlib.Path(name).resolve() for name in shlex.split(rule.split(": ", 1)[1])}
+        root = pathlib.Path("crates", crate, source).resolve()
+        return paths if root in paths else None
+    except (OSError, ValueError, IndexError):
+        return None
+
+
 if kind == "test":
     selected = tests
     if crate == "gwt":
@@ -144,9 +181,15 @@ if kind == "test":
             selected = [test for test in tests if test.partition("::")[0] in modules]
 elif kind == "lib":
     functions = set()
+    excluded = set()
+    compiled_sources = compiled_library_sources()
     for name in changed:
         path = pathlib.Path(name)
         if name.startswith(f"crates/{crate}/src/") and path.suffix == ".rs":
+            if compiled_sources is not None and path.is_file() and path.resolve() not in compiled_sources:
+                print(f"{entry}: {name} is not compiled into this library", file=sys.stderr)
+                excluded.add(name)
+                continue
             file_functions = set(re.findall(r"\bfn\s+(?:r#)?([A-Za-z_]\w*)\s*\(",
                                             path.read_text())) if path.is_file() else set()
             if not any(test.rsplit("::", 1)[-1] in file_functions for test in tests):
@@ -157,13 +200,28 @@ elif kind == "lib":
             functions.update(file_functions)
     selected = [test for test in tests if test.rsplit("::", 1)[-1] in functions]
     if not selected:
-        # External test modules / cfg-specific functions can prevent a safe
-        # mapping. Retain coverage rather than silently repeating zero tests.
-        print(f"{entry}: no safe changed-file match; retaining the full target", file=sys.stderr)
-        selected = tests
+        # Empty is proven only when every source was excluded and every
+        # companion is an uncompiled test, workflow, or Work event. Unknown
+        # inputs (including manifests/build scripts) retain the full fallback.
+        proven_empty = bool(excluded) and all(
+            not name or (
+                pathlib.Path(name).is_file()
+                and pathlib.Path(name).resolve() not in compiled_sources
+                and (name in excluded
+                     or (name.startswith(f"crates/{crate}/tests/") and name.endswith(".rs"))
+                     or (name.startswith(".github/workflows/") and name.endswith((".yml", ".yaml")))
+                     or (name.startswith(".gwt/work/events/") and name.endswith(".jsonl")))
+            ) for name in changed
+        )
+        if proven_empty:
+            print(f"{entry}: all changed sources are outside this library; no repetition needed", file=sys.stderr)
+        else:
+            print(f"{entry}: no safe changed-file match; retaining the full target", file=sys.stderr)
+            selected = tests
 else:
     raise SystemExit(f"Unsupported test target: {entry}")
-print("\n".join(selected))
+if selected:
+    print("\n".join(selected))
 # changed-test-selection-end
 PY
 }
@@ -248,7 +306,7 @@ for entry in $targets; do
       exit 1
     fi
     if [ ! -s "$selection" ] || ! grep -q '[^[:space:]]' "$selection"; then
-      echo "$entry: no active tests in the built target"
+      echo "$entry: no tests selected for repetition"
       remaining_targets=$((remaining_targets - 1))
       continue
     fi

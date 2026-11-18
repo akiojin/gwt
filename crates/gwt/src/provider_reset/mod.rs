@@ -4,7 +4,7 @@ pub(crate) mod native;
 
 use std::collections::BTreeMap;
 
-use chrono::{DateTime, Utc};
+use gwt_core::timestamp::UtcTimestamp;
 use serde::Serialize;
 
 use codex::{CodexResetClient, ResetOutcome, ResetSnapshot};
@@ -139,12 +139,12 @@ pub struct ResetProposal {
 /// explicit native consent when executed. No account calls happen while polling.
 pub fn proposals(
     holds: &BTreeMap<String, String>,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
     min_reset_wait_secs: u64,
 ) -> Vec<ResetProposal> {
     holds.iter().filter_map(|(provider, reset_at)| {
-        let deadline = DateTime::parse_from_rfc3339(reset_at).ok()?;
-        let remaining = deadline.signed_duration_since(now).num_seconds();
+        let deadline = UtcTimestamp::parse_from_rfc3339(reset_at).ok()?;
+        let remaining = deadline.signed_duration_since(now).whole_seconds();
         if remaining <= 0 { return None; }
         let (action, message) = match provider.as_str() {
             "codex" if remaining as u64 >= min_reset_wait_secs => (

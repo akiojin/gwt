@@ -255,7 +255,7 @@ fn close_project_authorization_is_client_scoped_single_use_and_generation_bound(
         .project_views
         .seed_fixture_view(gwt::project_execution_policy::ActualViewReceipt {
             receipt_id: uuid::Uuid::new_v4().to_string(),
-            accepted_at: chrono::Utc::now(),
+            accepted_at: gwt_core::timestamp::UtcTimestamp::now(),
             admitted_policy_revision: 0,
         });
     assert_eq!(

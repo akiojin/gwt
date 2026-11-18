@@ -16,8 +16,7 @@ the owner explicitly requests the check in an `interactive` launch, and
 1. Compute the `User Verification` block:
    - `Status: required` if any changed surface is marked Required above.
    - `Status: recommended` if only Recommended surfaces changed.
-   - `Status: skipped(<reason>)` for `--mode quick`, `Changed surfaces:
-     (none)`, docs-only changes, `--skip-user-check`, or any explicit
+   - `Status: skipped(<reason>)` for `Changed surfaces: (none)`, docs-only changes, `--skip-user-check`, or any explicit
      skip rule above. The reason must be human-readable and specific.
 2. Resolve and print the **Verification Target Card** before any instructions:
    - `Owner Issue/SPEC:` identifies the work item whose behavior is being

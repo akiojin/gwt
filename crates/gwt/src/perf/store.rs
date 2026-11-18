@@ -6,9 +6,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chrono::{NaiveDate, Utc};
 use fs2::FileExt;
 use gwt_core::{logging::housekeep::housekeep_at, paths::gwt_logs_dir};
+use time::{Date, OffsetDateTime};
 
 use super::{
     record::{PerfRecord, PerfViolationDetails},
@@ -23,22 +23,22 @@ const PERF_DATE_SUFFIX_FORMAT: &str = "%Y-%m-%d.jsonl";
 const DETECTOR_LOCK_WAIT: Duration = Duration::from_millis(25);
 
 pub(crate) trait UtcDateClock {
-    fn today_utc(&self) -> NaiveDate;
+    fn today_utc(&self) -> Date;
 }
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct SystemUtcDateClock;
 
 impl UtcDateClock for SystemUtcDateClock {
-    fn today_utc(&self) -> NaiveDate {
-        Utc::now().date_naive()
+    fn today_utc(&self) -> Date {
+        OffsetDateTime::now_utc().date()
     }
 }
 
 pub(crate) struct PerfStore<C = SystemUtcDateClock> {
     log_dir: PathBuf,
     clock: C,
-    open_date: Option<NaiveDate>,
+    open_date: Option<Date>,
     file: Option<File>,
 }
 
@@ -163,12 +163,9 @@ impl<C: UtcDateClock> PerfStore<C> {
         Ok(details)
     }
 
-    fn file_for_date(&mut self, date: NaiveDate) -> io::Result<&mut File> {
+    fn file_for_date(&mut self, date: Date) -> io::Result<&mut File> {
         if self.open_date != Some(date) {
-            let file_name = format!(
-                "{PERF_FILE_NAME_PREFIX}{}",
-                date.format(PERF_DATE_SUFFIX_FORMAT)
-            );
+            let file_name = format!("{PERF_FILE_NAME_PREFIX}{date}.jsonl");
             let file = OpenOptions::new()
                 .create(true)
                 .append(true)
@@ -187,46 +184,53 @@ impl<C: UtcDateClock> PerfStore<C> {
 mod tests {
     use std::{cell::Cell, fs, path::Path, rc::Rc};
 
-    use chrono::{DateTime, NaiveDate, Utc};
+    use gwt_core::timestamp::UtcTimestamp;
     use gwt_core::{paths::gwt_logs_dir, test_support::ScopedGwtHome};
+    use time::Date;
 
     use super::{PerfStore, UtcDateClock};
     use crate::perf::record::{PerfRecord, PerfStream, PerfUnit};
 
     #[derive(Clone)]
     struct FixedUtcDateClock {
-        today: Rc<Cell<NaiveDate>>,
+        today: Rc<Cell<Date>>,
     }
 
     impl FixedUtcDateClock {
-        fn new(today: NaiveDate) -> Self {
+        fn new(today: Date) -> Self {
             Self {
                 today: Rc::new(Cell::new(today)),
             }
         }
 
-        fn set(&self, today: NaiveDate) {
+        fn set(&self, today: Date) {
             self.today.set(today);
         }
     }
 
     impl UtcDateClock for FixedUtcDateClock {
-        fn today_utc(&self) -> NaiveDate {
+        fn today_utc(&self) -> Date {
             self.today.get()
         }
     }
 
-    fn date(year: i32, month: u32, day: u32) -> NaiveDate {
-        NaiveDate::from_ymd_opt(year, month, day).expect("valid test date")
+    fn date(year: i32, month: u32, day: u32) -> Date {
+        Date::from_calendar_date(year, time::Month::try_from(month as u8).unwrap(), day as u8)
+            .expect("valid test date")
     }
 
-    fn timestamp(day: NaiveDate) -> DateTime<Utc> {
-        day.and_hms_opt(12, 0, 0)
-            .expect("valid test timestamp")
-            .and_utc()
+    fn timestamp(day: Date) -> UtcTimestamp {
+        UtcTimestamp::from_timestamp(
+            day.with_hms(12, 0, 0)
+                .unwrap()
+                .assume_utc()
+                .unix_timestamp(),
+            0,
+        )
+        .unwrap()
     }
 
-    fn sample(day: NaiveDate, target: &str, value: f64) -> PerfRecord {
+    fn sample(day: Date, target: &str, value: f64) -> PerfRecord {
         PerfRecord::sample(
             timestamp(day),
             PerfStream::Op,

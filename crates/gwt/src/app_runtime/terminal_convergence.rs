@@ -38,7 +38,10 @@ pub(crate) use gwt::project_runtime::installation::{
 /// thread for the background observer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TerminalWindowSnapshot {
+    /// GUI alias used to apply the observation and close the exact projection.
     pub(crate) window_id: String,
+    /// Physical owner pane identity used by the durable Monitor binding.
+    pub(crate) monitor_window_id: String,
     pub(crate) session_id: String,
     pub(crate) project_root: PathBuf,
     pub(crate) worktree_path: PathBuf,
@@ -197,7 +200,7 @@ fn observe_terminal_windows_with_monitor_loader(
                     };
                     let facts = read_terminal_window_facts_with_monitor(
                         &session,
-                        &snapshot.window_id,
+                        &snapshot.monitor_window_id,
                         snapshot.window_status,
                         monitor,
                     );
@@ -212,7 +215,7 @@ fn observe_terminal_windows_with_monitor_loader(
                         {
                             match settle_issue_monitor_terminal_delivery_in_background(
                                 &snapshot.project_root,
-                                &snapshot.window_id,
+                                &snapshot.monitor_window_id,
                                 issue_number,
                                 commit_timeout,
                             ) {
@@ -348,6 +351,11 @@ impl AppRuntime {
                 let window = tab.workspace.window(&address.raw_id)?;
                 Some(TerminalWindowSnapshot {
                     window_id: active.window_id.clone(),
+                    monitor_window_id: self
+                        .runtimes
+                        .get(&active.window_id)
+                        .map(|runtime| runtime.owner_pane_id.clone())
+                        .unwrap_or_else(|| active.window_id.clone()),
                     session_id: active.session_id.clone(),
                     project_root: tab.project_root.clone(),
                     worktree_path: active.worktree_path.clone(),
@@ -576,6 +584,7 @@ mod tests {
         let snapshots: Vec<_> = (0..4)
             .map(|index| TerminalWindowSnapshot {
                 window_id: format!("tab-1::agent-{index}"),
+                monitor_window_id: format!("tab-1::agent-{index}"),
                 session_id: session.id.clone(),
                 project_root: projects[index / 2].clone(),
                 worktree_path: projects[0].clone(),

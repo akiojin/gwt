@@ -1,6 +1,6 @@
-//! Autonomous implementation completion requires a prepared owner PR (#5034).
+//! Autonomous completion validates the owner PR when product delivery is needed.
 
-use super::{execution_state as execution, verification_record as verification};
+use super::{delivered_owner, execution_state as execution, verification_record as verification};
 use crate::cli::{CliEnv, PrCommand};
 use gwt_git::pr_status::PrState;
 
@@ -40,16 +40,30 @@ pub(super) fn admit<E: CliEnv>(
     if owner.status != execution::ExecutionControlStatus::Active {
         return Ok(None);
     }
-    let evidence = verification::evaluate_evidence(&worktree, session_id, Some(owner.owner_number));
+    let verification_error = |evidence: verification::EvidenceStatus| {
+        format!(
+            "PR completion requires current verification: {}. Run verify.plan / verify.run and retry completion.",
+            evidence.describe()
+        )
+    };
+    let verified = verification::load(&worktree)
+        .map_err(|error| verification_error(verification::evidence_read_error(&error)))?
+        .ok_or_else(|| verification_error(verification::EvidenceStatus::MissingRecord))?;
+    let plan = verification::load_plan(&worktree)
+        .map_err(|error| verification_error(verification::evidence_read_error(&error)))?;
+    let evidence = verification::evaluate_evidence_snapshot(
+        &worktree,
+        session_id,
+        Some(owner.owner_number),
+        plan.as_ref(),
+        &verified,
+    );
     if !matches!(
         evidence,
         verification::EvidenceStatus::Fresh | verification::EvidenceStatus::FreshWithQuarantine
     ) {
-        return Err(format!("PR completion requires current verification: {}. Run verify.plan / verify.run and retry completion.", evidence.describe()));
+        return Err(verification_error(evidence));
     }
-    let verified = verification::load(&worktree)
-        .map_err(|error| error.to_string())?
-        .ok_or("PR completion verification record disappeared")?;
     let verified_head = verified
         .verified_head
         .as_deref()
@@ -58,6 +72,28 @@ pub(super) fn admit<E: CliEnv>(
         .and_then(|repo| repo.current_branch())
         .map_err(|error| error.to_string())?
         .ok_or("PR completion requires the owning branch")?;
+    // A derived plan can exclude generated outputs, so check the current
+    // unfiltered product surface before exempting a ledger-only run.
+    if explicit_pr.is_none()
+        && evidence == verification::EvidenceStatus::Fresh
+        && verified
+            .verification_plan_snapshot
+            .as_ref()
+            .is_some_and(|plan| {
+                plan.derived
+                    && plan.commands.is_empty()
+                    && plan.surfaces == ["trivial(ledger_only)"]
+            })
+    {
+        if let delivered_owner::SourceSurface::Zero { base } =
+            delivered_owner::probe_source_surface(&worktree)
+        {
+            out.push_str(&format!(
+                "completion: ledger-only verification and zero product source against {base}; no delivery PR required\n"
+            ));
+            return Ok(Some(verified.content_hash.clone()));
+        }
+    }
     let candidates = env
         .fetch_completion_pr_candidates(explicit_pr)
         .map_err(|error| {
@@ -234,18 +270,20 @@ pub(super) fn admit<E: CliEnv>(
 mod tests {
     use super::super::{execution_state as execution, verification_record as verification};
     use crate::cli::{CliEnv, SkillStateAction, TestEnv};
-    use chrono::Utc;
+
     use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
     use gwt_git::pr_status::PrState;
     use std::path::Path;
 
     fn prepare(repo: &Path, session_id: &str) {
         crate::cli::trusted_store::init_git_repo_with_origin(repo);
-        let branch = gwt_git::Repository::open(repo)
-            .unwrap()
-            .current_branch()
-            .unwrap()
+        let branch = "work/completion-fixture";
+        let output = gwt_core::process::hidden_command("git")
+            .args(["branch", "-m", branch])
+            .current_dir(repo)
+            .output()
             .unwrap();
+        assert!(output.status.success(), "{output:?}");
         assert!(gwt_core::process::resolved_command(
             gwt_core::process::ProcessPlanRequest::new("git")
                 .args(["update-ref", "refs/remotes/origin/develop", "HEAD"])
@@ -255,7 +293,7 @@ mod tests {
         .status()
         .unwrap()
         .success());
-        let mut session = gwt_agent::Session::new(repo, &branch, gwt_agent::AgentId::Codex);
+        let mut session = gwt_agent::Session::new(repo, branch, gwt_agent::AgentId::Codex);
         session.id = session_id.into();
         session.launch_route = gwt_agent::LaunchRoute::Autonomous;
         session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
@@ -270,7 +308,7 @@ mod tests {
                 status: execution::ExecutionControlStatus::Active,
                 blocked_reason: None,
                 missing_verification: None,
-                launched_at: Utc::now(),
+                launched_at: gwt_core::timestamp::UtcTimestamp::now(),
                 settled_at: None,
                 completion_evidence: None,
                 transfers: Vec::new(),
@@ -293,7 +331,7 @@ mod tests {
                 surfaces: Vec::new(),
                 generated_outputs: Vec::new(),
                 quarantines: Vec::new(),
-                created_at: Utc::now(),
+                created_at: gwt_core::timestamp::UtcTimestamp::now(),
                 content_hash: String::new(),
             }),
         )
@@ -315,10 +353,12 @@ mod tests {
             "body": "User Verification Result: n/a (autonomous)\nAgent Visual Check: n/a (no UI surface)\n"
         });
         let pr = gwt_git::pr_status::parse_pr_status_json(&value.to_string()).unwrap();
-        let mut inventory =
-            gwt_git::pr_status::parse_pr_inventory_json(&format!("[{value}]"), Utc::now())
-                .unwrap()
-                .remove(0);
+        let mut inventory = gwt_git::pr_status::parse_pr_inventory_json(
+            &format!("[{value}]"),
+            gwt_core::timestamp::UtcTimestamp::now(),
+        )
+        .unwrap()
+        .remove(0);
         inventory.unresolved_review_threads = Some(0);
         inventory.coderabbit_review_complete = Some(true);
         env.pr_quarantine_contexts.insert(
@@ -388,7 +428,7 @@ mod tests {
         let event = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Pr,
             "work-completion-receipt",
-            Utc::now(),
+            gwt_core::timestamp::UtcTimestamp::now(),
         );
         gwt_core::workspace_projection::record_workspace_work_event(repo.path(), event).unwrap();
         commit_and_reverify(repo.path(), session_id, ".gwt/work/events");
@@ -412,7 +452,7 @@ mod tests {
         let event = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Pr,
             "work-completion-receipt",
-            Utc::now(),
+            gwt_core::timestamp::UtcTimestamp::now(),
         );
         gwt_core::workspace_projection::record_workspace_work_event(repo.path(), event).unwrap();
         commit_fixture_change(repo.path(), ".gwt/work/events");
@@ -472,7 +512,7 @@ mod tests {
         let event = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Pr,
             "work-completion-receipt",
-            Utc::now(),
+            gwt_core::timestamp::UtcTimestamp::now(),
         );
         gwt_core::workspace_projection::record_workspace_work_event(repo.path(), event).unwrap();
         commit_and_reverify(repo.path(), session_id, ".gwt/work/events");
@@ -646,6 +686,74 @@ mod tests {
         );
         assert_eq!(env.completion_pr_call_log, pr_reads);
         assert_eq!(env.completion_pr_candidates_call_count, candidate_reads);
+    }
+
+    #[test]
+    fn autonomous_design_only_completion_ignores_unmatched_prior_pr() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let _spawn_host = crate::cli::test_support::declare_inherited_spawn_host();
+        let session_id = "completion-pr-design-only";
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+        let repo = tempfile::tempdir().unwrap();
+        prepare(repo.path(), session_id);
+        let mut env = TestEnv::new(repo.path().into());
+        seed_pr(&mut env, false, PrState::Merged);
+        env.completion_prs.get_mut(&9001).unwrap().head_sha = "unmatched-pr-head".into();
+        let event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Pr,
+            "work-completion-design-only",
+            gwt_core::timestamp::UtcTimestamp::now(),
+        );
+        gwt_core::workspace_projection::record_workspace_work_event(repo.path(), event).unwrap();
+        commit_fixture_change(repo.path(), ".gwt/work/events");
+
+        use crate::cli::{run_collect, CliCommand};
+        for command in [
+            verification::VerifyCommand::Plan {
+                commands: Vec::new(),
+                derive: true,
+            },
+            verification::VerifyCommand::Run {
+                commands: Vec::new(),
+                max_wait_secs: None,
+                headed_e2e_commands: Vec::new(),
+                user_verification_result: None,
+            },
+        ] {
+            let (code, out) = run_collect(&mut env, CliCommand::Verify(command)).unwrap();
+            assert_eq!(code, 0, "{out}");
+        }
+        let verified = verification::load(repo.path()).unwrap().unwrap();
+        assert_eq!(
+            verified
+                .verification_plan_snapshot
+                .as_ref()
+                .unwrap()
+                .surfaces,
+            ["trivial(ledger_only)"]
+        );
+
+        let mut out = String::new();
+        assert_eq!(
+            execution::run(&mut env, execution::ExecutionCommand::Complete, &mut out).unwrap(),
+            0,
+            "{out}"
+        );
+        let completed = execution::load(repo.path()).unwrap().unwrap();
+        assert_eq!(
+            completed.status,
+            execution::ExecutionControlStatus::Completed
+        );
+        assert_eq!(
+            completed.completion_evidence.unwrap().verification_run_hash,
+            verified.content_hash
+        );
+        assert_eq!(env.completion_pr_candidates_call_count, 0);
+        assert!(env.pr_ready_call_log.is_empty());
     }
 
     #[test]
@@ -902,7 +1010,7 @@ mod tests {
                 start_evidence: None,
                 active: true,
                 owner_spec: Some(5034),
-                started_at: Utc::now(),
+                started_at: gwt_core::timestamp::UtcTimestamp::now(),
                 phase: None,
                 session_id: "completion-pr-legacy-build".into(),
             },
@@ -1014,7 +1122,7 @@ mod tests {
             start_evidence: None,
             active: true,
             owner_spec: Some(5034),
-            started_at: Utc::now(),
+            started_at: gwt_core::timestamp::UtcTimestamp::now(),
             phase: None,
             session_id: "completion-pr-build".into(),
         };

@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use gwt_core::timestamp::UtcTimestamp;
 use std::{
     collections::HashSet,
     fs::{self, OpenOptions},
@@ -335,10 +335,17 @@ fn lookup_short_refs(
 }
 
 pub fn reserve_start_work_branch_name_with(
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
     mut branch_exists: impl FnMut(&str) -> Result<bool, StartWorkError>,
 ) -> Result<String, StartWorkError> {
-    let base = format!("work/{}", now.format("%Y%m%d-%H%M"));
+    let base = format!(
+        "work/{}",
+        now.utc_datetime()
+            .format(time::macros::format_description!(
+                "[year][month][day]-[hour][minute]"
+            ))
+            .expect("format UTC branch timestamp")
+    );
     if !branch_exists(&base)? {
         return Ok(base);
     }
@@ -353,7 +360,7 @@ pub fn reserve_start_work_branch_name_with(
 
 pub fn reserve_start_work_branch_name(
     repo_path: &Path,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
 ) -> Result<String, StartWorkError> {
     reserve_start_work_branch_name_with(now, |candidate| {
         local_or_remote_branch_exists(repo_path, candidate)
@@ -362,7 +369,7 @@ pub fn reserve_start_work_branch_name(
 
 pub fn reserve_start_work_branch_name_for_project(
     repo_path: &Path,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
 ) -> Result<String, StartWorkError> {
     let git_root = gwt_git::worktree::main_worktree_root(repo_path)
         .unwrap_or_else(|_| repo_path.to_path_buf());
@@ -377,13 +384,20 @@ pub fn reserve_start_work_branch_name_for_project(
 }
 
 pub fn reserve_start_work_branch_name_with_reservations(
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
     mut branch_exists: impl FnMut(&str) -> Result<bool, StartWorkError>,
     reservations_dir: &Path,
 ) -> Result<String, StartWorkError> {
     fs::create_dir_all(reservations_dir)
         .map_err(|error| StartWorkError::ReservationIo(error.to_string()))?;
-    let base = format!("work/{}", now.format("%Y%m%d-%H%M"));
+    let base = format!(
+        "work/{}",
+        now.utc_datetime()
+            .format(time::macros::format_description!(
+                "[year][month][day]-[hour][minute]"
+            ))
+            .expect("format UTC branch timestamp")
+    );
     for suffix in 1usize.. {
         let candidate = if suffix == 1 {
             base.clone()
@@ -446,8 +460,6 @@ fn remote_tracking_ref(remote_ref: &str) -> String {
 #[cfg(test)]
 mod tests {
     use std::{cell::RefCell, collections::HashSet, fs, path::Path, rc::Rc};
-
-    use chrono::{TimeZone, Utc};
 
     use super::{
         local_branches_resolving_to_commits, refallback_start_work_base_branch_with,
@@ -671,7 +683,8 @@ exit 1
 
     #[test]
     fn start_work_branch_name_uses_timestamp_and_suffix_for_collisions() {
-        let now = Utc.with_ymd_and_hms(2026, 5, 4, 12, 34, 0).unwrap();
+        let now =
+            gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 5, 4, 12, 34, 0).unwrap();
         let existing = HashSet::from([
             "work/20260504-1234".to_string(),
             "work/20260504-1234-2".to_string(),
@@ -688,7 +701,8 @@ exit 1
     fn start_work_branch_name_tracks_pending_reservations_without_git_refs() {
         let temp = tempfile::tempdir().expect("tempdir");
         let reservations_dir = temp.path().join("reservations");
-        let now = Utc.with_ymd_and_hms(2026, 5, 4, 12, 34, 0).unwrap();
+        let now =
+            gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 5, 4, 12, 34, 0).unwrap();
 
         let first =
             reserve_start_work_branch_name_with_reservations(now, |_| Ok(false), &reservations_dir)
@@ -709,7 +723,8 @@ exit 1
     fn reserve_branch_invokes_lookup_only_once_per_candidate() {
         let temp = tempfile::tempdir().expect("tempdir");
         let reservations_dir = temp.path().join("reservations");
-        let now = Utc.with_ymd_and_hms(2026, 5, 4, 12, 34, 0).unwrap();
+        let now =
+            gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 5, 4, 12, 34, 0).unwrap();
         let calls = Rc::new(RefCell::new(0usize));
         let calls_clone = Rc::clone(&calls);
 
@@ -735,7 +750,8 @@ exit 1
     fn reserve_branch_propagates_lookup_errors() {
         let temp = tempfile::tempdir().expect("tempdir");
         let reservations_dir = temp.path().join("reservations");
-        let now = Utc.with_ymd_and_hms(2026, 5, 4, 12, 34, 0).unwrap();
+        let now =
+            gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 5, 4, 12, 34, 0).unwrap();
 
         let error = reserve_start_work_branch_name_with_reservations(
             now,

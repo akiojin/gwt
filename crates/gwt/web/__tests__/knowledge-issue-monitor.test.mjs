@@ -360,6 +360,364 @@ function monitorBand(body) {
   };
 }
 
+test("Monitor Queue and slots read one immutable model projection in both views", async (t) => {
+  const { body, surface, document } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  const source = readFileSync(resolve(here, "../operator-shell.js"), "utf8")
+    .replace('from "/theme-manager.js"', `from "${new URL("../theme-manager.js", import.meta.url).href}"`)
+    .replace('from "/hotkey.js"', `from "${new URL("../hotkey.js", import.meta.url).href}"`)
+    .replace('from "/theme-toggle.js"', `from "${new URL("../theme-toggle.js", import.meta.url).href}"`);
+  const { subscribeIssueMonitorStatus } = await import(`data:text/javascript,${encodeURIComponent(source)}`);
+  const strip = document.createElement("div");
+  strip.id = "op-strip-issue-monitor";
+  strip.innerHTML = '<span id="op-strip-issue-monitor-value"></span>';
+  document.body.appendChild(strip);
+  t.after(subscribeIssueMonitorStatus(document, surface.issueMonitorModel));
+  const assertCounts = (queue, active, maxActive) => {
+    assert.equal(body.querySelector('[data-metric="queue"]').textContent, `Queue ${queue}`);
+    assert.equal(body.querySelector('[data-metric="capacity"]').textContent, `${active} of ${maxActive}`);
+    assert.match(body.querySelector('[data-metric="active"]').getAttribute("aria-description"),
+      new RegExp(`Issues agent capacity: ${active}/${maxActive}`));
+    assert.equal(strip.textContent, `Run Q${queue} A${active}/${maxActive}`);
+  };
+  surface.applyIssueMonitorStatus({ enabled: true, state: "active", queue_len: 3, active_count: 1, max_active_agents: 2,
+    counts: { queue: 99, active: 99, maxActive: 99 } });
+  const first = surface.issueMonitorModel.read().counts;
+  assert.deepEqual(first, { queue: 3, active: 1, maxActive: 2 });
+  assert.ok(Object.isFrozen(first));
+  assertCounts(3, 1, 2);
+  // A view that recounts the raw status must fail this structural regression.
+  surface.issueMonitorModel.update(model => ({ ...model, status: { ...model.status,
+    queue_len: 77, active_count: 77, max_active_agents: 77 } }));
+  assertCounts(3, 1, 2);
+  assert.equal(body.querySelector(".knowledge-monitor-pill").textContent, "Running");
+  surface.applyIssueMonitorStatus({ queue_len: 0, active_count: 0, max_active_agents: 0 });
+  assertCounts(0, 0, 0);
+  assert.equal(body.querySelector(".knowledge-monitor-pill").textContent, "Waiting · Empty");
+  surface.applyIssueMonitorStatus({ queue_len: 4 });
+  assertCounts(4, 0, 0);
+  assert.equal(body.querySelector(".knowledge-monitor-pill").textContent, "Waiting · Full");
+  assert.deepEqual(first, { queue: 3, active: 1, maxActive: 2 }, "older snapshots stay unchanged");
+  assert.match(body.querySelector('[data-metric="active"]').textContent, /^Active 0 · 0 issues · PM 0$/,
+    "the live-agent census keeps its separate meaning");
+});
+
+test("awaiting attention derives one union count that the strip and Issues pill both read", async (t) => {
+  const { body, surface, document } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  const source = readFileSync(resolve(here, "../operator-shell.js"), "utf8")
+    .replace('from "/theme-manager.js"', `from "${new URL("../theme-manager.js", import.meta.url).href}"`)
+    .replace('from "/hotkey.js"', `from "${new URL("../hotkey.js", import.meta.url).href}"`)
+    .replace('from "/theme-toggle.js"', `from "${new URL("../theme-toggle.js", import.meta.url).href}"`);
+  const { subscribeIssueMonitorStatus } = await import(`data:text/javascript,${encodeURIComponent(source)}`);
+  const strip = document.createElement("div");
+  strip.id = "op-strip-issue-monitor";
+  strip.innerHTML = '<span id="op-strip-issue-monitor-value"></span>';
+  document.body.appendChild(strip);
+  t.after(subscribeIssueMonitorStatus(document, surface.issueMonitorModel));
+  assert.equal(surface.issueMonitorModel.read().decisionAttention?.count, null,
+    "no inbox snapshot is unknown, not zero");
+  const steering = { reason: "Retry budget needs PM steering", requested_at: "2026-11-13T00:00:00Z", count: 2 };
+  surface.applyIssueMonitorStatus({ enabled: true, state: "active", autonomous_issues: [
+    { issue_number: 62, phase: "reviewing", steering,
+      review_dispatch_hold: { reason: "Review capacity", since: "2026-11-13T00:00:00Z" } },
+    { issue_number: 63, phase: "idle", steering },
+  ] });
+  surface.applyIssueMonitorInbox([61, 62, 63].map(number => ({
+    issue: { number, title: `Issue ${number}`, state: "open" },
+    state: number === 61 ? "needs_human" : "queued",
+    error_message: number === 61 ? "Choose credentials" : undefined,
+  })));
+  const snapshot = surface.issueMonitorModel.read().decisionAttention;
+  // Issue 62 is both a review hold and a PM steering request: one Issue, counted once.
+  assert.equal(snapshot.count, 3);
+  assert.equal(snapshot.summary, "Awaiting attention 3 | Needs human 1 | Review holds 1 | PM steering 2");
+  assert.ok(Object.isFrozen(snapshot));
+  assert.ok(strip.title.includes(snapshot.summary));
+  assert.ok(monitorBand(body).pill.title.includes(snapshot.summary));
+  // A view that recombines the component summaries itself must fail this regression.
+  surface.issueMonitorModel.update(model => ({ ...model,
+    humanAttention: { count: 9, summary: "Needs human 9", byIssue: {} } }));
+  assert.equal(strip.title.includes("Needs human 9"), false);
+  surface.applyIssueMonitorInbox([61, 62, 63].map(number => ({
+    issue: { number, title: `Issue ${number}`, state: "open" }, state: "queued",
+  })));
+  assert.equal(surface.issueMonitorModel.read().decisionAttention.summary,
+    "Awaiting attention 2 | Needs human 0 | Review holds 1 | PM steering 2");
+  assert.ok(strip.title.includes("Awaiting attention 2"));
+  assert.ok(monitorBand(body).pill.title.includes("Awaiting attention 2"));
+  assert.equal(snapshot.count, 3, "older snapshots stay unchanged");
+});
+
+// SPEC #5016 HSK: unanswered PM decisions join the same combined value.
+test("awaiting attention adds each PM window's unanswered decisions once", async (t) => {
+  const { body, surface, document } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  const source = readFileSync(resolve(here, "../operator-shell.js"), "utf8")
+    .replace('from "/theme-manager.js"', `from "${new URL("../theme-manager.js", import.meta.url).href}"`)
+    .replace('from "/hotkey.js"', `from "${new URL("../hotkey.js", import.meta.url).href}"`)
+    .replace('from "/theme-toggle.js"', `from "${new URL("../theme-toggle.js", import.meta.url).href}"`);
+  const { subscribeIssueMonitorStatus } = await import(`data:text/javascript,${encodeURIComponent(source)}`);
+  const strip = document.createElement("div");
+  strip.id = "op-strip-issue-monitor";
+  strip.innerHTML = '<span id="op-strip-issue-monitor-value"></span>';
+  document.body.appendChild(strip);
+  t.after(subscribeIssueMonitorStatus(document, surface.issueMonitorModel));
+  surface.applyPmDecisions("pm-1", { waiting: 2, ids: ["d-1", "d-2"] });
+  assert.equal(surface.issueMonitorModel.read().decisionAttention.summary,
+    "Awaiting attention 2 | PM decisions 2", "decisions count before any inbox snapshot");
+  surface.applyIssueMonitorInbox([61, 62].map(number => ({
+    issue: { number, title: `Issue ${number}`, state: "open" },
+    state: number === 61 ? "needs_human" : "queued",
+    error_message: number === 61 ? "Choose credentials" : undefined,
+  })));
+  surface.applyPmDecisions("pm-2", { waiting: 1, ids: ["d-1"] });
+  surface.applyPmDecisions("pm-loading", null);
+  const snapshot = surface.issueMonitorModel.read().decisionAttention;
+  // Decision ids are per PM window: the same id in two windows is two decisions.
+  assert.equal(snapshot.count, 4);
+  assert.equal(snapshot.summary, "Awaiting attention 4 | Needs human 1 | PM decisions 3");
+  assert.ok(Object.isFrozen(snapshot));
+  assert.ok(strip.title.includes(snapshot.summary));
+  assert.ok(monitorBand(body).pill.title.includes(snapshot.summary));
+  surface.applyPmDecisions("pm-1", null);
+  assert.equal(surface.issueMonitorModel.read().decisionAttention.summary,
+    "Awaiting attention 2 | Needs human 1 | PM decisions 1", "a closed PM window stops counting");
+  assert.ok(strip.title.includes("Awaiting attention 2"));
+  assert.ok(monitorBand(body).pill.title.includes("Awaiting attention 2"));
+  assert.equal(snapshot.count, 4, "older snapshots stay unchanged");
+});
+
+// SPEC #5016 HSV: unresolved reviews join the same Issue union.
+test("awaiting attention counts an Issue with an unresolved review once", async (t) => {
+  const { body, surface, document } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  const source = readFileSync(resolve(here, "../operator-shell.js"), "utf8")
+    .replace('from "/theme-manager.js"', `from "${new URL("../theme-manager.js", import.meta.url).href}"`)
+    .replace('from "/hotkey.js"', `from "${new URL("../hotkey.js", import.meta.url).href}"`)
+    .replace('from "/theme-toggle.js"', `from "${new URL("../theme-toggle.js", import.meta.url).href}"`);
+  const { subscribeIssueMonitorStatus } = await import(`data:text/javascript,${encodeURIComponent(source)}`);
+  const strip = document.createElement("div");
+  strip.id = "op-strip-issue-monitor";
+  strip.innerHTML = '<span id="op-strip-issue-monitor-value"></span>';
+  document.body.appendChild(strip);
+  t.after(subscribeIssueMonitorStatus(document, surface.issueMonitorModel));
+  surface.applyIssueMonitorInbox([71, 72].map(number => ({
+    issue: { number, title: `Issue ${number}`, state: "open" },
+    state: number === 71 ? "needs_human" : "queued",
+    error_message: number === 71 ? "Choose credentials" : undefined,
+  })));
+  surface.applyPmReviewAttention("pm-1", [
+    { pr_number: 801, issue_numbers: [71], reason: "Changes requested" },
+    { pr_number: 802, issue_numbers: [72], reason: "2 unresolved review threads" },
+    { pr_number: 803, issue_numbers: [], reason: "Changes requested" },
+  ]);
+  // The same PR observed by a second PM window is still one review.
+  surface.applyPmReviewAttention("pm-2", [{ pr_number: 802, issue_numbers: [72], reason: "Changes requested" }]);
+  surface.applyPmReviewAttention("pm-loading", null);
+  const snapshot = surface.issueMonitorModel.read().decisionAttention;
+  // #71 needs a human and has a review: one Issue. #803 has no Issue: its own entry.
+  assert.equal(snapshot.count, 3);
+  assert.equal(snapshot.summary, "Awaiting attention 3 | Needs human 1 | Unresolved reviews 3");
+  assert.ok(Object.isFrozen(snapshot));
+  assert.ok(strip.title.includes(snapshot.summary));
+  assert.ok(monitorBand(body).pill.title.includes(snapshot.summary));
+  surface.applyPmReviewAttention("pm-1", null);
+  assert.equal(surface.issueMonitorModel.read().decisionAttention.summary,
+    "Awaiting attention 2 | Needs human 1 | Unresolved reviews 1", "a closed PM window stops counting");
+  assert.ok(strip.title.includes("Awaiting attention 2"));
+  assert.ok(monitorBand(body).pill.title.includes("Awaiting attention 2"));
+  assert.equal(snapshot.count, 3, "older snapshots stay unchanged");
+});
+
+test("needs_human derives one immutable count and reason for shared Issue views", async (t) => {
+  const { body, surface, sent, mod } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  assert.equal(surface.issueMonitorModel.read().humanAttention?.count, null,
+    "no inbox snapshot is unknown, not zero");
+  const item = (number, state, error_message, issueState = "open") => ({
+    issue: { number, title: `Issue ${number}`, state: issueState }, state, error_message,
+  });
+  surface.applyIssueMonitorInbox([
+    item(41, "needs_human", "Old reason"), item(41, "needs_human", "Choose credentials"),
+    item(42, "needs_human", "stopped: PM paused"),
+    item(43, "needs_human", "SessionStart readiness pending: stale", "closed"),
+    item(44, "launched", "Running"),
+  ]);
+  const snapshot = surface.issueMonitorModel.read().humanAttention;
+  assert.deepEqual(snapshot, { count: 1, summary: "Needs human 1",
+    byIssue: { 41: { reason: "Choose credentials" } } });
+  assert.ok(Object.isFrozen(snapshot.byIssue[41]));
+  assert.equal(Boolean(body.querySelector('[data-issue-number="43"] [data-key="reason"]')), false,
+    "a closed issue must not bypass the shared attention snapshot with a raw reason");
+  assert.equal(mod.issueRowStateModel({ entry: {
+    ...knowledgeEntry(41, "needs_human"), human_attention: snapshot.byIssue[41],
+    error_message: "Stale view-local reason",
+  } }).secondary[0].label, snapshot.byIssue[41].reason);
+  assert.match(monitorBand(body).pill.title, /Needs human 1/);
+  body.querySelector('[data-issue-number="41"] .knowledge-row-select').click();
+  const request = sent.findLast(message => message.kind === "select_knowledge_bridge_entry");
+  surface.applyKnowledgeReceiveEvent({ kind: "knowledge_detail", id: "win-1", knowledge_kind: "issue",
+    request_id: request.request_id, detail: { number: 41, title: "Issue 41", state: "open",
+      labels: [], sections: [], related_works: [] } });
+  const reason = () => body.querySelector('[data-issue-number="41"] [data-key="reason"]')?.textContent;
+  const detailReason = () => body.querySelector('.issue-detail-status [data-key="reason"]')?.textContent;
+  assert.equal(reason(), snapshot.byIssue[41].reason);
+  assert.equal(detailReason(), reason());
+  surface.applyIssueMonitorStatus({ enabled: true, needs_human_count: 99 });
+  assert.equal(surface.issueMonitorModel.read().humanAttention.count, 99);
+  assert.equal(surface.issueMonitorModel.read().decisionAttention.count, null,
+    "different snapshot memberships leave the combined total unknown");
+  assert.match(monitorBand(body).pill.title, /Needs human 99/);
+  surface.applyIssueMonitorInbox([item(41, "needs_human", undefined)]);
+  assert.equal(reason(), "Human decision required");
+  assert.equal(detailReason(), reason());
+  surface.applyIssueMonitorInbox([item(41, "queued", undefined)]);
+  assert.equal(surface.issueMonitorModel.read().humanAttention.count, 99);
+  assert.equal(reason(), undefined);
+  assert.equal(detailReason(), undefined);
+  surface.applyIssueMonitorStatus({ enabled: true, needs_human_count: null });
+  assert.equal(surface.issueMonitorModel.read().humanAttention.count, null);
+  surface.applyIssueMonitorStatus({ enabled: true, needs_human_count: 0 });
+  surface.applyIssueMonitorInbox([]);
+  assert.deepEqual(surface.issueMonitorModel.read().humanAttention,
+    { count: 0, summary: "Needs human 0", byIssue: {} });
+  assert.equal(snapshot.byIssue[41].reason, "Choose credentials");
+});
+
+test("Issue #7536 external verification waits do not retain stale decision attention", async (t) => {
+  const { surface } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  surface.applyIssueMonitorStatus({ autonomous_issues: [{ issue_number: 7536, phase: "implementing",
+    needs_human: false, review_dispatch_hold: { reason: "Old dispatch hold" },
+    steering: { reason: "Old steering request" } }] });
+  surface.applyIssueMonitorInbox([{ issue: { number: 7536, state: "open" }, state: "awaiting_verification" }]);
+  const snapshot = surface.issueMonitorModel.read();
+  assert.equal(snapshot.humanAttention.count, 0);
+  assert.equal(snapshot.reviewAttention.count, 0);
+  assert.equal(snapshot.steeringAttention.count, 0);
+  assert.equal(snapshot.decisionAttention.count, 0);
+});
+
+test("review holds derive shared counts and reasons from current status and open inbox", async (t) => {
+  const { body, surface, sent, mod } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  const record = (issue_number, phase = "implementing", reason = "max_active reached (2/2)") => ({
+    issue_number, phase, review_dispatch_hold: { reason, since: "2026-11-12T15:00:00Z" },
+  });
+  const status = { autonomous_issues: [record(51, "implementing", "Old reason"), record(51),
+    record(52), record(53), record(54, "merged"), record(55)] };
+  surface.applyIssueMonitorStatus(status);
+  assert.equal(surface.issueMonitorModel.read().reviewAttention?.count, null,
+    "status without an inbox snapshot is unknown");
+  const inbox = [51, 52, 53, 54, 55].map(number => ({
+    issue: { number, title: `Issue ${number}`, state: number === 53 ? "closed" : "open" },
+    state: [52, 55].includes(number) ? "needs_human" : "launched",
+    error_message: number === 52 ? "stopped: PM paused" : undefined,
+  }));
+  surface.applyIssueMonitorInbox(inbox);
+  const snapshot = surface.issueMonitorModel.read().reviewAttention;
+  assert.deepEqual(snapshot, { count: 1, summary: "Review holds 1",
+    byIssue: { 51: { reason: "max_active reached (2/2)" } } });
+  assert.ok(Object.isFrozen(snapshot.byIssue[51]));
+  assert.equal(mod.issueRowStateModel({ entry: {
+    ...knowledgeEntry(51, "launched"), review_attention: snapshot.byIssue[51],
+  } }).secondary[0].label, snapshot.byIssue[51].reason);
+  assert.match(monitorBand(body).pill.title, /Review holds 1/);
+  body.querySelector('[data-issue-number="51"] .knowledge-row-select').click();
+  const request = sent.findLast(message => message.kind === "select_knowledge_bridge_entry");
+  surface.applyKnowledgeReceiveEvent({ kind: "knowledge_detail", id: "win-1", knowledge_kind: "issue",
+    request_id: request.request_id, detail: { number: 51, title: "Issue 51", state: "open",
+      labels: [], sections: [], related_works: [] } });
+  const rowReason = () => body.querySelector('[data-issue-number="51"] [data-key="reason"]')?.textContent;
+  const detailReason = () => body.querySelector('.issue-detail-status [data-key="reason"]')?.textContent;
+  assert.equal(rowReason(), snapshot.byIssue[51].reason);
+  assert.equal(detailReason(), rowReason());
+  surface.applyIssueMonitorStatus({ enabled: true });
+  assert.equal(surface.issueMonitorModel.read().reviewAttention.count, 0,
+    "omitting the status list must clear old holds");
+  assert.equal(rowReason(), undefined);
+  assert.equal(detailReason(), undefined);
+  surface.applyIssueMonitorStatus(status);
+  assert.equal(surface.issueMonitorModel.read().reviewAttention.count, 1,
+    "inbox-first updates derive the same value");
+  for (const state of ["launch_failed", "agent_failed"]) {
+    surface.applyIssueMonitorInbox([{ ...inbox[0], state, error_message: "Implementation failed" }]);
+    assert.equal(surface.issueMonitorModel.read().reviewAttention.count, 0,
+      "a terminal inbox overrides the earlier review hold");
+    assert.equal(rowReason(), "Implementation failed");
+    assert.equal(detailReason(), undefined);
+  }
+  surface.applyIssueMonitorInbox([{ ...inbox[0], issue: { ...inbox[0].issue, state: "closed" } }]);
+  assert.equal(surface.issueMonitorModel.read().reviewAttention.count, 0);
+  assert.equal(rowReason(), undefined);
+  assert.equal(detailReason(), undefined);
+  assert.equal(snapshot.byIssue[51].reason, "max_active reached (2/2)");
+});
+
+test("PM steering derives shared issue counts and current reasons", async (t) => {
+  const { body, surface, sent } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  const record = (issue_number, phase = "idle", reason = "Retry budget needs PM steering") => ({
+    issue_number, phase, steering: { reason, requested_at: "2026-11-13T00:00:00Z", count: 9 },
+  });
+  surface.applyIssueMonitorInbox([{ issue: { number: 51, state: "open" }, state: "queued" }]);
+  assert.equal(surface.issueMonitorModel.read().steeringAttention?.count, null,
+    "inbox without a status snapshot is unknown");
+  const status = { autonomous_issues: [record(51, "idle", "Old reason"), record(51),
+    record(52), record(53), record(54, "merged"), record(55), record(56, "unknown")] };
+  surface.applyIssueMonitorStatus(status);
+  const inbox = [51, 52, 53, 54, 55, 56].map(number => ({
+    issue: { number, title: `Issue ${number}`, state: number === 53 ? "closed" : "open" },
+    state: [52, 55].includes(number) ? "needs_human" : "queued",
+    error_message: number === 52 ? "stopped: PM paused" : undefined,
+  }));
+  surface.applyIssueMonitorInbox(inbox);
+  const snapshot = surface.issueMonitorModel.read().steeringAttention;
+  assert.deepEqual(snapshot, { count: 1, summary: "PM steering 1",
+    byIssue: { 51: { reason: "Retry budget needs PM steering" } } });
+  assert.ok(Object.isFrozen(snapshot.byIssue[51]));
+  assert.match(monitorBand(body).pill.title, /PM steering 1/);
+  body.querySelector('[data-issue-number="51"] .knowledge-row-select').click();
+  const request = sent.findLast(message => message.kind === "select_knowledge_bridge_entry");
+  surface.applyKnowledgeReceiveEvent({ kind: "knowledge_detail", id: "win-1", knowledge_kind: "issue",
+    request_id: request.request_id, detail: { number: 51, title: "Issue 51", state: "open",
+      labels: [], sections: [], related_works: [] } });
+  const rowReason = () => body.querySelector('[data-issue-number="51"] [data-key="reason"]')?.textContent;
+  const detailReason = () => body.querySelector('.issue-detail-status [data-key="reason"]')?.textContent;
+  assert.equal(rowReason(), snapshot.byIssue[51].reason);
+  assert.equal(detailReason(), rowReason());
+  for (const state of ["launch_failed", "agent_failed"]) {
+    surface.applyIssueMonitorInbox([{ ...inbox[0], state, error_message: "Latest failure" }]);
+    assert.equal(surface.issueMonitorModel.read().steeringAttention.count, 1,
+      "failed attempts can legitimately require PM steering");
+    assert.equal(rowReason(), "Latest failure", "an older steering request must not hide a new failure");
+    assert.equal(detailReason(), rowReason());
+  }
+  surface.applyIssueMonitorInbox([{ ...inbox[0], state: "not_ready", exclusion_reason: "Latest readiness blocker" }]);
+  assert.equal(rowReason(), "Latest readiness blocker", "current readiness must outrank an older steering request");
+  assert.equal(detailReason(), rowReason());
+  surface.applyIssueMonitorInbox([inbox[0]]);
+  const held = record(51, "reviewing", " ");
+  held.review_dispatch_hold = { reason: "Review capacity", since: "2026-11-13T00:00:00Z" };
+  surface.applyIssueMonitorStatus({ autonomous_issues: [held] });
+  assert.equal(surface.issueMonitorModel.read().steeringAttention.byIssue[51].reason, "PM steering requested");
+  assert.equal(surface.issueMonitorModel.read().reviewAttention.count, 1);
+  assert.equal(rowReason(), "PM steering requested", "PM steering and automatic review holds remain distinct");
+  surface.applyIssueMonitorStatus({ autonomous_issues: [{ issue_number: 51, phase: "idle" }] });
+  assert.equal(surface.issueMonitorModel.read().steeringAttention.count, 0);
+  assert.equal(rowReason(), undefined);
+  assert.equal(detailReason(), undefined);
+  surface.applyIssueMonitorStatus(status);
+  assert.equal(surface.issueMonitorModel.read().steeringAttention.count, 1);
+  surface.applyIssueMonitorInbox([{ ...inbox[0], issue: { ...inbox[0].issue, state: "closed" } }]);
+  assert.equal(surface.issueMonitorModel.read().steeringAttention.count, 0);
+  surface.applyIssueMonitorInbox([inbox[0]]);
+  surface.applyIssueMonitorStatus({ enabled: true });
+  assert.equal(surface.issueMonitorModel.read().steeringAttention.count, 0, "omitted status list clears old requests");
+  assert.equal(snapshot.byIssue[51].reason, "Retry budget needs PM steering");
+});
+
 test("Issues band presents and clears the quota-hold provider and reset", async (t) => {
   const { body, surface } = await makeFixture();
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));
@@ -595,7 +953,8 @@ test("Issue #3620: the Operator strip preserves a zero effective worker cap", as
     .replace('from "/theme-toggle.js"', `from "${new URL("../theme-toggle.js", import.meta.url).href}"`);
   const { renderIssueMonitorStatus } = await import(`data:text/javascript,${encodeURIComponent(source)}`);
   const { document } = parseHTML('<div id="op-strip-issue-monitor"><span id="op-strip-issue-monitor-value"></span></div>');
-  renderIssueMonitorStatus(document, { enabled: true, state: "idle", queue_len: 2, active_count: 0, max_active_agents: 0 });
+  renderIssueMonitorStatus(document, { status: { enabled: true, state: "idle" },
+    counts: { queue: 2, active: 0, maxActive: 0 } });
   assert.equal(document.getElementById("op-strip-issue-monitor-value").textContent, "Idle Q2 A0/0");
 });
 
@@ -649,7 +1008,7 @@ test("Issues band preserves higher-priority states around quota-hold metadata", 
     });
 
     assert.equal(band.text(), "Waiting · Hold | Queue 3 | Active 0 · 0 issues · PM 0");
-    assert.equal(band.pill.title, "Provider codex | Reset 2026-09-04T09:30:00Z");
+    assert.equal(band.pill.title, "Provider codex | Reset 2026-09-04T09:30:00Z | Awaiting attention 0 | Needs human 0 | Review holds 0 | PM steering 0");
   }
 
   surface.applyIssueMonitorStatus({
@@ -1127,11 +1486,20 @@ test("AC-M1: approved header reads status, actions, then one filter row", async 
   assert.deepEqual([...status.querySelectorAll(".issue-monitor-stat-label")].map(node => node.textContent),
     ["Issues", "Agent slots", "Queued", "Backlog", "Verification slots", "Last scan"]);
   surface.applyIssueMonitorStatus({enabled:true,state:"idle",active_count:1,max_active_agents:3,
-    max_active_agents_override:3,queue_len:2,unqueued_open_count:8,last_scan_at:"2026-10-25T00:00:00Z"});
+    max_active_agents_override:3,queue_len:2,unqueued_open_count:8,last_scan_at:"2026-10-25T00:00:00Z",
+    verification_capacity:{capacity:4,running:1,available:3}});
   assert.equal(status.querySelector('[data-metric="capacity"]').textContent,"1 of 3");
   assert.equal(status.querySelector('[data-metric="backlog"]').textContent,"8");
   assert.equal(status.querySelector('[data-metric="last-scan"]').textContent,"00:00:00 UTC");
-  assert.equal(status.querySelector('[data-metric="verification"]').textContent,"Not reported");
+  const verification = status.querySelector('[data-metric="verification"]');
+  assert.equal(verification.textContent,"1 of 4 · 3 available");
+  assert.match(verification.getAttribute("aria-description"), /1 running, 3 available, capacity 4/);
+  assert.equal(verification.getAttribute("title"), null, "no stale native unavailable tooltip");
+  surface.applyIssueMonitorStatus({verification_capacity:{capacity:4,running:0,available:4}});
+  assert.equal(verification.textContent,"0 of 4 · 4 available");
+  surface.applyIssueMonitorStatus({});
+  assert.equal(verification.textContent,"Unavailable", "missing observations clear stale measured values");
+  surface.applyIssueMonitorStatus({enabled:true,state:"idle",active_count:1,max_active_agents:3,max_active_agents_override:3});
   const limit = controls.querySelector('[data-action="monitor-limit"]');
   assert.equal(limit.value,"3");
   limit.value="4";
@@ -1600,7 +1968,7 @@ test("queue priority displays canonical reasons and observed assignment without 
   surface.applyKnowledgeReceiveEvent({ kind: "knowledge_entries", id: "win-1", knowledge_kind: "issue",
     request_id: load.request_id, entries: [1, 2, 3].map(number => knowledgeEntry(number, "queued", number)), refresh_enabled: true });
   surface.applyIssueMonitorStatus({ terminal_queue: [
-    { number: 1, queued_by: "urgent", priority: "urgent", priority_reason: "urgent_label", assigned_by: "alice", assigned_at: "2026-10-03T01:00:00Z" },
+    { number: 1, queued_by: "urgent", priority: "urgent", priority_reason: "urgent", assigned_by: "alice", assigned_at: "2026-10-03T01:00:00Z" },
     { number: 2, priority: "normal", priority_reason: "urgent_limit_reached" },
     { number: 3, priority: "normal", priority_reason: "pm_demoted", assigned_by: "pm-session", assigned_at: "2026-10-03T02:00:00Z" },
   ] });

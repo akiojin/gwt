@@ -10,12 +10,6 @@ impl LaunchWizardState {
                 .live_sessions
                 .iter()
                 .find(|session| session.session_id == entry.session_id)
-                .or_else(|| {
-                    context
-                        .live_sessions
-                        .iter()
-                        .find(|session| session.agent_id == entry.agent_id)
-                })
                 .map(|session| session.window_id.clone());
         }
     }
@@ -70,6 +64,7 @@ impl LaunchWizardState {
             docker_lifecycle_intent,
             skip_permissions: false,
             codex_fast_mode: false,
+            codex_speed: Default::default(),
             hermes_provider: String::new(),
             hermes_profile: String::new(),
             hermes_toolsets: String::new(),
@@ -521,6 +516,11 @@ impl LaunchWizardState {
             LaunchWizardAction::ClearLinkedIssue => {
                 self.linked_issue_number = None;
             }
+            LaunchWizardAction::SetCodexSpeed { speed } => {
+                if self.agent_is_codex() {
+                    self.codex_speed = speed;
+                }
+            }
             LaunchWizardAction::SetFastMode { enabled } => {
                 self.codex_fast_mode = enabled && self.current_agent_supports_fast_mode();
             }
@@ -947,6 +947,7 @@ impl LaunchWizardState {
         self.apply_restored_reasoning(entry.reasoning.clone());
         self.skip_permissions = entry.skip_permissions;
         self.codex_fast_mode = self.restored_fast_mode(&entry.agent_id, entry.codex_fast_mode);
+        self.codex_speed = entry.codex_speed;
         if let Some(resume_session_id) = entry.resume_session_id.clone() {
             self.mode = "resume".to_string();
             self.resume_session_id = Some(resume_session_id);
@@ -1010,6 +1011,7 @@ impl LaunchWizardState {
         self.apply_restored_reasoning(entry.reasoning);
         self.skip_permissions = entry.skip_permissions;
         self.codex_fast_mode = self.restored_fast_mode(&entry.agent_id, entry.codex_fast_mode);
+        self.codex_speed = entry.codex_speed;
         match mode {
             QuickStartLaunchMode::Resume => {
                 if let Some(window_id) = entry.live_window_id {
@@ -1071,6 +1073,7 @@ impl LaunchWizardState {
         self.resume_session_id = None;
         self.skip_permissions = profile.skip_permissions;
         self.codex_fast_mode = self.restored_fast_mode(&profile.agent_id, profile.fast_mode);
+        self.codex_speed = profile.codex_speed;
         // Issue #3863 AC-7: Hermes-specific values. `set_hermes_option` is
         // agent-agnostic state, so these only carry values for Hermes profiles.
         let hermes = profile.hermes;
@@ -1245,6 +1248,7 @@ impl LaunchWizardState {
             self.resume_session_id = None;
             self.skip_permissions = false;
             self.codex_fast_mode = false;
+            self.codex_speed = Default::default();
         } else {
             self.restore_agent_draft_or_defaults();
         }
@@ -1443,6 +1447,7 @@ impl LaunchWizardState {
 
         if !self.current_agent_supports_fast_mode() {
             self.codex_fast_mode = false;
+            self.codex_speed = Default::default();
         }
         self.sync_reasoning_state();
     }
@@ -1843,9 +1848,7 @@ impl LaunchWizardState {
     }
 
     pub(super) fn fast_mode_enabled_for_current_agent(&self) -> bool {
-        self.preserve_profile_launch_preferences
-            && self.codex_fast_mode
-            && self.current_agent_supports_fast_mode()
+        !self.agent_is_codex() && self.codex_fast_mode && self.current_agent_supports_fast_mode()
     }
 
     /// SPEC-2014 2026-05-18 amendment FR-D: filtered Execution Mode option
@@ -2032,6 +2035,7 @@ impl LaunchWizardState {
                 resume_session_id: self.resume_session_id.clone(),
                 skip_permissions: self.skip_permissions,
                 codex_fast_mode: self.codex_fast_mode && self.current_agent_supports_fast_mode(),
+                codex_speed: self.codex_speed,
             },
         );
     }
@@ -2067,6 +2071,7 @@ impl LaunchWizardState {
         let source_agent_id = self.agent_id.clone();
         self.skip_permissions = draft.skip_permissions;
         self.codex_fast_mode = self.restored_fast_mode(&source_agent_id, draft.codex_fast_mode);
+        self.codex_speed = draft.codex_speed;
     }
 
     fn reset_agent_draft_defaults(&mut self) {
@@ -2077,6 +2082,7 @@ impl LaunchWizardState {
         self.resume_session_id = None;
         self.skip_permissions = false;
         self.codex_fast_mode = false;
+        self.codex_speed = Default::default();
     }
 
     pub(super) fn normalize_execution_mode(&mut self) {
@@ -2104,26 +2110,14 @@ impl LaunchWizardState {
     }
 
     pub(super) fn current_reasoning_options(&self) -> Vec<ReasoningDisplayOption> {
-        if self.agent_is_codex() {
-            codex_reasoning_options_for_model(&self.model)
-        } else if self.effective_agent_id() == "grok" {
-            GROK_REASONING_OPTIONS.to_vec()
-        } else if self.effective_agent_id() == "claude"
-            && is_claude_opus_tier_model(self.model.as_str())
-        {
-            let mut options = CLAUDE_OPUS_REASONING_OPTIONS.to_vec();
-            // `ultracode` is opt-in and only usable on Opus-tier models with
-            // Claude Code >= 2.1.154 and workflows enabled. It is the last
-            // non-default row, so removing it keeps every other index stable.
-            if !self.current_claude_ultracode_supported() {
-                options.retain(|option| option.stored_value != "ultracode");
-            }
-            options
-        } else if self.effective_agent_id() == "claude" && self.model == "sonnet" {
-            CLAUDE_SONNET_REASONING_OPTIONS.to_vec()
-        } else {
-            Vec::new()
+        if self.effective_agent_id() == "codex" && !self.launch_target_is_agent() {
+            return Vec::new();
         }
+        reasoning_options_for_agent_model(
+            self.effective_agent_id(),
+            &self.model,
+            self.current_claude_ultracode_supported(),
+        )
     }
 
     fn current_claude_ultracode_supported(&self) -> bool {
@@ -2212,6 +2206,7 @@ impl LaunchWizardState {
         self.apply_restored_reasoning(entry.reasoning);
         self.skip_permissions = entry.skip_permissions;
         self.codex_fast_mode = self.restored_fast_mode(&entry.agent_id, entry.codex_fast_mode);
+        self.codex_speed = entry.codex_speed;
 
         match selected_action {
             QuickStartAction::ReuseEntry { .. } => {
@@ -2237,7 +2232,6 @@ impl LaunchWizardState {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{TimeZone, Utc};
 
     use super::super::test_support::*;
     use super::*;
@@ -2321,6 +2315,7 @@ mod tests {
                 live_window_id: None,
                 skip_permissions: true,
                 codex_fast_mode: true,
+                codex_speed: Default::default(),
                 runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
                 docker_service: None,
                 docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -2386,6 +2381,7 @@ mod tests {
                 live_window_id: None,
                 skip_permissions: false,
                 codex_fast_mode: false,
+                codex_speed: Default::default(),
                 runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
                 docker_service: None,
                 docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -2448,6 +2444,7 @@ mod tests {
                 live_window_id: None,
                 skip_permissions: false,
                 codex_fast_mode: false,
+                codex_speed: Default::default(),
                 runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
                 docker_service: None,
                 docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -2486,6 +2483,30 @@ mod tests {
         );
         state.set_agent_id("codex");
         state
+    }
+
+    #[test]
+    fn explicit_codex_speed_survives_drafts_and_builds_launch_args() {
+        let mut state = codex_manual_state();
+        assert_eq!(state.codex_speed, gwt_agent::CodexSpeed::Off);
+        state.apply(LaunchWizardAction::SetCodexSpeed {
+            speed: gwt_agent::CodexSpeed::Ultrafast,
+        });
+        assert_eq!(state.view().codex_speed, gwt_agent::CodexSpeed::Ultrafast);
+        assert!(state
+            .build_launch_config()
+            .unwrap()
+            .args
+            .iter()
+            .any(|arg| arg == "service_tier=ultrafast"));
+        state.apply(LaunchWizardAction::SetAgent {
+            agent_id: "claude".into(),
+        });
+        assert!(!state.view().show_codex_speed);
+        state.apply(LaunchWizardAction::SetAgent {
+            agent_id: "codex".into(),
+        });
+        assert_eq!(state.codex_speed, gwt_agent::CodexSpeed::Ultrafast);
     }
 
     #[test]
@@ -2606,6 +2627,7 @@ mod tests {
             session_mode: gwt_agent::SessionMode::Normal,
             skip_permissions: false,
             fast_mode: false,
+            codex_speed: Default::default(),
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             docker_service: None,
             docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -2708,6 +2730,7 @@ mod tests {
                 live_window_id: None,
                 skip_permissions: false,
                 codex_fast_mode: false,
+                codex_speed: Default::default(),
                 runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
                 docker_service: None,
                 docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -2755,6 +2778,7 @@ mod tests {
                 live_window_id: None,
                 skip_permissions: false,
                 codex_fast_mode: false,
+                codex_speed: Default::default(),
                 runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
                 docker_service: None,
                 docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -2790,6 +2814,7 @@ mod tests {
             session_mode: gwt_agent::SessionMode::Normal,
             skip_permissions: false,
             fast_mode: false,
+            codex_speed: Default::default(),
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             docker_service: None,
             docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -2848,6 +2873,7 @@ mod tests {
             session_mode: gwt_agent::SessionMode::Normal,
             skip_permissions: false,
             fast_mode: false,
+            codex_speed: Default::default(),
             runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
             docker_service: None,
             docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -3027,6 +3053,7 @@ mod tests {
                 session_mode: gwt_agent::SessionMode::Continue,
                 skip_permissions: false,
                 fast_mode: true,
+                codex_speed: Default::default(),
                 runtime_target: gwt_agent::LaunchRuntimeTarget::Docker,
                 docker_service: Some("gwt".to_string()),
                 docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Restart,
@@ -3085,6 +3112,7 @@ mod tests {
                 session_mode: gwt_agent::SessionMode::Normal,
                 skip_permissions: false,
                 fast_mode: false,
+                codex_speed: Default::default(),
                 runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
                 docker_service: None,
                 docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -3134,6 +3162,7 @@ mod tests {
                 session_mode: gwt_agent::SessionMode::Normal,
                 skip_permissions: false,
                 fast_mode: false,
+                codex_speed: Default::default(),
                 runtime_target: gwt_agent::LaunchRuntimeTarget::Docker,
                 docker_service: Some("missing".to_string()),
                 docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Restart,
@@ -3167,6 +3196,7 @@ mod tests {
                 session_mode: gwt_agent::SessionMode::Normal,
                 skip_permissions: false,
                 fast_mode: false,
+                codex_speed: Default::default(),
                 runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
                 docker_service: None,
                 docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -3203,6 +3233,7 @@ mod tests {
                 session_mode: gwt_agent::SessionMode::Normal,
                 skip_permissions: false,
                 fast_mode: false,
+                codex_speed: Default::default(),
                 runtime_target: gwt_agent::LaunchRuntimeTarget::Docker,
                 docker_service: Some("worker".to_string()),
                 docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Restart,
@@ -3389,6 +3420,7 @@ mod tests {
                 session_mode: gwt_agent::SessionMode::Normal,
                 skip_permissions: true,
                 fast_mode: true,
+                codex_speed: Default::default(),
                 runtime_target: gwt_agent::LaunchRuntimeTarget::Docker,
                 docker_service: Some("missing".to_string()),
                 docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Restart,
@@ -3415,6 +3447,7 @@ mod tests {
                 session_mode: gwt_agent::SessionMode::Normal,
                 skip_permissions: true,
                 fast_mode: true,
+                codex_speed: Default::default(),
                 runtime_target: gwt_agent::LaunchRuntimeTarget::Docker,
                 docker_service: Some("gwt".to_string()),
                 docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Restart,
@@ -3448,6 +3481,7 @@ mod tests {
                 session_mode: gwt_agent::SessionMode::Normal,
                 skip_permissions: true,
                 fast_mode: true,
+                codex_speed: Default::default(),
                 runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
                 docker_service: None,
                 docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
@@ -3515,6 +3549,7 @@ mod tests {
                     session_mode: gwt_agent::SessionMode::Normal,
                     skip_permissions: false,
                     fast_mode: false,
+                    codex_speed: Default::default(),
                     runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
                     docker_service: None,
                     docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::CreateAndStart,
@@ -3537,7 +3572,7 @@ mod tests {
             "feature/old",
             Path::new("/tmp/old-repo"),
             gwt_agent::AgentId::Codex,
-            Utc.with_ymd_and_hms(2026, 5, 10, 9, 0, 0).unwrap(),
+            gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 5, 10, 9, 0, 0).unwrap(),
             None,
         );
         codex.model = Some("gpt-6-luna".to_string());
@@ -3597,7 +3632,7 @@ mod tests {
             "feature/old",
             Path::new("/tmp/old-repo"),
             gwt_agent::AgentId::Codex,
-            Utc.with_ymd_and_hms(2026, 5, 10, 9, 0, 0).unwrap(),
+            gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 5, 10, 9, 0, 0).unwrap(),
             None,
         );
         let previous_profiles =
@@ -3643,7 +3678,7 @@ mod tests {
                 "feature/old",
                 Path::new("/tmp/old-repo"),
                 gwt_agent::AgentId::Codex,
-                Utc.with_ymd_and_hms(2026, 5, 10, 9, 0, 0).unwrap(),
+                gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 5, 10, 9, 0, 0).unwrap(),
                 None,
             );
             let previous_profiles =
@@ -3926,7 +3961,7 @@ mod tests {
             "feature/old",
             Path::new("/tmp/old-repo"),
             gwt_agent::AgentId::Codex,
-            Utc.with_ymd_and_hms(2026, 5, 10, 9, 0, 0).unwrap(),
+            gwt_core::timestamp::UtcTimestamp::from_ymd_and_hms(2026, 5, 10, 9, 0, 0).unwrap(),
             None,
         );
         let previous_profiles =
@@ -3966,7 +4001,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_context_resolution_disables_legacy_claude_fast_mode() {
+    fn runtime_context_resolution_preserves_explicit_claude_fast_mode() {
         let mut state = LaunchWizardState::open_start_work_with_previous_profile(
             context(branch("origin/develop"), "work/20260527-fast"),
             "origin/develop".to_string(),
@@ -3983,14 +4018,14 @@ mod tests {
             agent_id: "claude".to_string(),
         });
         state.apply(LaunchWizardAction::SetFastMode { enabled: true });
-        assert!(!state.view().fast_mode);
+        assert!(state.view().fast_mode);
 
         state.apply(LaunchWizardAction::Submit);
         match state.completion.as_ref() {
             Some(LaunchWizardCompletion::ResolveRuntime(config)) => match config.as_ref() {
                 LaunchWizardLaunchRequest::Agent(config) => {
                     assert_eq!(config.agent_id, gwt_agent::AgentId::ClaudeCode);
-                    assert!(!config.fast_mode);
+                    assert!(config.fast_mode);
                 }
                 other => panic!("expected agent runtime resolve request, got {other:?}"),
             },
@@ -4011,19 +4046,19 @@ mod tests {
             open_branch_candidates: Vec::new(),
         });
 
-        assert!(!state.view().fast_mode);
+        assert!(state.view().fast_mode);
         // SPEC-2014 FR-127: ConfigureAndStart は Runtime→Confirm→Launch の3段。
         state.apply(LaunchWizardAction::Submit); // Runtime -> Confirm
         assert!(state.completion.is_none());
         assert!(state.view().show_confirm);
-        assert!(!state.view().fast_mode);
+        assert!(state.view().fast_mode);
         state.apply(LaunchWizardAction::Submit); // Confirm -> Launch
         match state.completion.as_ref() {
             Some(LaunchWizardCompletion::Launch(config)) => match config.as_ref() {
                 LaunchWizardLaunchRequest::Agent(config) => {
                     assert_eq!(config.agent_id, gwt_agent::AgentId::ClaudeCode);
-                    assert!(!config.fast_mode);
-                    assert!(!config.args.windows(2).any(|pair| {
+                    assert!(config.fast_mode);
+                    assert!(config.args.windows(2).any(|pair| {
                         pair[0] == "--settings" && pair[1].ends_with("claude-settings-fast.json")
                     }));
                 }
@@ -4185,6 +4220,7 @@ mod tests {
                 live_window_id: None,
                 skip_permissions: true,
                 codex_fast_mode: true,
+                codex_speed: Default::default(),
                 runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
                 docker_service: None,
                 docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,

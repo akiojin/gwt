@@ -12,6 +12,8 @@ export interface NativePage {
 export async function withNativeHiddenPage<T, A>(
   browserType: BrowserType, info: TestInfo, prepare: (page: NativePage) => Promise<void>,
   observe: (arg: A) => T | Promise<T>, arg: A,
+  /** Runs after the measured page natively returns to the foreground. */
+  restored?: (page: NativePage) => Promise<void>,
 ): Promise<T> {
   const server = await browserType.launchServer({ headless: false,
     args: ["--remote-debugging-port=0"], ignoreDefaultArgs: [
@@ -82,6 +84,11 @@ export async function withNativeHiddenPage<T, A>(
     }
     result = await evaluate(source(observe, arg));
     await send("Page.bringToFront");
+    if (restored) {
+      await expect.poll(attention, { message: "the measured page natively returns to the foreground" })
+        .toMatchObject({ hidden: false });
+      await restored(page);
+    }
     const screenshot = await send("Page.captureScreenshot", { format: "png" });
     await info.attach("native-background-after-measurement-foreground.png", {
       body: Buffer.from(screenshot.data, "base64"), contentType: "image/png",

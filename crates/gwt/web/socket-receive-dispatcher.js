@@ -377,6 +377,12 @@ function coalesceByKind(
   if (!queue || queue.length <= 1) {
     return queue ? queue.slice() : [];
   }
+  // A snapshot belongs to the workspace identity that preceded it. Keep this
+  // batch ordered, including output on either side of the snapshot, so a new
+  // session's screen cannot be applied to a runtime that is about to retire.
+  if (queue.some((entry) => kindFor(entry) === "terminal_snapshot")) {
+    return queue.slice();
+  }
   const streamedChunkLimit = normalizeStreamedChunkLimit(maxStreamedBeforeState);
   const lastIndexByKind = new Map();
   for (let i = 0; i < queue.length; i += 1) {
@@ -409,13 +415,18 @@ function coalesceByKind(
           state.push(event);
         }
       }
+    } else if (kind === "terminal_status" || kind === "window_state") {
+      // Workspace snapshots also carry runtime status. Keep both status event
+      // forms in arrival order with the surviving snapshot, or an older
+      // Starting snapshot can overwrite the SessionStart Idle that followed it.
+      activationState.push(event);
     } else if (kind && orderedStateKinds.has(kind)) {
       state.push(event);
     } else {
       streamed.push(event);
     }
   }
-  // Apply the surviving project activation before scoped snapshots and action
+  // Apply project activation and runtime status before scoped snapshots and action
   // outcomes. A dropped intermediate workspace_state must not leave a stale
   // project outcome ahead of the latest active-project fence.
   const orderedState = activationState.concat(state);

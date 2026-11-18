@@ -725,14 +725,22 @@ fn client_frame_hook_round_trips_through_json() {
 fn client_frame_subscribe_serializes_channel_list() {
     let frame = ClientFrame::Subscribe {
         channels: vec!["board".to_string(), "runtime-status".to_string()],
+        gui_window: false,
     };
     let json_value = serde_json::to_value(&frame).unwrap();
     assert_eq!(json_value["type"], "subscribe");
     assert_eq!(json_value["channels"][0], "board");
     assert_eq!(json_value["channels"][1], "runtime-status");
+    assert!(json_value.get("gui_window").is_none());
 
     let round_trip: ClientFrame = serde_json::from_value(json_value).unwrap();
     assert_eq!(round_trip, frame);
+    let legacy: ClientFrame = serde_json::from_value(json!({
+        "type": "subscribe",
+        "channels": ["board", "runtime-status"]
+    }))
+    .unwrap();
+    assert_eq!(legacy, frame);
 }
 
 #[test]

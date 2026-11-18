@@ -76,6 +76,7 @@ pub(crate) struct RawHookEvent {
     tool_use_id: Option<String>,
     tool_input: Option<serde_json::Value>,
     session_id: Option<String>,
+    prompt_id: Option<String>,
     transcript_path: Option<String>,
     prompt: Option<String>,
     cwd: Option<String>,
@@ -102,6 +103,9 @@ struct RawHookEventWire {
     session_id: Option<String>,
     #[serde(rename = "sessionId")]
     session_id_camel: Option<String>,
+    prompt_id: Option<String>,
+    #[serde(rename = "promptId")]
+    prompt_id_camel: Option<String>,
     transcript_path: Option<String>,
     #[serde(rename = "transcriptPath")]
     transcript_path_camel: Option<String>,
@@ -123,6 +127,7 @@ impl From<RawHookEventWire> for RawHookEvent {
             tool_use_id: wire.tool_use_id.or(wire.tool_use_id_camel),
             tool_input: wire.tool_input.or(wire.tool_input_camel),
             session_id: wire.session_id.or(wire.session_id_camel),
+            prompt_id: wire.prompt_id.or(wire.prompt_id_camel),
             transcript_path: wire.transcript_path.or(wire.transcript_path_camel),
             prompt: wire.prompt,
             cwd: wire.cwd,
@@ -152,6 +157,13 @@ impl RawHookEvent {
 
     pub(crate) fn session_id(&self) -> Option<HookSessionId> {
         HookSessionId::parse(self.session_id.as_deref())
+    }
+
+    pub(crate) fn native_prompt_id(&self) -> Option<&str> {
+        self.prompt_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
     }
 
     pub(crate) fn tool_name(&self) -> Option<&str> {
@@ -272,6 +284,7 @@ mod tests {
             tool_use_id: None,
             tool_input: None,
             session_id: Some(session_id.to_string()),
+            prompt_id: None,
             transcript_path: None,
             prompt: None,
             cwd: None,
@@ -283,12 +296,13 @@ mod tests {
     #[test]
     fn raw_hook_event_accepts_both_key_spellings_and_prefers_snake_case() {
         let raw = RawHookEvent::read_from_str(
-            r#"{"sessionId":"camel","session_id":"snake","toolName":"run_command","tool_name":"Bash","transcriptPath":"/c","transcript_path":"/s"}"#,
+            r#"{"sessionId":"camel","session_id":"snake","promptId":"camel-turn","prompt_id":"snake-turn","toolName":"run_command","tool_name":"Bash","transcriptPath":"/c","transcript_path":"/s"}"#,
         )
         .unwrap()
         .unwrap();
 
         assert_eq!(raw.session_id().unwrap().as_str(), "snake");
+        assert_eq!(raw.native_prompt_id(), Some("snake-turn"));
         assert_eq!(raw.tool_name(), Some("Bash"));
         assert_eq!(raw.transcript_path.as_deref(), Some("/s"));
     }

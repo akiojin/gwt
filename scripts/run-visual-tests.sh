@@ -1,6 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if ! NODE_VERSION="$(node --version 2>/dev/null)"; then
+  echo "[FAIL] The visual test runner requires Node.js 22.x. Could not run node --version. Put Node.js 22.x first on PATH." >&2
+  exit 1
+fi
+case "$NODE_VERSION" in
+  v22.*) ;;
+  *)
+    echo "[FAIL] The visual test runner requires Node.js 22.x. Found $NODE_VERSION. Put Node.js 22.x first on PATH." >&2
+    exit 1
+    ;;
+esac
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Single source for the pinned version: the browsers installed by
 # scripts/install-playwright-browsers.sh must be the revision this
@@ -91,11 +103,23 @@ Module._resolveFilename = function resolveFromPinnedPlaywright(
 };
 JS
 
-export GWT_PLAYWRIGHT_NODE_MODULES="${PLAYWRIGHT_NODE_MODULES}"
-export GWT_PLAYWRIGHT_CHECKOUT_ROOT="${GWT_PLAYWRIGHT_CHECKOUT_ROOT:-$ROOT}"
-export GWT_PLAYWRIGHT_PROJECT_ROOT="${GWT_PLAYWRIGHT_PROJECT_ROOT:-$ROOT}"
-export NODE_PATH="${PLAYWRIGHT_NODE_MODULES}${NODE_PATH:+:${NODE_PATH}}"
-export NODE_OPTIONS="--require ${PLAYWRIGHT_RESOLVER}${NODE_OPTIONS:+ ${NODE_OPTIONS}}"
+# Node reads environment paths directly, without Git Bash's argv conversion.
+PLAYWRIGHT_NODE_PATH_DELIMITER="$(node -p 'require("node:path").delimiter')"
+node_environment_path() {
+  if [[ "$PLAYWRIGHT_NODE_PATH_DELIMITER" == ";" ]]; then
+    cygpath -m "$1"
+  else
+    printf '%s\n' "$1"
+  fi
+}
+
+GWT_PLAYWRIGHT_NODE_MODULES="$(node_environment_path "$PLAYWRIGHT_NODE_MODULES")"
+GWT_PLAYWRIGHT_CHECKOUT_ROOT="$(node_environment_path "${GWT_PLAYWRIGHT_CHECKOUT_ROOT:-$ROOT}")"
+GWT_PLAYWRIGHT_PROJECT_ROOT="$(node_environment_path "${GWT_PLAYWRIGHT_PROJECT_ROOT:-$ROOT}")"
+PLAYWRIGHT_NODE_RESOLVER="$(node_environment_path "$PLAYWRIGHT_RESOLVER")"
+export GWT_PLAYWRIGHT_NODE_MODULES GWT_PLAYWRIGHT_CHECKOUT_ROOT GWT_PLAYWRIGHT_PROJECT_ROOT
+export NODE_PATH="${GWT_PLAYWRIGHT_NODE_MODULES}${NODE_PATH:+${PLAYWRIGHT_NODE_PATH_DELIMITER}${NODE_PATH}}"
+export NODE_OPTIONS="--require \"${PLAYWRIGHT_NODE_RESOLVER}\"${NODE_OPTIONS:+ ${NODE_OPTIONS}}"
 
 mkdir -p "$RUN_DIR/crates/gwt/playwright"
 for source in "$ROOT/crates/gwt/playwright/"*; do

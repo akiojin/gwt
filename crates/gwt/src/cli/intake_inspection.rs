@@ -29,7 +29,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use chrono::{DateTime, Utc};
+use gwt_core::timestamp::UtcTimestamp;
 use serde::{Deserialize, Serialize};
 
 use super::spec_artifact_lint::{LintFinding, LintReport, LintSeverity};
@@ -38,7 +38,7 @@ use super::spec_artifact_lint::{LintFinding, LintReport, LintSeverity};
 /// reviewer and the completion gate read the same run (AC-3).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LintOutcome {
-    pub ran_at: DateTime<Utc>,
+    pub ran_at: UtcTimestamp,
     pub sections_scanned: Vec<String>,
     pub finding_count: usize,
     pub critical_count: usize,
@@ -69,7 +69,7 @@ pub struct IntakeInspectionSnapshot {
     pub directive_epoch: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase_slice: Option<String>,
-    pub captured_at: DateTime<Utc>,
+    pub captured_at: UtcTimestamp,
     /// AC-3: no `#[serde(default)]` — a snapshot without a lint outcome is
     /// not a snapshot, on the wire or in memory.
     pub lint: LintOutcome,
@@ -84,7 +84,7 @@ impl IntakeInspectionSnapshot {
         owner_number: u64,
         section_hashes: BTreeMap<String, String>,
         lint: &LintReport,
-        captured_at: DateTime<Utc>,
+        captured_at: UtcTimestamp,
     ) -> Self {
         Self {
             owner_number,
@@ -164,14 +164,14 @@ pub struct LedgerEntry {
 pub struct FindingDispositionLedger {
     pub owner_number: u64,
     pub entries: Vec<LedgerEntry>,
-    pub updated_at: DateTime<Utc>,
+    pub updated_at: UtcTimestamp,
 }
 
 impl FindingDispositionLedger {
     /// Seed the ledger from a lint run. Lint findings land here directly —
     /// they are never routed through the independent reviewer (AC-4).
     #[must_use]
-    pub fn seed_from_lint(report: &LintReport, updated_at: DateTime<Utc>) -> Self {
+    pub fn seed_from_lint(report: &LintReport, updated_at: UtcTimestamp) -> Self {
         let entries = report
             .findings
             .iter()
@@ -235,7 +235,7 @@ pub enum ReadbackSource {
 pub struct ReadbackEvidence {
     pub source: ReadbackSource,
     pub sha256: String,
-    pub observed_at: DateTime<Utc>,
+    pub observed_at: UtcTimestamp,
     /// Where the observation came from — comment ids, a commit, a pull ref.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub refs: Vec<String>,
