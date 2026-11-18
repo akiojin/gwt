@@ -12,6 +12,7 @@ use crate::{
     WindowProcessStatus,
 };
 use gwt_terminal::{pty::SpawnConfig, Pane, PtyHandle};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -23,6 +24,25 @@ use std::{
     thread,
 };
 use tokio::sync::{broadcast, oneshot};
+
+/// Budget for cleaning up and reporting a failed launch (Issue #7670).
+const FAILED_LAUNCH_SETTLEMENT_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// End the launch deadline and give the failure settlement its own budget.
+///
+/// A launch that fails *because* its deadline ran out used to settle under the
+/// same, already expired deadline: the Monitor readback timed out at once, the
+/// failure was never recorded, and the row stayed `launching` until someone
+/// requeued it by hand. Nested deadlines only ever shorten, so the launch
+/// deadline has to be released before the settlement one is entered.
+fn enter_failed_launch_settlement_deadline(
+    launch_deadline: &mut Option<gwt_core::operation_deadline::ScopedOperationDeadline>,
+) -> gwt_core::operation_deadline::ScopedOperationDeadline {
+    drop(launch_deadline.take());
+    gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+        gwt_core::operation_deadline::now() + FAILED_LAUNCH_SETTLEMENT_BUDGET,
+    )
+}
 
 fn spawn_owner_worker<T: Send + 'static>(
     work: impl FnOnce() -> T + Send + 'static,
@@ -94,6 +114,9 @@ impl Drop for WindowRuntime {
         self.pty.revoke_input_generation();
         if let Some(agent) = &self.agent {
             agent.current.store(false, Ordering::Release);
+        }
+        if self.pty.termination_disarmed() {
+            return;
         }
         if self.pty.tree_exit_confirmed()
             && self.output_thread.is_none()
@@ -351,7 +374,7 @@ pub(crate) struct AgentPrepared {
     result: Result<PreparedAgentLaunchSuccess, AgentLaunchError>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) enum CloseCause {
     ExplicitClose,
     ExplicitStop,
@@ -372,6 +395,13 @@ impl CloseCause {
 
     fn is_diagnostic(self) -> bool {
         matches!(self, Self::DiagnosticExit | Self::PmGenericCrash)
+    }
+
+    fn permits_retained_row_close(self, runtime: &WindowRuntime) -> bool {
+        matches!(self, Self::ExplicitStop)
+            || (matches!(self, Self::DiagnosticExit)
+                && runtime.agent.is_some()
+                && !runtime_uses_pm_worktree(runtime))
     }
 }
 
@@ -416,6 +446,125 @@ pub(crate) enum Retirement {
 pub(crate) enum StoppedOwnerWindowExit {
     CapturedPty(Arc<PtyHandle>),
     DiagnosticClosed(Box<gwt_agent::Session>),
+}
+
+#[derive(Deserialize, Serialize)]
+struct ShutdownRetirement {
+    id: String,
+    incarnation: u64,
+    kind: String,
+    session_id: Option<String>,
+    operation_id: Option<String>,
+    child_pid: Option<u32>,
+    child_started_at: Option<u64>,
+    tree_exit_confirmed: bool,
+    #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
+    observation: Option<&'static str>,
+}
+
+impl Retirement {
+    fn pty(&self) -> Option<&PtyHandle> {
+        match self {
+            Self::Runtime { runtime, .. } => Some(&runtime.pty),
+            Self::Pane { pane, .. } => Some(pane.pty()),
+            Self::Agent { success, .. } => Some(success.pane.pty()),
+            Self::SwitchStoppedWindow {
+                exit: StoppedOwnerWindowExit::CapturedPty(pty),
+                ..
+            } => Some(pty),
+            Self::StoppedWindow(_) | Self::SwitchStoppedWindow { .. } => None,
+        }
+    }
+
+    fn shutdown_record(&self, id: &str, incarnation: u64) -> ShutdownRetirement {
+        let (kind, session_id, operation_id, child_started_at) = match self {
+            Self::Runtime { runtime, cause } => (
+                format!("runtime_{cause:?}"),
+                runtime
+                    .agent
+                    .as_ref()
+                    .map(|agent| agent.snapshot.id.clone()),
+                None,
+                runtime.child_started_at,
+            ),
+            Self::StoppedWindow(capture) => (
+                "stopped_window".into(),
+                capture.cleanup.expected_session_id.clone(),
+                None,
+                None,
+            ),
+            Self::SwitchStoppedWindow { proof, .. } => (
+                "switch_source".into(),
+                Some(proof.session_id.clone()),
+                None,
+                Some(proof.child_started_at),
+            ),
+            Self::Pane { operation_id, .. } => ("pane".into(), None, operation_id.clone(), None),
+            Self::Agent {
+                success,
+                operation_id,
+                ..
+            } => (
+                "agent_launch".into(),
+                Some(success.active_session.session_id.clone()),
+                Some(operation_id.clone()),
+                None,
+            ),
+        };
+        let pty = self.pty();
+        ShutdownRetirement {
+            id: id.into(),
+            incarnation,
+            kind,
+            session_id,
+            operation_id,
+            child_pid: match self {
+                Self::SwitchStoppedWindow { proof, .. } => Some(proof.child_pid),
+                _ => pty.and_then(PtyHandle::process_id),
+            },
+            child_started_at,
+            tree_exit_confirmed: pty.is_some_and(PtyHandle::tree_exit_confirmed),
+            observation: None,
+        }
+    }
+}
+
+impl ShutdownRetirement {
+    fn observe(&self) -> &'static str {
+        if self.tree_exit_confirmed {
+            return "tree_exit_confirmed";
+        }
+        let (Some(pid), Some(birth)) = (self.child_pid, self.child_started_at) else {
+            return "unconfirmed";
+        };
+        if pid == 0 || birth == 0 {
+            return "unconfirmed";
+        }
+        // Only the leader is observed here. Keep the durable record and
+        // never infer process-tree exit or recreate stop authority from it.
+        match crate::process::host_process_start_time(pid) {
+            Some(current) if current == birth => "matching_child",
+            Some(_) => "child_identity_changed",
+            None if crate::process::host_process_liveness(pid) == Some(false) => "child_exited",
+            None => "unconfirmed",
+        }
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+struct OwnerShutdownRetirements {
+    host_instance_id: String,
+    host_pid: u32,
+    host_started_at: Option<u64>,
+    retirements: Vec<ShutdownRetirement>,
+}
+
+fn read_shutdown_retirements(path: &Path) -> std::io::Result<Vec<OwnerShutdownRetirements>> {
+    match std::fs::File::open(path) {
+        Ok(file) => Ok(serde_json::from_reader(std::io::BufReader::new(file))?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(error),
+    }
 }
 
 pub(crate) struct ShellRegistryPublication {
@@ -567,7 +716,7 @@ pub(crate) enum OwnerMessage {
     ObserveRuntimePolicy {
         id: String,
         incarnation: u64,
-        wall: chrono::DateTime<chrono::Utc>,
+        wall: gwt_core::timestamp::UtcTimestamp,
         now: std::time::Instant,
         reply: oneshot::Sender<Result<(), String>>,
     },
@@ -583,6 +732,8 @@ pub(crate) enum OwnerMessage {
         captured: Retirement,
         reply: oneshot::Sender<()>,
     },
+    #[cfg(all(test, unix))]
+    RetainExhaustedRetirement(oneshot::Sender<()>),
     #[cfg(test)]
     TickReconciliation {
         now: std::time::Instant,
@@ -633,7 +784,7 @@ pub(crate) enum OwnerMessage {
         cause: CloseCause,
         result: Result<(), String>,
     },
-    CloseAfterStop {
+    CloseAfterRuntimeExit {
         id: String,
         incarnation: u64,
         result: OwnerReply,
@@ -696,6 +847,7 @@ pub(crate) enum OwnerMessage {
     },
     Pane(PaneRuntimeEvent),
     Transport(TransportEvent),
+    MonitorWindowSnapshot(mpsc::Sender<Option<crate::IssueMonitorWindowSnapshot>>),
     GuiAttached {
         instance: uuid::Uuid,
         reply: oneshot::Sender<Result<u64, String>>,
@@ -712,8 +864,23 @@ pub struct OwnerHandle {
     pub(crate) sender: mpsc::Sender<OwnerMessage>,
     events: broadcast::Sender<OwnerEvent>,
     residency: tokio::sync::watch::Receiver<ResidencySnapshot>,
+    pub(crate) monitor_runtime_scan:
+        Arc<std::sync::OnceLock<crate::monitor_duplicate_runtime::MonitorRuntimeScan>>,
 }
 impl OwnerHandle {
+    pub(crate) fn monitor_window_snapshot(&self) -> Option<crate::IssueMonitorWindowSnapshot> {
+        let now = gwt_core::operation_deadline::now();
+        let timeout = std::time::Duration::from_secs(1);
+        let timeout = gwt_core::operation_deadline::current().map_or(timeout, |deadline| {
+            timeout.min(deadline.saturating_duration_since(now))
+        });
+        let (reply, receive) = mpsc::channel();
+        self.sender
+            .send(OwnerMessage::MonitorWindowSnapshot(reply))
+            .ok()?;
+        receive.recv_timeout(timeout).ok().flatten()
+    }
+
     #[cfg(any(test, feature = "test-gh-guard"))]
     pub(crate) async fn test_pause_runtime_reconciliation(
         &self,
@@ -866,7 +1033,7 @@ impl OwnerHandle {
         &self,
         id: &str,
         incarnation: u64,
-        wall: chrono::DateTime<chrono::Utc>,
+        wall: gwt_core::timestamp::UtcTimestamp,
         now: std::time::Instant,
     ) -> Result<(), String> {
         let (reply, receive) = oneshot::channel();
@@ -905,6 +1072,14 @@ impl OwnerHandle {
         receive
             .await
             .map_err(|_| "owner stopped before reconciliation tick".to_string())
+    }
+    #[cfg(all(test, unix))]
+    pub(crate) async fn test_retain_exhausted_retirement(&self) -> Result<(), String> {
+        let (reply, received) = oneshot::channel();
+        self.sender
+            .send(OwnerMessage::RetainExhaustedRetirement(reply))
+            .map_err(|_| "project owner unavailable".to_string())?;
+        received.await.map_err(|error| error.to_string())
     }
     #[cfg(any(test, feature = "test-gh-guard"))]
     pub(crate) async fn test_check_monitor_deadlines(
@@ -1174,6 +1349,8 @@ pub(crate) struct OwnerState {
     shared_registry_initialization: Option<Result<(), String>>,
     registry_projection: crate::persistence::PersistedWindowRegistry,
     pty_writers: super::agent_dispatch::PtyWriterRegistry,
+    monitor_runtime_scan:
+        Arc<std::sync::OnceLock<crate::monitor_duplicate_runtime::MonitorRuntimeScan>>,
     agent_dispatch_jobs: usize,
     deferred_agent_frontend: HashMap<(String, u64), Vec<DeferredAgentFrontend>>,
     pending_agent_self_closes: HashMap<String, super::agent_dispatch::PendingAgentSelfClose>,
@@ -1203,6 +1380,7 @@ pub(crate) struct OwnerState {
     agent_operations: HashMap<String, AgentOperation>,
     retirements: HashMap<(String, u64), Option<Retirement>>,
     reconciliation: ReconciliationRecovery,
+    previous_shutdown_retirements: Vec<OwnerShutdownRetirements>,
     readiness: HashMap<String, ReadinessJob>,
     close_replies: HashMap<(String, u64), Vec<oneshot::Sender<OwnerReply>>>,
     pub(crate) continue_work_outcomes:
@@ -1229,7 +1407,9 @@ impl OwnerState {
             sender: sender.clone(),
             events: events.clone(),
             residency: residency_projection,
+            monitor_runtime_scan: Default::default(),
         };
+        let monitor_runtime_scan = handle.monitor_runtime_scan.clone();
         let agent_registry = super::agent_dispatch::load_owner_registry(&root);
         let registry_projection = agent_registry
             .as_ref()
@@ -1257,6 +1437,7 @@ impl OwnerState {
             shared_registry_initialization: None,
             registry_projection,
             pty_writers: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            monitor_runtime_scan: Arc::clone(&monitor_runtime_scan),
             agent_dispatch_jobs: 0,
             deferred_agent_frontend: HashMap::new(),
             pending_agent_self_closes: HashMap::new(),
@@ -1302,6 +1483,7 @@ impl OwnerState {
                 ),
                 ..Default::default()
             },
+            previous_shutdown_retirements: Vec::new(),
             readiness: HashMap::new(),
             close_replies: HashMap::new(),
             continue_work_outcomes: HashMap::new(),
@@ -1325,6 +1507,9 @@ impl OwnerState {
                     })).collect())
                 },
             ).map_err(|error| tracing::error!(target: "gwt.monitor.runtime", %error, "failed to start owner Monitor runtime reconciliation")).ok();
+            if let Some(reconciler) = &_monitor_reconciler {
+                let _ = monitor_runtime_scan.set(reconciler.scan_trigger());
+            }
             #[cfg(any(test, feature = "test-gh-guard"))]
             {
                 state.test_reconciler = _monitor_reconciler
@@ -1383,6 +1568,7 @@ impl OwnerState {
         self.gui_presence = GuiPresence::new(self.gui_presence.intent(), std::time::Instant::now());
     }
     fn run(mut self, receiver: mpsc::Receiver<OwnerMessage>) -> Vec<oneshot::Sender<()>> {
+        self.resume_shutdown_reconciliation();
         let mut continue_active = false;
         let mut next_project_policy_check = std::time::Instant::now();
         loop {
@@ -1751,6 +1937,34 @@ impl OwnerState {
                     self.retirements.insert((id, incarnation), Some(captured));
                     let _ = reply.send(());
                 }
+                #[cfg(all(test, unix))]
+                OwnerMessage::RetainExhaustedRetirement(reply) => {
+                    let id = "retired-window".to_string();
+                    let cleanup = super::agent_dispatch::OwnedWindowRecordCleanup {
+                        registry: self.agent_registry.as_ref().unwrap().clone(),
+                        registry_path: crate::persistence::workspace_state_path(&self.root),
+                        root: self.root.clone(),
+                        project_key: self.project_key.clone(),
+                        canonical_id: id.clone(),
+                        expected_session_id: None,
+                    };
+                    self.retirements.insert(
+                        (id.clone(), 1),
+                        Some(Retirement::StoppedWindow(Box::new(
+                            super::agent_dispatch::StoppedWindowRetirement {
+                                sessions_dir: gwt_core::paths::gwt_sessions_dir(),
+                                expected: None,
+                                cleanup,
+                            },
+                        ))),
+                    );
+                    self.reconciliation.attempts.insert(
+                        ReconciliationTarget::Retirement(id, 1),
+                        ReconciliationAttempt::Attempted,
+                    );
+                    self.reconcile_failed_retirements(std::time::Instant::now());
+                    let _ = reply.send(());
+                }
                 #[cfg(test)]
                 OwnerMessage::TickReconciliation { now, reply } => {
                     self.reconcile_failed_retirements(now);
@@ -2012,7 +2226,7 @@ impl OwnerState {
                     cause,
                     result,
                 } => self.closed(id, incarnation, runtime, cause, result),
-                OwnerMessage::CloseAfterStop {
+                OwnerMessage::CloseAfterRuntimeExit {
                     id,
                     incarnation,
                     result,
@@ -2021,7 +2235,7 @@ impl OwnerState {
                     self.input_jobs = self.input_jobs.saturating_sub(1);
                     if result
                         .as_ref()
-                        .is_ok_and(|receipt| receipt["explicit_stop"] == true)
+                        .is_ok_and(|receipt| receipt["retained_window"] == true)
                     {
                         self.request(
                             OwnerRequest {
@@ -2302,6 +2516,10 @@ impl OwnerState {
                 }
                 OwnerMessage::Pane(event) => self.pane_event(event),
                 OwnerMessage::Transport(event) => self.handle_transport_event(event),
+                OwnerMessage::MonitorWindowSnapshot(reply) => {
+                    let _ = reply
+                        .send((!self.stopping).then(|| self.owner_monitor_window_snapshot("")));
+                }
                 OwnerMessage::Shutdown(reply) => self.begin_shutdown(Some(reply)),
             }
             #[cfg(any(test, feature = "test-gh-guard"))]
@@ -2381,7 +2599,7 @@ impl OwnerState {
         }
     }
     fn finish_shutdown_if_drained(&mut self) -> bool {
-        self.stopping
+        let drained = self.stopping
             && self.pending.is_empty()
             && self.closing.is_empty()
             && self.retiring == 0
@@ -2390,10 +2608,90 @@ impl OwnerState {
             && self.deferred_agent_frontend.is_empty()
             && self.pending_agent_self_closes.is_empty()
             && self.runtimes.is_empty()
-            && self.retirements.is_empty()
             && self.readiness.is_empty()
             && self.close_replies.is_empty()
-            && self.deferred_readiness_closes.is_empty()
+            && self.deferred_readiness_closes.is_empty();
+        if !drained || self.retirements.is_empty() {
+            return drained;
+        }
+        if self
+            .retirements
+            .iter()
+            .any(|((id, incarnation), captured)| {
+                captured.is_none()
+                    || !matches!(
+                        self.reconciliation
+                            .attempts
+                            .get(&ReconciliationTarget::Retirement(id.clone(), *incarnation)),
+                        Some(ReconciliationAttempt::NeedsHuman)
+                    )
+            })
+        {
+            return false;
+        }
+        match self.handoff_shutdown_retirements() {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::error!(target: "gwt.owner.recovery", project_key = %self.project_key, %error,
+                    "shutdown cannot relinquish unresolved exact retirements");
+                false
+            }
+        }
+    }
+
+    fn shutdown_retirements_path(&self) -> std::io::Result<PathBuf> {
+        let project_key = gwt_core::repo_hash::RepoHash::parse(&self.project_key)
+            .map_err(std::io::Error::other)?;
+        Ok(gwt_core::paths::gwt_project_dir(&project_key).join("owner-shutdown-retirements.json"))
+    }
+
+    fn handoff_shutdown_retirements(&self) -> std::io::Result<()> {
+        let path = self.shutdown_retirements_path()?;
+        let mut batches = read_shutdown_retirements(&path)?;
+        batches.retain(|batch| batch.host_instance_id != self.host_instance_id);
+        batches.push(OwnerShutdownRetirements {
+            host_instance_id: self.host_instance_id.clone(),
+            host_pid: std::process::id(),
+            host_started_at: crate::process::host_process_start_time(std::process::id()),
+            retirements: self
+                .retirements
+                .iter()
+                .filter_map(|((id, incarnation), captured)| {
+                    Some(captured.as_ref()?.shutdown_record(id, *incarnation))
+                })
+                .collect(),
+        });
+        std::fs::create_dir_all(path.parent().expect("project data directory"))?;
+        crate::persistence::write_durable_bytes(&path, &serde_json::to_vec(&batches)?)?;
+
+        // Dropping a live PTY normally kills it. Relinquish the in-memory
+        // stop authority only after its unresolved retirement is durable.
+        for pty in self
+            .retirements
+            .values()
+            .filter_map(|captured| captured.as_ref()?.pty())
+        {
+            pty.disarm_termination().map_err(std::io::Error::other)?;
+        }
+        Ok(())
+    }
+
+    fn resume_shutdown_reconciliation(&mut self) {
+        match self
+            .shutdown_retirements_path()
+            .and_then(|path| read_shutdown_retirements(&path))
+        {
+            Ok(mut batches) => {
+                for retirement in batches.iter_mut().flat_map(|batch| &mut batch.retirements) {
+                    retirement.observation = Some(retirement.observe());
+                }
+                self.previous_shutdown_retirements = batches;
+            }
+            Err(error) => {
+                tracing::error!(target: "gwt.owner.recovery", project_key = %self.project_key, %error,
+                "could not read previous owner shutdown retirements")
+            }
+        }
     }
 
     fn reconcile_failed_retirements(&mut self, now: std::time::Instant) {
@@ -2498,7 +2796,9 @@ impl OwnerState {
         self.next_incarnation = self.next_incarnation.max(incarnation);
         let child_pid = pane.pty().process_id();
         let child_started_at = child_pid.and_then(crate::process::host_process_start_time);
-        let started_at_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
+        let started_at_ms = gwt_core::timestamp::UtcTimestamp::now()
+            .timestamp_millis()
+            .max(0) as u64;
         let pty = pane.shared_pty();
         let pane = Arc::new(Mutex::new(pane));
         let send = self.sender.clone();
@@ -3892,7 +4192,7 @@ impl OwnerState {
                     .shared_registry_initialization
                     .as_ref()
                     .and_then(|result| result.as_ref().err());
-                let health = json!({"mobile_input_permit_version":super::events::MOBILE_INPUT_PERMIT_PROTOCOL_VERSION,"startup_intent":self.gui_presence.intent(),"gui_presence_count":self.gui_presence.count(),"pid":std::process::id(),"host_started_at":crate::process::host_process_start_time(std::process::id()),"host_instance_id":self.host_instance_id,"project_key":self.project_key,"panes":self.runtimes.len(),"pending_transport":self.pending_transport.len(),"draining":self.stopping,"reconciliation_retry_pending":self.reconciliation.retry_at.is_some(),"reconciliation_needs_human":self.reconciliation.needs_human,"reconciliation_required":self.retirements.values().any(Option::is_some)||self.agent_registry.is_err()||initialization_error.is_some(),"agent_registry_initialization_error":initialization_error,"reconciliation":self.retirements.iter().filter_map(|((id,incarnation),captured)| captured.as_ref().map(|_| json!({"id":id,"incarnation":incarnation}))).collect::<Vec<_>>()});
+                let health = json!({"mobile_input_permit_version":super::events::MOBILE_INPUT_PERMIT_PROTOCOL_VERSION,"startup_intent":self.gui_presence.intent(),"gui_presence_count":self.gui_presence.count(),"pid":std::process::id(),"host_started_at":crate::process::host_process_start_time(std::process::id()),"host_instance_id":self.host_instance_id,"project_key":self.project_key,"panes":self.runtimes.len(),"pending_transport":self.pending_transport.len(),"draining":self.stopping,"reconciliation_retry_pending":self.reconciliation.retry_at.is_some(),"reconciliation_needs_human":self.reconciliation.needs_human,"reconciliation_required":self.retirements.values().any(Option::is_some)||self.agent_registry.is_err()||initialization_error.is_some(),"agent_registry_initialization_error":initialization_error,"reconciliation":self.retirements.iter().filter_map(|((id,incarnation),captured)| captured.as_ref().map(|_| json!({"id":id,"incarnation":incarnation}))).collect::<Vec<_>>(),"previous_shutdown_retirements":self.previous_shutdown_retirements});
                 #[cfg(any(test, feature = "test-gh-guard"))]
                 let health = {
                     let mut health = health;
@@ -3925,8 +4225,8 @@ impl OwnerState {
                             .or_default()
                             .push(reply);
                     } else {
-                        // Close must still remove the row when a preceding STOP
-                        // is currently draining the same physical incarnation.
+                        // A stop or diagnostic exit can retire the exact PTY
+                        // while leaving its workspace row for Close to remove.
                         let (completed, receive) = oneshot::channel();
                         self.close_replies
                             .entry((id.clone(), incarnation))
@@ -3938,7 +4238,7 @@ impl OwnerState {
                             let result = receive.blocking_recv().unwrap_or_else(|_| {
                                 Err("owner stopped before close acknowledgement".into())
                             });
-                            let _ = sender.send(OwnerMessage::CloseAfterStop {
+                            let _ = sender.send(OwnerMessage::CloseAfterRuntimeExit {
                                 id,
                                 incarnation,
                                 result,
@@ -3957,7 +4257,7 @@ impl OwnerState {
                         Retirement::Runtime { runtime, cause } => {
                             self.retirements.remove(&(id.clone(), incarnation));
                             let cause =
-                                if !explicit_stop && matches!(cause, CloseCause::ExplicitStop) {
+                                if !explicit_stop && cause.permits_retained_row_close(&runtime) {
                                     CloseCause::ExplicitClose
                                 } else {
                                     cause
@@ -5955,8 +6255,10 @@ impl OwnerState {
             tracing::info!(target: "gwt.launch.timing", phase = "owner_dispatch", state = "finished",
                 elapsed_ms = launch_requested.elapsed().as_secs_f64() * 1000.0, "Issues owner launch phase");
             let owner_phase = super::launch::LaunchPhaseTimer::start("owner_materialization");
-            let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-                gwt_core::operation_deadline::now() + std::time::Duration::from_secs(120),
+            let mut launch_deadline = Some(
+                gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+                    gwt_core::operation_deadline::now() + std::time::Duration::from_secs(120),
+                ),
             );
             let sessions_dir = gwt_core::paths::gwt_sessions_dir();
             let expected_registry_row: Result<
@@ -6498,6 +6800,9 @@ impl OwnerState {
                     }
                     success
                 });
+            let _settlement_deadline = result
+                .is_err()
+                .then(|| enter_failed_launch_settlement_deadline(&mut launch_deadline));
             let mut unspawned_runtime_retired = false;
             if result.is_err()
                 && !input.physical_spawn_started
@@ -7591,7 +7896,7 @@ impl OwnerState {
         &self,
         excluded_id: &str,
     ) -> crate::IssueMonitorWindowSnapshot {
-        let observed_at = chrono::Utc::now().to_rfc3339();
+        let observed_at = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
         let windows = self
             .runtimes
             .iter()
@@ -7812,10 +8117,16 @@ impl OwnerState {
         let incarnation = runtime.incarnation;
         let sender = self.sender.clone();
         let writers = self.pty_writers.clone();
+        let monitor_runtime_scan = Arc::clone(&self.monitor_runtime_scan);
         spawn_owner_worker(move || {
             let registry_result =
                 super::agent_dispatch::forget_owner_writer(&writers, &id, &runtime.current);
-            let result = close_runtime(&id, &mut runtime, cause).and(registry_result);
+            // Issue #7676: logical requeue does not clear a census published
+            // while this child was alive. Publish that absence before the ACK,
+            // or active_count keeps the stale physical slot.
+            let result = close_runtime(&id, &mut runtime, cause)
+                .and(registry_result)
+                .and_then(|()| publish_closed_monitor_census(&monitor_runtime_scan, &runtime));
             let _ = sender.send(OwnerMessage::Closed {
                 id,
                 incarnation,
@@ -7833,6 +8144,7 @@ impl OwnerState {
         cause: CloseCause,
         result: Result<(), String>,
     ) {
+        let retained_window = cause.permits_retained_row_close(&runtime);
         let result = if self
             .closing
             .get(&id)
@@ -7938,7 +8250,7 @@ impl OwnerState {
                             child_started_at: runtime
                                 .child_started_at
                                 .filter(|birth| *birth > 0)?,
-                            requested_at: chrono::Utc::now().to_rfc3339(),
+                            requested_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
                         })
                     })
                     .flatten();
@@ -7956,6 +8268,7 @@ impl OwnerState {
                         receipt["closed"] = json!(true);
                         receipt["natural_exit"] = json!(!diagnostic_exit);
                         receipt["diagnostic_exit"] = json!(diagnostic_exit);
+                        receipt["retained_window"] = json!(retained_window);
                         receipt["status"] = json!(status);
                         receipt["detail"] = json!(runtime.detail);
                         if let Some(proof) = diagnostic_runtime {
@@ -8037,11 +8350,16 @@ impl OwnerState {
                     if let Some(Ok(receipt)) = operation.result.as_mut() {
                         receipt["closed"] = json!(true);
                         receipt["explicit_stop"] = json!(true);
+                        receipt["retained_window"] = json!(true);
                         receipt["status"] = json!(crate::WindowProcessStatus::Stopped);
                     }
                 }
             }
-            result.map(|_| json!({"closed":true,"id":id,"incarnation":incarnation,"pm_lifecycle":pm_lifecycle,"explicit_stop":matches!(cause, CloseCause::ExplicitStop)}))
+            result.map(|_| json!({
+                "closed": true, "id": id, "incarnation": incarnation, "pm_lifecycle": pm_lifecycle,
+                "explicit_stop": matches!(cause, CloseCause::ExplicitStop),
+                "retained_window": retained_window,
+            }))
         };
         for reply in self
             .close_replies
@@ -9562,15 +9880,16 @@ impl OwnerState {
         {
             return None;
         }
-        let operation = self.agent_operations.values().find(|operation| {
-            operation.id == id
-                && operation.incarnation == incarnation
-                && !operation.current.load(Ordering::Acquire)
-                && operation.result.as_ref().is_some_and(|result| {
-                    result.as_ref().is_ok_and(|receipt| {
-                        receipt["closed"] == true && receipt["explicit_stop"] == true
-                    })
-                })
+        let (operation, receipt) = self.agent_operations.values().find_map(|operation| {
+            if operation.id != id
+                || operation.incarnation != incarnation
+                || operation.current.load(Ordering::Acquire)
+            {
+                return None;
+            }
+            let receipt = operation.result.as_ref()?.as_ref().ok()?;
+            (receipt["closed"] == true && receipt["retained_window"] == true)
+                .then_some((operation, receipt))
         })?;
         let session_id = operation.session_id.as_ref()?;
         let raw = id.strip_prefix(&format!("{}::", self.project_key))?;
@@ -9580,15 +9899,15 @@ impl OwnerState {
             .iter()
             .find(|row| row.id == raw)?;
         if row.session_id.as_ref() != Some(session_id)
-            || row.status != crate::WindowProcessStatus::Stopped
-            || row.persist
+            || receipt["status"] != json!(row.status)
+            || (receipt["explicit_stop"] == true && row.persist)
         {
             return None;
         }
         Some(super::agent_dispatch::StoppedWindowRetirement {
             sessions_dir: gwt_core::paths::gwt_sessions_dir(),
-            // The exact successful STOP already committed Session/Work and
-            // reaped its tree. This retirement removes only that retained row.
+            // The exact finalizer already committed Session/Work and reaped
+            // its tree. This retirement removes only that retained row.
             expected: None,
             cleanup: super::agent_dispatch::OwnedWindowRecordCleanup {
                 registry: self.agent_registry.as_ref().ok()?.clone(),
@@ -10133,7 +10452,7 @@ impl OwnerState {
         if hook_status.is_none() && !progress {
             return;
         }
-        let now = chrono::Utc::now();
+        let now = gwt_core::timestamp::UtcTimestamp::now();
         let runtime = self.runtimes.get_mut(&id).expect("matched exact Session");
         let effective_before = Self::runtime_status(runtime);
         if progress {
@@ -10144,7 +10463,7 @@ impl OwnerState {
         let publish_heartbeat = runtime
             .policy
             .last_heartbeat
-            .is_none_or(|last| (now - last).num_seconds() >= 60);
+            .is_none_or(|last| (now - last).whole_seconds() >= 60);
         if publish_heartbeat {
             runtime.policy.last_heartbeat = Some(now);
         }
@@ -10510,14 +10829,14 @@ impl OwnerState {
             return None;
         }
         let now = std::time::Instant::now();
-        let wall = chrono::Utc::now();
+        let wall = gwt_core::timestamp::UtcTimestamp::now();
         self.runtimes
             .values()
             .flat_map(|runtime| {
                 let quota = runtime.policy.quota_candidate_since.map(|first| {
-                    let remaining = (first + chrono::Duration::seconds(120) - wall)
-                        .to_std()
-                        .unwrap_or_default();
+                    let remaining =
+                        std::time::Duration::try_from(first + time::Duration::seconds(120) - wall)
+                            .unwrap_or_default();
                     now + remaining
                 });
                 [runtime.policy.approval_settle_at, quota]
@@ -10535,7 +10854,7 @@ impl OwnerState {
         if self.stopping {
             return;
         }
-        let wall = chrono::Utc::now();
+        let wall = gwt_core::timestamp::UtcTimestamp::now();
         let due: Vec<_> = self
             .runtimes
             .iter()
@@ -10547,7 +10866,7 @@ impl OwnerState {
                     || runtime
                         .policy
                         .quota_candidate_since
-                        .is_some_and(|first| (wall - first).num_seconds() >= 120)
+                        .is_some_and(|first| (wall - first).whole_seconds() >= 120)
             })
             .map(|(id, _)| id.clone())
             .collect();
@@ -10560,7 +10879,7 @@ impl OwnerState {
     fn observe_owner_screen_policy(
         &mut self,
         id: &str,
-        now: chrono::DateTime<chrono::Utc>,
+        now: gwt_core::timestamp::UtcTimestamp,
         monotonic_now: std::time::Instant,
         captured_screen: Option<String>,
     ) {
@@ -10721,7 +11040,7 @@ impl OwnerState {
     }
 
     fn apply_policy_usage_snapshot(&mut self, accounts: Vec<gwt_core::usage::ProviderUsage>) {
-        let now = chrono::Utc::now();
+        let now = gwt_core::timestamp::UtcTimestamp::now();
         let mut changed = Vec::new();
         for (id, runtime) in &mut self.runtimes {
             if super::runtime_events::release_policy_quota(&mut runtime.policy, &accounts, now) {
@@ -11061,7 +11380,7 @@ impl OwnerState {
                 detail,
                 final_screen: screen.as_deref(),
                 accounts: &self.policy_usage_accounts,
-                now: chrono::Utc::now(),
+                now: gwt_core::timestamp::UtcTimestamp::now(),
             },
         );
         runtime.pty_status = raw_status;
@@ -11278,7 +11597,7 @@ impl OwnerState {
                     let runtime = self.runtimes.get_mut(&id).expect("exact output pane");
                     runtime.output_bytes = runtime.output_bytes.saturating_add(data.len() as u64);
                     runtime.last_output_at =
-                        Some(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
+                        Some(gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds());
                     std::mem::replace(&mut runtime.last_published_output_seq, seq)
                 };
                 use base64::Engine;
@@ -11307,7 +11626,7 @@ impl OwnerState {
                 };
                 self.observe_owner_screen_policy(
                     &id,
-                    chrono::Utc::now(),
+                    gwt_core::timestamp::UtcTimestamp::now(),
                     std::time::Instant::now(),
                     Some(screen.clone()),
                 );
@@ -11941,33 +12260,8 @@ pub(super) fn retire_unspawned_launch_runtime(
         |current, expected| Ok(serde_json::to_value(current)? == serde_json::to_value(expected)?),
         |current| {
             let path = gwt_agent::runtime_state_path(sessions_dir, &current.id);
-            let _writer = gwt_agent::session::runtime_writer_lease(&path)?;
-            let _publication = gwt_agent::session::runtime_publication_lease(&path)?;
             match captured_runtime {
-                Some(Ok(Some(expected))) => {
-                    let captured: gwt_agent::SessionRuntimeState =
-                        serde_json::from_slice(expected)?;
-                    if captured.execution_identity.is_some()
-                        || captured.runtime_incarnation.is_some()
-                        || captured.host_started_at.is_some()
-                        || captured.child_pid.is_some()
-                        || captured.child_started_at.is_some()
-                        || captured.source_event.is_some()
-                        || captured.active_tool_calls.is_some()
-                        || captured.last_completed_hook_event_at.is_some()
-                        || captured.last_completed_hook_outcome.is_some()
-                        || captured.current_hook_event.is_some()
-                        || captured.pending_discussion.is_some()
-                        || std::fs::read(&path)? != *expected
-                    {
-                        return Err(std::io::Error::other(
-                            "failed launch runtime changed or carries physical evidence",
-                        ));
-                    }
-                    std::fs::remove_file(&path)?;
-                    #[cfg(unix)]
-                    std::fs::File::open(path.parent().expect("runtime namespace"))?.sync_all()?;
-                }
+                Some(Ok(Some(expected))) => remove_unspawned_provisional_runtime(&path, expected)?,
                 Some(Ok(None)) if !path.try_exists()? => {}
                 _ => {
                     return Err(std::io::Error::other(
@@ -11982,8 +12276,52 @@ pub(super) fn retire_unspawned_launch_runtime(
     .map_err(|error| error.to_string())?;
     match outcome {
         gwt_agent::SessionSnapshotUpdateOutcome::Updated(stopped) => Ok(stopped),
-        _ => Err("failed launch Session changed before provisional runtime retirement".into()),
+        _ => {
+            // Issue #7665: the Session moved on, so it is not rewritten here.
+            // This launch never spawned a child, though: its own unchanged
+            // provisional runtime must not stay `Running` under the live host,
+            // where it makes the machine Agent census uncertain for everyone.
+            if let Some(Ok(Some(captured))) = captured_runtime {
+                let path = gwt_agent::runtime_state_path(sessions_dir, &expected.id);
+                if let Err(error) = remove_unspawned_provisional_runtime(&path, captured) {
+                    tracing::warn!(%error, session_id = %expected.id, "failed launch provisional runtime remains");
+                }
+            }
+            Err("failed launch Session changed before provisional runtime retirement".into())
+        }
     }
+}
+
+/// Removes exactly the provisional runtime this launch wrote: the captured
+/// bytes, unchanged on disk, carrying no physical child or hook evidence.
+fn remove_unspawned_provisional_runtime(
+    path: &std::path::Path,
+    expected: &[u8],
+) -> std::io::Result<()> {
+    let _writer = gwt_agent::session::runtime_writer_lease(path)?;
+    let _publication = gwt_agent::session::runtime_publication_lease(path)?;
+    let captured: gwt_agent::SessionRuntimeState = serde_json::from_slice(expected)?;
+    if captured.execution_identity.is_some()
+        || captured.runtime_incarnation.is_some()
+        || captured.host_started_at.is_some()
+        || captured.child_pid.is_some()
+        || captured.child_started_at.is_some()
+        || captured.source_event.is_some()
+        || captured.active_tool_calls.is_some()
+        || captured.last_completed_hook_event_at.is_some()
+        || captured.last_completed_hook_outcome.is_some()
+        || captured.current_hook_event.is_some()
+        || captured.pending_discussion.is_some()
+        || std::fs::read(path)? != *expected
+    {
+        return Err(std::io::Error::other(
+            "failed launch runtime changed or carries physical evidence",
+        ));
+    }
+    std::fs::remove_file(path)?;
+    #[cfg(unix)]
+    std::fs::File::open(path.parent().expect("runtime namespace"))?.sync_all()?;
+    Ok(())
 }
 
 fn finish_agent_session(
@@ -12069,7 +12407,7 @@ fn finish_agent_session(
                 }
                 runtime = latest;
                 runtime.status = gwt_agent::AgentStatus::Stopped;
-                runtime.updated_at = chrono::Utc::now();
+                runtime.updated_at = gwt_core::timestamp::UtcTimestamp::now();
                 writer.save(&runtime)?;
                 session.update_status(gwt_agent::AgentStatus::Stopped);
                 if let Some(receipt) = exit_receipt {
@@ -12094,6 +12432,31 @@ fn finish_agent_session(
         }
     }
     Ok(())
+}
+
+/// Issue #7676: a close ACK is the slot-release receipt. The census worker
+/// only republishes on its 5s wake, so a count taken while the child was
+/// alive still occupies `active_count` after the logical launch is gone.
+fn publish_closed_monitor_census(
+    scan: &std::sync::OnceLock<crate::monitor_duplicate_runtime::MonitorRuntimeScan>,
+    runtime: &WindowRuntime,
+) -> Result<(), String> {
+    let monitor_backed = runtime.agent.as_ref().is_some_and(|agent| {
+        agent.feedback.as_ref().is_some_and(|feedback| {
+            !feedback.issue_monitor_review_dispatch
+                && feedback
+                    .issue_monitor_launch_binding_issue_number()
+                    .is_some()
+        })
+    });
+    if !monitor_backed {
+        return Ok(());
+    }
+    let Some(scan) = scan.get() else {
+        return Ok(());
+    };
+    scan.publish_current_census()
+        .map_err(|error| format!("Monitor census did not release the closed slot: {error}"))
 }
 
 fn monitor_launch_for_agent(
@@ -12360,7 +12723,7 @@ fn close_agent_runtime(
             if let Some(task) = super::workspace::paused_work_record_task(
                 &runtime.project_root,
                 &agent.active,
-                chrono::Utc::now(),
+                gwt_core::timestamp::UtcTimestamp::now(),
             ) {
                 task();
             }
@@ -12739,7 +13102,7 @@ fn retry_unclaimed_monitor_capacity(
     detail: &str,
 ) -> Result<bool, String> {
     let Some(feedback) = feedback.filter(|feedback| {
-        (detail.starts_with("Issues max_active reached (")
+        (crate::issue_monitor::is_monitor_spawn_hold_refusal(detail)
             || detail.starts_with("Machine Agent capacity is occupied;")
             || detail.starts_with("Machine Agent capacity observation is unavailable;")
             || detail.starts_with("Machine Agent census is uncertain;"))
@@ -12770,7 +13133,7 @@ fn retry_unclaimed_monitor_capacity(
     }) else {
         return Ok(false);
     };
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
     let (_, requeued) = crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
         // Capacity may have recovered since rejection. Only the same unclaimed
         // delivery may be returned; never release another materializer's work.
@@ -12811,6 +13174,7 @@ fn owner_fixture(
         sender: sender.clone(),
         events: events.clone(),
         residency: tokio::sync::watch::channel(ResidencySnapshot::default()).1,
+        monitor_runtime_scan: Default::default(),
     };
     let state = OwnerState {
         test_continue_before_receive: None,
@@ -12826,6 +13190,7 @@ fn owner_fixture(
         shared_registry_initialization: None,
         registry_projection: crate::persistence::empty_workspace_state(),
         pty_writers: Arc::new(std::sync::RwLock::new(HashMap::new())),
+        monitor_runtime_scan: Default::default(),
         agent_dispatch_jobs: 0,
         deferred_agent_frontend: HashMap::new(),
         pending_agent_self_closes: HashMap::new(),
@@ -12866,6 +13231,7 @@ fn owner_fixture(
         agent_operations: HashMap::new(),
         retirements: HashMap::new(),
         reconciliation: ReconciliationRecovery::default(),
+        previous_shutdown_retirements: Vec::new(),
         readiness: HashMap::new(),
         close_replies: HashMap::new(),
         continue_work_outcomes: HashMap::new(),
@@ -13134,6 +13500,47 @@ mod worker_tests {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    /// Issue #7665: a failed launch whose Session moved on left its
+    /// provisional `Running` runtime under the live host. One such file makes
+    /// the machine Agent census uncertain and refuses every launch.
+    #[test]
+    fn issue7665_failed_launch_removes_its_unchanged_provisional_runtime_when_the_session_moved() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let root = home.path().join("repo");
+        std::fs::create_dir(&root).unwrap();
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let provisional = |evidence: bool| {
+            let mut session = gwt_agent::Session::new(&root, "main", gwt_agent::AgentId::Codex);
+            session.save(&sessions).unwrap();
+            let captured_session = session.clone();
+            let path = gwt_agent::runtime_state_path(&sessions, &session.id);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let mut runtime = gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running);
+            if evidence {
+                runtime.child_pid = Some(std::process::id());
+            }
+            let bytes = serde_json::to_vec(&runtime).unwrap();
+            std::fs::write(&path, &bytes).unwrap();
+            // The Session changes after the launch captured its snapshot.
+            session.agent_session_id = Some("moved-on".into());
+            session.save(&sessions).unwrap();
+            (captured_session, path, Ok(Some(bytes)))
+        };
+
+        let (captured, path, runtime) = provisional(false);
+        let refusal = retire_unspawned_launch_runtime(&sessions, &captured, Some(&runtime));
+        assert!(refusal.is_err(), "the moved Session is never rewritten");
+        assert!(
+            !path.exists(),
+            "this launch's own unchanged provisional runtime is retired"
+        );
+
+        let (captured, path, runtime) = provisional(true);
+        assert!(retire_unspawned_launch_runtime(&sessions, &captured, Some(&runtime)).is_err());
+        assert!(path.exists(), "physical child evidence is never removed");
+    }
     use crate::agent_capability::AgentCapabilityRegistry;
 
     fn run_fixture_owner(state: OwnerState, receiver: mpsc::Receiver<OwnerMessage>) {
@@ -13310,7 +13717,7 @@ mod tests {
         };
         let receipt = ActualViewReceipt {
             receipt_id: uuid::Uuid::new_v4().to_string(),
-            accepted_at: chrono::Utc::now(),
+            accepted_at: gwt_core::timestamp::UtcTimestamp::now(),
             admitted_policy_revision: gwt_core::project_execution_policy::load(root)
                 .map_or(0, |policy| policy.revision),
         };
@@ -13338,7 +13745,7 @@ mod tests {
                             crate::project_execution_policy::policy_corruption_digest(root),
                     },
                 )]),
-                observed_at: chrono::Utc::now(),
+                observed_at: gwt_core::timestamp::UtcTimestamp::now(),
             },
         )
         .unwrap();
@@ -14254,7 +14661,7 @@ mod tests {
             status: None,
             tool_name: None,
             message: None,
-            occurred_at: chrono::Utc::now().to_rfc3339(),
+            occurred_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
         };
         let issued = state
             .issuer
@@ -14345,7 +14752,7 @@ mod tests {
                 session_binding_id: "binding".into(),
                 initial_session_id: snapshot.id.clone(),
                 entrypoint: "fixture".into(),
-                requested_at: chrono::Utc::now(),
+                requested_at: gwt_core::timestamp::UtcTimestamp::now(),
             },
             binding: binding.clone(),
             session_identity: gwt_agent::SessionExecutionIdentity {
@@ -14903,6 +15310,84 @@ mod tests {
         assert!(!issuer.authenticates_token(&token));
     }
     #[tokio::test]
+    async fn issue7619_shutdown_preserves_live_child_and_restarts_observation() {
+        let root = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(root.path().join("home"));
+        let (_, pane) = unbound_fixture(root.path());
+        let pty = pane.shared_pty();
+        let pid = pty.process_id().unwrap();
+        let (mut state, receiver, handle) = owner_fixture(root.path());
+        state
+            .install_pane("pane".into(), 1, pane, Arc::new(AtomicBool::new(true)))
+            .unwrap();
+        let mut runtime = state.runtimes.remove("pane").unwrap();
+        let started_at = runtime.child_started_at.unwrap();
+        // On startup, this recorded birth names a different process than the live PID.
+        let recorded_birth = started_at + 1;
+        runtime.child_started_at = Some(recorded_birth);
+        state.retirements.insert(
+            ("pane".into(), 1),
+            Some(Retirement::Runtime {
+                runtime: Box::new(runtime),
+                cause: CloseCause::ExplicitClose,
+            }),
+        );
+        state.reconciliation.attempts.insert(
+            ReconciliationTarget::Retirement("pane".into(), 1),
+            ReconciliationAttempt::Attempted,
+        );
+        let owner = spawn_owner_worker(move || run_fixture_owner(state, receiver));
+        let health = handle.request(request(OwnerCommand::Health)).await.unwrap();
+        assert_eq!(health["reconciliation_needs_human"], true);
+        let guard = std::time::Duration::from_secs(10);
+        // test-hygiene: allow-wall-clock-deadline Hang guard for an exhausted owner that previously never completed shutdown.
+        let shutdown = tokio::time::timeout(guard, handle.shutdown()).await;
+        if shutdown.is_err() {
+            let _ = crate::session_finalizer::kill_and_reap(&pty, "pane");
+            let _ = handle
+                .request(request(OwnerCommand::Close {
+                    id: "pane".into(),
+                    incarnation: 1,
+                }))
+                .await;
+        }
+        shutdown.expect("exhausted retirement must acknowledge shutdown");
+        owner.join().unwrap();
+
+        let (mut state, receiver, restarted) = owner_fixture(root.path());
+        state.host_instance_id = "replacement-host".into();
+        let owner = spawn_owner_worker(move || run_fixture_owner(state, receiver));
+        let health = restarted
+            .request(request(OwnerCommand::Health))
+            .await
+            .unwrap();
+        restarted.shutdown().await;
+        owner.join().unwrap();
+        let alive = crate::process::host_process_start_time(pid) == Some(started_at)
+            && pty.try_wait().unwrap().is_none();
+        if alive && pty.termination_disarmed() {
+            // SAFETY: this is the test's live PTY child and its exact birth matches.
+            assert_eq!(unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) }, 0);
+            pty.wait().unwrap();
+        } else {
+            let _ = crate::session_finalizer::kill_and_reap(&pty, "pane");
+        }
+        assert!(
+            alive,
+            "retirement handoff and reconciliation must leave the fixture child unsignaled"
+        );
+        assert!(pty.termination_disarmed());
+        let batch = &health["previous_shutdown_retirements"][0];
+        assert_eq!(batch["host_instance_id"], "host");
+        let record = &batch["retirements"][0];
+        assert_eq!(record["id"], "pane");
+        assert_eq!(record["incarnation"], 1);
+        assert_eq!(record["child_pid"], pid);
+        assert_eq!(record["child_started_at"], recorded_birth);
+        assert_eq!(record["observation"], "child_identity_changed");
+    }
+
+    #[tokio::test]
     async fn shutdown_waits_for_an_already_running_close_finalizer() {
         let root = tempfile::tempdir().unwrap();
         let capabilities = AgentCapabilityRegistry::default();
@@ -14912,6 +15397,7 @@ mod tests {
             sender: sender.clone(),
             events: events.clone(),
             residency: tokio::sync::watch::channel(ResidencySnapshot::default()).1,
+            monitor_runtime_scan: Default::default(),
         };
         let pane = super::super::spawn_unbound_pane(
             "pane",
@@ -14981,6 +15467,7 @@ mod tests {
             shared_registry_initialization: None,
             registry_projection: crate::persistence::empty_workspace_state(),
             pty_writers: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            monitor_runtime_scan: Default::default(),
             agent_dispatch_jobs: 0,
             deferred_agent_frontend: HashMap::new(),
             pending_agent_self_closes: HashMap::new(),
@@ -15021,6 +15508,7 @@ mod tests {
             agent_operations: HashMap::new(),
             retirements: HashMap::new(),
             reconciliation: ReconciliationRecovery::default(),
+            previous_shutdown_retirements: Vec::new(),
             readiness: HashMap::new(),
             close_replies: HashMap::new(),
             continue_work_outcomes: HashMap::new(),
@@ -15896,6 +16384,27 @@ mod drop_tests {
     use super::*;
     use std::time::Duration;
 
+    /// Issue #7670: a launch that spent its whole deadline still has to
+    /// report the failure to the Monitor, which reads under the deadline.
+    #[test]
+    fn failed_launch_settlement_gets_a_budget_after_the_launch_deadline_expired() {
+        let now = std::time::Instant::now();
+        let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(now);
+        let mut launch_deadline =
+            Some(gwt_core::operation_deadline::ScopedOperationDeadline::enter(now));
+        gwt_core::operation_deadline::ensure_remaining("launch")
+            .expect_err("the launch deadline is spent");
+
+        let _settlement = enter_failed_launch_settlement_deadline(&mut launch_deadline);
+
+        assert!(launch_deadline.is_none());
+        assert_eq!(
+            gwt_core::operation_deadline::ensure_remaining("settlement")
+                .expect("failure settlement must not inherit the spent launch deadline"),
+            Some(now + FAILED_LAUNCH_SETTLEMENT_BUDGET)
+        );
+    }
+
     #[test]
     fn later_failed_cleanup_gets_its_own_recovery_budget() {
         let root = tempfile::tempdir().unwrap();
@@ -16209,7 +16718,7 @@ mod drop_tests {
         .unwrap();
         // Source-level writer reconciliation: this parser-fed report is not
         // evidence of a native startup-query ordering or counterexample.
-        let report = pane.process_owner_output(b"\x1b[6n").cursor_reports[0];
+        let report = pane.process_owner_output(b"\x1b[6n").replies[0];
         let pty = pane.shared_pty();
         let _cleanup = TestPtyGuard(pty.clone());
         let owner = OwnerState::start(
@@ -16243,7 +16752,7 @@ mod drop_tests {
         let result = completion.await.unwrap();
         // Exercise the physical generation fence independently of the expired
         // operation's logical current flag; no runtime authority is restored.
-        let response = pty.write_cursor_position_report(report, &AtomicBool::new(true));
+        let response = pty.write_terminal_reply(report, &AtomicBool::new(true));
         owner.shutdown().await;
         assert!(result.is_err_and(|error| error.contains("cancelled before installation")));
         assert!(pty.tree_exit_confirmed());

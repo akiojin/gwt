@@ -370,7 +370,6 @@ fn coordination_as_hook_error(err: gwt_core::GwtError) -> HookError {
 
 #[cfg(test)]
 mod tests {
-    use chrono::TimeZone;
     use gwt_agent::{AgentId, Session};
     use gwt_core::coordination::{
         coordination_events_path, load_snapshot, BoardEntry, BoardEntryKind,
@@ -835,7 +834,9 @@ mod tests {
             vec![],
             vec![],
         );
-        legacy_entry.created_at = chrono::Utc.with_ymd_and_hms(2026, 4, 14, 0, 0, 0).unwrap();
+        legacy_entry.created_at = "2026-04-14T00:00:00Z"
+            .parse::<gwt_core::timestamp::UtcTimestamp>()
+            .unwrap();
         legacy_entry.updated_at = legacy_entry.created_at;
         std::fs::create_dir_all(dir.path().join(".gwt/coordination")).unwrap();
         std::fs::write(
@@ -885,7 +886,9 @@ mod tests {
             vec![],
             vec![],
         );
-        legacy_entry.created_at = chrono::Utc.with_ymd_and_hms(2026, 4, 14, 0, 0, 0).unwrap();
+        legacy_entry.created_at = "2026-04-14T00:00:00Z"
+            .parse::<gwt_core::timestamp::UtcTimestamp>()
+            .unwrap();
         legacy_entry.updated_at = legacy_entry.created_at;
         std::fs::create_dir_all(dir.path().join(".gwt/coordination")).unwrap();
         std::fs::write(

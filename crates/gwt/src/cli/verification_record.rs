@@ -30,8 +30,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use chrono::{DateTime, Utc};
 use gwt_agent::session::ExecutionBindingIdentity;
+use gwt_core::timestamp::UtcTimestamp;
 use gwt_github::{
     client::{ApiError, FetchResult, IssueClient},
     IssueNumber, SpecOpsError,
@@ -404,7 +404,7 @@ pub struct TypedQuarantinedFailure {
 pub struct VerificationAdjudicationRef {
     pub board_entry_id: String,
     pub command: String,
-    pub attached_at: DateTime<Utc>,
+    pub attached_at: UtcTimestamp,
 }
 
 /// One tool-generated verification run (T-110).
@@ -468,8 +468,8 @@ pub struct VerificationRunData {
     /// merely committed after the block cannot be replayed as post-block
     /// evidence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub started_at: Option<DateTime<Utc>>,
-    pub created_at: DateTime<Utc>,
+    pub started_at: Option<UtcTimestamp>,
+    pub created_at: UtcTimestamp,
     /// T-130-lite: whether this run covered every command of the registered
     /// verification plan (`verify.plan`) for the same session/owner.
     #[serde(default)]
@@ -605,7 +605,7 @@ pub struct VerificationPlanData {
     /// change requires deriving and registering a new plan.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub worktree_fingerprint: String,
-    pub created_at: DateTime<Utc>,
+    pub created_at: UtcTimestamp,
     /// Integrity hash (P9a convention).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub content_hash: String,
@@ -879,7 +879,7 @@ fn register_plan_with_context_unleased(
         generated_outputs: context.generated_outputs,
         quarantines: context.quarantines,
         worktree_fingerprint: context.worktree_fingerprint,
-        created_at: Utc::now(),
+        created_at: UtcTimestamp::now(),
         content_hash: String::new(),
     });
     save_plan_unleased(worktree, &plan)
@@ -1487,7 +1487,7 @@ pub struct WorkEventSettlementRecord {
     pub(crate) pending_delivery: Option<PendingWorkEventDelivery>,
     pub obligation_open: bool,
     pub status: WorkEventSettlementStatus,
-    pub updated_at: DateTime<Utc>,
+    pub updated_at: UtcTimestamp,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1688,7 +1688,7 @@ pub(crate) fn prepare_work_event_settlement_record_with_held_lease(
             journal_entry_id: journal_entry.id.clone(),
             event_session_id: session_id.to_string(),
         },
-        updated_at: Utc::now(),
+        updated_at: UtcTimestamp::now(),
     };
     require_unchanged_work_event_settlement_trusted_dir(worktree, trusted_dir)?;
     persist_work_event_settlement_record_to_resolved_dir(trusted_dir, &record)?;
@@ -1736,7 +1736,7 @@ fn refresh_unpersisted_pending_record(
             journal_entry_id: delivery.journal_entry_id.clone(),
             event_session_id: delivery.event_session_id.clone(),
         },
-        updated_at: Utc::now(),
+        updated_at: UtcTimestamp::now(),
         ..record.clone()
     };
     require_unchanged_work_event_settlement_trusted_dir(worktree, trusted_dir)?;
@@ -1839,7 +1839,7 @@ pub(crate) fn save_work_event_settlement_record_with_comparison(
             pending_delivery: (!status.is_settled()).then_some(pending_delivery).flatten(),
             obligation_open: !status.is_settled() && (open_obligation || previous_open),
             status: status.clone(),
-            updated_at: Utc::now(),
+            updated_at: UtcTimestamp::now(),
         };
         require_unchanged_work_event_settlement_trusted_dir(worktree, &trusted_dir)?;
         persist_work_event_settlement_record_to_resolved_dir(&trusted_dir, &record)?;
@@ -1955,7 +1955,7 @@ pub(crate) fn close_completed_work_event_obligation_locked(
         return Ok(());
     }
     receipt.obligation_open = false;
-    receipt.updated_at = Utc::now();
+    receipt.updated_at = UtcTimestamp::now();
     if !receipt.status.is_settled() {
         tracing::warn!(status = ?receipt.status, "verified delivery retains unsettled Work bookkeeping for audit");
     }
@@ -2940,8 +2940,12 @@ pub struct WorkEventDirtyPath {
 /// An empty list means `git status` is clean for the store and no ignored
 /// canonical shard is pending.
 pub(crate) fn work_event_dirty_paths(worktree: &Path) -> Result<Vec<WorkEventDirtyPath>, ()> {
+    // `--no-optional-locks`: a read-only scan must not refresh the index. The
+    // rewrite would contend for `index.lock` with a running agent and would
+    // make every scan look like a store change to the diagnosis cache.
     let output = gwt_core::process::hidden_command("git")
         .args([
+            "--no-optional-locks",
             "status",
             "--porcelain=v1",
             "--untracked-files=all",
@@ -3002,6 +3006,129 @@ pub(crate) fn work_event_dirty_paths(worktree: &Path) -> Result<Vec<WorkEventDir
         }
     }
     Ok(dirty)
+}
+
+/// Diagnosis-only view of [`work_event_dirty_paths`] (Issue #7616).
+///
+/// The GUI diagnoses every Work on a fixed cadence, and a live scan starts
+/// `git status` over the whole Work event store. This view reuses the last
+/// scan while the files that decide its answer are unchanged, so an idle
+/// store starts no Git. Delivery gates keep calling the live scan.
+pub(crate) fn work_event_dirty_paths_for_diagnosis(
+    worktree: &Path,
+) -> Result<Vec<WorkEventDirtyPath>, ()> {
+    work_event_dirty_paths_for_diagnosis_at(worktree, std::time::SystemTime::now())
+}
+
+/// Timestamps younger than this cannot prove that no later write shares
+/// their tick, so such a scan is not reused.
+const WORK_EVENT_SCAN_SETTLE: std::time::Duration = std::time::Duration::from_secs(2);
+const WORK_EVENT_SCAN_CACHE_LIMIT: usize = 4096;
+
+type WorkEventScanCache = std::collections::HashMap<PathBuf, ([u8; 32], Vec<WorkEventDirtyPath>)>;
+
+fn work_event_scan_cache() -> std::sync::MutexGuard<'static, WorkEventScanCache> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<WorkEventScanCache>> =
+        std::sync::OnceLock::new();
+    CACHE
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn work_event_dirty_paths_for_diagnosis_at(
+    worktree: &Path,
+    now: std::time::SystemTime,
+) -> Result<Vec<WorkEventDirtyPath>, ()> {
+    let before = work_event_store_fingerprint(worktree);
+    if let Some((digest, _)) = &before {
+        if let Some((cached, dirty)) = work_event_scan_cache().get(worktree) {
+            if cached == digest {
+                return Ok(dirty.clone());
+            }
+        }
+    }
+    let scanned = work_event_dirty_paths(worktree);
+    let mut cache = work_event_scan_cache();
+    cache.remove(worktree);
+    // Reuse only a scan that nothing raced: the same facts before and after,
+    // all older than the timestamp resolution.
+    if let (Ok(dirty), Some((digest, newest)), Some(after)) =
+        (&scanned, before, work_event_store_fingerprint(worktree))
+    {
+        let settled = newest.is_none_or(|newest| {
+            now.duration_since(newest)
+                .is_ok_and(|age| age >= WORK_EVENT_SCAN_SETTLE)
+        });
+        if digest == after.0 && settled {
+            if cache.len() >= WORK_EVENT_SCAN_CACHE_LIMIT {
+                cache.clear();
+            }
+            cache.insert(worktree.to_path_buf(), (digest, dirty.clone()));
+        }
+    }
+    scanned
+}
+
+/// Digest and newest timestamp of the files that decide the Work event
+/// `git status` answer, read without starting Git: the index, HEAD and its
+/// branch ref, the ignore rules, the event log, the store directory with its
+/// direct children, and the trusted store that certifies delivery events.
+/// A shard is written by create or rename, which touches its directory; an
+/// in-place rewrite of an existing shard is seen at the next such change.
+/// `None` means the facts are unreadable and the scan must not be reused.
+fn work_event_store_fingerprint(
+    worktree: &Path,
+) -> Option<([u8; 32], Option<std::time::SystemTime>)> {
+    let git_dir = gwt_core::repo_hash::resolve_git_dir(worktree)?;
+    let common_dir = gwt_core::repo_hash::repository_common_dir(worktree)?;
+    let head = fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    let store = worktree.join(WORK_EVENT_STORE_RELATIVE);
+    let mut paths = vec![
+        git_dir.join("index"),
+        git_dir.join("HEAD"),
+        common_dir.join("packed-refs"),
+        common_dir.join("info").join("exclude"),
+        worktree.join(".gitignore"),
+        worktree.join(WORK_EVENT_LOG_RELATIVE),
+        store.clone(),
+    ];
+    if let Some(branch_ref) = head.trim().strip_prefix("ref: ") {
+        paths.push(common_dir.join(branch_ref));
+    }
+    paths.extend(super::trusted_store::trusted_dir_for_worktree(worktree));
+    match fs::read_dir(&store) {
+        Ok(entries) => {
+            let mut children = entries
+                .map(|entry| entry.map(|entry| entry.path()))
+                .collect::<io::Result<Vec<_>>>()
+                .ok()?;
+            children.sort();
+            paths.extend(children);
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(_) => return None,
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(head.as_bytes());
+    let mut newest = None;
+    for path in paths {
+        hasher.update(path.to_string_lossy().as_bytes());
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) => {
+                let modified = metadata.modified().ok()?;
+                let since_epoch = modified.duration_since(std::time::UNIX_EPOCH).ok()?;
+                hasher.update([1, u8::from(metadata.is_dir())]);
+                hasher.update(metadata.len().to_le_bytes());
+                hasher.update(since_epoch.as_nanos().to_le_bytes());
+                newest = newest.max(Some(modified));
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => hasher.update([0]),
+            Err(_) => return None,
+        }
+    }
+    Some((hasher.finalize().into(), newest))
 }
 
 fn event_commit_has_non_bookkeeping_change(
@@ -4736,7 +4863,7 @@ where
         .and_then(|record| record.continuation.as_ref())
         .and_then(|context| context.remaining(true).first().copied())
         .unwrap_or(0);
-    let mut started_at = Utc::now();
+    let mut started_at = UtcTimestamp::now();
     // Admit before the strict snapshot check so a live same-worktree runner
     // follows the normal wait/deferred path. Never wait under the write lease.
     // A first-command timeout still writes no record.
@@ -5429,7 +5556,7 @@ where
         quarantined_failures,
         adjudications: Vec::new(),
         started_at: Some(started_at),
-        created_at: Utc::now(),
+        created_at: UtcTimestamp::now(),
         plan_covered,
         planned_missing,
         skipped_after_failure,
@@ -5490,7 +5617,7 @@ where
         if let Some(authority) = authority {
             revalidate_verification_caller_authority(worktree, session_id, authority)?;
         }
-        record.created_at = Utc::now();
+        record.created_at = UtcTimestamp::now();
         record.content_hash = compute_content_hash(&record);
         save(worktree, &record)?;
         if let Some(attempt) = options.attempt { attempt.complete_under_lease()?; }
@@ -6586,7 +6713,7 @@ impl VerificationCommandActivityContext {
         // This exact command is still in its canonical wait scope, including
         // silent I/O waits. Stamp the successful observation before readback
         // or IPC can delay it.
-        let at = Utc::now().to_rfc3339();
+        let at = UtcTimestamp::now().to_rfc3339();
         if stopped.load(Ordering::Acquire) || !self.is_current() || stopped.load(Ordering::Acquire)
         {
             return None;
@@ -6791,7 +6918,7 @@ fn attach_board_decision_for_caller(
         record.adjudications.push(VerificationAdjudicationRef {
             board_entry_id: board_entry_id.to_string(),
             command: command.to_string(),
-            attached_at: Utc::now(),
+            attached_at: UtcTimestamp::now(),
         });
         save(worktree, &record)?;
         load(worktree)?.ok_or_else(|| {
@@ -7443,6 +7570,9 @@ pub(super) fn run_with_response<E: CliEnv>(
                         Some(command),
                         max_wait,
                         |artifacts| {
+                            if let Err(error) = attempt.mark_deferral_cleanup() {
+                                tracing::warn!(%error, "verify.run deferral cleanup status not published");
+                            }
                             let check = || attempt.cancelled().map_err(|error| error.to_string());
                             restore_gwtd_after_deferral_cancellable(
                                 &worktree,
@@ -7877,7 +8007,7 @@ pub(crate) mod tests {
                 surfaces: Vec::new(),
                 generated_outputs: Vec::new(),
                 quarantines: Vec::new(),
-                created_at: Utc::now(),
+                created_at: UtcTimestamp::now(),
                 content_hash: String::new(),
             }),
         )
@@ -7913,8 +8043,8 @@ pub(crate) mod tests {
             all_passed: true,
             quarantined_failures: Vec::new(),
             adjudications: Vec::new(),
-            started_at: Some(Utc::now()),
-            created_at: Utc::now(),
+            started_at: Some(UtcTimestamp::now()),
+            created_at: UtcTimestamp::now(),
             plan_covered: true,
             planned_missing: Vec::new(),
             skipped_after_failure: Vec::new(),
@@ -7972,7 +8102,7 @@ pub(crate) mod tests {
                 generated_outputs: Vec::new(),
                 quarantines: Vec::new(),
                 worktree_fingerprint: String::new(),
-                created_at: Utc::now(),
+                created_at: UtcTimestamp::now(),
                 content_hash: String::new(),
             }),
         )
@@ -8005,7 +8135,7 @@ pub(crate) mod tests {
             generated_outputs: Vec::new(),
             quarantines: Vec::new(),
             worktree_fingerprint: "fingerprint".to_string(),
-            created_at: Utc::now(),
+            created_at: UtcTimestamp::now(),
             content_hash: String::new(),
         }))
         .unwrap();
@@ -8248,7 +8378,7 @@ pub(crate) mod tests {
             surfaces: Vec::new(),
             generated_outputs: Vec::new(),
             quarantines: Vec::new(),
-            created_at: Utc::now(),
+            created_at: UtcTimestamp::now(),
             content_hash: String::new(),
         });
         save_plan(dir.path(), &plan).unwrap();
@@ -8327,7 +8457,7 @@ pub(crate) mod tests {
             surfaces: Vec::new(),
             generated_outputs: Vec::new(),
             quarantines: Vec::new(),
-            created_at: Utc::now(),
+            created_at: UtcTimestamp::now(),
             content_hash: String::new(),
         });
         forged_plan.content_hash = compute_plan_hash(&forged_plan);
@@ -8554,7 +8684,7 @@ pub(crate) mod tests {
             worktree_fingerprint: &'a str,
             commands: Vec<LegacyCommandResult<'a>>,
             all_passed: bool,
-            created_at: DateTime<Utc>,
+            created_at: UtcTimestamp,
             plan_covered: bool,
             #[serde(skip_serializing_if = "Option::is_none")]
             verification_plan_snapshot: Option<VerificationPlanData>,
@@ -8570,21 +8700,22 @@ pub(crate) mod tests {
                 exit_code: 0,
             }],
             all_passed: true,
-            created_at: DateTime::parse_from_rfc3339("2026-08-01T00:00:00Z")
-                .unwrap()
-                .with_timezone(&Utc),
+            created_at: "2026-08-01T00:00:00.007980Z".parse().unwrap(),
             plan_covered: true,
             verification_plan_snapshot: None,
         };
-        let serialized = serde_json::to_vec(&legacy).unwrap();
-        let hash = format!("{:x}", Sha256::digest(&serialized));
+        // This hash was produced from the previous Chrono-backed JSON projection.
+        let hash = "79655994754f1ae027a5df960b7c6cd6f7dabc6164336075854732a8690762e5";
         let mut value = serde_json::to_value(&legacy).unwrap();
-        value["content_hash"] = serde_json::Value::String(hash.clone());
+        value["content_hash"] = serde_json::json!(hash);
 
         let loaded: VerificationRunRecord = serde_json::from_value(value).unwrap();
         assert!(integrity_ok(&loaded));
         assert_eq!(compute_content_hash(&loaded), hash);
         assert!(loaded.commands[0].output_tail.is_empty());
+        let mut edited = loaded;
+        edited.created_at += time::Duration::nanoseconds(1);
+        assert!(!integrity_ok(&edited));
 
         // A legacy embedded plan must keep struct order too, rather than
         // acquiring the sorted object order of the versioned wire adapter.
@@ -10250,8 +10381,8 @@ fn default_integration_test_builds_a_guarded_binary() {
             all_passed: true,
             quarantined_failures: Vec::new(),
             adjudications: Vec::new(),
-            started_at: Some(Utc::now()),
-            created_at: Utc::now(),
+            started_at: Some(UtcTimestamp::now()),
+            created_at: UtcTimestamp::now(),
             plan_covered: true,
             planned_missing: Vec::new(),
             skipped_after_failure: Vec::new(),
@@ -10858,7 +10989,7 @@ fn default_integration_test_builds_a_guarded_binary() {
                 surfaces: Vec::new(),
                 generated_outputs: Vec::new(),
                 quarantines: Vec::new(),
-                created_at: Utc::now(),
+                created_at: UtcTimestamp::now(),
                 content_hash: String::new(),
             }),
         );
@@ -11100,7 +11231,7 @@ fn default_integration_test_builds_a_guarded_binary() {
             generated_outputs: Vec::new(),
             quarantines: vec![request.clone()],
             worktree_fingerprint: "fingerprint".to_string(),
-            created_at: Utc::now(),
+            created_at: UtcTimestamp::now(),
             content_hash: "hash".to_string(),
         });
         let mut env = crate::cli::TestEnv::new(std::path::PathBuf::from("."));
@@ -11265,7 +11396,7 @@ fn default_integration_test_builds_a_guarded_binary() {
                 generated_outputs: Vec::new(),
                 quarantines: vec![request.clone()],
                 worktree_fingerprint: worktree_fingerprint(dir.path()),
-                created_at: Utc::now(),
+                created_at: UtcTimestamp::now(),
                 content_hash: String::new(),
             }),
         )
@@ -11628,7 +11759,7 @@ fn default_integration_test_builds_a_guarded_binary() {
                 generated_outputs: vec!["artifacts/report.json".to_string()],
                 quarantines: Vec::new(),
                 worktree_fingerprint: String::new(),
-                created_at: Utc::now(),
+                created_at: UtcTimestamp::now(),
                 content_hash: String::new(),
             }),
         )
@@ -11645,7 +11776,7 @@ fn default_integration_test_builds_a_guarded_binary() {
                 fs::create_dir_all(dir.path().join("artifacts")).unwrap();
                 fs::write(dir.path().join("artifacts/report.json"), "{}").unwrap();
                 let mut plan = load_plan(dir.path()).unwrap().unwrap();
-                plan.created_at += chrono::Duration::seconds(1);
+                plan.created_at += time::Duration::seconds(1);
                 save_plan(dir.path(), &plan).unwrap();
             },
         )
@@ -11764,7 +11895,7 @@ fn default_integration_test_builds_a_guarded_binary() {
                 generated_outputs: vec!["report.json".to_string()],
                 quarantines: Vec::new(),
                 worktree_fingerprint: String::new(),
-                created_at: Utc::now(),
+                created_at: UtcTimestamp::now(),
                 content_hash: String::new(),
             }),
         )
@@ -11819,7 +11950,7 @@ fn default_integration_test_builds_a_guarded_binary() {
                 surfaces: Vec::new(),
                 generated_outputs: Vec::new(),
                 quarantines: Vec::new(),
-                created_at: Utc::now(),
+                created_at: UtcTimestamp::now(),
                 content_hash: String::new(),
             }),
         )
@@ -11864,7 +11995,7 @@ fn default_integration_test_builds_a_guarded_binary() {
                 surfaces: Vec::new(),
                 generated_outputs: Vec::new(),
                 quarantines: Vec::new(),
-                created_at: Utc::now(),
+                created_at: UtcTimestamp::now(),
                 content_hash: String::new(),
             }),
         )
@@ -11900,7 +12031,7 @@ fn default_integration_test_builds_a_guarded_binary() {
             EvidenceStatus::Fresh
         );
         // Change metadata deterministically; no sleep or clock deadline.
-        plan.created_at += chrono::Duration::seconds(1);
+        plan.created_at += time::Duration::seconds(1);
         save_plan(dir.path(), &plan).unwrap();
         assert_eq!(
             evaluate_evidence(dir.path(), "sess-1", None),
@@ -11925,7 +12056,7 @@ fn default_integration_test_builds_a_guarded_binary() {
         save(dir.path(), &run).unwrap();
         let previous = load_plan(dir.path()).unwrap().unwrap();
         let mut plan = previous.clone();
-        plan.created_at += chrono::Duration::seconds(1);
+        plan.created_at += time::Duration::seconds(1);
         save_plan(dir.path(), &plan).unwrap();
         assert_eq!(load_plan(dir.path()).unwrap().unwrap(), previous);
         assert_eq!(
@@ -11952,7 +12083,7 @@ fn default_integration_test_builds_a_guarded_binary() {
                 surfaces: Vec::new(),
                 generated_outputs: Vec::new(),
                 quarantines: Vec::new(),
-                created_at: Utc::now(),
+                created_at: UtcTimestamp::now(),
                 content_hash: String::new(),
             }),
         )
@@ -11982,7 +12113,7 @@ fn default_integration_test_builds_a_guarded_binary() {
                 surfaces: Vec::new(),
                 generated_outputs: Vec::new(),
                 quarantines: Vec::new(),
-                created_at: Utc::now(),
+                created_at: UtcTimestamp::now(),
                 content_hash: String::new(),
             }),
         )
@@ -12023,7 +12154,7 @@ fn default_integration_test_builds_a_guarded_binary() {
                 surfaces: Vec::new(),
                 generated_outputs: Vec::new(),
                 quarantines: Vec::new(),
-                created_at: Utc::now(),
+                created_at: UtcTimestamp::now(),
                 content_hash: String::new(),
             }),
         )
@@ -12584,7 +12715,7 @@ fn default_integration_test_builds_a_guarded_binary() {
                 surfaces: vec!["trivial(ledger_only)".to_string()],
                 generated_outputs: Vec::new(),
                 quarantines: Vec::new(),
-                created_at: Utc::now(),
+                created_at: UtcTimestamp::now(),
                 content_hash: String::new(),
             }),
         )
@@ -12667,7 +12798,7 @@ fn default_integration_test_builds_a_guarded_binary() {
                 surfaces: Vec::new(),
                 generated_outputs: Vec::new(),
                 quarantines: Vec::new(),
-                created_at: Utc::now(),
+                created_at: UtcTimestamp::now(),
                 content_hash: String::new(),
             }),
         )
@@ -12981,7 +13112,7 @@ fn default_integration_test_builds_a_guarded_binary() {
             session_binding_id: format!("binding-{operation_id}"),
             initial_session_id: session_id.to_string(),
             entrypoint: "continue-work".to_string(),
-            requested_at: Utc::now(),
+            requested_at: UtcTimestamp::now(),
         }
     }
 
@@ -13019,7 +13150,7 @@ fn default_integration_test_builds_a_guarded_binary() {
             from_session_id: from.to_string(),
             to_session_id: to.to_string(),
             reason: "verified stale owner".to_string(),
-            requested_at: Utc::now(),
+            requested_at: UtcTimestamp::now(),
         };
         let owner = generation_scoped_owner();
         crate::cli::execution_state::prepare_generation_takeover(worktree, owner, &request)
@@ -13194,7 +13325,8 @@ fn default_integration_test_builds_a_guarded_binary() {
             serde_json::to_value(&context.execution_identity).unwrap()
         );
         assert!(
-            DateTime::parse_from_rfc3339(payload["child_progress"]["at"].as_str().unwrap()).is_ok()
+            UtcTimestamp::parse_rfc3339(payload["child_progress"]["at"].as_str().unwrap())
+                .is_some()
         );
         runtime.runtime_incarnation = Some(2);
         runtime.save(&runtime_path).unwrap();
@@ -13701,7 +13833,7 @@ fn default_integration_test_builds_a_guarded_binary() {
             "window_id": "gone-window", "session_id": session_id,
             "execution_identity": identity, "host_pid": pid, "host_started_at": started,
             "runtime_incarnation": 17, "child_pid": pid, "child_started_at": started,
-            "requested_at": Utc::now().to_rfc3339(),
+            "requested_at": UtcTimestamp::now().to_rfc3339(),
         }]);
         let mut prefs: crate::IssueMonitorPrefs = serde_json::from_value(prefs).unwrap();
         let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(dir.path());
@@ -14594,7 +14726,7 @@ fn default_integration_test_builds_a_guarded_binary() {
             Some(&fixture.repo),
         )
         .unwrap();
-        let mut start = WorkEvent::new(WorkEventKind::Start, &root_id, Utc::now());
+        let mut start = WorkEvent::new(WorkEventKind::Start, &root_id, UtcTimestamp::now());
         start.owner = Some("Issue #4074".to_string());
         start.execution_container = Some(WorkspaceExecutionContainerRef {
             branch: Some("main".to_string()),
@@ -14607,7 +14739,7 @@ fn default_integration_test_builds_a_guarded_binary() {
             .unwrap();
         gwt_core::workspace_projection::record_workspace_work_event(
             &fixture.repo,
-            WorkEvent::new(WorkEventKind::Discard, &root_id, Utc::now()),
+            WorkEvent::new(WorkEventKind::Discard, &root_id, UtcTimestamp::now()),
         )
         .unwrap();
         assert!(canonical_work_for_worktree_is_terminal(&fixture.repo));
@@ -14617,7 +14749,7 @@ fn default_integration_test_builds_a_guarded_binary() {
                 "work-successor-{}",
                 hex::encode(sha2::Sha256::digest(root_id.as_bytes()))
             ),
-            Utc::now(),
+            UtcTimestamp::now(),
         );
         successor.owner = start.owner;
         successor.execution_container = start.execution_container;
@@ -14785,7 +14917,7 @@ fn default_integration_test_builds_a_guarded_binary() {
             Some(fixture.repo.as_path()),
         )
         .expect("canonical Work id");
-        let now = Utc::now();
+        let now = UtcTimestamp::now();
         let mut start = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Start,
             &work_id,
@@ -14801,7 +14933,7 @@ fn default_integration_test_builds_a_guarded_binary() {
             let mut discard = gwt_core::workspace_projection::WorkEvent::new(
                 gwt_core::workspace_projection::WorkEventKind::Discard,
                 &work_id,
-                now + chrono::Duration::seconds(1),
+                now + time::Duration::seconds(1),
             );
             discard.agent_session_id = Some(session_id.to_string());
             gwt_core::workspace_projection::record_workspace_work_event(&fixture.repo, discard)
@@ -14984,7 +15116,7 @@ fn default_integration_test_builds_a_guarded_binary() {
         let event = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Resume,
             "recovery-work",
-            Utc::now(),
+            UtcTimestamp::now(),
         );
         fixture.append_typed_event_shard(&event);
         let source = fixture.event_shard_path(&event.id);
@@ -14993,7 +15125,7 @@ fn default_integration_test_builds_a_guarded_binary() {
         let staged = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Update,
             "staged-work",
-            Utc::now(),
+            UtcTimestamp::now(),
         );
         fixture.append_typed_event_shard(&staged);
         fixture.git_ok(&[
@@ -15789,7 +15921,7 @@ fn default_integration_test_builds_a_guarded_binary() {
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
         let fixture = WorkEventGitFixture::tracked();
-        let updated_at = Utc::now();
+        let updated_at = UtcTimestamp::now();
         let mut event = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Done,
             "work-pending-terminal",
@@ -15875,7 +16007,7 @@ fn default_integration_test_builds_a_guarded_binary() {
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
         let fixture = WorkEventGitFixture::tracked_shards();
-        let updated_at = Utc::now();
+        let updated_at = UtcTimestamp::now();
         let mut event = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Done,
             "work-pending-shard",
@@ -16050,6 +16182,70 @@ fn default_integration_test_builds_a_guarded_binary() {
         assert_eq!(repositories, 1, "one fresh Git operation: {trace}");
     }
 
+    /// Issue #7616: a repeated diagnosis of an unchanged Work event store
+    /// must not start Git again, and a written or committed Work event must
+    /// still be re-read.
+    #[test]
+    fn work_event_diagnosis_scan_reuses_result_until_the_store_changes() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let fixture = WorkEventGitFixture::tracked_shards();
+        fixture.write_event_shard("pending-first", b"{}\n");
+        // Judge the fixture's fresh timestamps as settled without waiting.
+        let now = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
+        let repo = dunce::canonicalize(&fixture.repo).unwrap();
+        let scans = std::cell::Cell::new(0);
+        let scan = || {
+            scans.set(scans.get() + 1);
+            let trace_path = fixture
+                ._root
+                .path()
+                .join(format!("git-trace-{}.log", scans.get()));
+            let _trace = ScopedEnvVar::set("GIT_TRACE2_EVENT", &trace_path);
+            let mut dirty = work_event_dirty_paths_for_diagnosis_at(&fixture.repo, now).unwrap();
+            dirty.sort_by(|a, b| a.path.cmp(&b.path));
+            // The trace variable is process-wide, so parallel tests write to
+            // it too: count only Git processes opened on this repository.
+            let git_started = fs::read_to_string(&trace_path)
+                .unwrap_or_default()
+                .lines()
+                .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+                .filter(|event| {
+                    event["event"] == "def_repo"
+                        && event["worktree"].as_str().is_some_and(|path| {
+                            dunce::canonicalize(path).ok().as_ref() == Some(&repo)
+                        })
+                })
+                .count();
+            (
+                dirty
+                    .into_iter()
+                    .map(|dirty| dirty.path)
+                    .collect::<Vec<_>>(),
+                git_started,
+            )
+        };
+        let shard = |id| pending_work_event_shard_relative_path(&fixture.repo, id).unwrap();
+
+        assert_eq!(scan(), (vec![shard("pending-first")], 1));
+        assert_eq!(
+            scan(),
+            (vec![shard("pending-first")], 0),
+            "an unchanged store must not start Git"
+        );
+
+        fixture.write_event_shard("pending-second", b"{}\n");
+        let mut expected = vec![shard("pending-first"), shard("pending-second")];
+        expected.sort();
+        assert_eq!(scan(), (expected, 1), "a written Work event is re-read");
+
+        fixture.stage_event_shards();
+        fixture.commit("chore(work): record pending Work events");
+        assert_eq!(scan(), (Vec::new(), 1), "a commit is re-read");
+        assert_eq!(scan(), (Vec::new(), 0));
+    }
+
     #[test]
     fn pending_work_event_settlement_requires_every_exact_ignored_shard() {
         let _env_lock = crate::env_test_lock()
@@ -16064,7 +16260,7 @@ fn default_integration_test_builds_a_guarded_binary() {
         fixture.commit("chore: ignore managed project state");
         fixture.push();
 
-        let updated_at = Utc::now();
+        let updated_at = UtcTimestamp::now();
         let session_id = "session-ignored-shard";
         let mut prior_event = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Update,
@@ -16149,7 +16345,7 @@ fn default_integration_test_builds_a_guarded_binary() {
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
         let fixture = WorkEventGitFixture::tracked_shards();
-        let updated_at = Utc::now();
+        let updated_at = UtcTimestamp::now();
         let mut event = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Done,
             "work-exact-provenance",
@@ -16218,7 +16414,7 @@ fn default_integration_test_builds_a_guarded_binary() {
 
         let predecessor =
             initialize_generation_scoped_execution(&fixture.repo, predecessor_session);
-        let updated_at = Utc::now();
+        let updated_at = UtcTimestamp::now();
         let mut first = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Done,
             "work-superseded-obligation",
@@ -16318,7 +16514,7 @@ fn default_integration_test_builds_a_guarded_binary() {
         let fixture = WorkEventGitFixture::tracked_shards();
         let session_id = "session-shard-lost";
         initialize_generation_scoped_execution(&fixture.repo, session_id);
-        let updated_at = Utc::now();
+        let updated_at = UtcTimestamp::now();
         let mut event = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Done,
             "work-shard-lost",
@@ -16419,7 +16615,7 @@ fn default_integration_test_builds_a_guarded_binary() {
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
         let fixture = WorkEventGitFixture::tracked_shards();
-        let updated_at = Utc::now();
+        let updated_at = UtcTimestamp::now();
         let mut first = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Done,
             "work-first-pending",
@@ -16484,7 +16680,7 @@ fn default_integration_test_builds_a_guarded_binary() {
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
         let fixture = WorkEventGitFixture::tracked_shards();
-        let updated_at = Utc::now();
+        let updated_at = UtcTimestamp::now();
         let mut event = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Done,
             "work-same-identity-retry",
@@ -16582,7 +16778,7 @@ fn default_integration_test_builds_a_guarded_binary() {
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
         let fixture = WorkEventGitFixture::tracked_shards();
-        let updated_at = Utc::now();
+        let updated_at = UtcTimestamp::now();
         let mut first = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Done,
             "work-retry-pending",
@@ -16612,7 +16808,7 @@ fn default_integration_test_builds_a_guarded_binary() {
         )
         .expect("prepare first durable identity");
 
-        let retry_at = updated_at + chrono::TimeDelta::seconds(1);
+        let retry_at = updated_at + time::Duration::seconds(1);
         let mut retry = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Done,
             "work-retry-pending",
@@ -16650,7 +16846,7 @@ fn default_integration_test_builds_a_guarded_binary() {
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
         let fixture = WorkEventGitFixture::tracked_shards();
-        let updated_at = Utc::now();
+        let updated_at = UtcTimestamp::now();
         let mut event = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Done,
             "work-invalid-shard",
@@ -16732,7 +16928,7 @@ fn default_integration_test_builds_a_guarded_binary() {
         for index in 0..4 {
             let fixture = WorkEventGitFixture::tracked_shards();
             let session_id = format!("session-symlinked-store-{index}");
-            let updated_at = Utc::now();
+            let updated_at = UtcTimestamp::now();
             let mut event = gwt_core::workspace_projection::WorkEvent::new(
                 gwt_core::workspace_projection::WorkEventKind::Done,
                 format!("work-symlinked-store-{index}"),
@@ -16835,7 +17031,7 @@ fn default_integration_test_builds_a_guarded_binary() {
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
         let fixture = WorkEventGitFixture::tracked_shards();
-        let updated_at = Utc::now();
+        let updated_at = UtcTimestamp::now();
         let mut event = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Done,
             "work-unreadable-shard",
@@ -16895,7 +17091,7 @@ fn default_integration_test_builds_a_guarded_binary() {
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
         let fixture = WorkEventGitFixture::tracked_shards();
-        let updated_at = Utc::now();
+        let updated_at = UtcTimestamp::now();
         let mut event = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Done,
             "work-uninspectable-store",
@@ -16954,7 +17150,7 @@ fn default_integration_test_builds_a_guarded_binary() {
             pending_delivery: None,
             obligation_open: false,
             status: fixture.settled_status(),
-            updated_at: Utc::now(),
+            updated_at: UtcTimestamp::now(),
         };
         persist_work_event_settlement_record(&fixture.repo, &legacy)
             .expect("seed v1 settlement receipt");
@@ -17003,7 +17199,7 @@ fn default_integration_test_builds_a_guarded_binary() {
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
         let fixture = WorkEventGitFixture::tracked_shards();
-        let updated_at = Utc::now();
+        let updated_at = UtcTimestamp::now();
         let mut event = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Done,
             "work-early-v4",
@@ -17149,7 +17345,7 @@ fn default_integration_test_builds_a_guarded_binary() {
             pending_delivery: None,
             obligation_open: true,
             status: WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::GitStatusError),
-            updated_at: Utc::now(),
+            updated_at: UtcTimestamp::now(),
         };
 
         let error = persist_work_event_settlement_record(repo.path(), &record)
@@ -17181,7 +17377,7 @@ fn default_integration_test_builds_a_guarded_binary() {
             pending_delivery: None,
             obligation_open: false,
             status: WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::GitStatusError),
-            updated_at: Utc::now(),
+            updated_at: UtcTimestamp::now(),
         };
         let initial_bytes =
             serde_json::to_vec_pretty(&initial_record).expect("serialize initial settlement");
@@ -17252,7 +17448,7 @@ fn default_integration_test_builds_a_guarded_binary() {
             pending_delivery: None,
             obligation_open: false,
             status: WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::GitStatusError),
-            updated_at: Utc::now(),
+            updated_at: UtcTimestamp::now(),
         };
         let initial_bytes =
             serde_json::to_vec_pretty(&initial_record).expect("serialize initial settlement");
@@ -17407,7 +17603,7 @@ fn default_integration_test_builds_a_guarded_binary() {
                 surfaces: vec!["rust(gwt)".to_string()],
                 generated_outputs: Vec::new(),
                 quarantines: Vec::new(),
-                created_at: Utc::now(),
+                created_at: UtcTimestamp::now(),
                 content_hash: String::new(),
             }),
         )

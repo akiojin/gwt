@@ -310,6 +310,7 @@ fn backend_issue_monitor_status_serializes_for_monitor_card() {
             unqueued_open_count: 0,
             other_terminal_queue_count: 0,
             active_count: 1,
+            needs_human_count: Some(0),
             max_active_agents: 3,
             total_candidates: 8,
             active_issue_number: Some(42),
@@ -346,6 +347,7 @@ fn backend_issue_monitor_status_serializes_for_monitor_card() {
     assert_eq!(value["status"]["enabled"], true);
     assert_eq!(value["status"]["queue_len"], 2);
     assert_eq!(value["status"]["active_count"], 1);
+    assert_eq!(value["status"]["needs_human_count"], 0);
     assert_eq!(value["status"]["max_active_agents"], 3);
     assert_eq!(value["status"]["total_candidates"], 8);
     assert_eq!(value["status"]["active_issue_number"], 42);
@@ -363,7 +365,9 @@ fn backend_issue_monitor_status_serializes_for_monitor_card() {
         status["tier_facts"]
     );
     status.as_object_mut().unwrap().remove("tier_facts");
+    status.as_object_mut().unwrap().remove("needs_human_count");
     let legacy: IssueMonitorStatusView = serde_json::from_value(status).unwrap();
+    assert_eq!(legacy.needs_human_count, None);
     assert!(serde_json::to_value(legacy)
         .unwrap()
         .get("tier_facts")

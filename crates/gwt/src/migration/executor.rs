@@ -10,7 +10,6 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use chrono::Utc;
 use gwt_core::config::BareProjectConfig;
 use gwt_core::migration::backup::{self, BackupSnapshot};
 use gwt_core::migration::rollback;
@@ -257,7 +256,7 @@ fn run_post_backup(
     let cfg = BareProjectConfig {
         bare_repo_name,
         remote_url: origin_url,
-        created_at: Utc::now().to_rfc3339(),
+        created_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
         migrated_from: Some("normal".to_string()),
     };
     cfg.save(project_root).map_err(|e| MigrationError {

@@ -1,3 +1,5 @@
+import { FLEET_RATE_POINTS, FLEET_RATE_WINDOW_MINUTES } from "./agent-activity-model.js";
+
 const finite = value => typeof value === "number" && Number.isFinite(value);
 const number = value => finite(value) ? new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(value) : "—";
 const seconds = value => finite(value) ? `${Math.floor(value / 3600)}h ${Math.floor(value % 3600 / 60)}m` : "—";
@@ -46,8 +48,8 @@ function currentWorks(catalog, activity, roster, projectKey, entries) {
 }
 
 const sparkStates = new WeakMap();
-function drawSpark(document, svg, input, maximum) {
-  const values = Array.from({ length: 30 }, (_, index) => finite(input?.[index]) ? Math.max(0, input[index]) : null);
+function drawSpark(document, svg, input, maximum, minutes = 30, label = "Tokens per minute") {
+  const values = Array.from({ length: minutes }, (_, index) => finite(input?.[index]) ? Math.max(0, input[index]) : null);
   const known = values.filter(finite);
   const max = Math.max(1, maximum || 0, ...known);
   const previous = sparkStates.get(svg);
@@ -56,7 +58,7 @@ function drawSpark(document, svg, input, maximum) {
   svg.setAttribute("viewBox", "0 0 300 56");
   svg.setAttribute("preserveAspectRatio", "none");
   svg.setAttribute("role", "img");
-  svg.setAttribute("aria-label", `Tokens per minute, last 30 minutes: ${known.length} measured minutes, ${30 - known.length} unavailable`);
+  svg.setAttribute("aria-label", `${label}, last ${minutes} minutes: ${known.length} measured minutes, ${minutes - known.length} unavailable`);
   svg.dataset.knownCount = String(known.length);
   let points = [];
   const append = () => {
@@ -68,10 +70,11 @@ function drawSpark(document, svg, input, maximum) {
   };
   values.forEach((value, index) => {
     if (value === null) { append(); return; }
-    points.push(`${(index * 300 / 29).toFixed(1)},${(53 - value * 49 / max).toFixed(1)}`);
+    const x = (index * 300 / (minutes - 1)).toFixed(1), y = (53 - value * 49 / max).toFixed(1);
+    points.push(`${x},${y}`);
     const dot = document.createElementNS("http://www.w3.org/2000/svg", "circle");
-    dot.setAttribute("cx", (index * 300 / 29).toFixed(1));
-    dot.setAttribute("cy", (53 - value * 49 / max).toFixed(1)); dot.setAttribute("r", "1.5");
+    dot.setAttribute("cx", x);
+    dot.setAttribute("cy", y); dot.setAttribute("r", "1.5");
     svg.append(dot);
   });
   append();
@@ -85,10 +88,10 @@ export function createWorksSurface({ projectKey, document, windowCatalogModel, a
   const element = document.createElement("section");
   element.className = "works-surface"; element.setAttribute("aria-label", "Works");
   element.innerHTML = `<div class="works-overview"><header class="works-heading"><h2>Works</h2><div class="works-counts">
-    ${summaryCells.map(([key, label]) => `<span>${label} <b data-count="${key}">—</b></span>`).join("")}</div><span class="works-active"></span></header>
+    ${summaryCells.map(([key, label]) => `<span>${label} <b data-count="${key}">—</b></span>`).join("")}</div></header>
     <div class="works-today">Today · Tokens <b data-metric="today-total">—</b> · Input <b data-metric="today-input">—</b> · Cache <b data-metric="today-cache">—</b> · Output <b data-metric="today-output">—</b>
       <small class="works-availability" data-availability="today"></small></div>
-    <div class="works-fleet"><div>Fleet tokens/min <b data-metric="fleet-now">—</b><small>Last 30 minutes</small></div><svg></svg><small class="works-availability" data-availability="fleet"></small></div>
+    <div class="works-fleet"><div>Fleet tokens/min <b data-metric="fleet-now">—</b><small>${FLEET_RATE_WINDOW_MINUTES}-minute average · Last ${FLEET_RATE_POINTS} completed minutes</small></div><svg></svg><small class="works-availability" data-availability="fleet"></small></div>
     <div class="works-list" role="list" aria-label="Current agent works"></div><p class="works-empty">No local agents are active.</p></div>
     <section class="works-full" aria-label="Work terminal" hidden><header class="works-full-header"><button type="button" data-action="back">← Back to Works</button>
       <span class="works-full-name"></span><span class="works-full-meta"></span><span class="works-full-usage"></span>
@@ -354,7 +357,6 @@ export function createWorksSurface({ projectKey, document, windowCatalogModel, a
       if (list.children[index] !== entry.row) list.insertBefore(entry.row, list.children[index] || null);
     });
     renderSummary();
-    element.querySelector(".works-active").textContent = `Active ${number(activity.count)}`;
     for (const [key, value] of Object.entries({ total: finite(today.input_tokens) && finite(today.output_tokens) ? number(today.input_tokens + today.output_tokens) : "—", input: number(today.input_tokens), cache: number(today.cache_tokens), output: number(today.output_tokens) })) element.querySelector(`[data-metric="today-${key}"]`).textContent = value;
     for (const key of ["today", "fleet"]) {
       const note = element.querySelector(`[data-availability="${key}"]`);
@@ -363,7 +365,8 @@ export function createWorksSurface({ projectKey, document, windowCatalogModel, a
       note.textContent = status?.detail || "No data: session measurements are not available yet.";
     }
     element.querySelector('[data-metric="fleet-now"]').textContent = number(telemetry.fleet_tokens_per_minute?.at(-1));
-    drawSpark(document, element.querySelector(".works-fleet svg"), telemetry.fleet_tokens_per_minute);
+    drawSpark(document, element.querySelector(".works-fleet svg"), telemetry.fleet_tokens_per_minute, undefined,
+      FLEET_RATE_POINTS, `Fleet tokens per minute, ${FLEET_RATE_WINDOW_MINUTES}-minute average`);
     element.querySelector(".works-empty").textContent = activity.count === null ? "Local agent activity is unavailable." : "No local agents are active.";
     element.querySelector(".works-empty").hidden = works.length > 0;
     element.dataset.catalogVersion = String(catalog.version);

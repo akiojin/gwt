@@ -13,7 +13,7 @@
 //! user-facing reports follow the setting while the injected instructions
 //! stay in one language.
 
-use chrono::Duration;
+use time::Duration;
 
 pub(super) const SESSION_START_CAP: usize = 20;
 pub(super) const USER_PROMPT_DIFF_CAP: usize = 20;

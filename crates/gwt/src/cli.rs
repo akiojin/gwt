@@ -167,6 +167,7 @@ pub enum CliCommand {
     Pm(pm::PmCommand),
     /// SPEC #2920 FR-006: `gwt open` reads tray lock + opens browser.
     Open(open::OpenArgs),
+    ProjectControl(open::ProjectControlCommand),
     /// SPEC-1942 US-15: `search` JSON operation.
     Search(SearchCommand),
     GithubBudget(github_budget::GithubBudgetCommand),
@@ -179,6 +180,7 @@ pub enum CliCommand {
 pub enum AgentRegistryCommand {
     Status { source_key: Option<String> },
     Reconcile(Box<crate::agent_registry::RegistryReconcileRequest>),
+    RestoreSchema3,
 }
 
 /// SPEC-2077 command model for `daemon.*` JSON operations.
@@ -588,6 +590,7 @@ pub(crate) fn run_collect<E: CliEnv>(
                 AgentRegistryCommand::Reconcile(request) => {
                     crate::agent_registry::reconcile(&request)
                 }
+                AgentRegistryCommand::RestoreSchema3 => crate::agent_registry::restore_schema3(),
             }
             .map_err(io_as_api_error)?;
             out.push_str(&serde_json::to_string_pretty(&status).map_err(serde_as_api_error)?);
@@ -709,6 +712,7 @@ pub(crate) fn run_collect<E: CliEnv>(
         CliCommand::Perf(inner) => perf::run(env, inner, &mut out)?,
         CliCommand::Pm(inner) => pm::run(env, inner, &mut out)?,
         CliCommand::Open(args) => open::run(env, args, &mut out)?,
+        CliCommand::ProjectControl(command) => open::run_control(env, command, &mut out)?,
         CliCommand::Search(inner) => search::run(env, inner, &mut out)?,
     };
     Ok((code, out))

@@ -565,18 +565,38 @@ test("needs_human derives one immutable count and reason for shared Issue views"
   assert.equal(reason(), snapshot.byIssue[41].reason);
   assert.equal(detailReason(), reason());
   surface.applyIssueMonitorStatus({ enabled: true, needs_human_count: 99 });
-  assert.equal(surface.issueMonitorModel.read().humanAttention, snapshot);
+  assert.equal(surface.issueMonitorModel.read().humanAttention.count, 99);
+  assert.equal(surface.issueMonitorModel.read().decisionAttention.count, null,
+    "different snapshot memberships leave the combined total unknown");
+  assert.match(monitorBand(body).pill.title, /Needs human 99/);
   surface.applyIssueMonitorInbox([item(41, "needs_human", undefined)]);
   assert.equal(reason(), "Human decision required");
   assert.equal(detailReason(), reason());
   surface.applyIssueMonitorInbox([item(41, "queued", undefined)]);
-  assert.equal(surface.issueMonitorModel.read().humanAttention.count, 0);
+  assert.equal(surface.issueMonitorModel.read().humanAttention.count, 99);
   assert.equal(reason(), undefined);
   assert.equal(detailReason(), undefined);
+  surface.applyIssueMonitorStatus({ enabled: true, needs_human_count: null });
+  assert.equal(surface.issueMonitorModel.read().humanAttention.count, null);
+  surface.applyIssueMonitorStatus({ enabled: true, needs_human_count: 0 });
   surface.applyIssueMonitorInbox([]);
   assert.deepEqual(surface.issueMonitorModel.read().humanAttention,
     { count: 0, summary: "Needs human 0", byIssue: {} });
   assert.equal(snapshot.byIssue[41].reason, "Choose credentials");
+});
+
+test("Issue #7536 external verification waits do not retain stale decision attention", async (t) => {
+  const { surface } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  surface.applyIssueMonitorStatus({ autonomous_issues: [{ issue_number: 7536, phase: "implementing",
+    needs_human: false, review_dispatch_hold: { reason: "Old dispatch hold" },
+    steering: { reason: "Old steering request" } }] });
+  surface.applyIssueMonitorInbox([{ issue: { number: 7536, state: "open" }, state: "awaiting_verification" }]);
+  const snapshot = surface.issueMonitorModel.read();
+  assert.equal(snapshot.humanAttention.count, 0);
+  assert.equal(snapshot.reviewAttention.count, 0);
+  assert.equal(snapshot.steeringAttention.count, 0);
+  assert.equal(snapshot.decisionAttention.count, 0);
 });
 
 test("review holds derive shared counts and reasons from current status and open inbox", async (t) => {

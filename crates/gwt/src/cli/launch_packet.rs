@@ -20,7 +20,7 @@
 
 use std::{io, path::Path};
 
-use chrono::{DateTime, Utc};
+use gwt_core::timestamp::UtcTimestamp;
 use serde::{Deserialize, Serialize};
 
 /// Worktree-relative path of the packet.
@@ -53,7 +53,7 @@ pub struct PhaseLaunchPacket {
     pub artifacts: Vec<PacketArtifactRef>,
     /// Canonical commands to refresh and read the owner's sections.
     pub refresh_commands: Vec<String>,
-    pub generated_at: DateTime<Utc>,
+    pub generated_at: UtcTimestamp,
 }
 
 /// Write the packet for a launch. Best-effort from the launch path: a
@@ -105,7 +105,7 @@ fn write(
             format!("gwtd {{\"operation\":\"issue.spec.pull\",\"params\":{{\"numbers\":[{owner_number}]}}}}"),
             format!("gwtd {{\"operation\":\"issue.spec.section\",\"params\":{{\"number\":{owner_number},\"section\":\"tasks\"}}}}"),
         ],
-        generated_at: Utc::now(),
+        generated_at: gwt_core::timestamp::UtcTimestamp::now(),
     };
     let serialized = serde_json::to_vec_pretty(&packet)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;

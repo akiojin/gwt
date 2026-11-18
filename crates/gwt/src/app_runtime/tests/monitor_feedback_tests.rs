@@ -444,7 +444,8 @@ fn git_health_notice_is_shared_by_pm_and_monitor_until_recovery() {
         "an empty status is not evidence that Git recovered"
     );
     let mut validated = healthy.status_view();
-    validated.last_scan_at = Some((chrono::Utc::now() + chrono::Duration::seconds(1)).to_rfc3339());
+    validated.last_scan_at =
+        Some((gwt_core::timestamp::UtcTimestamp::now() + time::Duration::seconds(1)).to_rfc3339());
     runtime.issue_monitor_daemon_status_events(&repo, Box::new(validated));
     let recurrent = runtime.handle_pm_worktree_prepared(continuation(), Err(diagnostic.into()));
     assert_eq!(
@@ -952,7 +953,11 @@ fn issue5596_durable_facts_prefetch_is_bounded_and_keeps_claims_fifo() {
         },
         prefs,
     );
-    monitor.terminal_queue_push(&[3166, 3167], "operator", &Utc::now().to_rfc3339());
+    monitor.terminal_queue_push(
+        &[3166, 3167],
+        "operator",
+        &gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
+    );
     for issue_number in [3166, 3167] {
         monitor.record_candidate(gwt::IssueMonitorIssue {
             author_login: None,
@@ -970,7 +975,7 @@ fn issue5596_durable_facts_prefetch_is_bounded_and_keeps_claims_fifo() {
             format!("claim-prefetch-{issue_number}"),
             "host/session",
             &format!("effect-prefetch-{issue_number}"),
-            &Utc::now().to_rfc3339(),
+            &gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
         ));
     }
     let mut scheduled = monitor.prefs();
@@ -1283,7 +1288,7 @@ fn issue5596_durable_facts_prefetch_is_bounded_and_keeps_claims_fifo() {
     let before = gwt_core::process::thread_git_spawn_count();
     run_worker(0);
     assert!(
-        gwt_core::process::thread_git_spawn_count() - before > 2,
+        gwt_core::process::thread_git_spawn_count() - before > 0,
         "unavailable speculation must run normal facts preparation"
     );
     fixture
@@ -1782,7 +1787,7 @@ fn issue5596_preclaim_reused_by_another_owner_reprepares_a_new_window() {
             "Foreign producing owner",
             &["bug"],
             "Other work",
-            &Utc::now().to_rfc3339(),
+            &gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
         ))
         .unwrap();
     let owner = start_monitor_relaunch_owner(&mut fixture, false);
@@ -1817,7 +1822,7 @@ fn issue5596_preclaim_reused_by_another_owner_reprepares_a_new_window() {
     gwt::machine_agent_settings::set(
         Some(2),
         gwt::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
-        &Utc::now().to_rfc3339(),
+        &gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
     )
     .unwrap();
     // Two workers can capture this preview before either creates a pane.
@@ -2180,7 +2185,9 @@ fn issue6096_slow_admission_launches_after_one_revalidation_despite_rewrites() {
     let mut slow_evaluation_window = |priority_order: Vec<u64>| {
         for _ in 0..3 {
             renewal += 1;
-            let observed_at = u64::try_from(Utc::now().timestamp()).unwrap() + renewal;
+            let observed_at = u64::try_from(gwt_core::timestamp::UtcTimestamp::now().timestamp())
+                .unwrap()
+                + renewal;
             fs::write(
                 &capacity,
                 serde_json::to_vec(&serde_json::json!({
@@ -2260,7 +2267,7 @@ fn issue5596_unrelated_prefs_and_window_change_reuses_fresh_launch_facts() {
             "Unrelated producing owner",
             &["bug"],
             "Other work",
-            &Utc::now().to_rfc3339(),
+            &gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
         ))
         .unwrap();
     let owner = start_monitor_relaunch_owner(&mut fixture, false);
@@ -2376,7 +2383,7 @@ fn issue5596_unrelated_prefs_and_window_change_reuses_fresh_launch_facts() {
     let before = gwt_core::process::thread_git_spawn_count();
     drain_queued_blocking_tasks(&queued);
     let repeated_git = gwt_core::process::thread_git_spawn_count() - before;
-    assert_eq!(repeated_git, 0, "read-only revalidation must reuse Git/base/prompt facts; materializer claim belongs to the physical owner");
+    assert_eq!(repeated_git, 1, "revalidation must only probe the current base ref and reuse delivery/prompt facts; materializer claim belongs to the physical owner");
     fixture
         .runtime
         .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(

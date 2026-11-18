@@ -1,6 +1,6 @@
+use gwt_core::timestamp::UtcTimestamp;
 use std::path::{Path, PathBuf};
 
-use chrono::{TimeZone, Utc};
 use gwt_core::{
     paths::{gwt_project_state_projection_path, gwt_workspace_projection_path},
     repo_hash::compute_repo_hash,
@@ -44,7 +44,7 @@ fn projection(project_root: &Path) -> WorkspaceProjection {
             coordination_scope: Some("SPEC-2359 / start-work".to_string()),
             affiliation_status: WorkspaceAgentAffiliationStatus::Assigned,
             workspace_id: Some("work-1".to_string()),
-            updated_at: Utc.with_ymd_and_hms(2026, 5, 4, 12, 0, 0).unwrap(),
+            updated_at: "2026-05-04T12:00:00Z".parse::<UtcTimestamp>().unwrap(),
         }],
         git_details: Some(GitDetails {
             branch: Some("work/20260504-1200".to_string()),
@@ -55,11 +55,11 @@ fn projection(project_root: &Path) -> WorkspaceProjection {
             pr_url: None,
             pr_created_at: None,
             created_by_start_work: true,
-            created_at: Utc.with_ymd_and_hms(2026, 5, 4, 12, 0, 0).unwrap(),
+            created_at: "2026-05-04T12:00:00Z".parse::<UtcTimestamp>().unwrap(),
         }),
         board_refs: vec!["board-1".to_string()],
-        updated_at: Utc.with_ymd_and_hms(2026, 5, 4, 12, 1, 0).unwrap(),
-        created_at: Utc.with_ymd_and_hms(2026, 5, 4, 11, 30, 0).unwrap(),
+        updated_at: "2026-05-04T12:01:00Z".parse::<UtcTimestamp>().unwrap(),
+        created_at: "2026-05-04T11:30:00Z".parse::<UtcTimestamp>().unwrap(),
         creator: Some("codex".to_string()),
         lifecycle_stage: gwt_core::workspace_projection::WorkspaceLifecycleStage::Active,
         blocked_reason: None,
@@ -168,7 +168,7 @@ fn record_board_milestone_backfills_summary_when_missing_for_status_entry() {
         coordination_scope: None,
         affiliation_status: WorkspaceAgentAffiliationStatus::Assigned,
         workspace_id: Some("workspace-1".to_string()),
-        updated_at: Utc.with_ymd_and_hms(2026, 5, 13, 10, 0, 0).unwrap(),
+        updated_at: "2026-05-13T10:00:00Z".parse::<UtcTimestamp>().unwrap(),
     });
     projection.summary = None;
     let entry = BoardEntry::new(
@@ -215,7 +215,7 @@ fn record_board_milestone_sets_blocked_reason_separately_from_status_text() {
         coordination_scope: None,
         affiliation_status: WorkspaceAgentAffiliationStatus::Assigned,
         workspace_id: Some("workspace-1".to_string()),
-        updated_at: Utc.with_ymd_and_hms(2026, 5, 13, 10, 0, 0).unwrap(),
+        updated_at: "2026-05-13T10:00:00Z".parse::<UtcTimestamp>().unwrap(),
     });
     projection.blocked_reason = None;
     let entry = BoardEntry::new(
@@ -266,7 +266,7 @@ fn record_board_milestone_preserves_existing_summary_on_status_entry() {
         coordination_scope: None,
         affiliation_status: WorkspaceAgentAffiliationStatus::Assigned,
         workspace_id: Some("workspace-1".to_string()),
-        updated_at: Utc.with_ymd_and_hms(2026, 5, 13, 10, 0, 0).unwrap(),
+        updated_at: "2026-05-13T10:00:00Z".parse::<UtcTimestamp>().unwrap(),
     });
     projection.summary = Some("Existing summary that should survive".to_string());
     let entry = BoardEntry::new(
@@ -361,8 +361,8 @@ fn workspace_projection_serde_round_trip_preserves_new_fields() {
         agents: Vec::new(),
         git_details: None,
         board_refs: Vec::new(),
-        updated_at: Utc.with_ymd_and_hms(2026, 5, 13, 12, 0, 0).unwrap(),
-        created_at: Utc.with_ymd_and_hms(2026, 5, 13, 9, 0, 0).unwrap(),
+        updated_at: "2026-05-13T12:00:00Z".parse::<UtcTimestamp>().unwrap(),
+        created_at: "2026-05-13T09:00:00Z".parse::<UtcTimestamp>().unwrap(),
         creator: Some("codex".to_string()),
         lifecycle_stage: WorkspaceLifecycleStage::InReview,
         blocked_reason: Some("Waiting for review".to_string()),
@@ -441,7 +441,8 @@ fn detached_intake_worktree_source_never_needs_backfill() {
 
     let temp = tempfile::tempdir().expect("tempdir");
     let project_root = temp.path().join("repo");
-    let projection = WorkItemsProjection::empty(Utc.with_ymd_and_hms(2026, 7, 2, 0, 0, 0).unwrap());
+    let projection =
+        WorkItemsProjection::empty("2026-07-02T00:00:00Z".parse::<UtcTimestamp>().unwrap());
 
     let sources = vec![
         WorktreeReconcileSource {

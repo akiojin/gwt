@@ -6,7 +6,8 @@ import { homedir, tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import type { Page, TestInfo } from "@playwright/test";
-import { inspectLiveFixtureProcess } from "./process-inspection.mjs";
+import { watchExactRelaunchProcesses } from "./exact-relaunch-processes.cjs";
+import { inspectLiveFixtureProcess, queryWindowsProcess } from "./process-inspection.mjs";
 
 export async function readProcessState(pid: number): Promise<{ birth: number; parent: number } | null> {
   if (process.platform === "linux") {
@@ -530,15 +531,19 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     active_tab_id: "exact-relaunch", recent_projects: [],
   }));
 
-  await setup.beforeStart?.({ home, project, env, preferences });
-
+  const capacityExecutable = join(root, `target/debug/examples/exact_relaunch_capacity${suffix}`);
+  let reapProcesses: (() => Promise<void>) | undefined;
+  async function armProcessCleanup() {
+    // Native Windows verification already contains the worker and descendants
+    // in a kill-on-close Job Object. The POSIX launcher uses process groups.
+    if (!windows) reapProcesses ??= await watchExactRelaunchProcesses(home, capacityExecutable);
+  }
   let child: ChildProcess | undefined;
   let capacityChild: ChildProcess | undefined;
   async function startCapacityFixture() {
     if (!setup.fixedMachineCapacity || capacityChild) return;
-    const executable = join(root, `target/debug/examples/exact_relaunch_capacity${suffix}`);
-    await access(executable);
-    const current = spawn(executable, [project], {
+    await access(capacityExecutable);
+    const current = spawn(capacityExecutable, [project], {
       cwd: project, env, windowsHide: true, stdio: ["pipe", "pipe", "pipe"],
     });
     capacityChild = current;
@@ -703,9 +708,8 @@ readline.createInterface({input:process.stdin}).on('line', line => {
   function processCommand(pid: number) {
     return inspectLiveFixtureProcess(pid, () => {
       const result = windows
-        ? spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
-          `[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); (Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}').CommandLine`],
-        { encoding: "utf8", windowsHide: true })
+        ? queryWindowsProcess(
+          `[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); (Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}').CommandLine`)
         : spawnSync("ps", ["-p", String(pid), "-o", "command="], { encoding: "utf8" });
       if (result.error) throw result.error;
       if (result.status !== 0 && (windows || result.status !== 1)) throw new Error(`Cannot inspect owned fixture PID ${pid}: ${result.stderr}`);
@@ -723,13 +727,24 @@ readline.createInterface({input:process.stdin}).on('line', line => {
   function processBirth(pid: number) {
     return inspectLiveFixtureProcess(pid, () => {
       const result = windows
-        ? spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
-          `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().Ticks`],
-        { encoding: "utf8", windowsHide: true })
-        : spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8" });
+        ? queryWindowsProcess(
+          `$p = Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}' -ErrorAction Stop; if ($p) { $p.CreationDate.ToUniversalTime().Ticks }`)
+        : spawnSync("ps", ["-o", "stat=", "-o", "lstart=", "-p", String(pid)], { encoding: "utf8" });
       if (result.error) throw result.error;
-      return result.status === 0 ? result.stdout.trim() : "";
+      const output = result.stdout.trim();
+      if (!windows && result.status === 1 && !output && !result.stderr.trim()) return "";
+      if (result.status !== 0) throw new Error(`Cannot read creation time for fixture PID ${pid}: ${result.stderr}`);
+      if (windows) return output;
+      const [state, ...birth] = output.split(/\s+/);
+      return /^[ZX]/.test(state) ? "" : birth.join(" ");
     });
+  }
+  function providerProcessBirth(pid: number) {
+    const birth = processBirth(pid);
+    const provider = join(bin, windows ? "codex.cjs" : "codex");
+    // Ensure the observed process is our recorder, then check that the PID did
+    // not change hands between reading its creation time and command line.
+    return birth && processCommand(pid).includes(provider) && processBirth(pid) === birth ? birth : "";
   }
   async function captureGuiOwner() {
     const directory = join(state, "projects", hash, "runtime/daemon");
@@ -789,13 +804,16 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     if (signalFree && timedOut) throw new Error("Fixture signal-free GUI shutdown timed out");
   }
   async function stop(afterGuiStop?: () => Promise<void>, options: ShutdownOptions = {}) {
-    let failure: unknown;
-    try { await stopGuiAndProviders(afterGuiStop, options); } catch (error) { failure = error; }
-    try { await stopCapacityFixture(); } catch (error) {
-      if (failure) throw new AggregateError([failure, error], "Fixture cleanup failed");
-      throw error;
-    }
-    if (failure) throw failure;
+    const failures: unknown[] = [];
+    try { await stopGuiAndProviders(afterGuiStop, options); } catch (error) { failures.push(error); }
+    try { await stopCapacityFixture(); } catch (error) { failures.push(error); }
+    // Let the existing graceful shutdown assertions run before enforcing fixture
+    // cleanup, even when an assertion, callback or evidence attachment failed.
+    const reap = reapProcesses;
+    reapProcesses = undefined;
+    try { await reap?.(); } catch (error) { failures.push(error); }
+    if (failures.length === 1) throw failures[0];
+    if (failures.length) throw new AggregateError(failures, "Fixture cleanup failed");
   }
   async function stopGuiAndProviders(afterGuiStop?: () => Promise<void>, options: ShutdownOptions = {}) {
     let browserError: Error | undefined;
@@ -813,6 +831,7 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     const providerPaths = [join(bin, windows ? "codex.cjs" : "codex"), join(bin, windows ? "claude.cjs" : "claude")];
     let owner: { pid: number; birth: number; instance: string; startup_intent: "gui_managed" | "standalone"; natural: boolean | null } | null = null;
     let ownerCaptureFailed = false;
+    let ownerCaptureCause: string | undefined;
     let ownerError: Error | undefined;
     const ownerHealthObservations: Record<string, unknown>[] = [];
     const ownerHealthFields = (health: Record<string, unknown>) => {
@@ -911,8 +930,11 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     }
     if (ownedPid && windows && options.signalFree && !coldCleanupFailed && !protectGuiOwner) {
       try { windowsOwner = await captureGuiOwner(); }
-      catch {
+      catch (error) {
         ownerCaptureFailed = true;
+        // Only the system error code or error class: messages can carry endpoint details.
+        const code = (error as NodeJS.ErrnoException)?.code;
+        ownerCaptureCause = typeof code === "string" ? code : error instanceof Error ? error.name : "unknown";
         ownerError = new Error("Fixture owner capture failed");
       }
     }
@@ -1044,7 +1066,8 @@ readline.createInterface({input:process.stdin}).on('line', line => {
         await testInfo.attach("fixture-process-cleanup", { body: JSON.stringify({ pid: ownedPid, exited: !remaining,
           owner, owner_health_observations: ownerHealthObservations,
           ...(ownerObservationSupported || windowsOwner ? {} : { owner_observation: { status: "unsupported_platform", platform: process.platform, natural: null } }),
-          ...(ownerCaptureFailed ? { owner_capture_failed: true } : {}), provider_pre_fallback: providerPreFallback }), contentType: "application/json" });
+          ...(ownerCaptureFailed ? { owner_capture_failed: true } : {}),
+          ...(ownerCaptureCause ? { owner_capture_cause: ownerCaptureCause } : {}), provider_pre_fallback: providerPreFallback }), contentType: "application/json" });
         if (remaining) throw new Error(`Fixture gwt process ${ownedPid} remained after shutdown`);
       }
       child = undefined;
@@ -1235,9 +1258,14 @@ readline.createInterface({input:process.stdin}).on('line', line => {
       stream.once("error", resolve);
     });
     try {
+      await armProcessCleanup();
       await startCapacityFixture();
       child = spawn(gwt, ["--no-tray", "--no-open"], {
-        cwd: project, env: { ...env, GWT_BROWSER_URL_FILE: urlFile }, windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
+        cwd: project, windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
+        // Keep executing checkout binaries and identify this fixture even when
+        // verify.run has already removed its temporary cwd.
+        argv0: windows ? undefined : join(bin, "gwt"),
+        env: { ...env, GWT_BROWSER_URL_FILE: urlFile, ...(windows ? {} : { GWT_BIN_PATH: join(bin, "gwtd") }) },
       });
       const current = child;
       let failure: Error | undefined;
@@ -1272,8 +1300,15 @@ readline.createInterface({input:process.stdin}).on('line', line => {
       throw error;
     }
   }
+  await armProcessCleanup();
+  try { await setup.beforeStart?.({ home, project, env, preferences }); }
+  catch (error) {
+    await stop();
+    throw error;
+  }
   await start();
-  return { get url() { return url; }, get ownedPid() { return child?.pid; }, home, project, branch, preferences, argvLog, launches, start, stopGui, stop,
+  return { get url() { return url; }, get ownedPid() { return child?.pid; }, home, project, branch, preferences, argvLog, launches,
+    processBirth, providerProcessBirth, start, stopGui, stop,
     async restart(options: ShutdownOptions & { coldOwner?: ColdCensus } = {}) {
       if (options.coldOwner) return coldRestart(options.coldOwner, options);
       await stop(undefined, options); return start();

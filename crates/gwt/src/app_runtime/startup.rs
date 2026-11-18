@@ -552,10 +552,10 @@ fn session_project_scope_hash(session: &gwt_agent::Session) -> Option<String> {
 
 fn startup_auto_resume_is_fresh(
     session: &gwt_agent::Session,
-    now: chrono::DateTime<chrono::Utc>,
+    now: gwt_core::timestamp::UtcTimestamp,
 ) -> bool {
     now.signed_duration_since(session.last_activity_at)
-        <= chrono::Duration::seconds(STARTUP_AUTO_RESUME_STALE_AFTER_SECS)
+        <= time::Duration::seconds(STARTUP_AUTO_RESUME_STALE_AFTER_SECS)
 }
 
 /// Issue #4441 (AC-4): everything the startup-restore selection predicate
@@ -872,7 +872,7 @@ impl AppRuntime {
         // first startup after auto-done emission lands. The scan is idempotent
         // per `work_item_id` and skips silently when journal / work_events
         // files are missing or unreadable.
-        let now = chrono::Utc::now();
+        let now = gwt_core::timestamp::UtcTimestamp::now();
         let mut orphan_intake_prune_plans = Vec::new();
         for tab in &self.tabs {
             let Some(context) = self.project_context_for_root(&tab.project_root) else {
@@ -1038,7 +1038,7 @@ impl AppRuntime {
                 .then_with(|| left.id.cmp(&right.id))
         });
 
-        let now = chrono::Utc::now();
+        let now = gwt_core::timestamp::UtcTimestamp::now();
         let mut resumed_native_sessions = std::collections::HashSet::new();
         let mut restored_owner_issues = std::collections::HashSet::new();
         let mut resume_tabs = HashMap::new();
@@ -2412,7 +2412,7 @@ impl AppRuntime {
     /// release the projects' `update_drain` holds and queue a notice; only
     /// success bypasses the auto-resume freshness gate. Idempotent: a settled
     /// marker is gone; a failed attempt stays only in the apply result.
-    fn settle_update_resume_marker_at_bootstrap(&mut self, now: chrono::DateTime<chrono::Utc>) {
+    fn settle_update_resume_marker_at_bootstrap(&mut self, now: gwt_core::timestamp::UtcTimestamp) {
         let Some(settlement) =
             gwt_core::update::settle_update_resume_marker(env!("CARGO_PKG_VERSION"), now)
         else {

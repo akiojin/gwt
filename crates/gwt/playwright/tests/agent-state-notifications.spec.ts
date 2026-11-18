@@ -157,6 +157,29 @@ test("Issue #5016 AC-HS3: identical Issues notices aggregate into one counted ro
   await page.screenshot({ path: testInfo.outputPath("aggregated-history.png"), fullPage: true });
 });
 
+test("Issue #7520: a renewed steering request updates one counted row per Issue and reason", async ({ page }, testInfo) => {
+  const inject = (detail: Record<string, unknown>) => page.evaluate((payload) => {
+    window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: payload }));
+  }, detail);
+  const steering = (issue: number, count: number, reason: string) => inject({
+    kind: "issue_monitor_toast", level: "warn", issue_number: issue,
+    message: `Issue #${issue} steering requested (${count}): ${reason}`,
+  });
+  for (let count = 1; count <= 3; count += 1) await steering(4499, count, "launch stuck for 900s");
+  await steering(4499, 4, "resolve the review before closing");
+  await steering(4500, 1, "launch stuck for 900s");
+  const bell = page.locator("#op-notifications-button");
+  await expect(bell.locator(".op-rail__badge")).toHaveText("3");
+  await bell.click();
+  const rows = page.locator("#notification-center .notification-center__item");
+  await expect(rows).toHaveCount(3);
+  const renewed = rows.filter({ hasText: "launch stuck for 900s" }).filter({ hasText: "#4499" });
+  await expect(renewed).toHaveCount(1);
+  await expect(renewed.locator(".notification-center__count")).toHaveText("×3");
+  await expect(renewed).toContainText("steering requested (3): launch stuck for 900s");
+  await page.screenshot({ path: testInfo.outputPath("steering-renewals.png"), fullPage: true });
+});
+
 test(controllerTestTitle, async ({ page }, testInfo) => {
   const observed = await page.evaluate(() => {
     const state = window as any;

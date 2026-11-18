@@ -1,6 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if ! NODE_VERSION="$(node --version 2>/dev/null)"; then
+  echo "[FAIL] The visual test runner requires Node.js 22.x. Could not run node --version. Put Node.js 22.x first on PATH." >&2
+  exit 1
+fi
+case "$NODE_VERSION" in
+  v22.*) ;;
+  *)
+    echo "[FAIL] The visual test runner requires Node.js 22.x. Found $NODE_VERSION. Put Node.js 22.x first on PATH." >&2
+    exit 1
+    ;;
+esac
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Single source for the pinned version: the browsers installed by
 # scripts/install-playwright-browsers.sh must be the revision this

@@ -65,6 +65,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         createAgentAttentionToaster,
         notificationForTransition,
         monitorDiagnostic,
+        monitorNoticeIdentity,
       } from "/agent-completion-notifications.js";
       import { createReleaseNotesWindow } from "/release-notes-window.js";
 
@@ -2062,6 +2063,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         onClosed: (projectKey) => {
           if (projectKey !== routeProjectKey) return;
           routeProjectMissing = true;
+          projectViewReadiness.closed();
           closeSocketInputHandoff();
           if (reconnectTimer) clearTimeout(reconnectTimer);
           if (hubReconnectTimer) clearTimeout(hubReconnectTimer);
@@ -2602,7 +2604,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       function recomputeOperatorTelemetry() {
         if (!window.__operatorShell?.applyTelemetryCounts) return;
         // RUNNING / BLOCK / IDLE / ERROR come only from the server aggregate
-        // summary, the same value the tab title and the Works heading render.
+        // summary, also used by the tab title, Works and Agents.
         const summary = projectAgentSummaryModel?.read() ?? projectAgentSummary();
         const counts = {
           running: summary.running,
@@ -3264,7 +3266,13 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
 
       function revokeWorksTerminal(windowId, root, identity) {
         const owner = capturedWorksOwner(windowId, root, identity);
-        if (owner) reparentTerminalRuntime(windowId, owner.runtime, root, { readOnly: true });
+        if (!owner) return;
+        // A terminal that returned to its window stays there while the catalog
+        // still lists that session: a transport replacement clears activity,
+        // and nothing moves the terminal back while Works is closed.
+        if (owner.currentRoot !== root && currentNativeWindow(windowId)
+            && sameNativeSession(identity, nativeSessionIdentity(windowId))) return;
+        reparentTerminalRuntime(windowId, owner.runtime, root, { readOnly: true });
       }
 
       function settleWorksTerminal(windowId, root, identity, cause) {
@@ -5182,6 +5190,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
           title: monitorNotice?.title || "Issues",
           message: event?.message,
           issueNumber: event?.issue_number,
+          identity: monitorNoticeIdentity(event?.message),
         });
       });
 
@@ -6049,7 +6058,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         openSurface("works");
         return worksSurface.openWork(live);
       }
-      agentsSurface = createAgentsSurface({ document, storage: createBrowserEnv(document, window).storage, executionModel: projectExecutionPolicy.model, projectTitle: () => activeProjectTab()?.title || routeProjectKey, rosterModel, tuningController, pmSettingsPanel, scheduleModel, switchModel, activityModel: agentActivityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel,
+      agentsSurface = createAgentsSurface({ document, storage: createBrowserEnv(document, window).storage, executionModel: projectExecutionPolicy.model, projectTitle: () => activeProjectTab()?.title || routeProjectKey, rosterModel, tuningController, pmSettingsPanel, scheduleModel, switchModel, activityModel: agentActivityModel, summaryModel: projectAgentSummaryModel, windowCatalogModel, supportedAgentsModel, customAgentsModel,
         onReloadProfile: () => requestAgentRoster(),
         onSetPmEligibility: (memberId, eligible) => requestAgentRoster({ kind: "set_pm_eligibility", member_id: memberId, eligible }),
         onSelectPm: memberId => requestAgentRoster({ kind: "select_pm", member_id: memberId }),

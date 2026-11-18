@@ -424,10 +424,10 @@ fn failed_update_reset_events(app: &mut AppRuntime, version: &str) -> Vec<Outbou
             latest: manifest.version.clone(),
             release_url: manifest.asset_url.clone(),
             asset_url: Some(manifest.asset_url.clone()),
-            checked_at: chrono::Utc::now(),
+            checked_at: gwt_core::timestamp::UtcTimestamp::now(),
         },
         None => gwt_core::update::UpdateState::UpToDate {
-            checked_at: Some(chrono::Utc::now()),
+            checked_at: Some(gwt_core::timestamp::UtcTimestamp::now()),
         },
     };
     app.pending_update = Some(state.clone());
@@ -1677,6 +1677,9 @@ impl BoardDaemonSubscriberRegistry {
         }
         self.subscribers
             .retain(|project_root, _| active_roots.contains(project_root));
+        if app.daemon_supervisor.update_in_progress() {
+            return;
+        }
         let owner_contexts: HashMap<_, _> = app
             .project_states
             .values()
@@ -2209,7 +2212,7 @@ enum UserEvent {
     /// so rows can show the "safe to delete" badge.
     WorkMergeStatus {
         project_root: PathBuf,
-        merged_branches: std::collections::HashMap<String, chrono::DateTime<chrono::Utc>>,
+        merged_branches: std::collections::HashMap<String, gwt_core::timestamp::UtcTimestamp>,
         cleanup_ready_branches: std::collections::HashMap<String, String>,
         dirty_branches: std::collections::HashSet<String>,
         live_process_branches: std::collections::HashSet<String>,
@@ -2359,7 +2362,7 @@ enum UserEvent {
         observations: Vec<app_runtime::terminal_convergence::TerminalWindowObservation>,
     },
     UpdateDrainObserved {
-        now: chrono::DateTime<chrono::Utc>,
+        now: gwt_core::timestamp::UtcTimestamp,
         observations: Vec<app_runtime::UpdateDrainObservation>,
     },
     IssueMonitorScheduledScanComplete {
@@ -2460,6 +2463,10 @@ enum UserEvent {
         path: PathBuf,
         reply: app_runtime::ProjectOpenReply,
     },
+    ControlPaneLayoutPlace {
+        request: gwt::project_open_control::PaneLayoutPlaceRequest,
+        reply: tokio::sync::mpsc::Sender<bool>,
+    },
     ProjectObservationInvalidationCompleted(
         Box<app_runtime::project_execution_policy::ProjectObservationInvalidationCompleted>,
     ),
@@ -2533,14 +2540,15 @@ enum UserEvent {
     },
     /// Payload resolution failed; release apply admission before reporting it.
     UpdateApplyResolutionFailed(OutboundEvent),
-    /// Issue #4038 (AC-1): commit a persisted update manifest gracefully on
-    /// the event-loop thread: write the resume marker, spawn the helper
-    /// once, clear the manifest, then quit through `QuitApp` with
-    /// `GuiShutdownReason::ApplyUpdate`. Replaces every worker-thread
-    /// `exit(0)`.
+    /// Admit a staged update, then prepare daemon retirement and commit on a worker.
     ApplyUpdateGraceful {
         manifest: gwt_core::update::PendingUpdateManifest,
         client_id: ClientId,
+    },
+    UpdateApplyFinished {
+        version: String,
+        client_id: ClientId,
+        result: Result<String, String>,
     },
     /// SPEC-2041 Phase 19 (FR-056): worker thread completed `prepare_update`
     /// and the prepared payload is ready on disk. Dispatcher broadcasts
@@ -2688,7 +2696,7 @@ mod tests {
             .unwrap()
             .1;
         let apply = startup
-            .find("if update_front_door::try_apply_pending_update_at_bootstrap()")
+            .find("if update_front_door::try_apply_pending_update_at_bootstrap(&startup_dir)")
             .unwrap();
         assert!(
             startup
@@ -2994,7 +3002,7 @@ mod tests {
 
     use axum::http::{header::AUTHORIZATION, HeaderMap, HeaderValue};
     use base64::Engine;
-    use chrono::Utc;
+
     use tempfile::tempdir;
 
     use gwt::{
@@ -3581,6 +3589,7 @@ mod tests {
             unqueued_open_count: 0,
             other_terminal_queue_count: 0,
             active_count: 0,
+            needs_human_count: Some(0),
             max_active_agents: 1,
             total_candidates: 1,
             active_issue_number: None,
@@ -5509,7 +5518,7 @@ mod tests {
                 latest: "2.0.0".into(),
                 release_url: String::new(),
                 asset_url: None,
-                checked_at: Utc::now(),
+                checked_at: gwt_core::timestamp::UtcTimestamp::now(),
             },
             super::UPDATE_CONTROL_CLIENT_ID.into(),
             "Restart now",
@@ -5555,7 +5564,7 @@ mod tests {
             latest: "99.0.0".into(),
             release_url: "https://example.invalid/release".into(),
             asset_url: Some("https://example.invalid/gwt.tar.gz".into()),
-            checked_at: Utc::now(),
+            checked_at: gwt_core::timestamp::UtcTimestamp::now(),
         };
         assert!(
             !super::admit_update_download(
@@ -5571,7 +5580,7 @@ mod tests {
             version: "99.0.0".into(),
             asset_url: "https://example.invalid/gwt.tar.gz".into(),
             payload: gwt_core::update::PreparedPayload::PortableBinary { path: payload },
-            downloaded_at: Utc::now().to_rfc3339(),
+            downloaded_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
             origin: gwt_core::update::PendingUpdateOrigin::ManualLater,
             auto_apply_deferred: false,
         };
@@ -5598,7 +5607,7 @@ mod tests {
             to_version: manifest.version.clone(),
             observed_version: "9.0.0".into(),
             attempt: 1,
-            recorded_at: Utc::now().to_rfc3339(),
+            recorded_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
             message: Some("previous helper failed".into()),
         })
         .unwrap();
@@ -5641,7 +5650,7 @@ mod tests {
             latest: "9.106.0".into(),
             release_url: "https://example.invalid/release".into(),
             asset_url: Some("https://example.invalid/gwt-windows-x86_64.zip".into()),
-            checked_at: Utc::now(),
+            checked_at: gwt_core::timestamp::UtcTimestamp::now(),
         };
         for (autonomous_mode, auto_apply_updates) in
             [(false, Some(true)), (true, Some(false)), (true, None)]
@@ -5786,7 +5795,7 @@ mod tests {
             latest: "9.108.0".into(),
             release_url: "https://example.invalid/release".into(),
             asset_url: Some("https://example.invalid/gwt.tar.gz".into()),
-            checked_at: Utc::now(),
+            checked_at: gwt_core::timestamp::UtcTimestamp::now(),
         };
         runtime.update_download_in_flight =
             Some(crate::app_runtime::UPDATE_AUTO_APPLY_CLIENT_ID.into());
@@ -5810,7 +5819,7 @@ mod tests {
             &gwt::IssueMonitorPrefs {
                 update_drain: Some(gwt::IssueMonitorUpdateDrain {
                     version: "9.107.0".into(),
-                    since: Utc::now().to_rfc3339(),
+                    since: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
                     reason: gwt::IssueMonitorUpdateDrainReason::Auto,
                     automatic: None,
                     blocking: Vec::new(),
@@ -5835,7 +5844,7 @@ mod tests {
             version: "9.107.0".into(),
             asset_url: "https://example.invalid/gwt.tar.gz".into(),
             payload: gwt_core::update::PreparedPayload::PortableBinary { path: payload },
-            downloaded_at: Utc::now().to_rfc3339(),
+            downloaded_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
             origin: gwt_core::update::PendingUpdateOrigin::ManualLater,
             auto_apply_deferred: false,
         };
@@ -5845,7 +5854,7 @@ mod tests {
             latest: "9.107.0".into(),
             release_url: "https://example.invalid/release".into(),
             asset_url: Some(manifest.asset_url.clone()),
-            checked_at: Utc::now(),
+            checked_at: gwt_core::timestamp::UtcTimestamp::now(),
         };
         super::record_update_available(&mut runtime, state.clone());
         assert!(gwt_core::update::load_pending_update_manifest().is_some());
@@ -6060,7 +6069,7 @@ mod tests {
             payload: gwt_core::update::PreparedPayload::PortableBinary {
                 path: temp.path().join("prepared"),
             },
-            downloaded_at: Utc::now().to_rfc3339(),
+            downloaded_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
             origin: gwt_core::update::PendingUpdateOrigin::ManualLater,
             auto_apply_deferred: false,
         };
@@ -6091,7 +6100,7 @@ mod tests {
             payload: gwt_core::update::PreparedPayload::PortableBinary {
                 path: temp.path().join("prepared"),
             },
-            downloaded_at: Utc::now().to_rfc3339(),
+            downloaded_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
             origin: gwt_core::update::PendingUpdateOrigin::ManualLater,
             auto_apply_deferred: false,
         };
@@ -6129,7 +6138,7 @@ mod tests {
             latest: "9.20.2".to_string(),
             release_url: "https://example.invalid/releases/v9.20.2".to_string(),
             asset_url: Some("https://example.invalid/gwt-macos-arm64.dmg".to_string()),
-            checked_at: Utc::now(),
+            checked_at: gwt_core::timestamp::UtcTimestamp::now(),
         };
 
         let events = super::record_update_available(&mut runtime, state);
@@ -6176,7 +6185,7 @@ mod tests {
             version: "999.0.1".into(),
             asset_url: "https://example.invalid/update.zip".into(),
             payload: gwt_core::update::PreparedPayload::PortableBinary { path: payload },
-            downloaded_at: Utc::now().to_rfc3339(),
+            downloaded_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
             origin: gwt_core::update::PendingUpdateOrigin::ManualLater,
             auto_apply_deferred: false,
         };
@@ -6194,7 +6203,7 @@ mod tests {
 
     #[test]
     fn startup_update_state_classification_covers_publish_stop_and_retry() {
-        let checked_at = Utc::now();
+        let checked_at = gwt_core::timestamp::UtcTimestamp::now();
 
         assert!(matches!(
             super::classify_startup_update_state(&UpdateState::Available {
@@ -10473,7 +10482,7 @@ fn main() -> std::io::Result<()> {
 
     // Only the singleton owner may bootstrap a staged update. A duplicate
     // launch must never install while another GUI still owns running panes.
-    if update_front_door::try_apply_pending_update_at_bootstrap() {
+    if update_front_door::try_apply_pending_update_at_bootstrap(&startup_dir) {
         return Ok(());
     }
 
@@ -10967,6 +10976,8 @@ fn main() -> std::io::Result<()> {
 
     let mut gui_shutdown = GuiShutdownCoordinator::default();
     let mut update_apply_admission = update_front_door::UpdateApplyAdmission::default();
+    let mut quit_after_update_attempt = None;
+    let cancel_update_for_quit = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut board_refresh_queue = BoardRefreshQueue::default();
     let mut active_work_refresh_queue = ActiveWorkRefreshQueue::default();
     // Reuse the context-aware queue; roster refreshes do not retain Board views.
@@ -11144,6 +11155,15 @@ fn main() -> std::io::Result<()> {
             }
         };
         let app = app.as_mut().expect("startup complete");
+        if let Event::UserEvent(UserEvent::QuitApp { reason }) = &event {
+            if app.agent_maintenance.app_update_committing
+                && !matches!(reason, GuiShutdownReason::ApplyUpdate { .. })
+            {
+                cancel_update_for_quit.store(true, std::sync::atomic::Ordering::Release);
+                quit_after_update_attempt = Some(reason.clone());
+                return;
+            }
+        }
         if matches!(&event, Event::UserEvent(UserEvent::QuitApp { .. })) {
             app.daemon_supervisor.shutdown();
             board_daemon_subscribers.request_quit();
@@ -11335,7 +11355,7 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::ProviderUsageSnapshot { accounts }) => {
                 // Issue #3616: corroborate and re-check pending quota
                 // candidates. See `AppRuntime::handle_provider_usage_snapshot`.
-                let events = app.handle_provider_usage_snapshot(accounts, chrono::Utc::now());
+                let events = app.handle_provider_usage_snapshot(accounts, gwt_core::timestamp::UtcTimestamp::now());
                 clients.dispatch(events);
             }
             #[cfg(test)]
@@ -11912,6 +11932,14 @@ fn main() -> std::io::Result<()> {
                 let events = app.control_project_open_events(path, reply);
                 clients.dispatch(events);
             }
+            Event::UserEvent(UserEvent::ControlPaneLayoutPlace { request, reply }) => {
+                if !reply.is_closed() {
+                    let events = app.control_pane_layout_place_events(request);
+                    let placed = !events.is_empty();
+                    clients.dispatch(events);
+                    let _ = reply.try_send(placed);
+                }
+            }
             Event::UserEvent(UserEvent::PmConversationLoaded { client_id, window_id, session_id, snapshot }) => {
                 clients.dispatch(app.pm_conversation_loaded_events(client_id, &window_id, &session_id, snapshot));
             }
@@ -12074,7 +12102,7 @@ fn main() -> std::io::Result<()> {
                                 version: prepared.latest.clone(),
                                 asset_url: prepared.asset_url.clone(),
                                 payload: prepared.payload.clone(),
-                                downloaded_at: chrono::Utc::now().to_rfc3339(),
+                                downloaded_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
                                 origin: if client_id == app_runtime::UPDATE_AUTO_APPLY_CLIENT_ID {
                                     gwt_core::update::PendingUpdateOrigin::Automatic
                                 } else {
@@ -12210,8 +12238,8 @@ fn main() -> std::io::Result<()> {
                 // SPEC-2041 Phase 19 (T-130/T-133) + Issue #4038 (AC-2):
                 // consume the persisted manifest if it exists so we don't
                 // re-download the same payload; otherwise download + persist
-                // on a worker thread. Either way the commit happens through
-                // `ApplyUpdateGraceful` on this thread, never via `exit(0)`.
+                // on a worker thread. Either way the GUI admits the same
+                // `ApplyUpdateGraceful` event and eventually quits via QuitApp.
                 spawn_update_apply_resolution(
                     proxy.clone(),
                     state,
@@ -12238,23 +12266,43 @@ fn main() -> std::io::Result<()> {
                     "pending_applying",
                     "graceful apply commit started",
                 );
-                let log_path = gwt_core::update::update_log_path()
-                    .to_string_lossy()
-                    .to_string();
                 let marker = gwt_core::update::UpdateResumeMarker {
                     from_version: env!("CARGO_PKG_VERSION").to_string(),
                     to_version: manifest.version.clone(),
-                    started_at: chrono::Utc::now().to_rfc3339(),
+                    started_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
                     restart_args: update_front_door::current_restart_args(),
                     projects: app.update_resume_projects(),
                     attempt: 1,
                 };
-                match update_front_door::stage_graceful_update_apply(
-                    manifest,
-                    &marker,
-                    client_id == app_runtime::UPDATE_AUTO_APPLY_CLIENT_ID
-                        || client_id == app_runtime::UPDATE_MANUAL_DRAIN_CLIENT_ID,
-                ) {
+                let roots = app.tabs.iter()
+                    .filter(|tab| tab.kind == gwt::ProjectKind::Git)
+                    .map(|tab| tab.project_root.clone())
+                    .collect::<Vec<_>>();
+                let supervisor = app.daemon_supervisor.clone();
+                supervisor.set_update_in_progress(true);
+                let presence = std::mem::take(&mut board_daemon_subscribers.owner_subscribers);
+                let proxy = proxy.clone();
+                let cancelled = cancel_update_for_quit.clone();
+                app.blocking_tasks.spawn(move || {
+                    let scheduled = client_id == app_runtime::UPDATE_AUTO_APPLY_CLIENT_ID
+                        || client_id == app_runtime::UPDATE_MANUAL_DRAIN_CLIENT_ID;
+                    let result = gwt::daemon_supervisor::UpdateDaemonRetirement::capture(
+                        &roots, Some(&supervisor),
+                    ).and_then(|retirement| {
+                        update_front_door::stage_graceful_update_apply(manifest, &marker, scheduled, || {
+                            retirement.retire(|| drop(presence), || cancelled.load(std::sync::atomic::Ordering::Acquire))
+                        })
+                    });
+                    record_update_dispatch_result(
+                        proxy.send_event(UserEvent::UpdateApplyFinished {
+                            version: marker.to_version, client_id, result,
+                        }),
+                        "dispatch_update_apply_finished",
+                    );
+                });
+            }
+            Event::UserEvent(UserEvent::UpdateApplyFinished { version, client_id, result }) => {
+                match result {
                     Ok(version) => {
                         gwt_core::update::log_update_event(
                             "graceful_apply_committed",
@@ -12270,8 +12318,10 @@ fn main() -> std::io::Result<()> {
                     Err(message) => {
                         update_apply_admission.failed();
                         app.agent_maintenance.app_update_committing = false;
+                        app.daemon_supervisor.set_update_in_progress(false);
+                        board_daemon_subscribers.sync(app, proxy.clone());
                         app.record_update_apply_observation(
-                            &marker.to_version,
+                            &version,
                             "pending_failed",
                             &message,
                         );
@@ -12286,9 +12336,11 @@ fn main() -> std::io::Result<()> {
                             message: Some(message.clone()),
                             stage: Some("Restart now".to_string()),
                             reason: Some(message.clone()),
-                            log_path: Some(log_path),
+                            log_path: Some(gwt_core::update::update_log_path().to_string_lossy().into_owned()),
                         };
-                        let failure = if client_id == UPDATE_CONTROL_CLIENT_ID {
+                        let scheduled = client_id == app_runtime::UPDATE_AUTO_APPLY_CLIENT_ID
+                            || client_id == app_runtime::UPDATE_MANUAL_DRAIN_CLIENT_ID;
+                        let failure = if scheduled || client_id == UPDATE_CONTROL_CLIENT_ID {
                             OutboundEvent::broadcast(failure)
                         } else {
                             OutboundEvent::reply(client_id, failure)
@@ -12296,19 +12348,26 @@ fn main() -> std::io::Result<()> {
                         let mut events = Vec::new();
                         if gwt_core::update::load_update_apply_result().is_some_and(|result| {
                             result.outcome == gwt_core::update::UpdateApplyOutcome::Failure
-                                && result.to_version == marker.to_version
+                                && result.to_version == version
                                 && result.message.as_deref() == Some(message.as_str())
                         }) {
-                            events.extend(failed_update_reset_events(app, &marker.to_version));
+                            events.extend(failed_update_reset_events(app, &version));
+                        } else if scheduled {
+                            events.extend(app.release_update_auto_apply_events(
+                                &version, app_runtime::UpdateAutoApplyRelease::PreviousFailure,
+                            ));
                         }
                         events.extend([
                             OutboundEvent::global_update_notice(
                                 "error",
-                                format!("Update v{} could not be applied: {message}", marker.to_version),
+                                format!("Update v{version} could not be applied: {message}"),
                             ),
                             failure,
                         ]);
                         clients.dispatch(events);
+                        if let Some(reason) = quit_after_update_attempt.take() {
+                            let _ = proxy.send_event(UserEvent::QuitApp { reason });
+                        }
                     }
                 }
             }

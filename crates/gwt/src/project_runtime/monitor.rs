@@ -331,7 +331,8 @@ pub(crate) fn reject_preflight_launch(
                             claim.snapshot_tabs.clone(),
                         );
                     }
-                    let status = observed.agent_status_at(&chrono::Utc::now().to_rfc3339());
+                    let status = observed
+                        .agent_status_at(&gwt_core::timestamp::UtcTimestamp::now().to_rfc3339());
                     let unissued = prefs
                         .pending_launch_deliveries
                         .iter()
@@ -456,7 +457,7 @@ pub(crate) fn reject_preflight_launch(
                     );
                     let prepared = monitor.prepare_autonomous_handoff_delivery(
                         issue,
-                        &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                        &gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds(),
                     );
                     *prefs = monitor.prefs();
                     Ok(prepared)
@@ -789,7 +790,7 @@ impl MonitorLaunch {
     pub fn heartbeat(&self, at: Option<&str>, source_event: Option<&str>) -> Result<(), String> {
         self.check_current()?;
         publish(&self.root,json!({"heartbeat":{
-            "issue_number":self.issue()?, "at":at.map(str::to_string).unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
+            "issue_number":self.issue()?, "at":at.map(str::to_string).unwrap_or_else(|| gwt_core::timestamp::UtcTimestamp::now().to_rfc3339()),
             "agent_id":self.agent_id, "source_event":source_event,
         }})).map_err(|error| error.to_string())
     }
@@ -884,7 +885,7 @@ impl MonitorLaunch {
         if let Some(attempt) = self.feedback.issue_monitor_autonomous_handoff.as_ref() {
             let issue = self.issue()?;
             let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&self.root);
-            let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds();
             let (_, committed) = crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
                 // Zero identifies the no-pane preflight rejection. Captured
                 // failed runtimes may compensate after their writer is revoked.
@@ -1450,7 +1451,7 @@ pub fn prepare_issue_monitor_handoff_delivery(
     materializer_id: &str,
     bind_existing_session: bool,
 ) -> Result<Option<crate::AutonomousHandoffDeliveryPreparation>, String> {
-    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds();
     let preparation =
         crate::prepare_autonomous_handoff_delivery_from_prefs(prefs_path, issue_number, &now)
             .map_err(|error| format!("failed to prepare the autonomous answer: {error}"))?;
@@ -1635,7 +1636,7 @@ pub(crate) fn deliver_existing_answer(
         }
     };
     if let Err(error) = write() {
-        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds();
         let marker = crate::mark_autonomous_handoff_delivery_ambiguous_from_prefs(
             &prefs_path,
             &attempt.handoff_id,

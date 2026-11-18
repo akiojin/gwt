@@ -1209,7 +1209,7 @@ fn assert_grok_startup_progress(accepted: Option<&str>) {
             .block_on(fixture.owner.observe_runtime_policy(
                 &id,
                 incarnation,
-                chrono::Utc::now(),
+                gwt_core::timestamp::UtcTimestamp::now(),
                 observed_at,
             ))
             .unwrap();
@@ -1521,7 +1521,7 @@ fn assert_fresh_monitor_startup_failures_stop(failures: &[&str]) {
                     let mut start = gwt_core::workspace_projection::WorkEvent::new(
                         gwt_core::workspace_projection::WorkEventKind::Start,
                         &work_id,
-                        Utc::now(),
+                        gwt_core::timestamp::UtcTimestamp::now(),
                     );
                     start.owner = Some("Issue #999".into());
                     start.execution_container = Some(
@@ -2482,7 +2482,7 @@ fn leave_owner_fresh_activated_before_projection_commit(fixture: &OwnerFreshLaun
                             linked_issue_number: fixture.pending.linked_issue_number,
                             canonical_owner: Some(fixture.pending.owner), resume_context: fixture.pending.resume_context.as_ref(),
                             kind: WorkspaceLaunchProjectionKind::StartWork,
-                            live_session_ids: &HashSet::from([fixture.pending.binding.session_id.clone()]), now: Utc::now(),
+                            live_session_ids: &HashSet::from([fixture.pending.binding.session_id.clone()]), now: gwt_core::timestamp::UtcTimestamp::now(),
                         }, true)?;
                     Ok(((), events))
                 },
@@ -4045,7 +4045,7 @@ fn fresh_execution_prevalidation_conflict_leaves_work_writable_and_retains_candi
     let mut unrelated = gwt_core::workspace_projection::WorkEvent::new(
         gwt_core::workspace_projection::WorkEventKind::Start,
         "work-unrelated-after-fresh-callback-failure",
-        Utc::now(),
+        gwt_core::timestamp::UtcTimestamp::now(),
     );
     unrelated.title = Some("Unrelated writer after rejected callback".into());
     gwt_core::workspace_projection::record_workspace_work_event(&fixture.repo, unrelated)
@@ -4246,7 +4246,7 @@ fn continuation_resolves_legacy_mixed_root_external_commit_after_upgrade() {
             gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&work_event_root);
         let events = gwt_core::paths::gwt_repo_local_work_events_path(&work_event_root);
         let operation_id = format!("legacy-mixed-root-{label}");
-        let now = Utc::now();
+        let now = gwt_core::timestamp::UtcTimestamp::now();
         let session_id = format!("legacy-mixed-session-{label}");
         let work_id = format!("legacy-mixed-work-{label}");
         let resume_event_id = format!("legacy-mixed-resume-{label}");
@@ -4278,7 +4278,7 @@ fn continuation_resolves_legacy_mixed_root_external_commit_after_upgrade() {
                 affiliation_status:
                     gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Unassigned,
                 workspace_id: None,
-                updated_at: now - chrono::Duration::seconds(2),
+                updated_at: now - time::Duration::seconds(2),
             });
         gwt_core::workspace_projection::save_workspace_projection_to_path(
             &current,
@@ -4289,7 +4289,7 @@ fn continuation_resolves_legacy_mixed_root_external_commit_after_upgrade() {
         let mut start = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Start,
             &work_id,
-            now - chrono::Duration::seconds(2),
+            now - time::Duration::seconds(2),
         );
         start.title = Some("Legacy mixed-root target".to_string());
         start.owner = Some("Issue #3412".to_string());
@@ -4311,7 +4311,7 @@ fn continuation_resolves_legacy_mixed_root_external_commit_after_upgrade() {
         let mut unrelated = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Start,
             &unrelated_work_id,
-            now - chrono::Duration::seconds(1),
+            now - time::Duration::seconds(1),
         );
         unrelated.title = Some("Existing canonical Work".to_string());
         canonical_projection.apply_event(unrelated);

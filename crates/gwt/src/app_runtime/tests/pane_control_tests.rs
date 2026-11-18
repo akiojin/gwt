@@ -5234,7 +5234,7 @@ fn switch_source_retirement_fixture(
         child_pid: probe.pty.process_id().unwrap(),
         child_started_at: gwt::process::host_process_start_time(probe.pty.process_id().unwrap())
             .unwrap(),
-        requested_at: Utc::now().to_rfc3339(),
+        requested_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
         execution_identity: gwt_agent::SessionExecutionIdentity::from_session(source)
             .unwrap()
             .unwrap(),
@@ -5265,6 +5265,78 @@ fn switch_removed_event(
         }).await;
         result.unwrap_or_else(|error| panic!("the owner must publish exact Switch source removal: {error}; observed={observed:?}"))
     })
+}
+
+#[test]
+fn explicit_close_removes_exact_diagnostic_window_after_owner_exit() {
+    use gwt::project_runtime::events::{OwnerCommand, OwnerEvent};
+
+    let _lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let (runtime, owner, source, _) = switch_source_retirement_fixture(temp.path(), false);
+    let project = &runtime.tab("source").unwrap().project_root;
+    let session = source.session.as_ref().unwrap();
+    let mut events = owner.subscribe();
+    let mut failed = runtime_hook_state_for_event("Error", "PostToolUse", &session.id);
+    failed.project_root = Some(project.display().to_string());
+    failed.branch = Some(session.branch.clone());
+    assert!(owner_fixture_block_on(source.runtime_hook(&failed))
+        .unwrap()
+        .is_success());
+    owner_fixture_block_on(owner.command(OwnerCommand::Health)).unwrap();
+    assert!(source
+        .pty
+        .terminate_and_wait_for_tree(Duration::from_secs(5))
+        .unwrap());
+    owner_fixture_block_on(async {
+        // test-hygiene: allow-wall-clock-deadline Wait for the exact diagnostic retirement receipt before sending Close.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let OwnerEvent::Closed {
+                    id,
+                    incarnation,
+                    error,
+                    explicit_stop,
+                    ..
+                } = events.recv().await.unwrap()
+                {
+                    if id == source.id && incarnation == source.incarnation {
+                        assert_eq!(error, None);
+                        assert!(!explicit_stop);
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("the owner reaped the diagnostic process");
+    });
+    let window_exists = || {
+        gwt::persistence::load_workspace_state(&gwt::persistence::workspace_state_path(project))
+            .unwrap()
+            .windows
+            .iter()
+            .any(|row| row.session_id.as_ref() == Some(&session.id))
+    };
+    assert!(
+        window_exists(),
+        "the diagnostic window survives process exit"
+    );
+    let close = |incarnation| {
+        owner_fixture_block_on(owner.command(OwnerCommand::Close {
+            id: source.id.clone(),
+            incarnation,
+        }))
+    };
+    assert!(close(source.incarnation + 1).is_err());
+    assert!(window_exists(), "a mismatched Close must preserve the row");
+    let ack = close(source.incarnation).expect("exact Close after diagnostic exit");
+    assert_eq!(ack["id"], source.id);
+    assert_eq!(ack["incarnation"], source.incarnation);
+    assert!(!window_exists(), "Close ACK follows durable row removal");
 }
 
 #[test]

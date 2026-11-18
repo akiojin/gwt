@@ -533,6 +533,34 @@ gwtd <<'JSON'
 JSON
 ```
 
+Responses retain `ok`, `operation`, `exit_code` and the legacy human-readable
+`output` string. JSON object/array reports also appear directly in `data`,
+including `execution.status`, `board.show`, `pr.list` and PM status operations.
+`issue.view` exposes issue fields in `data`; `pr.view` and `pr.current` expose
+the PR snapshot (`pr.current` uses `data:null` when no PR exists). Existing
+`pr.checks` and verification data contracts are preserved. Text-only operations
+may omit `data`. Prefer `data` to parsing `output` in new callers.
+
+Failures include `error_category` and a stable `error_code`. Categories are
+`not_found` (for example `NOT_FOUND_ISSUE`), `conflict`
+(`CONFLICT_CONCURRENT_WRITE`), `permission` (`PERMISSION_DENIED`), `input`
+(`INPUT_VALIDATION_FAILED`), `internal` (`INTERNAL_INDEX_INTEGRITY`), `external`
+(`EXTERNAL_NETWORK`) and `operation` (`OPERATION_FAILED`, an unclassified
+nonzero result). Existing operation-specific codes such as
+`ISSUE_CACHE_CONFLICT` are retained. Categories use typed failure information;
+legacy failures that have lost that information use a fallback rather than
+guessing from message wording. `refusal` and recovery fields retain their
+existing meaning. Invalid envelopes answer JSON with exit code 2,
+`error_category:"input"`, an `INPUT_*` code and `operation:null`; redacted
+intake diagnostics never echo caller-controlled secrets.
+
+Nested operations use JSON objects in `data`: after decoding the response once,
+`pm.operation.execute` exposes its audit result at `data` and the inner envelope
+at `data.after`. A JSON inner report is available at `data.after.data`, with no
+additional JSON decoding. The nested legacy `output` strings remain for
+compatibility. Error codes classify failures; they do not authorize retries or
+prove whether a remote mutation committed.
+
 The [operation catalog](crates/gwt/src/cli/operation_catalog.rs) (`OPERATIONS`)
 defines **230 canonical operations across 36 families**, plus **40 aliases**
 (270 accepted spellings) in v9.167.1. A family is the first dot-separated
@@ -558,10 +586,33 @@ print(len(names), len({name.split('.')[0] for name in names}), alias_count)
 PY
 ```
 
-Use `gwtd --help` or `gwtd --help daemon` for help. Ordinary operation argv such
+Use `gwtd --help` or `gwtd --help daemon` for help. `gwtd --help` lists every
+family, and each `gwtd --help <family>` ends with that family's complete
+operation list, generated from the same catalog. Ordinary operation argv such
 as `gwtd daemon start` is rejected; send `daemon.start` as an envelope instead.
 Managed hooks retain the dedicated argv transports `gwtd hook event <Event>`
 and `gwtd hook provider-event <provider> <native-event>`.
+
+To return to a binary that only supports Agent registry schema 3, stop all
+Agents, the desktop app, and daemons first. Using the **new** `gwtd`, run:
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"agent.registry.restore_schema3","params":{}}
+JSON
+```
+
+This writes the current shared registry and every project's committed preferences
+to schema 3 without reverting to the migration backup. It refuses outstanding
+Agent assignments, live or unproven Sessions, missing/damaged records, and unknown
+mirror contents. Stop Agents and release reservations normally; use
+`agent.registry.status` / `agent.registry.reconcile` to inspect and resolve mirror
+conflicts before retrying. Do not delete records to bypass a refusal.
+The registry replacement is atomic; an interruption leaves either the complete
+schema 4 or the complete schema 3 registry. Records and the original
+`agent-registry.schema3-backup.json` are retained. After success, start the old
+binary directly: starting the new desktop app would migrate back to schema 4.
+Running the operation again on schema 3 makes no changes.
 
 The runtime daemon supports macOS/Linux Unix domain sockets and Windows named
 pipes. The GUI supervises the project daemon, starting or replacing it as needed;
@@ -1300,6 +1351,26 @@ explicitly tagged `(measurement)` or `[measurement]`, the Issue stays in Backlog
 as **Awaiting measurement**, outside NeedsHuman, and the comment identifies
 `awaiting_measurement`. Update its acceptance checklist
 after measurement to allow close, or choose **Return to queue** to resume work.
+For checks that require a release, main, or another host, explicitly tag each
+remaining criterion `(release-verification)`, `(main-verification)`, or
+`(host-verification)` (square brackets also work). With Autonomous on, only
+those checks and optional measurement criteria remaining puts the delivered
+Issue in **Awaiting verification** (`awaiting_verification`), outside active
+slots and NeedsHuman. Record who will verify in each criterion. After the
+release or host becomes available, choose **Return to queue** (or
+`issue.monitor.requeue` with a reason) to request verification. Untagged
+implementation criteria continue through the normal queue.
+After the external-check-only delivery is settled, assign every remaining
+criterion a verifier with `issue.monitor.verification.declare`:
+
+```json
+{"schema_version":1,"operation":"issue.monitor.verification.declare","params":{"number":42,"criteria":[{"id":"AC-2","verifier":"PM on release host"}]}}
+```
+
+`issue.monitor.status` retains `verification_declaration` with the original
+criterion text, verifier, and declaration time. Every remaining AC must appear
+exactly once. Missing delivery or settlement, implementation criteria, and empty
+verifiers are refused; declaring verification does not change Autonomous mode.
 With Autonomous off, unchecked criteria retain the `NeedsHuman` state with a
 `merge 済み・未達 AC あり` comment. A `gwt-spec` Issue
 is closed only after every task phase is complete. Delegating remaining criteria
@@ -2464,15 +2535,33 @@ an entry removes its copied policy on the next refresh.
 - In the selected **Team** member's details, **Next planned issues** shows upcoming assignments in order with their reasons. Choose another member and select **Reassign** to move a queued issue, or use **Refresh plans** to reload after a conflict or failed response.
 - **Switch to next issue** waits for current activity to finish, then asks the agent to save and push a coherent checkpoint before the same member starts the selected issue. The current task stays open when activity or saved state cannot be confirmed. Use **Cancel switch** before stopping begins; after a launch failure, **Continue saved work** uses the saved task's normal continuation flow. A Host restart discards an unexecuted switch request.
 - **Register** adds one enabled member to the shared roster. **Rest member** reduces it by one while allowing current work to finish. At least one enabled member remains. Machine safety limits can lower the effective allocation.
+- A registered PM can send the `pm.agent.add` JSON operation with `name` and `agent_id` to add one enabled member and receive its ID. To use that member for scheduled Issues, select its ID with `issue.monitor.profiles.set`.
 - Use **Split view** to choose each pane independently; **Close split** keeps the active surface in one pane. Shells remain auxiliary terminals and do not count as members or live agents.
 
-**Active** counts live agents on this machine, including PM. **Team** counts enabled registered members, including the configured PM. **Busy** counts active implementation members; concurrent capacity excludes members holding a PM role. Member identities, enabled capacity, and confirmed
+The project browser tab title, status bar, Works, and Agents show the same **Running**
+count from the project's agent-window status snapshot, including PM agent windows. Shells
+are excluded. The status mapping is:
+
+| Agent window status | Project count |
+| --- | --- |
+| Running, Starting | Running |
+| Waiting, Stopped, Interrupted | Block |
+| Error | Block and Error |
+| Idle | Idle |
+
+**Team** counts enabled registered members, including the configured PM. **Busy** counts active implementation members; concurrent capacity excludes members holding a PM role. Member identities, enabled capacity, and confirmed
 planned-issue reassignments survive an app restart.
 
 Works shows session-attributed input, cache and output usage, a thirty-minute activity graph,
 branch and verification facts. Unavailable measurements display **—**, including context remaining
 unless the provider reports it directly. Today totals use this project's measured conversations;
 account-wide usage is not copied into them. Individual PR information is not shown here.
+**Fleet tokens/min** averages the fleet's token use over five completed UTC minutes. Each
+point sums timestamp-matched minute buckets for the project's currently observed live
+sessions, then divides by five. The chart shows the latest 25 rolling points and excludes
+each session's in-progress minute. A missing session, missing or unmeasured bucket
+(`null`), or unavailable usage makes the affected point a gap and shows **—** when it is
+the latest point. A fully measured window with no tokens shows **0**.
 Today and Fleet explain whether measurements are missing, partial, unavailable, or complete;
 unknown totals stay **—**, while measured zero stays **0**. Cost and Landed PRs are omitted
 because their data sources are not connected.
@@ -2480,6 +2569,11 @@ because their data sources are not connected.
 Issues shows host-wide **Verification slots** as running, capacity, and available counts.
 `issue.monitor.status` exposes the same observation as `verification_capacity`.
 Unavailable observations display **Unavailable** rather than zero.
+
+The Issues status strip displays **Needs human** from the Monitor's
+`needs_human_count`. The Monitor counts distinct Issues requiring a human
+response, including affected Issues during a failure surge. An observed empty
+set displays **0**. An unavailable count is `null` and the status strip omits it.
 
 Saved sessions restore into the current surfaces. The former terminal tabs, grid and Columns
 setting do not return after reload or restart; the roster's Team/Past tabs remain.

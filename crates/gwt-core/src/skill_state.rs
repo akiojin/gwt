@@ -27,7 +27,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use chrono::{DateTime, Utc};
+use crate::timestamp::UtcTimestamp;
 use serde::{Deserialize, Serialize};
 
 /// Relative directory under the worktree where per-skill state files live.
@@ -46,7 +46,7 @@ pub struct SkillState {
     pub active: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_spec: Option<u64>,
-    pub started_at: DateTime<Utc>,
+    pub started_at: UtcTimestamp,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase: Option<String>,
     pub session_id: String,
@@ -107,14 +107,13 @@ pub fn mark_inactive(worktree: &Path, skill: &str) -> io::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
 
     fn sample_state(session: &str) -> SkillState {
         SkillState {
             start_evidence: None,
             active: true,
             owner_spec: Some(1935),
-            started_at: Utc.with_ymd_and_hms(2026, 4, 21, 9, 0, 0).unwrap(),
+            started_at: "2026-04-21T09:00:00Z".parse().unwrap(),
             phase: Some("plan-draft".to_string()),
             session_id: session.to_string(),
         }
@@ -132,6 +131,10 @@ mod tests {
         let state = sample_state("sess-1");
         save(dir.path(), "plan-spec", &state).unwrap();
         let loaded = load(dir.path(), "plan-spec").unwrap();
+        let wire: serde_json::Value =
+            serde_json::from_slice(&fs::read(state_path(dir.path(), "plan-spec")).unwrap())
+                .unwrap();
+        assert_eq!(wire["started_at"], "2026-04-21T09:00:00Z");
         assert_eq!(loaded, Some(state));
     }
 

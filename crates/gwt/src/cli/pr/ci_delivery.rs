@@ -735,7 +735,7 @@ fn create<E: crate::cli::CliEnv>(
     let audit_id = uuid::Uuid::new_v4().to_string();
     let file = format!("pr-ci-delivery-{audit_id}.json");
     let audit = serde_json::json!({"schema_version":1,"audit_id":audit_id,
-        "created_at":chrono::Utc::now(),"session_id":session_id,"actor":format!("{authority:?}"),
+        "created_at":gwt_core::timestamp::UtcTimestamp::now(),"session_id":session_id,"actor":format!("{authority:?}"),
         "evidence":snapshot,"execution_hash":crate::cli::execution_state::load(&worktree)?.map(|record| record.content_hash),
         "local_verification_hash":crate::cli::verification_record::load(&worktree)?.map(|record| record.content_hash.clone())});
     crate::cli::trusted_store::write_with_readback(
@@ -782,7 +782,7 @@ fn create<E: crate::cli::CliEnv>(
         Ok(pr) => env.fetch_pr_head_sha(pr.number),
         Err(_) => Ok(None),
     };
-    let outcome = serde_json::json!({"audit_id":audit_id,"created_at":chrono::Utc::now(),
+    let outcome = serde_json::json!({"audit_id":audit_id,"created_at":gwt_core::timestamp::UtcTimestamp::now(),
             "pr":result.as_ref().ok(),"error":result.as_ref().err().map(ToString::to_string),
             "observed_head":observed_head.as_ref().ok(),"readback_error":observed_head.as_ref().err().map(ToString::to_string)});
     crate::cli::trusted_store::write_with_readback(

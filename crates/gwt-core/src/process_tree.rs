@@ -778,7 +778,14 @@ mod windows_job {
         /// succeed, `self` retains ownership so its armed `Drop` remains the
         /// failure-path safety net.
         pub fn release_without_termination(mut self) -> Result<(), WindowsJobError> {
-            let job = self.handle.expect("live Windows Job handle");
+            self.try_release_without_termination()
+        }
+
+        /// Relinquish the Job, retaining the handle if disarming it fails.
+        pub fn try_release_without_termination(&mut self) -> Result<(), WindowsJobError> {
+            let Some(job) = self.handle else {
+                return Ok(());
+            };
             let mut original = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
             let info_size = std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32;
             // SAFETY: `original` is the exact buffer required by the selected

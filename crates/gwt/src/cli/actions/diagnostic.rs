@@ -570,7 +570,7 @@ fn submit<E: CliEnv + ?Sized>(
         repository: REPOSITORY.into(),
         actor: actor.clone(),
         published: remote.clone(),
-        created_at: chrono::Utc::now().to_rfc3339(),
+        created_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
         revision: 1,
         state: "Prepared".into(),
         run_id: None,

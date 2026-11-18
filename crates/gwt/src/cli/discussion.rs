@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use chrono::{Local, NaiveDate};
+use gwt_core::timestamp::{parse_utc_date, UtcTimestamp};
 use gwt_github::{client::ApiError, SpecOpsError};
 
 use super::{CliEnv, CliParseError};
@@ -120,9 +120,9 @@ fn non_empty(flag: &'static str, value: &str) -> Result<String, CliParseError> {
 
 fn valid_date(value: &str) -> Result<String, CliParseError> {
     let value = non_empty("--date", value)?;
-    NaiveDate::parse_from_str(&value, "%Y-%m-%d")
+    parse_utc_date(&value)
         .map(|_| value)
-        .map_err(|_| CliParseError::InvalidValue {
+        .ok_or(CliParseError::InvalidValue {
             flag: "--date",
             reason: "must be YYYY-MM-DD",
         })
@@ -197,7 +197,7 @@ fn update_discussion_entry(
         let date = update
             .date
             .clone()
-            .unwrap_or_else(|| Local::now().format("%Y-%m-%d").to_string());
+            .unwrap_or_else(|| UtcTimestamp::now().local_datetime().date().to_string());
         let heading = format!("## {date} — {}", update.title);
         let entry = format_discussion_entry(&date, update, origin_session);
         content = replace_or_append_section(&content, &heading, &entry);

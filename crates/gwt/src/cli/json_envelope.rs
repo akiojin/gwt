@@ -106,17 +106,30 @@ pub(super) fn dispatch_input<E: CliEnv>(
     let parsed = match parse(input) {
         Ok(parsed) => parsed,
         Err(err) => {
-            if !matches!(
+            let redact = !matches!(
                 err,
                 CliParseError::InvalidVerificationMode | CliParseError::InvalidParams(_)
-            ) && super::feedback::safe_intake_required(env.repo_path())
-            {
-                // A malformed envelope cannot reliably identify its operation.
-                // Never echo serde's caller-controlled keys/values in Auto.
-                let _ = writeln!(env.stderr(), "{prog}: invalid JSON envelope");
+            ) && super::feedback::safe_intake_required(env.repo_path());
+            let (code, message) = if redact {
+                // Malformed input cannot reliably identify an operation, and
+                // serde diagnostics may contain secrets supplied by the caller.
+                ("INPUT_INVALID_ENVELOPE", "invalid JSON envelope; check schema_version, operation and params with gwtd --help".into())
             } else {
-                let _ = writeln!(env.stderr(), "{prog}: {err}");
+                let code = match err {
+                    CliParseError::UnknownSubcommand(_) => "INPUT_UNKNOWN_OPERATION",
+                    CliParseError::InvalidJson(_) => "INPUT_INVALID_ENVELOPE",
+                    _ => "INPUT_INVALID_PARAMS",
+                };
+                (code, err.to_string())
+            };
+            let payload = serde_json::json!({
+                "ok": false, "operation": null, "exit_code": 2,
+                "error_category": "input", "error_code": code, "error": message,
+            });
+            if let Err(error) = write_dispatch_response(env, &mut captured, &payload) {
+                return report_undelivered_response(env, prog, "envelope", &error);
             }
+            let _ = writeln!(env.stderr(), "{prog}: {message}");
             return 2;
         }
     };
@@ -133,8 +146,35 @@ pub(super) fn dispatch_input<E: CliEnv>(
     // operation on this thread left behind before this one runs.
     super::operation_warnings::take();
     let mut pr_checks_data = None;
+    let mut operation_data = None;
     let mut verification_response = None;
     let outcome = match parsed.command {
+        command @ (CliCommand::Issue(_) | CliCommand::Pr(_))
+            if !matches!(command, CliCommand::Pr(PrCommand::Checks { .. })) =>
+        {
+            let mut output = String::new();
+            let result = match command {
+                CliCommand::Issue(command) => {
+                    super::issue::run_with_data(env, command, &mut output, &mut operation_data)
+                }
+                CliCommand::Pr(command) => {
+                    super::pr::run_with_data(env, command, &mut output, &mut operation_data)
+                }
+                _ => unreachable!(),
+            };
+            result
+                .map(|exit_code| super::governance::GovernedCommandOutput {
+                    exit_code,
+                    output,
+                    refusal: None,
+                })
+                .map_err(|error| {
+                    Box::new(super::governance::GovernedCommandFailure {
+                        error,
+                        refusal: None,
+                    })
+                })
+        }
         CliCommand::Verify(command) => {
             let mut output = String::new();
             super::verification_record::run_with_response(
@@ -191,6 +231,13 @@ pub(super) fn dispatch_input<E: CliEnv>(
                 "exit_code": code,
                 "output": output,
             });
+            if let Some(data) = operation_data.or_else(|| {
+                serde_json::from_str::<Value>(&output)
+                    .ok()
+                    .filter(|data| data.is_object() || data.is_array())
+            }) {
+                payload["data"] = data;
+            }
             if code == 0 {
                 crate::pm_activity::record_successful_operation(
                     requested_project_root
@@ -246,6 +293,9 @@ pub(super) fn dispatch_input<E: CliEnv>(
                     }
                 }
             }
+            if code != 0 {
+                attach_error_metadata(&mut payload, None);
+            }
             attach_project_store(&mut payload);
             if let Err(err) = write_dispatch_response(env, &mut captured, &payload) {
                 return report_undelivered_response(env, prog, &operation, &err);
@@ -300,6 +350,7 @@ pub(super) fn dispatch_input<E: CliEnv>(
                 payload["refusal"] = serde_json::to_value(refusal)
                     .expect("operation refusal metadata must serialize");
             }
+            attach_error_metadata(&mut payload, Some(&failure.error));
             attach_project_store(&mut payload);
             if let Err(err) = write_dispatch_response(env, &mut captured, &payload) {
                 return report_undelivered_response(env, prog, &operation, &err);
@@ -319,6 +370,79 @@ pub(super) fn dispatch_input<E: CliEnv>(
             }
             1
         }
+    }
+}
+
+/// Stable categories come from typed failures, never human-message matching.
+/// Keep operation-specific codes and refusal/recovery metadata additive.
+fn attach_error_metadata(payload: &mut Value, error: Option<&gwt_github::SpecOpsError>) {
+    use gwt_github::{ApiError, SpecOpsError};
+    let (category, code) = match error {
+        Some(SpecOpsError::LocalIo(error)) => match error.kind() {
+            std::io::ErrorKind::NotFound => ("not_found", "NOT_FOUND_LOCAL_RESOURCE"),
+            std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::WouldBlock => {
+                ("conflict", "CONFLICT_LOCAL_STATE")
+            }
+            std::io::ErrorKind::PermissionDenied => ("permission", "PERMISSION_DENIED"),
+            std::io::ErrorKind::InvalidInput => ("input", "INPUT_INVALID_PARAMS"),
+            _ => ("internal", "INTERNAL_LOCAL_IO"),
+        },
+        Some(SpecOpsError::Api(ApiError::NotFound(_))) => ("not_found", "NOT_FOUND_ISSUE"),
+        Some(SpecOpsError::Api(ApiError::CommentNotFound(_))) => ("not_found", "NOT_FOUND_COMMENT"),
+        Some(SpecOpsError::SectionNotFound(_)) => ("not_found", "NOT_FOUND_SECTION"),
+        Some(SpecOpsError::CacheConflict(_)) => ("conflict", "ISSUE_CACHE_CONFLICT"),
+        Some(SpecOpsError::ConcurrentWrite) => ("conflict", "CONFLICT_CONCURRENT_WRITE"),
+        Some(SpecOpsError::ReadbackMismatch { .. }) => ("conflict", "CONFLICT_READBACK_MISMATCH"),
+        Some(SpecOpsError::Api(ApiError::Unauthorized)) => {
+            ("permission", "PERMISSION_AUTHENTICATION_REQUIRED")
+        }
+        Some(SpecOpsError::Api(ApiError::PermissionDenied { .. })) => {
+            ("permission", "PERMISSION_DENIED")
+        }
+        Some(SpecOpsError::Api(ApiError::RepositoryMismatch { .. })) => {
+            ("permission", "PERMISSION_REPOSITORY_MISMATCH")
+        }
+        Some(SpecOpsError::Validation(_)) => ("input", "INPUT_VALIDATION_FAILED"),
+        Some(SpecOpsError::Api(ApiError::BodyTooLarge)) => ("input", "INPUT_BODY_TOO_LARGE"),
+        Some(SpecOpsError::Api(ApiError::PullRequestInsteadOfIssue(_))) => {
+            ("input", "INPUT_RESOURCE_KIND")
+        }
+        Some(SpecOpsError::Api(ApiError::RateLimited { .. })) => {
+            ("external", "EXTERNAL_RATE_LIMITED")
+        }
+        Some(SpecOpsError::Api(ApiError::Timeout { .. })) => ("external", "EXTERNAL_TIMEOUT"),
+        Some(SpecOpsError::Api(ApiError::Network(_))) => ("external", "EXTERNAL_NETWORK"),
+        Some(SpecOpsError::Api(ApiError::PartialPage { .. })) => {
+            ("external", "EXTERNAL_PARTIAL_PAGE")
+        }
+        Some(SpecOpsError::IndexIntegrity(_)) => ("internal", "INTERNAL_INDEX_INTEGRITY"),
+        Some(SpecOpsError::Cache(_)) => ("internal", "INTERNAL_CACHE"),
+        Some(_) => ("internal", "INTERNAL_OPERATION_FAILED"),
+        None => match payload["error_code"].as_str() {
+            Some("invalid_request") => ("input", "INPUT_INVALID_REQUEST"),
+            Some("identity_conflict" | "transaction_conflict") => ("conflict", "CONFLICT_STATE"),
+            Some(
+                "primary_actor_required" | "execution_binding_mismatch" | "provenance_mismatch",
+            ) => ("permission", "PERMISSION_AUTHORITY"),
+            Some("internal") => ("internal", "INTERNAL_OPERATION_FAILED"),
+            _ => ("operation", "OPERATION_FAILED"),
+        },
+    };
+    // Governance is authoritative even when a legacy error wrapper has lost
+    // the underlying cause (for example an identity refusal in Unexpected).
+    let (category, code) = match payload["refusal"]["governance"]["cause"].as_str() {
+        Some("authority" | "managed_identity" | "structural_governance") => {
+            ("permission", "PERMISSION_AUTHORITY")
+        }
+        Some("integrity") => ("internal", "INTERNAL_INTEGRITY"),
+        Some("domain_invalid") => ("input", "INPUT_DOMAIN_INVALID"),
+        Some("transient_governance" | "not_ready") => ("conflict", "CONFLICT_NOT_READY"),
+        Some("external_wait") => ("external", "EXTERNAL_WAIT"),
+        _ => (category, code),
+    };
+    payload["error_category"] = category.into();
+    if payload.get("error_code").is_none() {
+        payload["error_code"] = code.into();
     }
 }
 
@@ -521,6 +645,10 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
     let params = params_object(&envelope.params)?;
     let recording = param_audit::Recording::start();
     let command = match envelope.operation.as_str() {
+        "agent.registry.restore_schema3" => {
+            reject_unknown_params(params, &[], &envelope.operation)?;
+            CliCommand::AgentRegistry(super::AgentRegistryCommand::RestoreSchema3)
+        }
         "agent.registry.status" => {
             reject_unknown_params(params, &["source_key"], &envelope.operation)?;
             let source_key: Option<String> = serde_json::from_value(
@@ -855,14 +983,13 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             let recovery_id = required_string(params, "recovery_id")?;
             let body = required_string(params, "body")?;
             let recovered_at = required_string(params, "recovered_at")?;
-            let recovered_at = chrono::DateTime::parse_from_rfc3339(&recovered_at)
+            let recovered_at = gwt_core::timestamp::UtcTimestamp::parse_from_rfc3339(&recovered_at)
                 .map_err(|_| {
                     CliParseError::InvalidJson(
                         "recovered_at must be an RFC3339 timestamp of the actual intervention"
                             .into(),
                     )
                 })?
-                .with_timezone(&chrono::Utc)
                 .to_rfc3339();
             if number == 0
                 || body.trim().is_empty()
@@ -979,6 +1106,29 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 provider: required_string(params, "provider")?,
                 // An unexplained release of a provider hold is not auditable.
                 reason: required_string(params, "reason")?,
+            })
+        }
+        "issue.monitor.verification.declare" => {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Assignment {
+                id: String,
+                verifier: String,
+            }
+            let criteria: Vec<Assignment> =
+                serde_json::from_value(lookup(params, "criteria").cloned().unwrap_or(Value::Null))
+                    .map_err(|error| {
+                        CliParseError::InvalidJson(format!(
+                            "criteria must contain {{id, verifier}} assignments: {error}"
+                        ))
+                    })?;
+            CliCommand::Issue(IssueCommand::MonitorVerificationDeclare {
+                project_root: optional_path(params, "project_root")?,
+                number: required_u64(params, "number")?,
+                criteria: criteria
+                    .into_iter()
+                    .map(|entry| (entry.id, entry.verifier))
+                    .collect(),
             })
         }
         "issue.monitor.wait" => {
@@ -1937,6 +2087,28 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 id: optional_string(params, "id")?,
             })
         }
+        "pane.layout.place" => {
+            let lane_id = required_string(params, "lane_id")?;
+            let lane_id = serde_json::from_value(Value::String(lane_id)).map_err(|_| {
+                CliParseError::InvalidValue {
+                    flag: "lane_id",
+                    reason: "expected plan, active, blocked, or done",
+                }
+            })?;
+            let order = optional_u64(params, "order")?
+                .map(u32::try_from)
+                .transpose()
+                .map_err(|_| CliParseError::InvalidValue {
+                    flag: "order",
+                    reason: "expected a 32-bit unsigned integer",
+                })?;
+            CliCommand::ProjectControl(super::open::ProjectControlCommand::PlacePane {
+                id: required_string(params, "id")?,
+                board_id: required_string(params, "board_id")?,
+                lane_id,
+                order,
+            })
+        }
         "pane.name" => {
             reject_unknown_params(params, &["candidate"], "pane.name")?;
             CliCommand::Pane(PaneCommand::Name {
@@ -2003,6 +2175,16 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 ));
             }
             CliCommand::Pm(crate::cli::pm::PmCommand::ProjectExecutionStatus { operation_id })
+        }
+        "project.open" => CliCommand::ProjectControl(super::open::ProjectControlCommand::Open {
+            path: required_string(params, "path")?.into(),
+        }),
+        "pm.agent.add" => {
+            reject_unknown_params(params, &["name", "agent_id"], &envelope.operation)?;
+            CliCommand::Pm(crate::cli::pm::PmCommand::AgentAdd {
+                name: required_string(params, "name")?,
+                agent_id: required_string(params, "agent_id")?,
+            })
         }
         "pm.capabilities" => CliCommand::Pm(crate::cli::pm::PmCommand::Capabilities),
         "pm.request_tasks.read" => {
@@ -2191,6 +2373,11 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 input,
             })
         }
+        "pm.auto_start.set" => CliCommand::Pm(crate::cli::pm::PmCommand::SetAutoStart {
+            project_root: optional_string(params, "project_root")?,
+            enabled: optional_bool(params, "enabled")?
+                .ok_or(CliParseError::MissingFlag("enabled"))?,
+        }),
         "pm.pause" | "pm.resume" => CliCommand::Pm(crate::cli::pm::PmCommand::SetPaused {
             project_root: optional_string(params, "project_root")?,
             paused: envelope.operation == "pm.pause",
@@ -3340,8 +3527,12 @@ mod tests {
             r#"{"schema_version":1,"operation":"search","params":{"query":"admission","project_root":"/elsewhere"}}"#,
         ] {
             assert_eq!(dispatch_json_input(&mut env, "gwtd", input), 2);
-            assert!(env.stdout.is_empty());
+            let reply: Value = serde_json::from_slice(&env.stdout).unwrap();
+            assert_eq!(reply["ok"], false);
+            assert_eq!(reply["error_category"], "input");
+            assert!(reply["error_code"].as_str().is_some());
             assert!(String::from_utf8_lossy(&env.stderr).starts_with("gwtd: "));
+            env.stdout.clear();
             env.stderr.clear();
         }
 
@@ -3450,6 +3641,8 @@ mod tests {
         );
         let reply: Value = serde_json::from_slice(&env.stdout).unwrap();
         let result: Value = serde_json::from_str(reply["output"].as_str().unwrap()).unwrap();
+        assert_eq!(reply["data"], result);
+        assert_eq!(reply["data"]["after"]["data"]["dry_run"], true);
         assert_eq!(result["after"]["operation"], "worktree.gc_build_artifacts");
         assert_eq!(result["after"]["ok"], true);
         let report: Value =
@@ -3565,8 +3758,121 @@ mod tests {
             assert_eq!(super::dispatch(&mut env, "gwtd"), 0);
             let response: Value = serde_json::from_slice(&env.stdout).unwrap();
             assert_eq!(response["kind"], kind);
+            assert_eq!(response["data"]["number"], number);
+            assert_eq!(response["data"]["title"], "typed resource");
             assert!(response["output"].as_str().unwrap().starts_with(header));
         }
+    }
+
+    #[test]
+    fn issue_7521_status_and_list_expose_json_data_without_changing_output() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let mut env = TestEnv::new(temp.path().join("repo"));
+        for operation in ["execution.status", "pr.list", "board.show"] {
+            env.stdout.clear();
+            env.stdin = envelope(operation, json!({}));
+            assert_eq!(super::dispatch(&mut env, "gwtd"), 0, "{operation}");
+            let reply: Value = serde_json::from_slice(&env.stdout).unwrap();
+            let legacy: Value = serde_json::from_str(reply["output"].as_str().unwrap()).unwrap();
+            assert!(legacy.is_object() || legacy.is_array(), "{operation}");
+            assert_eq!(reply["data"], legacy, "{operation}");
+        }
+    }
+
+    #[test]
+    fn issue_7521_typed_failures_have_stable_categories_and_preserve_legacy_codes() {
+        use gwt_github::{ApiError, IssueNumber, SpecOpsError};
+        for (error, category, code) in [
+            (
+                SpecOpsError::Api(ApiError::NotFound(IssueNumber(1))),
+                "not_found",
+                "NOT_FOUND_ISSUE",
+            ),
+            (
+                SpecOpsError::ConcurrentWrite,
+                "conflict",
+                "CONFLICT_CONCURRENT_WRITE",
+            ),
+            (
+                SpecOpsError::Api(ApiError::PermissionDenied {
+                    message: "policy".into(),
+                }),
+                "permission",
+                "PERMISSION_DENIED",
+            ),
+            (
+                SpecOpsError::Validation("body".into()),
+                "input",
+                "INPUT_VALIDATION_FAILED",
+            ),
+            (
+                SpecOpsError::IndexIntegrity("index".into()),
+                "internal",
+                "INTERNAL_INDEX_INTEGRITY",
+            ),
+        ] {
+            let mut reply = json!({"ok":false,"error":error.to_string()});
+            super::attach_error_metadata(&mut reply, Some(&error));
+            assert_eq!(reply["error_category"], category);
+            assert_eq!(reply["error_code"], code);
+        }
+        let mut reply = json!({"ok":false,"error_code":"ISSUE_CACHE_CONFLICT"});
+        super::attach_error_metadata(
+            &mut reply,
+            Some(&SpecOpsError::CacheConflict(IssueNumber(1))),
+        );
+        assert_eq!(reply["error_category"], "conflict");
+        assert_eq!(reply["error_code"], "ISSUE_CACHE_CONFLICT");
+        let legacy = SpecOpsError::Api(ApiError::Unexpected("missing identity".into()));
+        for error in [None, Some(&legacy)] {
+            let refusal = json!({"governance":{"cause":"managed_identity"}});
+            let mut reply = json!({"ok":false,"refusal":refusal});
+            super::attach_error_metadata(&mut reply, error);
+            assert_eq!(reply["error_category"], "permission");
+            assert_eq!(reply["error_code"], "PERMISSION_AUTHORITY");
+            assert_eq!(reply["refusal"], refusal);
+        }
+    }
+
+    #[test]
+    fn issue_7521_stale_queue_order_is_a_conflict_through_the_handler() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let repo = temp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(&path, &Default::default()).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let mut env = TestEnv::new(repo);
+        env.stdin = envelope(
+            "issue.monitor.queue.move",
+            json!({
+                "number":42, "position":0, "expected_queue_order":[42]
+            }),
+        );
+        assert_eq!(super::dispatch(&mut env, "gwtd"), 1);
+        let reply: Value = serde_json::from_slice(&env.stdout).unwrap();
+        assert_eq!(reply["error_category"], "conflict");
+        assert_eq!(reply["error_code"], "CONFLICT_LOCAL_STATE");
+        assert!(reply["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("network error: queue_order changed"));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn issue_7521_linked_pr_transport_failure_remains_external() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let mut env = TestEnv::new(temp.path().join("repo"));
+        env.linked_pr_errors.insert(42, "connection reset".into());
+        env.stdin = envelope("issue.linked_prs", json!({"number":42,"refresh":true}));
+        assert_eq!(super::dispatch(&mut env, "gwtd"), 1);
+        let reply: Value = serde_json::from_slice(&env.stdout).unwrap();
+        assert_eq!(reply["error_category"], "external");
+        assert_eq!(reply["error_code"], "EXTERNAL_NETWORK");
     }
 
     #[test]
@@ -3607,6 +3913,24 @@ mod tests {
             Ok(_) => panic!("expected Err for {operation}"),
             Err(err) => err,
         }
+    }
+
+    #[test]
+    fn issue_7518_project_and_pane_operations_accept_typed_params() {
+        let _ = ok("project.open", json!({"path": "./project"}));
+        let _ = ok(
+            "pane.layout.place",
+            json!({"id":"tab::agent","board_id":"tab::board","lane_id":"active","order":0}),
+        );
+        let _ = err("project.open", json!({"path": ""}));
+        let _ = err(
+            "pane.layout.place",
+            json!({"id":"tab::agent","board_id":"tab::board","lane_id":"unknown"}),
+        );
+        let _ = err(
+            "pane.layout.place",
+            json!({"id":"tab::agent","board_id":"tab::board","lane_id":"active","project_key":"foreign"}),
+        );
     }
 
     fn concern_call(env: &mut TestEnv, operation: &str, params: Value) -> Value {
@@ -3980,7 +4304,7 @@ mod tests {
     fn every_named_pr_default_action_operation_is_callable() {
         use gwt_git::pr_status::{classify_pr_lifecycle, PrInventoryFields};
 
-        let now = chrono::Utc::now();
+        let now = gwt_core::timestamp::UtcTimestamp::now();
         let mut seen_update_branch = false;
         for (mergeable, merge_state_status, ci_status, is_draft) in [
             ("MERGEABLE", "BEHIND", "SUCCESS", true),
@@ -4256,6 +4580,8 @@ mod tests {
 
     #[test]
     fn agent_registry_operations_parse_strict_recovery_identity() {
+        assert!(parse_operation("agent.registry.restore_schema3", &json!({})).is_ok());
+        assert!(parse_operation("agent.registry.restore_schema3", &json!({"force":true})).is_err());
         assert!(parse_operation("agent.registry.status", &json!({})).is_ok());
         assert!(parse_operation(
             "agent.registry.status",
@@ -4684,6 +5010,8 @@ mod tests {
         assert_eq!(payload["ok"], json!(false));
         assert_eq!(payload["operation"], json!("issue.view"));
         assert_eq!(payload["exit_code"], json!(1));
+        assert_eq!(payload["error_category"], "not_found");
+        assert_eq!(payload["error_code"], "NOT_FOUND_ISSUE");
         assert!(
             payload["error"]
                 .as_str()
@@ -6698,6 +7026,29 @@ mod tests {
             err("issue.monitor.wait", json!({"reason": "x"})),
             CliParseError::MissingFlag("resume_condition")
         ));
+    }
+
+    #[test]
+    fn issue_7536_verification_declaration_requires_typed_assignments() {
+        assert_eq!(
+            ok(
+                "issue.monitor.verification.declare",
+                json!({"number":42,"criteria":[{"id":"AC-1","verifier":"PM"}]})
+            ),
+            CliCommand::Issue(IssueCommand::MonitorVerificationDeclare {
+                project_root: None,
+                number: 42,
+                criteria: vec![("AC-1".into(), "PM".into())]
+            })
+        );
+        for params in [
+            json!({"number":42}),
+            json!({"number":42,"criteria":[{"id":"AC-1"}]}),
+            json!({"number":42,"criteria":[{"id":"AC-1","verifier":"PM","text":"caller supplied"}]}),
+            json!({"number":42,"criteria":[{"id":"AC-1","verifier":"PM"}],"verifier":"extra"}),
+        ] {
+            let _ = err("issue.monitor.verification.declare", params);
+        }
     }
 
     /// Issue #4286 AC-1/AC-2: the PM invalidates one wait declaration. The
@@ -8808,6 +9159,72 @@ mod tests {
         );
     }
 
+    #[test]
+    fn pm_auto_start_set_requires_an_explicit_boolean() {
+        let _ = ok("pm.auto_start.set", json!({"enabled": false}));
+        for params in [
+            json!({}),
+            json!({"enabled": null}),
+            json!({"enabled": "false"}),
+            json!({"enabled": false, "session_id": "resident"}),
+        ] {
+            let error = err("pm.auto_start.set", params);
+            assert!(!matches!(error, CliParseError::UnknownSubcommand(_)));
+        }
+    }
+
+    #[test]
+    fn pm_auto_start_set_preserves_residency_and_requires_pm_authority() {
+        use crate::pm_registry;
+        use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
+
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path().join("state"));
+        let _session = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let mut env = TestEnv::new(repo.clone());
+        let path = pm_registry::pm_prefs_path_for_repo_path(&repo);
+        let original: pm_registry::PmPrefs = serde_json::from_value(json!({
+            "settings": {"auto_start": true, "paused": true, "loop_interval_secs": 90},
+            "registration": {"session_id":"resident", "agent_id":"codex", "worktree_path":repo}
+        }))
+        .unwrap();
+        pm_registry::save_pm_prefs(&path, &original).unwrap();
+
+        let set = |enabled| ok("pm.auto_start.set", json!({"enabled": enabled}));
+        let (_, output) = crate::cli::run_collect(&mut env, set(false)).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).unwrap()["auto_start"],
+            false
+        );
+        let mut expected = original.clone();
+        expected.settings.auto_start = false;
+        assert_eq!(pm_registry::load_pm_prefs(&path).unwrap(), expected);
+
+        let _agent = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "unrelated-agent");
+        assert!(crate::cli::run_collect(&mut env, set(true)).is_err());
+        assert_eq!(pm_registry::load_pm_prefs(&path).unwrap(), expected);
+
+        let _pm = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "resident");
+        let (_, output) = crate::cli::run_collect(
+            &mut env,
+            ok(
+                "pm.auto_start.set",
+                json!({"enabled": true, "project_root": repo}),
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).unwrap()["auto_start"],
+            true
+        );
+        assert_eq!(pm_registry::load_pm_prefs(&path).unwrap(), original);
+    }
+
     // Issue #4249 FR-003: the PM self-description is a read-only diagnostic.
     #[test]
     fn pm_capabilities_parses_and_stays_read_only() {
@@ -8820,6 +9237,90 @@ mod tests {
                 "pm.capabilities"
             )
         );
+    }
+
+    #[test]
+    fn pm_agent_add_is_published_and_registers_one_member() {
+        use crate::{agent_names, pm_registry};
+        use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
+
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path().join("state"));
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let pm_worktree = pm_registry::pm_worktree_path_for_repo_path(&repo);
+        std::fs::create_dir_all(&pm_worktree).unwrap();
+        let mut env = TestEnv::new(pm_worktree.clone());
+        let (_, output) =
+            crate::cli::run_collect(&mut env, ok("pm.capabilities", json!({}))).unwrap();
+        let catalog: Value = serde_json::from_str(&output).unwrap();
+        assert!(
+            catalog["capabilities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["operation"] == "pm.agent.add" && row["executable"] == true),
+            "the published catalog must offer member registration"
+        );
+
+        let monitor_path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let before = agent_names::read_project_roster(&repo, &sessions).unwrap();
+        let monitor_before = std::fs::read(&monitor_path).unwrap();
+        let pm_path = pm_registry::pm_prefs_path_for_repo_path(&repo);
+        let pm_prefs = serde_json::from_value(json!({
+            "registration": {
+                "session_id": "resident", "agent_id": "codex", "worktree_path": pm_worktree
+            }
+        }))
+        .unwrap();
+        pm_registry::save_pm_prefs(&pm_path, &pm_prefs).unwrap();
+        let pm_before = std::fs::read(&pm_path).unwrap();
+        let params = json!({"name": "Additional teammate", "agent_id": "codex"});
+        let add = || ok("pm.agent.add", params.clone());
+        let registry_path = crate::agent_registry::path();
+        let registry_before = std::fs::read(&registry_path).unwrap();
+        {
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "another-agent");
+            assert!(crate::cli::run_collect(&mut env, add()).is_err());
+            assert_eq!(std::fs::read(&registry_path).unwrap(), registry_before);
+        }
+
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "resident");
+        assert!(crate::cli::run_collect(
+            &mut env,
+            ok(
+                "pm.agent.add",
+                json!({"name": "Other teammate", "agent_id": "unregistered-tool"})
+            )
+        )
+        .is_err());
+        assert_eq!(std::fs::read(&registry_path).unwrap(), registry_before);
+        let (_, output) = crate::cli::run_collect(&mut env, add()).unwrap();
+        let member: agent_names::AgentMember = serde_json::from_str(&output).unwrap();
+        assert_eq!(member.name, "Additional teammate");
+        assert_eq!(member.agent_id.as_deref(), Some("codex"));
+        assert!(member.enabled && member.implementation_eligible());
+        assert!(member.assignment.is_none());
+        let key = gwt_core::paths::project_scope_hash(&repo);
+        let persisted = crate::agent_registry::SessionMemberSnapshot::load()
+            .unwrap()
+            .project_snapshot(&key)
+            .unwrap()
+            .agent_roster
+            .unwrap();
+        assert_eq!(
+            persisted.members.split_last(),
+            Some((&member, before.members.as_slice()))
+        );
+        let registry_after = std::fs::read(&registry_path).unwrap();
+        assert!(crate::cli::run_collect(&mut env, add()).is_err());
+        assert_eq!(std::fs::read(&registry_path).unwrap(), registry_after);
+        assert_eq!(std::fs::read(monitor_path).unwrap(), monitor_before);
+        assert_eq!(std::fs::read(pm_path).unwrap(), pm_before);
     }
 
     #[test]

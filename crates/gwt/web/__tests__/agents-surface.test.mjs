@@ -479,7 +479,6 @@ test("resting members stay registered after work ends and across unavailable act
   assert.equal(f.surface.element.querySelector('.roster-row[data-member-id="m1"]')?.getAttribute("aria-selected"), "true");
   assert.equal(f.surface.element.querySelector(".roster-count").textContent, "1");
   assert.equal(f.surface.element.querySelector(".roster-capacity-value").textContent, "1");
-  assert.equal(f.surface.element.querySelector(".roster-active").textContent, "Active 1");
   assert.match(f.surface.element.querySelector('.roster-row[data-member-id="m1"]').textContent, /Resting.*Finishing/);
   const rested = f.surface.element.querySelector('.roster-row[data-member-id="rested-idle"]');
   assert.ok(rested, "a canonical resting member remains registered without a live assignment");
@@ -502,7 +501,7 @@ test("resting members stay registered after work ends and across unavailable act
   assert.equal(f.surface.element.querySelector('.roster-row[data-member-id="rested-idle"]'), rested);
   assert.equal(rested.getAttribute("aria-selected"), "true");
   assert.equal(f.surface.element.querySelector(".roster-count").textContent, "1");
-  assert.equal(f.surface.element.querySelector(".roster-active").textContent, "Active —");
+  assert.match(f.surface.element.querySelector(".roster-capacity-note").textContent, /Busy —/);
   assert.deepEqual(f.rested, []); assert.deepEqual(f.added, []);
   workSurface.dispose(); f.surface.dispose();
 });
@@ -603,7 +602,6 @@ test("one member row shows both project assignments without granting foreign ter
   assert.deepEqual(f.opened, [], "foreign summary only navigates to its own project");
   local.click();
   assert.deepEqual(f.opened, [current], "local input still requires the exact current census");
-  assert.equal(f.surface.element.querySelector(".roster-active").textContent, "Active 1");
   const preview = f.document.createElement("aside"); f.surface.setPreviewHost(preview);
   assert.equal(preview.querySelector('[data-assignment-project="project-b"]').disabled, true);
   f.rosterModel.update(state => ({ ...state, members: state.members.map(member =>

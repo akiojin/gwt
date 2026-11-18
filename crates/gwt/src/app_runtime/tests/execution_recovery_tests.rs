@@ -240,7 +240,7 @@ fn historical_fresh_receipt_waits_for_a_foreign_owner_ledger_first_repair() {
         session_binding_id: "foreign-owner-ledger-first-binding".to_string(),
         initial_session_id: "foreign-owner-ledger-first-session".to_string(),
         entrypoint: "$gwt-execute #3327".to_string(),
-        requested_at: Utc::now(),
+        requested_at: gwt_core::timestamp::UtcTimestamp::now(),
     };
     gwt::cli::execution_state::prepare_fresh_linked_owner_launch_successor(
         &fixture.repo,
@@ -395,7 +395,7 @@ fn historical_genesis_receipt_does_not_terminalize_a_different_current_owner() {
     let mut unrelated = gwt_core::workspace_projection::WorkEvent::new(
         gwt_core::workspace_projection::WorkEventKind::Start,
         unrelated_work_id,
-        Utc::now(),
+        gwt_core::timestamp::UtcTimestamp::now(),
     );
     unrelated.title = Some("Unrelated current owner Work".to_string());
     unrelated.agent_session_id = Some("superseding-genesis-owner-session".to_string());
@@ -435,7 +435,7 @@ fn historical_genesis_receipt_does_not_terminalize_a_different_current_owner() {
         session_binding_id: "foreign-genesis-owner-ledger-first-binding".to_string(),
         initial_session_id: "foreign-genesis-owner-ledger-first-session".to_string(),
         entrypoint: "$gwt-execute #3327".to_string(),
-        requested_at: Utc::now(),
+        requested_at: gwt_core::timestamp::UtcTimestamp::now(),
     };
     gwt::cli::execution_state::prepare_fresh_linked_owner_launch_successor(
         &repo,
@@ -863,7 +863,7 @@ fn startup_does_not_commit_foreign_same_operation_for_stale_activated_session() 
     let mut unrelated = gwt_core::workspace_projection::WorkEvent::new(
         gwt_core::workspace_projection::WorkEventKind::Start,
         "work-after-foreign-activated-recovery",
-        Utc::now(),
+        gwt_core::timestamp::UtcTimestamp::now(),
     );
     unrelated.title = Some("Foreign marker must remain unresolved".to_string());
     assert!(
@@ -953,7 +953,7 @@ fn startup_does_not_delete_aborted_session_when_project_state_root_is_foreign() 
     let mut unrelated = gwt_core::workspace_projection::WorkEvent::new(
         gwt_core::workspace_projection::WorkEventKind::Start,
         "work-after-foreign-aborted-recovery",
-        Utc::now(),
+        gwt_core::timestamp::UtcTimestamp::now(),
     );
     unrelated.title = Some("Canonical marker must remain unresolved".to_string());
     assert!(
@@ -2002,7 +2002,7 @@ fn continue_work_pre_dispatch_abort_surfaces_durable_write_failure() {
         session_binding_id: "binding-candidate".to_string(),
         initial_session_id: "candidate-session".to_string(),
         entrypoint: "gwt-execute".to_string(),
-        requested_at: Utc::now(),
+        requested_at: gwt_core::timestamp::UtcTimestamp::now(),
     };
     let execution = PendingContinueWorkExecution::Successor(request);
 
@@ -2072,7 +2072,7 @@ fn continue_work_authenticated_session_start_commits_stale_takeover_without_new_
     let predecessor_binding = gwt::cli::execution_state::current_execution_binding(&repo, owner)
         .expect("read predecessor binding")
         .expect("predecessor binding");
-    let now = chrono::Utc::now();
+    let now = gwt_core::timestamp::UtcTimestamp::now();
     let mut start = gwt_core::workspace_projection::WorkEvent::new(
         gwt_core::workspace_projection::WorkEventKind::Start,
         work_id,
@@ -2235,7 +2235,7 @@ fn continue_work_authenticated_session_start_commits_stale_takeover_without_new_
             "legacy Prepared identity must exactly match the actual owner Session"
         );
         readiness.agent_session_id.clone_from(&physical.session.as_ref().unwrap().agent_session_id);
-        readiness.occurred_at = chrono::Utc::now().to_rfc3339();
+        readiness.occurred_at = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
         assert_eq!(physical.runtime_hook(&readiness).await.unwrap(), reqwest::StatusCode::NO_CONTENT);
         // test-hygiene: allow-wall-clock-deadline hang guard for the exact owner outcome; accepted messages establish ordering
         let outcome = tokio::time::timeout(Duration::from_secs(30), async { loop {
@@ -2804,6 +2804,41 @@ fn app_runtime_closing_issue_monitor_window_returns_issue_to_pending() {
         owner_monitor_fixture(temp.path(), 42, false, &["pane-contract-fixture"]);
     let pane = owner_monitor_launch(&root, &owner, 42, "agent", delivery_id);
     assert_eq!(owner_monitor_read(&root, 42).status_view().active_count, 1);
+    // Issue #7676: the host census is published on its own pass, up to 5s after
+    // the child is still alive. Coverage lets that pass land before close. A
+    // logical requeue does not drop the stale physical count, so active_count
+    // stays 1 until a later census observes the reap. Establish that census
+    // first, then require close's ACK to free the slot without another wait.
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&root);
+    let host_pid = std::process::id();
+    let host_started_at = gwt::process::host_process_start_time(host_pid).unwrap();
+    let host_key = format!("{host_pid}:{host_started_at}");
+    let pane_id = pane.id.clone();
+    owner_fixture_block_on(async {
+        // test-hygiene: allow-wall-clock-deadline Observe the live host census before close; elapsed time is not the slot-release proof.
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+                if prefs
+                    .monitor_runtime_counts
+                    .get(&host_key)
+                    .is_some_and(|census| {
+                        census.counts.get(&42) == Some(&1)
+                            && census.windows.get(&pane_id) == Some(&42)
+                    })
+                {
+                    break;
+                }
+                owner
+                    .command(gwt::project_runtime::events::OwnerCommand::Health)
+                    .await
+                    .unwrap();
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the launched pane must enter the host census before close");
+    });
     super::pane_control_tests::control_close(&owner, &pane);
     assert!(
         pane.pty.try_wait().unwrap().is_some(),

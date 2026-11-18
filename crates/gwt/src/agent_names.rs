@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
     fs::OpenOptions,
-    io::{BufRead, BufReader, Write},
+    io::{self, BufRead, BufReader, Write},
     path::Path,
 };
 
@@ -237,7 +237,7 @@ impl AgentRoster {
             enabled: true,
             pm_eligible: false,
             pm_project_key: None,
-            created_at: chrono::Utc::now().to_rfc3339(),
+            created_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
             origin_session_id: None,
             last_issue_number: None,
             last_spec_number: None,
@@ -312,6 +312,18 @@ fn canonical_tool(value: &str) -> Result<String, String> {
     Ok(tool.command().to_string())
 }
 
+pub(crate) fn validate_registration_tool(value: &str) -> Result<(), String> {
+    match gwt_agent::resolve_agent_id(value) {
+        Some(gwt_agent::AgentId::Custom(id))
+            if crate::issue_monitor::custom_coding_agent_definition(&id).is_none() =>
+        {
+            Err("Choose a known coding tool when registering an Agent".into())
+        }
+        Some(_) => Ok(()),
+        None => Err("Unknown Agent tool".into()),
+    }
+}
+
 /// Upgrade provider-only preferences under the existing project writer lock.
 /// Current assignments keep their person and tool, including when their future
 /// slot is rested to preserve the configured capacity for the saved primary.
@@ -369,7 +381,8 @@ fn synchronize_roster_tools(
                 }
             }
         }
-        return validate_registered_profiles(prefs, &prefs.launch_profile_pool());
+        return validate_registered_profiles(prefs, &prefs.launch_profile_pool())
+            .map_err(String::from);
     }
     let pool = prefs.launch_profile_pool();
     let tools: Vec<_> = pool
@@ -496,14 +509,24 @@ fn synchronize_roster_tools(
     if legacy {
         prefs.set_launch_profile_pool(migrated);
     }
-    validate_registered_profiles(prefs, &prefs.launch_profile_pool())
+    validate_registered_profiles(prefs, &prefs.launch_profile_pool()).map_err(String::from)
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct RegisteredProfileError(String);
+
+impl From<RegisteredProfileError> for String {
+    fn from(error: RegisteredProfileError) -> Self {
+        error.0
+    }
 }
 
 /// Provider is only a capability key; a bound candidate must name its owner.
 pub fn validate_registered_profiles(
     prefs: &crate::IssueMonitorPrefs,
     profiles: &[crate::IssueMonitorLaunchProfile],
-) -> Result<(), String> {
+) -> Result<(), RegisteredProfileError> {
     for profile in profiles {
         let Some(id) = profile.agent_member_id.as_ref() else {
             continue;
@@ -517,18 +540,27 @@ pub fn validate_registered_profiles(
                     .iter()
                     .find(|member| &member.agent_member_id == id)
             })
-            .ok_or_else(|| format!("Registered Agent {id} is unavailable; reload Agents"))?;
-        if member.agent_id.as_deref() != Some(canonical_tool(&profile.agent_id)?.as_str()) {
-            return Err(format!(
-                "Agent {} has a fixed tool; choose its registered profile",
-                member.name
-            ));
-        }
+            .ok_or_else(|| {
+                RegisteredProfileError(format!(
+                    "Registered Agent {id} is unavailable. Reload Agents."
+                ))
+            })?;
+        let name = &member.name;
         if !member.implementation_eligible() {
-            return Err(format!(
-                "Agent {} is configured or reserved as PM; choose another implementation candidate",
-                member.name
-            ));
+            return Err(RegisteredProfileError(format!(
+                "Agent {name} is configured or reserved as PM. Choose another implementation candidate."
+            )));
+        }
+        let tool = canonical_tool(&profile.agent_id).map_err(RegisteredProfileError)?;
+        let Some(registered_tool) = member.agent_id.as_deref() else {
+            return Err(RegisteredProfileError(format!(
+                "Agent {name} needs a registered tool. Reload Agents."
+            )));
+        };
+        if registered_tool != tool {
+            return Err(RegisteredProfileError(format!(
+                "Agent {name} has a fixed tool. In Settings → Issues → Candidates, select “Use registered profiles” to apply {name} ({registered_tool})."
+            )));
         }
     }
     Ok(())
@@ -538,30 +570,26 @@ pub fn validate_registered_profiles(
 pub(crate) fn synchronize_roster_capacity(
     prefs: &mut crate::IssueMonitorPrefs,
     prefs_path: &Path,
-) -> Result<(), String> {
+) -> io::Result<()> {
     let default_tool = prefs
         .launch_profile_pool()
         .first()
         .map(|profile| profile.agent_id.clone())
         .unwrap_or_else(|| "codex".into());
     if let Some(roster) = prefs.agent_roster.as_mut() {
-        roster.validate()?;
-        if matches!(roster.schema_version, 2 | 3) {
-            return validate_registered_profiles(prefs, &prefs.launch_profile_pool());
-        }
-        if roster.enabled_count() != prefs.max_active_agents {
-            roster.resize(
-                prefs.max_active_agents,
-                &history_for_prefs(prefs_path)?,
-                &default_tool,
-            )?;
+        roster.validate().map_err(io::Error::other)?;
+        if roster.schema_version == 1 && roster.enabled_count() != prefs.max_active_agents {
+            let history = history_for_prefs(prefs_path).map_err(io::Error::other)?;
+            roster
+                .resize(prefs.max_active_agents, &history, &default_tool)
+                .map_err(io::Error::other)?;
             roster.revision = roster
                 .revision
                 .checked_add(1)
-                .ok_or("Agent roster revision exhausted")?;
+                .ok_or_else(|| io::Error::other("Agent roster revision exhausted"))?;
         }
     }
-    validate_registered_profiles(prefs, &prefs.launch_profile_pool())
+    validate_registered_profiles(prefs, &prefs.launch_profile_pool()).map_err(io::Error::other)
 }
 
 pub(crate) const MAX_AGENT_ROSTER_SIZE: usize = 256;
@@ -813,19 +841,18 @@ pub fn mutate_project_roster_snapshot(
         agent_id: Some(id), ..
     } = &action
     {
-        if let Some(gwt_agent::AgentId::Custom(id)) = gwt_agent::resolve_agent_id(id) {
-            if crate::issue_monitor::custom_coding_agent_definition(&id).is_none() {
-                return Err("Choose a known coding tool when registering an Agent".into());
-            }
-        }
-        canonical_tool(id)?;
+        validate_registration_tool(id)?;
     }
     let path = crate::issue_monitor_prefs_path_for_repo_path(root);
     let pm_identity = crate::agent_registry::ensure_current_pm_identity(root, sessions_dir)
         .map_err(|error| error.to_string())?;
     if pm_identity && !path.exists() {
-        return crate::agent_registry::mutate_pm_selection(root, action, expected_revision)
-            .map_err(|error| error.to_string());
+        return crate::agent_registry::mutate_pm_selection(
+            &gwt_core::paths::project_scope_hash(root),
+            action,
+            expected_revision,
+        )
+        .map_err(|error| error.to_string());
     }
     crate::agent_registry::ensure_active_for_project(root).map_err(|error| error.to_string())?;
     if matches!(
@@ -834,8 +861,12 @@ pub fn mutate_project_roster_snapshot(
             | AgentRosterAction::SetPmEligibility { .. }
             | AgentRosterAction::SelectPm { .. }
     ) {
-        return crate::agent_registry::mutate_pm_selection(root, action, expected_revision)
-            .map_err(|error| error.to_string());
+        return crate::agent_registry::mutate_pm_selection(
+            &gwt_core::paths::project_scope_hash(root),
+            action,
+            expected_revision,
+        )
+        .map_err(|error| error.to_string());
     }
     let seed = initial_project_members(root, &path, sessions_dir)?;
     let dead = dead_project_assignments(root, &path, sessions_dir)?;

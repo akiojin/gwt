@@ -1,6 +1,205 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.171.1] - 2026-11-18
+
+### Bug Fixes
+
+- **issue-monitor:** 重複 runtime の needs_human 理由に判別材料を載せる
+- **ci:** Answer ConPTY startup in monitor hook tests
+- **daemon:** Exit after exact retirement recovery is exhausted
+- **issue-monitor:** Stop retries for invalid agent profiles
+- **runtime:** Close stopped diagnostic agent windows
+- **hook:** Wait for pr contention during tool runtime publication
+- **gui:** Work event の dirty 診断を変更時だけ再スキャンする
+
+### Miscellaneous Tasks
+
+- **work:** Issue 5132 の Work イベントを記録
+- **work:** Issue 5132 の blocked イベントを記録
+- **work:** Issue 5132 の Work イベントを記録
+- **work:** Issue 5132 の検証 Work イベントを記録
+- **work:** Record Windows verification handoff
+- **work:** Record PR #7631 delivery event
+- **work:** Record issue 7608 pull request
+- **work:** Issue 7616 の Work イベントを記録
+- **work:** Issue 7616 の検証 Work イベントを記録
+- **work:** Record issue 7608 acceptance evaluation
+
+### Testing
+
+- **ci:** Record ConPTY regressions in Windows inventory
+- **daemon:** Keep shutdown deadline annotation attached
+- **gui:** Work event 診断テストの Git 起動数を対象リポジトリに限定する
+
+## [9.171.0] - 2026-11-18
+
+### Bug Fixes
+
+- **monitor:** 送り仮名なしの受入条件見出しを受け入れ基準として認識する
+- **verify:** Report cleanup after admission deadline
+- **test:** Reap interrupted exact relaunch fixtures
+- **monitor:** Unblock agent switches on non-root macos
+- **build:** Preserve standalone build stamp tests on macos
+- **verify:** Pre-PR 導出が T94418 の Linux step を委譲対象として受け入れる
+- **issue-monitor:** Recover slots after native update restart
+- **issue-monitor:** Require host exit for immediate restart recovery
+
+### Features
+
+- **pm:** Expose shared agent member registration
+
+### Miscellaneous Tasks
+
+- **build:** Document macos-only cc use for cargo machete
+- **work:** Issue #7610 の PR 作成イベントを記録する
+
+### Testing
+
+- **monitor:** Count only clear switch cwd observations
+- **issue-monitor:** Initialize restart observation fixture
+
+### Ci
+
+- **test:** T94418 を必須の Linux テスト shard で実行する
+- **test:** T94418 の step 名を Issues の表記に合わせる
+
+## [9.170.0] - 2026-11-18
+
+### Bug Fixes
+
+- **update:** Wait for project daemon retirement before apply
+- **gwtd:** Authenticate pane placement before reading the request
+- **gui:** 実行中・判断待ち件数と Fleet 利用率の表示をそろえる
+- **pm:** 判断待ち件数の変更をレポートに反映する
+- **ci:** Bound nextest test enumeration
+- **ci:** Bound nextest listing output forwarding
+- **issue-monitor:** 引退した Issue の claim 記録と解除済みの open PR 観測を保存時に落とす
+- **issue-monitor:** Confirm GitHub state before agent launch
+- **test:** Synchronize owner readiness before quit
+- **issue-monitor:** Reclaim closed settled runtime slots
+- **issue-monitor:** Scope scan test helper to unix
+- **test:** Require node 22 for the visual runner
+- **workspace:** 既存ブランチの Issue 付き起動で Work を公開する
+- **hook:** Preserve prompts on runtime writer timeout
+- **monitor:** Refuse expired wait renewals
+- **monitor:** Use utc timestamp for wait expiry
+- **execution:** Settle verified design-only work without a PR
+- **hook:** Retry contended session leases for runtime state
+
+### Features
+
+- **gwtd:** Add GUI operation parity ledger and controls
+
+### Miscellaneous Tasks
+
+- **work:** Record first operation parity pull request
+- **work:** Record Switch helper registration design
+- **work:** Record PR for Switch helper design
+- **work:** Record the Windows startup restore delivery
+
+### Performance
+
+- **agents:** Prefs transaction が project の mirror を重複してデコードしないようにする
+
+### Testing
+
+- **agents:** Commit する mirror の bytes が以前の encoder と一致することを固定する
+- **issue-monitor:** Seed live state for relaunch fixtures
+- **ci:** Pin conditional quit stress check
+- **windows:** 起動フィクスチャの時刻を直接代入する
+- **monitor:** 同一 HOME の 2 project で共有スロットの返却・admission・再開を実測する
+- **monitor:** 共有上限による保留を拒否と見送りの両方の形で受け入れる
+- **monitor:** 共有上限の保護が成立するまで待ってから未起動を確認する
+- **hook:** Guard the prompt regression fixture environment
+- **windows:** Wait for the old GUI and owner before cold restore
+- **windows:** Preserve the provider wait and log contract
+- **monitor:** Pin the equal-marker prefs transaction clock
+- **issues:** T94418 の issue.monitor.stop を非同期 fixture 操作で実行する
+- **monitor:** Stabilize the shared slot return fixture
+
+## [9.169.0] - 2026-11-17
+
+### Bug Fixes
+
+- **gui:** ページ復帰後も PM の Execution log をウィンドウに残す
+- **daemon:** Continue authenticated retirement after IPC loss
+- **pm:** 未登録候補の優先順指定に応答の説明を合わせる
+- **terminal:** Answer Codex startup queries in the PTY owner
+
+### Features
+
+- **pm:** 自律モードのキュー投入を Monitor に一本化する
+
+### Miscellaneous Tasks
+
+- **work:** Issue 7542 の配信を PR 7555 に関連付ける
+- **work:** Issue 7542 の配信監査と継続履歴を保存する
+- **work:** Issue 7542 の履歴配信を PR 7559 に関連付ける
+- **work:** Issue 7558 の Work event を記録する
+- **work:** Issue 7558 の進捗イベントを記録する
+- **work:** Record Issue #7541 retirement investigation
+- **work:** Record verified daemon retirement slice
+- **work:** Track PR #7561 delivery
+- **work:** Finalize Issue #7541 retirement slice
+- **work:** Issue 7558 の精算イベントを記録する
+- **work:** Issue 7558 の後続スライスの Work event を記録する
+
+### Testing
+
+- **gui:** 回収の境界とネイティブ非表示からの復帰を固定する
+- **pm:** キュー制御回帰の環境変数変更を直列化する
+
+## [9.168.0] - 2026-11-17
+
+### Bug Fixes
+
+- **runtime:** Keep debug state out of user-facing failures
+- **runtime:** Keep launch diagnostics in logs and remove timing flake
+- **agents:** 他 project の record 書き込みを待たずに prefs を保存できるようにする
+- **agents:** Confirm restored registry durability on retry
+- **issues:** Park delivered owners awaiting external verification
+- **issues:** Clarify manual verification settlement guidance
+- **pm:** Reconcile or quarantine wedged PM reservations on NEW launch
+- **ui:** Steering の再要求を Issue と reason ごとの 1 行に集約する
+- **pm:** Expect the identity guard error for a foreign PM registration
+- **daemon:** Bound stale-daemon retirement with staged termination
+- **update:** 再起動後の停止済み担当が占有する枠を回復する
+- **cli:** Preserve local error kinds in envelope failures
+- **pm:** 世代交代後に残った PM 予約を新規起動時に回収する
+- **pm:** PM の起動失敗を PM が起動していない状態として明示する
+
+### Features
+
+- **agents:** Restore current split registry to schema 3
+- **gwtd:** ヘルプの operation 一覧をカタログから生成する
+- **cli:** Expose structured envelope data and error categories
+
+### Miscellaneous Tasks
+
+- **work:** Resume verified runtime failure delivery
+- **work:** Issue 7486 の配信を PR 7515 と PR 7530 に関連付ける
+- **work:** Issue 7486 の後続 slice の Work event を記録する
+- **work:** Issue 7486 の受け入れ条件 4 の作業 Work event を記録する
+- **work:** Record registry restore delivery PR
+- **work:** Record structured response delivery PR
+- **work:** Record external verification delivery PR
+- **work:** Issue 7520 の配信を PR 7540 に関連付ける
+- **security:** Allowlist the chrono unmaintained advisory in deny.toml
+- **work:** Issue 7526 の再開検証と配信記録を保存
+- **work:** Issue 7526 の継続検証と配信状態を記録
+- **work:** Issue 7526 の配信を PR 7544 に関連付ける
+- **work:** Record local failure delivery PR
+
+### Performance
+
+- **agents:** Core を変えないと分かった時点で core lock を放す
+- **terminal:** Drain large terminal backlogs in a time-budgeted catch-up
+
+### Testing
+
+- **gwtd:** ヘルプの手書き文が catalog に無い operation を名指さないことを固定する
+
 ## [9.167.3] - 2026-11-17
 
 ### Bug Fixes

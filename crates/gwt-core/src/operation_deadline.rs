@@ -1,5 +1,7 @@
 //! Thread-scoped absolute deadlines for synchronous local operations.
 
+use crate::timestamp::UtcTimestamp;
+
 use std::{
     cell::Cell,
     fs::File,
@@ -302,6 +304,48 @@ impl NamedFileLock {
         Self::acquire_with_observer(path, operation, false, || {})
     }
 
+    /// Acquire with the caller's wait limit. Probe once even when the limit
+    /// has elapsed, and return `WouldBlock` only after actual contention.
+    pub fn acquire_until(
+        path: &Path,
+        operation: &str,
+        deadline: Option<Instant>,
+    ) -> io::Result<Self> {
+        let file = open_named_lock(path)?;
+        let holder_path = named_lock_holder_path(path);
+        if let Some(deadline) = deadline {
+            #[cfg(any(test, feature = "test-support"))]
+            let mut observed = false;
+            loop {
+                match file.try_lock_exclusive() {
+                    Ok(()) => break,
+                    Err(error) if is_lock_contended(&error) => {
+                        #[cfg(any(test, feature = "test-support"))]
+                        if !observed {
+                            observed = true;
+                            notify_named_lock_contention(path);
+                        }
+                        let now = now();
+                        if now >= deadline {
+                            return Err(named_lock_error(
+                                &holder_path,
+                                operation,
+                                io::Error::new(io::ErrorKind::WouldBlock, error),
+                            ));
+                        }
+                        std::thread::sleep(
+                            LOCK_POLL_INTERVAL.min(deadline.saturating_duration_since(now)),
+                        );
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        } else {
+            FileExt::lock_exclusive(&file)?;
+        }
+        Ok(Self::record(file, holder_path, operation))
+    }
+
     /// Try once. Only actual OS lock contention is returned as `WouldBlock`.
     pub fn try_acquire(path: &Path, operation: &str) -> io::Result<Self> {
         let file = open_named_lock(path)?;
@@ -327,7 +371,7 @@ impl NamedFileLock {
         let holder = ObservedLockHolder {
             pid: std::process::id(),
             operation: operation.to_owned(),
-            acquired_at: chrono::Utc::now().to_rfc3339(),
+            acquired_at: UtcTimestamp::now().to_rfc3339(),
         };
         let recorded = (|| -> io::Result<()> {
             let bytes = serde_json::to_vec(&holder)?;
@@ -421,14 +465,14 @@ fn open_named_lock_holder(path: &Path) -> io::Result<File> {
 }
 
 fn named_lock_error(holder_path: &Path, operation: &str, error: io::Error) -> io::Error {
-    named_lock_error_at(holder_path, operation, error, chrono::Utc::now())
+    named_lock_error_at(holder_path, operation, error, UtcTimestamp::now())
 }
 
 fn named_lock_error_at(
     holder_path: &Path,
     operation: &str,
     error: io::Error,
-    observed_at: chrono::DateTime<chrono::Utc>,
+    observed_at: UtcTimestamp,
 ) -> io::Error {
     // Bound diagnostic IO, and do not require valid metadata from old writers.
     // Issue #4975 AC-1: four distinct outcomes used to collapse into the same
@@ -464,16 +508,14 @@ fn named_lock_error_at(
         .unwrap_or("unknown");
     // Holder metadata remains observational. An invalid or future timestamp
     // cannot prove a hold duration; only the Work lock has this short budget.
-    let elapsed_ms = chrono::DateTime::parse_from_rfc3339(acquired_at)
+    let elapsed_ms = UtcTimestamp::parse_rfc3339(acquired_at).and_then(|acquired_at| {
+        u64::try_from(
+            observed_at
+                .signed_duration_since(acquired_at)
+                .whole_milliseconds(),
+        )
         .ok()
-        .and_then(|acquired_at| {
-            u64::try_from(
-                observed_at
-                    .signed_duration_since(acquired_at)
-                    .num_milliseconds(),
-            )
-            .ok()
-        });
+    });
     let hold_threshold_ms = (holder_operation
         == crate::workspace_projection::WORKSPACE_WORK_ITEMS_LOCK_OPERATION)
         .then_some(WORKSPACE_WORK_ITEMS_HOLD_THRESHOLD_MS);
@@ -665,9 +707,7 @@ mod tests {
     fn named_file_lock_reports_elapsed_hold_time_and_workspace_threshold() {
         let directory = tempfile::tempdir().expect("tempdir");
         let holder_path = directory.path().join("lock.holder.json");
-        let observed_at = chrono::DateTime::parse_from_rfc3339("2026-10-12T00:00:06Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc);
+        let observed_at = UtcTimestamp::parse_rfc3339("2026-10-12T00:00:06Z").unwrap();
         for (holder_operation, acquired_at, elapsed, threshold, exceeded) in [
             (
                 "workspace work items",
@@ -747,7 +787,7 @@ mod tests {
             serde_json::from_slice(&std::fs::read(&holder_path).unwrap()).unwrap();
         assert_eq!(metadata["pid"], std::process::id());
         assert_eq!(metadata["operation"], "board.append");
-        chrono::DateTime::parse_from_rfc3339(metadata["acquired_at"].as_str().unwrap())
+        UtcTimestamp::parse_rfc3339(metadata["acquired_at"].as_str().unwrap())
             .expect("acquisition timestamp");
         let contender_path = path.clone();
         std::thread::spawn(move || {

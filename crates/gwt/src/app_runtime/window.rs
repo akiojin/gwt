@@ -246,6 +246,25 @@ impl AppRuntime {
         self.activate_tab_for_window_events(address.tab_id)
     }
 
+    pub(crate) fn control_pane_layout_place_events(
+        &mut self,
+        request: gwt::project_open_control::PaneLayoutPlaceRequest,
+    ) -> Vec<OutboundEvent> {
+        if self
+            .project_key_for_window(&request.id)
+            .map(|key| key.as_str())
+            != Some(request.project_key.as_str())
+        {
+            return Vec::new();
+        }
+        self.place_agent_window_in_kanban_events(
+            &request.id,
+            &request.board_id,
+            request.lane_id,
+            request.order,
+        )
+    }
+
     pub(crate) fn place_agent_window_in_kanban_events(
         &mut self,
         id: &str,

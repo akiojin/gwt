@@ -14,6 +14,8 @@
 //! flow through here unchanged — the handler emits the same
 //! `BackendEvent::BoardEntries` / `BackendEvent::BoardError` responses.
 
+use gwt_core::timestamp::UtcTimestamp;
+
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -477,7 +479,7 @@ pub(crate) fn attach_board_body_html(entries: &mut [coordination::BoardEntry]) {
 /// Keep the source too: remote providers can reuse IDs in different channels.
 #[derive(Default)]
 struct BoardBodyHtmlCache {
-    entries: HashMap<String, (chrono::DateTime<chrono::Utc>, String, String)>,
+    entries: HashMap<String, (UtcTimestamp, String, String)>,
 }
 
 impl BoardBodyHtmlCache {
@@ -921,7 +923,7 @@ pub(crate) fn run_board_projection_refresh(
                 .iter()
                 .map(|entry| entry.updated_at)
                 .max()
-                .unwrap_or(chrono::DateTime::<chrono::Utc>::MIN_UTC)
+                .unwrap_or(UtcTimestamp::MIN)
         });
         // All uses the same bounded cache as Workspace/Broadcast. The core
         // hot cursor handles ordinary appends without rereading event segments.
@@ -958,8 +960,8 @@ pub(crate) fn run_board_projection_refresh(
         }) {
             if let Some(since) = since {
                 let since = since
-                    .checked_sub_signed(chrono::Duration::nanoseconds(1))
-                    .unwrap_or(chrono::DateTime::<chrono::Utc>::MIN_UTC);
+                    .checked_add(-time::Duration::nanoseconds(1))
+                    .unwrap_or(UtcTimestamp::MIN);
                 match gwt::board_provider::load_entries_since(&window.tab_project_root, since) {
                     Ok(recent) => {
                         let mut ids = entries
@@ -1086,7 +1088,7 @@ mod body_html_tests {
             cache.html_for(&entry, |_| panic!("unchanged body rendered again")),
             first
         );
-        entry.updated_at += chrono::Duration::seconds(1);
+        entry.updated_at += time::Duration::seconds(1);
         entry.body = "**new**".into();
         let next = cache.html_for(&entry, gwt::board_remote::markdown::markdown_to_html);
         assert!(next.contains("<strong>new</strong>"));

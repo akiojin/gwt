@@ -12,7 +12,6 @@
 //! `active: false` without deleting the file so later inspection (and
 //! Codex smoke tests) can see the skill's final state.
 
-use chrono::Utc;
 use gwt_agent::GWT_SESSION_ID_ENV;
 use gwt_core::skill_state::{self, SkillState};
 use gwt_github::SpecOpsError;
@@ -50,7 +49,7 @@ pub(super) fn run_with_start_evidence<E: CliEnv>(
                 start_evidence,
                 active: true,
                 owner_spec: Some(spec),
-                started_at: Utc::now(),
+                started_at: gwt_core::timestamp::UtcTimestamp::now(),
                 phase: None,
                 session_id: current_session_id(),
             };

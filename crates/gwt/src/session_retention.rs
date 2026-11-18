@@ -6,11 +6,12 @@ use std::{
     path::Path,
 };
 
-use chrono::{DateTime, Duration, Utc};
 use gwt::cli::execution_state::{
     self, ExecutionControlStatus, ExecutionOwnerKey, ExecutionOwnerKind,
 };
 use gwt_agent::{AgentStatus, Session, SessionExecutionIdentity};
+use gwt_core::timestamp::UtcTimestamp;
+use time::Duration;
 
 const RETENTION_DAYS: i64 = 30;
 
@@ -22,7 +23,7 @@ pub(crate) struct RetentionStats {
 
 pub(crate) fn prune_session_ledger(
     sessions_dir: &Path,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
 ) -> io::Result<RetentionStats> {
     let entries = match fs::read_dir(sessions_dir) {
         Ok(entries) => entries,
@@ -113,7 +114,7 @@ pub(crate) fn prune_session_ledger(
     Ok(stats)
 }
 
-fn expired_stopped_session(session: &Session, now: DateTime<Utc>) -> bool {
+fn expired_stopped_session(session: &Session, now: UtcTimestamp) -> bool {
     let latest = [
         Some(session.created_at),
         Some(session.updated_at),
@@ -134,7 +135,7 @@ fn expired_stopped_session(session: &Session, now: DateTime<Utc>) -> bool {
 fn safe_to_prune(
     session: &Session,
     sessions_dir: &Path,
-    now: DateTime<Utc>,
+    now: UtcTimestamp,
     saved_windows: &BTreeSet<String>,
 ) -> io::Result<bool> {
     if !expired_stopped_session(session, now)
@@ -284,11 +285,11 @@ fn is_session_temporary_file(name: &str) -> bool {
         || (name.starts_with('.') && name.contains(".toml.tmp-"))
 }
 
-fn prune_temporary_file(path: &Path, now: DateTime<Utc>) -> io::Result<bool> {
+fn prune_temporary_file(path: &Path, now: UtcTimestamp) -> io::Result<bool> {
     let metadata = fs::symlink_metadata(path)?;
     if !metadata.is_file()
         || metadata.file_type().is_symlink()
-        || DateTime::<Utc>::from(metadata.modified()?) >= now - Duration::days(RETENTION_DAYS)
+        || UtcTimestamp::from(metadata.modified()?) >= now - Duration::days(RETENTION_DAYS)
     {
         return Ok(false);
     }
@@ -316,13 +317,14 @@ fn prune_temporary_file(path: &Path, now: DateTime<Utc>) -> io::Result<bool> {
 mod tests {
     use std::{fs, path::Path};
 
-    use chrono::{DateTime, Duration, Utc};
     use gwt_agent::{AgentId, AgentStatus, Session};
     use gwt_core::test_support::ScopedGwtHome;
+    use gwt_core::timestamp::UtcTimestamp;
+    use time::Duration;
 
     use super::prune_session_ledger;
 
-    fn old_session(sessions: &Path, worktree: &Path, id: &str, now: DateTime<Utc>) -> Session {
+    fn old_session(sessions: &Path, worktree: &Path, id: &str, now: UtcTimestamp) -> Session {
         let mut session = Session::new(worktree, "develop", AgentId::Codex);
         session.id = id.to_string();
         session.status = AgentStatus::Stopped;
@@ -341,7 +343,7 @@ mod tests {
         let sessions = dir.path().join("sessions");
         let worktree = dir.path().join("worktree");
         fs::create_dir_all(&worktree).unwrap();
-        let now = Utc::now();
+        let now = gwt_core::timestamp::UtcTimestamp::now();
         old_session(&sessions, &worktree, "expired", now);
         for (id, status, restore) in [
             ("running", AgentStatus::Running, false),
@@ -402,7 +404,7 @@ mod tests {
         let sessions = dir.path().join("sessions");
         let worktree = dir.path().join("worktree");
         fs::create_dir_all(&worktree).unwrap();
-        let now = Utc::now();
+        let now = gwt_core::timestamp::UtcTimestamp::now();
         old_session(&sessions, &worktree, "saved-window", now);
         let mut workspace = gwt::persistence::default_workspace_state();
         workspace.windows[0].session_id = Some("saved-window".to_string());
@@ -456,7 +458,7 @@ mod tests {
     fn expires_abandoned_temporary_files_without_touching_fresh_writes_or_foreign_files() {
         let dir = tempfile::tempdir().unwrap();
         let _home = ScopedGwtHome::set(dir.path().join("home"));
-        let now = Utc::now();
+        let now = gwt_core::timestamp::UtcTimestamp::now();
         let old_time: std::time::SystemTime = (now - Duration::days(31)).into();
         let old = fs::FileTimes::new().set_modified(old_time);
         // Keep the unused PID positive after Unix's pid_t cast: u32::MAX
@@ -499,7 +501,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let _home = ScopedGwtHome::set(dir.path().join("home"));
         let sessions = dir.path().join("sessions");
-        let now = Utc::now();
+        let now = gwt_core::timestamp::UtcTimestamp::now();
         for (number, id, status) in [
             (1, "completed", ExecutionControlStatus::Completed),
             (2, "active", ExecutionControlStatus::Active),

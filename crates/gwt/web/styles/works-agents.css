@@ -73,12 +73,10 @@
 .work-side,
 .work-identity,
 .work-stats,
-.works-active,
 .roster-active { color: var(--color-text-muted); }
 .works-counts b,
 .works-today b,
 .work-stats b { color: var(--color-text); font-weight: 600; }
-.works-active,
 .roster-active { margin-inline-start: auto; font-size: var(--type-xs); }
 .works-today { line-height: 1.8; }
 .works-availability {

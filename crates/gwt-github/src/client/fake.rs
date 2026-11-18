@@ -14,6 +14,8 @@ use std::{
     },
 };
 
+use time::{format_description::well_known::Rfc3339, macros::datetime, Duration};
+
 use crate::client::{
     ApiError, CollectionGeneration, CommentId, CommentSnapshot, CommitComparison,
     CompleteCollection, CreateRepositoryIssue, FetchResult, IssueClient, IssueCloseReason,
@@ -458,11 +460,11 @@ impl FakeIssueClient {
     fn tick(&self) -> UpdatedAt {
         let next = self.clock.fetch_add(1, Ordering::SeqCst) + 1;
         if self.rfc3339_timestamps.load(Ordering::SeqCst) {
-            let epoch = chrono::DateTime::parse_from_rfc3339("2026-09-01T00:00:00Z")
-                .expect("fixed logical epoch");
+            let epoch = datetime!(2026-09-01 00:00 UTC);
             return UpdatedAt(
-                (epoch + chrono::Duration::seconds(next as i64))
-                    .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                (epoch + Duration::seconds(next as i64))
+                    .format(&Rfc3339)
+                    .expect("fixed logical clock uses RFC3339 UTC"),
             );
         }
         UpdatedAt(format!("t{next}"))

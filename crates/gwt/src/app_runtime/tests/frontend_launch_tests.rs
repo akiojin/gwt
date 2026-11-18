@@ -1874,7 +1874,7 @@ fn manual_launch_replays_existing_prepared_owner_successor_after_response_loss()
         session_binding_id: "manual-existing-prepared-binding".to_string(),
         initial_session_id: "manual-existing-prepared-candidate".to_string(),
         entrypoint: "$gwt-execute #3547".to_string(),
-        requested_at: Utc::now(),
+        requested_at: gwt_core::timestamp::UtcTimestamp::now(),
     };
     gwt::cli::execution_state::prepare_exact_manual_launch_successor(
         &repo,
@@ -2110,7 +2110,7 @@ fn manual_update_check_coalesces_and_publishes_without_staging() {
     fs::write(
         &cache,
         serde_json::to_vec(&serde_json::json!({
-            "checked_at": chrono::Utc::now(), "latest_version": "999.0.0",
+            "checked_at": gwt_core::timestamp::UtcTimestamp::now(), "latest_version": "999.0.0",
             "release_url": "https://example.invalid/cached-release"
         }))
         .unwrap(),
@@ -2140,7 +2140,7 @@ fn manual_update_check_coalesces_and_publishes_without_staging() {
         latest: "99.0.0".into(),
         release_url: "https://github.com/akiojin/gwt/releases/tag/v99.0.0".into(),
         asset_url: Some("https://example.invalid/gwt.dmg".into()),
-        checked_at: chrono::Utc::now(),
+        checked_at: gwt_core::timestamp::UtcTimestamp::now(),
     };
     let failure = gwt_core::update::UpdateApplyResult {
         outcome: gwt_core::update::UpdateApplyOutcome::Failure,
@@ -2148,7 +2148,7 @@ fn manual_update_check_coalesces_and_publishes_without_staging() {
         to_version: "9.150.0".into(),
         observed_version: "9.149.0".into(),
         attempt: 1,
-        recorded_at: chrono::Utc::now().to_rfc3339(),
+        recorded_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
         message: Some("version mismatch".into()),
     };
     let completed = runtime.complete_manual_update_check(state.clone(), Some(failure.clone()));
@@ -2221,7 +2221,7 @@ fn manual_update_check_replaces_staged_release_and_releases_its_drain() {
         &gwt::IssueMonitorPrefs {
             update_drain: Some(gwt::IssueMonitorUpdateDrain {
                 version: "99.0.0".into(),
-                since: chrono::Utc::now().to_rfc3339(),
+                since: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
                 reason: gwt::IssueMonitorUpdateDrainReason::Auto,
                 automatic: None,
                 blocking: Vec::new(),
@@ -2240,7 +2240,7 @@ fn manual_update_check_replaces_staged_release_and_releases_its_drain() {
         version: "99.0.0".into(),
         asset_url: "https://example.invalid/gwt.tar.gz".into(),
         payload: gwt_core::update::PreparedPayload::PortableBinary { path: payload },
-        downloaded_at: chrono::Utc::now().to_rfc3339(),
+        downloaded_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
         origin: gwt_core::update::PendingUpdateOrigin::ManualLater,
         auto_apply_deferred: false,
     };
@@ -2250,7 +2250,7 @@ fn manual_update_check_replaces_staged_release_and_releases_its_drain() {
         latest: "100.0.0".into(),
         release_url: "https://example.invalid/release".into(),
         asset_url: Some(manifest.asset_url.clone()),
-        checked_at: chrono::Utc::now(),
+        checked_at: gwt_core::timestamp::UtcTimestamp::now(),
     };
     let mut old = replacement.clone();
     if let gwt_core::update::UpdateState::Available { latest, .. } = &mut old {
@@ -2333,7 +2333,7 @@ fn manual_update_check_preserves_pending_release_when_cleanup_fails() {
         version: "99.0.0".into(),
         asset_url: "https://example.invalid/gwt.tar.gz".into(),
         payload: gwt_core::update::PreparedPayload::PortableBinary { path: payload },
-        downloaded_at: chrono::Utc::now().to_rfc3339(),
+        downloaded_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
         origin: gwt_core::update::PendingUpdateOrigin::ManualLater,
         auto_apply_deferred: false,
     };
@@ -2343,7 +2343,7 @@ fn manual_update_check_preserves_pending_release_when_cleanup_fails() {
         latest: "99.0.0".into(),
         release_url: "https://example.invalid/release".into(),
         asset_url: Some(manifest.asset_url.clone()),
-        checked_at: chrono::Utc::now(),
+        checked_at: gwt_core::timestamp::UtcTimestamp::now(),
     };
     runtime.pending_update = Some(old.clone());
     let mut replacement = old.clone();
@@ -2421,7 +2421,7 @@ fn app_runtime_apply_update_uses_pending_available_update_state() {
         latest: "9.20.2".to_string(),
         release_url: "https://example.invalid/releases/v9.20.2".to_string(),
         asset_url: Some("https://example.invalid/gwt-macos-arm64.dmg".to_string()),
-        checked_at: chrono::Utc::now(),
+        checked_at: gwt_core::timestamp::UtcTimestamp::now(),
     });
 
     let outbound =
@@ -2464,7 +2464,7 @@ fn app_runtime_apply_update_without_applicable_pending_update_reports_error() {
         latest: "9.20.2".to_string(),
         release_url: "https://example.invalid/releases/v9.20.2".to_string(),
         asset_url: None,
-        checked_at: chrono::Utc::now(),
+        checked_at: gwt_core::timestamp::UtcTimestamp::now(),
     });
 
     let outbound =
@@ -3448,7 +3448,7 @@ fn owner_launch_failure_does_not_reconstruct_the_failed_delivery() {
         WindowProcessStatus::Starting,
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let now = Utc::now().to_rfc3339();
+    let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
     let mut monitor = test_monitor_with_prefs(
         gwt::IssueMonitorConfig {
             enabled: true,

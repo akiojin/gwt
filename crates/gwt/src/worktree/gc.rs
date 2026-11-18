@@ -15,7 +15,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use chrono::{DateTime, Utc};
+use gwt_core::timestamp::UtcTimestamp;
 use serde::{Deserialize, Serialize};
 
 use crate::cli::worktree_gc::{
@@ -176,8 +176,8 @@ pub fn probe_disk(
 pub fn decide(
     config: &gwt_config::BuildArtifactGcConfig,
     disk: &DiskSpaceStatus,
-    last_finished_at: Option<DateTime<Utc>>,
-    now: DateTime<Utc>,
+    last_finished_at: Option<UtcTimestamp>,
+    now: UtcTimestamp,
 ) -> AutoGcDecision {
     if !config.auto {
         return AutoGcDecision::Skip {
@@ -227,14 +227,12 @@ fn append_record(path: &Path, record: &BuildArtifactGcRecord) -> std::io::Result
     writeln!(file, "{line}")
 }
 
-fn last_finished_at(path: &Path) -> Option<DateTime<Utc>> {
-    last_record(path)
-        .and_then(|record| DateTime::parse_from_rfc3339(&record.finished_at).ok())
-        .map(|at| at.with_timezone(&Utc))
+fn last_finished_at(path: &Path) -> Option<UtcTimestamp> {
+    last_record(path).and_then(|record| UtcTimestamp::parse_from_rfc3339(&record.finished_at).ok())
 }
 
-fn within_cooldown(last_finished_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
-    last_finished_at.is_some_and(|last| (now - last).num_seconds() < COOLDOWN_SECS)
+fn within_cooldown(last_finished_at: Option<UtcTimestamp>, now: UtcTimestamp) -> bool {
+    last_finished_at.is_some_and(|last| (now - last).whole_seconds() < COOLDOWN_SECS)
 }
 
 /// Called by Issues scan on every pass. Cheap unless it decides to
@@ -245,7 +243,12 @@ pub fn maybe_spawn(project_root: &Path) -> AutoGcDecision {
     let config = current_config();
     let disk = probe_disk(project_root, &config);
     let record_path = record_path(project_root);
-    let decision = decide(&config, &disk, last_finished_at(&record_path), Utc::now());
+    let decision = decide(
+        &config,
+        &disk,
+        last_finished_at(&record_path),
+        gwt_core::timestamp::UtcTimestamp::now(),
+    );
     let AutoGcDecision::Run { trigger } = &decision else {
         return decision;
     };
@@ -299,7 +302,10 @@ fn run_exclusive(project_root: &Path, record_path: &Path, trigger: &str) {
     }
     // A sweep that finished while this one waited for the lock already did
     // the work; do not repeat it inside the cooldown.
-    if within_cooldown(last_finished_at(record_path), Utc::now()) {
+    if within_cooldown(
+        last_finished_at(record_path),
+        gwt_core::timestamp::UtcTimestamp::now(),
+    ) {
         return;
     }
     let started_at = now_rfc3339();
@@ -338,7 +344,7 @@ fn run_exclusive(project_root: &Path, record_path: &Path, trigger: &str) {
 }
 
 fn now_rfc3339() -> String {
-    Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds()
 }
 
 /// The record for one sweep, whichever way it ended. A failed sweep is
@@ -427,10 +433,8 @@ mod tests {
         }
     }
 
-    fn now() -> DateTime<Utc> {
-        DateTime::parse_from_rfc3339("2026-09-15T12:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc)
+    fn now() -> UtcTimestamp {
+        UtcTimestamp::parse_from_rfc3339("2026-09-15T12:00:00Z").unwrap()
     }
 
     fn enabled() -> gwt_config::BuildArtifactGcConfig {
@@ -478,12 +482,12 @@ mod tests {
     #[test]
     fn does_not_fire_again_within_the_cooldown() {
         let disk = evaluate(vec![volume(GIB, 3600 * GIB)]);
-        let recent = now() - chrono::Duration::minutes(10);
+        let recent = now() - time::Duration::minutes(10);
         assert!(matches!(
             decide(&enabled(), &disk, Some(recent), now()),
             AutoGcDecision::Skip { .. }
         ));
-        let stale = now() - chrono::Duration::seconds(COOLDOWN_SECS + 1);
+        let stale = now() - time::Duration::seconds(COOLDOWN_SECS + 1);
         assert!(matches!(
             decide(&enabled(), &disk, Some(stale), now()),
             AutoGcDecision::Run { .. }
@@ -741,11 +745,7 @@ mod tests {
         assert_eq!(last_record(&path), Some(record("2026-09-15T11:00:00Z")));
         assert_eq!(
             last_finished_at(&path),
-            Some(
-                DateTime::parse_from_rfc3339("2026-09-15T11:00:00Z")
-                    .unwrap()
-                    .with_timezone(&Utc)
-            )
+            Some(UtcTimestamp::parse_from_rfc3339("2026-09-15T11:00:00Z").unwrap())
         );
     }
 }

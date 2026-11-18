@@ -100,7 +100,6 @@ fn truncate_body_for_context(body: &str, limit: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use chrono::Utc;
     use gwt_core::coordination::{
         AuthorKind, BoardEntry, BoardEntryKind, BoardMention, BoardMentionTargetKind,
     };
@@ -210,7 +209,7 @@ mod tests {
             vec![],
         )
         .with_origin_session_id("sess-self");
-        self_entry.created_at = Utc::now();
+        self_entry.created_at = gwt_core::timestamp::UtcTimestamp::now();
         self_entry.updated_at = self_entry.created_at;
         let other_entry = BoardEntry::new(
             AuthorKind::Agent,

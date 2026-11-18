@@ -2,7 +2,6 @@
 
 use std::path::{Path, PathBuf};
 
-use chrono::Utc;
 use gwt::cli::{
     governance::GovernanceEffect,
     hook::{
@@ -512,7 +511,7 @@ fn workspace_agent(
         coordination_scope: None,
         affiliation_status: WorkspaceAgentAffiliationStatus::Assigned,
         workspace_id: Some("workspace-existing".to_string()),
-        updated_at: Utc::now(),
+        updated_at: gwt_core::timestamp::UtcTimestamp::now(),
     }
 }
 
@@ -532,7 +531,7 @@ fn unassigned_workspace_agent(session_id: &str) -> WorkspaceAgentSummary {
         coordination_scope: None,
         affiliation_status: WorkspaceAgentAffiliationStatus::Unassigned,
         workspace_id: None,
-        updated_at: Utc::now(),
+        updated_at: gwt_core::timestamp::UtcTimestamp::now(),
     }
 }
 

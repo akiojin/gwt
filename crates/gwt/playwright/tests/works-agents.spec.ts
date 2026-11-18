@@ -89,6 +89,38 @@ test.describe("Works and Agents approved baseline", () => {
     await expect(workRow(page, "agent-one").locator(".work-state")).toHaveText("Idle");
   });
 
+  test("Issue #7519 shows one running count, a five-minute fleet rate and decisions due", async ({ page }, info) => {
+    await page.evaluate(() => {
+      const fixture = (window as any).__worksAgentsFixture;
+      fixture.status("agent-one", "idle");
+      fixture.monitorActive(3, 2);
+      fixture.usage("measured", 0, [50, 999]);
+    });
+    await expect(page).toHaveTitle(/RUN 2/);
+    await expect(page.locator("#op-strip-running")).toHaveText("2");
+    await expect(works(page).locator('[data-count="running"]')).toHaveText("2");
+    await expect(works(page).locator(".work-row")).toHaveCount(3);
+    await expect(works(page).locator('[data-metric="fleet-now"]')).toHaveText("30");
+    const needsHuman = page.locator("#op-strip-needs-human");
+    await expect(needsHuman).toBeVisible();
+    await expect(needsHuman).toHaveText("Needs human 2");
+    await expect(needsHuman).toHaveCSS("white-space", "nowrap");
+    await info.attach("works-status", { body: await page.screenshot(), contentType: "image/png" });
+    await page.evaluate(() => {
+      const fixture = (window as any).__worksAgentsFixture;
+      fixture.usage("unavailable");
+      fixture.monitorActive(3, 0);
+    });
+    await expect(works(page).locator('[data-metric="fleet-now"]')).toHaveText("—");
+    await expect(needsHuman).toHaveText("Needs human 0");
+    await openRail(page, "agents");
+    await expect(roster(page).locator(".roster-active")).toHaveText("Running 2");
+    await page.evaluate(() => (window as any).__worksAgentsFixture.status("agent-one", "starting"));
+    await expect(roster(page).locator(".roster-active")).toHaveText("Running 3");
+    await expect(page).toHaveTitle(/RUN 3/);
+    await expect(page.locator("#op-strip-running")).toHaveText("3");
+  });
+
   test("live Works never disappear while activity and catalogs converge", async ({ page }, info) => {
     await page.evaluate(() => {
       const surface = document.querySelector(".works-surface:not(.works-surface--preview)")!;
@@ -381,7 +413,6 @@ test.describe("Works and Agents approved baseline", () => {
     await expect(workRow(page, "pm-window").locator(".window-role-badge")).toHaveText("PM");
     await expect(workRow(page, "pm-window").locator(".work-member")).toHaveCount(0);
     for (const [state, count] of [["running", "3"], ["block", "1"], ["idle", "0"], ["error", "0"]]) await expect(works(page).locator(`[data-count="${state}"]`)).toHaveText(count);
-    await expect(works(page).locator(".works-active")).toHaveText("Active 3");
     await expect(page.locator(".agents-grid, .agent-tile, .agents-tabs")).toHaveCount(0);
     await expect(page.getByRole("spinbutton", { name: "Agent columns" })).toHaveCount(0);
     await expect(works(page).locator('[data-metric="today-input"]')).toHaveText("—");
@@ -391,7 +422,7 @@ test.describe("Works and Agents approved baseline", () => {
     await expect(works(page).locator('[data-availability="today"]')).toContainText("No data");
     await expect(works(page).locator('[data-availability="fleet"]')).toContainText("No data");
     await expect(works(page).locator(".works-source-note")).toHaveCount(0);
-    await expect(works(page).locator(".works-fleet svg")).toHaveAttribute("aria-label", /last 30 minutes/);
+    await expect(works(page).locator(".works-fleet svg")).toHaveAttribute("aria-label", /5-minute average, last 25 minutes/);
     await expect(works(page).locator(".works-fleet svg")).toHaveAttribute("data-known-count", "0");
     await expect(workRow(page, "agent-one").locator(".work-stats")).toContainText("Context remaining");
     await expect(workRow(page, "agent-one").locator(".work-stats")).toContainText("Verification");
@@ -538,7 +569,7 @@ test.describe("Works and Agents approved baseline", () => {
     await expect(works(page).locator('[data-availability="fleet"]')).toHaveAttribute("data-state", "measured");
     await expect(works(page).locator('[data-metric="today-input"]')).toHaveText("0");
     await expect(works(page).locator('[data-metric="fleet-now"]')).toHaveText("0");
-    await expect(works(page).locator(".works-fleet svg")).toHaveAttribute("data-known-count", "30");
+    await expect(works(page).locator(".works-fleet svg")).toHaveAttribute("data-known-count", "25");
     await expect(workRow(page, "agent-one").locator('[data-stat="context"]')).toHaveText("0%");
     await page.screenshot({ path: info.outputPath("works-measured-zero.png") });
   });
@@ -547,7 +578,7 @@ test.describe("Works and Agents approved baseline", () => {
     await page.evaluate(() => (window as any).__worksAgentsFixture.usage());
     const metric = works(page).locator('[data-metric="today-input"]');
     await expect(metric).toHaveText("0");
-    await expect(works(page).locator(".works-fleet svg")).toHaveAttribute("data-known-count", "30");
+    await expect(works(page).locator(".works-fleet svg")).toHaveAttribute("data-known-count", "25");
     await workRow(page, "agent-one").focus(); await page.keyboard.press("Enter");
     const input = full(page).locator(".xterm-helper-textarea"); await input.focus();
     await full(page).locator(".works-terminal-host").evaluate(host => {
@@ -706,7 +737,7 @@ test.describe("Works and Agents approved baseline", () => {
     await expect(roster(page).locator(".roster-count")).toHaveText("3");
     await expect(roster(page).locator(".roster-capacity-value")).toHaveText("3");
     await expect(roster(page).locator(".roster-capacity-note")).toContainText("Recommended capacity 6");
-    await expect(roster(page).locator(".roster-active")).toHaveText("Active 3");
+    await expect(roster(page).locator(".roster-active")).toHaveText("Running 3");
     await expect(roster(page).locator(".roster-detail .roster-stat")).toHaveCount(4);
     await expect(roster(page).locator(".roster-detail")).toContainText("Codex");
     await expect(roster(page).locator(".roster-detail")).toContainText("Member since 2026-10-20");
@@ -781,10 +812,10 @@ test.describe("Works and Agents approved baseline", () => {
     await expect(resting.locator(".roster-state")).toHaveText("Resting");
     await expect(roster(page).locator(".roster-capacity-note")).toContainText("Registered 4");
     await page.evaluate(() => (window as any).__worksAgentsFixture.census(null));
-    await expect(roster(page).locator(".roster-active")).toHaveText("Active —");
+    await expect(roster(page).locator(".roster-capacity-note")).toContainText("Busy —");
     await expect(resting).toBeVisible();
     await page.evaluate(() => (window as any).__worksAgentsFixture.census(["agent-one", "agent-two", "pm-window"]));
-    await expect(roster(page).locator(".roster-active")).toHaveText("Active 3");
+    await expect(roster(page).locator(".roster-capacity-note")).toContainText("Busy 2");
 
     await roster(page).locator('.roster-row[data-member-id="m-one"]').click();
     await roster(page).locator(".roster-now button").evaluate(button => {
@@ -879,7 +910,7 @@ test.describe("Works and Agents approved baseline", () => {
       .toEqual({ ...busyRecord, enabled: false });
     await expect(roster(page).locator(".roster-count")).toHaveText("3");
     await expect(roster(page).locator(".roster-capacity-value")).toHaveText("3");
-    await expect(roster(page).locator(".roster-active")).toHaveText("Active 3");
+    await expect(roster(page).locator(".roster-active")).toHaveText("Running 3");
     await expect(roster(page).locator(".roster-capacity-note")).toContainText("Registered 4 · Busy 2 / Team 3");
     await roster(page).locator(".roster-now button").click();
     await expect(full(page).locator(".works-full-name")).toHaveText("Aster");
@@ -890,7 +921,7 @@ test.describe("Works and Agents approved baseline", () => {
     await openRail(page, "agents");
     await expect(busy).toHaveAttribute("aria-selected", "true");
     await expect(busy.locator(".roster-state")).toHaveText("Resting");
-    await expect(roster(page).locator(".roster-active")).toHaveText("Active 2");
+    await expect(roster(page).locator(".roster-active")).toHaveText("Running 3");
     await expect(roster(page).locator(".roster-count")).toHaveText("3");
     await expect(roster(page).locator(".roster-capacity-value")).toHaveText("3");
     await expect(roster(page).locator(".roster-capacity-note")).toContainText("Registered 4 · Busy 1 / Team 3");
@@ -1467,15 +1498,15 @@ async function installWorksAgentsBackend(page: Page) {
         const snapshot = activity().projection.local_agent_activity;
         socket.emit({ kind: "local_agent_activity", activity: { ...snapshot, agents: ids === null ? null : agents } });
       },
-      monitorActive(active_count: number) {
+      monitorActive(active_count: number, needs_human_count?: number | null) {
         socket.emit({ kind: "issue_monitor_status", status: {
-          enabled: true, state: "active", queue_len: 0, active_count, max_active_agents: 3,
+          enabled: true, state: "active", queue_len: 0, active_count, max_active_agents: 3, needs_human_count,
         } });
       },
       status(id: string, status: string) { const data = windows.find(data => data.id === id); if (data) data.status = status; socket.emit({ kind: "terminal_status", id, status }); socket.emit(aggregate()); },
       retire(id: string, immediate: boolean) { agents = agents.filter(agent => agent.window_id !== id); const event = activity(); if (immediate) window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: event })); else socket.emit(event); },
       error(message: string) { socket.emit({ kind: "agent_roster_error", project_key: projectKey, message }); },
-      usage(quality = "measured", inputTokens = 0) {
+      usage(quality = "measured", inputTokens = 0, fleetTail = [0, 0]) {
         const measured = quality === "measured", value = measured ? 0 : null;
         socket.emit({ kind: "provider_usage", accounts: [], consumption: [], sessions: agents.map(agent => ({
           session_id: agent.session_id, provider_session_id: `provider-${agent.session_id}`,
@@ -1485,10 +1516,10 @@ async function installWorksAgentsBackend(page: Page) {
           context_limit_tokens: null, context_left_pct: null, limit_reached: false, eligible: true,
           state: quality === "unavailable" ? { kind: "unavailable", reason: "Fixture transcript cannot be read" } : { kind: "ok" },
           telemetry: quality === "unavailable" ? null : { source: "fixture-reported", quality,
-            observed_at: "2026-10-25T00:00:00Z", today_tokens: measured ? inputTokens : null, today_input_tokens: measured ? inputTokens : null,
+            observed_at: "2026-10-24T23:59:30Z", today_tokens: measured ? inputTokens : null, today_input_tokens: measured ? inputTokens : null,
             today_cache_read_tokens: value, today_cache_creation_tokens: value, today_output_tokens: value,
             minute_buckets: Array.from({ length: 30 }, (_, index) => ({
-              started_at: new Date(1792884600000 + index * 60000).toISOString(), tokens: value,
+              started_at: new Date(1792884600000 + index * 60000).toISOString(), tokens: measured && index >= 28 ? fleetTail[index - 28] : value,
             })),
           },
         })) });

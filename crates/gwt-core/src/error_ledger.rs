@@ -11,8 +11,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
+use time::Date;
+
+use crate::timestamp::{parse_utc_date, UtcTimestamp};
 
 pub const SCHEMA_VERSION: u32 = 1;
 pub const LEDGER_FILE_PREFIX: &str = "errors";
@@ -77,7 +79,7 @@ pub struct ErrorRecord {
     pub scope: ErrorScope,
     pub schema_version: u32,
     pub id: String,
-    pub recorded_at: DateTime<Utc>,
+    pub recorded_at: UtcTimestamp,
     pub kind: ErrorKind,
     pub message: String,
     #[serde(default)]
@@ -98,7 +100,7 @@ pub struct ErrorRecord {
 struct ErrorRecordWire {
     schema_version: u32,
     id: String,
-    recorded_at: DateTime<Utc>,
+    recorded_at: UtcTimestamp,
     kind: ErrorKind,
     message: String,
     #[serde(default)]
@@ -163,7 +165,7 @@ impl ErrorRecord {
             },
             schema_version: SCHEMA_VERSION,
             id: uuid::Uuid::new_v4().to_string(),
-            recorded_at: Utc::now(),
+            recorded_at: UtcTimestamp::now(),
             kind,
             message: sanitize_error_message(&message.into()),
             target,
@@ -229,7 +231,7 @@ pub fn record_fail_open(kind: ErrorKind, message: impl Into<String>, target: Err
 /// Return ledger rows at or after `since`, oldest first. Reader-generated
 /// corruption diagnostics use the source file's UTC day, retaining overlapping
 /// or unknown days conservatively; their timestamp is not a precise event time.
-pub fn list_since(since: Option<DateTime<Utc>>) -> io::Result<Vec<ErrorRecord>> {
+pub fn list_since(since: Option<UtcTimestamp>) -> io::Result<Vec<ErrorRecord>> {
     #[cfg(any(test, feature = "test-support"))]
     if crate::test_support::gwt_home_override().is_none() {
         return Ok(Vec::new());
@@ -260,7 +262,7 @@ fn ledger_dir() -> PathBuf {
     crate::paths::gwt_error_ledger_dir()
 }
 
-fn ledger_path_for_date(date: NaiveDate) -> PathBuf {
+fn ledger_path_for_date(date: Date) -> PathBuf {
     ledger_dir().join(format!("{LEDGER_FILE_PREFIX}.{date}.jsonl"))
 }
 
@@ -408,7 +410,7 @@ fn append_record(record: &ErrorRecord, once: bool) -> io::Result<()> {
     {
         return Ok(());
     }
-    let path = ledger_path_for_date(record.recorded_at.date_naive());
+    let path = ledger_path_for_date(record.recorded_at.utc_date());
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
     serde_json::to_writer(&mut file, record).map_err(json_io_error)?;
     file.write_all(b"\n")?;
@@ -416,7 +418,7 @@ fn append_record(record: &ErrorRecord, once: bool) -> io::Result<()> {
 }
 
 // Callers hold the ledger lock: shared for listing, exclusive for record_once.
-fn read_ledger_files(since: Option<DateTime<Utc>>) -> io::Result<Vec<ErrorRecord>> {
+fn read_ledger_files(since: Option<UtcTimestamp>) -> io::Result<Vec<ErrorRecord>> {
     let dir = ledger_dir();
     let mut paths = match fs::read_dir(&dir) {
         Ok(entries) => entries
@@ -474,7 +476,7 @@ fn read_ledger_files(since: Option<DateTime<Utc>>) -> io::Result<Vec<ErrorRecord
                     // A stable day anchor (or explicit unknown sentinel), never
                     // the read time. Keep uncertainty in the existing context.
                     diagnostic.recorded_at =
-                        source_day.map_or(DateTime::<Utc>::UNIX_EPOCH, |(start, _)| start);
+                        source_day.map_or(UtcTimestamp::UNIX_EPOCH, |(start, _)| start);
                     diagnostic.context.insert(
                         "source_time_precision".into(),
                         if source_day.is_some() {
@@ -502,19 +504,19 @@ fn read_ledger_files(since: Option<DateTime<Utc>>) -> io::Result<Vec<ErrorRecord
     Ok(records)
 }
 
-fn ledger_source_day(path: &Path) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
+fn ledger_source_day(path: &Path) -> Option<(UtcTimestamp, UtcTimestamp)> {
     let date = path
         .file_name()?
         .to_str()?
         .strip_prefix("errors.")?
         .strip_suffix(".jsonl")?;
-    let day = NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()?;
-    if day.format("%Y-%m-%d").to_string() != date {
+    let day = parse_utc_date(date)?;
+    if day.to_string() != date {
         return None;
     }
     Some((
-        day.and_hms_opt(0, 0, 0)?.and_utc(),
-        day.succ_opt()?.and_hms_opt(0, 0, 0)?.and_utc(),
+        UtcTimestamp::from_unix_seconds(day.midnight().assume_utc().unix_timestamp())?,
+        UtcTimestamp::from_unix_seconds(day.next_day()?.midnight().assume_utc().unix_timestamp())?,
     ))
 }
 
@@ -526,7 +528,7 @@ fn json_io_error(error: serde_json::Error) -> io::Error {
 mod tests {
     use super::*;
     use crate::test_support::ScopedGwtHome;
-    use chrono::TimeZone;
+    use time::{macros::date, Duration};
 
     fn isolated_home() -> (tempfile::TempDir, ScopedGwtHome) {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -673,7 +675,7 @@ mod tests {
                         let _home = ScopedGwtHome::set(home);
                         let mut row = sample(ErrorKind::DaemonFault, "inbox population shrank");
                         row.id = "shrink-event".to_string();
-                        row.recorded_at = Utc.with_ymd_and_hms(2026, 8, day, 0, 0, 0).unwrap();
+                        row.recorded_at = format!("2026-08-{day:02}T00:00:00Z").parse().unwrap();
                         barrier.wait();
                         record_once(row).expect("record once")
                     })
@@ -698,9 +700,9 @@ mod tests {
     fn list_since_returns_only_rows_at_or_after_the_cutoff() {
         let (_dir, _home) = isolated_home();
         let mut older = sample(ErrorKind::HookFailure, "older hook");
-        older.recorded_at = Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap();
+        older.recorded_at = "2026-08-01T00:00:00Z".parse().unwrap();
         let mut newer = sample(ErrorKind::DaemonFault, "newer daemon");
-        newer.recorded_at = Utc.with_ymd_and_hms(2026, 8, 30, 12, 0, 0).unwrap();
+        newer.recorded_at = "2026-08-30T12:00:00Z".parse().unwrap();
         record(older).expect("older");
         record(newer.clone()).expect("newer");
 
@@ -727,7 +729,7 @@ mod tests {
         let (_dir, _home) = isolated_home();
         let home = crate::test_support::gwt_home_override().unwrap();
         let start = std::sync::Barrier::new(8);
-        let recorded_at = Utc.with_ymd_and_hms(2026, 8, 30, 12, 0, 0).unwrap();
+        let recorded_at = "2026-08-30T12:00:00Z".parse().unwrap();
         std::thread::scope(|threads| {
             for writer in 0..8 {
                 let home = &home;
@@ -747,7 +749,7 @@ mod tests {
             }
         });
 
-        let raw = fs::read_to_string(ledger_path_for_date(recorded_at.date_naive())).unwrap();
+        let raw = fs::read_to_string(ledger_path_for_date(recorded_at.utc_date())).unwrap();
         let rows: Vec<ErrorRecord> = raw
             .lines()
             .map(|line| serde_json::from_str(line).expect("one complete JSON record per line"))
@@ -761,7 +763,7 @@ mod tests {
     fn list_since_reports_corrupt_rows_without_losing_valid_records() {
         let (_dir, _home) = isolated_home();
         let valid = record(sample(ErrorKind::OperationRefusal, "valid")).unwrap();
-        let path = ledger_path_for_date(valid.recorded_at.date_naive());
+        let path = ledger_path_for_date(valid.recorded_at.utc_date());
         OpenOptions::new()
             .append(true)
             .open(&path)
@@ -795,9 +797,9 @@ mod tests {
     fn historical_corruption_is_stable_visible_and_outside_the_current_window() {
         let (_dir, _home) = isolated_home();
         let mut valid = sample(ErrorKind::HookFailure, "current");
-        valid.recorded_at = Utc.with_ymd_and_hms(2026, 11, 2, 12, 0, 0).unwrap();
+        valid.recorded_at = "2026-11-02T12:00:00Z".parse().unwrap();
         record(valid.clone()).unwrap();
-        let path = ledger_path_for_date(NaiveDate::from_ymd_opt(2026, 10, 1).unwrap());
+        let path = ledger_path_for_date(date!(2026 - 10 - 01));
         let bytes = b"{PRIVATE_BROKEN_ROW}\n\xff\n";
         fs::write(&path, bytes).unwrap();
         let modified = fs::metadata(&path).unwrap().modified().unwrap();
@@ -811,10 +813,7 @@ mod tests {
             .iter()
             .filter(|row| row.kind == ErrorKind::LedgerCorruption)
         {
-            assert_eq!(
-                row.recorded_at,
-                Utc.with_ymd_and_hms(2026, 10, 1, 0, 0, 0).unwrap()
-            );
+            assert_eq!(row.recorded_at, "2026-10-01T00:00:00Z".parse().unwrap());
             assert_eq!(row.context["source_time_precision"], "day");
             assert_eq!(
                 row.context["source_day_end_exclusive"],
@@ -839,7 +838,7 @@ mod tests {
     fn corruption_window_keeps_boundary_future_and_unknown_dates_fail_closed() {
         let (_dir, _home) = isolated_home();
         fs::create_dir_all(ledger_dir()).unwrap();
-        let since = Utc.with_ymd_and_hms(2026, 11, 2, 12, 0, 0).unwrap();
+        let since = "2026-11-02T12:00:00Z".parse().unwrap();
         for name in [
             "2026-11-01",
             "2026-11-02",
@@ -865,16 +864,14 @@ mod tests {
             .iter()
             .all(|row| row.kind == ErrorKind::LedgerCorruption && row.context["line"] == "2"));
         assert_eq!(
-            list_since(Some(since - chrono::Duration::hours(12)))
-                .unwrap()
-                .len(),
+            list_since(Some(since - Duration::hours(12))).unwrap().len(),
             6
         );
         for row in rows
             .iter()
             .filter(|row| row.context["source_time_precision"] == "unknown")
         {
-            assert_eq!(row.recorded_at, DateTime::<Utc>::UNIX_EPOCH);
+            assert_eq!(row.recorded_at, UtcTimestamp::UNIX_EPOCH);
         }
         assert_eq!(rows, list_since(Some(since)).unwrap());
     }
@@ -883,7 +880,7 @@ mod tests {
     fn ledger_file_read_failure_is_not_historical_corruption() {
         let (_dir, _home) = isolated_home();
         fs::create_dir_all(ledger_dir().join("errors.2026-01-01.jsonl")).unwrap();
-        assert!(list_since(Some(Utc.with_ymd_and_hms(2026, 11, 2, 0, 0, 0).unwrap())).is_err());
+        assert!(list_since(Some("2026-11-02T00:00:00Z".parse().unwrap())).is_err());
     }
 
     #[test]

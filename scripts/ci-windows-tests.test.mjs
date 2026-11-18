@@ -25,6 +25,24 @@ test("exited fixture PIDs skip inspection without hiding live or uncertain proce
   assert.equal(queries, 2);
 });
 
+test("Windows fixture process queries outlast a saturated runner's CIM startup", async () => {
+  // Issue #7270: Get-CimInstance took the whole old 10 s budget (10 055 ms
+  // observed) and failed the cold-restart owner capture with ETIMEDOUT.
+  const { queryWindowsProcess } = await import("../crates/gwt/playwright/tests/_helpers/process-inspection.mjs");
+  const calls = [];
+  const result = queryWindowsProcess("$PID", (command, args, options) => {
+    calls.push({ command, args, options });
+    return { status: 0, stdout: "42\n", stderr: "" };
+  });
+  assert.equal(result.stdout, "42\n");
+  assert.equal(calls[0].command, "powershell.exe");
+  assert.deepEqual(calls[0].args, ["-NoProfile", "-NonInteractive", "-Command", "$PID"]);
+  assert.ok(calls[0].options.timeout >= 30_000, `timeout ${calls[0].options.timeout} must exceed observed CIM latency`);
+  assert.equal(calls[0].options.windowsHide, true);
+  const timedOut = Object.assign(new Error("spawnSync powershell.exe ETIMEDOUT"), { code: "ETIMEDOUT" });
+  assert.throws(() => queryWindowsProcess("$PID", () => ({ error: timedOut })), { code: "ETIMEDOUT" });
+});
+
 test("required Windows CI builds and runs the gate lifecycle regressions", () => {
   assert.ok(targets("default").some(([pkg, kind, name]) =>
     pkg === "gwt-terminal" && kind === "test" && name === "pty_start_gate_test"));

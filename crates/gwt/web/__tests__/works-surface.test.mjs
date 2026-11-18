@@ -329,7 +329,7 @@ test("Works batches bursts, resolves synchronous navigation and rejects ended or
 
 test("Works distinguishes measured zero from unavailable tokens and thirty-minute graph gaps", async () => {
   const values = [...Array(29).fill(null), 0];
-  const telemetry = { today: { input_tokens: 0, cache_tokens: 0, output_tokens: 0 }, fleet_tokens_per_minute: values, by_window: { one: { input_tokens: 0, cache_tokens: 0, output_tokens: 0, context_remaining_percent: 0, ahead_of_develop: 0, tokens_per_minute: values } } };
+  const telemetry = { today: { input_tokens: 0, cache_tokens: 0, output_tokens: 0 }, fleet_tokens_per_minute: values.slice(-25), by_window: { one: { input_tokens: 0, cache_tokens: 0, output_tokens: 0, context_remaining_percent: 0, ahead_of_develop: 0, tokens_per_minute: values } } };
   telemetry.availability = { today: { state: "measured", detail: "Measured: all project session tokens are available." },
     fleet: { state: "partial", detail: "Partial: some live agent minutes are missing." } };
   const f = await fixture(telemetry);
@@ -338,6 +338,8 @@ test("Works distinguishes measured zero from unavailable tokens and thirty-minut
   assert.equal(f.surface.element.querySelector('[data-availability="fleet"]').textContent, telemetry.availability.fleet.detail);
   assert.equal(f.surface.element.querySelector(".works-source-note"), null);
   assert.equal(f.surface.element.querySelector('[data-metric="fleet-now"]').textContent, "0");
+  assert.match(f.surface.element.querySelector(".works-fleet").textContent, /5-minute average/);
+  assert.match(f.surface.element.querySelector(".works-fleet svg").getAttribute("aria-label"), /1 measured minutes, 24 unavailable/);
   const graph = f.surface.element.querySelector('[data-window-id="one"] svg');
   assert.equal(graph.dataset.knownCount, "1");
   assert.match(graph.getAttribute("aria-label"), /29 unavailable/);
@@ -348,7 +350,7 @@ test("Works distinguishes measured zero from unavailable tokens and thirty-minut
   assert.equal(f.surface.element.querySelector('[data-metric="today-total"]').textContent, "15", "cached input is already included in input and must not be added twice");
   const row = f.surface.element.querySelector('[data-window-id="one"]');
   telemetry.today = { input_tokens: null, cache_tokens: null, output_tokens: null };
-  telemetry.fleet_tokens_per_minute = Array(30).fill(null);
+  telemetry.fleet_tokens_per_minute = Array(25).fill(null);
   for (const state of ["unavailable", "partial"]) {
     telemetry.availability = { today: { state, detail: `${state}: project session measurements are missing.` },
       fleet: { state, detail: `${state}: live agent measurements are missing.` } };
@@ -359,7 +361,7 @@ test("Works distinguishes measured zero from unavailable tokens and thirty-minut
     assert.equal(f.surface.element.querySelector('[data-metric="fleet-now"]').textContent, "—");
   }
   telemetry.today = { input_tokens: 0, cache_tokens: 0, output_tokens: 0 };
-  telemetry.fleet_tokens_per_minute = Array(30).fill(0);
+  telemetry.fleet_tokens_per_minute = Array(25).fill(0);
   telemetry.availability = { today: { state: "measured", detail: "Measured project tokens." }, fleet: { state: "measured", detail: "Measured live agent minutes." } };
   f.surface.sync();
   assert.equal(f.surface.element.querySelector('[data-metric="today-total"]').textContent, "0");
@@ -415,7 +417,6 @@ test("Works retains the selected stopped transcript without adding it to live ac
   assert.match(f.surface.element.querySelector(".works-full-meta").textContent, /Stopped/);
   assert.equal(f.mounts.filter(mount => mount.id === "one").at(-1).readOnly, true);
   assert.equal(f.surface.openWork(live[0]), true, "the same physical transcript keeps its exact assignment");
-  assert.equal(f.surface.element.querySelector(".works-active").textContent, "Active 1");
   assert.equal(f.surface.element.querySelector('[data-count="running"]').textContent, "0");
 
   f.windowCatalogModel.update(() => ({ catalog: catalog([{ ...stopped, runtime_started_at_ms: 456 }, windows[1]], 3) })); f.flush();
@@ -439,7 +440,6 @@ test("Works opens a fresh retained STOP snapshot until its canonical window is r
   assert.deepEqual([...f.surface.element.querySelectorAll(".work-row")].map(row => row.dataset.windowId), ["one"]);
   assert.equal(f.surface.openWork("one"), true);
   assert.equal(f.surface.openWork(live[0]), false, "a fresh snapshot must not invent a physical incarnation");
-  assert.equal(f.surface.element.querySelector(".works-active").textContent, "Active 0");
   assert.equal(f.surface.element.querySelector('[data-count="running"]').textContent, "0");
   assert.equal(f.surface.element.querySelector(".works-empty").hidden, true);
   f.windowCatalogModel.update(() => ({ catalog: catalog([], 2) })); f.flush();
@@ -804,18 +804,35 @@ test("Works ordinary surface departure keeps unavailable native ownership readon
   assert.equal(f.runtime.readOnly, false);
   assert.ok(f.previous.get("one") === record, "fresh return keeps the surviving entry association");
   f.api.enter(); f.surface.showList(); f.api.leave();
+  const bindingCount = f.events.length;
   f.activity.clearAgentActivity();
-  assert.ok(f.runtime.terminalContainer === root, "proof loss also reclaims a normally returned list native");
+  // Issue #7558: a transport replacement clears activity while the window shows this terminal.
+  assert.ok(f.runtime.terminalContainer === f.original, "proof loss leaves a returned native in its still-listed window");
+  assert.equal(f.runtime.readOnly, false);
+  assert.equal(f.events.length, bindingCount, "proof loss has no binding effects on the window host");
+  f.dispose();
+});
+
+// Issue #7558 narrows proof-loss reclaim only for a still-listed same Session.
+test("Works reclaims a returned native readonly once its window leaves the catalog", async () => {
+  const f = await nativeLifetimeFixture();
+  const root = f.runtime.terminalContainer;
+  f.api.leave(); f.activity.clearAgentActivity();
+  assert.ok(f.runtime.terminalContainer === f.original && f.runtime.readOnly === false);
+  f.api.workspace(projectCatalog([]).appState);
+  assert.ok(f.runtime.terminalContainer === root, "catalog loss reclaims the returned native");
   assert.equal(f.runtime.readOnly, true);
-  const bindingCount = f.events.filter(event => event === "readonly").length;
-  f.activity.clearAgentActivity();
-  assert.equal(f.events.filter(event => event === "readonly").length, bindingCount, "repeated loss has no binding effects");
-  f.activity.applyAgentActivitySnapshot(activitySnapshot([live[0]], 2));
-  f.api.enter(); f.api.leave();
-  assert.ok(f.runtime.terminalContainer === f.original);
-  f.activity.clearAgentActivity();
-  assert.ok(f.runtime.terminalContainer === root, "an earlier revoked flag cannot suppress reclaim after another fresh list return");
-  assert.equal(f.runtime.readOnly, true);
+  assert.equal(f.runtime.terminal.disposed, false);
+  f.dispose();
+});
+
+test("Works fences a returned native when its window is rebound to another Session", async () => {
+  const f = await nativeLifetimeFixture();
+  f.api.leave(); f.activity.clearAgentActivity();
+  assert.ok(f.runtime.terminalContainer === f.original && f.runtime.readOnly === false);
+  f.api.workspace(projectCatalog([{ ...windows[0], session_id: "new-session" }]).appState);
+  assert.equal(f.runtime.terminal.disposed, true, "the old Session's native cannot keep input");
+  assert.ok(f.terminalMap.get("one") !== f.runtime);
   f.dispose();
 });
 

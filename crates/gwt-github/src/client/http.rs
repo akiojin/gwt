@@ -20,9 +20,10 @@ use std::{
     collections::{BTreeMap, HashSet},
     io::Read,
     sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
+use gwt_core::timestamp::UtcTimestamp;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
@@ -515,7 +516,7 @@ pub struct DiscussionComment {
     pub id: String,
     pub body: String,
     pub author: String,
-    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub created_at: UtcTimestamp,
 }
 
 /// One page of top-level comments from a GitHub Discussion.
@@ -834,7 +835,7 @@ impl<T: HttpTransport> HttpIssueClient<T> {
         let Some((budget, gate)) = &self.budget else {
             return Ok(());
         };
-        let now = chrono::Utc::now();
+        let now = SystemTime::now().into();
         if gwt_core::github_budget::suppressed_spawn_detail(gate, budget, args, now).is_some() {
             let quota = gwt_core::github_quota::classify_gh_args(args);
             let retry_after = budget
@@ -858,7 +859,7 @@ impl<T: HttpTransport> HttpIssueClient<T> {
             return result;
         };
         let quota = gwt_core::github_quota::classify_gh_args(args);
-        let now = chrono::Utc::now();
+        let now = SystemTime::now().into();
         match &result {
             Ok(_) => {
                 gate.record_success(quota);
@@ -1445,9 +1446,8 @@ impl<T: HttpTransport> HttpIssueClient<T> {
                     return Err(invalid("comment.id is empty"));
                 }
                 let created_at = required_string(node, "createdAt", operation)?;
-                let created_at = chrono::DateTime::parse_from_rfc3339(&created_at)
-                    .map_err(|_| invalid("comment.createdAt invalid"))?
-                    .with_timezone(&chrono::Utc);
+                let created_at = UtcTimestamp::parse_rfc3339(&created_at)
+                    .ok_or_else(|| invalid("comment.createdAt invalid"))?;
                 Ok(DiscussionComment {
                     id,
                     body: required_string(node, "body", operation)?,
@@ -2017,7 +2017,7 @@ impl<T: HttpTransport> HttpIssueClient<T> {
                 budget.record_graphql_response(
                     &gwt_core::github_budget::http_source(&GRAPHQL_BUDGET_ARGS),
                     &rate_limit,
-                    chrono::Utc::now(),
+                    SystemTime::now().into(),
                 );
             }
         }
@@ -2894,11 +2894,21 @@ fn parse_graphql_issue(issue: &Value) -> Result<IssueSnapshot, ApiError> {
         .unwrap_or_default();
     Ok(IssueSnapshot {
         number: IssueNumber(number),
+        // GraphQL names a bot without the `[bot]` suffix REST gives the same
+        // account. Author trust compares one spelling, so store the REST one.
         author_login: issue
             .pointer("/author/login")
             .and_then(Value::as_str)
             .filter(|login| !login.is_empty())
-            .map(str::to_string),
+            .map(|login| {
+                let bot =
+                    issue.pointer("/author/__typename").and_then(Value::as_str) == Some("Bot");
+                if bot && !login.ends_with("[bot]") {
+                    format!("{login}[bot]")
+                } else {
+                    login.to_string()
+                }
+            }),
         title,
         body,
         labels,
@@ -3099,7 +3109,7 @@ fn parse_owner_comment(value: &Value, operation: &str) -> Result<RepositoryComme
         .and_then(Value::as_str)
         .ok_or_else(|| parse("comment updated_at missing"))?
         .to_string();
-    if chrono::DateTime::parse_from_rfc3339(&updated_at).is_err() {
+    if UtcTimestamp::parse_rfc3339(&updated_at).is_none() {
         return Err(parse("comment updated_at is not RFC3339"));
     }
     let author = value
@@ -3298,7 +3308,7 @@ query($owner:String!,$repo:String!,$number:Int!,$after:String){
     issue: issueOrPullRequest(number:$number){
       __typename
       ... on Issue {
-        number title body state updatedAt author{login}
+        number title body state updatedAt author{login __typename}
         labels(first:50){nodes{name}}
         comments(first:100, after:$after){
           nodes{databaseId body updatedAt}
@@ -3525,8 +3535,7 @@ impl<T: HttpTransport> IssueClient for HttpIssueClient<T> {
                     .get("created_at")
                     .and_then(Value::as_str)
                     .ok_or_else(malformed)?;
-                let at =
-                    chrono::DateTime::parse_from_rfc3339(created_at).map_err(|_| malformed())?;
+                let at = UtcTimestamp::parse_rfc3339(created_at).ok_or_else(malformed)?;
                 let key = (at, id);
                 if latest
                     .as_ref()
@@ -4338,11 +4347,13 @@ fn required_u64(value: &Value, field: &str, operation: &str) -> Result<u64, ApiE
 
 #[cfg(test)]
 mod check_status_tests {
+    use std::time::{Duration, SystemTime};
+
     use serde_json::json;
 
     use super::{
         check_status, classify_graphql_errors, HttpError, HttpIssueClient, HttpRequest,
-        HttpResponse, HttpTransport, ResolutionDeadline,
+        HttpResponse, HttpTransport, ResolutionDeadline, UtcTimestamp,
     };
     use crate::client::{ApiError, IssueClient, SpecListFilter};
 
@@ -4452,15 +4463,15 @@ mod check_status_tests {
         let ledger = gwt_core::github_budget::BudgetLedger::at(temp.path());
         let gate: &'static gwt_core::github_quota::QuotaGate =
             Box::leak(Box::new(gwt_core::github_quota::QuotaGate::default()));
-        let now = chrono::Utc::now();
+        let now = SystemTime::now();
         ledger.record_block(
             &gwt_core::github_quota::RateLimitBlock {
                 resource: "graphql".to_string(),
                 limit: 5000,
                 remaining: 0,
-                reset_at: now + chrono::Duration::seconds(300),
+                reset_at: (now + Duration::from_secs(300)).into(),
             },
-            now,
+            now.into(),
         );
         let transport = crate::client::http::FakeTransport::new();
         let client = HttpIssueClient::with_transport(transport, "token".to_string(), "octo", "gwt")
@@ -4494,12 +4505,12 @@ mod check_status_tests {
             ledger
                 .active_block(
                     gwt_core::github_quota::GitHubQuota::GraphQl,
-                    chrono::Utc::now()
+                    SystemTime::now().into()
                 )
                 .is_some(),
             "the refusal opens the persisted window"
         );
-        let snapshot = ledger.snapshot(chrono::Utc::now());
+        let snapshot = ledger.snapshot(SystemTime::now().into());
         assert_eq!(
             snapshot.local["graphql"].calls_last_hour, 1,
             "the sent call was counted: {:?}",
@@ -4553,7 +4564,7 @@ mod check_status_tests {
         assert_eq!(page.cursor.as_deref(), Some("full-page-cursor"));
         assert!(page.has_next_page);
         assert_eq!(
-            ledger.snapshot(chrono::Utc::now()).local["graphql"].points_last_hour,
+            ledger.snapshot(SystemTime::now().into()).local["graphql"].points_last_hour,
             3
         );
         let request: serde_json::Value =
@@ -4570,9 +4581,9 @@ mod check_status_tests {
                 resource: "graphql".into(),
                 limit: 5000,
                 remaining: 0,
-                reset_at: chrono::Utc::now() + chrono::Duration::seconds(300),
+                reset_at: (SystemTime::now() + Duration::from_secs(300)).into(),
             },
-            chrono::Utc::now(),
+            SystemTime::now().into(),
         );
         assert!(matches!(
             client.board_discussions(None),
@@ -4635,12 +4646,12 @@ mod check_status_tests {
                 id: "C_1".into(),
                 body: "message".into(),
                 author: "owner".into(),
-                created_at: "2026-10-16T00:00:00Z".parse().unwrap(),
+                created_at: UtcTimestamp::parse_rfc3339("2026-10-16T00:00:00Z").unwrap(),
             }]
         );
         assert_eq!(page.cursor.as_deref(), Some("cursor"));
         assert_eq!(
-            ledger.snapshot(chrono::Utc::now()).local["graphql"].points_last_hour,
+            ledger.snapshot(SystemTime::now().into()).local["graphql"].points_last_hour,
             3
         );
         client.transport().enqueue(HttpResponse {
@@ -4652,7 +4663,7 @@ mod check_status_tests {
             .add_discussion_comment(&page.discussion_id, "message")
             .unwrap();
         assert_eq!(
-            ledger.snapshot(chrono::Utc::now()).local["graphql"].calls_last_hour,
+            ledger.snapshot(SystemTime::now().into()).local["graphql"].calls_last_hour,
             2
         );
         let requests = client.transport().recorded();
@@ -4673,9 +4684,9 @@ mod check_status_tests {
                 resource: "graphql".into(),
                 limit: 5000,
                 remaining: 0,
-                reset_at: chrono::Utc::now() + chrono::Duration::seconds(300),
+                reset_at: (SystemTime::now() + Duration::from_secs(300)).into(),
             },
-            chrono::Utc::now(),
+            SystemTime::now().into(),
         );
         assert!(matches!(
             client.discussion_comments(42, None),
@@ -4826,6 +4837,40 @@ mod check_status_tests {
 }
 
 #[cfg(test)]
+mod issue_author_tests {
+    use super::*;
+
+    /// Issue #7632: GraphQL names a bot without the `[bot]` suffix REST uses.
+    /// One Issue must carry one author spelling whichever endpoint read it.
+    #[test]
+    fn graphql_and_rest_report_the_same_bot_author() {
+        assert!(FETCH_ISSUE_QUERY.contains("author{login __typename}"));
+        let graphql = |login: &str, kind: &str| {
+            parse_graphql_issue(&json!({
+                "number": 1, "updatedAt": "2026-11-18T00:00:00Z",
+                "author": {"login": login, "__typename": kind},
+            }))
+            .unwrap()
+            .author_login
+        };
+        let rest = parse_rest_issue(&json!({
+            "number": 1, "updated_at": "2026-11-18T00:00:00Z",
+            "user": {"login": "github-actions[bot]"},
+        }))
+        .unwrap()
+        .author_login;
+
+        assert_eq!(graphql("github-actions", "Bot"), rest);
+        assert_eq!(graphql("github-actions[bot]", "Bot"), rest);
+        assert_eq!(
+            graphql("github-actions", "User").as_deref(),
+            Some("github-actions"),
+            "a user account must never be promoted to the trusted bot spelling"
+        );
+    }
+}
+
+#[cfg(test)]
 mod label_assignment_tests {
     use super::*;
 
@@ -4880,6 +4925,24 @@ mod label_assignment_tests {
         assert!(requests.iter().all(|r| r.method == HttpMethod::Get
             && r.headers
                 .contains(&("Authorization".into(), "Bearer token".into()))));
+    }
+
+    #[test]
+    fn label_assignment_keeps_leap_seconds_in_order_and_on_the_wire() {
+        let mut normal = event(3, "labeled", "urgent", "first");
+        normal["created_at"] = json!("2016-12-31T23:59:59.999999999Z");
+        let mut leap = event(2, "labeled", "urgent", "second");
+        leap["created_at"] = json!("2017-01-01T00:59:60.125+01:00");
+
+        let transport = FakeTransport::new();
+        transport.enqueue(response(vec![normal, leap], false));
+        let client = HttpIssueClient::with_transport(transport, "token".into(), "o", "r");
+        let assignment = client
+            .fetch_label_assignment(IssueNumber(7), "urgent")
+            .unwrap()
+            .unwrap();
+        assert_eq!(assignment.actor.as_deref(), Some("second"));
+        assert_eq!(assignment.created_at, "2017-01-01T00:59:60.125+01:00");
     }
 
     #[test]

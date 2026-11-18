@@ -33,9 +33,10 @@ use std::{
     time::SystemTime,
 };
 
-use chrono::{DateTime, SecondsFormat, Utc};
 use fs2::FileExt;
+use gwt_core::timestamp::UtcTimestamp;
 use serde::{Deserialize, Serialize};
+use time::{macros::format_description, OffsetDateTime};
 use uuid::Uuid;
 
 use crate::{
@@ -48,6 +49,22 @@ pub const ISSUE_VALIDATION_RECEIPT_FILE: &str = "issue-validation.json";
 const ISSUE_VALIDATION_RECEIPT_VERSION: u32 = 1;
 const SUMMARY_GENERATION_FILE: &str = ".summary-generation";
 const SUMMARY_CACHE_ROOT_LIMIT: usize = 8;
+
+fn validation_timestamp(now: OffsetDateTime) -> String {
+    now.format(format_description!(
+        "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:9]Z"
+    ))
+    .expect("all UTC datetime components are available")
+}
+
+#[cfg(test)]
+#[test]
+fn validation_receipt_timestamp_keeps_nine_fractional_digits() {
+    assert_eq!(
+        validation_timestamp(time::macros::datetime!(2026-11-18 12:34:56.012 UTC)),
+        "2026-11-18T12:34:56.012000000Z"
+    );
+}
 
 /// Errors reported by cache operations.
 #[derive(Debug, thiserror::Error)]
@@ -457,14 +474,15 @@ impl Cache {
             {
                 return Ok(ValidatedCacheEntry::Unvalidated(versioned));
             }
-            let Ok(validated_at) = DateTime::parse_from_rfc3339(&receipt.validated_at) else {
+            let Some(validated_at) = UtcTimestamp::parse_rfc3339(&receipt.validated_at) else {
                 return Ok(ValidatedCacheEntry::Unvalidated(versioned));
             };
-            let age = Utc::now().signed_duration_since(validated_at.with_timezone(&Utc));
-            let Ok(ttl) = chrono::Duration::from_std(ttl) else {
-                return Ok(ValidatedCacheEntry::Stale(versioned));
-            };
-            if age < chrono::Duration::zero() || age >= ttl {
+            let age = UtcTimestamp::now().signed_duration_since(validated_at);
+            // The old signed duration could represent up to i64::MAX milliseconds.
+            if ttl > std::time::Duration::from_millis(i64::MAX as u64)
+                || age.is_negative()
+                || age >= ttl
+            {
                 Ok(ValidatedCacheEntry::Stale(versioned))
             } else {
                 Ok(ValidatedCacheEntry::Fresh(versioned))
@@ -534,7 +552,7 @@ impl Cache {
         let receipt = IssueValidationReceipt {
             version: ISSUE_VALIDATION_RECEIPT_VERSION,
             generation: format!("{}:{}", generation.0, Uuid::new_v4()),
-            validated_at: Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true),
+            validated_at: validation_timestamp(OffsetDateTime::now_utc()),
         };
         self.invalidate_validation_receipt_unlocked(expected.number)?;
         write_atomic(

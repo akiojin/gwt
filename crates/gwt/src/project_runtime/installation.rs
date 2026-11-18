@@ -3,7 +3,10 @@
 mod project_catalog;
 pub(crate) use project_catalog::owner_host_project_catalog;
 
-use super::workspace::{save_resumed_workspace_projection, save_start_work_workspace_projection};
+use super::workspace::{
+    save_resumed_workspace_projection, save_start_work_workspace_projection,
+    save_workspace_launch_projection, WorkspaceLaunchProjectionKind,
+};
 use super::{launch_finalization::*, launch_payload::*, ActiveLaunchHandshakeCleanup};
 use crate::launch_runtime::same_worktree_path;
 use crate::session_launch::{
@@ -1066,7 +1069,7 @@ pub fn install_agent_launch(
         std::time::Duration::from_secs(2),
         |session| {
             session.restore_window_on_startup = true;
-            session.updated_at = chrono::Utc::now();
+            session.updated_at = gwt_core::timestamp::UtcTimestamp::now();
             session.launch_origin = input.origin;
             session.restore_source_session_id = input.auto_resume_source_session_id.clone();
             Ok(())
@@ -1236,7 +1239,7 @@ pub fn install_agent_launch(
             session_id: session_id.clone(),
             agent_id: agent_id.command().to_string(),
             worktree_path: worktree_path.to_string_lossy().into_owned(),
-            created_at: Some(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+            created_at: Some(gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds()),
             consecutive_crashes: 0,
             next_not_before: None,
         };
@@ -1315,6 +1318,19 @@ pub fn install_agent_launch(
                 linked_issue_number,
                 canonical_owner,
                 context,
+                None,
+            )
+            .map(|()| true)
+        } else if let Some(genesis) = genesis.as_ref() {
+            // An Issue-linked NEW session can start on an existing branch.
+            save_workspace_launch_projection(
+                &input.project_root,
+                &active,
+                None,
+                linked_issue_number,
+                Some(genesis.owner),
+                None,
+                WorkspaceLaunchProjectionKind::StartWork,
                 None,
             )
             .map(|()| true)
@@ -2089,7 +2105,7 @@ struct IssueMonitorSpawnAdmissionDecision {
 
 impl IssueMonitorSpawnAdmissionDecision {
     fn evaluate(monitor: &crate::IssueMonitorState, issue_number: u64) -> Self {
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
         Self {
             update_drain: monitor.update_drain().is_some(),
             source_exclusion: monitor.launch_source_exclusion(issue_number),
@@ -2158,7 +2174,8 @@ impl PreparedIssueMonitorSpawnAdmission {
     /// trusted without re-deriving that limit.
     fn capacity_admits(&self) -> bool {
         let sample_current = self.capacity_expires_at.is_none_or(|expires| {
-            chrono::Utc::now().timestamp() < i64::try_from(expires).unwrap_or(i64::MAX)
+            gwt_core::timestamp::UtcTimestamp::now().timestamp()
+                < i64::try_from(expires).unwrap_or(i64::MAX)
         }) && self
             .dependencies_with_role(IssueMonitorAdmissionDependencyRole::Capacity)
             .all(IssueMonitorAdmissionFileStamp::is_current);
@@ -2305,7 +2322,7 @@ impl IssueMonitorSpawnAdmissionInput {
             "Issues launch phase"
         );
         let capacity = monitor
-            .agent_status_at(&chrono::Utc::now().to_rfc3339())
+            .agent_status_at(&gwt_core::timestamp::UtcTimestamp::now().to_rfc3339())
             .agent_capacity;
         let capacity_expires_at = capacity.is_fresh().then_some(capacity.expires_at).flatten();
         let capacity_limit = monitor.effective_max_active_agents();
@@ -2846,7 +2863,7 @@ pub fn load_local_issue_monitor_fallback_projection(
     (
         cached_issues,
         cache_error.or(origin_error),
-        chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds(),
         source_repository.ok(),
     )
 }
@@ -2892,6 +2909,48 @@ pub(crate) struct PreparedOwnerAgentAdmission {
     pub issue_monitor_launch: bool,
     pub purpose_title: Option<String>,
 }
+
+pub(super) fn confirm_open_monitor_issue(
+    project_root: &Path,
+    issue_number: u64,
+) -> Result<(), String> {
+    let (state, updated_at) =
+        crate::issue_cache::fetch_issue_state_for_launch(project_root, issue_number).map_err(
+            |error| {
+                format!(
+                    "Cannot confirm Issue #{issue_number} is open on GitHub: {error}; {}",
+                    gwt_agent::TRANSIENT_LAUNCH_RETRY_HINT
+                )
+            },
+        )?;
+    if state == gwt_github::IssueState::Open {
+        return Ok(());
+    }
+
+    let result = super::monitor::publish(
+        project_root,
+        serde_json::json!({
+            "issue_state": { "number": issue_number, "state": "closed", "updated_at": updated_at }
+        }),
+    );
+    let result = match result {
+        Err(error) if error.allows_local_fallback() => {
+            commit_local_issue_monitor_control_with_timeout(
+                project_root,
+                std::time::Duration::from_secs(5),
+                |monitor| monitor.record_closed(issue_number, Some(updated_at)),
+            )
+            .map(|_| ())
+        }
+        other => other,
+    };
+    let detail = format!("Issue #{issue_number} is closed on GitHub");
+    Err(match result {
+        Ok(()) => detail,
+        Err(error) => format!("{detail}; Monitor closure could not be recorded: {error}"),
+    })
+}
+
 pub(crate) fn prepare_owner_agent_admission(
     input: OwnerAgentAdmissionInput<'_>,
     config: &mut gwt_agent::LaunchConfig,
@@ -3052,7 +3111,7 @@ pub(crate) fn prepare_owner_agent_admission(
                 }
             }
         }
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
         let monitor = &mut prepared.monitor;
         if !review_dispatch
             && monitor
@@ -3095,8 +3154,9 @@ pub(crate) fn prepare_owner_agent_admission(
             ));
         }
         if let Some(reason) = monitor.launch_source_exclusion(issue_number) {
-            return Err(format!(
-                "Issues source admission refused Issue #{issue_number}: {reason}"
+            return Err(crate::issue_monitor::source_admission_refusal_message(
+                issue_number,
+                &reason,
             ));
         }
         if !review_dispatch {
@@ -3105,6 +3165,12 @@ pub(crate) fn prepare_owner_agent_admission(
                     "Issues dependency admission refused Issue #{issue_number}: {reason}"
                 ));
             }
+        }
+        if let Some(reason) = monitor.monitor_spawn_hold_reason(issue_number, review_dispatch) {
+            return Err(format!(
+                "{}{issue_number}: {reason}",
+                crate::issue_monitor::MONITOR_SPAWN_HOLD_PREFIX
+            ));
         }
         if !monitor.has_capacity_for_monitor_spawn(issue_number, review_dispatch) {
             let status = monitor.agent_status_at(&now);
@@ -4286,7 +4352,7 @@ mod delivery_ack_tests {
             materialized_window_id: Some(window_id.into()),
             workspace_durable_window_id: Some(window_id.into()),
             launch_session_strategy: gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
-            created_at: chrono::Utc::now().to_rfc3339(),
+            created_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
             requeue_reason: None,
         };
         let prefs = gwt::IssueMonitorPrefs {
@@ -4634,7 +4700,7 @@ mod owner_admission_tests {
             host_project_roots: &roots,
             snapshot: crate::IssueMonitorWindowSnapshot {
                 project_tab_id: "tab".into(),
-                observed_at: chrono::Utc::now().to_rfc3339(),
+                observed_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
                 windows: vec![],
             },
             snapshot_tabs: Default::default(),
@@ -4938,7 +5004,7 @@ mod owner_admission_tests {
             host_project_roots: &roots,
             snapshot: crate::IssueMonitorWindowSnapshot {
                 project_tab_id: "tab".into(),
-                observed_at: chrono::Utc::now().to_rfc3339(),
+                observed_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
                 windows: vec![],
             },
             snapshot_tabs: Default::default(),
@@ -5168,7 +5234,7 @@ mod owner_admission_tests {
                 .status
                 .success());
         }
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
         let cache = crate::issue_cache::issue_cache_root_for_repo_path(&repo).unwrap();
         gwt_github::Cache::new(cache)
             .write_snapshot(&gwt_github::IssueSnapshot {
@@ -5283,7 +5349,7 @@ mod owner_admission_tests {
         let result = admit_after_prefs_update(None, |prefs| {
             prefs.update_drain = Some(crate::IssueMonitorUpdateDrain {
                 version: "99.0.0".into(),
-                since: chrono::Utc::now().to_rfc3339(),
+                since: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
                 reason: crate::IssueMonitorUpdateDrainReason::Manual,
                 automatic: None,
                 blocking: Vec::new(),

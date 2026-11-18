@@ -410,7 +410,7 @@ fn seed_active_owner(repo: &Path, session: &str) {
             start_evidence: None,
             active: true,
             owner_spec: Some(5630),
-            started_at: chrono::Utc::now(),
+            started_at: gwt_core::timestamp::UtcTimestamp::now(),
             phase: Some("verify".into()),
             session_id: session.into(),
         },

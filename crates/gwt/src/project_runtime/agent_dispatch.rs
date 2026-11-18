@@ -721,8 +721,7 @@ pub fn authenticated_pm_pane_send_input_events(
                     }
                     let prepared = pm_registry::PmDeliveryReceipt {
                         operation_id: worker_operation_id.clone(),
-                        recorded_at: chrono::Utc::now()
-                            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                        recorded_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339_seconds(),
                         status: pm_registry::PmDeliveryReceiptStatus::Prepared,
                         grok_prompt: None,
                         principal_session_id: principal_session_id.clone(),
@@ -1550,7 +1549,7 @@ pub fn agent_close_board_check(
         principal.session_id(),
         target_session,
         target_owner,
-        chrono::Utc::now(),
+        gwt_core::timestamp::UtcTimestamp::now(),
     ) {
         Ok(entries) if !entries.is_empty() => Some(
             crate::board_read_receipts::read_required_message("pane.close", &entries),
@@ -1921,12 +1920,16 @@ pub fn record_work_close(
 ) -> Result<bool, String> {
     use gwt_core::workspace_projection as work;
     let changed = match close_kind {
-        work::WorkCloseKind::Done => {
-            work::emit_workspace_done_event_if_absent(project_root, work_id, chrono::Utc::now())
-        }
-        work::WorkCloseKind::Discarded => {
-            work::emit_workspace_discard_event_if_absent(project_root, work_id, chrono::Utc::now())
-        }
+        work::WorkCloseKind::Done => work::emit_workspace_done_event_if_absent(
+            project_root,
+            work_id,
+            gwt_core::timestamp::UtcTimestamp::now(),
+        ),
+        work::WorkCloseKind::Discarded => work::emit_workspace_discard_event_if_absent(
+            project_root,
+            work_id,
+            gwt_core::timestamp::UtcTimestamp::now(),
+        ),
     }
     .map_err(|error| error.to_string())?;
     let items = work::load_workspace_work_items(project_root)
@@ -2045,7 +2048,7 @@ pub fn supersede_invalid_work_for_pm(
                             container.clone(),
                             super::workspace::SuccessorSupersessionAuthority::RegisteredPm,
                             live_session_ids,
-                            chrono::Utc::now(),
+                            gwt_core::timestamp::UtcTimestamp::now(),
                         )?;
                         if locked_target.events.iter().any(|event| {
                             event.work_item_id == locked_target.id

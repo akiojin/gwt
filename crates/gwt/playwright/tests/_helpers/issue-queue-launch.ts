@@ -18,12 +18,15 @@ export async function startIssueQueueLaunchFixture(info: TestInfo, options: {
   monitorPreferences?: Record<string, unknown>;
   targetIssueNumber?: 44; switching?: boolean; positive?: boolean; terminalConvergence?: boolean; autonomousMode?: boolean;
   targetRefreshGate?: boolean;
+  /** Issue #7451: a second repository and Host under the same HOME. */
+  secondProject?: { issueNumbers: number[] };
   prepare?: ExactRelaunchSetup["prepare"];
 } = {}) {
   const windows = process.platform === "win32";
   const comments: { id: number; body: string; updated_at: string }[] = [];
   const requests: { method: string; url: string }[] = [];
   const issue = {
+    repo: "queue",
     number: options.issueNumber ?? 43, title: "Queue launch fixture", state: "OPEN",
     body: "## Acceptance Criteria\n- [ ] AC-1: Record the provider handoff.",
     labels: [{ name: "bug" }, { name: "auto-improve" }],
@@ -33,7 +36,11 @@ export async function startIssueQueueLaunchFixture(info: TestInfo, options: {
   const issues = [issue, ...(options.targetIssueNumber ? [{ ...issue, number: options.targetIssueNumber,
     title: "Next planned switch fixture", url: `https://github.com/fixture/queue/issues/${options.targetIssueNumber}` }] : []),
     ...(options.additionalIssueNumbers ?? []).map(number => ({ ...issue, number,
-      title: `Queue refill fixture ${number}`, url: `https://github.com/fixture/queue/issues/${number}` }))];
+      title: `Queue refill fixture ${number}`, url: `https://github.com/fixture/queue/issues/${number}` })),
+    ...(options.secondProject?.issueNumbers ?? []).map(number => ({ ...issue, repo: "queue-b", number,
+      title: `Second project fixture ${number}`, url: `https://github.com/fixture/queue-b/issues/${number}` }))];
+  if (new Set(issues.map(value => value.number)).size !== issues.length) throw new Error("Fixture Issue numbers must be unique across repositories");
+  const repositoryOf = (text: string) => /(?:^|\/)repos\/fixture\/queue-b\//.test(text) ? "queue-b" : "queue";
   for (const [number, body] of Object.entries(options.initialBodies ?? {})) {
     const selected = issues.find(value => value.number === Number(number));
     if (!selected) throw new Error(`Initial body references unknown Issue ${number}`);
@@ -65,42 +72,42 @@ export async function startIssueQueueLaunchFixture(info: TestInfo, options: {
           pageInfo: { hasNextPage: false, endCursor: null } },
         timelineItems: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },
       } } } };
-    } else if (/^\/repos\/fixture\/queue\/issues\/\d+\/comments$/.test(request.url || "") && request.method === "POST") {
+    } else if (/^\/repos\/fixture\/queue(?:-b)?\/issues\/\d+\/comments$/.test(request.url || "") && request.method === "POST") {
       const number = Number(request.url!.split("/").at(-2));
       const selected = issueComments.get(number);
       if (!selected) { response.writeHead(404); response.end("{}"); return; }
       const comment = { id: nextCommentId++, body: payload.body, updated_at: new Date().toISOString() };
       selected.push(comment);
       result = comment;
-    } else if (/^\/repos\/fixture\/queue\/issues\/comments\/\d+$/.test(request.url || "") && request.method === "PATCH") {
+    } else if (/^\/repos\/fixture\/queue(?:-b)?\/issues\/comments\/\d+$/.test(request.url || "") && request.method === "PATCH") {
       const comment = [...issueComments.values()].flat().find(entry => entry.id === Number(request.url!.split("/").at(-1)));
       if (!comment) { response.writeHead(404); response.end("{}"); return; }
       comment.body = payload.body;
       comment.updated_at = new Date().toISOString();
       result = comment;
     } else if (options.terminalConvergence && request.method === "PATCH"
-      && /^\/repos\/fixture\/queue\/issues\/\d+$/.test(request.url || "")) {
+      && /^\/repos\/fixture\/queue(?:-b)?\/issues\/\d+$/.test(request.url || "")) {
       const selected = issues.find(value => value.number === Number(request.url!.split("/").at(-1)));
       if (!selected) { response.writeHead(404); response.end("{}"); return; }
       selected.state = String(payload.state).toUpperCase();
       selected.updatedAt = new Date().toISOString();
       result = restIssue(selected);
     } else if (options.terminalConvergence && request.method === "DELETE"
-      && /^\/repos\/fixture\/queue\/issues\/\d+\/labels\//.test(request.url || "")) {
+      && /^\/repos\/fixture\/queue(?:-b)?\/issues\/\d+\/labels\//.test(request.url || "")) {
       const parts = request.url!.split("/");
       const selected = issues.find(value => value.number === Number(parts[5]));
       if (!selected) { response.writeHead(404); response.end("{}"); return; }
       selected.labels = selected.labels.filter(label => label.name !== decodeURIComponent(parts[7]));
       selected.updatedAt = new Date().toISOString();
       result = selected.labels;
-    } else if (request.method === "GET" && /^\/repos\/fixture\/queue\/issues(?:\?|$)/.test(request.url || "")) {
-      result = issues.map(restIssue);
-    } else if (request.method === "GET" && /^\/repos\/fixture\/queue\/issues\/\d+(?:\?|$)/.test(request.url || "")) {
+    } else if (request.method === "GET" && /^\/repos\/fixture\/queue(?:-b)?\/issues(?:\?|$)/.test(request.url || "")) {
+      result = issues.filter(value => value.repo === repositoryOf(request.url || "")).map(restIssue);
+    } else if (request.method === "GET" && /^\/repos\/fixture\/queue(?:-b)?\/issues\/\d+(?:\?|$)/.test(request.url || "")) {
       const number = Number(request.url!.split("/").at(-1)!.split("?")[0]);
       const selected = issues.find(value => value.number === number);
       if (!selected) { response.writeHead(404); response.end("{}"); return; }
       result = restIssue(selected);
-    } else if (request.method === "GET" && /^\/repos\/fixture\/queue\/issues\/\d+\/comments(?:\?|$)/.test(request.url || "")) {
+    } else if (request.method === "GET" && /^\/repos\/fixture\/queue(?:-b)?\/issues\/\d+\/comments(?:\?|$)/.test(request.url || "")) {
       const number = Number(request.url!.split("/").at(-2));
       result = (issueComments.get(number) || []).map(comment => ({ ...comment, user: { login: "fixture" }, created_at: comment.updated_at }));
     } else {
@@ -121,12 +128,12 @@ export async function startIssueQueueLaunchFixture(info: TestInfo, options: {
   let remotePath = "";
   let realGitPath = "";
   const hookAudits: unknown[] = [];
-  function auditHooks(cwd: string, repair: boolean): { status: string; issues: string[] } {
+  function auditHooks(cwd: string, repair: boolean, env = auditEnv): { status: string; issues: string[] } {
     const operation = repair ? "hook.doctor" : "hook.health";
-    const result = spawnSync(checkoutGwtd, [], { cwd, env: auditEnv, encoding: "utf8", timeout: 30_000, windowsHide: true,
+    const result = spawnSync(checkoutGwtd, [], { cwd, env, encoding: "utf8", timeout: 30_000, windowsHide: true,
       input: JSON.stringify({ schema_version: 1, operation, params: {
         ...(repair ? { repair: true } : {}), expected_hook_bin: stableHook,
-        runtime_state_path: join(auditEnv.HOME!, ".gwt", "fixture-missing-runtime-state.json"),
+        runtime_state_path: join(env.HOME!, ".gwt", "fixture-missing-runtime-state.json"),
       } }),
     });
     if (result.status !== 0) throw new Error(`${operation} failed: ${result.stdout} ${result.stderr}`);
@@ -136,20 +143,26 @@ export async function startIssueQueueLaunchFixture(info: TestInfo, options: {
     const health = repair ? output.health : output;
     hookAudits.push({ operation, cwd, health });
     if (repair) {
-      const registered = spawnSync(checkoutGwtd, [], { cwd, env: auditEnv, encoding: "utf8", timeout: 30_000, windowsHide: true,
+      const registered = spawnSync(checkoutGwtd, [], { cwd, env, encoding: "utf8", timeout: 30_000, windowsHide: true,
         input: JSON.stringify({ schema_version: 1, operation: "hook.register_codex_managed_hook_trust", params: {
-          project_root: cwd, codex_config: join(auditEnv.HOME!, ".codex/config.toml"), codex_hook_discovery: "both",
+          project_root: cwd, codex_config: join(env.HOME!, ".codex/config.toml"), codex_hook_discovery: "both",
         } }),
       });
       if (registered.status !== 0 || !JSON.parse(registered.stdout).ok) throw new Error(`Fixture hook trust registration failed: ${registered.stderr}`);
-      return auditHooks(cwd, false);
+      return auditHooks(cwd, false, env);
     }
     const issues = (health.issues ?? []).filter((issue: string) => !issue.startsWith("managed hook failure:") || !issue.includes("state=fail-open"));
     if (issues.length || (!repair && health.status === "inactive")) throw new Error(`Hook audit failed: ${JSON.stringify(health)}`);
     return health;
   }
   let daemon: ChildProcess | undefined;
+  let secondDaemon: ChildProcess | undefined;
+  let secondProject = "", secondEnv: NodeJS.ProcessEnv = {}, secondKey = "", secondState = "";
   async function stopDaemon() {
+    try { await stopOwnedDaemon(secondDaemon); }
+    finally { await stopOwnedDaemon(daemon); }
+  }
+  async function stopOwnedDaemon(daemon: ChildProcess | undefined) {
     if (daemon && daemon.exitCode === null && daemon.signalCode === null) {
       daemon.kill("SIGTERM");
       const until = Date.now() + 5_000;
@@ -160,8 +173,9 @@ export async function startIssueQueueLaunchFixture(info: TestInfo, options: {
       if (daemon.exitCode === null && daemon.signalCode === null) throw new Error(`Owned fixture daemon ${daemon.pid} remained after shutdown`);
     }
   }
-  async function startDaemon(project: string, env: NodeJS.ProcessEnv) {
-    daemon = spawn(checkoutGwtd, [], { cwd: project, env, windowsHide: true, stdio: ["pipe", "ignore", "pipe"] });
+  async function startDaemon(project: string, env: NodeJS.ProcessEnv, second = false) {
+    const daemon = spawn(checkoutGwtd, [], { cwd: project, env, windowsHide: true, stdio: ["pipe", "ignore", "pipe"] });
+    if (second) secondDaemon = daemon; else assignDaemon(daemon);
     let daemonErrors = "";
     daemon.stderr?.on("data", chunk => { daemonErrors += chunk; });
     daemon.stdin?.end(JSON.stringify({ schema_version: 1, operation: "daemon.start", params: {} }) + "\n");
@@ -175,6 +189,7 @@ export async function startIssueQueueLaunchFixture(info: TestInfo, options: {
     }
     throw new Error(`Fixture daemon readiness timed out: ${daemonErrors}`);
   }
+  function assignDaemon(started: ChildProcess) { daemon = started; }
   let fixture;
   try {
     fixture = await startExactRelaunchFixture(info, {
@@ -182,7 +197,7 @@ export async function startIssueQueueLaunchFixture(info: TestInfo, options: {
       terminalConvergence: options.terminalConvergence,
       freshNativeIds: !!options.switching || !!options.terminalConvergence,
       switching: options.switching ? { sourceIssueNumber: issue.number,
-        positive: !!options.positive && process.platform === "linux" && process.env.GWT_PLAYWRIGHT_SWITCH_POSITIVE === "1" } : undefined,
+        positive: !!options.positive } : undefined,
       monitorPreferences: {
         enabled: true, autonomous_mode: options.autonomousMode ?? false, auto_close_merged_issues: false,
         auto_apply_updates: false, terminal_queue_auto_refill: false,
@@ -194,7 +209,27 @@ export async function startIssueQueueLaunchFixture(info: TestInfo, options: {
           await writeFile(join(home, ".gwt/config.toml"), "[agent]\nterminal_close_grace_secs = 1\n");
         projectState = preferences;
         projectLogs = join(preferences, "..", "logs");
+        if (options.secondProject) {
+          // The second Host reads the same HOME; only its project root differs.
+          secondEnv = { ...env, GWT_PROJECT_ROOT: secondProject };
+          const status = spawnSync(checkoutGwtd, [], { cwd: secondProject, env: secondEnv, encoding: "utf8", timeout: 30_000, windowsHide: true,
+            input: JSON.stringify({ schema_version: 1, operation: "issue.monitor.status", params: {} }) });
+          const envelope = status.status === 0 ? JSON.parse(status.stdout) : null;
+          secondKey = envelope?.ok ? envelope.project_store?.hash : "";
+          if (!/^[a-zA-Z0-9_-]+$/.test(secondKey) || preferences.includes(secondKey))
+            throw new Error(`Second project needs its own project store: ${status.stdout} ${status.stderr}`);
+          secondState = join(home, ".gwt", "projects", secondKey, "project-state");
+          await mkdir(secondState, { recursive: true });
+          await writeFile(join(secondState, "pm.json"), JSON.stringify({ settings: { auto_start: false } }));
+          await writeFile(join(secondState, "issue-monitor.json"),
+            await readFile(join(preferences, "issue-monitor.json")));
+          await writeFile(join(home, ".gwt/session.json"), JSON.stringify({ tabs: [
+            { id: "exact-relaunch", title: "exact-relaunch", project_root: project, kind: "git" },
+            { id: "second-project", title: "second-project", project_root: secondProject, kind: "git" },
+          ], active_tab_id: "exact-relaunch", recent_projects: [] }));
+        }
         await startDaemon(project, env);
+        if (options.secondProject) await startDaemon(secondProject, secondEnv, true);
       },
       async prepare({ home, bin, project, env }) {
         auditEnv = env;
@@ -238,7 +273,7 @@ export async function startIssueQueueLaunchFixture(info: TestInfo, options: {
         git("push", "-q", "-u", "origin", "main");
         git("--git-dir", remote, "symbolic-ref", "HEAD", "refs/heads/main");
         git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main");
-        const gitWrapper = `#!${process.execPath}\nconst cp=require('node:child_process');\nconst a=process.argv.slice(2);\nif(a.slice(-3).join(' ')==='remote get-url origin'){console.log('https://github.com/fixture/queue.git');process.exit(0);}\nconst r=cp.spawnSync(${JSON.stringify(realGit)},a,{stdio:'inherit',windowsHide:true});process.exit(r.status??1);\n`;
+        const gitWrapper = `#!${process.execPath}\nconst cp=require('node:child_process');\nconst a=process.argv.slice(2);\nif(a.slice(-3).join(' ')==='remote get-url origin'){const o=cp.spawnSync(${JSON.stringify(realGit)},['config','--get','remote.origin.url'],{encoding:'utf8',windowsHide:true}).stdout||'';console.log(/origin-b\\.git\\s*$/.test(o)?'https://github.com/fixture/queue-b.git':'https://github.com/fixture/queue.git');process.exit(0);}\nconst r=cp.spawnSync(${JSON.stringify(realGit)},a,{stdio:'inherit',windowsHide:true});process.exit(r.status??1);\n`;
         await writeFixtureNodeCommand(bin, "git", gitWrapper, true);
         await writeFile(join(home, ".codex", "auth.json"), JSON.stringify({ OPENAI_API_KEY: "fixture-only" }));
         const ghLog = join(home, "gh-argv.jsonl");
@@ -251,7 +286,7 @@ const selected=issues.find(issue=>issue.number===Number(a[2]))||issues[0];
 if(a[0]==='--version'){console.log('gh version 2.80.0');process.exit(0);}
 if(a[0]==='auth'){if(a[1]==='token')console.log('fixture-only');process.exit(0);}
 if(a.includes('--include'))process.stdout.write('HTTP/2.0 200 OK\\r\\n\\r\\n');
-if(a[0]==='api' && text.includes('/issues?')){console.log(JSON.stringify(/[?&]page=1(?:&| |$)/.test(text)?issues:[]));process.exit(0);}
+if(a[0]==='api' && text.includes('/issues?')){const repo=text.includes('repos/fixture/queue-b/')?'queue-b':'queue';console.log(JSON.stringify(/[?&]page=1(?:&| |$)/.test(text)?issues.filter(issue=>issue.repo===repo):[]));process.exit(0);}
 if(a[0]==='api' && text.includes('/pulls?')){console.log('[]');process.exit(0);}
 if(a[0]==='issue'&&a[1]==='view'){
 ${options.targetRefreshGate ? `
@@ -292,6 +327,27 @@ console.error('Unimplemented fixture gh: '+text);process.exit(64);
         await mkdir(join(project, ".codex"), { recursive: true });
         await writeFile(join(project, ".codex/hooks.json"), "{}");
         auditHooks(project, true);
+        if (options.secondProject) {
+          // A sibling directory keeps the second project's worktrees apart.
+          secondProject = join(home, "second", "project");
+          await mkdir(secondProject, { recursive: true });
+          const secondGit = (...args: string[]) => {
+            const result = spawnSync(realGit, args, { cwd: secondProject, env, encoding: "utf8", windowsHide: true });
+            if (result.status !== 0) throw new Error(`Second project git failed: ${result.stderr}`);
+          };
+          const secondRemote = join(home, "origin-b.git");
+          secondGit("init", "-q", "-b", "main");
+          secondGit("-c", "user.name=gwt", "-c", "user.email=gwt@example.invalid",
+            "commit", "-q", "--allow-empty", "-m", "second project fixture");
+          secondGit("init", "--bare", "-q", secondRemote);
+          secondGit("remote", "add", "origin", secondRemote);
+          secondGit("push", "-q", "-u", "origin", "main");
+          secondGit("--git-dir", secondRemote, "symbolic-ref", "HEAD", "refs/heads/main");
+          secondGit("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main");
+          await mkdir(join(secondProject, ".codex"), { recursive: true });
+          await writeFile(join(secondProject, ".codex/hooks.json"), "{}");
+          auditHooks(secondProject, true, { ...env, GWT_PROJECT_ROOT: secondProject });
+        }
         await options.prepare?.({ home, bin, project, env });
       },
     });
@@ -364,6 +420,21 @@ console.error('Unimplemented fixture gh: '+text);process.exit(64);
     if (!result.stdout.trim()) throw new Error(`Fixture ${operation} returned no envelope: ${result.stderr}`);
     return JSON.parse(result.stdout);
   }
+  /** The loopback GitHub service runs on this worker, so an operation that reads it must not block the worker. */
+  async function operationAsync(operation: string, params: Record<string, unknown> = {}, projectRoot = active.project) {
+    const child = spawn(checkoutGwtd, [], { cwd: projectRoot, windowsHide: true,
+      env: projectRoot === secondProject ? secondEnv : auditEnv });
+    let stdout = "", stderr = "", timedOut = false;
+    child.stdout.on("data", data => { stdout += data; });
+    child.stderr.on("data", data => { stderr += data; });
+    const timer = setTimeout(() => { timedOut = true; child.kill(); }, 60_000);
+    try {
+      child.stdin.end(JSON.stringify({ schema_version: 1, operation, params: { ...params, project_root: projectRoot } }));
+      await new Promise<number | null>((resolve, reject) => { child.once("error", reject); child.once("close", resolve); });
+    } finally { clearTimeout(timer); }
+    if (timedOut || !stdout.trim()) throw new Error(`Fixture ${operation} returned no envelope: ${stderr}`);
+    return JSON.parse(stdout);
+  }
   async function closeIssue() {
     if (!options.terminalConvergence) throw new Error("Closing requires the isolated terminal fixture");
     // The loopback HTTP server runs on this worker. A synchronous child would
@@ -387,18 +458,23 @@ console.error('Unimplemented fixture gh: '+text);process.exit(64);
     if (timedOut || code !== 0) throw new Error("Fixture issue.close failed: " + stdout + stderr);
     return JSON.parse(stdout);
   }
-  async function restoreSummary(since: string) {
+  async function* logRows() {
     for (const directory of [join(active.home, ".gwt", "logs"), projectLogs]) {
       for (const file of await readdir(directory).catch(() => [])) {
         if (!/\.log(?:\.|$)/.test(file)) continue;
         for (const line of (await readFile(join(directory, file), "utf8")).split("\n")) {
           let row;
           try { row = JSON.parse(line); } catch { continue; } // Retry an incomplete final write.
-          if (row.target === "gwt.restore.admission" && row.fields?.scope === "startup restore"
-            && row.fields.message === "session restore admission summary"
-            && Date.parse(row.timestamp) >= Date.parse(since)) return row.fields;
+          yield row;
         }
       }
+    }
+  }
+  async function restoreSummary(since: string) {
+    for await (const row of logRows()) {
+      if (row.target === "gwt.restore.admission" && row.fields?.scope === "startup restore"
+        && row.fields.message === "session restore admission summary"
+        && Date.parse(row.timestamp) >= Date.parse(since)) return row.fields;
     }
     return null;
   }
@@ -433,6 +509,24 @@ console.error('Unimplemented fixture gh: '+text);process.exit(64);
       return active.start();
     },
     issueNumber: issue.number, targetIssueNumber: options.targetIssueNumber, requests, comments, hookAudits, restoreSummary,
+    async ownerCloseResult(windowId: string, since: string) {
+      for await (const row of logRows()) {
+        if (row.target === "gwt.pane.teardown" && row.fields?.stage === "owner_close_result"
+          && row.fields.window_id === windowId && Date.parse(row.timestamp) >= Date.parse(since)) {
+          return { timestamp: row.timestamp, ...row.fields };
+        }
+      }
+      return null;
+    },
+    async switchCwdCensus() {
+      const observations = [];
+      for await (const row of logRows()) {
+        if (row.target === "gwt::issue_monitor::switch_checkpoint::macos" && row.fields?.message === "Switch cwd census") {
+          observations.push({ timestamp: row.timestamp, ...row.fields });
+        }
+      }
+      return observations;
+    },
     commentsForIssue: (number: number) => (issueComments.get(number) ?? []).map(comment => ({ ...comment })),
     actorEvents: async () => (await readFile(join(active.home, "switch-actor.jsonl"), "utf8").catch(() => ""))
       .split("\n").filter(Boolean).map(line => JSON.parse(line)),
@@ -458,6 +552,9 @@ console.error('Unimplemented fixture gh: '+text);process.exit(64);
     workItems, eventShardPath, stagedDiff, seedActiveOrphan,
     scheduleOperation,
     fixtureOperation: scheduleOperation,
+    operationAsync,
+    second: { get project() { return secondProject; }, get key() { return secondKey; },
+      preferencesBytes: () => readFile(join(secondState, "issue-monitor.json")) },
     closeIssue,
     monitorPreferencesBytes: () => readFile(join(projectState, "issue-monitor.json")),
     auditHooks: (cwd: string) => auditHooks(cwd, false),

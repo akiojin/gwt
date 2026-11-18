@@ -1271,7 +1271,7 @@ fn observe_candidates(
                 .get(&child_pid)
                 .filter(|started| **started > 0)
                 .and_then(|started| i64::try_from(*started).ok())
-                .and_then(|started| chrono::DateTime::<chrono::Utc>::from_timestamp(started, 0))
+                .and_then(|started| gwt_core::timestamp::UtcTimestamp::from_timestamp(started, 0))
             else {
                 inventory.uncertain(
                     &path,
@@ -1298,7 +1298,7 @@ fn observe_candidates(
                 host_pid,
                 child_pid,
                 child_started_at,
-                started_at: started_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                started_at: started_at.to_rfc3339_seconds(),
                 launch_origin: session.launch_origin,
                 launch_entrypoint: gwt_skills::assets::CLAUDE_SKILLS
                     .dirs()

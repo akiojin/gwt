@@ -20,7 +20,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use base64::{engine::general_purpose, Engine as _};
-use chrono::{DateTime, Duration, Utc};
+use time::Duration;
+
+use crate::timestamp::UtcTimestamp;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -54,13 +56,13 @@ fn parse_credits(value: &Value) -> Option<CodexCredits> {
     })
 }
 
-fn parse_reset(window: &Value, observed_at: Option<DateTime<Utc>>) -> Option<DateTime<Utc>> {
+fn parse_reset(window: &Value, observed_at: Option<UtcTimestamp>) -> Option<UtcTimestamp> {
     if let Some(epoch) = window.get("resets_at").and_then(Value::as_i64) {
-        return DateTime::from_timestamp(epoch, 0);
+        return UtcTimestamp::from_timestamp(epoch, 0);
     }
     if let Some(text) = window.get("resets_at").and_then(Value::as_str) {
-        if let Ok(dt) = DateTime::parse_from_rfc3339(text) {
-            return Some(dt.with_timezone(&Utc));
+        if let Some(dt) = UtcTimestamp::parse_rfc3339(text) {
+            return Some(dt);
         }
     }
     if let Some(rel) = window.get("resets_in_seconds").and_then(Value::as_i64) {
@@ -85,7 +87,7 @@ fn classify_pool(key: &str, window_minutes: Option<u32>) -> WindowKind {
         .unwrap_or(WindowKind::Unknown)
 }
 
-fn window_from(key: &str, obj: &Value, observed_at: Option<DateTime<Utc>>) -> Option<UsageWindow> {
+fn window_from(key: &str, obj: &Value, observed_at: Option<UtcTimestamp>) -> Option<UsageWindow> {
     let used = obj.get("used_percent").and_then(Value::as_f64)? as f32;
     let window_minutes = obj
         .get("window_minutes")
@@ -103,13 +105,13 @@ fn window_from(key: &str, obj: &Value, observed_at: Option<DateTime<Utc>>) -> Op
 
 /// Parse a `rate_limits` JSON object into account windows. Returns `None` when
 /// the value is `null` (Codex exec mode) or has no recognized windows.
-pub fn parse_rate_limits(rate_limits: &Value, now: DateTime<Utc>) -> Option<CodexAccount> {
+pub fn parse_rate_limits(rate_limits: &Value, now: UtcTimestamp) -> Option<CodexAccount> {
     parse_rate_limits_at(rate_limits, Some(now))
 }
 
 pub(super) fn parse_rate_limits_at(
     rate_limits: &Value,
-    observed_at: Option<DateTime<Utc>>,
+    observed_at: Option<UtcTimestamp>,
 ) -> Option<CodexAccount> {
     if rate_limits.is_null() {
         return None;
@@ -138,7 +140,7 @@ pub(super) fn parse_rate_limits_at(
 }
 
 /// Preserve the source event time: rereading a rollout is not a new observation.
-fn last_token_count_event(jsonl: &str) -> Option<(Value, Option<DateTime<Utc>>)> {
+fn last_token_count_event(jsonl: &str) -> Option<(Value, Option<UtcTimestamp>)> {
     let mut last = None;
     for line in jsonl.lines() {
         let line = line.trim();
@@ -153,8 +155,7 @@ fn last_token_count_event(jsonl: &str) -> Option<(Value, Option<DateTime<Utc>>)>
             let observed_at = obj
                 .get("timestamp")
                 .and_then(Value::as_str)
-                .and_then(|text| DateTime::parse_from_rfc3339(text).ok())
-                .map(|time| time.with_timezone(&Utc));
+                .and_then(UtcTimestamp::parse_rfc3339);
             last = Some((payload.clone(), observed_at));
         }
     }
@@ -189,7 +190,7 @@ fn last_model(jsonl: &str) -> Option<String> {
 }
 
 /// Parse account usage from full rollout JSONL text.
-pub fn parse_codex_account(jsonl: &str, now: DateTime<Utc>) -> Option<CodexAccount> {
+pub fn parse_codex_account(jsonl: &str, now: UtcTimestamp) -> Option<CodexAccount> {
     let tc = last_token_count(jsonl)?;
     let rl = tc.get("rate_limits")?;
     parse_rate_limits(rl, now)
@@ -280,7 +281,7 @@ pub fn read_auth_account_identity(home: &Path) -> Option<String> {
 /// On a stateless read, observations predating the current auth file cannot be
 /// safely attributed to its account. A live poller can retain this boundary
 /// across token refreshes while the stable account identity stays the same.
-pub fn auth_modified_at(home: &Path) -> Option<DateTime<Utc>> {
+pub fn auth_modified_at(home: &Path) -> Option<UtcTimestamp> {
     fs::metadata(home.join("auth.json"))
         .ok()?
         .modified()
@@ -466,15 +467,15 @@ pub fn rollout_for_session(home: &Path, session_id: &str) -> Option<PathBuf> {
 /// recent files avoids a spurious `NoData`. `rate_limits` is account-global, so
 /// the most recent one is the freshest account state. Returns degraded
 /// `NoData` when none have account data.
-pub fn read_codex_account(home: &Path, now: DateTime<Utc>) -> ProviderUsage {
+pub fn read_codex_account(home: &Path, now: UtcTimestamp) -> ProviderUsage {
     read_codex_account_since(home, now, auth_modified_at(home))
 }
 
 /// Read observations after an authentication boundary retained by the poller.
 pub fn read_codex_account_since(
     home: &Path,
-    now: DateTime<Utc>,
-    authenticated_at: Option<DateTime<Utc>>,
+    now: UtcTimestamp,
+    authenticated_at: Option<UtcTimestamp>,
 ) -> ProviderUsage {
     read_codex_account_with(home, now, authenticated_at, || {
         recent_rollouts(home, 8)
@@ -492,9 +493,9 @@ pub fn read_codex_account_since(
 /// Share account attribution/freshness rules with the poll-owned offset cache.
 pub(super) fn read_codex_account_with(
     home: &Path,
-    now: DateTime<Utc>,
-    authenticated_at: Option<DateTime<Utc>>,
-    read: impl FnOnce() -> Vec<(CodexAccount, Option<DateTime<Utc>>)>,
+    now: UtcTimestamp,
+    authenticated_at: Option<UtcTimestamp>,
+    read: impl FnOnce() -> Vec<(CodexAccount, Option<UtcTimestamp>)>,
 ) -> ProviderUsage {
     let auth = fs::read_to_string(home.join("auth.json")).ok();
     let account_id = auth.as_deref().and_then(parse_auth_account_identity);
@@ -502,7 +503,7 @@ pub(super) fn read_codex_account_with(
         return ProviderUsage::degraded(UsageProvider::Codex, UsageState::NoData);
     }
     let account_label = auth.as_deref().and_then(parse_auth_account_label);
-    let mut newest: Option<(CodexAccount, Option<DateTime<Utc>>)> = None;
+    let mut newest: Option<(CodexAccount, Option<UtcTimestamp>)> = None;
     for (acc, observed_at) in read() {
         if observed_at.is_some_and(|at| at > now)
             || authenticated_at.is_some_and(|boundary| observed_at.is_none_or(|at| at < boundary))
@@ -555,8 +556,8 @@ pub fn read_codex_session(home: &Path, session_id: &str) -> Option<SessionUsage>
 mod tests {
     use super::*;
 
-    fn now() -> DateTime<Utc> {
-        DateTime::from_timestamp(1_780_000_000, 0).unwrap()
+    fn now() -> UtcTimestamp {
+        UtcTimestamp::from_timestamp(1_780_000_000, 0).unwrap()
     }
 
     fn write_auth_fixture(home: &Path) {
@@ -574,7 +575,7 @@ mod tests {
             .unwrap();
     }
 
-    fn write_account_fixture(home: &Path, event_at: DateTime<Utc>) {
+    fn write_account_fixture(home: &Path, event_at: UtcTimestamp) {
         write_auth_fixture(home);
         let sessions = home.join("sessions");
         fs::create_dir_all(&sessions).unwrap();
@@ -637,7 +638,7 @@ mod tests {
         assert_eq!(acc.windows[1].used_percent, 23.0);
         assert_eq!(
             acc.windows[0].resets_at,
-            DateTime::from_timestamp(1780376627, 0)
+            UtcTimestamp::from_timestamp(1780376627, 0)
         );
     }
 
@@ -690,7 +691,7 @@ mod tests {
         assert_eq!(acc.windows[0].used_percent, 12.0);
         assert_eq!(
             acc.windows[0].resets_at,
-            DateTime::from_timestamp(1780376627, 0)
+            UtcTimestamp::from_timestamp(1780376627, 0)
         );
     }
 
