@@ -244,7 +244,7 @@
   .set-row .grow{flex:1;min-width:200px}
   .set-row .t{font-weight:700;font-size:13.5px}
   .set-row .d2{font-size:12.3px;color:var(--ink2)}
-  .switch{width:46px;height:26px;border-radius:99px;background:var(--accent);position:relative;flex:none;display:inline-block}
+  .switch{width:46px;height:26px;border-radius:99px;background:var(--accent);position:relative;flex:none;display:inline-block;cursor:pointer}
   .switch::after{content:"";position:absolute;top:3px;right:3px;width:20px;height:20px;border-radius:50%;background:#fff}
   .switch.off{background:var(--line2)} .switch.off::after{right:auto;left:3px}
   .use{margin-top:5px;display:flex;align-items:center;gap:8px;font-size:12px;color:var(--ink2);flex-wrap:wrap}
@@ -680,7 +680,7 @@
             <input class="field" type="text" placeholder="プロジェクトを探す…" aria-label="プロジェクトを探す" style="width:100%;margin-bottom:12px">
             <div class="plist">
               <div class="prow"><span class="ptag"><i style="background:#0f766e"></i>gwt</span><div class="grow"><div class="meta"><span class="st run"><i></i>作業中</span><span class="loopst run">自律駆動中</span><span>最終更新 12分前</span><span class="path">~/Repos/gwt</span></div></div><span class="badge b-wait">判断待ち 2件</span><button class="btn ghost" type="button">停止</button><button class="btn" type="button" data-openpage="gwt">開く</button></div>
-              <div class="prow"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><div class="grow"><div class="meta"><span class="st run"><i></i>作業中</span><span class="loopst drain">停止待ち</span><span>作業中のエージェント 2件の完了待ち</span><span>最終更新 34分前</span><span class="path">~/Repos/keiba-db</span></div></div><span class="badge b-wait">判断待ち 1件</span><button class="btn ghost" type="button">停止を取り消す</button><button class="btn" type="button" data-openpage="keibadb">開く</button></div>
+              <div class="prow"><span class="ptag"><i style="background:#be123c"></i>KeibaDB</span><div class="grow"><div class="meta"><span class="st run"><i></i>作業中</span><span class="loopst drain">停止待ち</span><span data-loopnote>作業中のエージェント 2件の完了待ち</span><span>最終更新 34分前</span><span class="path">~/Repos/keiba-db</span></div></div><span class="badge b-wait">判断待ち 1件</span><button class="btn ghost" type="button">停止を取り消す</button><button class="btn" type="button" data-openpage="keibadb">開く</button></div>
               <div class="prow"><span class="ptag"><i style="background:#0e7490"></i>vr-cabin-exposure</span><div class="grow"><div class="meta"><span class="st run"><i></i>作業中</span><span class="loopst run">自律駆動中</span><span>最終更新 1時間前</span><span class="path">~/Repos/vr-cabin-exposure</span></div></div><button class="btn ghost" type="button">停止</button><button class="btn" type="button">開く</button></div>
               <div class="prow"><span class="ptag"><i style="background:#c2410c"></i>event-magazine</span><div class="grow"><div class="meta"><span class="st run"><i></i>作業中</span><span class="loopst run">自律駆動中</span><span>最終更新 2時間前</span><span class="path">~/Repos/event-magazine</span></div></div><button class="btn ghost" type="button">停止</button><button class="btn" type="button">開く</button></div>
               <div class="prow"><span class="ptag"><i style="background:#2563eb"></i>llmlb</span><div class="grow"><div class="meta"><span class="st"><i></i>待機中</span><span class="loopst run">自律駆動中</span><span>最終更新 昨日 22:10</span><span class="path">~/Repos/llmlb</span></div></div><button class="btn ghost" type="button">停止</button><button class="btn" type="button">開く</button></div>
@@ -1916,7 +1916,7 @@
               </div>
               <div class="set-group">
                 <div class="set-head">自律駆動</div>
-                <div class="set-row"><div class="grow"><div class="t">状態</div><div class="d2">プロジェクト一覧の開始・停止と同じ状態です。停止すると、新しい課題の割り当ても PM の巡回も止まります（動いているエージェントは、今の作業を終えてから止まります）。</div></div><span class="loopst run">自律駆動中</span></div>
+                <div class="set-row"><div class="grow"><div class="t">状態</div><div class="d2">プロジェクト一覧の開始・停止と同じ状態です。停止すると、新しい課題の割り当ても PM の巡回も止まります（動いているエージェントは、今の作業を終えてから止まります）。</div></div><span class="loopst run" data-loopchip="gwt">自律駆動中</span></div>
                 <div class="set-row"><div class="grow"><div class="t">自動で補充する（Auto Refill）</div><div class="d2">キューが補充の上限（Refill limit）未満のとき、Backlog から対象の課題を自動で補充します。</div></div><span class="switch" aria-hidden="true"></span></div>
                 <div class="set-row"><div class="grow"><div class="t">補充の上限（Refill limit）</div><div class="d2">キューに保持する課題数の目標です。0 のまま自動補充をオンにすると、既定の 3 になります。</div></div><input class="field" type="number" value="3" aria-label="補充の上限" style="width:80px"></div>
                 <div class="set-row"><div class="grow"><div class="t">自律実行（Autonomous）</div><div class="d2">人手の承認なしで、対象の課題を自動で実行します。</div></div><span class="switch" aria-hidden="true"></span></div>
@@ -2443,7 +2443,7 @@
               <p class="h-sub">このプロジェクトだけの設定です。</p>
               <div class="set-group">
                 <div class="set-head">自律駆動</div>
-                <div class="set-row"><div class="grow"><div class="t">状態</div><div class="d2">プロジェクト一覧の開始・停止と同じ状態です。停止待ちの間は、新しい課題の割り当ても PM の巡回も止まっています（動いているエージェントは、今の作業を終えてから止まります）。</div></div><span class="loopst drain">停止待ち</span></div>
+                <div class="set-row"><div class="grow"><div class="t">状態</div><div class="d2">プロジェクト一覧の開始・停止と同じ状態です。停止待ちの間は、新しい課題の割り当ても PM の巡回も止まっています（動いているエージェントは、今の作業を終えてから止まります）。</div></div><span class="loopst drain" data-loopchip="keibadb">停止待ち</span></div>
                 <div class="set-row"><div class="grow"><div class="t">残っている作業</div><div class="d2">作業中のエージェント 2件の完了待ちです。全員が終わると「停止中」になります。</div></div></div>
                 <div class="set-row"><div class="grow"><div class="t">自動で補充する（Auto Refill）</div><div class="d2">キューが補充の上限（Refill limit）未満のとき、Backlog から対象の課題を自動で補充します。</div></div><span class="switch" aria-hidden="true"></span></div>
                 <div class="set-row"><div class="grow"><div class="t">補充の上限（Refill limit）</div><div class="d2">キューに保持する課題数の目標です。0 のまま自動補充をオンにすると、既定の 3 になります。</div></div><input class="field" type="number" value="3" aria-label="補充の上限" style="width:80px"></div>
@@ -3079,6 +3079,76 @@
   }
   wireComposer("startInput", "startSend", "startTopics", null);
   wireComposer("emptyInput", "emptySend", "emptyTopics", "emptyTopicsNote");
+  /* mock interactions: in-session only, nothing is persisted (reload resets) */
+  /* project loop start/stop: one in-memory state per project, shared by the list and the project settings */
+  var LOOP_LABEL = { run: "自律駆動中", drain: "停止待ち", stop: "停止中" };
+  var loopState = {};
+  function loopKeyOf(row) {
+    var t = row.querySelector(".ptag");
+    return t ? t.textContent.trim().toLowerCase() : "";
+  }
+  function renderLoop(key) {
+    var st = loopState[key];
+    if (!st) return;
+    document.querySelectorAll(".prow").forEach(function (row) {
+      if (loopKeyOf(row) !== key) return;
+      var chip = row.querySelector(".loopst");
+      if (chip) { chip.className = "loopst " + st; chip.textContent = LOOP_LABEL[st]; }
+      var note = row.querySelector("[data-loopnote]");
+      if (st === "drain") {
+        if (!note && chip) {
+          note = document.createElement("span");
+          note.setAttribute("data-loopnote", "");
+          note.textContent = "作業中のエージェントの完了待ち";
+          chip.after(note);
+        }
+        if (note) note.hidden = false;
+      } else if (note) { note.hidden = true; }
+      var btn = row.querySelector("[data-loopbtn]");
+      if (btn) {
+        if (st === "run") { btn.textContent = "停止"; btn.className = "btn ghost"; }
+        else if (st === "drain") { btn.textContent = "停止を取り消す"; btn.className = "btn ghost"; }
+        else { btn.textContent = "開始"; btn.className = "btn"; }
+      }
+    });
+    document.querySelectorAll('[data-loopchip="' + key + '"]').forEach(function (chip) {
+      chip.className = "loopst " + st;
+      chip.textContent = LOOP_LABEL[st];
+    });
+  }
+  document.querySelectorAll(".prow").forEach(function (row) {
+    var chip = row.querySelector(".loopst");
+    if (!chip) return;
+    var key = loopKeyOf(row);
+    if (!key) return;
+    loopState[key] = chip.classList.contains("drain") ? "drain" : chip.classList.contains("stop") ? "stop" : "run";
+    row.querySelectorAll("button").forEach(function (b) {
+      var label = b.textContent.trim();
+      if (label !== "停止" && label !== "停止を取り消す" && label !== "開始") return;
+      b.setAttribute("data-loopbtn", "");
+      b.addEventListener("click", function () {
+        loopState[key] = loopState[key] === "run" ? "drain" : "run";
+        renderLoop(key);
+      });
+    });
+    renderLoop(key);
+  });
+  /* settings switches: click (or Space / Enter) toggles on/off */
+  document.querySelectorAll(".switch").forEach(function (sw) {
+    sw.removeAttribute("aria-hidden");
+    sw.setAttribute("role", "switch");
+    sw.setAttribute("tabindex", "0");
+    function syncSwitch() {
+      var on = !sw.classList.contains("off");
+      sw.setAttribute("aria-checked", on ? "true" : "false");
+      sw.setAttribute("aria-label", on ? "オン" : "オフ");
+    }
+    syncSwitch();
+    sw.addEventListener("click", function () { sw.classList.toggle("off"); syncSwitch(); });
+    sw.addEventListener("keydown", function (ev) {
+      if (ev.key === " " || ev.key === "Enter") { ev.preventDefault(); sw.classList.toggle("off"); syncSwitch(); }
+    });
+  });
   /* fullscreen mode: app screen only (?full=1 or the enter button) */
   var fullEnter = document.getElementById("fullEnter");
   var fullExit = document.getElementById("fullExit");
