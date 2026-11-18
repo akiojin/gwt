@@ -177,6 +177,11 @@
   .statebar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:0 0 14px}
   .statebar .lab{font-size:13px;font-weight:700;color:var(--ink2)}
   .statebar .seg{margin:0}
+  .ptabs{display:flex;align-items:flex-end;gap:2px;border-bottom:1px solid var(--line);margin:0 0 18px;overflow-x:auto}
+  .ptab{display:inline-flex;align-items:center;gap:6px;border:0;background:transparent;font:inherit;font-size:13px;font-weight:700;color:var(--ink2);padding:8px 13px;border-bottom:2px solid transparent;margin-bottom:-1px;cursor:pointer;white-space:nowrap;min-height:36px}
+  .ptab i{width:8px;height:8px;border-radius:50%;display:block;flex:none}
+  .ptab.on{color:var(--ink);border-bottom-color:var(--ink)}
+  .ptab-more{font-size:12px;color:var(--ink2);padding:8px 6px;white-space:nowrap}
   .chat-head{display:flex;align-items:center;gap:11px;padding-bottom:14px;border-bottom:1px solid var(--line);margin-bottom:16px}
   .chat-head .nm{font-weight:800;font-size:15px;line-height:1.3}
   .chat-head .sub{font-size:12px;color:var(--ink2)}
@@ -319,7 +324,7 @@
   <header class="doc">
     <div class="doc-kicker">gwt — Issue #7007</div>
     <h1>全画面刷新モック v3</h1>
-    <p class="lead">全ページを1つのモックで触れる形にしたものです。起点は<strong>開始画面</strong>で、ここはプロジェクトのランチャーではなく<strong>端末 PM との会話の場所</strong>です。開始画面にプロジェクトの内容は出さず、脇の一覧は名前だけの導線に留めます。プロジェクトはそれぞれ独立したページ（ブラウザのタブ）で開き、<strong>1画面＝1文脈</strong>を原則にします。<strong>エージェント台帳</strong>と<strong>ツール</strong>は、設定の中ではなくヘッダーから開く独立画面です。下のボタンから全画面へ移動できます。</p>
+    <p class="lead">全ページを1つのモックで触れる形にしたものです。起点は<strong>開始画面</strong>で、ここはプロジェクトのランチャーではなく<strong>端末 PM との会話の場所</strong>です。開始画面にプロジェクトの内容は出さず、脇の一覧と上部のタブは名前だけの導線に留めます。プロジェクトはそれぞれ独立したページ（ブラウザのタブ）で開き、<strong>1画面＝1文脈</strong>を原則にします。<strong>エージェント台帳</strong>と<strong>ツール</strong>は、設定の中ではなくヘッダーから開く独立画面です。下のボタンから全画面へ移動できます。</p>
   </header>
 
   <nav class="screens" aria-label="画面一覧">
@@ -383,6 +388,13 @@
 
           <!-- あり -->
           <div data-startpane="has">
+            <div class="ptabs" role="tablist" aria-label="プロジェクトのタブ">
+              <button class="ptab on" type="button" aria-current="page">ホーム</button>
+              <button class="ptab" type="button" data-openpage="gwt"><i style="background:#0f766e"></i>gwt</button>
+              <button class="ptab" type="button" data-openpage="keibadb"><i style="background:#be123c"></i>KeibaDB</button>
+              <button class="ptab" type="button"><i style="background:#6d28d9"></i>unity-cli</button>
+            </div>
+            <p class="rel" style="margin:-8px 0 14px">上部のタブも名前だけの導線です（件数・要約・バッジは出しません）。タブを選ぶと、そのプロジェクトのページへ移ります。</p>
             <div class="start-grid">
               <div>
                 <div class="chat-head">
@@ -442,6 +454,9 @@
 
           <!-- なし（空状態） -->
           <div data-startpane="empty" hidden>
+            <div class="ptabs" role="tablist" aria-label="プロジェクトのタブ">
+              <button class="ptab on" type="button" aria-current="page">ホーム</button>
+            </div>
             <div class="empty-col">
               <div class="chat-head">
                 <span class="pm-face"><span class="dot"></span></span>
@@ -461,6 +476,17 @@
 
           <!-- 多い（20件） -->
           <div data-startpane="many" hidden>
+            <div class="ptabs" role="tablist" aria-label="プロジェクトのタブ">
+              <button class="ptab on" type="button" aria-current="page">ホーム</button>
+              <button class="ptab" type="button" data-openpage="gwt"><i style="background:#0f766e"></i>gwt</button>
+              <button class="ptab" type="button" data-openpage="keibadb"><i style="background:#be123c"></i>KeibaDB</button>
+              <button class="ptab" type="button"><i style="background:#2563eb"></i>llmlb</button>
+              <button class="ptab" type="button"><i style="background:#c2410c"></i>event-magazine</button>
+              <button class="ptab" type="button"><i style="background:#6d28d9"></i>unity-cli</button>
+              <button class="ptab" type="button"><i style="background:#a16207"></i>155-Demi</button>
+              <button class="ptab" type="button"><i style="background:#475569"></i>160-Idina</button>
+              <span class="ptab-more">ほか13件（脇の一覧と検索で探します）</span>
+            </div>
             <div class="start-grid">
               <div>
                 <div class="chat-head">
