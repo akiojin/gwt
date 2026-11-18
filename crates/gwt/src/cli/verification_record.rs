@@ -2940,8 +2940,12 @@ pub struct WorkEventDirtyPath {
 /// An empty list means `git status` is clean for the store and no ignored
 /// canonical shard is pending.
 pub(crate) fn work_event_dirty_paths(worktree: &Path) -> Result<Vec<WorkEventDirtyPath>, ()> {
+    // `--no-optional-locks`: a read-only scan must not refresh the index. The
+    // rewrite would contend for `index.lock` with a running agent and would
+    // make every scan look like a store change to the diagnosis cache.
     let output = gwt_core::process::hidden_command("git")
         .args([
+            "--no-optional-locks",
             "status",
             "--porcelain=v1",
             "--untracked-files=all",
@@ -3002,6 +3006,129 @@ pub(crate) fn work_event_dirty_paths(worktree: &Path) -> Result<Vec<WorkEventDir
         }
     }
     Ok(dirty)
+}
+
+/// Diagnosis-only view of [`work_event_dirty_paths`] (Issue #7616).
+///
+/// The GUI diagnoses every Work on a fixed cadence, and a live scan starts
+/// `git status` over the whole Work event store. This view reuses the last
+/// scan while the files that decide its answer are unchanged, so an idle
+/// store starts no Git. Delivery gates keep calling the live scan.
+pub(crate) fn work_event_dirty_paths_for_diagnosis(
+    worktree: &Path,
+) -> Result<Vec<WorkEventDirtyPath>, ()> {
+    work_event_dirty_paths_for_diagnosis_at(worktree, std::time::SystemTime::now())
+}
+
+/// Timestamps younger than this cannot prove that no later write shares
+/// their tick, so such a scan is not reused.
+const WORK_EVENT_SCAN_SETTLE: std::time::Duration = std::time::Duration::from_secs(2);
+const WORK_EVENT_SCAN_CACHE_LIMIT: usize = 4096;
+
+type WorkEventScanCache = std::collections::HashMap<PathBuf, ([u8; 32], Vec<WorkEventDirtyPath>)>;
+
+fn work_event_scan_cache() -> std::sync::MutexGuard<'static, WorkEventScanCache> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<WorkEventScanCache>> =
+        std::sync::OnceLock::new();
+    CACHE
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn work_event_dirty_paths_for_diagnosis_at(
+    worktree: &Path,
+    now: std::time::SystemTime,
+) -> Result<Vec<WorkEventDirtyPath>, ()> {
+    let before = work_event_store_fingerprint(worktree);
+    if let Some((digest, _)) = &before {
+        if let Some((cached, dirty)) = work_event_scan_cache().get(worktree) {
+            if cached == digest {
+                return Ok(dirty.clone());
+            }
+        }
+    }
+    let scanned = work_event_dirty_paths(worktree);
+    let mut cache = work_event_scan_cache();
+    cache.remove(worktree);
+    // Reuse only a scan that nothing raced: the same facts before and after,
+    // all older than the timestamp resolution.
+    if let (Ok(dirty), Some((digest, newest)), Some(after)) =
+        (&scanned, before, work_event_store_fingerprint(worktree))
+    {
+        let settled = newest.is_none_or(|newest| {
+            now.duration_since(newest)
+                .is_ok_and(|age| age >= WORK_EVENT_SCAN_SETTLE)
+        });
+        if digest == after.0 && settled {
+            if cache.len() >= WORK_EVENT_SCAN_CACHE_LIMIT {
+                cache.clear();
+            }
+            cache.insert(worktree.to_path_buf(), (digest, dirty.clone()));
+        }
+    }
+    scanned
+}
+
+/// Digest and newest timestamp of the files that decide the Work event
+/// `git status` answer, read without starting Git: the index, HEAD and its
+/// branch ref, the ignore rules, the event log, the store directory with its
+/// direct children, and the trusted store that certifies delivery events.
+/// A shard is written by create or rename, which touches its directory; an
+/// in-place rewrite of an existing shard is seen at the next such change.
+/// `None` means the facts are unreadable and the scan must not be reused.
+fn work_event_store_fingerprint(
+    worktree: &Path,
+) -> Option<([u8; 32], Option<std::time::SystemTime>)> {
+    let git_dir = gwt_core::repo_hash::resolve_git_dir(worktree)?;
+    let common_dir = gwt_core::repo_hash::repository_common_dir(worktree)?;
+    let head = fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    let store = worktree.join(WORK_EVENT_STORE_RELATIVE);
+    let mut paths = vec![
+        git_dir.join("index"),
+        git_dir.join("HEAD"),
+        common_dir.join("packed-refs"),
+        common_dir.join("info").join("exclude"),
+        worktree.join(".gitignore"),
+        worktree.join(WORK_EVENT_LOG_RELATIVE),
+        store.clone(),
+    ];
+    if let Some(branch_ref) = head.trim().strip_prefix("ref: ") {
+        paths.push(common_dir.join(branch_ref));
+    }
+    paths.extend(super::trusted_store::trusted_dir_for_worktree(worktree));
+    match fs::read_dir(&store) {
+        Ok(entries) => {
+            let mut children = entries
+                .map(|entry| entry.map(|entry| entry.path()))
+                .collect::<io::Result<Vec<_>>>()
+                .ok()?;
+            children.sort();
+            paths.extend(children);
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(_) => return None,
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(head.as_bytes());
+    let mut newest = None;
+    for path in paths {
+        hasher.update(path.to_string_lossy().as_bytes());
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) => {
+                let modified = metadata.modified().ok()?;
+                let since_epoch = modified.duration_since(std::time::UNIX_EPOCH).ok()?;
+                hasher.update([1, u8::from(metadata.is_dir())]);
+                hasher.update(metadata.len().to_le_bytes());
+                hasher.update(since_epoch.as_nanos().to_le_bytes());
+                newest = newest.max(Some(modified));
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => hasher.update([0]),
+            Err(_) => return None,
+        }
+    }
+    Some((hasher.finalize().into(), newest))
 }
 
 fn event_commit_has_non_bookkeeping_change(
@@ -16053,6 +16180,61 @@ fn default_integration_test_builds_a_guarded_binary() {
             })
             .count();
         assert_eq!(repositories, 1, "one fresh Git operation: {trace}");
+    }
+
+    /// Issue #7616: a repeated diagnosis of an unchanged Work event store
+    /// must not start Git again, and a written or committed Work event must
+    /// still be re-read.
+    #[test]
+    fn work_event_diagnosis_scan_reuses_result_until_the_store_changes() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let fixture = WorkEventGitFixture::tracked_shards();
+        fixture.write_event_shard("pending-first", b"{}\n");
+        // Judge the fixture's fresh timestamps as settled without waiting.
+        let now = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
+        let scans = std::cell::Cell::new(0);
+        let scan = || {
+            scans.set(scans.get() + 1);
+            let trace_path = fixture
+                ._root
+                .path()
+                .join(format!("git-trace-{}.log", scans.get()));
+            let _trace = ScopedEnvVar::set("GIT_TRACE2_EVENT", &trace_path);
+            let mut dirty = work_event_dirty_paths_for_diagnosis_at(&fixture.repo, now).unwrap();
+            dirty.sort_by(|a, b| a.path.cmp(&b.path));
+            let git_started = fs::read_to_string(&trace_path)
+                .unwrap_or_default()
+                .lines()
+                .filter(|line| line.contains(r#""event":"start""#))
+                .count();
+            (
+                dirty
+                    .into_iter()
+                    .map(|dirty| dirty.path)
+                    .collect::<Vec<_>>(),
+                git_started,
+            )
+        };
+        let shard = |id| pending_work_event_shard_relative_path(&fixture.repo, id).unwrap();
+
+        assert_eq!(scan(), (vec![shard("pending-first")], 1));
+        assert_eq!(
+            scan(),
+            (vec![shard("pending-first")], 0),
+            "an unchanged store must not start Git"
+        );
+
+        fixture.write_event_shard("pending-second", b"{}\n");
+        let mut expected = vec![shard("pending-first"), shard("pending-second")];
+        expected.sort();
+        assert_eq!(scan(), (expected, 1), "a written Work event is re-read");
+
+        fixture.stage_event_shards();
+        fixture.commit("chore(work): record pending Work events");
+        assert_eq!(scan(), (Vec::new(), 1), "a commit is re-read");
+        assert_eq!(scan(), (Vec::new(), 0));
     }
 
     #[test]
