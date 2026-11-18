@@ -1304,6 +1304,9 @@ mod tests {
         use gwt_agent::session::{runtime_writer_lease, HookCompletionOutcome};
         use gwt_core::operation_deadline::{ScopedOperationClock, ScopedOperationDeadline};
 
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         super::super::health::browser_preflight_tests::with_source(|input, _, runtime_path, _| {
             let worktree = &input.worktree_root;
             let _forward = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
