@@ -16194,6 +16194,7 @@ fn default_integration_test_builds_a_guarded_binary() {
         fixture.write_event_shard("pending-first", b"{}\n");
         // Judge the fixture's fresh timestamps as settled without waiting.
         let now = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
+        let repo = dunce::canonicalize(&fixture.repo).unwrap();
         let scans = std::cell::Cell::new(0);
         let scan = || {
             scans.set(scans.get() + 1);
@@ -16204,10 +16205,18 @@ fn default_integration_test_builds_a_guarded_binary() {
             let _trace = ScopedEnvVar::set("GIT_TRACE2_EVENT", &trace_path);
             let mut dirty = work_event_dirty_paths_for_diagnosis_at(&fixture.repo, now).unwrap();
             dirty.sort_by(|a, b| a.path.cmp(&b.path));
+            // The trace variable is process-wide, so parallel tests write to
+            // it too: count only Git processes opened on this repository.
             let git_started = fs::read_to_string(&trace_path)
                 .unwrap_or_default()
                 .lines()
-                .filter(|line| line.contains(r#""event":"start""#))
+                .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+                .filter(|event| {
+                    event["event"] == "def_repo"
+                        && event["worktree"].as_str().is_some_and(|path| {
+                            dunce::canonicalize(path).ok().as_ref() == Some(&repo)
+                        })
+                })
                 .count();
             (
                 dirty
