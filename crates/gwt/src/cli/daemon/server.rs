@@ -9426,6 +9426,15 @@ fn scan_issue_monitor_with_runtime_reconciliation(
         );
     }
     timing.next("execution-observation");
+    // With a native owner, the GUI is only a projection. An automatic
+    // restore has no new Monitor launch delivery to publish its pane ID.
+    if let Some(snapshot) = native_owner.and_then(|owner| owner.monitor_window_snapshot()) {
+        let pid = std::process::id();
+        if let Some(started) = crate::process::host_process_start_time(pid) {
+            monitor.record_window_snapshot_from_host(snapshot, pid, started, Default::default());
+        }
+    }
+    let window_now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
     let execution_observations =
         crate::issue_monitor_worker::refresh_issue_monitor_execution_observations(
             &mut monitor,
@@ -9438,7 +9447,8 @@ fn scan_issue_monitor_with_runtime_reconciliation(
     );
     // Candidate projection may run again for refreshed cache rows. Retire the
     // dead predecessor once, before any verified ownership repair can requeue it.
-    let terminal_windows = monitor.reconcile_dead_terminal_launches(&execution_observations, &now);
+    let terminal_windows =
+        monitor.reconcile_dead_terminal_launches(&execution_observations, &window_now);
     timing.next("candidate-reconciliation");
     let monitor_owner = crate::process::current_claim_owner();
     crate::issue_monitor_worker::scan_loaded_issue_monitor_candidates(
@@ -9614,14 +9624,14 @@ fn scan_issue_monitor_with_runtime_reconciliation(
         crate::issue_monitor_worker::read_verified_live_launch_owners(
             &monitor,
             &scope.project_root,
-            &now,
+            &window_now,
         );
     crate::issue_monitor_worker::reconcile_issue_monitor_windows_with_observations(
         &mut monitor,
         &execution_observations,
         &live_launch_owners,
         &observed_at,
-        &now,
+        &window_now,
         terminal_windows,
     );
     // SPEC #3200 Phase 7: a scan only proposes kill-switch disarms. Executing
