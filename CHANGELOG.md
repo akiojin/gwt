@@ -1,6 +1,43 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.171.2] - 2026-11-18
+
+### Bug Fixes
+
+- **issue-monitor:** Source 拒否を 1 回で保留にし bot 作成者名を統一する
+- **issue-monitor:** Disarm auto-merge after an accepted review FAIL
+- **issue-monitor:** Keep slow remote branch pushes out of the launch deadline
+- **hook:** PM の turn receipt を RuntimeState 公開と並行に書く
+- **issue-monitor:** 更新再起動後に launch が理由なく止まる経路を直す
+- **monitor:** Free the active slot when the window close ack returns
+- **verify:** Nextest の --retries 0 で名前付き target を Heavy 判定しない
+- **issue-monitor:** 実証のない process hold で windowless timeout を止めない
+- **monitor:** Idle のレビュー窓を重複 launch として自動 close しない
+- **release:** Windows の portable zip を ZipFile で展開する
+
+### Miscellaneous Tasks
+
+- **work:** Record issue 7616 acceptance evaluation
+- **work:** Record issue 7632 delivery
+- **work:** Record issue 7670 delivery
+- **work:** Record issue 7670 delivery
+- **work:** Issue #7270 の作業記録を残す
+- **work:** Record Issue #7270 acceptance evaluation
+- **work:** Issue #7270 の受け入れ評価と完了を記録する
+- **work:** Record issue 7679 delivery
+- **work:** Record issue 7035 delivery work events
+- **work:** Record issue 7035 review window slice work events
+- **work:** Record Issue #7682 PR handoff
+
+### Styling
+
+- **hook:** Clippy の unnecessary_lazy_evaluations に従う
+
+### Testing
+
+- **e2e:** Windows の cold restart owner capture と PM prompt の deadline 劣化を固定する
+
 ## [9.171.1] - 2026-11-18
 
 ### Bug Fixes
