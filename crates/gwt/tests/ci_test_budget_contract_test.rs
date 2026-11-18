@@ -1111,6 +1111,7 @@ fn windows_regression_slices_build_each_harness_once_and_gate_all_filters() {
         "gwt bin gwt real_bun_global_placeholder_fixture",
         "gwt bin gwt command_prompt_agent_wrapper",
         "gwt-terminal lib gwt_terminal pty::windows_spawn::tests -- --test-threads=1",
+        "gwt lib gwt cli::hook::runtime_state::tests::raw_monitor_input_ -- --nocapture | tee \"$RUNNER_TEMP/raw-monitor-hook.log\"",
         "gwt-agent lib gwt_agent claude_child_session_marker -- --test-threads=1",
         "gwt test ci_contracts windows_binary_subsystem_test:: -- --test-threads=1",
         "gwt test ci_contracts ci_concurrency_contract_test::windows_diagnostic_selftest_keeps_secret_sentinels_private -- --exact --test-threads=1",
@@ -1170,7 +1171,7 @@ fn windows_regression_slices_build_each_harness_once_and_gate_all_filters() {
         "gwt test cli_contracts memory_cli_test::memory_add_writes_to_machine_local_work_notes -- --exact --test-threads=1 --nocapture",
         "gwt test cli_contracts gwtd_cli_test::auto_feedback_real_worker_has_no_consent_auth_process_or_raw_sinks -- --exact --test-threads=1 --nocapture",
     ];
-    assert_eq!(expected_filters.len(), 73);
+    assert_eq!(expected_filters.len(), 74);
     expected_filters.sort_unstable();
     actual_filters.sort_unstable();
     assert_eq!(actual_filters, expected_filters);
