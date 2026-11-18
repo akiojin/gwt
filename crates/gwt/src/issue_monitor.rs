@@ -18198,8 +18198,18 @@ impl IssueMonitorState {
         self.close_review_window(issue_number, IssueMonitorIdleKind::ReviewVerdictPublished);
         // A close worker may already be doing remote readback. Preserve the
         // veto now instead of waiting for its settlement to mark work done.
-        if !passed
-            && self.pending_effects.iter().any(|effect| {
+        if !passed {
+            // Issue #7303 / #6052: CI can already be green, and the
+            // implementation agent can already have requested auto-merge,
+            // before this FAIL is accepted. Drop a prepared arm of this PR
+            // and queue a disarm so that SHA cannot land after rejection.
+            if let Some(pr_number) = self
+                .autonomous_record(issue_number)
+                .and_then(|record| record.pr_number)
+            {
+                self.disarm_auto_merge_after_rejected_review(issue_number, pr_number);
+            }
+            if self.pending_effects.iter().any(|effect| {
                 matches!(
                     &effect.payload,
                     IssueMonitorEffectPayload::SettleMergedIssue {
@@ -18208,10 +18218,35 @@ impl IssueMonitorState {
                         ..
                     } if *owner == issue_number
                 )
-            })
-        {
-            self.hold_failed_merged_review(issue_number);
+            }) {
+                self.hold_failed_merged_review(issue_number);
+            }
         }
+    }
+
+    /// Queue one disarm for a SHA whose independent review was accepted as FAIL.
+    /// An in-flight arm stays in the journal; the disarm is the safety effect
+    /// that must run against it. A prepared arm is not in flight and is dropped
+    /// so it cannot re-enable auto-merge after the disarm.
+    fn disarm_auto_merge_after_rejected_review(&mut self, issue_number: u64, pr_number: u64) {
+        self.pending_effects.retain(|effect| {
+            effect.state != IssueMonitorEffectState::Prepared
+                || !matches!(
+                    effect.payload,
+                    IssueMonitorEffectPayload::ArmAutoMerge {
+                        issue_number: pending_issue,
+                        pr_number: pending_pr,
+                        ..
+                    } if pending_issue == issue_number && pending_pr == pr_number
+                )
+        });
+        ensure_auto_merge_disarm_effect(
+            &mut self.pending_effects,
+            self.effect_authority_epoch,
+            &format!("review-fail:{issue_number}:{pr_number}"),
+            issue_number,
+            pr_number,
+        );
     }
 
     /// Issue #4117: live independent review windows, ordered by Issue.
@@ -52448,6 +52483,91 @@ mod tests {
             monitor.autonomous_record(7).unwrap().review_passed,
             Some(false)
         );
+    }
+
+    /// Issue #7303 / #6052: CI is already green and auto-merge is already
+    /// requested when the daemon accepts an overall FAIL for that SHA.
+    /// Acceptance must queue a disarm and must not leave a prepared arm that
+    /// can still land the rejected head.
+    #[test]
+    fn issue_7303_accepted_review_fail_disarms_the_same_sha() {
+        use crate::issue_monitor_review::REVIEW_VERDICT_SCHEMA;
+
+        let fail_raw = format!(
+            r#"{{"schema":"{REVIEW_VERDICT_SCHEMA}","overall":"fail","criteria":[{{"id":"AC-5","verdict":"fail"}}]}}"#
+        );
+        let mut monitor = autonomous_state();
+        monitor.begin_review(7, 99, "abc123");
+        let epoch = monitor.effect_authority_epoch();
+        assert!(monitor.prepare_effect(PendingIssueMonitorEffect::prepared(
+            format!("arm:7:99:abc123:{epoch}"),
+            epoch,
+            IssueMonitorEffectPayload::ArmAutoMerge {
+                issue_number: 7,
+                pr_number: 99,
+                reviewed_sha: "abc123".to_string(),
+            },
+        )));
+
+        assert_eq!(
+            monitor.apply_review_verdict(7, "abc123", &fail_raw),
+            Some(false),
+            "an overall FAIL for the reviewed SHA is accepted"
+        );
+        assert_eq!(
+            monitor.autonomous_record(7).unwrap().review_passed,
+            Some(false)
+        );
+        assert_eq!(
+            review_fail_disarms(&monitor),
+            1,
+            "accepted FAIL disarms auto-merge for that PR"
+        );
+        assert!(
+            monitor.pending_effects().iter().all(|effect| !matches!(
+                effect.payload,
+                IssueMonitorEffectPayload::ArmAutoMerge {
+                    issue_number: 7,
+                    pr_number: 99,
+                    ..
+                }
+            )),
+            "accepted FAIL drops a prepared arm of the same SHA"
+        );
+
+        monitor.record_review_verdict(7, false);
+        assert_eq!(
+            review_fail_disarms(&monitor),
+            1,
+            "a repeated FAIL does not stack another disarm"
+        );
+
+        let mut passed = autonomous_state();
+        passed.begin_review(7, 99, "abc123");
+        passed.record_review_verdict(7, true);
+        assert_eq!(review_fail_disarms(&passed), 0);
+
+        let mut stale = autonomous_state();
+        stale.begin_review(7, 99, "abc123");
+        assert_eq!(stale.apply_review_verdict(7, "other", &fail_raw), None);
+        assert_eq!(review_fail_disarms(&stale), 0);
+    }
+
+    fn review_fail_disarms(monitor: &IssueMonitorState) -> usize {
+        monitor
+            .pending_effects()
+            .iter()
+            .filter(|effect| {
+                matches!(
+                    effect.payload,
+                    IssueMonitorEffectPayload::DisarmAutoMerge {
+                        issue_number: 7,
+                        pr_number: 99,
+                        ..
+                    }
+                )
+            })
+            .count()
     }
 
     #[test]
