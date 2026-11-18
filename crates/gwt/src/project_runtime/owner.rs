@@ -1349,6 +1349,8 @@ pub(crate) struct OwnerState {
     shared_registry_initialization: Option<Result<(), String>>,
     registry_projection: crate::persistence::PersistedWindowRegistry,
     pty_writers: super::agent_dispatch::PtyWriterRegistry,
+    monitor_runtime_scan:
+        Arc<std::sync::OnceLock<crate::monitor_duplicate_runtime::MonitorRuntimeScan>>,
     agent_dispatch_jobs: usize,
     deferred_agent_frontend: HashMap<(String, u64), Vec<DeferredAgentFrontend>>,
     pending_agent_self_closes: HashMap<String, super::agent_dispatch::PendingAgentSelfClose>,
@@ -1435,6 +1437,7 @@ impl OwnerState {
             shared_registry_initialization: None,
             registry_projection,
             pty_writers: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            monitor_runtime_scan: Arc::clone(&monitor_runtime_scan),
             agent_dispatch_jobs: 0,
             deferred_agent_frontend: HashMap::new(),
             pending_agent_self_closes: HashMap::new(),
@@ -8114,10 +8117,16 @@ impl OwnerState {
         let incarnation = runtime.incarnation;
         let sender = self.sender.clone();
         let writers = self.pty_writers.clone();
+        let monitor_runtime_scan = Arc::clone(&self.monitor_runtime_scan);
         spawn_owner_worker(move || {
             let registry_result =
                 super::agent_dispatch::forget_owner_writer(&writers, &id, &runtime.current);
-            let result = close_runtime(&id, &mut runtime, cause).and(registry_result);
+            // Issue #7676: logical requeue does not clear a census published
+            // while this child was alive. Publish that absence before the ACK,
+            // or active_count keeps the stale physical slot.
+            let result = close_runtime(&id, &mut runtime, cause)
+                .and(registry_result)
+                .and_then(|()| publish_closed_monitor_census(&monitor_runtime_scan, &runtime));
             let _ = sender.send(OwnerMessage::Closed {
                 id,
                 incarnation,
@@ -12425,6 +12434,31 @@ fn finish_agent_session(
     Ok(())
 }
 
+/// Issue #7676: a close ACK is the slot-release receipt. The census worker
+/// only republishes on its 5s wake, so a count taken while the child was
+/// alive still occupies `active_count` after the logical launch is gone.
+fn publish_closed_monitor_census(
+    scan: &std::sync::OnceLock<crate::monitor_duplicate_runtime::MonitorRuntimeScan>,
+    runtime: &WindowRuntime,
+) -> Result<(), String> {
+    let monitor_backed = runtime.agent.as_ref().is_some_and(|agent| {
+        agent.feedback.as_ref().is_some_and(|feedback| {
+            !feedback.issue_monitor_review_dispatch
+                && feedback
+                    .issue_monitor_launch_binding_issue_number()
+                    .is_some()
+        })
+    });
+    if !monitor_backed {
+        return Ok(());
+    }
+    let Some(scan) = scan.get() else {
+        return Ok(());
+    };
+    scan.publish_current_census()
+        .map_err(|error| format!("Monitor census did not release the closed slot: {error}"))
+}
+
 fn monitor_launch_for_agent(
     id: &str,
     incarnation: u64,
@@ -13156,6 +13190,7 @@ fn owner_fixture(
         shared_registry_initialization: None,
         registry_projection: crate::persistence::empty_workspace_state(),
         pty_writers: Arc::new(std::sync::RwLock::new(HashMap::new())),
+        monitor_runtime_scan: Default::default(),
         agent_dispatch_jobs: 0,
         deferred_agent_frontend: HashMap::new(),
         pending_agent_self_closes: HashMap::new(),
@@ -15432,6 +15467,7 @@ mod tests {
             shared_registry_initialization: None,
             registry_projection: crate::persistence::empty_workspace_state(),
             pty_writers: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            monitor_runtime_scan: Default::default(),
             agent_dispatch_jobs: 0,
             deferred_agent_frontend: HashMap::new(),
             pending_agent_self_closes: HashMap::new(),
